@@ -1,0 +1,39 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* One toolbar control: "标签：日期" inside the regular control frame. */
+  .field {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    height: var(--ui-control);
+    margin: 0;
+    padding: 0 var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--control-border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    white-space: nowrap;
+  }
+  .field:hover {
+    border-color: var(--ui-border-hover);
+  }
+  .field:has(input:focus-visible) {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-focus-width);
+  }
+  .field > input {
+    width: auto;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
+  .field > input:focus-visible {
+    outline: 0;
+  }
+}

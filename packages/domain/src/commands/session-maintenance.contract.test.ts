@@ -443,3 +443,32 @@ test("repeated scans and restart notify once per continuous cause; recovery and 
   });
   expect(result.data.session_maintenance?.notice_sent).toBeUndefined();
 });
+
+test("shared workspace Run history fences retirement; a different machine's history is excluded", () => {
+  const initial = setup(),
+    a = { ...initial.assignments[0]!, worktree_path: "/fixture/shared" };
+  const sibling = { ...a, id: "A-2" as typeof a.id };
+  const run = {
+    ...initial.runs[0]!,
+    id: "R-2" as (typeof initial.runs)[number]["id"],
+    assignment_id: sibling.id,
+    status: "running" as const,
+  };
+  const state = {
+    ...initial,
+    assignments: [sibling, a],
+    runs: [run, ...initial.runs],
+  };
+  expect(sessionMaintenanceCandidate(state, a, now).reason).toBe("run_busy");
+  expect(
+    JSON.parse(sessionMaintenanceBasis(state, a)).runs.map(
+      ([id]: [string]) => id,
+    ),
+  ).toEqual([initial.runs[0]!.id, run.id].sort());
+  const isolated = {
+    ...state,
+    assignments: [{ ...sibling, machine_id: "other" }, a],
+  };
+  expect(sessionMaintenanceCandidate(isolated, a, now).candidate).toBe(true);
+  expect(JSON.parse(sessionMaintenanceBasis(isolated, a)).runs).toHaveLength(1);
+});

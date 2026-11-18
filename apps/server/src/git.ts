@@ -28,6 +28,7 @@ import {
   type RemoveWorktreeInput,
   type RemoveWorktreeOutcome,
   type RepositoryLock,
+  RepositoryLockTimeoutError,
   reconcile,
   reconcileExecutorChecks,
   type SourceSync,
@@ -147,6 +148,9 @@ export interface ServerGitOptions {
     project_id: string,
   ) => Promise<AgentCheckListing>;
 }
+
+/** The candidate transport was never entered, even if other Git work was done. */
+export class CandidatePushNotStarted extends RepositoryLockTimeoutError {}
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
@@ -576,10 +580,21 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     input: CandidatePushRequest,
   ): Promise<PushResult> {
-    const repository = await this.central.ensureCentral(project);
-    return this.lock({ project_id: project.project_id, repository }, () =>
-      this.transport.pushCandidateCommit(repository, input),
-    );
+    let started = false;
+    try {
+      const repository = await this.central.ensureCentral(project);
+      return await this.lock(
+        { project_id: project.project_id, repository },
+        () => {
+          started = true;
+          return this.transport.pushCandidateCommit(repository, input);
+        },
+      );
+    } catch (error) {
+      if (!started && error instanceof RepositoryLockTimeoutError)
+        throw new CandidatePushNotStarted(error.waitMs);
+      throw error;
+    }
   }
   async deleteCheckCandidate(
     project: CentralProject,
