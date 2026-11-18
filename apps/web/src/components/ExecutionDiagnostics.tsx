@@ -173,15 +173,13 @@ function Messages({
 }: {
   diagnostics: ExecutionDiagnosticsResource;
 }) {
-  const { data, unavailable, stale, count, state } = diagnostics;
+  const { unavailable, stale, state } = diagnostics;
   return (
     <>
       {state === "checking" && <p role="status">检查中</p>}
-      {unavailable && <p role="status">诊断不可用</p>}
+      {unavailable && state !== "checking" && <p role="status">诊断不可用</p>}
       {stale && <p role="status">运行诊断已过期，请刷新</p>}
-      {data && data.available !== false && !stale && count === 0 && (
-        <p>没有告警</p>
-      )}
+      {state === "ok" && <p>没有告警</p>}
     </>
   );
 }
@@ -192,7 +190,6 @@ export function ExecutionDiagnosticsStatus({
 }: {
   diagnostics: ExecutionDiagnosticsResource;
 }) {
-  const id = useId();
   if (!diagnostics.supported || diagnostics.state === "warn") return null;
   const label = stateLabel[diagnostics.state];
   return (
@@ -203,7 +200,6 @@ export function ExecutionDiagnosticsStatus({
           variant="ghost"
           className="ui-page-status-trigger"
           aria-label={`启动与运行诊断：${label}`}
-          aria-controls={id}
           data-diagnostics-trigger=""
           data-diagnostics-state={diagnostics.state}
         >
@@ -211,7 +207,6 @@ export function ExecutionDiagnosticsStatus({
         </Button>
       </Popover.Trigger>
       <Popover.PopoverContent
-        id={id}
         aria-label="启动与运行诊断"
         side="bottom"
         align="end"

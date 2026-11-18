@@ -142,6 +142,27 @@ test("unavailable observations are never shown as healthy; refresh retries", asy
   expect(read).toHaveBeenCalledTimes(2);
 });
 
+test("a pending refresh never shows the previous result as current", async () => {
+  let resolve: (value: unknown) => void = () => {};
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce({ configuration: [], sessions: [] })
+    .mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+  render(<Harness client={fakeClient({ executionDiagnostics: read })} />);
+  const panel = await openStatus("无告警");
+  fireEvent.click(screen.getByRole("button", { name: "刷新诊断" }));
+  await screen.findByRole("button", { name: "启动与运行诊断：检查中" });
+  expect(panel.textContent).toContain("检查中");
+  expect(panel.textContent).not.toContain("没有告警");
+  resolve({ configuration: [], sessions: [] });
+  await screen.findByRole("button", { name: "启动与运行诊断：无告警" });
+});
+
 test("a refresh keeps existing warnings in place until the new result arrives", async () => {
   let resolve: (value: unknown) => void = () => {};
   const warning = {
