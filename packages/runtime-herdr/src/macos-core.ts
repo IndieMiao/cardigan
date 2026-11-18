@@ -1,4 +1,4 @@
-/** hc 0.1.21 owns its SSH-started core (setsid + core.lock + holder recovery).
+/** Manifest-pinned hc owns its SSH-started core (setsid + core.lock + holder recovery).
  * Never run a competing LaunchDaemon or synthesize SSH_CONNECTION to bypass
  * hc's GUI launchd path. This script runs only on the selected worker.
  */
