@@ -279,12 +279,14 @@ export function parseWorkerOnboarding(
   }
 }
 
-// Launch permission belongs to the operator, not to the onboarding binding.
-function onboardingBindingDigest({
-  allow_remote_launch: _allowRemoteLaunch,
-  mcp_url,
-  ...binding
-}: Record<string, unknown>): string {
+type BindingSource = "applied" | "draft";
+
+function onboardingBindingDigest(
+  { mcp_url, ...binding }: Record<string, unknown>,
+  source: BindingSource,
+): string {
+  // Only the applied file has operator-managed settings; compare drafts in full.
+  if (source === "applied") delete binding.allow_remote_launch;
   return onboardingDigest({ ...binding, mcp_url: mcpUrl(mcp_url) });
 }
 
@@ -293,6 +295,7 @@ export function checkWorkerDraft(
   config: WorkerOnboardingConfig,
   current: unknown,
   dataDir: string,
+  source: BindingSource = "draft",
 ): void {
   if (current === undefined) return;
   try {
@@ -319,7 +322,8 @@ export function checkWorkerDraft(
       );
       if (
         old &&
-        onboardingBindingDigest(old) !== onboardingBindingDigest(binding)
+        onboardingBindingDigest(old, source) !==
+          onboardingBindingDigest(binding, source)
       )
         onboardingFail("worker_config_conflict");
       if (!old) projects.push(binding);

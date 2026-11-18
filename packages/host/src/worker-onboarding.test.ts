@@ -214,6 +214,28 @@ test("live conflict, changed journal configuration and changed draft never overw
   expect(readOnboardingYaml(draftPath())).toEqual(existing);
 });
 
+test.each(["resume", "check"] as const)(
+  "%s rejects a launch flag added to a saved draft before registration or journal updates",
+  async (mode) => {
+    const o = options();
+    expect(await onboardWorker(o)).toBe(true);
+    const journal = readFileSync(journalPath());
+    const draft = input().runtime;
+    Object.assign(first(first(draft.machines).projects), {
+      allow_remote_launch: false,
+    });
+    writeFileSync(draftPath(), stringify(draft));
+    vi.mocked(o.registration).mockClear();
+
+    await expect(onboardWorker({ ...o, mode })).rejects.toThrow(
+      "worker_config_conflict",
+    );
+    expect(o.registration).not.toHaveBeenCalled();
+    expect(readFileSync(journalPath())).toEqual(journal);
+    expect(readOnboardingYaml(draftPath())).toEqual(draft);
+  },
+);
+
 test("confirmed configuration archives old evidence, replaces only its draft and checks every step again", async () => {
   const o = options();
   await onboardWorker(o);
