@@ -118,7 +118,10 @@ export function selectMachine(
         reasons.push(
           `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree ?? "未声明"}）`,
         );
-      if (!f?.launch_allowed) reasons.push("allow_remote_launch 未开启");
+      if (f?.remote_binding === "platform_mismatch")
+        reasons.push("远程绑定的 OS 或架构与机器登记不一致");
+      else if (f?.remote_binding !== "allowed")
+        reasons.push("allow_remote_launch 未开启");
       if (!f?.health) reasons.push("缺少健康快照");
       else if (!f.health.available || f.health.status !== "passed")
         reasons.push(

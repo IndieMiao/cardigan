@@ -36,7 +36,7 @@ const remote: Machine = {
   last_seen: now,
 };
 const healthy: MachinePlacement = {
-  launch_allowed: true,
+  remote_binding: "allowed",
   health: { status: "passed", available: true },
   capabilities: [{ key: "godot", version: "4.10", available: true }],
   limit: 4,
@@ -343,7 +343,8 @@ test("selection records sorted scores and exclusions, never redeems an unverifie
 });
 
 test.each([
-  [{ launch_allowed: false }, "allow_remote_launch"],
+  [{ remote_binding: "disabled" }, "allow_remote_launch"],
+  [{ remote_binding: "platform_mismatch" }, "OS 或架构与机器登记不一致"],
   [{ health: null }, "缺少健康快照"],
   [
     { health: { status: "passed", available: false, launch_enabled: true } },

@@ -31,6 +31,7 @@ import {
 } from "./machine-capabilities.js";
 import {
   loadRuntimeWorkers,
+  matchesWorkerPlatform,
   type RuntimeWorker,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
@@ -162,8 +163,7 @@ export class RuntimeTargets implements Runtime {
       (machine_id !== "local" || workers.some((w) => w.machine_id === "local"))
     )
       return rejected("worker_unconfigured");
-    if (worker && (machine.os !== worker.os || machine.arch !== worker.arch))
-      return rejected();
+    if (worker && !matchesWorkerPlatform(machine, worker)) return rejected();
     const execution = worker?.execution ?? this.options.execution;
     const session =
       worker?.session ??

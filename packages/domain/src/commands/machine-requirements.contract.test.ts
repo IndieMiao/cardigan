@@ -327,7 +327,7 @@ test("requirements filter new assignments but never move or mutate an existing a
         [
           "local",
           {
-            launch_allowed: false,
+            remote_binding: "disabled",
             health: null,
             limit: 4,
             occupied: 0,

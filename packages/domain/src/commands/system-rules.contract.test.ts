@@ -884,7 +884,7 @@ test("C-300 ready assignment pins the unique tagged machine and audits it withou
         [
           "worker-a",
           {
-            launch_allowed: true,
+            remote_binding: "allowed",
             health: { status: "passed", available: true, launch_enabled: true },
             capabilities: [],
             limit: 4,

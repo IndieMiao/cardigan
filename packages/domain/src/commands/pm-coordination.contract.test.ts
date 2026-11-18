@@ -339,7 +339,7 @@ test("first producer selects a qualified employee and never creates a second per
 test("automatic first producer skips the idle remote worker for worktree roles and defers if local cannot run", () => {
   const base = producerState();
   const available: MachinePlacement = {
-    launch_allowed: true,
+    remote_binding: "allowed",
     health: { status: "passed", available: true },
     capabilities: [],
     occupied: 0,

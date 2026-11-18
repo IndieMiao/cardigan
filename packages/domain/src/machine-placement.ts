@@ -1,6 +1,7 @@
 /** Transaction-local host evidence. Contains neither worker configuration nor other projects' identities. */
 export interface MachinePlacement {
-  readonly launch_allowed: boolean;
+  /** Current project opt-in and platform match; a past health check is not a binding. */
+  readonly remote_binding: "disabled" | "platform_mismatch" | "allowed";
   readonly health: {
     readonly status: string;
     readonly available: boolean;
