@@ -8,17 +8,17 @@
 
 运行命令使用 pnpm 锁定的 Node 24.22.2；浏览器为 Linux Chrome Headless Shell **157.0.8103.15**，固定软件栅格路径（`--run-all-compositor-stages-before-draw --disable-new-content-rendering-timeout --disable-threaded-animation --disable-threaded-scrolling --disable-partial-raster --disable-gpu --disable-skia-runtime-opts --force-color-profile=srgb --num-raster-threads=1`），DPR 1，视口 **1440×1000 / 390×1000**，亮/暗主题，字体来自锁文件中的 Inter Variable、Noto Sans SC Variable、JetBrains Mono Variable。等待字体加载及两帧布局稳定，截图未聚焦文本输入。各场景重新载入，清空本夹具的偏好；每个截图状态明确设置。截图是视口截图，不声称验证屏幕外全部内容。
 
+下表是基准包中的文件名。在主分支对应提交的 **Warm dependency cache → Artifacts → `page-skeleton-<完整 SHA>`** 中查看图片，也可按下文命令在该提交本地重拍。不要用另一次运行的“最新图”代替指定版本。
+
 | 图号 | 标准内容 | 对应截图 |
 |---|---|---|
-| 图 1 | 页面结构、工具栏、图标、看板 | [看板·亮·1440](../../apps/web/test-support/page-skeleton-snapshots/board-1440-light.png) / [暗](../../apps/web/test-support/page-skeleton-snapshots/board-1440-dark.png) |
-| 图 2 | 表格、编号、状态、下一步头像 | [列表·亮·1440](../../apps/web/test-support/page-skeleton-snapshots/list-1440-light.png) / [暗](../../apps/web/test-support/page-skeleton-snapshots/list-1440-dark.png) |
-| 图 3 | 窄屏换行、右操作组、列表 | [列表·亮·390](../../apps/web/test-support/page-skeleton-snapshots/list-390-light.png) / [暗](../../apps/web/test-support/page-skeleton-snapshots/list-390-dark.png) |
-| 图 4 | 详情标题、正文、侧栏和头像 | [详情·亮·1440](../../apps/web/test-support/page-skeleton-snapshots/detail-1440-light.png) / [窄屏](../../apps/web/test-support/page-skeleton-snapshots/detail-390-light.png) |
-| 图 5 | 下拉菜单、选项与键盘焦点 | [下一步筛选](../../apps/web/test-support/page-skeleton-snapshots/filter-1440-light.png) / [窄屏](../../apps/web/test-support/page-skeleton-snapshots/filter-390-dark.png) |
-| 图 6 | 页头摘要和容量浮层 | [容量详情](../../apps/web/test-support/page-skeleton-snapshots/capacity-1440-light.png) / [窄屏](../../apps/web/test-support/page-skeleton-snapshots/capacity-390-dark.png) |
-| 图 7 | 分组与字段显示 | [状态分组](../../apps/web/test-support/page-skeleton-snapshots/grouped-1440-light.png) / [关闭显示字段](../../apps/web/test-support/page-skeleton-snapshots/minimal-1440-light.png) |
-
-![图 1：卡片页基准](../../apps/web/test-support/page-skeleton-snapshots/board-1440-light.png)
+| 图 1 | 页面结构、工具栏、图标、看板 | `board-1440-light.png` / `board-1440-dark.png` |
+| 图 2 | 表格、编号、状态、下一步头像 | `list-1440-light.png` / `list-1440-dark.png` |
+| 图 3 | 窄屏换行、右操作组、列表 | `list-390-light.png` / `list-390-dark.png` |
+| 图 4 | 详情标题、正文、侧栏和头像 | `detail-1440-light.png` / `detail-390-light.png` |
+| 图 5 | 下拉菜单、选项与键盘焦点 | `filter-1440-light.png` / `filter-390-dark.png` |
+| 图 6 | 页头摘要和容量浮层 | `capacity-1440-light.png` / `capacity-390-dark.png` |
+| 图 7 | 分组与字段显示 | `grouped-1440-light.png` / `minimal-1440-light.png` |
 
 ## 页面结构和骨架
 
@@ -102,18 +102,18 @@
 开发样式参考页为 `test-support/style-reference-fixture.tsx`，由截图脚本的临时 Vite 路由 `/__skeleton` 加载，`--reference` 选择该入口；不加入产品导航。它覆盖默认/已选择筛选、刷新关闭/刷新中、选中视图、禁用按钮、状态/编号、空态、展开筛选/周期选项、键盘焦点。
 
 ```sh
-# CHROMIUM_PATH 指向上述版本的 chrome-headless-shell；不得使用生产浏览器配置。
+# CHROMIUM_PATH 指向上述版本的 Linux x64 chrome-headless-shell。
 pnpm exec tsc -b apps/web
 pnpm --filter @cardigan/web test:ui-snapshots
-# 有意改变组件外观时，先核对 *.actual.png，取得界面卡授权后更新并逐张审核：
-pnpm --filter @cardigan/web test:ui-snapshots --update
+# 仅在界面卡授权、已核对差异时：重拍并记录本卡改变的场景，再跑上面的只读比较。
+pnpm --filter @cardigan/web test:ui-snapshots --update C-123
 ```
 
-本卡的原始卡片页基准用 `UI_BASELINE_REF=73c3a1ba2b26d976eca1fd1652f1bbced110e254 pnpm exec node apps/web/test-support/page-skeleton-screenshots.mjs --update` 生成：Vite 只覆盖本次变更的原有 CardListPage、PageHeader、Capacity 模块为历史源码；样式、字体、合成数据和浏览器相同，新增共享组件不参与历史页渲染。当前页面必须在不更新图片时通过全部比较。
+**什么进 Git？** 只有 `page-skeleton-approvals/seed.json`（迁移时 44 张既有 PNG 的 SHA-256）和本卡的 `C-编号.json`。每个条目为 `[场景代数, PNG 的 SHA-256]`。不要改种子或其它卡的文件。图片、测量与 `manifest.json` 每次从头生成到忽略目录 `apps/web/test-support/page-skeleton-snapshots/`；源码变化但外观不变，不需要更新任何基准文件。
 
-卡片页/详情 28 图：看板、列表、状态分组、关闭显示字段、详情、筛选展开、容量浮层 × 两个宽度 × 两种主题。参考页 16 图：默认、筛选展开、周期展开、键盘焦点 × 两宽度 × 两主题。每张解码为 RGBA，逐像素比较，阈值 **0**；尺寸变化也失败。没有用抗锯齿容差掩盖差异。脚本同时检查页面无横向溢出、菜单可通过 Enter 打开、Escape 关闭并返回焦点。
+**合并检查什么？** GitHub 的预检、单卡及批次合并检查从实际候选树拍摄 28 张页面图和 16 张样式参考图，与每个场景最高代的认可值逐一对比。比较整份 PNG 字节的 SHA-256，无像素容差，尺寸或编码改变也会失败。固定浏览器、字体、字体栅格设置和视口；仍检查无横向溢出、菜单 Enter/Escape 与焦点归还。只读检查从不写认可记录。main 推送后用同一命令重拍、校验，成功才归档；附件到期可检出原 SHA 重建，不会回退到其它提交的包。
 
-全部图片及原始测量 JSON 在 `page-skeleton-snapshots/`。`UiVisualBaseline.test.ts` 比较共用源码和全部 44 张 PNG 的散列清单；源码变更后须运行完整视觉脚本生成新清单，像素差异需逐张审核再更新基准。常规本地/远程 Vitest 都执行这一防陈旧检查；实际浏览器比较单独使用固定版本运行，不把另一版本的渲染结果冒充同环境比较。
+**设计总监看哪一版？** 改前取干净基线提交，改后取干净交付提交，分别运行同一命令。保留两个版本的图片、测量和清单附件，注明完整 SHA/tree；核对 `dirty: false`、图片 SHA-256 和本卡改动场景，再对该交付给结论。候选合入其它卡时，未改场景沿用原认可值；独立场景各按自己的最高代校验。同一场景的同代认可完全相同则可直接合并；认可不同、或组合页面产生未审的新图，检查失败，不取任一方充数。在新基线上查看实际图片、重新说明差异，只在本卡记录下一代并重交设计验收。归档清单逐图给出散列，可与验收附件对照；CI 绿色不能代替肉眼验收。非这 44 个场景的界面改动，仍按下节另附当前交付的证据。
 
 ## 界面卡流程
 
@@ -140,6 +140,6 @@ pnpm --filter @cardigan/web test:ui-snapshots --update
 - [ ] 逐元素测量字号/行高：页标题 20/28、控件及表头 13/20、详情正文 14/20、详情区段标题 16/24；卡片 body 14/23.1（1.65 倍）、表格单元格 13/18.85（1.45 倍）、看板标题 14/22、看板元信息文字 `.board-card-badge` 及列底 `.board-lane-total` 为 12/19.8（1.65 倍）。新控件复用既有 token，历史倍数及固定行高按上表核对，亮暗皆可辨识。
 - [ ] 表头/单元格对齐、间距、缺省值、行高、窄屏记录布局与图 2/3 一致；排序仅出现在有实际能力的控件上。
 - [ ] 状态图形/文字、编号前缀/类型色、头像大小/折行、tooltip 全文与焦点行为符合图 1/2/4/5/6。
-- [ ] 样式参考 16 图覆盖对应状态，新增源码或图片能使陈旧基准测试失败；无授权的像素差异不能直接更新图片。
+- [ ] 样式参考 16 图覆盖对应状态，候选实拍与认可图不同会使检查失败；无授权的像素差异不能直接更新图片。
 - [ ] `pnpm lint`（含 check-ui）、相关 Vitest、Web 增量构建、`pnpm check:deps` 通过；远程预检绑定交付 SHA。
 - [ ] 没有新增说明小字、页面 CSS、手写骨架、近似替换图标或第二套样式；历史例外没有扩张。
