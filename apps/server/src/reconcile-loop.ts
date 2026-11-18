@@ -190,7 +190,16 @@ export class ReconcileExecutor {
       const { created } = this.options.store.recordReconcileFindings(
         project_id,
         findings,
-        { unscanned },
+        {
+          unscanned,
+          // A failed targeted probe must not resolve a previously confirmed
+          // missing directory, or preserve a different Assignment's prefix.
+          unscannedPaths: findings
+            .filter((finding) => finding.kind === "worker_unchecked")
+            .flatMap((finding) =>
+              finding.path === undefined ? [] : [finding.path],
+            ),
+        },
       );
       retireReconcileNotifications(this.options.store.database, project_id, at);
       for (const finding of created) {

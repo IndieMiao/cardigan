@@ -770,6 +770,23 @@ export class GitWorktreeService {
     return path;
   }
 
+  /** Read only the bound Assignment directory through this machine's file port. */
+  async worktreeDirectoryExists(
+    project_id: string,
+    assignment: Assignment,
+  ): Promise<boolean> {
+    const { path } = this.worktreeOf(project_id, assignment);
+    try {
+      const present = await this.files.isDirectory(path);
+      if (typeof present !== "boolean")
+        throw new Error("Invalid worktree directory response");
+      return present;
+    } catch (error) {
+      if (code(error) === "ENOENT") return false;
+      throw error;
+    }
+  }
+
   /** §3.6: gather the facts `reconcile` needs; this method never deletes. */
   async listWorktreeState(project: CentralProject): Promise<WorktreeState> {
     const root = join(this.worktrees, project.project_id),
@@ -814,6 +831,7 @@ export class GitWorktreeService {
     );
     const state: WorktreeState = {
       project_id: project.project_id,
+      machine_id: this.machineId,
       worktrees_root: root,
       checks_root: checksRoot,
       builds_root: buildsRoot,

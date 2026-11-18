@@ -95,6 +95,22 @@ test("a missing directory with no registration is still missing", () => {
   ]);
 });
 
+test("local paths cannot establish ownership or absence for another machine", () => {
+  const remote = assignment({ machine_id: "worker-a" });
+  expect(reconcile(state(), [remote], [])).toEqual([]);
+  expect(reconcile(state({ directories: [worktree] }), [remote], [])).toEqual([
+    expect.objectContaining({ kind: "orphan_worktree", path: worktree }),
+  ]);
+  expect(
+    reconcile(state({ machine_id: "worker-a" }), [assignment(), remote], []),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "missing_worktree",
+      assignment_id: remote.id,
+    }),
+  ]);
+});
+
 test("a directory that exists is not missing, registered or not", () => {
   for (const registeredWorktrees of [registered(worktree), undefined]) {
     const findings = reconcile(
@@ -349,3 +365,26 @@ test("P2a-3 another Assignment's activity never protects a build", () => {
     ).map((finding) => finding.kind),
   ).toEqual(["orphan_worktree"]);
 });
+
+test.each([true, false])(
+  "a remote Run cannot protect a local build directory or registration (present=%s)",
+  (present) => {
+    expect(
+      reconcile(
+        state({
+          builds_root: builds,
+          directories: present ? [build] : [],
+          registered: [{ path: build, head: "a".repeat(40) }],
+        }),
+        [assignment({ id: "A-7" as never, machine_id: "worker-a" })],
+        [],
+        buildChecks([{ assignment_id: "A-7", unfinished: true }]),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: present ? "orphan_worktree" : "stale_registration",
+        path: build,
+      }),
+    ]);
+  },
+);
