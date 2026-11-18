@@ -334,8 +334,8 @@ request={'path':str(binary),'signature':{'app':str(app),'team':'ABCDEFGHIJ','ide
 m.platform.system=lambda:'Darwin';commands=[]
 m.run=lambda argv,timeout:commands.append(argv) or ''
 assert m.tool(request)=={'arch':'arm64','signed':True}
-assert commands[0][:4]==['/usr/bin/codesign','--verify','--deep','--strict']
-assert 'anchor apple generic' in commands[0][5] and 'ABCDEFGHIJ' in commands[0][5]
+assert commands[0]==['/usr/bin/codesign','--verify','--deep','--strict','-R',
+ '=anchor apple generic and identifier "invalid.example.fixture" and certificate leaf[subject.OU] = "ABCDEFGHIJ"',str(app)]
 request['signature']=None
 assert m.tool(request)['signed'] is None
 request['signature']={'app':str(base/'Other.app'),'team':'ABCDEFGHIJ','identifier':'invalid.example.fixture'}

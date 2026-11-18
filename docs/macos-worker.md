@@ -163,7 +163,7 @@ PY
 管理员先核对现有 `/Applications/Herdr Core.app`，未安装才将上述已验证的 App 安装到该位置（保留签名和目录结构，root 持有；不要覆盖其它人在用的版本）。用系统签名工具验证：
 
 ```sh
-codesign --verify --deep --strict -R 'anchor apple generic and identifier "dev.herdr.core"' '/Applications/Herdr Core.app'
+codesign --verify --deep --strict -R '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"' '/Applications/Herdr Core.app'
 # 仅创建缺失链接；已存在时先核对，ln 不加 -f
 sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/hc
 sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/herdr-core

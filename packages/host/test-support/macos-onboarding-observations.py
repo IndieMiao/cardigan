@@ -74,7 +74,8 @@ elif c['step'] == 'tools':
             if fault == 'unknown-arch': arch = b'arm64_unknown'
             return types.SimpleNamespace(returncode=0, stdout=arch)
         if argv[0] == '/usr/bin/codesign':
-            assert argv[-1] == APP and 'anchor apple generic' in argv[-2]
+            assert argv == ['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R',
+                            '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"', APP]
             return types.SimpleNamespace(returncode=1 if fault == 'signature' else 0, stdout=b'')
         if argv == [paths['node'], '-p', 'process.arch']:
             assert paths['node'] in checked

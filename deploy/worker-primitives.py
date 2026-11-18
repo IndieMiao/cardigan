@@ -361,7 +361,7 @@ def tool(request):
         app = os.path.realpath(pin['app'])
         if not app.endswith('.app') or not Path(os.path.realpath(path)).is_relative_to(Path(app)):
             raise ValueError('invalid_app_path')
-        requirement = f'anchor apple generic and identifier "{pin["identifier"]}" and certificate leaf[subject.OU] = "{pin["team"]}"'
+        requirement = f'=anchor apple generic and identifier "{pin["identifier"]}" and certificate leaf[subject.OU] = "{pin["team"]}"'
         run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R', requirement, app], request['timeout_ms'])
         signed = True
     return dict(arch=arch, signed=signed)
