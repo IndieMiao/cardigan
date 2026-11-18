@@ -89,90 +89,17 @@ elif c['step'] == 'tools':
     subprocess.run = run
 elif c['step'] == 'resources':
     label = c['launchd']['label']
-    path = '/Library/LaunchDaemons/' + label + '.plist'
-    entry(path, owner=0, group=0, mode=0o644, regular=True)
-    native['acl_safe'] = lambda fd: False if fault == 'plist-acl' else not attributes(fd)
-    os.listxattr = forbidden
-    if fault == 'plist-owner': facts[path].st_uid = c['uid']
-    plist = dict(Label=label, ProgramArguments=[CORE, 'serve'], UserName=c['user'],
-                 WorkingDirectory=c['home'], EnvironmentVariables=dict(PATH=c['path'], HOME=c['home'],
-                                                                       HC_SESSION=c['session'], HC_RUNTIME='1'),
-                 RunAtLoad=True, KeepAlive=True, InitGroups=False, ProcessType='Background')
-    for key in ('ProgramArguments', 'UserName', 'WorkingDirectory', 'EnvironmentVariables', 'InitGroups', 'KeepAlive'):
-        if fault == key: plist[key] = None
-    for key in ('HC_SESSION', 'HC_RUNTIME'):
-        if fault == 'missing-' + key: plist['EnvironmentVariables'].pop(key)
-        if fault == 'wrong-' + key: plist['EnvironmentVariables'][key] = 'default' if key == 'HC_SESSION' else '0'
-    builtins.open = lambda filename, *args, **kwargs: io.BytesIO(plistlib.dumps(plist))
-    # plistlib cannot serialize None; represent missing/mismatched fields instead.
-    plist = {key: value for key, value in plist.items() if value is not None}
-    loaded = '\n'.join([
-        'system/' + label + ' = {', '\tpath = ' + path, '\tprogram = ' + CORE,
-        '\tstate = running', '\tusername = ' + c['user'], '\tworking directory = ' + c['home'],
-        '\targuments = {', '\t\t' + CORE, '\t\tserve', '\t}',
-        '\tenvironment = {', '\t\tPATH => ' + c['path'], '\t\tHOME => ' + c['home'],
-        '\t\tHC_SESSION => ' + c['session'], '\t\tHC_RUNTIME => 1', '\t}',
-        '\tpid = 123', '}',
-    ])
-    if fault == 'loaded-path': loaded = loaded.replace('\tpath = ' + path, '\tpath = /other.plist')
-    if fault == 'loaded-user': loaded = loaded.replace('\tusername = ' + c['user'], '\tusername = root')
-    if fault == 'loaded-args': loaded = loaded.replace('\t\tserve', '\t\tserver start')
-    if fault == 'loaded-env': loaded = loaded.replace('\t\tPATH => ' + c['path'], '\t\tPATH => /usr/bin')
-    if fault == 'loaded-cwd': loaded = loaded.replace('\tworking directory = ' + c['home'], '\tworking directory = /')
-    if fault == 'loaded-socket-override': loaded = loaded.replace('\t\tHC_RUNTIME => 1', '\t\tHC_RUNTIME => 1\n\t\tHC_SOCKET => /other.sock')
-    for key, value in [('HC_SESSION', c['session']), ('HC_RUNTIME', '1')]:
-        line = '\t\t' + key + ' => ' + value
-        if fault == 'loaded-missing-' + key: loaded = loaded.replace(line, '')
-        if fault == 'loaded-wrong-' + key: loaded = loaded.replace(line, '\t\t' + key + ' => wrong')
-
+    os.path.lexists = lambda path: fault == 'plist-present'
     def run(argv, **kwargs):
         assert argv == ['/bin/launchctl', 'print', 'system/' + label]
-        return types.SimpleNamespace(returncode=1 if fault == 'unloaded' else 0, stdout=loaded.encode())
+        assert kwargs['env'] == dict(PATH='/usr/bin:/bin', LC_ALL='C')
+        if fault == 'timeout': raise subprocess.TimeoutExpired(argv, 1)
+        code = 0 if fault == 'loaded' else 113
+        error = ('Could not find service "' + label + '" in domain for system').encode()
+        if fault == 'permission-denied': error = b'Operation not permitted'
+        if fault == 'wrong-label': error = b'Could not find service "other" in domain for system'
+        return types.SimpleNamespace(returncode=code, stdout=b'', stderr=error)
     subprocess.run = run
-    os.getpgid = lambda _: 123
-    calls = 0
-    path_observed = False
-
-    # Keep production identity/credential code. Only the Darwin ABI is synthetic,
-    # so omitting GID from production observations cannot be hidden by a stub.
-    class Function:
-        def __init__(self, fn): self.fn = fn
-        def __call__(self, *args): return self.fn(*args)
-
-    class Library: pass
-    library = Library()
-
-    def boot(name, buffer, size, write, length):
-        ctypes.memmove(buffer, b'fixture-boot\0', 13)
-        return 0
-
-    def info(pid, kind, arg, buffer, size):
-        global calls
-        calls += 1
-        assert kind == 3 and size == 136
-        value = ctypes.cast(buffer, ctypes.POINTER(native['ProcBSDInfo'])).contents
-        value.pid, value.status, value.pgid = pid, 2, 123
-        value.uid = value.ruid = value.svuid = c['uid']
-        value.gid = value.rgid = value.svgid = c['gid']
-        value.start_sec, value.start_usec = 1, calls if fault == 'reused-pid' else 2
-        if fault == 'root-pid': value.uid = 0
-        for credential in ('ruid', 'svuid', 'gid', 'rgid', 'svgid'):
-            if fault == 'wrong-' + credential: setattr(value, credential, 0)
-        if fault == 'credentials-changed' and path_observed: value.gid = 0
-        if fault == 'unknown-pid' or (fault == 'credentials-unknown' and calls > 2): return size - 1
-        if fault == 'credentials-denied' and calls > 2: return -1
-        if fault == 'credentials-reused' and calls > 2: value.start_usec = 3
-        return size
-
-    library.sysctlbyname = Function(boot)
-    library.proc_pidinfo = Function(info)
-    ctypes.CDLL = lambda *args, **kwargs: library
-
-    def executable(pid):
-        global path_observed
-        path_observed = True
-        return '/other/hc' if fault == 'wrong-executable' else CORE
-    process_path = executable
 elif c['step'] == 'mcp':
     class Endpoint:
         def open(self, request, timeout):

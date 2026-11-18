@@ -3,11 +3,8 @@
 `native` is the controller's worker-primitives module, never a worker import.
 Shared require/protected functions are defined by worker-onboarding-probes.ts.
 """
-import ctypes
 import os
-import pathlib
 import plistlib
-import re
 import shutil
 import subprocess
 import sys
@@ -68,72 +65,17 @@ def macos_tools(c):
             and info.get('CFBundleShortVersionString') == c['hc_version'])
 
 
-def process_path(pid):
-    libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    buffer = ctypes.create_string_buffer(4096)
-    require(libproc.proc_pidpath(pid, buffer, len(buffer)) > 0)
-    return buffer.value.decode()
-
-
-def process_credentials(pid, identity):
-    # Read the running process, not its account's current directory-service
-    # membership or its process group (pgid is unrelated to permission groups).
-    libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    info = native['ProcBSDInfo']()
-    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-    require(libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info))
-    require(info.pid == pid and info.status != 5 and info.start_sec > 0
-            and f'{info.start_sec}:{info.start_usec}' == identity['start']
-            and info.pgid == identity['process_group'])
-    return (info.uid, info.ruid, info.svuid, info.gid, info.rgid, info.svgid)
-
 
 def macos_resources(c):
-    # No XDG/HC_SOCKET overrides in the supported LaunchDaemon environment.
     base = c['home'] + '/.local/state/herdr-core/' + c['session'] + '/' + c['session']
     require(all(len(path.encode('utf-8')) <= 103 for path in
                 (base + '.sock', base + '.holder.00000000.sock')))
-    service = c['launchd']
-    label = service['label']
-    path = '/Library/LaunchDaemons/' + label + '.plist'
-    # System LaunchDaemon + UserName runs without a desktop login. Never bootstrap
-    # or kickstart from a probe; failed observations leave operator action pending.
-    protected(path, 0, 0, 0o644, True)
-    with open(path, 'rb') as file:
-        plist = plistlib.load(file)
-    arguments = [CORE, 'serve']
-    require(plist.get('Label') == label and plist.get('ProgramArguments') == arguments)
-    require(plist.get('Program', CORE) == CORE and plist.get('UserName') == c['user'])
-    require(plist.get('WorkingDirectory') == c['home'])
-    environment = dict(PATH=c['path'], HOME=c['home'], HC_SESSION=c['session'], HC_RUNTIME='1')
-    require(plist.get('EnvironmentVariables') == environment)
-    require(plist.get('RunAtLoad') is True and plist.get('KeepAlive') is True)
-    require(plist.get('InitGroups') is False and plist.get('ProcessType') == 'Background')
-    require(not any(key in plist for key in ('RootDirectory', 'GroupName', 'LimitLoadToSessionType', 'Disabled')))
-    output = command(c, ['/bin/launchctl', 'print', 'system/' + label]).decode()
-
-    def field(name):
-        matches = re.findall(r'^\t' + re.escape(name) + r' = (.+)$', output, re.M)
-        require(len(matches) == 1)
-        return matches[0]
-
-    require(field('path') == path and field('program') == CORE and field('state') == 'running')
-    require(field('username') == c['user'] and field('working directory') == c['home'])
-    args = re.search(r'^\targuments = \{\n(.*?)^\t\}', output, re.M | re.S)
-    require(args is not None and [line.strip() for line in args[1].splitlines()] == arguments)
-    env = re.search(r'^\tenvironment = \{\n(.*?)^\t\}', output, re.M | re.S)
-    require(env is not None)
-    for key, value in environment.items():
-        require(re.findall(r'^\s+' + key + r' => (.+)$', env[1], re.M) == [value])
-    require(not re.search(r'^\s+(?:HC_SOCKET|XDG_RUNTIME_DIR|XDG_STATE_HOME|XDG_CONFIG_HOME) =>', env[1], re.M))
-    pid = int(field('pid'))
-    require(pid > 0)
-    process_group = os.getpgid(pid)
-    before = native['identity'](label, pid, label, process_group)
-    require(before is not None and before['uid'] == c['uid'])
-    credentials = (c['uid'], c['uid'], c['uid'], c['gid'], c['gid'], c['gid'])
-    require(process_credentials(pid, before) == credentials)
-    require(process_path(pid) == CORE)
-    require(process_credentials(pid, before) == credentials)
-    require(native['identity'](label, pid, label, process_group) == before)
+    # hc owns core.lock and crash recovery. A second supervisor is forbidden,
+    # even if currently stopped: a remaining plist can return at the next boot.
+    label = c['launchd']['label']
+    require(not os.path.lexists('/Library/LaunchDaemons/' + label + '.plist'))
+    result = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
+                            stdin=subprocess.DEVNULL, capture_output=True,
+                            timeout=c['timeout'], env=dict(PATH='/usr/bin:/bin', LC_ALL='C'))
+    require(result.returncode == 113 and
+            ('Could not find service "' + label + '" in domain for system') in result.stderr.decode())

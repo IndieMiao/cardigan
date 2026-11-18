@@ -109,6 +109,7 @@ test.each([
     else expect(parseConfig).toThrow("worker_macos_socket_path_too_long");
     source.runtime.machines[0].os = "linux";
     delete source.launchd;
+    delete source.runtime.machines[0].projects[0].retired_launchd_label;
     expect(parseConfig).not.toThrow();
   },
 );
@@ -335,46 +336,17 @@ test.each(["arm64e-git", "arm64e-tools"])(
 );
 test.each([
   "safe",
-  "plist-acl",
-  "plist-owner",
-  "ProgramArguments",
-  "UserName",
-  "WorkingDirectory",
-  "EnvironmentVariables",
+  "plist-present",
+  "loaded",
+  "permission-denied",
+  "wrong-label",
+  "timeout",
   "holder-too-long",
   "socket-too-long",
-  "loaded-socket-override",
-  ...["HC_SESSION", "HC_RUNTIME"].flatMap((key) => [
-    `missing-${key}`,
-    `wrong-${key}`,
-    `loaded-missing-${key}`,
-    `loaded-wrong-${key}`,
-  ]),
-  "InitGroups",
-  "KeepAlive",
-  "loaded-path",
-  "loaded-user",
-  "loaded-args",
-  "loaded-env",
-  "loaded-cwd",
-  "unloaded",
-  "unknown-pid",
-  "root-pid",
-  "reused-pid",
-  "wrong-executable",
-  "wrong-ruid",
-  "wrong-svuid",
-  "wrong-gid",
-  "wrong-rgid",
-  "wrong-svgid",
-  "credentials-unknown",
-  "credentials-denied",
-  "credentials-reused",
-  "credentials-changed",
-])("LaunchDaemon must match the installed and running service: %s", (fixture) =>
+])("hc owns the core only after retiring LaunchDaemon: %s", (fixture) =>
   probe("resources", fixture),
 );
-test("LaunchDaemon accepts the 103-byte holder boundary", () =>
+test("hc socket accepts the 103-byte holder boundary", () =>
   probe("resources", "socket-limit", true));
 test.each(["safe", "forbidden"])(
   "Darwin MCP requires unauthenticated refusal: %s",

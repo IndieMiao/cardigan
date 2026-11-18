@@ -290,7 +290,7 @@ export function workerNextAction(
         "worker_macos_app_setup_required：按 docs/macos-worker.md 使用 deploy/hc-version.json 的 macos-aarch64 归档；由人在 Mac 现场安装并验证签名 App、为专用账号确认首次局域网许可。核对 arm64 工具和 /opt/homebrew/bin PATH，不使用 Rosetta。",
       helpers: WORKER_NEXT_ACTION.helpers,
       resources:
-        "worker_macos_launchd_or_capacity_required：按 docs/macos-worker.md 设置 run-capacity.yaml 的机器 limit/max_limit 并重载控制主机；核对系统 LaunchDaemon 的 ProgramArguments、UserName、WorkingDirectory、PATH 和实际 hc UID/GID。macOS 无 cgroup 硬隔离。",
+        "worker_macos_core_owner_or_capacity_required：按 docs/macos-worker.md 设置 run-capacity.yaml 的机器 limit/max_limit 并重载控制主机；在无活跃任务时停用并归档旧 LaunchDaemon，由 hc 经 SSH 自管核心。macOS 无 cgroup 硬隔离。",
       mcp: `${WORKER_NEXT_ACTION.mcp} Mac 首次局域网许可需在专用账号现场确认；原因码 worker_macos_local_network_required。`,
     };
     return actions[step];

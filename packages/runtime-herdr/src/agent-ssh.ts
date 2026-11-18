@@ -6,6 +6,7 @@ import { checkLockName } from "./agent-files.js";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 import { isHcVersionCompatible, warnIfHcUntested } from "./hc-version.js";
+import { MACOS_CORE_SCRIPT } from "./macos-core.js";
 
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export const AGENT_PATH =
@@ -112,6 +113,40 @@ export function agentSshCommand(config: AgentConfig): string {
     .map(shellQuote)
     .join(" ");
 }
+/** Fixed macOS connect entry. hc's appended remote command is intentionally
+ * unused: it may autostart/install through an environment we have not checked.
+ * Linux retains its original hc --via command byte for byte.
+ */
+export function agentCoreCommand(config: AgentConfig, session: string): string {
+  if (!config.macosCore) return agentSshCommand(config);
+  const { python, retiredLaunchdLabel } = config.macosCore;
+  if (
+    !literalPath(python) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(retiredLaunchdLabel) ||
+    !/^[A-Za-z0-9_-]{1,48}$/u.test(session) ||
+    !config.user
+  )
+    fail("invalid_launch", "Invalid macOS core configuration");
+  const remote = [
+    'test -n "$SSH_CONNECTION" && exec env -i',
+    shellQuote(`PATH=${config.path ?? AGENT_PATH}`),
+    'HOME="$HOME" SSH_CONNECTION="$SSH_CONNECTION" HC_RUNTIME=1',
+    ...[
+      python,
+      "-I",
+      "-B",
+      "-c",
+      MACOS_CORE_SCRIPT,
+      session,
+      retiredLaunchdLabel,
+      config.user,
+    ].map(shellQuote),
+  ].join(" ");
+  const command = ["ssh", ...sshArguments(config), remote]
+    .map(shellQuote)
+    .join(" ");
+  return ["sh", "-c", `exec ${command}`, "sh"].map(shellQuote).join(" ");
+}
 /** A streaming, credential-checked entry; the caller supplies an explicit environment. */
 export async function agentProcessCommand(
   config: AgentConfig,
@@ -139,7 +174,7 @@ export async function registerAgentMachine(
   version: string,
 ) {
   await checkAgentFiles(config);
-  const target = agentSshCommand(config);
+  const target = agentCoreCommand(config, session);
   const listing = JSON.parse(await client.exec(["machine", "ls", "--json"]));
   if (!Array.isArray(listing.machines))
     fail("runtime_unavailable", "Invalid hc machine list");

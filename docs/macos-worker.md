@@ -31,7 +31,7 @@ mcp_url: https://control.example.ts.net/mcp
 hc_version: 0.1.21
 # 默认 15000；范围 1000–60000 毫秒
 timeout_ms: 15000
-launchd:
+launchd: # 旧服务标识；仅用于确认它已撤下，不再安装 LaunchDaemon
   label: dev.cardigan.example
   hc_path: /System/Volumes/Data/Users/cg_example/.local/bin/hc
 runtime:
@@ -51,6 +51,7 @@ runtime:
           gid: 2201
           alias: example-worker-a
           session: cg
+          retired_launchd_label: dev.cardigan.example
           root: /System/Volumes/Data/Users/cardigan-workers/example
           path: /System/Volumes/Data/Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
           generation: initial
@@ -68,7 +69,7 @@ runtime:
 
 将身份文件改为真实绝对路径；YAML 不展开变量、`~` 或 shell rc。`--host` 必须与配置一致。PATH 必须显式包含 `/opt/homebrew/bin`；hc 与 herdr-core 都指向下一节安装的签名 App 可执行文件。发布限额仅约束启动材料，沿用 Linux 向导合同；两处 MCP 地址必须一致。
 
-macOS 省略 `session` 时，向导在草案中填入短名 `cg`；每项目独立账号和 HOME 保证状态分离。显式会话名保留，不自动改名。固定版本 hc 在未配置路径覆盖时使用 `HOME/.local/state/herdr-core/<session>/<session>.sock`，holder 使用同目录的 `<session>.holder.<8 位十六进制标识>.sock`。两条完整路径按 UTF-8 字节计算，macOS 上限均为 **103 字节**；holder 比主 socket 多 16 字节，主 socket 未超限也可能被拒绝。向导在草案与资源检查中拒绝超限，原因码为 `worker_macos_socket_path_too_long`。优先缩短 `session`，并同步 plist；HOME 本身过长则由管理员重新规划独立账号目录。此向导使用默认路径，不配置 `HC_SOCKET`、XDG 路径环境变量或 hc 配置文件里的 socket 覆盖。
+macOS 省略 `session` 时，向导在草案中填入短名 `cg`；每项目独立账号和 HOME 保证状态分离。显式会话名保留，不自动改名。固定版本 hc 在未配置路径覆盖时使用 `HOME/.local/state/herdr-core/<session>/<session>.sock`，holder 使用同目录的 `<session>.holder.<8 位十六进制标识>.sock`。两条完整路径按 UTF-8 字节计算，macOS 上限均为 **103 字节**；holder 比主 socket 多 16 字节，主 socket 未超限也可能被拒绝。向导在草案与资源检查中拒绝超限，原因码为 `worker_macos_socket_path_too_long`。优先缩短 `session`，并按第 5 节重新确认配置；HOME 本身过长则由管理员重新规划独立账号目录。连接入口清除外部 XDG/HC 环境，并把 `HC_SOCKET` 固定为上述默认路径，避免本地 shell 或 hc 配置文件重定向 socket。
 
 在控制主机私有 `$CARDIGAN_CONFIG_DIR/run-capacity.yaml` 合入并设文件权限 0600：
 
@@ -177,45 +178,58 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /S
 
 `worker-primitives.py` 由安装器安装，三个 helper 必须为不同路径且与控制主机发行文件摘要一致。App 首装及首次局域网许可必须由人在**专用账号**的现场会话完成；允许局域网访问后再验证无头服务。原因码 `worker_macos_app_setup_required` / `worker_macos_local_network_required` 指向这一步。向导不点击许可、不关闭 Gatekeeper/SIP、不申请无关的录屏或辅助功能权限；检查通过不表示模型账号已登录。
 
-## 4. worker：资源、launchd 与 MCP
+## 4. worker：核心所有权、资源与 MCP
 
-固定采用 **系统 LaunchDaemon + UserName**：专用账号无需保持桌面登录。`hc serve` 为本发行固定 hc 的前台入口，直接运行签名 App 内的二进制；不要用会退出的 `hc server start` 配 KeepAlive。首次安装/许可仍需现场，之后是否锁屏/注销/重启可用须实测。
+固定采用 **hc 经 SSH 自管核心**，不再安装系统 LaunchDaemon。控制主机的 Darwin hc 注册入口只执行签名 App 内的 `connect --session <绑定会话>`，保留真实 `SSH_CONNECTION`，清理其它继承环境。hc 自己负责脱离 SSH 进程、会话锁和核心恢复；控制主机不另行 `serve`、删除 socket/lock 或接管旧进程。没有图形会话也不伪造一个图形登录。首装/许可、注销/重启后的实际可用性仍需现场核验。
 
-管理员创建 `/Library/LaunchDaemons/dev.cardigan.example.plist`（root:wheel、0644），替换身份和 PATH 后用 `plutil -lint` 检查：
+hc **v0.1.21** 源码固定提交为 `1b0393f80c35b1dae34f37934d33d0144a8fc8d7`（Apache-2.0），核对结果如下：
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>dev.cardigan.example</string>
-  <key>ProgramArguments</key><array>
-    <string>/Applications/Herdr Core.app/Contents/MacOS/herdr-core</string><string>serve</string>
-  </array>
-  <key>UserName</key><string>cg_example</string>
-  <key>InitGroups</key><false/>
-  <key>WorkingDirectory</key><string>/System/Volumes/Data/Users/cg_example</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>HOME</key><string>/System/Volumes/Data/Users/cg_example</string>
-    <key>PATH</key><string>/System/Volumes/Data/Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>HC_SESSION</key><string>cg</string>
-    <key>HC_RUNTIME</key><string>1</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
-</dict></plist>
-```
+| 机制 | 核对结果与源码 |
+|---|---|
+| connect | [cli.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/cli.rs#L700) 调用 connect_for_app；[macos_session.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/platform/macos_session.rs#L56) 在非 GUI 会话使用 connect_or_start。Unix 没有 no-autostart 参数/环境开关；HC_RUNTIME 不是禁止启动开关 |
+| serve 与 GUI launchd | [macos_launchd.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/platform/macos_launchd.rs#L119) 在真实 SSH 环境跳过 GUI launchd；其它入口尝试 gui/UID，成功则当前进程退出，失败才直接运行。直接把 serve 放在 KeepAlive 下不能保证它永远前台常驻 |
+| SSH 持久化 | [unix.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/platform/unix.rs#L201) spawn_detached 调用 setsid、stdin/stdout 接 /dev/null，stderr 写 core.log；[macos_launchd.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/platform/macos_launchd.rs#L148) 明确保留 SSH 启动的这一生命周期 |
+| 锁与残留 socket | [client.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/client.rs#L85) 先连接，失败后核对其它 socket、等待 core.lock，再尝试启动；[server.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/server.rs#L43) 只有抢到锁的 serve 才绑定 socket，输家以 0 退出；[unix.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/platform/unix.rs#L91) 由胜者移除旧 socket 再绑定。不能人工删持有中的 core.lock，否则会破坏互斥 |
+| 核心退出 | [holder.rs](https://github.com/herdrdev/herdr-core/blob/1b0393f80c35b1dae34f37934d33d0144a8fc8d7/crates/herdr-core/src/holder.rs#L436) 有终端时自带延迟恢复；无 holder 时下一次 connect 启动。故即便另写只连 socket 的代理，也不足以保证外部 LaunchDaemon 是唯一监管者 |
+
+向导和每次新的 hc SSH 连接均只读检查旧服务：`/Library/LaunchDaemons/<label>.plist` 必须不存在（符号链接也拒绝），`launchctl print system/<label>` 必须返回 113，错误明确为 `Could not find service "<label>" in domain for system`。权限不足、超时、其它错误、服务仍加载或只停服务但保留 plist 均拒绝。此检查不自动卸载或删除服务。
+
+`launchd.label` 现在表示需要撤下的旧服务，须与绑定 `retired_launchd_label` 相同；绑定未填时默认 `dev.cardigan.<项目编号>`。新机器也保留这一检查，防止以后误装旧示例。自定义旧服务须填写实际 label；其它同账号的外部 hc 启动服务也由操作员撤下。机器检查连接的是本项目独立账号和绑定 session；Linux 入口与已有 alias 原样保留。
+
+### 从旧 LaunchDaemon 迁移（张良现场执行）
+
+以下全部为示例值，替换成私有配置实际值。先在控制主机执行 `cardigan machine drain worker-a --project example`，等待本机全部活跃 Run/会话按正常流程结束；有未确认退出的会话时不要继续。停用远程派发，保存旧配置。迁移会改变 Darwin 目标指纹，不能把旧 runtime_ref 改绑到新会话。
+
+在 Mac 管理员终端核对旧 label 后，卸载服务并把 plist 归档到 LaunchDaemons 目录以外（目标目录必须是本次新建的；已有目录时停下核对）：
 
 ```sh
-plutil -lint /Library/LaunchDaemons/dev.cardigan.example.plist
-# 首次载入；已有服务先核对，不盲目卸载或重启活跃 worker
-sudo launchctl bootstrap system /Library/LaunchDaemons/dev.cardigan.example.plist
+sudo mkdir -m 0700 /var/root/cardigan-core-migration
+sudo launchctl bootout system/dev.cardigan.example
+sudo mv /Library/LaunchDaemons/dev.cardigan.example.plist /var/root/cardigan-core-migration/
 launchctl print system/dev.cardigan.example
 ```
 
-向导对照磁盘 plist 和已加载服务的参数、账号、目录、环境，并用 libproc 核实 hc 进程路径、有效/真实/保存 UID 与 GID 均等于专用账号/组，以及稳定启动身份；仅有 plist 或其它账号已启动 hc 均不通过。不自动 bootstrap/kickstart。配置不匹配、无法读取或进程身份/主组凭据变化均 blocked。磁盘 plist 已修正也不能代替旧 hc 进程实际凭据；管理员须在无活跃任务时按正常流程重载服务，再检查。
+预期最后一条返回 113 且显示上述 service not found。若服务原本没有加载，先确认这一事实再归档文件，不用重启服务来凑流程。不要删除 hc 状态目录、终端数据或 core.lock。
 
-`HC_SESSION` 必须与私有配置的绑定 `session` 完全一致，`HC_RUNTIME` 固定为字符串 `1`；不能只修改磁盘 plist 而保留载入旧环境的进程。
+在专用账号的真实 SSH 会话中，用与旧核心一致的 HOME/session/socket 执行 `hc server stop`（该命令对不存在的核心不自举）；核对旧核心退出。已经缩短 session 时也核对原会话，勿留下另一个 session 的活跃终端。运行配置与向导配置填写相同的新 session、retired_launchd_label 和新 generation，保持远程派发关闭，然后按第 5 节确认配置。
+
+```sh
+# 在专用账号 SSH 会话中；示例旧 session 为 cg，按实际旧值替换
+HC_SESSION=cg HC_SOCKET="$HOME/.local/state/herdr-core/cg/cg.sock" \
+  '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' server stop
+```
+
+控制主机用**与服务相同的本地 hc 环境**查看 `hc machine ls --json`。旧 Darwin alias 的 target 与新入口不同，会故意报 `invalid_launch`，不会自动覆盖。确认该 alias 没有任何活跃引用后执行 `hc machine rm example-worker-a`（仅忘记连接登记，不停止远端终端），重载控制主机配置，再执行 `cardigan machine check worker-a --project example`，由新入口登记。不要执行 `hc machine update`，它会尝试安装/升级远端二进制；本卡没有更改 hc 版本。
+
+### 现场验收与预期输出
+
+1. `cardigan worker check --project example --machine worker-a`：九步均 passed；resources 不再要求常驻 LaunchDaemon。`launchctl print system/<旧 label>` 仍是明确的 113。保留失败原始日志供排查，不把任意非零当成服务不存在。
+2. 完成远程启动原有前置并启用私有开关后，用 `cardigan machine update worker-a --project example --status online` 恢复接单，连续执行三次 `cardigan machine check worker-a --project example`：均 `launch_enabled=true`，不出现 runtime_timeout/runtime_unavailable。关闭所有管理 SSH 连接再检查一次；用专用账号 `ps -u <账号> -o pid,ppid,command` 核对该 session 只有一个 serve 核心（connect 可有多个，holder 不是重复核心），core.log 没有本次新增 GUI bootstrap 125。不同 session 不算同一核心。
+3. 仅在无活跃终端时，用专用账号的同 HOME/session/socket 环境执行 `hc server stop`，再运行 machine check：恢复成功，新核心唯一。不要手工制造或删除生产 socket；残留 socket 与锁争用由确定性夹具覆盖。
+4. 发起一个正常空 Run，确认模型凭据、MCP、工作目录和完成回报均正常；保留 run_id。待该 Run 完整退出后测试锁屏、注销和重启，再 machine check；重启后首次连接按需启动，不要求开机预先运行 hc。
+5. 修改向导私有 YAML 的合法配置后先 resume：预期 worker_config_changed 和带新摘要的确认命令；核对后执行该命令，旧记录留档、所有步骤重查。错误摘要不能通过，物理机器/已应用配置冲突不能绕过。
+
+现场结果须记录软件 SHA、hc 版本、命令/退出码、三次检查与断开 SSH/重启的结果；本卡本地的 Python/Unix socket 合成夹具不等于真实 Mac 实测通过。
 
 macOS 没有 Linux cgroup 的 CPU/内存硬隔离。Run 并发上限及 Background 优先级只表达各自限制，不保证共用 CI 隔离；需要硬隔离的共享模式不在支持范围。每 Run 测试并发按主机限流配置执行，不用压测验证。
 
@@ -230,7 +244,7 @@ cardigan worker resume --project example --machine worker-a
 cardigan worker check --project example --machine worker-a
 ```
 
-新机器登记为 offline；已有身份/状态/容量/标签保持原值。`resume`、重复 `add` 和 `check` 都重新核验事实，`status` 只显示 journal 历史。配置摘要改变会拒绝续跑，不能用旧 passed 代替现场事实。`check` 不登记、不发布草案、不启用远程派发。
+新机器登记为 offline；已有身份/状态/容量/标签保持原值。`resume`、重复 `add` 和 `check` 都重新核验事实，`status` 只显示 journal 历史。配置摘要改变会拒绝续跑并给出 `worker resume --confirm-config <当前完整摘要>`。先核对新旧配置、确认没有旧目标的活跃引用；如已应用的 runtime-workers.yaml 与新配置冲突，先由操作员按停派发/清退旧会话流程核对并同步，确认参数不会绕过冲突。再执行打印的确认命令：旧 journal 与草案保存为新的 `*.history.json`，仅替换本项目草案，全部步骤重查；不能用旧 passed 代替现场事实。确认后的中途失败可 resume；若写草案前进程崩溃，重新执行同一确认命令。`check` 不登记、不发布草案、不启用远程派发。
 
 journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录 0700、文件 0600，沿用 [Linux 向导的恢复合同](linux-worker.md#5-控制主机add续跑check-和-status)。管理员核对草案后才合入 `runtime-workers.yaml`，保留其它机器/项目；`allow_remote_launch` 仍须按远程启动门禁显式启用。检查通过不会自动启用机器或改变 Assignment。
 
@@ -240,11 +254,12 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 |---|---|
 | `worker_macos_arm64_required` | Intel Mac 不支持；不要用 Rosetta |
 | `worker_launchd_config_invalid` | 核对 launchd label、hc_path 和显式 Homebrew PATH |
-| `worker_macos_socket_path_too_long` | 缩短绑定 session 并同步 HC_SESSION；按实际 HOME 核对 socket 与 holder 均不超过 103 字节 |
+| `worker_macos_socket_path_too_long` | 缩短绑定 session 并重新确认配置；按实际 HOME 核对 socket 与 holder 均不超过 103 字节 |
 | `worker_account_blocked` / `worker_directories_blocked` | 核对目录服务、实际 UID/GID/组、sudo 拒绝、父链/ACL 和安装布局 |
 | `worker_tools_blocked` / `worker_macos_app_setup_required` | 核对原生二进制、固定版本签名 App、链接和现场许可 |
-| `worker_resources_blocked` / `worker_macos_launchd_or_capacity_required` | 核对显式 Run 容量、重载状态、系统 LaunchDaemon 和 hc 进程归属 |
+| `worker_resources_blocked` / `worker_macos_core_owner_or_capacity_required` | 核对显式 Run 容量、重载状态与旧 LaunchDaemon 已卸载且 plist 已归档 |
 | `worker_mcp_blocked` / `worker_macos_local_network_required` | 核对 HTTPS/TLS、tailnet、现场局域网许可和未鉴权拒绝 |
-| `worker_config_changed` / `worker_config_conflict` | 人工核对旧绑定；保留记录，不覆盖或改绑活跃 Assignment |
+| `worker_config_changed` / `worker_config_confirmation_invalid` | 核对后使用错误提示中的当前摘要确认命令；旧记录保留，重跑全部检查 |
+| `worker_config_conflict` | 核对物理身份、其它项目或已应用配置冲突；确认参数不能绕过，也不改绑活跃 Assignment |
 
-本卡自动测试均为合成夹具，**未现场验证 Mac**。合并后由 human_action 跟进：专用账号安装/许可、无桌面登录及锁屏/重启后的服务、add/check/resume、空 Run、真实开发 commit/回传/同 SHA 预检、失联后准确退出证明。现场结果分别记录；未知退出保留占用，不建第二个 Run，不把本向导当作接管授权。
+本卡自动测试均为合成夹具，**未现场验证 Mac**。合并后由 human_action 跟进：专用账号安装/许可、无桌面登录及锁屏/重启后的核心、add/check/resume、空 Run、真实开发 commit/回传/同 SHA 预检、失联后准确退出证明。现场结果分别记录；未知退出保留占用，不建第二个 Run，不把本向导当作接管授权。
