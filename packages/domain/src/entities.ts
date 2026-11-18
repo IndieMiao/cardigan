@@ -89,6 +89,7 @@ export const toolNames = [
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export interface RoleReference {
+  readonly required_capabilities?: readonly string[];
   readonly required_machine_tags?: readonly string[];
   readonly role_id: RoleId;
   readonly role_version: number;
@@ -379,6 +380,7 @@ export interface MergeCheckView {
   readonly infra_flaky?: boolean;
 }
 interface WorkItemFields {
+  readonly requirements?: import("./machine-requirements.js").WorkItemRequirements;
   /** PM/human hold: system assignment and reminders skip this item. */
   readonly manual_assign?: boolean;
   readonly id: WorkItemId;

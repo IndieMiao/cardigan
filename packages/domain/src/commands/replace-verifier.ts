@@ -111,6 +111,9 @@ export function replaceVerificationWorkItem(
       required: old.required,
       depends_on: [...old.depends_on],
       completion_criteria: [...old.completion_criteria],
+      ...(old.requirements === undefined
+        ? {}
+        : { requirements: old.requirements }),
       max_review_rounds: old.max_review_rounds,
       ...(old.target_work_item_id
         ? { target_work_item_id: old.target_work_item_id }

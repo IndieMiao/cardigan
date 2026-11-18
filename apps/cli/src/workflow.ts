@@ -17,7 +17,9 @@ import {
   completeHumanAction,
   createCard,
   createHostOpsAssignment,
+  createWorkItem,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  getWorkItem,
   hasVerifiedMergeNoop,
   isRoleActive,
   listNeedsYou,
@@ -37,6 +39,8 @@ import {
   standingTools,
   supersedeCard,
   updateCard,
+  updateWorkItem,
+  type WorkItemRequirements,
 } from "@cardigan/domain";
 import {
   effectiveRunLimit,
@@ -77,6 +81,9 @@ import { launchExecution, terminalExecution } from "./runtime-check.js";
 
 const USAGE = [
   "用法：",
+  "  cardigan work-item create <C-n> --title <标题> --role <角色> --kind produce|verify [--required on|off] [--acceptance <标准>] [--target <W-n>] [--requirements <JSON>]",
+  "  cardigan work-item update <W-n> --requirements <JSON> | work-item show <W-n>",
+  "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
@@ -215,6 +222,8 @@ export async function runWorkflowCommand(
 ): Promise<number> {
   const [command, ...rest] = args;
   switch (command) {
+    case "work-item":
+      return workItemCommand(rest, io);
     case "card":
       return cardCommand(rest, io);
     case "assign":
@@ -608,6 +617,129 @@ function cardDependencyFlags(
   };
 }
 
+function jsonFlag(flags: Args["flags"], name: string): unknown {
+  try {
+    return JSON.parse(required(flags, name));
+  } catch {
+    throw new CliError(`--${name} 必须是合法 JSON`, EXIT.usage);
+  }
+}
+
+function workItemCommand(args: readonly string[], io: CliIo): number {
+  const [action, ...rest] = args;
+  if (!["create", "update", "show"].includes(action ?? ""))
+    throw new CliError(
+      "用法：cardigan work-item create|update|show",
+      EXIT.usage,
+    );
+  const { flags, positionals } = parseArgs(rest, []);
+  const allowed = [
+    "project",
+    "data-dir",
+    ...(action === "create"
+      ? [
+          "title",
+          "role",
+          "kind",
+          "required",
+          "acceptance",
+          "target",
+          "requirements",
+        ]
+      : action === "update"
+        ? ["requirements"]
+        : []),
+  ];
+  if (
+    positionals.length !== 1 ||
+    Object.keys(flags).some((key) => !allowed.includes(key))
+  )
+    throw new CliError("工作项参数不合法", EXIT.usage);
+  const store = openStoreFrom(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    const identity = resolveCommandIdentity(io, project_id, store);
+    if (action === "show") {
+      const result = store.uow.read(
+        (tx) =>
+          unwrap(
+            getWorkItem(
+              loadCommandState(tx, project_id),
+              identity.actor,
+              parseWorkItem(positionals[0]),
+            ),
+          ).data,
+      );
+      io.stdout(JSON.stringify(result, null, 2));
+      return EXIT.ok;
+    }
+    const requirements =
+      flags.requirements === undefined
+        ? undefined
+        : (jsonFlag(flags, "requirements") as WorkItemRequirements);
+    if (action === "update") {
+      if (requirements === undefined)
+        throw new CliError("需要 --requirements", EXIT.usage);
+      const item = runCommand(store, {
+        operation: "更新工作项",
+        target: positionals[0] as string,
+        project_id,
+        ...identity,
+        reduce: (s, a, p) =>
+          updateWorkItem(
+            s,
+            a,
+            { work_item_id: parseWorkItem(positionals[0]), requirements },
+            p,
+          ),
+      });
+      io.stdout(JSON.stringify(item, null, 2));
+    } else {
+      const card = parseId("card", positionals[0]);
+      const kind = required(flags, "kind");
+      const requiredFlag = optional(flags, "required") ?? "on";
+      if (
+        !card.ok ||
+        !["produce", "verify"].includes(kind) ||
+        !["on", "off"].includes(requiredFlag)
+      )
+        throw new CliError("卡号、工作项类型或必需标记不合法", EXIT.usage);
+      const item = runCommand(store, {
+        operation: "创建工作项",
+        target: card.value.id,
+        project_id,
+        ...identity,
+        reduce: (s, a, p) =>
+          createWorkItem(
+            s,
+            a,
+            {
+              card_id: card.value.id,
+              title: required(flags, "title"),
+              role_id: required(flags, "role"),
+              kind: kind as "produce" | "verify",
+              required: requiredFlag === "on",
+              completion_criteria: list(optional(flags, "acceptance") ?? ""),
+              ...(requirements === undefined ? {} : { requirements }),
+              ...(flags.target === undefined
+                ? {}
+                : {
+                    target_work_item_id: parseWorkItem(
+                      required(flags, "target"),
+                    ),
+                  }),
+            },
+            p,
+          ),
+      });
+      io.stdout(JSON.stringify(item, null, 2));
+    }
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
 function cardCreate(args: readonly string[], io: CliIo): number {
   const parsed = parseArgs(args, []);
   const template = optional(parsed.flags, "template") ?? "dev";
@@ -634,6 +766,14 @@ function cardCreate(args: readonly string[], io: CliIo): number {
           actor,
           {
             ...cardDependencyFlags(parsed.flags),
+            ...(parsed.flags["work-item-requirements"] === undefined
+              ? {}
+              : {
+                  work_item_requirements: jsonFlag(
+                    parsed.flags,
+                    "work-item-requirements",
+                  ) as Readonly<Record<string, WorkItemRequirements>>,
+                }),
             title: required(parsed.flags, "title"),
             goal: required(parsed.flags, "goal"),
             acceptance_criteria: acceptance,

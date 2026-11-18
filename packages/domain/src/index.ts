@@ -205,6 +205,7 @@ export {
   type InteractionSample,
   type InteractionState,
 } from "./interaction.js";
+export * from "./machine-requirements.js";
 export * from "./member.js";
 export * from "./merge-batch.js";
 export * from "./merge-override.js";

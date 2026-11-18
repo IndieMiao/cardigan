@@ -746,3 +746,107 @@ test("C-383 completion committed before revocation remains one recorded completi
   ).not.toBe(0);
   expect(hostActionState()).toEqual(completed);
 });
+
+test("MC-2 CLI PM requirements use existing permissions and round-trip through item show", async () => {
+  const pm = tokenIo(issue().token);
+  expect(
+    await run(
+      [
+        "work-item",
+        "update",
+        "W-1",
+        "--requirements",
+        '{"capabilities":["godot>=4.7"],"tags":["office"]}',
+      ],
+      pm,
+    ),
+  ).toBe(0);
+  expect(await run(["work-item", "show", "W-1"], pm)).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    requirements: { capabilities: ["godot>=4.7"], tags: ["office"] },
+  });
+  expect(
+    await run(
+      [
+        "work-item",
+        "create",
+        "C-1",
+        "--title",
+        "Extra",
+        "--role",
+        "coder",
+        "--kind",
+        "produce",
+        "--requirements",
+        '{"capabilities":["xcode"]}',
+      ],
+      pm,
+    ),
+  ).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    requirements: { capabilities: ["xcode"] },
+  });
+  const limited = tokenIo(issue(["get_card"]).token);
+  expect(
+    await run(["work-item", "update", "W-1", "--requirements", "{}"], limited),
+  ).toBe(2);
+  expect(await run(["work-item", "show", "W-1"], limited)).toBe(0);
+  expect(
+    await run(
+      [
+        "work-item",
+        "update",
+        "W-1",
+        "--requirements",
+        '{"capabilities":["godot^4"]}',
+      ],
+      pm,
+    ),
+  ).not.toBe(0);
+  expect(
+    await run(
+      [
+        "work-item",
+        "update",
+        "W-1",
+        "--requirements",
+        '{"machine_id":"other"}',
+      ],
+      pm,
+    ),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) => tx.work_items.get(project, "W-1" as never))
+      ?.requirements,
+  ).toEqual({ capabilities: ["godot>=4.7"], tags: ["office"] });
+});
+
+test("MC-2 CLI creates template items with requirements and rejects misspelled keys", async () => {
+  const args = [
+    "card",
+    "create",
+    "--title",
+    "Machine work",
+    "--goal",
+    "Build",
+    "--acceptance",
+    "Pass",
+    "--repo",
+    "example/repo",
+    "--work-item-requirements",
+  ];
+  expect(
+    await run([
+      ...args,
+      '{"development":{"os":"linux","capabilities":["godot=4.7"]}}',
+    ]),
+  ).toBe(0);
+  expect(
+    store.uow
+      .read((tx) => tx.work_items.list(project))
+      .some((w) => w.requirements?.capabilities?.includes("godot=4.7")),
+  ).toBe(true);
+  const before = store.uow.read((tx) => tx.cards.list(project)).length;
+  expect(await run([...args, '{"typo":{}}'])).not.toBe(0);
+  expect(store.uow.read((tx) => tx.cards.list(project))).toHaveLength(before);
+});

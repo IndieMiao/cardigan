@@ -1,5 +1,6 @@
 import type { Actor } from "../entities.js";
 import type { AttachmentId, CardId } from "../ids.js";
+import { validateWorkItemRequirements } from "../machine-requirements.js";
 import type { CardTemplate, CardTemplateDefinition } from "../templates.js";
 import {
   activeTemplateRole,
@@ -91,6 +92,8 @@ export function validateCardTemplate(
       "validation_failed",
       "工作项类型或必需标记不合法",
     );
+    if (w.requirements !== undefined)
+      unwrap(validateWorkItemRequirements(w.requirements));
     text(w.key, "工作项 key");
     text(w.title, "工作项标题");
     ensure(

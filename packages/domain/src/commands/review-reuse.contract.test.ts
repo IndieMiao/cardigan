@@ -222,7 +222,12 @@ test("missing old host evidence cannot be retroactively trusted", async () => {
   expect((await deliver(s)).data.reused_reviews).toBeUndefined();
 });
 
-test.each(["risk", "requirements", "required_verifier"] as const)(
+test.each([
+  "risk",
+  "requirements",
+  "machine_requirements",
+  "required_verifier",
+] as const)(
   "%s changes invalidate reuse permanently, even if restored",
   async (change) => {
     let { s, review } = await passed();
@@ -246,6 +251,19 @@ test.each(["risk", "requirements", "required_verifier"] as const)(
           ),
         ),
       );
+    } else if (change === "machine_requirements") {
+      for (const requirements of [{ capabilities: ["godot>=4.7"] }, {}])
+        s = apply(
+          s,
+          value(
+            updateWorkItem(
+              s,
+              human,
+              { work_item_id: id("work_item", 1), requirements },
+              io,
+            ),
+          ),
+        );
     } else if (change === "requirements") {
       s = apply(
         s,

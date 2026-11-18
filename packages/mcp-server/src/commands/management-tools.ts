@@ -31,6 +31,7 @@ import {
   triageHumanAction,
   updateCard,
   updateWorkItem,
+  validateWorkItemRequirements,
   validationFailed,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -90,6 +91,22 @@ const readyWhen = (manual: boolean) =>
         ? "Defer until a card gets a new delivery, a card merges, or PM Ops releases it (manual). Use instead of writing 'do this later' in the text. Merge-holding items still show once their card submits completion."
         : "Human decisions only: defer until a card gets a new delivery or merges. Use instead of writing 'decide this later' in the text.",
     );
+const requirements = z
+  .object({
+    os: text.optional(),
+    arch: text.optional(),
+    capabilities: z.array(text).optional(),
+    tags: z.array(text).optional(),
+  })
+  .strict()
+  .transform((input, ctx) => {
+    const result = validateWorkItemRequirements(input);
+    if (!result.ok) {
+      ctx.addIssue({ code: "custom", message: result.error.message });
+      return z.NEVER;
+    }
+    return result.value;
+  });
 const schemas = {
   set_merge_solo: { card_id: id("card"), solo: z.boolean(), reason: text },
   set_merge_window: { card_id: id("card"), open: z.boolean(), reason: text },
@@ -331,6 +348,12 @@ const schemas = {
     due: text.optional(),
   },
   create_card: {
+    work_item_requirements: z
+      .record(text, requirements)
+      .optional()
+      .describe(
+        "Additional machine requirements by template work-item key; template defaults and role requirements are retained.",
+      ),
     depends_on_cards: z
       .array(id("card"))
       .optional()
@@ -467,6 +490,7 @@ const schemas = {
       ),
   },
   create_work_item: {
+    requirements: requirements.optional(),
     card_id: id("card"),
     title: text,
     kind: z.enum(["produce", "verify"]),
@@ -478,6 +502,11 @@ const schemas = {
     max_review_rounds: z.number().int().positive().optional(),
   },
   update_work_item: {
+    requirements: requirements
+      .optional()
+      .describe(
+        "Replace item requirements; {} clears custom requirements while retaining template defaults and role constraints. Does not move an existing Assignment.",
+      ),
     manual_assign: z.boolean().optional(),
     work_item_id: id("work_item"),
     title: text.optional(),
@@ -667,6 +696,7 @@ export function managementTools(clock?: Clock) {
               deadline,
               template,
               template_id,
+              work_item_requirements,
               repo: _repo,
               base_branch: _base,
               ...required
@@ -677,6 +707,9 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
+                  ...(work_item_requirements === undefined
+                    ? {}
+                    : { work_item_requirements }),
                   ...(depends_on_cards === undefined
                     ? {}
                     : { depends_on_cards }),

@@ -163,6 +163,7 @@ export function completionSources(d: CommandDraft, card: Card) {
       w.kind === "verify" ? w.target_work_item_id : null,
       w.completion_criteria,
       w.status === "cancelled",
+      ...(w.requirements === undefined ? [] : [w.requirements]),
     ]),
     identities: d
       .list("assignments")

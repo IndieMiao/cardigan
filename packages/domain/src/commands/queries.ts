@@ -27,7 +27,8 @@ import type {
 } from "../entities.js";
 import { eventsForDecision } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
-import type { CardId } from "../ids.js";
+import type { CardId, WorkItemId } from "../ids.js";
+import { effectiveWorkItemRequirements } from "../machine-requirements.js";
 import { mergeBatches } from "../merge-batch.js";
 import { mergeStage } from "../merge-stage.js";
 import { requesterNotificationRecipient } from "../notification.js";
@@ -310,6 +311,9 @@ function templateSummary(template: CardTemplate) {
       role_id: item.role_id,
       kind: item.kind,
       required: item.required,
+      ...(item.requirements === undefined
+        ? {}
+        : { requirements: item.requirements }),
       ...(item.completion_criteria === undefined
         ? {}
         : { completion_criteria: item.completion_criteria }),
@@ -384,6 +388,12 @@ export function listRoles(state: CommandState, actor: Actor) {
                   }),
                 }),
             capabilities: [...role.capabilities],
+            ...(role.required_capabilities === undefined
+              ? {}
+              : { required_capabilities: [...role.required_capabilities] }),
+            ...(role.required_machine_tags === undefined
+              ? {}
+              : { required_machine_tags: [...role.required_machine_tags] }),
             ...(role.worktree === undefined ? {} : { worktree: role.worktree }),
             ...(role.abilities === undefined
               ? {}
@@ -1048,4 +1058,46 @@ function selectNeedsYou<T>(
             })),
         ],
   };
+}
+
+/** CLI item view uses the existing card scope and get_card permission. */
+export function getWorkItem(state: CommandState, actor: Actor, id: WorkItemId) {
+  return command(state, actor, "get_card", undefined, (d) => {
+    const item = d.work(id);
+    ensure(
+      actor.kind === "human" ||
+        cardReadAccess({
+          project_id: state.project_id,
+          assignment: d.assignment,
+          card: d.card(item.card_id),
+          work_items: state.work_items,
+          preferences: state.project_preferences?.find(
+            (p) => p.id === state.project_id,
+          ),
+        }) === "full",
+      "unauthorized",
+      "此卡仅可查看摘要，不能读取工作项详情",
+    );
+    const assignment = state.assignments.find(
+      (a) => a.id === item.assignment_id,
+    );
+    const role = state.roles
+      .filter(
+        (r) =>
+          r.role_id === item.role_id &&
+          (assignment === undefined ||
+            r.role_version === assignment.role_version),
+      )
+      .sort((a, b) => b.role_version - a.role_version)[0];
+    const effective = effectiveWorkItemRequirements(
+      item.requirements,
+      role ?? {},
+    );
+    ensure(
+      effective.ok,
+      "validation_failed",
+      effective.ok ? "" : effective.error.message,
+    );
+    return { ...item, effective_requirements: effective.value };
+  });
 }

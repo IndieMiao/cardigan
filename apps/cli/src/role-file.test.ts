@@ -511,3 +511,29 @@ test("file writes reject pasted system sections; explicit legacy conversion remo
   expect(converted.instructions).not.toContain("## 协作规则");
   expect(converted.instructions).not.toContain("## 协议（每个 Run 都要遵守）");
 });
+
+test("MC-2 role YAML persists and shows required capabilities without replacing the previous version", async () => {
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  writeFileSync(
+    roleFile,
+    `${ROLE_YAML}\nrequired_capabilities: [browser.chromium, 'godot>=4.7']\n`,
+  );
+  expect(await run(["role", "update", "--file", roleFile])).toBe(0);
+  expect(await run(["role", "show", "coder"])).toBe(0);
+  expect(printed()).toContain("browser.chromium");
+  const store = Store.open({ dataDir });
+  try {
+    store.uow.read((tx) => {
+      expect(
+        getRoleVersion(tx, "p-roles", "coder", 1)?.required_capabilities,
+      ).toBeUndefined();
+      expect(
+        getRoleVersion(tx, "p-roles", "coder", 2)?.required_capabilities,
+      ).toEqual(["browser.chromium", "godot>=4.7"]);
+    });
+  } finally {
+    store.close();
+  }
+  writeFileSync(roleFile, `${ROLE_YAML}\nrequired_capabilities: ['godot~4']\n`);
+  expect(await run(["role", "update", "--file", roleFile])).not.toBe(0);
+});
