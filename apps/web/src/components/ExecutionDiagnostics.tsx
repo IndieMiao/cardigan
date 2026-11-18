@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CardiganClient, ExecutionDiagnosticsData } from "../api.js";
 import {
   CompactNotice,
@@ -113,6 +113,36 @@ export function useExecutionDiagnostics(
     const timer = setTimeout(() => setStale(true), Math.max(0, remaining));
     return () => clearTimeout(timer);
   }, [data]);
+  // Warnings swap the header status for the attention row (and back). If the
+  // keyboard was in the old entry when it unmounts, the new entry takes focus;
+  // a pointer press or focus elsewhere means the user moved on.
+  const focusInside = useRef(false);
+  useEffect(() => {
+    const inside = (target: EventTarget | null) =>
+      target instanceof Element &&
+      target.closest("[data-diagnostics-entry]") !== null;
+    const onFocusIn = (event: FocusEvent) => {
+      focusInside.current = inside(event.target);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!inside(event.target)) focusInside.current = false;
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, []);
+  const claimFocus = useCallback((target: HTMLElement | null) => {
+    const active = document.activeElement;
+    if (
+      target &&
+      focusInside.current &&
+      (!active || active === document.body || !active.isConnected)
+    )
+      target.focus();
+  }, []);
   const sessions = stale
     ? []
     : (data?.sessions.filter((s) => causes[s.cause]) ?? []);
@@ -137,6 +167,7 @@ export function useExecutionDiagnostics(
     sessions,
     count,
     state,
+    claimFocus,
     refresh: () => setRequest((n) => n + 1),
   };
 }
@@ -157,11 +188,14 @@ function RefreshButton({
 }: {
   diagnostics: ExecutionDiagnosticsResource;
 }) {
+  // aria-disabled keeps keyboard focus in place while a check is pending.
   return (
     <Button
       type="button"
-      disabled={diagnostics.busy}
-      onClick={diagnostics.refresh}
+      aria-disabled={diagnostics.busy || undefined}
+      onClick={() => {
+        if (!diagnostics.busy) diagnostics.refresh();
+      }}
     >
       {diagnostics.busy ? "检查中" : "刷新诊断"}
     </Button>
@@ -190,16 +224,24 @@ export function ExecutionDiagnosticsStatus({
 }: {
   diagnostics: ExecutionDiagnosticsResource;
 }) {
-  if (!diagnostics.supported || diagnostics.state === "warn") return null;
+  const trigger = useRef<HTMLButtonElement>(null);
+  const visible = diagnostics.supported && diagnostics.state !== "warn";
+  const { claimFocus } = diagnostics;
+  useEffect(() => {
+    if (visible) claimFocus(trigger.current);
+  }, [visible, claimFocus]);
+  if (!visible) return null;
   const label = stateLabel[diagnostics.state];
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
         <Button
+          ref={trigger}
           type="button"
           variant="ghost"
           className="ui-page-status-trigger"
           aria-label={`启动与运行诊断：${label}`}
+          data-diagnostics-entry=""
           data-diagnostics-trigger=""
           data-diagnostics-state={diagnostics.state}
         >
@@ -213,6 +255,7 @@ export function ExecutionDiagnosticsStatus({
         sideOffset={4}
         collisionPadding={12}
         className={compactNoticePanelClassName}
+        data-diagnostics-entry=""
         data-diagnostics-panel=""
       >
         <strong>启动与运行诊断</strong>
@@ -233,12 +276,22 @@ export function ExecutionDiagnosticsAlert({
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const { data, sessions, count } = diagnostics;
-  if (!diagnostics.supported || count === 0) return null;
+  const toggle = useRef<HTMLButtonElement>(null);
+  const { data, sessions, count, claimFocus } = diagnostics;
+  const visible = diagnostics.supported && count > 0;
+  useEffect(() => {
+    if (visible) claimFocus(toggle.current);
+  }, [visible, claimFocus]);
+  if (!visible) return null;
   return (
-    <CompactNotice aria-label="启动与运行诊断" data-diagnostics-alert="">
+    <CompactNotice
+      aria-label="启动与运行诊断"
+      data-diagnostics-entry=""
+      data-diagnostics-alert=""
+    >
       <CompactNoticeLine>
         <Button
+          ref={toggle}
           type="button"
           variant="ghost"
           className={compactNoticeToggleClassName}

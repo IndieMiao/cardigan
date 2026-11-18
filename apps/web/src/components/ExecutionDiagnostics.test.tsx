@@ -122,7 +122,10 @@ test("checking stays compact and its refresh cannot fire twice", async () => {
   const panel = await openStatus("检查中");
   const refresh = screen.getByRole("button", { name: "检查中" });
   expect(panel.contains(refresh)).toBe(true);
-  expect((refresh as HTMLButtonElement).disabled).toBe(true);
+  expect(refresh.getAttribute("aria-disabled")).toBe("true");
+  refresh.focus();
+  fireEvent.click(refresh);
+  expect(document.activeElement).toBe(refresh);
   expect(screen.queryByRole("region", { name: "启动与运行诊断" })).toBeNull();
   expect(read).toHaveBeenCalledTimes(1);
 });
@@ -187,9 +190,10 @@ test("a refresh keeps existing warnings in place until the new result arrives", 
     screen.getByRole("button", { name: "启动与运行诊断（1）" }),
   ).toBeTruthy();
   expect(
-    (screen.getByRole("button", { name: "检查中" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+    screen
+      .getByRole("button", { name: "检查中" })
+      .getAttribute("aria-disabled"),
+  ).toBe("true");
   resolve({ configuration: [], sessions: [] });
   await screen.findByRole("button", { name: "启动与运行诊断：无告警" });
   expect(screen.queryByRole("region", { name: "启动与运行诊断" })).toBeNull();
@@ -288,4 +292,110 @@ test("clients without a diagnostics reader render nothing", () => {
   delete (client as { executionDiagnostics?: unknown }).executionDiagnostics;
   const view = render(<Harness client={client} />);
   expect(view.container.textContent).toBe("");
+});
+
+const warningResult = {
+  configuration: [
+    { profile: "fixture", code: "codex_approval", message: "审批策略待核对" },
+  ],
+  sessions: [],
+};
+const emptyResult = { configuration: [], sessions: [] };
+/** First read resolves immediately, the refresh waits for the returned resolver. */
+function pendingSecondRead(first: unknown) {
+  const control: { resolve: (value: unknown) => void } = { resolve: () => {} };
+  const read = vi
+    .fn()
+    .mockResolvedValueOnce(first)
+    .mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          control.resolve = r;
+        }),
+    );
+  return { read, control };
+}
+
+test("keyboard refresh from the header hands focus to the new attention row", async () => {
+  const { read, control } = pendingSecondRead(emptyResult);
+  render(<Harness client={fakeClient({ executionDiagnostics: read })} />);
+  await openStatus("无告警");
+  const refresh = screen.getByRole("button", { name: "刷新诊断" });
+  refresh.focus();
+  fireEvent.click(refresh);
+  // Pending keeps the keyboard position and blocks a second request.
+  expect(document.activeElement).toBe(refresh);
+  fireEvent.click(refresh);
+  expect(read).toHaveBeenCalledTimes(2);
+  control.resolve(warningResult);
+  const toggle = await screen.findByRole("button", {
+    name: "启动与运行诊断（1）",
+  });
+  await waitFor(() => expect(document.activeElement).toBe(toggle));
+  expect(
+    screen.queryByRole("button", { name: /^启动与运行诊断：/u }),
+  ).toBeNull();
+});
+
+test("clearing warnings from the attention row hands focus back to the header status", async () => {
+  const { read, control } = pendingSecondRead(warningResult);
+  render(<Harness client={fakeClient({ executionDiagnostics: read })} />);
+  await screen.findByRole("button", { name: "启动与运行诊断（1）" });
+  const refresh = screen.getByRole("button", { name: "刷新诊断" });
+  refresh.focus();
+  fireEvent.click(refresh);
+  expect(document.activeElement).toBe(refresh);
+  control.resolve(emptyResult);
+  const status = await screen.findByRole("button", {
+    name: "启动与运行诊断：无告警",
+  });
+  await waitFor(() => expect(document.activeElement).toBe(status));
+  expect(screen.queryByRole("region", { name: "启动与运行诊断" })).toBeNull();
+});
+
+test("focus is not taken back after the user has moved elsewhere", async () => {
+  const { read, control } = pendingSecondRead(emptyResult);
+  render(
+    <>
+      <button type="button">其它控件</button>
+      <Harness client={fakeClient({ executionDiagnostics: read })} />
+    </>,
+  );
+  await openStatus("无告警");
+  const refresh = screen.getByRole("button", { name: "刷新诊断" });
+  refresh.focus();
+  fireEvent.click(refresh);
+  const other = screen.getByRole("button", { name: "其它控件" });
+  fireEvent.pointerDown(other);
+  other.focus();
+  control.resolve(warningResult);
+  await screen.findByRole("button", { name: "启动与运行诊断（1）" });
+  expect(document.activeElement).toBe(other);
+});
+
+test("a pointer press outside before the swap leaves focus where the user put it", async () => {
+  const { read, control } = pendingSecondRead(warningResult);
+  render(<Harness client={fakeClient({ executionDiagnostics: read })} />);
+  await screen.findByRole("button", { name: "启动与运行诊断（1）" });
+  const refresh = screen.getByRole("button", { name: "刷新诊断" });
+  refresh.focus();
+  fireEvent.click(refresh);
+  fireEvent.pointerDown(document.body);
+  refresh.blur();
+  control.resolve(emptyResult);
+  await screen.findByRole("button", { name: "启动与运行诊断：无告警" });
+  expect(document.activeElement).toBe(document.body);
+});
+
+test("initial warnings never steal focus on page load", async () => {
+  render(
+    <>
+      <button type="button">其它控件</button>
+      <Harness
+        client={fakeClient({ executionDiagnostics: async () => warningResult })}
+      />
+    </>,
+  );
+  await screen.findByRole("button", { name: "启动与运行诊断（1）" });
+  expect(document.activeElement).toBe(document.body);
 });

@@ -40,6 +40,26 @@ const diagnostics: Record<string, ExecutionDiagnosticsData> = {
     ],
   },
 };
+// ok-then-warn / warn-then-ok: the first read resolves at once; later reads
+// wait for window.__resolveDiagnostics() so a browser script can drive the swap.
+const swap: Record<string, [string, string]> = {
+  "ok-then-warn": ["ok", "warn"],
+  "warn-then-ok": ["warn", "ok"],
+};
+let reads = 0;
+const read = (): Promise<ExecutionDiagnosticsData> => {
+  const pair = swap[state];
+  if (!pair)
+    return state === "checking"
+      ? new Promise<ExecutionDiagnosticsData>(() => {})
+      : Promise.resolve(diagnostics[state] ?? diagnostics.ok);
+  const [first, next] = pair;
+  if (reads++ === 0) return Promise.resolve(diagnostics[first]!);
+  return new Promise((resolve) => {
+    (window as { __resolveDiagnostics?: () => void }).__resolveDiagnostics =
+      () => resolve(diagnostics[next]!);
+  });
+};
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing fixture root");
 createRoot(root).render(
@@ -50,10 +70,7 @@ createRoot(root).render(
         return () => {};
       },
       execution: async () => executionDisplayFixture(),
-      executionDiagnostics: () =>
-        state === "checking"
-          ? new Promise<ExecutionDiagnosticsData>(() => {})
-          : Promise.resolve(diagnostics[state] ?? diagnostics.ok),
+      executionDiagnostics: read,
       executionRuns: async (_project, id) => {
         const runs = executionDisplayFixture().runs.filter(
           (r) => r.assignment_id === id,
