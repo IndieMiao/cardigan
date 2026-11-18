@@ -176,6 +176,8 @@ test("Run history uses its dispatch machine even after the Assignment moves; mis
   expect(within(history).getByLabelText("机器：未记录")).toBeTruthy();
   const dialog = screen.getByRole("dialog");
   expect(within(dialog).getByLabelText("机器：工作机")).toBeTruthy();
+  expect(within(dialog).getByText("t-0")).toBeTruthy();
+  expect(dialog.textContent).not.toContain("runtime-host");
 });
 
 test("refresh is opt-in, remembered by project, and still supports manual refresh", async () => {

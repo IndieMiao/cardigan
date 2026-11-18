@@ -140,7 +140,8 @@ try {
         return { overflow:document.documentElement.scrollWidth > innerWidth, header:box('.ui-page-header'), filter:box('.ui-filter-row'), actions:box('.ui-filter-row > .ui-action-row'), capacity:document.querySelector('.capacity-status')?.textContent,
           controls:[...document.querySelectorAll('.ui-filter-row button')].filter(e=>e.getClientRects().length).map(e=>({name:e.getAttribute('aria-label')||e.textContent,height:e.getBoundingClientRect().height})),
           ids:[...document.querySelectorAll('[data-ui="id-badge"]')].filter(e=>e.getClientRects().length).map(e=>e.getBoundingClientRect().height),
-          title:document.querySelector('.ui-page-header h1') ? getComputedStyle(document.querySelector('.ui-page-header h1')).fontSize : null };
+          title:document.querySelector('.ui-page-header h1') ? getComputedStyle(document.querySelector('.ui-page-header h1')).fontSize : null,
+          taskTitles:[...document.querySelectorAll('.execution-task-title')].map(e=>{const r=e.getBoundingClientRect(),style=getComputedStyle(e),row=e.closest('tr');return {text:e.textContent,height:r.height,minHeight:style.minHeight,paddingTop:style.paddingTop,paddingBottom:style.paddingBottom,inTable:!!row,rowHeight:row?.getBoundingClientRect().height??null};}) };
       })()`);
         if (axe) {
           await evaluate(axe);
@@ -156,6 +157,29 @@ try {
             `${mode}: toolbar control size`,
           );
           if (axe) assert.deepEqual(metrics.axe, [], `${mode}: axe`);
+          for (const title of metrics.taskTitles) {
+            assert.equal(
+              title.minHeight,
+              title.inTable ? "28px" : "0px",
+              `${mode}: task title minimum height`,
+            );
+            assert.equal(
+              title.paddingTop,
+              title.inTable ? "4px" : "0px",
+              `${mode}: task title top spacing`,
+            );
+            assert.equal(
+              title.paddingBottom,
+              title.inTable ? "4px" : "0px",
+              `${mode}: task title bottom spacing`,
+            );
+            if (title.inTable)
+              assert.equal(
+                title.height,
+                28,
+                `${mode}: single-line fixture title height`,
+              );
+          }
         }
         const { data } = await send("Page.captureScreenshot", {
           format: "png",
@@ -285,6 +309,16 @@ try {
         await until(
           "!!document.querySelector('[role=dialog] [aria-label=\"机器：cardigan-ci\"]')",
         );
+        const drawer = await evaluate(
+          `(() => { const dl=document.querySelector('.execution-basics'); const value=label=>[...dl.querySelectorAll('dt')].find(e=>e.textContent===label).nextElementSibling; const machine=value('机器'),terminal=value('终端'); const range=document.createRange();range.selectNodeContents(machine.firstElementChild);return {machine:machine.textContent.trim(),terminal:terminal.textContent.trim(),valueX:machine.getBoundingClientRect().x,textX:range.getBoundingClientRect().x}; })()`,
+        );
+        assert.equal(drawer.machine, "cardigan-ci");
+        assert.equal(drawer.terminal, "t-1");
+        assert.equal(
+          drawer.textX,
+          drawer.valueX,
+          "drawer machine text aligns with its value column",
+        );
         await screenshot(`drawer-${theme}-${width}`);
         let violations = null;
         if (axe) {
@@ -312,6 +346,7 @@ try {
           focused,
           capacity,
           drawerFocusReturned: true,
+          drawer,
           axe: violations,
         });
       }

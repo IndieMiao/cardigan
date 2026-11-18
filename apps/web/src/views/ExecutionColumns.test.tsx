@@ -265,6 +265,7 @@ test("C-232: the task cell shows the full Card title after its id using shared t
   // A standing PM has no Card and so no title line.
   expect(cells("A-7").row.querySelector(".execution-task-title")).toBeNull();
   expect(titleNode?.classList.contains("card-table-title")).toBe(true);
+  expect(titleNode?.classList.contains("ui-data-title")).toBe(true);
 });
 
 test("C-436: seven columns put employee, task, state and context first and fold Harness/model/effort into one line", async () => {

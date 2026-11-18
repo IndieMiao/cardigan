@@ -92,20 +92,33 @@ import { useBoardPan } from "../useBoardPan.js";
 import { useResource } from "../useResource.js";
 
 const MachinesContext = createContext<ExecutionData["machines"]>([]);
-function MachineBadge({ id }: { readonly id: string }) {
+function MachineBadge({
+  id,
+  plain = false,
+}: {
+  readonly id: string;
+  readonly plain?: boolean;
+}) {
   const machines = useContext(MachinesContext);
+  const Label = plain ? "span" : Badge;
   return (
-    <Badge
+    <Label
       title={id || "没有机器记录"}
       aria-label={`机器：${machineLabel(id, machines)}`}
     >
       {machineLabel(id, machines)}
-    </Badge>
+    </Label>
   );
 }
-function AssignmentMachine({ a }: { readonly a: ExecutionAssignment }) {
+function AssignmentMachine({
+  a,
+  plain = false,
+}: {
+  readonly a: ExecutionAssignment;
+  readonly plain?: boolean;
+}) {
   const machines = useContext(MachinesContext);
-  return <MachineBadge id={assignmentMachine(a, machines)} />;
+  return <MachineBadge id={assignmentMachine(a, machines)} plain={plain} />;
 }
 const kinds: Readonly<Record<string, string>> = {
   initial: "首次执行",
@@ -326,8 +339,8 @@ export function standingLabel(
 }
 /**
  * C-207: what the Assignment is working on; Card, priority and work item.
- * C-232: the Card title follows on its own line, cut to one line with the
- * full title in the tooltip; the Card id above always stays visible.
+ * C-232: the full Card title follows its identifiers. Table titles use the
+ * shared data-title spacing; card layouts retain their inline title spacing.
  */
 function TaskCell({
   a,
@@ -335,12 +348,14 @@ function TaskCell({
   roleName,
   tooltipClearAbove,
   trailing,
+  table = false,
 }: {
   readonly a: ExecutionAssignment;
   readonly projectId: string;
   readonly roleName?: string | undefined;
   readonly tooltipClearAbove?: string | undefined;
   readonly trailing?: ReactNode;
+  readonly table?: boolean;
 }) {
   const row = (
     <IdentityRow className="execution-task">
@@ -365,7 +380,7 @@ function TaskCell({
     <div className="execution-task-cell">
       {row}
       <span
-        className="execution-task-title card-table-title"
+        className={`execution-task-title card-table-title${table ? " ui-data-title" : ""}`}
         title={a.card_title}
       >
         {a.card_title}
@@ -548,7 +563,7 @@ function AssignmentRow({
         </IdentityRow>
       </TableCell>
       <TableCell data-column="task">
-        <TaskCell a={a} projectId={projectId} roleName={roleName} />
+        <TaskCell a={a} projectId={projectId} roleName={roleName} table />
       </TableCell>
       <TableCell data-column="state">
         <div className="execution-state">
@@ -958,18 +973,14 @@ function ExecutionDetail({
           <dt>Session</dt>
           <dd>{a.session_ref ?? "尚无会话"}</dd>
           <dt>终端</dt>
-          <dd>
-            {a.runtime_ref
-              ? `${a.runtime_ref.runtime_machine} / ${a.runtime_ref.terminal_ref}`
-              : "未登记"}
-          </dd>
+          <dd>{a.runtime_ref?.terminal_ref ?? "未登记"}</dd>
           <dt>Worktree</dt>
           <dd>{a.worktree_path ?? "不使用工作树"}</dd>
           <dt>分支</dt>
           <dd>{a.branch ?? "无"}</dd>
           <dt>机器</dt>
           <dd>
-            <AssignmentMachine a={a} />
+            <AssignmentMachine a={a} plain />
           </dd>
           {a.session_maintenance && (
             <>
