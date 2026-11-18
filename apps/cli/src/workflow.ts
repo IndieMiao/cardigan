@@ -1,4 +1,3 @@
-import { arch, platform } from "node:os";
 import type {
   Assignment,
   CardId,
@@ -32,7 +31,6 @@ import {
   projectSnapshot,
   runtimeUnknownDeferred,
   saveMachine,
-  selectMachine,
   setCardSensitive,
   standingTools,
   supersedeCard,
@@ -49,6 +47,7 @@ import { secureDataDirectory } from "@cardigan/runtime-herdr";
 import {
   backfillStandingModesInTransaction,
   openStore as openCardiganStore,
+  readMachineObservations,
   type Store,
   updateMachineDescription,
 } from "@cardigan/store";
@@ -671,7 +670,7 @@ async function machineCommand(
     io.stdout(USAGE);
     return EXIT.ok;
   }
-  if (hasToken(io))
+  if (hasToken(io) || io.env.MCP_TOKEN !== undefined)
     throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
   const [sub, ...rest] = args;
   if (
@@ -725,55 +724,41 @@ async function machineCommand(
         throw new CliError("本项目未登记该机器", EXIT.failure);
       io.stdout(
         JSON.stringify(
-          selected.map((m) => ({ ...m, max_assignments: limit(m.id) })),
+          selected.map((m) => ({
+            ...m,
+            max_assignments: limit(m.id),
+            ...(sub === "show"
+              ? readMachineObservations(store, project_id, m.id)
+              : {}),
+          })),
           null,
           2,
         ),
       );
       if (sub === "check") {
         const machine = selected[0] as Machine;
-        if (machine.id !== "local") {
-          const dataDir = resolveDataDir(
-            io,
-            optional(parsed.flags, "data-dir"),
-          );
-          const connection = await terminalExecution(
-            io,
-            dataDir,
-            null,
-            machine.id,
-          );
-          const runtime = await RuntimeTargets.create({
-            ...connection,
-            env: io.env,
-            store,
-            project: project_id,
-          });
-          const checked = runtime.ok
-            ? await runtime.value.check(project_id, machine.id)
-            : runtime;
-          if (!checked.ok)
-            throw new CliError(checked.error.message, EXIT.failure);
-          io.stdout(JSON.stringify(checked.value, null, 2));
-          if (checked.value.blockers.length)
-            throw new CliError("远程机器检查未通过", EXIT.failure);
-          return EXIT.ok;
-        }
-        try {
-          selectMachine(selected, {
-            machine_id: "local",
-            os: platform(),
-            arch: arch(),
-          });
-        } catch {
-          throw new CliError(
-            "本机登记的系统、架构或状态不满足要求",
-            EXIT.failure,
-          );
-        }
-        io.stdout(
-          "本机登记与系统/架构一致；此检查不证明 SSH/hc、工具链或 MCP 可达。",
+        const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
+        const connection = await terminalExecution(
+          io,
+          dataDir,
+          null,
+          machine.id,
         );
+        const runtime = await RuntimeTargets.create({
+          ...connection,
+          env: io.env,
+          store,
+          project: project_id,
+        });
+        if (!runtime.ok)
+          throw new CliError(runtime.error.message, EXIT.failure);
+        const observations = await runtime.value.refreshMachine(
+          project_id,
+          machine.id,
+        );
+        io.stdout(JSON.stringify(observations, null, 2));
+        if (!observations.health?.available)
+          throw new CliError("机器检查未通过", EXIT.failure);
       }
       return EXIT.ok;
     }

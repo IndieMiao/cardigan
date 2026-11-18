@@ -18,7 +18,11 @@ import {
   resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { RuntimeTargets } from "@cardigan/host";
-import { Store } from "@cardigan/store";
+import {
+  beginMachineObservation,
+  completeMachineObservation,
+  Store,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { runCommand } from "./host.js";
 import { main } from "./index.js";
@@ -139,7 +143,7 @@ test("machine CLI is human-only, audits metadata and cannot enable remote execut
     await run(["machine", "update", "worker-a", "--status", "online"]),
   ).toBe(0);
   expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
-  expect(errors.join("\n")).toContain("Runtime target rejected");
+  expect(errors.join("\n")).toContain("机器检查未通过");
   expect(
     await run(["machine", "update", "worker-a", "--ssh-endpoint", "forbidden"]),
   ).not.toBe(0);
@@ -192,6 +196,28 @@ test("machine check reports actual remote results without a blanket field-verifi
     ]),
   ).toBe(0);
   const check = vi.spyOn(RuntimeTargets.prototype, "check");
+  const resolve = vi
+    .spyOn(RuntimeTargets.prototype, "resolve")
+    .mockReturnValue({
+      execution: { mode: "local", dataDir },
+      session: "fixture",
+      machine: {
+        id: "worker-a",
+        label: "Worker A",
+        os: "linux",
+        arch: "x64",
+        herdr_machine: "worker-a",
+        status: "online",
+        tags: [],
+        max_assignments: 1,
+      },
+    });
+  const original = RuntimeTargets.prototype.refreshMachine;
+  const refresh = vi
+    .spyOn(RuntimeTargets.prototype, "refreshMachine")
+    .mockImplementation(function (project, machine) {
+      return original.call(this, project, machine, { catalog: () => [] });
+    });
   try {
     for (const launch_enabled of [false, true]) {
       check.mockResolvedValueOnce({
@@ -212,9 +238,49 @@ test("machine check reports actual remote results without a blanket field-verifi
     expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
     expect(printed()).toContain("worker_directories");
     expect(errors.join("\n")).not.toContain("现场前置仍未验收");
+    expect(await run(["machine", "show", "worker-a"])).toBe(0);
+    expect(printed()).toContain('"status": "failed"');
+    expect(printed()).toContain("worker_directories");
   } finally {
     check.mockRestore();
+    resolve.mockRestore();
+    refresh.mockRestore();
   }
+});
+
+test("machine show reads persisted versions, verification times and health; MCP Token cannot refresh", async () => {
+  await bootstrap();
+  const store = Store.open({ dataDir });
+  const now = new Date().toISOString();
+  try {
+    const system = { kind: "system", project_id: "p-work" } as const;
+    beginMachineObservation(store, system, "p-work", "local", "fixture", now);
+    completeMachineObservation(
+      store,
+      system,
+      "p-work",
+      "local",
+      "fixture",
+      { status: "passed", checked_at: now, launch_enabled: true, blockers: [] },
+      [
+        {
+          key: "node",
+          version: "24.0.0",
+          verified_at: now,
+          evidence_ref: "fixture-proof",
+        },
+      ],
+    );
+  } finally {
+    store.close();
+  }
+  expect(await run(["machine", "show", "local"])).toBe(0);
+  expect(printed()).toContain('"version": "24.0.0"');
+  expect(printed()).toContain(`"verified_at": "${now}"`);
+  expect(printed()).toContain('"status": "passed"');
+  io = { ...io, env: { ...io.env, MCP_TOKEN: "fixture-token" } };
+  expect(await run(["machine", "check", "local"])).not.toBe(0);
+  expect(errors.join("\n")).toContain("Token");
 });
 
 test("machine updates atomically share physical descriptions while preserving each project's policy and audit", async () => {

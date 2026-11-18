@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { arch, platform } from "node:os";
 import type {
   Assignment,
   Machine,
@@ -24,6 +25,10 @@ import {
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import {
+  type MachineObservationOptions,
+  refreshMachineObservations,
+} from "./machine-capabilities.js";
 import {
   loadRuntimeWorkers,
   type RuntimeWorker,
@@ -402,13 +407,18 @@ export class RuntimeTargets implements Runtime {
       },
       async (runtime) => {
         const target = this.resolve(project, machine_id);
+        // Health is a live observation for local execution accounts too.
+        const live = await runtime.captureAgent("git", ["--version"]);
+        if (!live.ok) return live;
         let blockers: readonly string[] = [];
+        if (
+          target.execution.mode === "local" &&
+          (target.machine.os !== platform() || target.machine.arch !== arch())
+        )
+          blockers = ["machine_platform_mismatch"];
         if (machine_id !== "local") {
           if (target.execution.mode !== "agent-ssh")
             return failure<MachineCheck>();
-          // Recheck the current hc alias even when the adapter was already cached.
-          const live = await runtime.captureAgent("git", ["--version"]);
-          if (!live.ok) return live;
           blockers = await (this.options.workerReadiness ?? workerReadiness)(
             target.execution,
           );
@@ -445,6 +455,29 @@ export class RuntimeTargets implements Runtime {
         };
       },
     );
+  }
+  refreshMachine(
+    project: ProjectId,
+    machine: string,
+    overrides: Pick<
+      MachineObservationOptions,
+      "catalog" | "probe" | "now" | "signal"
+    > = {},
+  ) {
+    return refreshMachineObservations({
+      store: this.options.store,
+      project,
+      machine,
+      ...(this.options.env ? { env: this.options.env } : {}),
+      target: () => this.resolve(project, machine),
+      check: async () => {
+        const checked = await this.check(project, machine);
+        return checked.ok
+          ? checked.value
+          : { blockers: [checked.error.code], launch_enabled: false };
+      },
+      ...overrides,
+    });
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
     return this.targetForRef(ref, project).execution;
