@@ -14,7 +14,11 @@ import {
   useNarrow,
 } from "../components/ExecutionContent.js";
 import { ExecutionDetail } from "../components/ExecutionDetail.js";
-import { ExecutionDiagnostics } from "../components/ExecutionDiagnostics.js";
+import {
+  ExecutionDiagnosticsAlert,
+  ExecutionDiagnosticsStatus,
+  useExecutionDiagnostics,
+} from "../components/ExecutionDiagnostics.js";
 import { ExecutionToolbar } from "../components/ExecutionToolbar.js";
 import { EmptyState, IdTag, StatusTag } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
@@ -120,6 +124,7 @@ export function ExecutionPage({
     load,
     revision + contextRevision,
   );
+  const diagnostics = useExecutionDiagnostics(client, projectId);
   const refreshKey = `cardigan.execution.refresh.${projectId}`;
   const readRefresh = (key: string) => {
     try {
@@ -304,6 +309,7 @@ export function ExecutionPage({
         <PageHeader
           title="执行视图"
           capacityByMachine
+          status={<ExecutionDiagnosticsStatus diagnostics={diagnostics} />}
           count={
             data
               ? `${assignments.length} / ${data.assignments.length}`
@@ -339,11 +345,7 @@ export function ExecutionPage({
           error={error}
           retry={reload}
         />
-        <ExecutionDiagnostics
-          client={client}
-          projectId={projectId}
-          onOpen={open}
-        />
+        <ExecutionDiagnosticsAlert diagnostics={diagnostics} onOpen={open} />
         {data &&
           (assignments.length === 0 ? (
             <EmptyState>没有匹配的执行记录</EmptyState>
