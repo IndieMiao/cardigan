@@ -354,6 +354,43 @@ test.each(["codex", "pi", "claude-code"] as const)(
       ).toEqual({ "/independent-worker/worktrees/fixture/A-1": true });
   },
 );
+test("worktree preparation reports one redacted cause to the dispatcher and to the abort event before any token/provision", async () => {
+  const f = fixture();
+  const secret = "fixture-only-credential";
+  await expect(
+    launchRun(
+      { ...f.host, launch: { ...f.host.launch, secrets: { CUSTOM: secret } } },
+      {
+        project: "fixture",
+        assignment_id: "A-1",
+        actor: { kind: "system", project_id: "fixture" },
+        run: f.run,
+        reuse_session: true,
+        prepare_worktree: async () => {
+          throw Object.assign(
+            new Error("Command failed: git -c private-argument"),
+            {
+              stderr: `fatal: lock unavailable ${secret} Authorization: Bearer synthetic-private /private/path\nextra-context`,
+            },
+          );
+        },
+      },
+    ),
+  ).rejects.toThrow(
+    /directory preparation: fatal: lock unavailable.*withdrawn/u,
+  );
+  expect(order).toEqual(["clear", "clear"]);
+  const reason = f.latest()?.summary;
+  expect(reason).toContain("directory preparation: fatal: lock unavailable");
+  expect(reason).not.toMatch(
+    /private-argument|synthetic-private|fixture-only-credential|extra-context|\/private\/path/u,
+  );
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter("fixture", undefined, 0))
+      .find((e) => e.type === "run_dispatch_aborted")?.payload.reason,
+  ).toBe(reason);
+});
 test("failed remote MCP check revokes the new token before any material or process is published", async () => {
   const f = fixture();
   failAt = "mcp";
@@ -596,7 +633,10 @@ test("target withdrawal before start keeps the queued Run and never provisions",
 test("unknown exit survives database restart and recovery only resumes exact-generation cleanup", async () => {
   const f = fixture();
   failAt = "clear_fail";
-  await expect(f.start()).rejects.toThrow("unconfirmed");
+  const reason =
+    "runtime provision: provision failed: runtime_timeout synthetic";
+  await expect(f.start()).rejects.toThrow(`${reason}; exit_unconfirmed`);
+  expect(f.latest()?.launch_publication?.failure_reason).toBe(reason);
   expect(f.latest()?.launch_publication?.phase).toBe("stopping");
   expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
   const generation = f.latest()?.launch_publication?.generation;
@@ -613,6 +653,7 @@ test("unknown exit survives database restart and recovery only resumes exact-gen
   await recoverLaunchPublications({ ...f.host, store }, "fixture");
   expect(f.latest()).toMatchObject({
     status: "cancelled",
+    summary: reason,
     launch_publication: { phase: "exited" },
   });
   expect(runtime.provision).toHaveBeenCalledTimes(1);

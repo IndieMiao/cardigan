@@ -51,6 +51,14 @@ export function recordLaunchPublication(
         /^[a-f0-9]{32}$/u.test(value.generation) &&
         /^[a-f0-9]{64}$/u.test(value.target.fingerprint) &&
         (!value.sha || /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value.sha)) &&
+        (value.failure_reason === undefined ||
+          (["stopping", "exited"].includes(value.phase) &&
+            value.failure_reason.length > 0 &&
+            value.failure_reason.length <= 300 &&
+            !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value.failure_reason))) &&
+        (!old?.failure_reason ||
+          old.phase === "exited" ||
+          old.failure_reason === value.failure_reason) &&
         Number.isSafeInteger(value.log_offset) &&
         value.log_offset >= 0 &&
         (!old ||
@@ -119,7 +127,11 @@ export function recordLaunchPublication(
       !value.wait &&
       !["completed", "failed", "cancelled"].includes(updated.status)
     )
-      return cancelRunDispatch(d, updated, "Worker launch publication failed");
+      return cancelRunDispatch(
+        d,
+        updated,
+        value.failure_reason ?? "Worker launch publication failed",
+      );
     return updated;
   });
 }
