@@ -70,7 +70,13 @@ import {
   type ExecutionConfig,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
-import type { ProjectRecord, Store } from "@cardigan/store";
+import type {
+  ProjectRecord,
+  Store,
+  StoreTransactionContext,
+} from "@cardigan/store";
+
+import { backupBranches, backupWriter } from "./git-backup.js";
 
 /**
  * M4.4: the server's Git assembly.
@@ -856,14 +862,16 @@ export class ServerGit implements GitBinding {
   async backup(project: CentralProject): Promise<void> {
     const projectId = project.project_id as ProjectId;
     const uow = this.options.store.uow;
-    const assignments = uow?.read((tx) => tx.assignments.list(projectId)) ?? [];
-    const writers = assignments.filter(
-      (a) =>
-        a.scope === "work_item" &&
-        a.status === "active" &&
-        a.branch &&
-        a.worktree_path,
-    );
+    if (!uow) throw new Error("Backup requires current Assignment state");
+    const assignments = uow.read((tx) => tx.assignments.list(projectId));
+    const writers = assignments.filter(backupWriter);
+    const context = {
+      project,
+      currentProject: () => this.projectOf(projectId),
+      transport: this.transport,
+      lock: this.lock,
+      uow,
+    };
     const localBranches = writers.flatMap((a) =>
       a.machine_id === "local" && a.branch ? [a.branch] : [],
     );
@@ -873,74 +881,23 @@ export class ServerGit implements GitBinding {
     const local = assignments.find((a) => a.machine_id === "local");
     if (!this.options.targets || local) {
       try {
-        if (this.options.targets && local)
-          await this.withAssignmentSource(
-            project,
-            local,
-            (central) =>
-              central.backupAgentBranches(project, "local", localBranches),
-            "repository",
-          );
-        else
-          await this.central.backupAgentBranches(
-            project,
-            "local",
-            localBranches,
-          );
+        const source =
+          this.options.targets && local
+            ? this.workspaceServices(project, local, "repository")
+            : { central: this.central };
+        await backupBranches(
+          { ...context, ...source },
+          { excludedBranches: localBranches },
+        );
       } catch (error) {
         localFailure = error;
         failures.push("local");
       }
     }
     for (const assignment of writers) {
-      const branch = assignment.branch;
-      if (!branch) continue;
       try {
-        await this.withAssignmentSource(
-          project,
-          assignment,
-          async (central) => {
-            const result = await central.backupAssignmentBranch(
-              project,
-              assignment,
-            );
-            try {
-              uow?.run((tx) => {
-                const current = tx.assignments.get(projectId, assignment.id);
-                if (
-                  current?.machine_id !== assignment.machine_id ||
-                  current.branch !== assignment.branch
-                )
-                  throw new Error("Backup Assignment changed");
-                tx.events.append(projectId, {
-                  id: tx.ids.nextEventId(),
-                  seq: tx.ids.nextEventSequence(projectId, undefined),
-                  actor: { kind: "system", project_id: projectId },
-                  type: "assignment_branch_backed_up",
-                  payload: {
-                    assignment_id: assignment.id,
-                    machine_id: assignment.machine_id,
-                    branch,
-                    sha: result.sha,
-                    ref: result.ref,
-                  },
-                  created_at: new Date().toISOString(),
-                });
-              });
-            } catch (error) {
-              // A failed evidence transaction must retain the last successful backup.
-              // CAS avoids overwriting a newer backup produced by another operation.
-              if (result.previous_sha && result.previous_sha !== result.sha)
-                await central.git.compareAndSwapRef(
-                  central.repositoryPath(project),
-                  result.ref,
-                  result.previous_sha,
-                  result.sha,
-                );
-              throw error;
-            }
-          },
-        );
+        const source = this.workspaceServices(project, assignment);
+        await backupBranches({ ...context, ...source }, { assignment });
       } catch {
         failures.push(`${assignment.machine_id}/${assignment.id}`);
       }
@@ -1049,7 +1006,6 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignment: Assignment,
     operation: (central: CentralRepositoryService) => Promise<T>,
-    sourceScope: "assignment" | "repository" = "assignment",
   ): Promise<T> {
     return this.lock(
       {
@@ -1057,9 +1013,7 @@ export class ServerGit implements GitBinding {
         repository: this.central.repositoryPath(project),
       },
       async () =>
-        operation(
-          this.workspaceServices(project, assignment, sourceScope).central,
-        ),
+        operation(this.workspaceServices(project, assignment).central),
     );
   }
   private worktreesFor(project: CentralProject, assignment: Assignment) {
@@ -1070,24 +1024,29 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignment: Assignment,
     sourceScope: "assignment" | "repository" = "assignment",
-  ): { central: CentralRepositoryService; worktrees: GitWorktreeService } {
+  ): {
+    central: CentralRepositoryService;
+    worktrees: GitWorktreeService;
+    validateTarget?: (tx?: StoreTransactionContext) => void;
+  } {
     const targets = this.options.targets;
     if (!targets) {
       if (assignment.machine_id !== "local")
         throw new Error("Worker target is not configured");
       return { central: this.central, worktrees: this.worktrees };
     }
-    const resolveTarget = () =>
+    const resolveTarget = (tx?: StoreTransactionContext) =>
       sourceScope === "repository"
         ? targets.forRepository(
             project.project_id as ProjectId,
             assignment.machine_id,
+            tx,
           )
-        : targets.forWorkspace(project.project_id as ProjectId, assignment);
+        : targets.forWorkspace(project.project_id as ProjectId, assignment, tx);
     const execution = resolveTarget().execution;
-    const validateTarget = () => {
+    const validateTarget = (tx?: StoreTransactionContext) => {
       if (
-        resolveTarget().execution.target?.fingerprint !==
+        resolveTarget(tx).execution.target?.fingerprint !==
         execution.target?.fingerprint
       )
         throw new Error("Workspace target configuration changed");
@@ -1134,6 +1093,7 @@ export class ServerGit implements GitBinding {
       );
       return {
         central,
+        validateTarget,
         worktrees: new GitWorktreeService(
           new LocalGitTransport("git", {}, workspace),
           central,
@@ -1194,6 +1154,7 @@ export class ServerGit implements GitBinding {
     });
     return {
       central,
+      validateTarget,
       worktrees: new GitWorktreeService(transport, central, {
         dataDir: this.options.dataDir,
         ...roots,

@@ -24,7 +24,7 @@ import {
   runtimeDifferences,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import type { ReadRepositories, Store } from "@cardigan/store";
 import {
   type MachineObservationOptions,
   refreshMachineObservations,
@@ -42,6 +42,7 @@ import {
 } from "./worker-mcp.js";
 import { workerReadiness } from "./worker-readiness.js";
 
+type TargetState = Pick<ReadRepositories, "machines" | "assignments">;
 type Adapter = Runtime &
   Partial<RuntimeInteractionReader> &
   Partial<RuntimeLaunchRecovery> &
@@ -147,12 +148,11 @@ export class RuntimeTargets implements Runtime {
         )
           rejected();
   }
-  resolve(project: ProjectId, machine_id: string): Target {
+  resolve(project: ProjectId, machine_id: string, state?: TargetState): Target {
     if (this.options.project !== undefined && this.options.project !== project)
       return rejected();
-    const machine = this.options.store.uow.read((tx) =>
-      tx.machines.get(project, machine_id),
-    );
+    const read = (tx: TargetState) => tx.machines.get(project, machine_id);
+    const machine = state ? read(state) : this.options.store.uow.read(read);
     if (!machine) return rejected("machine_unregistered");
     const workers = this.workers();
     const worker = workers.find(
@@ -215,8 +215,12 @@ export class RuntimeTargets implements Runtime {
     };
   }
   /** A shared project clone belongs to its configured account, not a historical terminal. */
-  forRepository(project: ProjectId, machine_id: string): Target {
-    const target = this.resolve(project, machine_id);
+  forRepository(
+    project: ProjectId,
+    machine_id: string,
+    state?: TargetState,
+  ): Target {
+    const target = this.resolve(project, machine_id, state);
     if (!["online", "degraded"].includes(target.machine.status))
       return rejected();
 
@@ -228,15 +232,19 @@ export class RuntimeTargets implements Runtime {
     return target;
   }
   /** Git preparation can address a registered worker before runtime launch is enabled. */
-  forWorkspace(project: ProjectId, assignment: Assignment): Target {
-    const target = this.forRepository(project, assignment.machine_id);
+  forWorkspace(
+    project: ProjectId,
+    assignment: Assignment,
+    state?: TargetState,
+  ): Target {
+    const target = this.forRepository(project, assignment.machine_id, state);
     if (
       assignment.runtime_ref &&
       assignment.runtime_ref.machine_id !== assignment.machine_id
     )
       return rejected("target_mismatch");
     if (assignment.runtime_ref)
-      this.targetForRef(assignment.runtime_ref, project);
+      this.targetForRef(assignment.runtime_ref, project, state);
     return target;
   }
   /** Call before files, Git, credentials or version probes are touched. */
@@ -333,24 +341,21 @@ export class RuntimeTargets implements Runtime {
   private targetForRef(
     ref: RuntimeRef,
     expectedProject = this.options.project,
+    state?: TargetState,
   ): Target {
     const project =
       ref.target?.project_id ??
-      this.options.store
-        .listProjects()
-        .find((p) =>
-          this.options.store.uow.read((tx) =>
-            tx.assignments
-              .list(p.id)
-              .some(
-                (a) => JSON.stringify(a.runtime_ref) === JSON.stringify(ref),
-              ),
-          ),
-        )?.id ??
+      this.options.store.listProjects().find((p) => {
+        const owns = (tx: TargetState) =>
+          tx.assignments
+            .list(p.id)
+            .some((a) => JSON.stringify(a.runtime_ref) === JSON.stringify(ref));
+        return state ? owns(state) : this.options.store.uow.read(owns);
+      })?.id ??
       expectedProject;
     if (!project || (expectedProject && expectedProject !== project))
       return rejected();
-    const target = this.resolve(project, ref.machine_id);
+    const target = this.resolve(project, ref.machine_id, state);
     if (!ref.target) {
       // Historical refs are usable only with the legacy local configuration.
       if (

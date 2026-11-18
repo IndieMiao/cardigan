@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import {
   lstat,
@@ -10,7 +11,15 @@ import {
   rmdir,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import type {
   GitCentralPort,
@@ -565,6 +574,130 @@ export class CentralGitTransport
         ...refspecs,
       ]);
     await (remote ? this.workerEndpoint(fetch) : fetch(local));
+  }
+  /** Private refs per transfer. Borrow center objects for negotiation; import
+   * only the validated tips, without creating any ref (including FETCH_HEAD).
+   * Unpublished objects are not recovery roots and can be collected by Git. */
+  async stageBackup(
+    repository: string,
+    fetch: (stage: string) => Promise<void>,
+    previous: ReadonlyMap<string, string>,
+    machine: string,
+  ) {
+    const format = await this.objectFormat(repository);
+    const stage = await mkdtemp(join(this.root, ".backup-"));
+    try {
+      await this.checked(stage, [
+        "init",
+        "--bare",
+        "--template=",
+        `--object-format=${format}`,
+      ]);
+      // Relative to the stage object directory; only a validated project basename
+      // enters this one-line alternates file (never an Agent path).
+      await writeFile(
+        join(stage, "objects/info/alternates"),
+        `../../${basename(repository)}/objects\n`,
+      );
+      await fetch(stage);
+      const raw = await this.checked(stage, [
+        "for-each-ref",
+        "--format=%(refname) %(objectname) %(objecttype)",
+        "refs/heads/agent/",
+      ]);
+      const edits = raw
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const [name, sha, type] = line.split(" ");
+          if (
+            !name?.startsWith("refs/heads/agent/") ||
+            !sha ||
+            !fullSha.test(sha) ||
+            type !== "commit"
+          )
+            throw new Error("Invalid staged backup commit");
+          const ref = `refs/cardigan/backups/${machine}/${name.slice("refs/heads/".length)}`;
+          return { ref, sha, old: previous.get(ref) ?? null };
+        });
+      const tips = [
+        ...new Set(edits.filter((e) => e.sha !== e.old).map((e) => e.sha)),
+      ];
+      if (tips.length) await this.fetchRefs(repository, stage, tips);
+      // A successful poll of the very same SHA is still newer evidence. Fence
+      // it too, so an older in-flight rewrite cannot win an ABA race.
+      if (!edits.length) return { edits, generations: [] };
+      const nonce = join(stage, "generation");
+      await writeFile(nonce, randomUUID());
+      const generation = await this.checked(repository, [
+        "hash-object",
+        "-w",
+        "--",
+        nonce,
+      ]);
+      const generations = edits.map(({ ref }) => {
+        const key = ref.replace(
+          "refs/cardigan/backups/",
+          "refs/cardigan/backup-generations/",
+        );
+        return { ref: key, sha: generation, old: previous.get(key) ?? null };
+      });
+      return { edits, generations };
+    } finally {
+      await rm(stage, { recursive: true, force: true });
+    }
+  }
+  /** Prepare local CAS before entering the short authorization/SQLite section.
+   * One update-ref transaction protects wildcard publication and its rollback. */
+  async backupRefTransaction(
+    repository: string,
+    edits: readonly { ref: string; sha: string; old: string | null }[],
+  ) {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected backup repository");
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    const forward: string[] = [],
+      reverse: string[] = [];
+    for (const { ref, sha, old } of edits) {
+      if (
+        !/^refs\/cardigan\/(?:backups|backup-generations)\/[A-Za-z0-9._-]+\/agent\//u.test(
+          ref,
+        ) ||
+        ref.includes("\0") ||
+        !fullSha.test(sha) ||
+        (old !== null && !fullSha.test(old))
+      )
+        throw new Error("Invalid backup ref transaction");
+      forward.push(`update ${ref}\0${sha}\0${old ?? "0".repeat(sha.length)}\0`);
+      if (old !== sha)
+        reverse.push(
+          old === null
+            ? `delete ${ref}\0${sha}\0`
+            : `update ${ref}\0${old}\0${sha}\0`,
+        );
+    }
+    const run = (commands: string[]) => {
+      if (!commands.length) return;
+      const args = [
+        ...gitSafetyArguments,
+        "-C",
+        repository,
+        "update-ref",
+        "--no-deref",
+        "--stdin",
+        "-z",
+      ];
+      this.options.onCommand?.(repository, args);
+      execFileSync("git", args, {
+        env: gitEnvironment(),
+        timeout: gitTimeoutMs("update-ref", this.options),
+        killSignal: "SIGKILL",
+        input: commands.join(""),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    };
+    return { publish: () => run(forward), rollback: () => run(reverse) };
   }
   /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
   private async refsUnchanged(

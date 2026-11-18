@@ -269,7 +269,8 @@ test("reconcile and backup Git IO yields to the event loop outside database tran
   };
   await new ReconcileExecutor(options).tick(f.project_id);
   await new BackupExecutor(options).tick(f.project_id);
-  expect(calls).toBe(2);
+  // Source reconciliation, backup capture and its ref-less local import.
+  expect(calls).toBe(3);
 });
 
 test("an orphan directory and a manual project directory are reported", async () => {
@@ -697,3 +698,22 @@ test.skipIf(process.getuid?.() === 0)(
     }
   },
 );
+
+test("a project-only binding cannot authorize unbound backup publication", async () => {
+  const repository = await centralWithBaseClone();
+  git(base, "branch", "agent/unbound");
+  const gitService = new ServerGit({
+    dataDir: f.dataDir,
+    store: {
+      getProject: (id) => f.store.getProject(id),
+      listProjects: () => f.store.listProjects(),
+    },
+  });
+  await expect(gitService.backup(project)).rejects.toThrow(/Assignment state/);
+  expect(
+    await central.git.readRef(
+      repository,
+      "refs/cardigan/backups/local/agent/unbound",
+    ),
+  ).toBeUndefined();
+});
