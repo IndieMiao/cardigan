@@ -9,19 +9,40 @@ import "../src/components/ui/theme.css";
 
 Date.now = () => new Date("2026-11-15T07:47:30Z").getTime();
 const source = executionDisplayFixture();
-const machines = [
-  { id: "local", label: "local", status: "online" },
-  { id: "worker", label: "cardigan-ci", status: "online" },
-];
+// A focused crowded-header regression: 409 working records out of 701, three
+// machines. These are deterministic copies of the small synthetic fixture.
+const crowded = new URLSearchParams(location.search).has("crowded");
+const machines = crowded
+  ? [
+      { id: "local", label: "local", status: "online" },
+      { id: "worker", label: "synthetic-machine", status: "online" },
+      { id: "ci", label: "cardigan-ci", status: "online" },
+    ]
+  : [
+      { id: "local", label: "local", status: "online" },
+      { id: "worker", label: "cardigan-ci", status: "online" },
+    ];
+const assignments = crowded
+  ? Array.from({ length: 701 }, (_, i) => {
+      const original = source.assignments[i % source.assignments.length];
+      if (!original) throw new Error("Missing synthetic assignment");
+      return {
+        ...original,
+        id: `A-${i + 1}`,
+        status: i < 409 ? "active" : "released",
+        runtime_state: i < 409 ? "running" : "released",
+      };
+    })
+  : source.assignments;
 const data = {
   machines,
-  assignments: source.assignments.map((a, i) => ({
+  assignments: assignments.map((a, i) => ({
     ...a,
     external: false,
-    machine_id: i % 2 ? "worker" : "local",
+    machine_id: machines[i % machines.length]?.id ?? "local",
     runtime_ref: {
       terminal_ref: `t-${i}`,
-      runtime_machine: i % 2 ? "worker" : "local",
+      runtime_machine: machines[i % machines.length]?.id ?? "local",
     },
     card_title:
       i % 2

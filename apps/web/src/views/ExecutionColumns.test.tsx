@@ -261,7 +261,7 @@ test("C-232: the task cell shows the full Card title after its id using shared t
     coder.task?.indexOf(title) ?? -1,
   );
   const titleNode = coder.row.querySelector(".execution-task-title");
-  expect(titleNode?.getAttribute("title")).toBe(title);
+  expect(titleNode?.textContent).toBe(title);
   // A standing PM has no Card and so no title line.
   expect(cells("A-7").row.querySelector(".execution-task-title")).toBeNull();
   expect(titleNode?.classList.contains("card-table-title")).toBe(true);
@@ -437,16 +437,8 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
       .closest("details") as HTMLDetailsElement;
     expect(details.open).toBe(false);
     expect(details.textContent).toContain("claude / opus-5.5 / xhigh");
-    // The mobile sort control replaces the table header.
-    fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
-      key: "ArrowDown",
-    });
-    expect(
-      screen
-        .getByRole("menuitemcheckbox", { name: "最近活动降序" })
-        .getAttribute("aria-checked"),
-    ).toBe("true");
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    // Sorting remains available in the shared toolbar on narrow screens.
+    expect(screen.getByRole("combobox", { name: "排序：全部" })).toBeTruthy();
     // A plain card area opens the drawer.
     fireEvent.click(card.querySelector(".execution-card-context") as Element);
     expect(
