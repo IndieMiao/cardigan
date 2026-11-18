@@ -24,6 +24,7 @@ import { CheckHandoffs, type Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { AuthorPrechecks } from "./author-prechecks.js";
+import { CandidatePushNotStarted } from "./git.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -74,9 +75,10 @@ test("candidate conflicts retain a structured host reason and baseline without r
   await (await service.schedule([x.f.project_id])).done;
   expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
 });
-async function setup() {
+async function setup(shared?: { dataDir: string; project_id: string }) {
   let clockMs = Date.parse("2030-01-01T00:00:00Z");
   const f = m4Fixture({
+    ...shared,
     clock: { now: () => new Date(clockMs).toISOString() },
   });
   fixtures.push(f);
@@ -595,6 +597,14 @@ test.each([false, true])(
       onError: (e: unknown) => x.errors.push(e),
     };
     const first = new MergeChecks(options);
+    if (!parallel) {
+      git.pushCheckCandidate.mockRejectedValueOnce(
+        new CandidatePushNotStarted(1),
+      );
+      await (await first.schedule([x.f.project_id])).done;
+      expect(x.check().status).toBe("queued");
+      expect(client.dispatch).not.toHaveBeenCalled();
+    }
     const scheduled = await first.schedule([x.f.project_id]);
     if (parallel) {
       await vi.waitFor(() => expect(dispatched.has(124)).toBe(true));
@@ -689,12 +699,13 @@ test.each([false, true])(
     x.advance();
     await resumed.schedule([x.f.project_id]);
     await next.done;
+    await (await resumed.schedule([x.f.project_id])).done;
     expect(x.check()).toMatchObject({
       status: "passed",
       external_run: { run_id: 123, run_attempt: 1 },
     });
     expect(client.dispatch).toHaveBeenCalledTimes(parallel ? 2 : 1);
-    expect(git.pushCheckCandidate).toHaveBeenCalledTimes(parallel ? 2 : 1);
+    expect(git.pushCheckCandidate).toHaveBeenCalledTimes(2);
     expect(client.cancel).not.toHaveBeenCalled();
     expect(x.run).not.toHaveBeenCalled();
     expect(x.errors).toEqual([]);
@@ -1300,10 +1311,134 @@ test("a queued HEAD lock timeout retries the same attempt; a changed HEAD after 
     .mockRejectedValueOnce(new RepositoryLockTimeoutError(1))
     .mockResolvedValueOnce("e".repeat(40));
   await (await host.schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("running");
+  await (await host.schedule([x.f.project_id])).done;
   expect(x.run).toHaveBeenCalledOnce();
   expect(x.git.preparePrecheck).toHaveBeenCalledOnce();
   expect(x.check()).toMatchObject({
     attempt_id: attempt,
     status: "interrupted",
   });
+});
+
+test.each([true, false])(
+  "a completed SSH result survives restart during HEAD proof (ready=%s) without holding another project's only slot",
+  async (ready) => {
+    const a = await setup(),
+      b = await setup({ dataDir: a.f.dataDir, project_id: "p-second" });
+    const requested = await a.queue();
+    const bp = b.f.project_id,
+      ap = a.f.project_id;
+    const checkedHead = a.check().head_sha;
+    let busy = false;
+    const git = {
+      ...a.git,
+      projectOf: (project_id: typeof ap) => ({
+        ...a.git.projectOf(),
+        project_id,
+      }),
+      checkHead: vi.fn(async (project: typeof ap) => {
+        if (busy && project === ap) throw new RepositoryLockTimeoutError(1);
+        return checkedHead;
+      }),
+      changedPaths: vi.fn(),
+      readWorkspace: vi.fn(),
+      sync: vi.fn(),
+      baseline: vi.fn(),
+      prepare: vi.fn(),
+      publish: vi.fn(),
+      merge: vi.fn(),
+    };
+    const dispatched: string[] = [];
+    const executor: CheckExecutor = {
+      dispatch: async (r) => {
+        dispatched.push(r.project);
+        if (ready || r.project === bp) r.onReady?.();
+        return { id: r.project };
+      },
+      poll: async (h) => {
+        if (h.id === ap) busy = true;
+        return !ready && h.id === ap
+          ? { status: "executor_unreachable", checks: [], cleanup_errors: [] }
+          : {
+              status: "passed",
+              checks: [{ name: "test", status: "passed", exit_code: 0 }],
+              cleanup_errors: [],
+            };
+      },
+      cancel: vi.fn(),
+      fetchFailureLog: async () => undefined,
+    };
+    const options = {
+      ...a.options,
+      git,
+      checkExecutor: executor,
+      sweep: async () => {},
+    };
+    const first = new MergeChecks(options);
+    await first.tick([ap]);
+    await first.idle(); // Startup orphan sweep shares the target slot.
+    await first.tick([ap]);
+    expect(a.check()).toMatchObject({
+      attempt_id: requested.attempt_id,
+      status: ready ? "running" : "queued",
+    });
+    expect(a.check().checks).toBeUndefined();
+    expect(
+      a.f.store.database
+        .prepare("SELECT count(*) AS n FROM merge_check_capacity")
+        .get()?.n,
+    ).toBe(0);
+    await b.queue();
+    await first.tick([ap, bp]);
+    expect(b.check().status).toBe("passed");
+    first.stop();
+    await first.idle();
+    busy = false;
+    const resumed = new MergeChecks({ ...options, store: b.f.store });
+    await resumed.tick([ap, bp]);
+    await resumed.tick([ap]);
+    expect(dispatched).toEqual([ap, bp]);
+    expect(a.check()).toMatchObject({
+      attempt_id: requested.attempt_id,
+      status: ready ? "passed" : "executor_unreachable",
+      checks: ready ? [{ name: "test", status: "passed", exit_code: 0 }] : [],
+    });
+    expect(
+      a.f.store.database
+        .prepare("SELECT count(*) AS n FROM precheck_head_proofs")
+        .get()?.n,
+    ).toBe(0);
+    expect(a.errors).toEqual([]);
+    resumed.stop();
+  },
+);
+
+test("a restored proof cannot pass after its owner changes during the HEAD read", async () => {
+  const x = await setup();
+  await x.queue();
+  const head = x.check().head_sha;
+  x.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    return {
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+      cleanup_errors: [],
+    };
+  });
+  x.git.checkHead
+    .mockResolvedValueOnce(head)
+    .mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("running");
+  x.git.checkHead.mockImplementationOnce(async () => {
+    x.f.store.uow.run((tx) =>
+      tx.assignments.put(x.f.project_id, { ...x.s.coder, status: "released" }),
+    );
+    return head;
+  });
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(x.check().status).toBe("interrupted");
+  expect(x.errors).toEqual([]);
 });

@@ -1,4 +1,4 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import type { Assignment, Clock, Precheck, ProjectId } from "@cardigan/domain";
 import {
   prechecks,
@@ -111,8 +111,58 @@ export class AuthorPrechecks {
   private state(project: ProjectId) {
     return this.options.store.uow.read((tx) => loadCommandState(tx, project));
   }
+  private proof(project: ProjectId, check: Precheck): Precheck | undefined {
+    const row = this.options.store.database
+      .prepare(`SELECT result FROM precheck_head_proofs
+      WHERE project_id=? AND card_id=? AND attempt_id=?`)
+      .get(project, check.card_id, check.attempt_id);
+    return row ? (JSON.parse(String(row.result)) as Precheck) : undefined;
+  }
+  /** The indexed projection is updated by the same transaction as its system event. */
+  private current(project: ProjectId, check: Precheck): Precheck | undefined {
+    const row = this.options.store.database
+      .prepare(`SELECT doc FROM check_recovery_attempts
+      WHERE project_id=? AND card_id=? AND attempt_id=?`)
+      .get(project, check.card_id, check.attempt_id);
+    return row ? (JSON.parse(String(row.doc)) as Precheck) : undefined;
+  }
+  private async verify(project: ProjectId, result: Precheck) {
+    const owner = this.owner(project, result);
+    let same = false;
+    if (owner) {
+      if (!this.options.git.checkHead)
+        throw new Error("No trusted Git adapter");
+      try {
+        same =
+          (await this.options.git.checkHead(project, owner)) ===
+          result.head_sha;
+      } catch (error) {
+        // Another tick (or controller after restart) retries only the proof.
+        if (error instanceof RepositoryLockTimeoutError) return;
+        throw error;
+      }
+    }
+    this.update(
+      project,
+      same
+        ? result
+        : {
+            ...result,
+            status: "interrupted",
+            summary: "分支HEAD或负责人已变化，原结果不再有效",
+          },
+      true,
+    );
+  }
   private update(project: ProjectId, check: Precheck, verifyOwner = false) {
     this.options.store.uow.run((tx) => {
+      // A stale queue observer cannot interrupt/requeue a completed execution;
+      // concurrent proof readers cannot publish a second terminal result.
+      if (verifyOwner !== !!this.proof(project, check)) {
+        if (["queued", "running"].includes(check.status))
+          throw new CheckExecutorSuspended();
+        return;
+      }
       if (verifyOwner && !this.ownerIn(tx, project, check))
         check = {
           ...check,
@@ -127,6 +177,11 @@ export class AuthorPrechecks {
       );
       if (!effect.ok) throw new Error(`Precheck record: ${effect.error.code}`);
       persistEffect(tx, project, effect.value);
+      if (!["queued", "running"].includes(check.status))
+        this.options.store.database
+          .prepare(`DELETE FROM precheck_head_proofs
+          WHERE project_id=? AND card_id=? AND attempt_id=?`)
+          .run(project, check.card_id, check.attempt_id);
     });
     // A terminal pre-dispatch failure has no remote run or unsettled publisher.
     if (
@@ -239,6 +294,7 @@ export class AuthorPrechecks {
       a.scope === "work_item" &&
       a.work_item_id === item?.id &&
       item.assignment_id === a.id &&
+      item.card_id === check.card_id &&
       item.status !== "cancelled" &&
       a.branch === check.branch &&
       a.machine_id === check.machine_id &&
@@ -297,7 +353,7 @@ export class AuthorPrechecks {
           ).blockedProject(project)
         )
           continue;
-        if (this.held(project, check)) continue;
+
         const work = this.execute(project, check)
           .catch(() => {
             this.options.onError(new Error("作者预检查收尾失败，保留当前记录"));
@@ -314,12 +370,19 @@ export class AuthorPrechecks {
       log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let slot: { index: number; release(): void } | undefined,
       release: ReturnType<typeof acquireMergeCheckCapacity> | undefined;
-    let finishedLog = false;
+    let finishedLog = false,
+      verifying = false;
     let errorEnv: Readonly<Record<string, string>> = {};
     try {
+      const pending = this.options.store.uow.read(() =>
+        this.proof(projectId, check),
+      );
+      verifying = !!pending;
       if (
-        Date.parse(this.options.clock.now()) <
-        (this.retry.get(check.attempt_id) ?? 0)
+        !pending &&
+        (this.held(projectId, check) ||
+          Date.parse(this.options.clock.now()) <
+            (this.retry.get(check.attempt_id) ?? 0))
       )
         return;
       const settings = this.options.configuration.forProject(projectId);
@@ -333,6 +396,11 @@ export class AuthorPrechecks {
           check.executor.type !== (target.type ?? "ssh"))
       )
         throw new Error("Precheck target configuration changed");
+      if (pending) {
+        stage = "核对分支HEAD";
+        await this.verify(projectId, pending);
+        return;
+      }
       if (
         new CheckHandoffs(this.options.store, "precheck-observer").blocked(
           target.name,
@@ -423,6 +491,16 @@ export class AuthorPrechecks {
         undefined,
         target.maxConcurrent,
       );
+      // Admission awaited a slot/HEAD. A different controller may have already
+      // completed execution for our old queue snapshot and released its slot.
+      if (
+        this.options.store.uow.read(
+          () =>
+            this.proof(projectId, check) ||
+            !isDeepStrictEqual(this.current(projectId, check), original),
+        )
+      )
+        return;
       stage = "准备候选";
       const candidate =
         check.candidate_sha && check.base_sha && check.tree_sha
@@ -490,7 +568,8 @@ export class AuthorPrechecks {
         executor,
         {
           beforeDispatch: () => {
-            if (this.held(projectId, check)) throw new CheckExecutorSuspended();
+            if (!this.owner(projectId, check) || this.held(projectId, check))
+              throw new CheckExecutorSuspended();
           },
           kind: "precheck",
           project: projectId,
@@ -548,42 +627,42 @@ export class AuthorPrechecks {
       stage = "保存日志";
       finishedLog = true;
       const saved = await log.finish(result);
-      stage = "核对分支HEAD";
-      // Keep the saved result and the active attempt. Lock contention after
-      // dispatch must retry only the proof, never prepare or dispatch again.
-      let same = false;
-      for (;;) {
-        const current = this.owner(projectId, check);
-        if (!current) break;
-        try {
-          same =
-            (await this.options.git.checkHead(projectId, current)) ===
-            check.head_sha;
-          break;
-        } catch (error) {
-          if (!(error instanceof RepositoryLockTimeoutError)) throw error;
-          const { signal } = this.options;
-          if (signal.aborted) return;
-          await delay(1000, undefined, { signal }).catch((error) => {
-            if (!signal.aborted) throw error;
-          });
-          if (signal.aborted) return;
-        }
+      const completed: Precheck = {
+        ...check,
+        ...(bound ? { external_run: bound } : {}),
+        status: saved.status,
+        checks: saved.checks,
+        summary: saved.summary,
+        log_ref: saved.log_ref,
+      };
+      // Save only the host's redacted structured result, never raw executor output.
+      // The public status stays queued/running until recordPrecheck validates it.
+      const recorded = this.options.store.uow.run(() => {
+        const latest = this.current(projectId, check);
+        if (!latest || !["queued", "running"].includes(latest.status))
+          return false;
+        return (
+          this.options.store.database
+            .prepare(`INSERT INTO precheck_head_proofs
+          (project_id,card_id,attempt_id,result) VALUES (?,?,?,?)
+          ON CONFLICT(project_id,card_id,attempt_id) DO NOTHING`)
+            .run(
+              projectId,
+              check.card_id,
+              check.attempt_id,
+              JSON.stringify(completed),
+            ).changes === 1
+        );
+      });
+      release();
+      release = undefined;
+      slot.release();
+      slot = undefined;
+      if (recorded) {
+        verifying = true;
+        stage = "核对分支HEAD";
+        await this.verify(projectId, completed);
       }
-      this.update(
-        projectId,
-        {
-          ...check,
-          ...(bound ? { external_run: bound } : {}),
-          status: same ? saved.status : "interrupted",
-          checks: saved.checks,
-          summary: same
-            ? saved.summary
-            : "分支HEAD或负责人已变化，原结果不再有效",
-          log_ref: saved.log_ref,
-        },
-        true,
-      );
     } catch (error) {
       if (
         error instanceof CheckAdmissionClosed ||
@@ -611,6 +690,17 @@ export class AuthorPrechecks {
         }
       }
       const summary = boundedCheckSummary(...diagnostics);
+      if (verifying) {
+        // Still require the checkpoint when publishing a proof failure: a
+        // different verifier may already have settled it. A write fault leaves
+        // the checkpoint intact for the next pass, never eligible to dispatch.
+        this.update(
+          projectId,
+          { ...check, status: "environment_failed", summary },
+          true,
+        );
+        return;
+      }
       this.finishFailure(projectId, {
         ...check,
         summary,

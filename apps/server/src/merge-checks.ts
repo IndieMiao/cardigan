@@ -92,7 +92,7 @@ import {
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
-import type { MergeGit } from "./git.js";
+import { CandidatePushNotStarted, type MergeGit } from "./git.js";
 import { MergeBatches } from "./merge-batches.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -330,7 +330,17 @@ export class MergeChecks {
             baselineBranch: project.base_branch,
             onExternalRun: bind,
           }),
-          push: (input) => push.call(options.git, project, input),
+          push: async (input) => {
+            try {
+              return await push.call(options.git, project, input);
+            } catch (error) {
+              // Only this pre-transport lock timeout proves there was no push.
+              // The provider settles its publisher fence before propagating suspension.
+              if (error instanceof CandidatePushNotStarted)
+                throw new CheckExecutorSuspended();
+              throw error;
+            }
+          },
           isBaselineAncestor: (sha, branch) =>
             ancestor.call(options.git, project, sha, branch),
         });
