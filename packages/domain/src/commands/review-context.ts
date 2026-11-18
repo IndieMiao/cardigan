@@ -133,6 +133,9 @@ export function reviewReuseContext(
         required: w.required,
         target: w.kind === "verify" ? w.target_work_item_id : undefined,
         completion_criteria: w.completion_criteria,
+        ...(w.requirements === undefined
+          ? {}
+          : { machine_requirements: w.requirements }),
         depends_on: w.depends_on,
         cancelled: w.status === "cancelled",
         replaced: w.replaced_by_work_item_id,

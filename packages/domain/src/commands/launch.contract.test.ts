@@ -77,6 +77,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     | "capabilities"
     | "status"
     | "required_machine_tags"
+    | "required_capabilities"
   >();
   expectTypeOf<keyof Runtime>().toEqualTypeOf<
     | "provision"

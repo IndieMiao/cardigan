@@ -2,6 +2,7 @@ import type { Actor, Event, ToolName } from "../entities.js";
 import type { Result } from "../errors.js";
 import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type { ProjectId } from "../ids.js";
+import { validateWorkItemRequirements } from "../machine-requirements.js";
 import {
   canManageRoles,
   isStandingOnlyTool,
@@ -41,6 +42,7 @@ const editable = [
   "abilities",
   "worktree",
   "required_machine_tags",
+  "required_capabilities",
 ];
 
 function reviewTools(tools: readonly ToolName[]): readonly ToolName[] {
@@ -101,6 +103,14 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
         `${key} 必须是非空字符串数组`,
       );
     }
+    const requirements = validateWorkItemRequirements({
+      capabilities: role.required_capabilities,
+    });
+    ensure(
+      requirements.ok,
+      "validation_failed",
+      requirements.ok ? "" : requirements.error.message,
+    );
     // Save the derived permission in this new version; old roles/tokens stay fixed.
     role = { ...role, allowed_tools: reviewTools(role.allowed_tools) };
     const kind = roleKind(role);
@@ -213,6 +223,9 @@ function save(
     abilities: [...source.abilities],
     worktree: source.worktree,
     required_machine_tags: [...source.required_machine_tags],
+    ...(source.required_capabilities === undefined
+      ? {}
+      : { required_capabilities: [...new Set(source.required_capabilities)] }),
     version: (latest(state, definition.role_id)?.version ?? 0) + 1,
     status,
   };
@@ -378,6 +391,7 @@ export function rollbackRole(
 
 /** The fields a role takes from the default pack on `role upgrade --from-default`. */
 export const DEFAULT_PACK_FIELDS = [
+  "required_capabilities",
   "instructions",
   "allowed_tools",
   "capabilities",
@@ -386,11 +400,19 @@ export const DEFAULT_PACK_FIELDS = [
 ] as const;
 export type DefaultPackPatch = Pick<
   RoleDefinition,
-  "allowed_tools" | "capabilities" | "kind" | "worktree"
+  | "allowed_tools"
+  | "capabilities"
+  | "kind"
+  | "worktree"
+  | "required_capabilities"
 > & { readonly instructions: string };
 
 export interface RoleFieldChange {
-  readonly field: "instructions" | "kind" | "worktree";
+  readonly field:
+    | "instructions"
+    | "kind"
+    | "worktree"
+    | "required_capabilities";
   readonly from: string;
   readonly to: string;
 }
@@ -436,6 +458,21 @@ export function roleUpgradeDiff(
   const added_capabilities = minus(patch.capabilities, previous.capabilities);
   const removed_capabilities = minus(previous.capabilities, patch.capabilities);
   const fields: RoleFieldChange[] = [];
+  if (
+    minus(
+      previous.required_capabilities ?? [],
+      patch.required_capabilities ?? [],
+    ).length ||
+    minus(
+      patch.required_capabilities ?? [],
+      previous.required_capabilities ?? [],
+    ).length
+  )
+    fields.push({
+      field: "required_capabilities",
+      from: (previous.required_capabilities ?? []).join(", "),
+      to: (patch.required_capabilities ?? []).join(", "),
+    });
   const previousKind = roleKind(previous);
   if (previous.kind !== patch.kind)
     fields.push({ field: "kind", from: previous.kind, to: patch.kind });
@@ -522,6 +559,7 @@ function previewDefaultUpgrade(
     instructions: source.instructions,
     allowed_tools: [...reviewTools(source.allowed_tools)],
     capabilities: [...source.capabilities],
+    required_capabilities: [...(source.required_capabilities ?? [])],
     kind: source.kind,
     worktree: source.worktree,
   };

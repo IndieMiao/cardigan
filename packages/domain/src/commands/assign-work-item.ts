@@ -2,12 +2,16 @@ import type { Assignment } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
 import {
+  effectiveWorkItemRequirements,
+  mergeMachineRequirements,
+} from "../machine-requirements.js";
+import {
   remoteWorkerLosses,
   remoteWorkerLossReleased,
 } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
-import { type CommandDraft, ensure } from "./core.js";
+import { type CommandDraft, ensure, unwrap } from "./core.js";
 import {
   checkEmployeeNotExternal,
   checkEmployeeSeparation,
@@ -176,12 +180,21 @@ export function assignWorkItem(
     automaticTarget && employee
       ? employeeAssignmentLoad(d, employee)
       : undefined;
+  const required = unwrap(
+    mergeMachineRequirements(
+      unwrap(effectiveWorkItemRequirements(item.requirements, role)),
+      {
+        ...(p.os === undefined ? {} : { os: p.os }),
+        ...(p.arch === undefined ? {} : { arch: p.arch }),
+        ...(p.required_tags === undefined ? {} : { tags: p.required_tags }),
+      },
+    ),
+  );
   const machine = selectMachine(d.list("machines"), {
     ...p,
-    required_tags: [
-      ...(role.required_machine_tags ?? []),
-      ...(p.required_tags ?? []),
-    ],
+    ...(required.os === undefined ? {} : { os: required.os }),
+    ...(required.arch === undefined ? {} : { arch: required.arch }),
+    ...(required.tags === undefined ? {} : { required_tags: required.tags }),
   });
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;

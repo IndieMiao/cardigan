@@ -271,6 +271,7 @@ export async function main(
     if (command === "inbox") return inboxCommand(rest, io);
     if (command === "attention") return attentionCommand(rest, io);
     if (
+      command === "work-item" ||
       command === "card" ||
       command === "assign" ||
       command === "token" ||

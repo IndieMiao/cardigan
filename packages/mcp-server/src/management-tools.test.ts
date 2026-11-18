@@ -2607,3 +2607,126 @@ test("MCP recovery selection is validated and cannot become an ordinary assign w
       .isError,
   ).toBe(true);
 });
+
+test("MC-2 MCP persists template, card and item requirements and rejects invalid expressions", async () => {
+  store.uow.run((tx) =>
+    tx.card_templates.put(project, {
+      ...productCardTemplate,
+      id: "machine-work",
+      builtin: false,
+      work_items: productCardTemplate.work_items.map((w) => ({
+        ...w,
+        requirements: { capabilities: ["godot>=4.7"], tags: ["office"] },
+      })),
+    }),
+  );
+  const created = await ok<Card>(office, "create_card", {
+    title: "Machine work",
+    goal: "Build",
+    template_id: "machine-work",
+    acceptance_criteria: ["Pass"],
+    source: { kind: "quote", text: "Build" },
+    repo: "example/repo",
+    base_branch: "main",
+    work_item_requirements: { development: { capabilities: ["blender=4.2"] } },
+  });
+  const view = await ok<{ work_items: WorkItem[] }>(office, "get_card", {
+    card_id: created.id,
+  });
+  const item = view.work_items.find((w) => w.kind === "produce");
+  if (!item) throw new Error("Missing producer");
+  expect(item.requirements).toEqual({
+    capabilities: ["godot>=4.7", "blender=4.2"],
+    tags: ["office"],
+  });
+  const updated = await ok<WorkItem>(office, "update_work_item", {
+    work_item_id: item.id,
+    requirements: {},
+  });
+  expect(updated.requirements).toEqual({
+    capabilities: ["godot>=4.7"],
+    tags: ["office"],
+  });
+  const extra = await ok<WorkItem>(office, "create_work_item", {
+    card_id: created.id,
+    title: "Extra",
+    kind: "produce",
+    role_id: "coder",
+    required: false,
+    completion_criteria: [],
+    requirements: { arch: "arm64", capabilities: ["xcode"] },
+  });
+  expect(extra.requirements).toEqual({
+    arch: "arm64",
+    capabilities: ["xcode"],
+  });
+  for (const requirements of [
+    { capabilities: ["godot~4"] },
+    { os: "" },
+    { command: "probe" },
+    null,
+  ]) {
+    const before = rows();
+    expect(
+      (
+        await raw(office, "update_work_item", {
+          work_item_id: item.id,
+          requirements,
+        })
+      ).isError,
+    ).toBe(true);
+    expect(rows()).toEqual(before);
+  }
+  expect(
+    (
+      await raw(office, "create_card", {
+        title: "Typo",
+        goal: "Build",
+        acceptance_criteria: ["Pass"],
+        source: { kind: "quote", text: "Build" },
+        repo: "example/repo",
+        base_branch: "main",
+        work_item_requirements: { typo: {} },
+      })
+    ).isError,
+  ).toBe(true);
+  const templates = await ok<{
+    templates: { id: string; work_items: { requirements?: unknown }[] }[];
+  }>(office, "list_templates", {});
+  expect(
+    templates.templates.find((t) => t.id === "machine-work")?.work_items[0]
+      ?.requirements,
+  ).toEqual({ capabilities: ["godot>=4.7"], tags: ["office"] });
+});
+
+test("MC-2 an author with advertised management tools still cannot edit machine requirements", async () => {
+  const assigned = await ok<AssignmentReply>(office, "assign", {
+    work_item_id: work("coder").id,
+    role_id: "coder",
+  });
+  const author = await connect(assigned);
+  const before = rows();
+  expect(
+    (
+      await raw(author, "update_work_item", {
+        work_item_id: work("coder").id,
+        requirements: { capabilities: ["godot"] },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(
+    (
+      await raw(author, "create_work_item", {
+        card_id: card.id,
+        title: "Extra",
+        kind: "produce",
+        role_id: "coder",
+        required: false,
+        completion_criteria: [],
+        requirements: {},
+      })
+    ).isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  expect(work("coder").requirements).toBeUndefined();
+});

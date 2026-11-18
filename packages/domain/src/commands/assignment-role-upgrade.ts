@@ -97,6 +97,20 @@ export function beginIdleAssignmentRoleUpgrade(
       "illegal_transition",
       "No newer active role version",
     );
+    const pinned = state.roles.find(
+      (r) =>
+        r.role_id === previous.role_id &&
+        r.role_version === previous.role_version,
+    );
+    const capabilities = pinned?.required_capabilities ?? [];
+    const required = latest.required_capabilities ?? [];
+    ensure(
+      pinned &&
+        capabilities.every((c) => required.includes(c)) &&
+        required.every((c) => capabilities.includes(c)),
+      "illegal_transition",
+      "机器能力要求变化时保留既有 Assignment 的角色版本；新要求只用于新指派",
+    );
     const next = {
       ...previous,
       role_upgrade: {

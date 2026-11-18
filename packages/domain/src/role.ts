@@ -31,6 +31,9 @@ export function roleReference(role: Role): RoleReference {
     allowed_tools: role.allowed_tools,
     capabilities: role.capabilities,
     required_machine_tags: role.required_machine_tags,
+    ...(role.required_capabilities === undefined
+      ? {}
+      : { required_capabilities: role.required_capabilities }),
     ...(role.status === undefined ? {} : { status: role.status }),
   };
 }

@@ -318,3 +318,22 @@ test("a confirmed human stop permits the version upgrade without resuming work",
   expect(stoppedByHuman(upgraded.events, owner.id)).toBe(true);
   expect(upgraded.runs).toEqual([]);
 });
+
+test("MC-2 machine capability changes cannot silently upgrade an existing work Assignment", () => {
+  const original = setup();
+  const state = {
+    ...original,
+    roles: original.roles.map((r) =>
+      r.role_version === 2
+        ? { ...r, required_capabilities: ["browser.chromium"] }
+        : r,
+    ),
+  };
+  const owner = state.assignments[0];
+  if (!owner) throw new Error("Missing owner");
+  expect(
+    beginIdleAssignmentRoleUpgrade(state, system, owner.id, ports()),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  expect(state.assignments).toEqual(original.assignments);
+  expect(state.runs).toEqual([]);
+});

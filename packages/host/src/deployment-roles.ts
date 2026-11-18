@@ -60,6 +60,10 @@ export function deploymentRolePolicyHash(role: RoleDefinition): string {
     capabilities: [...role.capabilities].sort(),
     kind: role.kind,
     worktree: role.worktree,
+    // Keep historical hashes for roles with no machine capability constraints.
+    ...(role.required_capabilities?.length
+      ? { required_capabilities: [...role.required_capabilities].sort() }
+      : {}),
   };
   return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
 }

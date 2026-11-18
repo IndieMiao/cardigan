@@ -248,3 +248,64 @@ test.each(["safe", "widening", "manual"] as const)(
     }
   },
 );
+
+test("MC-2 deployed machine capabilities append a role version while keeping work assignments and tokens pinned", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  const project = "capability-upgrade";
+  try {
+    store.createProject({ id: project });
+    const next = defaultRoleDefinition("frontend_engineer", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    expect(next.required_capabilities).toEqual(["browser.chromium"]);
+    const { required_capabilities: _new, ...old } = next;
+    expect(
+      deploymentRolePolicyHash({ ...old, required_capabilities: [] }),
+    ).toBe(deploymentRolePolicyHash(old));
+    const assignment: Assignment = {
+      id: "A-1" as never,
+      scope: "work_item",
+      work_item_id: "W-1" as never,
+      role_id: "frontend_engineer",
+      role_version: 1,
+      status: "active",
+      runtime_state: "idle",
+      runtime_ref: null,
+      machine_id: "local",
+      mcp_token_id: "fixture",
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+    const issued = store.uow.run((tx) => {
+      writeRole(
+        tx,
+        project,
+        { ...old, version: 1, core_prompt: "" },
+        { mode: "add" },
+      );
+      tx.assignments.put(project, assignment);
+      return tx.issueToken({
+        project_id: project,
+        assignment_id: assignment.id,
+        role: { role_version: 1, allowed_tools: old.allowed_tools },
+      });
+    });
+    upgradeDeployedRoles(store, project, ["frontend_engineer"], {
+      frontend_engineer: deploymentRolePolicyHash(old),
+    });
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, project, "frontend_engineer")).toMatchObject({
+        version: 2,
+        required_capabilities: ["browser.chromium"],
+      });
+      expect(
+        getRoleVersion(tx, project, "frontend_engineer", 1)
+          ?.required_capabilities,
+      ).toBeUndefined();
+      expect(tx.assignments.get(project, assignment.id)).toEqual(assignment);
+    });
+    expect(store.verifyToken(issued.token)?.role_version).toBe(1);
+  } finally {
+    store.close();
+  }
+});

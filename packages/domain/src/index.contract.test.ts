@@ -66,6 +66,7 @@ test("invariant 1: roles contain capabilities and permissions, not runtime owner
     | "capabilities"
     | "status"
     | "required_machine_tags"
+    | "required_capabilities"
   >();
   expectTypeOf<RoleReference>().not.toHaveProperty("session_ref");
   expectTypeOf<RoleReference>().not.toHaveProperty("worktree_path");

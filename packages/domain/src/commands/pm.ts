@@ -8,6 +8,10 @@ import type {
 import { projectFlowVersion, validFlowVersion } from "../flow.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
+  mergeMachineRequirements,
+  type WorkItemRequirements,
+} from "../machine-requirements.js";
+import {
   independentReviewMaxRounds,
   initialReviewMaxRounds,
   reviewMaxRounds,
@@ -77,6 +81,9 @@ export type CreateCardParams = Pick<
   > &
   CardDependencyInput & {
     readonly template_id?: string;
+    readonly work_item_requirements?: Readonly<
+      Record<string, WorkItemRequirements>
+    >;
     readonly priority?: number | string;
   };
 export function createCard(
@@ -117,6 +124,17 @@ export function createCard(
       "停用模板不能建卡",
     );
     validateCardTemplate(template, state.roles);
+    ensure(
+      p.work_item_requirements === undefined ||
+        (p.work_item_requirements !== null &&
+          typeof p.work_item_requirements === "object" &&
+          !Array.isArray(p.work_item_requirements) &&
+          Object.keys(p.work_item_requirements).every((key) =>
+            template.work_items.some((w) => w.key === key),
+          )),
+      "validation_failed",
+      "work_item_requirements 必须按模板工作项 key 指定需求",
+    );
     if (template.requires_repo || p.repo !== undefined) text(p.repo, "repo");
     if (
       template.requires_repo ||
@@ -206,6 +224,17 @@ export function createCard(
         depends_on: [],
         completion_criteria: [...acceptance, ...(w.completion_criteria ?? [])],
         template_key: w.key,
+        ...(w.requirements === undefined &&
+        p.work_item_requirements?.[w.key] === undefined
+          ? {}
+          : {
+              requirements: unwrap(
+                mergeMachineRequirements(
+                  w.requirements,
+                  p.work_item_requirements?.[w.key],
+                ),
+              ),
+            }),
         status: "todo" as const,
       };
       if (w.kind === "produce")
@@ -502,6 +531,7 @@ export type CreateWorkItemParams = Pick<
   WorkItem,
   "card_id" | "title" | "kind" | "role_id" | "required" | "completion_criteria"
 > & {
+  requirements?: WorkItemRequirements;
   depends_on?: readonly WorkItemId[];
   target_work_item_id?: WorkItemId;
   max_review_rounds?: number;
@@ -578,6 +608,9 @@ export function createWorkItem(
       role_id: p.role_id,
       required: p.required,
       completion_criteria: p.completion_criteria,
+      ...(p.requirements === undefined
+        ? {}
+        : { requirements: unwrap(mergeMachineRequirements(p.requirements)) }),
       depends_on: [...new Set(p.depends_on ?? [])],
       status: "todo" as const,
     };
@@ -607,6 +640,7 @@ export function updateWorkItem(
   actor: Actor,
   p: {
     work_item_id: WorkItemId;
+    requirements?: WorkItemRequirements;
     status?: WorkItem["status"];
     title?: string;
     completion_criteria?: readonly string[];
@@ -702,6 +736,20 @@ export function updateWorkItem(
     }
     let result: WorkItem = {
       ...item,
+      ...(p.requirements === undefined
+        ? {}
+        : {
+            requirements: unwrap(
+              mergeMachineRequirements(
+                item.template_key
+                  ? resolveCardTemplate(d, card).work_items.find(
+                      (w) => w.key === item.template_key,
+                    )?.requirements
+                  : undefined,
+                p.requirements,
+              ),
+            ),
+          }),
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.completion_criteria
         ? { completion_criteria: p.completion_criteria }
@@ -741,6 +789,12 @@ export function updateWorkItem(
       {
         work_item_id: item.id,
         resume_work_items: resumed ? [item.id] : [],
+        ...(p.requirements === undefined
+          ? {}
+          : {
+              requirements: { ...result.requirements },
+              previous_requirements: { ...item.requirements },
+            }),
         ...(p.manual_assign !== undefined
           ? {
               manual_assign: p.manual_assign,

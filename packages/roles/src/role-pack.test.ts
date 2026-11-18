@@ -801,3 +801,13 @@ test("frontend engineering preserves coder permissions and adds evidenced UI del
   ])
     expect(instructionsFor("design_director")).toContain(phrase);
 });
+
+test("MC-2 frontend machine requirements are separate from permission capabilities", () => {
+  const launch = { harness: "codex" as const, launch_profile_ref: "fixture" };
+  const frontend = defaultRoleDefinition("frontend_engineer", launch);
+  expect(frontend.required_capabilities).toEqual(["browser.chromium"]);
+  expect(frontend.capabilities).not.toContain("browser.chromium");
+  expect(defaultRoleDefinition("coder", launch).required_capabilities).toEqual(
+    [],
+  );
+});

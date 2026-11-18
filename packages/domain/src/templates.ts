@@ -2,6 +2,7 @@ import type { Card, Decider, RoleReference, WorkItem } from "./entities.js";
 import type { RoleId } from "./ids.js";
 
 export type TemplateWorkItem = {
+  readonly requirements?: import("./machine-requirements.js").WorkItemRequirements;
   readonly key: string;
   readonly title: string;
   readonly role_id: RoleId;

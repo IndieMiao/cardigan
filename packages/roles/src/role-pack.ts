@@ -699,6 +699,8 @@ export function defaultRoleDefinition(
     ...launch,
     abilities: [],
     required_machine_tags: [],
+    required_capabilities:
+      role === "frontend_engineer" ? ["browser.chromium"] : [],
     worktree:
       role === "host_ops" ? "none" : kind === "produce" ? "write" : "readonly",
     capabilities:

@@ -45,6 +45,9 @@ export function roleFromDocument(document: unknown): Role {
     abilities: record.abilities,
     worktree: record.worktree,
     required_machine_tags: record.required_machine_tags,
+    ...(record.required_capabilities === undefined
+      ? {}
+      : { required_capabilities: record.required_capabilities }),
   };
 }
 

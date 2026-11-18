@@ -49,7 +49,7 @@ const USAGE = [
   "  update <角色> --convert-legacy",
   "  upgrade <角色> --from-default [--dry-run]",
   "    为已有默认角色（pm、coder、frontend_engineer、reviewer、designer、ui_ux_designer、design_director、tester、host_ops）追加新版本：instructions、allowed_tools、",
-  "    capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
+  "    capabilities、required_capabilities、kind、worktree 取当前默认角色包；harness、launch_profile_ref、display_name、abilities、",
   "    required_machine_tags 保留项目自己的。先打印变化和放宽项；内容相同时不追加。--dry-run 只打印不写入。",
   "  deactivate|activate <角色>",
   "  rollback <角色> --version <n>",

@@ -117,6 +117,7 @@ test("list_roles returns the latest active role without prompts or launch policy
     display_name: "designer v2",
     kind: "produce",
     capabilities: ["design"],
+    required_machine_tags: ["gpu"],
     worktree: "write",
     abilities: ["draw"],
   });
@@ -130,7 +131,6 @@ test("list_roles returns the latest active role without prompts or launch policy
   for (const hidden of [
     "SECRET",
     "fixture-profile",
-    "gpu",
     "allowed_tools",
     "harness",
   ])

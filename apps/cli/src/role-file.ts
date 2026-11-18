@@ -24,6 +24,7 @@ export interface RoleFile {
   readonly abilities: readonly string[];
   readonly worktree: "none" | "write" | "readonly";
   readonly required_machine_tags: readonly string[];
+  readonly required_capabilities?: readonly string[];
 }
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/;
@@ -130,6 +131,14 @@ export function parseRoleFile(source: string, path: string): RoleFile {
       "write",
       "readonly",
     ] as const),
+    ...(record.required_capabilities === undefined
+      ? {}
+      : {
+          required_capabilities: list(
+            record.required_capabilities,
+            "required_capabilities",
+          ),
+        }),
     required_machine_tags: list(
       record.required_machine_tags,
       "required_machine_tags",
