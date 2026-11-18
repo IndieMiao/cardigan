@@ -11,7 +11,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../.."),
 const LEGACY_CENSUS = "19977ef68f2ae244a4ed7e97957e72a83a713cfe";
 // The imported foundation is integrated with the reviewed main baseline.
 // Its execution diagnostics/maintenance styles predate this migration gate.
-const SKELETON_BASE = "73c3a1ba2b26d976eca1fd1652f1bbced110e254";
+// Includes the reviewed C-438 execution-toolbar overlap fix merged during C-439.
+const SKELETON_BASE = "c7766300101592172f9d872d654092f332ce5473";
 const STYLE_BASE = "99587a67c29facfa4f9cb5e990e26a533b0f0ff9";
 const legacyCss = [
   "styles.css",
