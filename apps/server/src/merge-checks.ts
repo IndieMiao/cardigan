@@ -71,6 +71,7 @@ import {
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
+  nextMaintenanceRetry,
   type ProjectMergeGate,
   runCheckExecutor,
   type runInTemporaryCheckout,
@@ -103,6 +104,7 @@ import {
   MergeMutex,
   tryPublication,
 } from "./publication-lock.js";
+import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -269,7 +271,12 @@ export class MergeChecks {
     }
   >();
   /** Serializes every Git/state step; only the check command runs outside. */
-  private readonly exclusive = new MergeMutex();
+  private readonly writers = new Map<string, MergeMutex>();
+  private readonly batchAdmissions = new Map<
+    ProjectId,
+    Promise<{ done: Promise<void> }>
+  >();
+  private readonly gitPasses = new Map<string, Promise<void>>();
   private readonly prepared = new Map<
     string,
     { key: string; value: PreparedMerge }
@@ -353,14 +360,37 @@ export class MergeChecks {
   }
   /** Resolves when no check lane is in flight. */
   async idle(): Promise<void> {
-    while (this.lanes.size) await Promise.all(this.lanes.values());
+    while (this.batchAdmissions.size || this.gitPasses.size || this.lanes.size)
+      await Promise.all([
+        ...this.batchAdmissions.values(),
+        ...this.gitPasses.values(),
+        ...this.lanes.values(),
+      ]);
     await Promise.all([...this.sweeps.values()].map((sweep) => sweep.work));
     await Promise.all(this.githubRecoveries.values());
     await this.prechecks.idle();
     await Promise.all(this.polling);
   }
-  private serial<T>(work: () => Promise<T>): Promise<T> {
-    return this.exclusive.run(work);
+  private async serial<T>(project: string, work: () => Promise<T>): Promise<T> {
+    const writer = this.writers.get(project) ?? new MergeMutex();
+    this.writers.set(project, writer);
+    try {
+      return await writer.run(work);
+    } finally {
+      if (!writer.busy && this.writers.get(project) === writer)
+        this.writers.delete(project);
+    }
+  }
+  private gitPass(key: string, start: () => Promise<void>): Promise<void> {
+    const previous = this.gitPasses.get(key);
+    if (previous) return previous;
+    const work = start()
+      .catch((error: unknown) => this.report(error))
+      .finally(() => {
+        this.gitPasses.delete(key);
+      });
+    this.gitPasses.set(key, work);
+    return work;
   }
   configured(project: ProjectId): boolean {
     return this.options.configuration.forProject(project).status !== "disabled";
@@ -626,7 +656,10 @@ export class MergeChecks {
       };
     }
     const git = this.git();
-    await git.sync(task.project);
+    // Background Git can outlive its admission tick, so give it a separate
+    // sample rather than appending a duration to a tick that already logged.
+    const sync = () => git.sync(task.project);
+    await (tickProfiler()?.tick("merge.git_sync", sync) ?? sync());
     const baseline = await git.baseline(task.project),
       id = `${task.project.project_id}/${task.plan.card_id}`;
     const key = JSON.stringify([task.project, task.plan, baseline]);
@@ -1176,6 +1209,15 @@ export class MergeChecks {
     journal: GithubDispatchJournal,
   ): void {
     const id = `${intent.project}/${intent.card}/${intent.attempt}`;
+    const now = () => Date.parse(this.options.clock.now());
+    if (
+      now() <
+      Math.max(
+        intent.nextDiscoveryAt ?? 0,
+        intent.maintenanceRetry?.retryAt ?? 0,
+      )
+    )
+      return;
     if (
       this.githubRecoveries.has(id) ||
       !intent.abandoned ||
@@ -1247,8 +1289,22 @@ export class MergeChecks {
       .then(
         () => {},
         (error) => {
-          if (error instanceof GithubRetryLater || this.abort.signal.aborted)
-            return;
+          if (this.abort.signal.aborted) return;
+          const at = now();
+          const expired =
+            at >=
+            (intent.discoveryDeadlineAt ??
+              Date.parse(intent.startedAt) +
+                (config.waitStartMs ?? GITHUB_POLL_DEFAULTS.waitStartMs));
+          const retry = nextMaintenanceRetry(
+            intent.maintenanceRetry,
+            at,
+            config.pollIntervalMs ?? GITHUB_POLL_DEFAULTS.pollIntervalMs,
+            expired ? "discovery_expired" : "discovery_error",
+            error instanceof GithubRetryLater ? error.retryAt : 0,
+          );
+          journal.retryBinding(intent).save(retry);
+          if (error instanceof GithubRetryLater && !expired) return;
           const cause =
             error instanceof GithubExecutorError
               ? `${error.category}: ${error.diagnostic ?? error.message}`
@@ -1259,11 +1315,12 @@ export class MergeChecks {
           );
           this.report(
             new Error(
-              `旧 GitHub 派发身份尚未确认，保留占用 project=${intent.project} card=${intent.card} attempt=${intent.attempt}: ${detail}`,
+              `旧 GitHub 派发身份尚未确认，保留占用 project=${intent.project} card=${intent.card} attempt=${intent.attempt}${expired ? " 发现期限已过，无法确认" : ""} retryAt=${new Date(retry.retryAt).toISOString()}: ${detail}`,
             ),
           );
         },
       )
+      .catch((error: unknown) => this.report(error))
       .finally(() => {
         this.githubRecoveries.delete(id);
       });
@@ -1395,7 +1452,7 @@ export class MergeChecks {
         new SshCheckExecutor({
           execution,
           distribute: () =>
-            this.serial(async () => {
+            this.serial(task.project.project_id, async () => {
               await this.git().distribute(task.project, execution);
               connected = true;
               if (!this.valid(task)) throw new Error("Merge target changed");
@@ -1756,31 +1813,45 @@ export class MergeChecks {
     projects: readonly ProjectId[],
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
+    const batching = new Set<ProjectId>();
+    const batchPasses: Promise<void>[] = [];
     for (const id of projects) {
       const settings = this.options.configuration.forProject(id);
-      if (settings.status !== "enabled") continue;
       if (
-        !settings.queue &&
-        !this.state(id).events.some(
-          (e) => e.type === "merge_queue_configured" && e.payload,
-        )
+        settings.status !== "enabled" ||
+        (!settings.queue &&
+          !this.state(id).events.some(
+            (e) => e.type === "merge_queue_configured" && e.payload,
+          ))
       )
         continue;
-      try {
-        const project = this.options.git.projectOf(id);
-        if (project)
-          await this.serial(() => this.batches.tick(project, settings));
-      } catch (error) {
-        this.report(error);
+      const project = this.options.git.projectOf(id);
+      if (!project) continue;
+      batching.add(id);
+      // Admit once after the queue view is current. Do not keep the batch
+      // writer occupied while checks wait for a later poll or queue pass.
+      let admission = this.batchAdmissions.get(id);
+      if (!admission) {
+        admission = this.serial(id, () => this.batches.tick(project, settings))
+          .catch((error: unknown) => this.report(error))
+          .then(() => ({ done: this.startCards([id]) }))
+          .finally(() => {
+            this.batchAdmissions.delete(id);
+          });
+        this.batchAdmissions.set(id, admission);
       }
+      batchPasses.push(admission.then(({ done }) => done));
     }
     for (const execution of this.executions.values())
       if (!this.valid(execution.task)) execution.abort.abort();
     const journal = new GithubDispatchJournal(this.options.store);
-    journal.reconcile(projects, (project) =>
-      this.options.configuration.forProject(project),
-    );
-    for (const intent of journal.unfinished()) {
+    const unfinished = profileSpanSync("merge.journal", () => {
+      journal.reconcile(projects, (project) =>
+        this.options.configuration.forProject(project),
+      );
+      return journal.unfinished();
+    });
+    for (const intent of unfinished) {
       if (
         projects.includes(intent.project as ProjectId) &&
         !this.fenced(intent.project)
@@ -1844,6 +1915,7 @@ export class MergeChecks {
           intent.identity,
           () => journal.finish(intent),
           intent.boundByDispatchId === true,
+          journal.retryBinding(intent),
         );
       } catch (error) {
         this.report(error);
@@ -1873,29 +1945,49 @@ export class MergeChecks {
       .catch((error: unknown) => this.report(error));
     this.polling.add(maintenance);
     void maintenance.finally(() => this.polling.delete(maintenance));
-    let tasks: Task[];
     try {
       this.sweep(projects);
-      tasks = this.tasks(projects);
     } catch (error) {
       this.report(error);
-      return { done: maintenance };
     }
-    const publishable = tasks.filter(
-      (task) => task.publishable && !this.active.has(this.key(task)),
+    const cards = this.startCards(projects.filter((id) => !batching.has(id)));
+    const author = await profileSpan("merge.prechecks", () =>
+      this.prechecks.schedule(projects),
     );
-    if (publishable.length)
-      await this.serial(async () => {
-        for (const task of publishable) {
-          if (this.abort.signal.aborted) return;
-          if (this.active.has(this.key(task))) continue;
-          try {
-            await this.ready(task);
-          } catch (error) {
+    return {
+      done: Promise.all([
+        cards,
+        ...batchPasses,
+        maintenance,
+        ...this.githubRecoveries.values(),
+        author.done,
+      ]).then(() => {}),
+    };
+  }
+  private async startCards(projects: readonly ProjectId[]): Promise<void> {
+    if (this.abort.signal.aborted || !projects.length) return;
+    let tasks: Task[];
+    try {
+      tasks = profileSpanSync("merge.tasks", () => this.tasks(projects));
+    } catch (error) {
+      this.report(error);
+      return;
+    }
+    const started: Promise<void>[] = [];
+    for (const task of tasks) {
+      const key = this.key(task);
+      if (!task.publishable || this.active.has(key)) continue;
+      started.push(
+        this.gitPass(`ready/${key}`, () =>
+          this.serial(task.project.project_id, async () => {
+            if (!this.abort.signal.aborted && !this.active.has(key))
+              await this.ready(task);
+          }).catch((error: unknown) => {
             this.failure(task, error);
-          }
-        }
-      }).catch((error: unknown) => this.report(error));
+          }),
+        ),
+      );
+    }
     const fresh: Task[] = [];
     for (const task of tasks) {
       if (this.lanes.has(this.key(task)) || !this.valid(task)) continue;
@@ -1911,7 +2003,6 @@ export class MergeChecks {
       )
         this.prepared.delete(key);
     }
-    const started: Promise<void>[] = [];
     for (const task of fresh) {
       const id = this.key(task);
       // Nobody may await a background lane: it must never reject, even when
@@ -1930,15 +2021,7 @@ export class MergeChecks {
       this.lanes.set(id, lane);
       started.push(lane);
     }
-    const author = await this.prechecks.schedule(projects);
-    return {
-      done: Promise.all([
-        ...started,
-        maintenance,
-        ...this.githubRecoveries.values(),
-        author.done,
-      ]).then(() => {}),
-    };
+    await Promise.all(started);
   }
   private async cleanGithubCandidates(
     projects: readonly ProjectId[],
@@ -2285,7 +2368,7 @@ export class MergeChecks {
           JSON.stringify(current.plan) === JSON.stringify(task.plan),
       );
     // Persist queued before waiting for capacity; preparation never overlaps Git.
-    await this.serial(async () => {
+    await this.serial(task.project.project_id, async () => {
       if (this.abort.signal.aborted || !this.valid(task)) return;
       const prepared = await this.prepare(task);
       if (!this.valid(task)) return;
@@ -2313,7 +2396,7 @@ export class MergeChecks {
       )
         return;
       // A slot wait may outlive a baseline change, cancellation or confirmation.
-      const check = await this.serial(async () => {
+      const check = await this.serial(current.project.project_id, async () => {
         if (!this.valid(current) || this.failedCompletion(current))
           return undefined;
         const prepared = await this.prepare(current);
@@ -2335,7 +2418,9 @@ export class MergeChecks {
         }
         if (this.executor(current, "poll")) return;
       }
-      await this.serial(() => this.publish(current));
+      await this.serial(current.project.project_id, () =>
+        this.publish(current),
+      );
     } finally {
       slot.release();
     }

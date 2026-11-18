@@ -485,13 +485,14 @@ export class GithubClient {
     return [...found.values()];
   }
   /** D4 lists once per maintenance cycle; missing bound ids are queried directly. */
-  async pollRuns(etag?: string) {
+  async pollRuns(etag?: string, signal?: AbortSignal) {
     const result = await this.request(
       `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs?per_page=100`,
       await this.token(),
       "GET",
       undefined,
       etag,
+      signal,
     );
     if (result.unchanged) return { unchanged: true as const };
     if (!Array.isArray(result.body.workflow_runs))
@@ -502,12 +503,16 @@ export class GithubClient {
       etag: result.etag,
     };
   }
-  async jobs(id: number): Promise<readonly GithubJob[]> {
+  async jobs(id: number, signal?: AbortSignal): Promise<readonly GithubJob[]> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
     const { body, link } = await this.request(
       `repos/${this.options.config.repo}/actions/runs/${id}/attempts/1/jobs?per_page=100`,
       await this.token(),
+      "GET",
+      undefined,
+      undefined,
+      signal,
     );
     if (
       !Array.isArray(body.jobs) ||
@@ -517,13 +522,16 @@ export class GithubClient {
       throw new GithubExecutorError("security");
     return body.jobs as GithubJob[];
   }
-  async cancel(id: number): Promise<void> {
+  async cancel(id: number, signal?: AbortSignal): Promise<void> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
     await this.request(
       `repos/${this.options.config.repo}/actions/runs/${id}/cancel`,
       await this.token(),
       "POST",
+      undefined,
+      undefined,
+      signal,
     );
   }
   async jobLog(id: number): Promise<string> {

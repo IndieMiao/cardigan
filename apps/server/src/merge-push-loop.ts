@@ -13,6 +13,7 @@ import {
   recordMergePushResult,
 } from "@cardigan/domain";
 import type { PushResult } from "@cardigan/git-transport";
+import { withMergeTransferBudget } from "@cardigan/git-transport";
 import type { MergeGateConfiguration } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -90,14 +91,16 @@ export class MergePushExecutor {
     });
   }
   tick(project?: ProjectId): Promise<void> {
-    const next = this.serial.then(async () => {
-      await Promise.all(
-        (project
-          ? [project]
-          : this.options.store.listProjects().map((p) => p.id)
-        ).map((id) => this.project(id)),
-      );
-    });
+    const next = withMergeTransferBudget(() =>
+      this.serial.then(async () => {
+        await Promise.all(
+          (project
+            ? [project]
+            : this.options.store.listProjects().map((p) => p.id)
+          ).map((id) => this.project(id)),
+        );
+      }),
+    );
     this.serial = next.catch(() => {});
     return next;
   }

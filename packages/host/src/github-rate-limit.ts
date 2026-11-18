@@ -80,3 +80,29 @@ export class GithubRateLimit {
     throw new GithubRetryLater(retryAt);
   }
 }
+
+export interface MaintenanceRetry {
+  readonly failures: number;
+  readonly retryAt: number;
+  readonly reason:
+    | "identity_mismatch"
+    | "discovery_error"
+    | "discovery_expired";
+}
+
+/** Retry a read-only investigation, never a workflow dispatch. */
+export function nextMaintenanceRetry(
+  previous: MaintenanceRetry | undefined,
+  now: number,
+  interval: number,
+  reason: MaintenanceRetry["reason"],
+  notBefore = 0,
+): MaintenanceRetry {
+  const failures = Math.min((previous?.failures ?? 0) + 1, 16);
+  const cap = Math.max(interval, GITHUB_POLL_DEFAULTS.waitStartMs);
+  const delay =
+    reason === "discovery_expired"
+      ? cap
+      : Math.min(interval * 2 ** failures, cap);
+  return { failures, reason, retryAt: Math.max(notBefore, now + delay) };
+}

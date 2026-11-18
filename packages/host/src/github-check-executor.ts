@@ -19,8 +19,13 @@ import type {
   ExternalGithubRun,
   GithubDispatchIntent,
   GithubDispatchJournal,
+  RetryBinding,
 } from "./github-dispatch-journal.js";
-import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
+import {
+  GITHUB_POLL_DEFAULTS,
+  GithubRetryLater,
+  nextMaintenanceRetry,
+} from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { boundedCheckSummary, safeCheckDiagnostic } from "./merge-gate-log.js";
 import { validPushBranch } from "./merge-push-config.js";
@@ -48,6 +53,7 @@ export interface GithubCheckLifecycle {
     identity: GithubRun,
     onTerminal?: () => void,
     boundByDispatchId?: boolean,
+    retry?: RetryBinding,
   ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
@@ -175,7 +181,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     key: string,
     abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle> {
-    let recoveringBound = false;
+    let claimedIntent: GithubDispatchIntent | undefined;
     let dispatchToken = "";
     try {
       const startedAt = new Date(
@@ -209,8 +215,13 @@ export class GithubCheckExecutor implements CheckExecutor {
             this.options.config.maxConcurrent,
           );
       const intent = claimed.intent;
+      claimedIntent = intent;
+      if (
+        intent.maintenanceRetry &&
+        (this.options.now?.() ?? Date.now()) < intent.maintenanceRetry.retryAt
+      )
+        throw new GithubRetryLater(intent.maintenanceRetry.retryAt);
       let boundByDispatchId = intent.boundByDispatchId === true;
-      recoveringBound = intent.externalRun !== undefined;
       let run: GithubRun;
       if (intent.externalRun) {
         run = await this.options.client.run(intent.externalRun.run_id);
@@ -336,6 +347,13 @@ export class GithubCheckExecutor implements CheckExecutor {
         identity,
         () => this.options.journal.finish(intent),
         boundByDispatchId,
+        this.options.journal.retryBinding({
+          ...intent,
+          externalRun: external,
+          maintenanceRetry: intent.externalRun
+            ? intent.maintenanceRetry
+            : undefined,
+        }),
       );
       // A late dispatch still returns a cancellable handle, without publishing
       // readiness or domain callbacks after the supervisor has closed.
@@ -348,13 +366,34 @@ export class GithubCheckExecutor implements CheckExecutor {
       this.handles.set(handle, { run: external, intent });
       return handle;
     } catch (error) {
+      // Only a matching durable claim can record a failed identity check.
+      // Abandoned discovery records its own deadline and backoff at the caller.
+      if (
+        claimedIntent &&
+        !abandoned &&
+        !request.signal?.aborted &&
+        error instanceof GithubExecutorError &&
+        error.category === "security"
+      ) {
+        this.options.journal
+          .retryBinding(claimedIntent)
+          .save(
+            nextMaintenanceRetry(
+              claimedIntent.maintenanceRetry,
+              this.options.now?.() ?? Date.now(),
+              this.options.config.pollIntervalMs ??
+                GITHUB_POLL_DEFAULTS.pollIntervalMs,
+              "identity_mismatch",
+            ),
+          );
+      }
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
       if (
         error instanceof CheckExecutorSuspended ||
         error instanceof GithubExecutorError ||
         (error instanceof GithubRetryLater &&
-          (recoveringBound ||
+          (claimedIntent?.externalRun ||
             this.options.journal.hasUnboundIntent(
               request.project,
               context.card,

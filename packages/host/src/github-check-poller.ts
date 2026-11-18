@@ -7,8 +7,17 @@ import {
   type GithubJob,
   type GithubRun,
 } from "./github-client.js";
-import type { ExternalGithubRun } from "./github-dispatch-journal.js";
-import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
+import { githubDeadline } from "./github-deadline.js";
+import type {
+  ExternalGithubRun,
+  RetryBinding,
+} from "./github-dispatch-journal.js";
+import {
+  GITHUB_POLL_DEFAULTS,
+  GithubRetryLater,
+  type MaintenanceRetry,
+  nextMaintenanceRetry,
+} from "./github-rate-limit.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 export const GITHUB_CHECK_NAMES = [
@@ -50,6 +59,8 @@ interface Pending {
   cancelWork?: Promise<void> | undefined;
   reading?: Promise<void> | undefined;
   revision: number;
+  retry?: MaintenanceRetry | undefined;
+  binding?: RetryBinding | undefined;
   listed?: boolean;
   failedJob?: number | undefined;
   boundByDispatchId: boolean;
@@ -97,6 +108,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     identity: GithubRun,
     onTerminal?: () => void,
     boundByDispatchId = false,
+    binding?: RetryBinding,
   ): void {
     const previous = this.pending.get(external.run_id);
     if (previous) {
@@ -121,6 +133,8 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       onTerminal,
       listed: false,
       revision: 0,
+      binding,
+      retry: binding?.current,
       boundByDispatchId,
     });
     // A new registration must be observed even if the list's ETag is unchanged.
@@ -147,17 +161,17 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     // Cancellation shares budget/backoff; tick retries until GitHub acknowledges it.
     await this.sendCancel(state);
   }
-  private sendCancel(state: Pending): Promise<void> {
-    if (state.cancelled || state.terminal) return Promise.resolve();
+  private sendCancel(state: Pending, parent?: AbortSignal): Promise<void> {
+    if (state.cancelled || state.terminal || state.retry)
+      return Promise.resolve();
     if (state.cancelWork) return state.cancelWork;
-    state.cancelWork = this.options.client
-      .cancel(state.external.run_id)
-      .then(() => {
-        state.cancelled = true;
-      })
-      .finally(() => {
-        state.cancelWork = undefined;
-      });
+    state.cancelWork = githubDeadline(async (signal) => {
+      await this.options.client.cancel(state.external.run_id, signal);
+      signal.throwIfAborted();
+      state.cancelled = true;
+    }, parent).finally(() => {
+      state.cancelWork = undefined;
+    });
     return state.cancelWork;
   }
   async fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined> {
@@ -173,43 +187,62 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     for (const state of this.pending.values()) {
       if (
         !state.terminal &&
+        !state.retry &&
         state.identity.status &&
         state.identity.status !== "completed"
       )
         this.waiting(state, state.identity);
     }
-    if (this.listing) return this.listing.then(({ done }) => done);
+    if (this.listing)
+      return this.listing.then(
+        ({ done }) => done,
+        () => {},
+      );
     if (this.now() < this.next) return Promise.resolve();
     this.next =
       this.now() +
       (this.options.pollIntervalMs ?? GITHUB_POLL_DEFAULTS.pollIntervalMs);
     const active = [...this.pending.values()].filter(
-      (state) => !state.terminal,
+      (state) =>
+        !state.terminal && (!state.retry || this.now() >= state.retry.retryAt),
     );
     if (!active.length) return Promise.resolve();
     // A cancel acknowledgement is not terminal evidence. Join its bounded IO
     // for shutdown, but never make it a prerequisite for this or the next list.
-    const cancellations = active
-      .filter((state) => state.cancelRequested)
-      .map((state) =>
-        this.sendCancel(state).catch((error: unknown) => {
-          this.deferred(error);
-        }),
-      );
-    const listing = this.cycle(active).finally(() => {
-      this.listing = undefined;
+    return githubDeadline(async (signal) => {
+      const cancellations = active
+        .filter((state) => state.cancelRequested)
+        .map((state) =>
+          this.sendCancel(state, signal).catch((error: unknown) => {
+            if (!signal.aborted) this.deferred(error);
+          }),
+        );
+      const listing = githubDeadline(
+        () => this.cycle(active, signal),
+        signal,
+      ).finally(() => {
+        if (this.listing === listing) this.listing = undefined;
+      });
+      this.listing = listing;
+      await Promise.all([listing.then(({ done }) => done), ...cancellations]);
+    }).catch((error: unknown) => {
+      // A previous generation's timeout is diagnostic only; a newer list
+      // may already have installed its ETag while the old jobs were pending.
+      this.report(error);
     });
-    this.listing = listing;
-    return Promise.all([
-      listing.then(({ done }) => done),
-      ...cancellations,
-    ]).then(() => {});
   }
   private report(error: unknown): void {
     const category =
       error instanceof GithubExecutorError ? error.category : "api";
     try {
-      this.options.onError?.(new GithubExecutorError(category));
+      this.options.onError?.(
+        error instanceof DOMException && error.name === "TimeoutError"
+          ? Object.assign(new GithubExecutorError(category), {
+              message: "GitHub poll cycle timed out",
+              diagnostic: "GitHub poll cycle timed out",
+            })
+          : new GithubExecutorError(category),
+      );
     } catch {
       /* Diagnostic-only. */
     }
@@ -223,26 +256,28 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     this.report(error);
     return false;
   }
-  private async cycle(active: Pending[]) {
+  private async cycle(active: Pending[], signal: AbortSignal) {
     let response: Awaited<ReturnType<GithubClient["pollRuns"]>>;
     try {
-      response = await this.options.client.pollRuns(this.etag);
+      response = await this.options.client.pollRuns(this.etag, signal);
+      signal.throwIfAborted();
     } catch (error) {
-      this.deferred(error);
+      if (!signal.aborted) this.deferred(error);
       return { done: Promise.resolve() };
     }
     if (!response.unchanged) this.etag = response.etag;
     // Serialize details per run, not per executor. The next list can deliver
     // new evidence for peers while this run is still reading jobs.
     return {
-      done: Promise.all(active.map((state) => this.read(state, response))).then(
-        () => {},
-      ),
+      done: Promise.all(
+        active.map((state) => this.read(state, response, signal)),
+      ).then(() => {}),
     };
   }
   private async read(
     state: Pending,
     response: Awaited<ReturnType<GithubClient["pollRuns"]>>,
+    signal: AbortSignal,
   ) {
     if (state.terminal) return;
     try {
@@ -274,14 +309,29 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
         }
         return; // This run's earlier tick owns the in-flight request.
       }
-      state.reading = this.process(state, run, state.revision).finally(() => {
+      state.reading = githubDeadline(
+        (deadline) => this.process(state, run, state.revision, deadline),
+        signal,
+      ).finally(() => {
         state.reading = undefined;
       });
       await state.reading;
     } catch (error) {
-      if (this.deferred(error)) return;
-      if (error instanceof GithubExecutorError && error.category === "security")
+      if (signal.aborted || this.deferred(error)) return;
+      if (
+        error instanceof GithubExecutorError &&
+        error.category === "security"
+      ) {
+        const retry = nextMaintenanceRetry(
+          state.retry,
+          this.now(),
+          this.options.pollIntervalMs ?? GITHUB_POLL_DEFAULTS.pollIntervalMs,
+          "identity_mismatch",
+        );
+        state.retry = retry;
         this.unconfirmed(state);
+        state.binding?.save(retry);
+      }
     }
   }
   private observe(state: Pending, run: GithubRun) {
@@ -299,12 +349,17 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     state: Pending,
     listed: GithubRun | undefined,
     revision: number,
+    signal: AbortSignal,
   ) {
     const run =
-      listed ?? (await this.options.client.run(state.external.run_id));
-    if (state.revision !== revision) return;
+      listed ?? (await this.options.client.run(state.external.run_id, signal));
+    if (signal.aborted || state.revision !== revision) return;
     if (!sameIdentity(state.identity, run, state.boundByDispatchId))
       throw new GithubExecutorError("security");
+    if (state.retry) {
+      state.binding?.save(undefined);
+      state.retry = undefined;
+    }
     this.observe(state, run);
     if (run.status !== "completed") return;
     if (run.conclusion === "cancelled") {
@@ -316,8 +371,8 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       });
       return;
     }
-    const jobs = await this.options.client.jobs(run.id);
-    if (state.revision !== revision) return;
+    const jobs = await this.options.client.jobs(run.id, signal);
+    if (signal.aborted || state.revision !== revision) return;
     const result = mapGithubCheckResult(state.request, run, jobs);
     const failedJob = jobs.find(
       (job) =>

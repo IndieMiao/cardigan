@@ -541,7 +541,7 @@ test("C-466: an SSH distribution lock timeout keeps the original attempt queued 
   const { f, check } = await fixture("auto");
   const c = controller(f);
   const serial = c.gate as unknown as {
-    serial(work: () => Promise<void>): Promise<void>;
+    serial(project: string, work: () => Promise<void>): Promise<void>;
   };
   const held = Promise.withResolvers<void>();
   const entered = Promise.withResolvers<void>();
@@ -549,7 +549,7 @@ test("C-466: an SSH distribution lock timeout keeps the original attempt queued 
   const spy = vi
     .spyOn(SshCheckExecutor.prototype, "dispatch")
     .mockImplementationOnce(function (this: SshCheckExecutor, request) {
-      void serial.serial(() => held.promise);
+      void serial.serial(f.project_id, () => held.promise);
       const waiting = dispatch.call(this, request);
       entered.resolve();
       return waiting;
@@ -3301,7 +3301,7 @@ test.each([
     await round.done;
     if (mode === "invalidated" || mode === "switched") {
       const { GithubDispatchJournal } = await import("@cardigan/host");
-      expect(client.cancel).toHaveBeenCalledWith(123);
+      expect(client.cancel).toHaveBeenCalledWith(123, expect.any(AbortSignal));
       expect(new GithubDispatchJournal(f.store).unfinished()).toEqual([]);
       expect(check()?.status).not.toBe("passed");
       expect(c.git.publish).not.toHaveBeenCalled();
@@ -3658,6 +3658,9 @@ test.each([
           { attempt, phase: "dispatching" },
         ]);
         const sent = fetcher.mock.calls.length;
+        time += 20_000;
+        await restarted.tick([f.project_id]);
+        expect(fetcher.mock.calls.length).toBe(sent);
         time += 20_000;
         await restarted.tick([f.project_id]);
         expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
@@ -4938,6 +4941,7 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
     await gate.schedule([h.f.project_id]);
     expect(h.client.cancel).toHaveBeenCalledWith(
       required(first.external_run).run_id,
+      expect.any(AbortSignal),
     );
     expect(
       h.client.cancel.mock.calls.every(
@@ -4947,8 +4951,13 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
     expect(h.counts()?.running).toBe(2);
     expect(h.check(1)).toEqual(second);
     h.finish(0, "cancelled");
-    await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.counts()?.running).toBe(1));
+    // A scheduled pass can join the preceding list. Drive normal host ticks
+    // until the next list sees the new terminal; never complete on a cancel ACK.
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await gate.schedule([h.f.project_id]);
+      expect(h.counts()?.running).toBe(1);
+    });
     h.finish(1);
     await gate.schedule([h.f.project_id]);
     await gate.idle();
@@ -5360,7 +5369,7 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   h.advance();
   await restarted.schedule([h.f.project_id]);
   await restarted.idle();
-  await restarted.schedule([h.f.project_id]);
+  await (await restarted.schedule([h.f.project_id])).done;
   expect(h.c.errors).not.toHaveBeenCalled();
   expect(h.client.dispatch).toHaveBeenCalledTimes(4);
   expect(publish).toHaveBeenCalledTimes(1);
@@ -5518,5 +5527,186 @@ test("C-466: late abandoned discovery cannot bind after the maintenance deadline
     gate.stop();
     await gate.idle();
     vi.useRealTimers();
+  }
+});
+
+test("C-466: a stuck Git sync does not block a second project's merge check", async () => {
+  const slow = await fixture("auto", { project_id: "slow-git" });
+  const fast = await fixture("auto", {
+    project_id: "fast-check",
+    dataDir: slow.f.dataDir,
+  });
+  const c = controller(slow.f);
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const gate = new MergeChecks({
+    ...c.options,
+    git: {
+      ...c.git,
+      sync: async (project) => {
+        if (project.project_id === slow.f.project_id) {
+          entered.resolve();
+          await held.promise;
+          throw new Error("Git fetch timed out");
+        }
+        return "up_to_date";
+      },
+    },
+  });
+  try {
+    void gate.schedule([slow.f.project_id]);
+    await entered.promise;
+    void gate.schedule([fast.f.project_id]);
+    await vi.waitFor(() => expect(fast.check()?.status).toBe("passed"));
+    expect(slow.check()?.status).not.toBe("passed");
+    expect(
+      c.git.publish.mock.calls.some(
+        ([p]) => p.project_id === slow.f.project_id,
+      ),
+    ).toBe(false);
+  } finally {
+    held.resolve();
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: expired abandoned discovery reports its deadline and persists its next investigation across restart", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const check = required(h.check());
+  h.advance(15 * 60_000);
+  const investigate = async () => {
+    const gate = h.create();
+    try {
+      await gate.tick([h.f.project_id]);
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  };
+  await investigate();
+  const retryAt = h.now() + 15 * 60_000;
+  expect(journal.admitted()).toMatchObject([
+    {
+      attempt: check.attempt_id,
+      maintenanceRetry: { reason: "discovery_expired", retryAt, failures: 1 },
+    },
+  ]);
+  expect(h.c.errors.mock.calls.map(([e]) => String(e))).toContainEqual(
+    expect.stringContaining(
+      `attempt=${check.attempt_id} 发现期限已过，无法确认 retryAt=${new Date(retryAt).toISOString()}`,
+    ),
+  );
+  const reads = h.client.runs.mock.calls.length;
+  h.advance(15 * 60_000 - 1);
+  await investigate();
+  expect(h.client.runs).toHaveBeenCalledTimes(reads);
+  h.advance(1);
+  await investigate();
+  expect(h.client.runs).toHaveBeenCalledTimes(reads + 1);
+  expect(journal.admitted()).toMatchObject([
+    {
+      attempt: check.attempt_id,
+      maintenanceRetry: { reason: "discovery_expired", failures: 2 },
+    },
+  ]);
+  expect(h.client.dispatch).toHaveBeenCalledOnce();
+  expect(h.client.cancel).not.toHaveBeenCalled();
+});
+
+test("C-466: author admission proceeds while same-project ready publication is waiting for Git sync", async () => {
+  const h = await parallelGithub(1);
+  const gate = h.create();
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await h.running(0);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.check(0).status).toBe("passed");
+    h.f.decide(required(mergeConfirmation(h.f, h.scenario.card.id)), "merge");
+    h.git.sync.mockImplementationOnce(async () => {
+      entered.resolve();
+      await held.promise;
+      return "up_to_date";
+    });
+    const author = await queueGithubAuthor(h);
+    void gate.schedule([h.f.project_id]);
+    await entered.promise;
+    await vi.waitFor(() =>
+      expect(h.client.dispatch.mock.calls.map(([, i]) => i.card)).toContain(
+        author,
+      ),
+    );
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    held.resolve();
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: a slow ungated repository does not hold the scheduler; enabling its gate during sync prevents unchecked publication", async () => {
+  const slow = await fixture("auto", { project_id: "slow-direct" });
+  const fast = await fixture("auto", {
+    project_id: "fast-gated",
+    dataDir: slow.f.dataDir,
+  });
+  const c = controller(slow.f);
+  const entered = Promise.withResolvers<void>(),
+    held = Promise.withResolvers<void>();
+  let gated = false;
+  const config = {
+    ...c.options.configuration,
+    forProject: (id: string): ProjectMergeGate =>
+      id === slow.f.project_id && !gated
+        ? { status: "disabled" }
+        : c.options.configuration.forProject(),
+  };
+  const git = {
+    ...c.git,
+    sync: async (project: CentralProject) => {
+      if (project.project_id === slow.f.project_id) {
+        entered.resolve();
+        await held.promise;
+      }
+      return "up_to_date" as const;
+    },
+  };
+  const executor = new MergeExecutor({
+    store: c.options.store,
+    git,
+    clock: c.options.clock,
+    onError: c.errors,
+    gate: { configuration: config, execution: c.options.execution, run: c.run },
+  });
+  try {
+    void executor.schedule();
+    await entered.promise;
+    await vi.waitFor(() => expect(fast.check()?.status).toBe("passed"));
+    gated = true;
+    held.resolve();
+    await executor.idle();
+    expect(
+      c.git.publish.mock.calls.some(
+        ([p]) => p.project_id === slow.f.project_id,
+      ),
+    ).toBe(false);
+    expect(c.git.merge).not.toHaveBeenCalled();
+  } finally {
+    held.resolve();
+    executor.stop();
+    await executor.idle();
   }
 });
