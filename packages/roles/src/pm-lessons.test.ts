@@ -178,7 +178,7 @@ test("Flow Lite preserves template selection, acceptance evidence and explicit d
   const pm = corePromptFor("pm");
   for (const phrase of [
     "第五级流程已开放且项目已登记相应模板时",
-    "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
+    "工程卡选 `dev@2`，产品卡选 `product@1`，界面卡默认选 `ui@1`",
     "旧卡继续按固定模板验收",
     "不自行登记、升级或改写旧卡",
     "人的授权不增加 Agent 执行权限",

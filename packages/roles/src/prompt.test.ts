@@ -16,6 +16,7 @@ import { parseLaunchConfig } from "./schema.js";
 
 test.each([
   "coder",
+  "frontend_engineer",
   "reviewer",
   "pm",
   "design_director",
@@ -38,6 +39,7 @@ test.each([
   "tester",
   "pm",
   "coder",
+  "frontend_engineer",
   "host_ops",
   "ui_ux_designer",
   "design_director",
@@ -59,6 +61,7 @@ test.each([
 test.each([
   "pm",
   "coder",
+  "frontend_engineer",
   "reviewer",
   "designer",
   "tester",

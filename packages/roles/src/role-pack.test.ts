@@ -334,6 +334,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       pm: "standing",
       host_ops: "standing",
       coder: "produce",
+      frontend_engineer: "produce",
       ui_ux_designer: "produce",
       reviewer: "verify",
       independent_reviewer: "verify",
@@ -410,6 +411,10 @@ describe("default role kinds (p2v-12 §2.3)", () => {
 
   test("the design roles default to cross-model launch settings", () => {
     expect(DEFAULT_ROLE_LAUNCH).toEqual({
+      frontend_engineer: {
+        harness: "claude-code",
+        launch_profile_ref: "claude-opus",
+      },
       ui_ux_designer: { harness: "codex", launch_profile_ref: "codex-astra" },
       design_director: {
         harness: "claude-code",
@@ -697,6 +702,8 @@ test("C-269: default role text permits only the scoped command and C2b template 
         .replaceAll("`pnpm --filter @cardigan/domain test:types`", "")
         .replaceAll("`dev@2`", "")
         .replaceAll("`product@1`", "")
+        .replaceAll("`ui@1`", "")
+        .replaceAll("pnpm --filter @cardigan/web test:ui-snapshots", "")
         .replaceAll("`fast_patch@1`", ""),
       role,
     ).not.toContain("@");
@@ -729,7 +736,7 @@ test("Flow Lite: coder runs lint, affected tests with snapshots and deps before 
   ])
     expect(body).toContain(phrase);
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
-    if (role !== "coder")
+    if (role !== "coder" && role !== "frontend_engineer")
       expect(instructionsFor(role), role).not.toContain(
         "每次交付前必须跑 `pnpm lint`",
       );
@@ -747,4 +754,50 @@ test("C-370 PM instructions document explicit dependencies without granting work
     "不自动追随替代卡",
   ])
     expect(prompt).toContain(text);
+});
+
+test("frontend engineering preserves coder permissions and adds evidenced UI delivery rules", () => {
+  const frontend = defaultRoleDefinition("frontend_engineer", launch);
+  const coder = defaultRoleDefinition("coder", launch);
+  expect(frontend).toMatchObject({
+    kind: "produce",
+    worktree: "write",
+    capabilities: ["produce", "browser"],
+  });
+  expect(frontend.allowed_tools).toEqual(coder.allowed_tools);
+  expect(validateRole(frontend).ok).toBe(true);
+  expect(frontend.allowed_tools).not.toContain("submit_review");
+  for (const phrase of [
+    "docs/design/ui-guidelines.md",
+    "apps/web/src/components/ui/README.md",
+    "骨架共用组件和 components/ui",
+    "不新增页面 CSS",
+    "不加解释性、提示性的说明小字",
+    "改动外观前后都用无头浏览器截图",
+    "1440/390 × 亮/暗",
+    "同宽同主题的并排截图",
+    "关键测量",
+    "check-ui",
+    "pnpm --filter @cardigan/web test:ui-snapshots",
+    "基准图只能在界面卡明确授权下更新",
+    "逐张说明差异原因",
+    "界面验收清单",
+    "通过/不通过/未核",
+    "submit_delivery.attachments",
+    "request_check",
+    "不得打开生产 Workbench",
+    "每次交付前必须跑 `pnpm lint`",
+    "最新的基线分支",
+    "不 push",
+  ])
+    expect(frontend.instructions).toContain(phrase);
+  for (const phrase of [
+    "界面验收清单",
+    "逐条",
+    "通过/不通过/未核",
+    "测量值或差异像素数",
+    "基准截图",
+    "不能只给总体印象",
+  ])
+    expect(instructionsFor("design_director")).toContain(phrase);
 });

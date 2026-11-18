@@ -119,3 +119,71 @@ test.each(["pm", "host_ops"] as const)(
     }
   },
 );
+
+test.each(["frontend_engineer", "design_director"] as const)(
+  "C-444: %s default updates preserve existing work-item assignments and tokens",
+  (roleId) => {
+    const store = Store.open({ dbPath: ":memory:" });
+    const project = "fixture";
+    try {
+      store.createProject({ id: project });
+      const source = defaultRoleDefinition(roleId, {
+        harness: "claude-code",
+        launch_profile_ref: "fixture",
+      });
+      const previous = { ...source, instructions: "Previous default" };
+      const owner: Assignment = {
+        id: "A-50" as never,
+        scope: "work_item",
+        work_item_id: "W-50" as never,
+        role_id: roleId,
+        role_version: 1,
+        status: "active",
+        runtime_state: "running",
+        machine_id: "local",
+        runtime_ref: null,
+        mcp_token_id: "fixture",
+        created_at: "2026-01-01T00:00:00Z",
+      };
+      const token = store.uow.run((tx) => {
+        writeRole(
+          tx,
+          project,
+          { ...previous, core_prompt: "", version: 1 },
+          { mode: "add" },
+        );
+        tx.assignments.put(project, owner);
+        return tx.issueToken({
+          project_id: project,
+          assignment_id: owner.id,
+          role: { role_version: 1, allowed_tools: previous.allowed_tools },
+        });
+      });
+      for (let i = 0; i < 2; i++) {
+        upgradeDeployedRoles(store, project, [roleId], {
+          [roleId]: deploymentRolePolicyHash(previous),
+        });
+        rotateIdleDeployedRoles(store, project);
+      }
+      store.uow.read((tx) => {
+        expect(getRoleVersion(tx, project, roleId)).toMatchObject({
+          version: 2,
+          instructions: source.instructions,
+        });
+        expect(getRoleVersion(tx, project, roleId, 1)?.instructions).toBe(
+          "Previous default",
+        );
+        expect(tx.assignments.get(project, owner.id)).toEqual(owner);
+        expect(tx.human_actions.list(project)).toEqual([]);
+        expect(
+          tx.events
+            .listAfter(project, undefined, 0)
+            .filter((e) => e.type === "host_role_upgraded"),
+        ).toHaveLength(1);
+      });
+      expect(store.verifyToken(token.token)).toBeTruthy();
+    } finally {
+      store.close();
+    }
+  },
+);

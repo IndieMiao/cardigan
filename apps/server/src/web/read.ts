@@ -2036,6 +2036,7 @@ export function activity(
 const DEFAULT_ROLE_CANDIDATES = [
   "pm",
   "coder",
+  "frontend_engineer",
   "reviewer",
   "designer",
   "ui_ux_designer",
