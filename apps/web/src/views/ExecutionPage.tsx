@@ -1473,28 +1473,31 @@ export function ExecutionPage({
           onChange={setFilters}
         >
           <div className="ui-action-row">
-            <div className="ui-refresh-controls">
-              <SelectControl
-                aria-label="自动刷新"
-                value={interval}
-                onValueChange={(value) => {
-                  const next = Number(value);
-                  setRefreshChoice({ key: refreshKey, value: next });
-                  try {
-                    localStorage.setItem(refreshKey, String(next));
-                  } catch {
-                    /* Optional preference. */
-                  }
-                }}
-              >
-                <option value={10000}>10 秒</option>
-                <option value={30000}>30 秒</option>
-                <option value={60000}>60 秒</option>
-                <option value={300000}>5 分钟</option>
-                <option value={0}>关闭</option>
-              </SelectControl>
+            <div className="ui-refresh-controls shrink-0">
+              <label>
+                <SelectControl
+                  aria-label="自动刷新"
+                  value={interval}
+                  onValueChange={(value) => {
+                    const next = Number(value);
+                    setRefreshChoice({ key: refreshKey, value: next });
+                    try {
+                      localStorage.setItem(refreshKey, String(next));
+                    } catch {
+                      /* Optional preference. */
+                    }
+                  }}
+                >
+                  <option value={10000}>10 秒</option>
+                  <option value={30000}>30 秒</option>
+                  <option value={60000}>60 秒</option>
+                  <option value={300000}>5 分钟</option>
+                  <option value={0}>关闭</option>
+                </SelectControl>
+              </label>
               <Button
                 variant="ghost"
+                className="shrink-0"
                 aria-disabled={pending}
                 onClick={() => {
                   if (!pending) reload();
