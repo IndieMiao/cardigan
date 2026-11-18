@@ -162,13 +162,6 @@ export function DecisionHistoryPage({
     refreshChoice.key === refreshKey
       ? refreshChoice.value
       : readRefresh(refreshKey);
-  useEffect(() => {
-    if (!interval || pending) return;
-    const timer = window.setInterval(() => {
-      if (!document.hidden) reload();
-    }, interval);
-    return () => window.clearInterval(timer);
-  }, [interval, pending, reload]);
   // Pages appended by "加载更多" extend the range of one load result; the
   // next refresh result already covers them.
   const first = resource.data;
@@ -207,8 +200,27 @@ export function DecisionHistoryPage({
       setLoadingMore(false);
     }
   };
+  // A refresh replaces the first page, so it must not race an appended page.
+  const busy = pending || loadingMore;
+  useEffect(() => {
+    if (!interval || busy) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) reload();
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [interval, busy, reload]);
   const openId = filters.decision;
   const selected = visible.find((q) => q.id === openId);
+  // A link to a record outside the loaded range cannot open; drop it so the
+  // drawer does not appear later by surprise.
+  const missing =
+    openId !== undefined && first !== undefined && !busy && !selected;
+  useEffect(() => {
+    if (!missing) return;
+    const next = { ...filters };
+    delete next.decision;
+    setFilters(next);
+  }, [missing, filters, setFilters]);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -281,7 +293,7 @@ export function DecisionHistoryPage({
       >
         <RefreshGroup
           interval={interval}
-          pending={pending}
+          pending={busy}
           onRefresh={reload}
           onIntervalChange={(value) => {
             setRefreshChoice({ key: refreshKey, value });

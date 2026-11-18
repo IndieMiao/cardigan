@@ -155,7 +155,7 @@ try {
           const box = s => { const e=document.querySelector(s); if(!e) return null; const r=e.getBoundingClientRect(); return {x:r.x,y:r.y,right:r.right,width:r.width,height:r.height}; };
           const font = s => { const e=document.querySelector(s); if(!e) return null; const c=getComputedStyle(e); return {fontSize:c.fontSize,lineHeight:c.lineHeight,fontWeight:c.fontWeight}; };
           const visible = s => [...document.querySelectorAll(s)].filter(e=>e.getClientRects().length);
-          const controls = visible('.ui-filter-row button,.ui-filter-row input,.filter-bar input,.filter-bar button').map(e=>{const r=e.getBoundingClientRect();return {name:e.getAttribute('aria-label')||e.textContent.trim(),height:r.height,x:r.x,y:r.y,right:r.right,bottom:r.bottom};});
+          const controls = visible('.ui-filter-row button,.ui-filter-row input:not([type=date]),.ui-filter-row label:has(> input[type=date]),.filter-bar input:not([type=date]),.filter-bar button').map(e=>{const r=e.getBoundingClientRect();return {name:e.getAttribute('aria-label')||e.querySelector('input')?.getAttribute('aria-label')||e.textContent.trim(),height:r.height,x:r.x,y:r.y,right:r.right,bottom:r.bottom};});
           return {
             scrollWidth:document.documentElement.scrollWidth, innerWidth, overflow:document.documentElement.scrollWidth > innerWidth,
             content:box('main'), header:box('.ui-page-header,.page-title'), title:font('main h1'), count:document.querySelector('.ui-page-count')?.textContent ?? null,
@@ -164,8 +164,8 @@ try {
             idBadges:visible('[data-ui="id-badge"]').slice(0,3).map(e=>e.getBoundingClientRect().height),
             icons:visible('.ui-filter-row svg').slice(0,3).map(e=>e.getBoundingClientRect().width),
             controls,
-            toolbarOverlap:controls.some((a,i)=>controls.some((b,j)=>i<j && Math.min(a.right,b.right)>Math.max(a.x,b.x) && Math.min(a.bottom,b.bottom)>Math.max(a.y,b.y))),
-            drawer:box('[role=dialog]'), drawerTitle:font('[role=dialog] .drawer-title'), drawerSection:font('[role=dialog] .card-page h2'), drawerBody:font('[role=dialog] .card-page'),
+            toolbarOverlap:controls.flatMap((a,i)=>controls.filter((b,j)=>i<j && Math.min(a.right,b.right)>Math.max(a.x,b.x) && Math.min(a.bottom,b.bottom)>Math.max(a.y,b.y)).map(b=>a.name+" × "+b.name)),
+            drawer:box('[role=dialog]'), drawerTitle:font('[role=dialog] .drawer-title'), drawerSection:font('[role=dialog] article h2'), drawerBody:font('[role=dialog] article'),
             dialogText:document.querySelector('[role=dialog]')?.textContent ?? null,
             listbox:!!document.querySelector('[role=listbox]'),
             refresh:document.querySelector('[aria-label="自动刷新"]')?.textContent ?? null,
@@ -193,7 +193,11 @@ try {
         if (Object.keys(interaction).length > 3) interactions.push(interaction);
         if (after) {
           assert(!metrics.overflow, `${mode} ${width} ${theme}: overflow`);
-          assert(!metrics.toolbarOverlap, `${mode}: toolbar overlaps`);
+          assert.deepEqual(
+            metrics.toolbarOverlap,
+            [],
+            `${mode}: toolbar overlaps`,
+          );
         }
       }
     }

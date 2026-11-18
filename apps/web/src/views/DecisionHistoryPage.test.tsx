@@ -428,3 +428,70 @@ test("a refresh with only the first page loaded stays at the newest 10", async (
   expect(records()).toHaveLength(10);
   expect(decisionHistory).toHaveBeenCalledTimes(2);
 });
+
+test("a decision link opens its drawer when loaded and is dropped when it is not", async () => {
+  window.location.hash = "#/p/p-1/decision-history?decision=Q-1";
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [record],
+          next_cursor: null,
+        }),
+      })}
+    />,
+  );
+  expect((await screen.findByRole("dialog")).textContent).toContain("符合授权");
+  cleanup();
+  window.location.hash = "#/p/p-1/decision-history?decision=Q-99";
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [record],
+          next_cursor: null,
+        }),
+      })}
+    />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  await waitFor(() =>
+    expect(window.location.hash).not.toContain("decision=Q-99"),
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("refresh waits for a pending load-more so the appended page is kept", async () => {
+  let release: () => void = () => {};
+  const decisionHistory = vi.fn(
+    async (
+      _p: string,
+      _f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      if (!cursor) return { decisions: many(10), next_cursor: "c1" };
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { decisions: many(3, 10), next_cursor: null };
+    },
+  );
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory })}
+    />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-10" });
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await waitFor(() => expect(decisionHistory).toHaveBeenCalledTimes(2));
+  const refresh = screen.getByRole("button", { name: "立即刷新" });
+  expect(refresh.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(refresh);
+  expect(decisionHistory).toHaveBeenCalledTimes(2);
+  release();
+  await screen.findByRole("row", { name: "拍板记录 Q-13" });
+  expect(records()).toHaveLength(13);
+});
