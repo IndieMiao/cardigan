@@ -8,11 +8,24 @@ import { chromium } from "./chromium.mjs";
 
 const output = resolve(process.argv[2] ?? "build/execution-migration");
 const stage = process.argv[3] ?? "after";
+const crowded = process.argv.includes("--crowded");
+const modes = crowded
+  ? [
+      "table",
+      "groups",
+      "machine-groups",
+      "cards",
+      "machine-cards",
+      "machine-filter",
+      "reference",
+    ]
+  : ["table", "groups", "cards", "reference", "detail"];
 const axe = process.env.AXE_PATH
   ? await readFile(process.env.AXE_PATH, "utf8")
   : null;
 const server = await createServer({
   root: fileURLToPath(new URL("../", import.meta.url)),
+  cacheDir: resolve(output, ".vite-cache"),
   server: { host: "127.0.0.1", port: 0 },
   plugins: [
     {
@@ -124,15 +137,15 @@ try {
           { name: "prefers-reduced-motion", value: "reduce" },
         ],
       });
-      for (const mode of ["table", "groups", "cards", "reference", "detail"]) {
+      for (const mode of modes) {
         await send("Page.navigate", { url: "about:blank" });
         await until("document.URL === 'about:blank'");
         await send("Page.navigate", {
-          url: `${server.resolvedUrls.local[0]}__execution_migration#/p/p-1/execution?view=all`,
+          url: `${server.resolvedUrls.local[0]}__execution_migration${crowded ? "?crowded" : ""}#/p/p-1/execution${crowded ? "" : "?view=all"}`,
         });
         await until("!!document.querySelector('.execution-open')");
         await evaluate(
-          `localStorage.setItem('cardigan.execution.display.p-1', JSON.stringify({mode:'${mode === "cards" ? "cards" : "table"}', grouped:${mode === "groups"}}))`,
+          `localStorage.setItem('cardigan.execution.display.p-1', JSON.stringify({mode:'${mode.includes("cards") ? "cards" : "table"}', grouped:${mode.includes("groups")}, groupBy:'${mode.startsWith("machine") ? "machine" : "employee"}'}))`,
         );
         await send("Page.reload");
         await delay(500);
@@ -147,11 +160,19 @@ try {
               : "!!document.querySelector('.card-table')",
           );
         }
+        if (mode === "machine-filter") {
+          await evaluate("location.hash = '#/p/p-1/execution?machine=worker'");
+          await until(
+            "!!document.querySelector('[aria-label=\"机器：synthetic-machine\"]')",
+          );
+        }
         await evaluate("document.fonts.ready.then(() => true)");
         await delay(200);
         const metrics = await evaluate(`(() => {
         const box = s => { const e=document.querySelector(s); if(!e) return null; const r=e.getBoundingClientRect(); return {x:r.x,y:r.y,right:r.right,width:r.width,height:r.height}; };
-        return { overflow:document.documentElement.scrollWidth > innerWidth, header:box('.ui-page-header'), filter:box('.ui-filter-row'), actions:box('.ui-filter-row > .ui-action-row'), capacity:document.querySelector('.capacity-status')?.textContent,
+        const capacityText = [...document.querySelectorAll('.capacity-wide,.capacity-compact')].find(e=>e.getClientRects().length);
+        const textRects = capacityText ? (()=>{const range=document.createRange();range.selectNodeContents(capacityText);return [...range.getClientRects()].map(r=>({left:r.left,right:r.right,top:r.top,bottom:r.bottom}));})() : [];
+        return { scrollWidth:document.documentElement.scrollWidth, innerWidth, capacityBox:box('.capacity-status'), capacityText:capacityText?.textContent, capacityTextRects:textRects, count:document.querySelector('.ui-page-count')?.textContent, overflow:document.documentElement.scrollWidth > innerWidth, header:box('.ui-page-header'), filter:box('.ui-filter-row'), actions:box('.ui-filter-row > .ui-action-row'), capacity:document.querySelector('.capacity-status')?.textContent,
           controls:[...document.querySelectorAll('.ui-filter-row button')].filter(e=>e.getClientRects().length).map(e=>({name:e.getAttribute('aria-label')||e.textContent,height:e.getBoundingClientRect().height})),
           ids:[...document.querySelectorAll('[data-ui="id-badge"]')].filter(e=>e.getClientRects().length).map(e=>e.getBoundingClientRect().height),
           title:document.querySelector('.ui-page-header h1') ? getComputedStyle(document.querySelector('.ui-page-header h1')).fontSize : null,
@@ -169,6 +190,33 @@ try {
         if (stage === "after") {
           assert(!metrics.toolbarOverlap, `${mode}: toolbar overlaps`);
           assert(!metrics.overflow, `${mode} ${width} ${theme}: overflow`);
+          if (metrics.capacityBox)
+            assert.equal(
+              metrics.capacityBox.right,
+              metrics.header.right,
+              `${mode}: wrapped capacity stays right aligned`,
+            );
+          assert(
+            metrics.capacityTextRects.every(
+              (r) =>
+                r.left >= metrics.capacityBox.x &&
+                r.right <= metrics.capacityBox.right &&
+                r.top >= metrics.capacityBox.y &&
+                r.bottom <= metrics.capacityBox.y + metrics.capacityBox.height,
+            ),
+            `${mode}: capacity text must fit its button`,
+          );
+          if (crowded && mode !== "reference") {
+            assert(
+              metrics.capacityText.includes("synthetic-machine") &&
+                metrics.capacityText.includes("cardigan-ci"),
+              "all machines remain visible",
+            );
+            assert.equal(
+              metrics.count,
+              mode === "machine-filter" ? "136 / 701" : "409 / 701",
+            );
+          }
           assert(
             metrics.controls.every((c) => c.height === 28),
             `${mode}: toolbar control size`,
@@ -206,7 +254,7 @@ try {
           Buffer.from(data, "base64"),
         );
       }
-      if (stage === "after") {
+      if (stage === "after" && !crowded) {
         await evaluate(
           "localStorage.removeItem('cardigan.execution.display.p-1');location.hash='#/p/p-1/execution?view=all'",
         );
@@ -422,7 +470,7 @@ await writeFile(
 );
 await writeFile(
   resolve(output, `${stage}-environment.json`),
-  `${JSON.stringify({ browser: browserVersion, fixture: "8 assignments, 4 runs, 4 cards, 2 machines; synthetic, not production scale", clock: "2026-11-15T07:47:30Z", dpr: 1, fonts: ["Inter Variable", "Noto Sans SC Variable", "JetBrains Mono Variable"], capture: "viewport only" }, null, 2)}\n`,
+  `${JSON.stringify({ browser: browserVersion, fixture: crowded ? "701 synthetic assignments (409 working) cloned from executionDisplayFixture, 4 runs, 4 cards, 3 machines; focused layout regression, not production data" : "8 assignments, 4 runs, 4 cards, 2 machines; synthetic, not production scale", clock: "2026-11-15T07:47:30Z", dpr: 1, fonts: ["Inter Variable", "Noto Sans SC Variable", "JetBrains Mono Variable"], capture: "viewport only" }, null, 2)}\n`,
 );
 console.log(`${stage}: ${records.length} screenshots and measurements`);
 

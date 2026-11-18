@@ -48,6 +48,13 @@
     color: var(--text-muted);
     font-weight: 400;
   }
+  .ui-page-header > .ui-page-capacity {
+    margin-inline-start: auto;
+    max-width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .ui-refresh-controls label {
     display: flex;
     align-items: center;
@@ -180,9 +187,6 @@
     flex-direction: column;
     min-width: 0;
     gap: 0;
-  }
-  .ui-workspace > .ui-page-header {
-    flex-wrap: nowrap;
   }
   .ui-workspace .ui-filter-row > .ui-action-row {
     width: auto;
