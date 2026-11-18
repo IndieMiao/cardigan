@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -148,7 +149,9 @@ test.each([false, true])(
     expect(within(lane).getAllByRole("listitem")).toHaveLength(4);
     const pmCard = within(lane).getByRole("listitem", { name: "王熙凤 A-4" });
     expect(within(pmCard).getByText("王熙凤")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "移除机器筛选" }));
+    changeControl(screen.getByRole("combobox", { name: /^机器：/ }), {
+      target: { value: "" },
+    });
     expect(screen.getByRole("region", { name: "工作机泳道" })).toBeTruthy();
     fireEvent.change(screen.getByRole("searchbox"), {
       target: { value: "主机运维" },
@@ -241,4 +244,21 @@ test("saved refresh-off survives remount and pending refresh keeps focus without
   });
   expect(refresh.getAttribute("aria-disabled")).toBe("false");
   expect(document.activeElement).toBe(refresh);
+});
+
+test("a retired machine from an old link stays visible in the machine dropdown and clears there", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all&machine=retired-worker";
+  show();
+  const machine = await screen.findByRole("combobox", {
+    name: "机器：retired-worker",
+  });
+  await waitFor(() =>
+    expect(document.querySelector(".ui-page-count")?.textContent).toBe("0 / 8"),
+  );
+  expect(machine.textContent).toContain("retired-worker");
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(machine, { target: { value: "" } });
+  await waitFor(() => expect(ids()).toHaveLength(8));
+  expect(screen.getByRole("combobox", { name: "机器：全部" })).toBeTruthy();
+  expect(location.hash).not.toContain("machine=");
 });

@@ -519,3 +519,50 @@ test("an implicit interactive request hands an actionable gap to Ops once; expli
       .ok,
   ).toBe(false);
 });
+
+test("MC-4 ranks by the tightest required slot without moving an existing assignment", () => {
+  const s = state();
+  const slots = (limit: number, occupied: number) => ({ limit, occupied });
+  const multi: CommandState = {
+    ...s,
+    machines: [machine(), remote],
+    roles: s.roles.map((r) => ({ ...r, required_capabilities: ["godot>=4"] })),
+    read_machine_placement: () =>
+      new Map([
+        [
+          "local",
+          {
+            ...healthy,
+            limit: 10,
+            occupied: 1,
+            resources: new Map([["godot", slots(4, 3)]]),
+          },
+        ],
+        [
+          remote.id,
+          {
+            ...healthy,
+            occupied: 2,
+            resources: new Map([["blender", slots(1, 1)]]),
+          },
+        ],
+      ]),
+  };
+  const selected = value(select(multi));
+  expect(selected.data.machine_id).toBe(remote.id);
+  expect(selected.events.at(-1)?.payload).toMatchObject({
+    candidates: [
+      { machine_id: remote.id, remaining_ratio: 0.5 },
+      {
+        machine_id: "local",
+        remaining_ratio: 0.25,
+        resources: [{ key: "godot", limit: 4, occupied: 3 }],
+      },
+    ],
+  });
+  const bound = apply(multi, selected);
+  expect(
+    value(select({ ...bound, read_machine_placement: () => new Map() })).data
+      .machine_id,
+  ).toBe(remote.id);
+});

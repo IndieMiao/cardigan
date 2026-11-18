@@ -14,6 +14,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import { eventLabel } from "../events.js";
 import { parseRoute, routeHash } from "../route.js";
+import { changeControl } from "../testing/controls.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { ActivityPage } from "../views/ActivityPage.js";
 import { CardListPage } from "../views/CardListPage.js";
@@ -283,7 +284,7 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
   expect(await screen.findByRole("heading", { name: /卡片/u })).toBeTruthy();
 });
 
-test("U1 list filters survive a copied route, chip removal, back navigation and remount", async () => {
+test("U1 list filters survive a copied route, dropdown clearing, back navigation and remount", async () => {
   window.location.hash =
     "#/p/p-1/cards?view=list&status=in_progress&next=human&q=%E5%87%86%E5%A4%87";
   const cards = vi.fn(fakeClient().cards),
@@ -313,7 +314,9 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
       .getAttribute("aria-checked"),
   ).toBe("true");
   fireEvent.keyDown(document, { key: "Escape" });
-  fireEvent.click(screen.getByRole("button", { name: "移除下一步谁做筛选" }));
+  changeControl(screen.getByRole("combobox", { name: "下一步：所有者" }), {
+    target: { value: "" },
+  });
   expect(parseRoute(window.location.hash)).toMatchObject({
     kind: "cards",
     filters: { view: "list", status: "in_progress", q: "准备" },
@@ -348,7 +351,9 @@ test("U1 activity restores filters and pagination without losing project identit
       before: "e/2",
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "移除发言方筛选" }));
+  changeControl(screen.getByRole("combobox", { name: "发言方" }), {
+    target: { value: "" },
+  });
   expect(parseRoute(window.location.hash)).toEqual({
     kind: "activity",
     projectId: "p-1",

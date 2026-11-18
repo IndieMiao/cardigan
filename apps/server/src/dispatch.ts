@@ -39,6 +39,7 @@ import {
   queueRun,
   refreshRunTargetWait,
   refreshTestReviewLimits,
+  remainingResourceRatio,
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
@@ -49,12 +50,15 @@ import {
   unreadableCommentTrigger,
 } from "@cardigan/domain";
 import {
+  assignmentResourceKeys,
   deferTargetAttempt,
   effectiveRunLimit,
   failAutomaticContextRun,
   type HarnessActivityInspection,
   HostLaunchError,
+  hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  type ReadResourceLimits,
   RunPreparationDeferred,
   RunTargetDeferred,
   redactFailureLine,
@@ -168,6 +172,7 @@ export interface DispatcherOptions {
   readonly maxRetries?: number;
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
+  readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
@@ -1230,7 +1235,13 @@ export class Dispatcher {
         return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
-        const capacity = runCapacitySnapshot(store, tx);
+        const capacity = runCapacitySnapshot(
+          store,
+          tx,
+          this.options.resourceLimits,
+        );
+        const slots = capacity.resourcesForMachine(a.machine_id);
+        const keys = assignmentResourceKeys(tx, project, a);
         const trigger = state.events.find(
           (e) => e.id === run?.trigger_event_id,
         );
@@ -1243,20 +1254,20 @@ export class Dispatcher {
           created_at: trigger?.created_at ?? a.created_at,
           trigger_event_id: run.trigger_event_id,
         };
-        const earlier = capacity.queue.some(
-          (entry) =>
-            entry.machine_id === a.machine_id &&
-            compareDispatchOrder(entry, order) < 0 &&
-            tx.assignments.list(entry.project_id).some(
-              (owner) =>
-                owner.id === entry.assignment_id &&
-                hasRunTarget(owner, {
-                  work_items: tx.work_items.list(entry.project_id),
-                  deliveries: tx.deliveries.list(entry.project_id),
-                }),
-            ),
+        const earlier = hasEarlierCapacityWait(
+          tx,
+          capacity.queue,
+          order,
+          a.machine_id,
+          slots,
+          (p, owner) =>
+            hasRunTarget(owner, {
+              work_items: tx.work_items.list(p),
+              deliveries: tx.deliveries.list(p),
+            }),
         );
         if (
+          remainingResourceRatio(keys, slots) <= 0 ||
           (!isRunCapacityExempt(a) && earlier) ||
           !canDispatchRun(
             effectiveRunLimit(
@@ -1275,7 +1286,7 @@ export class Dispatcher {
         }
         // A pending launch is reserved by its BellAttempt until dispatchRun
         // commits. It must no longer appear as a capacity wait in read views.
-        const cleared = { ...run };
+        const cleared = { ...run, resource_keys: keys };
         delete cleared.queue_reason;
         run = cleared;
         tx.runs.put(project, run);
