@@ -84,6 +84,37 @@ export const developmentCardTemplateV2 = {
     },
   ],
 } as const satisfies CardTemplate;
+/** UI implementation follows the same Flow Lite completion path as dev@2. */
+export const uiCardTemplate = {
+  ...developmentCardTemplateV2,
+  id: "ui",
+  version: 1,
+  title: "界面卡",
+  description:
+    "界面卡默认使用：前端开发、按规范清单设计验收与代码审核；已有界面卡不迁移",
+  work_items: [
+    {
+      ...developmentCardTemplateV2.work_items[0],
+      title: "前端开发",
+      role_id: "frontend_engineer",
+      completion_criteria: [
+        "按 docs/design/ui-guidelines.md 的界面验收清单逐条自查，附 1440/390 亮暗主题的前后截图、与卡片页同宽同主题的并排截图和关键测量",
+      ],
+    },
+    {
+      key: "design_review",
+      title: "界面验收",
+      kind: "verify",
+      role_id: "design_director",
+      required: true,
+      target_work_item_key: "development",
+      completion_criteria: [
+        "逐条对照 docs/design/ui-guidelines.md 的界面验收清单与基准截图，给出通过/不通过/未核、截图证据和测量值；绑定当前交付与完整 SHA",
+      ],
+    },
+    developmentCardTemplateV2.work_items[1],
+  ],
+} as const satisfies CardTemplate;
 /** Evidence is checked against trusted probe events before a product can be delivered. */
 export const integrationCardTemplate = {
   ...developmentCardTemplateV2,
@@ -210,6 +241,7 @@ export function builtinCardTemplatesForFlow(
         productCardTemplate,
         fastPatchCardTemplate,
         integrationCardTemplate,
+        uiCardTemplate,
       ]
     : builtinCardTemplates;
 }
@@ -220,6 +252,7 @@ export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   productCardTemplate,
   fastPatchCardTemplate,
   integrationCardTemplate,
+  uiCardTemplate,
 ];
 
 /** Historical cards resolve v1; never silently use a newer definition. */

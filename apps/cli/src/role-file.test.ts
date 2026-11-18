@@ -287,6 +287,7 @@ test("a run pinned to an old version still resolves that version", async () => {
 
 test("design roles copy from the default pack with their recommended launch settings", async () => {
   for (const [id, harness, launch_profile_ref, kind] of [
+    ["frontend_engineer", "claude-code", "claude-opus", "produce"],
     ["ui_ux_designer", "codex", "codex-astra", "produce"],
     ["design_director", "claude-code", "claude-opus", "verify"],
   ] as const) {
