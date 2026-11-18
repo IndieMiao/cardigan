@@ -200,8 +200,10 @@ export {
 } from "./repository-lock.js";
 export {
   effectiveRunLimit,
+  hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,
   machineRunCapacity,
+  type ReadResourceLimits,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,
@@ -210,6 +212,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { assignmentResourceKeys } from "./run-resources.js";
 export {
   deferTargetAttempt,
   RunTargetDeferred,

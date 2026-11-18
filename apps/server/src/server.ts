@@ -725,6 +725,7 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        resourceLimits: runCapacity.resourcesForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
