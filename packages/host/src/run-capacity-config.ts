@@ -6,12 +6,14 @@ import {
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
+  parseCapabilityRequirement,
 } from "@cardigan/domain";
 import { parseDocument } from "yaml";
 
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
+  resourcesForMachine(machine: string): ReadonlyMap<string, number>;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
   readonly inactiveCancelAfterMs: number | null;
@@ -35,6 +37,8 @@ export async function loadRunCapacityConfig(
   );
   const limits = new Map<string, number>();
   const maximums = new Map<string, number>();
+  const resources = new Map<string, ReadonlyMap<string, number>>();
+  const unlimited: ReadonlyMap<string, number> = new Map();
   const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
@@ -44,6 +48,8 @@ export async function loadRunCapacityConfig(
     // Invalid configuration stops automatic work items; standing PMs remain exempt.
     forMachine: (machine) =>
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
+    resourcesForMachine: (machine) =>
+      errors.length ? unlimited : (resources.get(machine) ?? unlimited),
     maxForMachine: (machine) =>
       errors.length ? 0 : (maximums.get(machine) ?? DEFAULT_MAX_RUN_LIMIT),
     displayNameForMachine: (machine) =>
@@ -115,7 +121,8 @@ export async function loadRunCapacityConfig(
       const settings = object(entry) ? entry : { limit: entry };
       if (
         Object.keys(settings).some(
-          (key) => !["limit", "max_limit", "display_name"].includes(key),
+          (key) =>
+            !["limit", "max_limit", "display_name", "resources"].includes(key),
         )
       )
         throw new Error("Invalid machine fields");
@@ -134,6 +141,27 @@ export async function loadRunCapacityConfig(
         limit > maximum
       )
         throw new Error("Invalid limit");
+      if (settings.resources !== undefined) {
+        if (
+          !object(settings.resources) ||
+          Object.getPrototypeOf(settings.resources) !== Object.prototype
+        )
+          throw new Error("Invalid resources");
+        const slots = new Map<string, number>();
+        for (const [key, value] of Object.entries(settings.resources)) {
+          const parsed = parseCapabilityRequirement(key);
+          if (
+            !parsed.ok ||
+            parsed.value.key !== key ||
+            typeof value !== "number" ||
+            !Number.isSafeInteger(value) ||
+            value < 1
+          )
+            throw new Error("Invalid resource limit");
+          slots.set(key, value);
+        }
+        resources.set(machine, slots);
+      }
       if (settings.display_name !== undefined) {
         const name = settings.display_name;
         if (
@@ -151,7 +179,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes 须为允许范围的正整数，display_name 须为有效文字。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

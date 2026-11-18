@@ -22,6 +22,7 @@ import {
   isRunCapacityExempt,
   recoverPreparation,
   recoveryTargetCurrent,
+  remainingResourceRatio,
   standingModeOf,
   standingRunDormant,
 } from "@cardigan/domain";
@@ -77,7 +78,13 @@ import {
   preparationPolicy,
   withPreparationQueue,
 } from "./preparation-queue.js";
-import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
+import {
+  assignmentResourceKeys,
+  effectiveRunLimit,
+  hasEarlierCapacityWait,
+  type ReadResourceLimits,
+  runCapacitySnapshot,
+} from "./run-capacity.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
@@ -134,6 +141,7 @@ export class RunPreparationDeferred extends Error {
 export interface LaunchHost {
   readonly configDir?: string;
   readonly runLimit?: (machine: string) => number;
+  readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
   readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
@@ -333,7 +341,9 @@ async function launchWithClaim(
     if (!assignment)
       throw new HostLaunchError("dispatch", "Assignment is missing");
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
-    const capacity = runCapacitySnapshot(host.store, tx);
+    const capacity = runCapacitySnapshot(host.store, tx, host.resourceLimits);
+    const slots = capacity.resourcesForMachine(assignment.machine_id);
+    const keys = assignmentResourceKeys(tx, input.project, assignment);
     const manual =
       input.actor.kind === "human" && input.actor.project_id === input.project;
     const limit = effectiveRunLimit(
@@ -345,17 +355,29 @@ async function launchWithClaim(
     const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
     // Q-88: only the explicit human host entry may bypass machine capacity.
     // PM tools, Dispatcher and recovery callers retain system/assignment actors.
+    const position = capacity.queue.find(
+      (entry) => entry.project_id === input.project && entry.run_id === run.id,
+    );
+    // Resource limits are hard even for a manual launch. A zero total denotes
+    // invalid private configuration, so resource-bearing Runs cannot infer that they're unlimited.
     if (
-      !manual &&
-      (!canDispatchRun(limit, occupied, isRunCapacityExempt(assignment)) ||
-        (!isRunCapacityExempt(assignment) &&
-          (capacity.queue.find(
-            (r) => r.project_id === input.project && r.run_id === run.id,
-          )?.ahead ?? 0) > 0))
+      remainingResourceRatio(keys, slots) <= 0 ||
+      (limit === 0 && keys.length > 0) ||
+      (!manual &&
+        (!canDispatchRun(limit, occupied, isRunCapacityExempt(assignment)) ||
+          (!isRunCapacityExempt(assignment) &&
+            position &&
+            hasEarlierCapacityWait(
+              tx,
+              capacity.queue,
+              position,
+              assignment.machine_id,
+              slots,
+            ))))
     ) {
       return undefined;
     }
-    const cleared = { ...run };
+    const cleared = { ...run, resource_keys: keys };
     delete cleared.queue_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();

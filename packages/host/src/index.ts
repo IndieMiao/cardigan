@@ -198,9 +198,12 @@ export {
   repositoryLockPath,
 } from "./repository-lock.js";
 export {
+  assignmentResourceKeys,
   effectiveRunLimit,
+  hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,
   machineRunCapacity,
+  type ReadResourceLimits,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,

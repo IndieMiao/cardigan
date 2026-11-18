@@ -444,9 +444,13 @@ test("placement reads current project opt-in and unexpired observations in the c
     );
   try {
     write(true);
-    writeFileSync(join(root, "run-capacity.yaml"), "machines: {worker-a: 6}", {
-      mode: 0o600,
-    });
+    writeFileSync(
+      join(root, "run-capacity.yaml"),
+      "machines: {worker-a: {limit: 6, resources: {godot: 2}}}",
+      {
+        mode: 0o600,
+      },
+    );
     for (const p of [project, "other"]) store.createProject({ id: p });
     store.uow.run((tx) => {
       for (const p of [project, "other"])
@@ -473,7 +477,7 @@ test("placement reads current project opt-in and unexpired observations in the c
         depends_on: [],
       });
       tx.assignments.put("other", { ...assignment(), machine_id: "worker-a" });
-      tx.runs.put("other", run());
+      tx.runs.put("other", { ...run(), resource_keys: ["godot"] });
     });
     const actor = { kind: "system", project_id: project } as const;
     beginMachineObservation(store, actor, project, "worker-a", "check", now);
@@ -507,6 +511,7 @@ test("placement reads current project opt-in and unexpired observations in the c
       remote_binding: "allowed",
       limit: 6,
       occupied: 1,
+      resources: new Map([["godot", { limit: 2, occupied: 1 }]]),
       health: { available: true },
       capabilities: [{ key: "godot", available: true }],
     });

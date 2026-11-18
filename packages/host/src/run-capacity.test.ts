@@ -3,7 +3,9 @@ import { beginLaunchAttempt, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   assignment,
+  fixture,
   now,
+  role as roleFixture,
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import { acquireMergeCheckCapacity } from "./merge-check-capacity.js";
@@ -89,6 +91,38 @@ test.each(["coder", "pm", "host_ops"])(
   (role) => {
     const owner = role === "coder" ? assignment(1) : standing(1, role);
     const limited = role === "coder" ? 1 : 0;
+    store.uow.run((tx) => {
+      const item = fixture().work_items[0];
+      if (!item) throw new Error("Missing fixture");
+      tx.work_items.put("first", {
+        ...item,
+        requirements: {
+          capabilities: ["godot>=3", "blender"],
+          tags: ["unrelated"],
+        },
+      });
+      tx.roles.put("first", {
+        ...roleFixture(role),
+        required_capabilities: ["godot=4", "ios.simulator"],
+      });
+    });
+    const slots = () =>
+      store.uow.read((tx) =>
+        [
+          ...runCapacitySnapshot(
+            store,
+            tx,
+            () =>
+              new Map([
+                ["godot", 1],
+                ["ios.simulator", 1],
+                ["unrelated", 1],
+              ]),
+          )
+            .resourcesForMachine("local")
+            .values(),
+        ].map((slot) => slot.occupied),
+      );
     const execution = run(1);
     const ref = {
       machine_id: "local",
@@ -109,6 +143,8 @@ test.each(["coder", "pm", "host_ops"])(
     });
     const variants: Run[] = [
       execution,
+      { ...execution, status: "dispatched" },
+      { ...execution, status: "acked" },
       { ...execution, status: "queued" },
       {
         ...execution,
@@ -135,6 +171,7 @@ test.each(["coder", "pm", "host_ops"])(
     for (const variant of variants) {
       store.uow.run((tx) => tx.runs.put("first", variant));
       expect(counts()).toEqual([1, limited, limited]);
+      expect(slots()).toEqual([limited, limited, 0]);
       store.uow.read((tx) => {
         const fallback = runCapacitySnapshot(store, {
           ...tx,
@@ -178,6 +215,7 @@ test.each(["coder", "pm", "host_ops"])(
       }),
     );
     expect(counts()).toEqual([0, 0, 0]);
+    expect(slots()).toEqual([0, 0, 0]);
   },
 );
 

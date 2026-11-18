@@ -1,17 +1,23 @@
 import {
+  type Assignment,
   type AssignmentId,
   assignmentDependenciesAllowStart,
   cardDependencyDispatchOrder,
   compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
+  type DispatchOrder,
   dispatchTier,
   type Event,
   type HostOpsExecution,
   isRunCapacityExempt,
+  type MachineResources,
   type MachineRunCapacity,
+  parseCapabilityRequirement,
   pendingHostOpsActions,
   type QueuedRun,
+  type Run,
+  remainingResourceRatio,
   runOccupiesSlot,
   runQueuePositions,
 } from "@cardigan/domain";
@@ -205,8 +211,82 @@ const pendingActions = new WeakMap<
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
+/** The work item's template defaults are already persisted; use the pinned role, not the latest. */
+export function assignmentResourceKeys(
+  tx: ReadRepositories,
+  project: string,
+  owner: Assignment,
+): string[] {
+  if (!owner.work_item_id) return [];
+  const item = tx.work_items.get(project, owner.work_item_id);
+  const role = tx.roles.get(project, {
+    role_id: owner.role_id,
+    role_version: owner.role_version,
+  });
+  const keys = new Set<string>();
+  for (const constraint of [
+    ...(item?.requirements?.capabilities ?? []),
+    ...(role?.required_capabilities ?? []),
+  ]) {
+    const parsed = parseCapabilityRequirement(constraint);
+    if (!parsed.ok) throw new Error("Invalid stored capability requirement");
+    keys.add(parsed.value.key);
+  }
+  return [...keys];
+}
+
+/** Keep the existing order among runnable waiters, without blocking other resources. */
+export function hasEarlierCapacityWait(
+  tx: ReadRepositories,
+  queue: readonly QueuedRun[],
+  order: DispatchOrder,
+  machine: string,
+  resources: MachineResources,
+  eligible?: (project: string, owner: Assignment) => boolean,
+): boolean {
+  return queue.some((entry) => {
+    if (entry.machine_id !== machine || compareDispatchOrder(entry, order) >= 0)
+      return false;
+    if (!resources.size && !eligible) return true;
+    const owner = tx.assignments
+      .list(entry.project_id)
+      .find((a) => a.id === entry.assignment_id);
+    return (
+      !!owner &&
+      (!eligible || eligible(entry.project_id, owner)) &&
+      (!resources.size ||
+        remainingResourceRatio(
+          assignmentResourceKeys(tx, entry.project_id, owner),
+          resources,
+        ) > 0)
+    );
+  });
+}
+
+export type ReadResourceLimits = (
+  machine: string,
+) => ReadonlyMap<string, number>;
+
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
-export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
+export function runCapacitySnapshot(
+  store: Store,
+  tx: ReadRepositories,
+  limits?: ReadResourceLimits,
+) {
+  const machines = new Map<
+    string,
+    Map<string, { limit: number; occupied: number }>
+  >();
+  const resourceSlots = (machine: string) => {
+    let slots = machines.get(machine);
+    if (!slots) {
+      slots = new Map();
+      for (const [key, limit] of limits?.(machine) ?? [])
+        slots.set(key, { limit, occupied: 0 });
+      machines.set(machine, slots);
+    }
+    return slots;
+  };
   // Both views share the exact same effective Run/reservation set. Only the
   // trusted Assignment scope and role determine exemption, never Run labels.
   const agentOccupied = new Map<string, number>();
@@ -250,13 +330,22 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
       if (!allAgentOccupied.has(machine_id))
         allAgentOccupied.set(machine_id, 0);
     }
-    const count = (assignmentId: AssignmentId) => {
+    const count = (assignmentId: AssignmentId, run?: Run) => {
       const owner = owners.get(assignmentId);
       if (!owner) return;
       const machine = owner.machine_id;
       allAgentOccupied.set(machine, (allAgentOccupied.get(machine) ?? 0) + 1);
       if (!isRunCapacityExempt(owner))
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
+      const slots = resourceSlots(machine);
+      if (slots.size && owner.work_item_id) {
+        // Pre-MC-4 Runs have no pinned keys: derive from their existing owner.
+        for (const key of run?.resource_keys ??
+          assignmentResourceKeys(tx, project.id, owner)) {
+          const slot = slots.get(key);
+          if (slot) slot.occupied++;
+        }
+      }
       countedOwners.add(owner.id);
     };
     for (const run of runs)
@@ -264,13 +353,16 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
         runOccupiesSlot(run) ||
         (run.status === "queued" && reserved.has(run.id))
       )
-        count(run.assignment_id);
+        count(run.assignment_id, run);
     for (const action of actions)
       if (
         action.runtime_ref !== null &&
         !countedOwners.has(action.assignment_id)
       )
-        count(action.assignment_id);
+        count(
+          action.assignment_id,
+          action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
+        );
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.
@@ -288,6 +380,8 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
     occupied,
     agentOccupied,
     allAgentOccupied,
+    resourcesForMachine: (machine: string): MachineResources =>
+      resourceSlots(machine),
     mergeChecks,
     queue: queueSnapshot(store, tx, reservedRuns),
   };
