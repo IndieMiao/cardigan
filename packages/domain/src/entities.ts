@@ -518,6 +518,8 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Physical resources pinned by the host at admission, not live editable requirements. */
+  readonly resource_keys?: readonly string[];
   /** Q-744: fixed on the first independent queue, inherited without reset. */
   readonly recovery_policy?: {
     readonly version: 6;

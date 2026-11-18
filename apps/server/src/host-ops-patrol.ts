@@ -42,14 +42,12 @@ export function patrolHostOps(
     )
       return;
     if (
-      store
-        .listNotifications({ project_id: project })
-        .some(
-          (n) =>
-            n.recipient.kind === "assignment" &&
-            n.recipient.assignment_id === a.id &&
-            ["pending", "belled", "delivery_failed"].includes(n.status),
-        )
+      store.listNotifications({
+        project_id: project,
+        recipient_kind: "assignment",
+        assignment_id: a.id,
+        statuses: ["pending", "belled", "delivery_failed"],
+      }).length
     )
       return;
     const event = {

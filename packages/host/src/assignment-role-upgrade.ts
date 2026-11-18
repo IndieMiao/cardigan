@@ -70,7 +70,7 @@ export async function upgradeIdleAssignmentRoles(
       MAX_IDLE_ROLE_UPGRADES - retired,
     );
   } finally {
-    scan.finish();
+    await scan.finish();
   }
 }
 
