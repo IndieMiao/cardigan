@@ -86,8 +86,8 @@ test.each(["等待新交付", "待审核 · 手动派活", "正在审核"])(
         projectId="p-1"
       />,
     );
-    changeControl(screen.getByLabelText("筛选"), {
-      target: { value: "all" },
+    changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
+      target: { value: "" },
     });
     expect(await screen.findByText(label)).toBeTruthy();
     expect(screen.getByText("空闲")).toBeTruthy();
@@ -155,7 +155,9 @@ test("conditional same-version recheck renders as reviewing on both card and exe
       />
     </>,
   );
-  changeControl(screen.getByLabelText("筛选"), { target: { value: "all" } });
+  changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
+    target: { value: "" },
+  });
   await waitFor(() => expect(screen.getAllByText("正在审核")).toHaveLength(2));
   expect(screen.queryByText("等待新交付")).toBeNull();
   const pass = f.commit(
