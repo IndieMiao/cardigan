@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
@@ -20,7 +20,6 @@ const git = (...args) =>
 const historical = new Map(
   baseline
     ? [
-        "styles.css",
         "components/ui/theme.css",
         "components/layout/CardDetailLayout.module.css",
       ].map((path) => [
@@ -29,6 +28,22 @@ const historical = new Map(
       ])
     : [],
 );
+// theme.css inlines styles.css from disk, so point it at the baseline copy.
+const legacy = resolve(root, "node_modules/.c463-baseline/styles.css");
+if (baseline) {
+  await mkdir(dirname(legacy), { recursive: true });
+  await writeFile(legacy, git("show", `${baseline}:apps/web/src/styles.css`));
+  const theme = resolve(root, "src/components/ui/theme.css");
+  const source = historical.get(theme);
+  assert(source.includes('@import "../../styles.css"'), "theme import");
+  historical.set(
+    theme,
+    source.replace(
+      '@import "../../styles.css"',
+      '@import "../../../node_modules/.c463-baseline/styles.css"',
+    ),
+  );
+}
 const server = await createServer({
   root,
   logLevel: "error",
