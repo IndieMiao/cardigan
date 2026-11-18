@@ -776,15 +776,12 @@ export class GitWorktreeService {
     assignment: Assignment,
   ): Promise<boolean> {
     const { path } = this.worktreeOf(project_id, assignment);
-    try {
-      const present = await this.files.isDirectory(path);
-      if (typeof present !== "boolean")
-        throw new Error("Invalid worktree directory response");
-      return present;
-    } catch (error) {
-      if (code(error) === "ENOENT") return false;
-      throw error;
-    }
+    // Transport prerequisites can also fail with ENOENT (for example a host
+    // SSH identity file). Only the file port's explicit false proves absence.
+    const present = await this.files.isDirectory(path);
+    if (typeof present !== "boolean")
+      throw new Error("Invalid worktree directory response");
+    return present;
   }
 
   /** §3.6: gather the facts `reconcile` needs; this method never deletes. */

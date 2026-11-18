@@ -289,6 +289,56 @@ test("unconfigured legacy binding skips released and unplaced workers and never 
   expect(probe).not.toHaveBeenCalled();
 });
 
+test
+  .skipIf(process.platform !== "linux")
+  .each(["identityFile", "knownHostsFile"] as const)(
+  "missing host %s leaves remote worktree existence unchecked through the real worker channel",
+  async (missingFile) => {
+    // Exercise RuntimeTargets -> WorkerGitTransport -> workerGitCommand without
+    // replacing the channel: a local prerequisite fails before any SSH process.
+    vi.restoreAllMocks();
+    const a = required(assignments[0]);
+    const execution = required(workers[0]).execution;
+    if (execution.mode !== "agent-ssh") throw new Error("fixture worker");
+    if (missingFile === "knownHostsFile")
+      writeFileSync(execution.identityFile, "fixture only", {
+        mode: 0o600,
+        flag: "wx",
+      });
+    expect(existsSync(execution[missingFile])).toBe(false);
+    const project = required(service.projectOf(f.project_id));
+    expect(await service.reconcile(project, [a], [])).toEqual([
+      expect.objectContaining({
+        kind: "worker_unchecked",
+        assignment_id: a.id,
+        path: `${a.machine_id}:${a.worktree_path}`,
+        detail: expect.stringContaining("远程未核"),
+      }),
+    ]);
+    // A failed prerequisite is not a fresh observation of an already missing directory.
+    f.store.recordReconcileFindings(f.project_id, [
+      {
+        kind: "missing_worktree",
+        detail: "Previously confirmed missing on worker",
+        assignment_id: a.id,
+        path: `${a.machine_id}:${a.worktree_path}`,
+      },
+    ]);
+    const previous = f.store.listReconcileFindings(f.project_id)[0];
+    vi.spyOn(f.clock, "now").mockReturnValue("2040-01-01T00:00:00.000Z");
+    await new ReconcileExecutor({
+      store: f.store,
+      git: service,
+      clock: f.clock,
+    }).tick(f.project_id);
+    expect(
+      f.store
+        .listReconcileFindings(f.project_id, { openOnly: true })
+        .filter((finding) => finding.kind === "missing_worktree"),
+    ).toEqual([previous]);
+  },
+);
+
 test("worker outage retains confirmed missing evidence, deduplicates warnings and resolves after recovery", async () => {
   const a = required(assignments[0]);
   let status: "missing" | "unreachable" | "present" = "missing";
