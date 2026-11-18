@@ -5,7 +5,7 @@ import {
   type CommandState,
   currentHarnessActivity,
   type HarnessActivity,
-  harnessActivityTime,
+  lastInactiveStopActivity,
   lastRunActivity,
   type ProjectId,
   type Run,
@@ -13,7 +13,11 @@ import {
 import type { HarnessActivityInspection } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
-import { alertAudience, dispatchAlert } from "./dispatch-alert.js";
+import {
+  alertAudience,
+  dispatchAlert,
+  hostOpsAlertRecipient,
+} from "./dispatch-alert.js";
 import type { StandingResolver } from "./dispatch-inbox.js";
 
 interface Options {
@@ -33,6 +37,23 @@ interface Options {
 }
 type Target = { assignment: Assignment; run: Run };
 type Check = "completed" | "read_failed" | "timeout" | "unavailable";
+
+// The initial alert and an eventual host handoff have separate durable identities.
+function alertState(state: CommandState, run: Run) {
+  let alerted = false;
+  for (const event of state.events) {
+    if (event.type !== "run_inactive" && event.type !== "run_activity_unknown")
+      continue;
+    const payload = event.payload as {
+      run_id?: string;
+      activity_forwarded_to?: string;
+    };
+    if (payload.run_id !== run.id) continue;
+    if (payload.activity_forwarded_to) return "forwarded";
+    alerted = true;
+  }
+  return alerted ? "alerted" : "new";
+}
 
 /** Bounded diagnostic recheck before a Run's existing, durable one-shot alert. */
 export class InactivityAlerts {
@@ -72,17 +93,9 @@ export class InactivityAlerts {
       !a.external &&
       run.status === "running" &&
       Date.parse(at) -
-        lastRunActivity(
-          run,
-          a,
-          harnessActivityTime(currentHarnessActivity(state, a, at, sample)),
-        ) >=
-        this.options.graceMs &&
-      !state.events.some(
-        (e) =>
-          e.type === "run_inactive" &&
-          (e.payload as { run_id?: string }).run_id === run.id,
-      )
+        (lastInactiveStopActivity(state, run, a, at, sample) ??
+          lastRunActivity(run, a)) >=
+        this.options.graceMs
     );
   }
   tick(tx: StoreTransactionContext, state: CommandState, at: string) {
@@ -96,6 +109,15 @@ export class InactivityAlerts {
       );
       const sample = this.options.harnessActivity?.(project, run.assignment_id);
       if (!assignment || !this.due(state, assignment, run, at, sample))
+        continue;
+      const prior = alertState(state, run);
+      if (
+        prior === "forwarded" ||
+        (prior === "alerted" &&
+          (run.harness !== "claude-code" ||
+            !hostOpsAlertRecipient(state, assignment) ||
+            associatedHarnessActivity(state, assignment, at, sample)))
+      )
         continue;
       if (!this.options.inspectHarnessActivity) {
         this.alert(
@@ -132,39 +154,7 @@ export class InactivityAlerts {
       cancelled = true;
       clearTimeout(timer);
       this.polls.delete(project);
-      this.options.store.uow.run((currentTx) => {
-        const current = loadCommandState(currentTx, project);
-        const now = this.options.clock.now();
-        for (const {
-          assignment: expected,
-          run: expectedRun,
-        } of targets.values()) {
-          const a = current.assignments.find((a) => a.id === expected.id);
-          const run = current.runs.findLast(
-            (r) => r.assignment_id === expected.id,
-          );
-          // A late read cannot settle an alert for a successor session/Run.
-          if (
-            !a ||
-            run?.id !== expectedRun.id ||
-            JSON.stringify(a.runtime_ref) !==
-              JSON.stringify(expected.runtime_ref) ||
-            a.session_ref !== expected.session_ref
-          )
-            continue;
-          this.alert(
-            currentTx,
-            current,
-            a,
-            run,
-            now,
-            samples?.get(a.id) ?? {
-              status: check === "read_failed" ? "read_failed" : "missing",
-            },
-            check,
-          );
-        }
-      });
+      this.publish(project, targets.values(), samples, check);
     };
     timer = setTimeout(() => {
       try {
@@ -194,6 +184,47 @@ export class InactivityAlerts {
       )
       .catch((error) => this.options.onError?.(error));
   }
+  // The stop-time read may discover a lost transcript before the patrol cache changes.
+  publish(
+    project: ProjectId,
+    targets: Iterable<Target>,
+    samples:
+      | ReadonlyMap<Assignment["id"], HarnessActivityInspection>
+      | undefined,
+    check: Check,
+  ) {
+    if (this.closed) return;
+    this.options.store.uow.run((currentTx) => {
+      const current = loadCommandState(currentTx, project);
+      const now = this.options.clock.now();
+      for (const { assignment: expected, run: expectedRun } of targets) {
+        const a = current.assignments.find((a) => a.id === expected.id);
+        const run = current.runs.findLast(
+          (r) => r.assignment_id === expected.id,
+        );
+        // A late read cannot settle an alert for a successor session/Run.
+        if (
+          !a ||
+          run?.id !== expectedRun.id ||
+          JSON.stringify(a.runtime_ref) !==
+            JSON.stringify(expected.runtime_ref) ||
+          a.session_ref !== expected.session_ref
+        )
+          continue;
+        this.alert(
+          currentTx,
+          current,
+          a,
+          run,
+          now,
+          samples?.get(a.id) ?? {
+            status: check === "read_failed" ? "read_failed" : "missing",
+          },
+          check,
+        );
+      }
+    });
+  }
   private alert(
     tx: StoreTransactionContext,
     state: CommandState,
@@ -222,16 +253,22 @@ export class InactivityAlerts {
       status =
         age < 0 || age > sample.stale_after_ms ? "stale" : "unassociated";
     }
+    const prior = alertState(state, run);
+    const forward = claude && status !== "stale" && status !== "fresh";
+    if (prior === "forwarded" || (prior === "alerted" && !forward)) return;
     dispatchAlert(tx, this.options.store, state, at, {
       assignment: a,
-      type: "run_inactive",
+      type: prior === "new" ? "run_inactive" : "run_activity_unknown",
       reason: "mcp_inactivity",
       activity_source: associated?.source ?? "活动来源缺失",
       activity_status: status,
-      notifyHostOps: claude && status !== "stale" && status !== "fresh",
+      notifyHostOps: forward,
       activity_check: check,
-      mark: true,
-      audience: alertAudience(a, state, this.options.standing),
+      mark: prior === "new",
+      audience:
+        prior === "new"
+          ? alertAudience(a, state, this.options.standing)
+          : "host_ops_only",
       run_id: run.id,
       card_id: state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
     });

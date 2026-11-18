@@ -176,6 +176,35 @@ test.each([429, 503])(
   },
 );
 
+test.each(["same", "other_cwd", "other_session"])(
+  "Claude error retains only attributable normal progress: %s",
+  async (mode) => {
+    const timestamp = "2026-01-01T00:59:00.000Z";
+    await write(
+      join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl"),
+      line({
+        type: "assistant",
+        sessionId: mode === "other_session" ? "other" : "session-1",
+        cwd: mode === "other_cwd" ? `${cwd}-sibling` : join(cwd, "apps"),
+        timestamp,
+      }) +
+        line({
+          type: "system",
+          subtype: "api_error",
+          sessionId: "session-1",
+          cwd,
+          timestamp: now,
+          error: { status: 503 },
+        }),
+    );
+    const sample = (await read(state("claude-code")))?.activity;
+    expect(sample?.error).toBe("server_error");
+    expect(sample?.last_progress_at).toBe(
+      mode === "same" ? timestamp : undefined,
+    );
+  },
+);
+
 test("missing files, failed reads and symlinked roots never imply activity", async () => {
   expect((await read())?.activity_status).toBe("missing");
   await write(rollout(), codex());

@@ -707,11 +707,36 @@ export class HostOpsService {
     return row?.activity;
   }
 
-  /** Alert checks share the current diagnostic poll, never the completed cache. */
+  /** Alerts can join an active poll. Destructive checks must start a new, target-only read. */
   async inspectHarnessActivity(
     project: ProjectId,
+    stopTarget?: AssignmentId,
   ): Promise<ReadonlyMap<AssignmentId, HarnessActivityInspection>> {
-    const samples = await this.sessions(project);
+    let samples: SessionContextDiagnostic[];
+    if (stopTarget) {
+      const usage = this.options.contextUsage;
+      if (this.closing || !usage) return new Map();
+      const state = this.options.store.uow.read((tx) =>
+        loadCommandState(tx, project),
+      );
+      samples = await readSessionContexts(
+        {
+          ...state,
+          assignments: state.assignments.filter(
+            (a) => a.id === stopTarget && !a.external,
+          ),
+        },
+        {
+          execution: usage.execution,
+          ...(usage.staleAfterMs !== undefined
+            ? { staleAfterMs: usage.staleAfterMs }
+            : {}),
+          signal: this.contextAbort.signal,
+        },
+        this.clock.now(),
+      );
+      if (this.closing) return new Map();
+    } else samples = await this.sessions(project);
     return new Map(
       samples.flatMap((s) =>
         s.assignment_id

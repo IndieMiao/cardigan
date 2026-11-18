@@ -68,7 +68,24 @@ export function lastInactiveStopActivity(
       associated.run_id !== run.id
     )
       return;
-    return lastRunActivity(run, assignment, harnessActivityTime(associated));
+    if (!associated.error)
+      return lastRunActivity(
+        run,
+        assignment,
+        Date.parse(associated.updated_at),
+      );
+    // An error proves ownership, not progress. Never fall back to MCP alone.
+    const progress = associated.last_progress_at;
+    if (
+      !progress ||
+      Date.parse(progress) > Date.parse(associated.updated_at) ||
+      !associatedHarnessActivity(state, assignment, now, {
+        ...associated,
+        updated_at: progress,
+      })
+    )
+      return;
+    return lastRunActivity(run, assignment, Date.parse(progress));
   }
   return lastRunActivity(
     run,

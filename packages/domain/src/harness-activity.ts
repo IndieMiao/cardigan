@@ -14,6 +14,8 @@ export interface HarnessActivity
   > {
   readonly run_id: RunId;
   readonly stale_after_ms: number;
+  /** Last normal Claude record in the same bounded transcript read, before an error. */
+  readonly last_progress_at?: string;
   readonly error?:
     | "rate_limit"
     | "server_error"

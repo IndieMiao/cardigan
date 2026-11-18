@@ -281,13 +281,35 @@ test("C-462: Claude needs associated evidence at claim and again before stopping
       updated_at: new Date(Date.parse(activity.updated_at) + 1).toISOString(),
     }),
   ).toBeUndefined();
+  const error = {
+    ...activity,
+    updated_at: f.io.clock.now(),
+    error: "server_error" as const,
+  };
+  for (const progress of [
+    undefined,
+    "invalid",
+    "2000-01-01T00:00:00Z",
+    error.updated_at,
+    new Date(Date.parse(error.updated_at) + 1).toISOString(),
+  ]) {
+    expect(
+      t.claim({
+        ...error,
+        ...(progress ? { last_progress_at: progress } : {}),
+      }),
+    ).toBeUndefined();
+  }
   const stop = t.claim(activity)?.inactivity_stop;
   if (!stop) throw new Error("Expected a due, associated Claude run");
   expect(t.start(stop.attempt_id)).toBeUndefined();
   expect(
     f.state.runs.find((r) => r.id === t.run.id)?.inactivity_stop,
   ).toBeUndefined();
-  const retry = t.claim(activity)?.inactivity_stop;
+  const retry = t.claim({
+    ...error,
+    last_progress_at: activity.updated_at,
+  })?.inactivity_stop;
   if (!retry) throw new Error("Expected new claim");
   expect(t.start(retry.attempt_id, activity)?.inactivity_stop?.stopping).toBe(
     true,

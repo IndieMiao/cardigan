@@ -365,3 +365,124 @@ test.each(["missing", "unassociated", "read_failed"] as const)(
     }
   },
 );
+
+test.each(["missing", "unassociated"] as const)(
+  "C-462: stale then %s notifies host ops without repeating the original alert",
+  async (unknown) => {
+    const run = f.session(f.target.assignment, false);
+    const updated_at = f.clock.now();
+    f.store.uow.run((tx) => {
+      const current = tx.runs.get(f.project, run.id);
+      if (!current) throw new Error("Missing run");
+      tx.runs.put(f.project, { ...current, harness: "claude-code" });
+    });
+    const activity = {
+      assignment_id: run.assignment_id,
+      run_id: run.id,
+      runtime_key: JSON.stringify(f.refFor(f.target.assignment)),
+      session_id: "fixture",
+      updated_at,
+      stale_after_ms: 600_000,
+      source: "claude-code:session_metadata",
+    };
+    let stale = true;
+    f.skipEvents();
+    f.advance(20 * 60_000);
+    const config = {
+      ...options(),
+      inactiveCancelAfterMs: 60 * 60_000,
+      // A destructive re-read can find the missing file even before the patrol cache changes.
+      harnessActivity: () =>
+        stale || unknown === "missing" ? activity : undefined,
+      inspectHarnessActivity: async () =>
+        new Map([
+          [
+            run.assignment_id,
+            stale
+              ? { status: "stale" as const, activity }
+              : { status: unknown },
+          ],
+        ]),
+    };
+    let dispatcher = new Dispatcher(config);
+    const tick = async () => {
+      await dispatcher.tick();
+      await new Promise<void>((r) => setImmediate(r));
+    };
+    try {
+      await tick();
+      expect(
+        f
+          .state()
+          .events.filter((e) => e.type === "run_inactive")
+          .map((e) => e.payload),
+      ).toMatchObject([{ activity_status: "stale" }]);
+      expect(hostNotes()).toHaveLength(0);
+      stale = false;
+      f.advance(41 * 60_000);
+      await tick();
+      dispatcher.close();
+      dispatcher = new Dispatcher(config);
+      await tick();
+      expect(
+        f.state().events.filter((e) => e.type === "run_inactive"),
+      ).toHaveLength(1);
+      const followup = f
+        .state()
+        .events.filter((e) => e.type === "run_activity_unknown");
+      expect(followup.map((e) => e.payload)).toMatchObject([
+        { activity_status: unknown, run_id: run.id },
+      ]);
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === followup[0]?.id)
+          .map((n) => n.recipient),
+      ).toEqual([{ kind: "assignment", assignment_id: hostOps.id }]);
+      expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+        "running",
+      );
+      expect(f.runtime.release).not.toHaveBeenCalled();
+    } finally {
+      dispatcher.close();
+    }
+  },
+);
+
+// Errors remain visible to upstream diagnostics but do not erase recent normal output.
+test("C-462: an upstream error after recent Claude progress does not raise an idle alert", async () => {
+  const run = f.session(f.target.assignment, false);
+  f.store.uow.run((tx) => {
+    const current = tx.runs.get(f.project, run.id);
+    if (!current) throw new Error("Missing Run");
+    tx.runs.put(f.project, { ...current, harness: "claude-code" });
+  });
+  f.skipEvents();
+  f.advance(59 * 60_000);
+  const progress = f.clock.now();
+  f.advance(60_000);
+  const activity = {
+    assignment_id: run.assignment_id,
+    run_id: run.id,
+    runtime_key: JSON.stringify(f.refFor(f.target.assignment)),
+    session_id: "fixture",
+    stale_after_ms: 600_000,
+    source: "claude-code:session_metadata",
+    updated_at: f.clock.now(),
+    error: "server_error" as const,
+    last_progress_at: progress,
+  };
+  const dispatcher = new Dispatcher({
+    ...options(),
+    inactivityGraceMs: 15 * 60_000,
+    harnessActivity: () => activity,
+  });
+  try {
+    await dispatcher.tick();
+    expect(
+      f.state().events.filter((e) => e.type === "run_inactive"),
+    ).toHaveLength(0);
+  } finally {
+    dispatcher.close();
+  }
+});

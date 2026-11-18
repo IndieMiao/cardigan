@@ -675,8 +675,10 @@ async function assembleServer(
         ...(hostOps
           ? {
               hostOpsTick: () => hostOps.tick(),
-              inspectHarnessActivity: (project: ProjectId) =>
-                hostOps.inspectHarnessActivity(project),
+              inspectHarnessActivity: (
+                project: ProjectId,
+                stopTarget?: Assignment["id"],
+              ) => hostOps.inspectHarnessActivity(project, stopTarget),
               harnessActivity: (
                 project: ProjectId,
                 assignment: Assignment["id"],
