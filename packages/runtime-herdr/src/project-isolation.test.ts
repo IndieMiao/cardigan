@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
+import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
 import { fixture } from "../../../test-support/worker-capabilities.js";
 import {
   projectIsolationCombination,
@@ -33,7 +34,11 @@ test.each([
   ["Darwin", "explicit-_lpoperator:NestedGroups", false],
   ["Linux", "safe", true],
   ["Linux", "linux-implicit", false],
+  ["Linux", "linux-share", false],
   ["Linux", "process-admin", false],
+  ...darwinSharedGroupCases.map(
+    ([fixture, accepted]) => ["Darwin", fixture, accepted] as const,
+  ),
 ] as const)(
   "native isolation group policy on %s: %s",
   (system, fault, accepted) => {
@@ -50,7 +55,7 @@ m['os'].getgid=m['os'].getegid=lambda:2201
 try:
  m['project_isolation'](dict(account='fixture',uid=2201,home='/fixture',root='/fixture'))
  raise AssertionError('overlapping roots passed')
-except ValueError as error:
+except (ValueError,OSError) as error:
  print('accepted' if str(error)=='isolation_roots' else 'blocked')
 `;
     expect(

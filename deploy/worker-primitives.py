@@ -90,12 +90,15 @@ def isolation_groups(account, inherited=(), timeout_ms=5000):
     primary_name = grp.getgrgid(primary).gr_name
     if (primary in (0, 20, 80, *DARWIN_IMPLICIT_GROUPS.values())
             or primary_name in ('root', 'wheel', 'admin', 'staff', 'sudo', *DARWIN_IMPLICIT_GROUPS)
-            or primary_name.startswith('com.apple.')
-            or not extra <= set(DARWIN_IMPLICIT_GROUPS.values())):
+            or primary_name.startswith('com.apple.') or extra & {0, 20, 80}):
         raise ValueError('isolation_groups')
 
     def record(path, attributes):
-        data = plistlib.loads(run(['/usr/bin/dscl', '-plist', '.', '-read', path, *attributes], timeout_ms).encode())
+        # Group membership attributes are optional. Asking dscl for an absent
+        # key can emit "No such key" instead of a plist; read the group record.
+        # User reads remain restricted to identity fields, never authentication data.
+        query = attributes if path.startswith('/Users/') else []
+        data = plistlib.loads(run(['/usr/bin/dscl', '-plist', '.', '-read', path, *query], timeout_ms).encode())
         if not isinstance(data, dict):
             raise ValueError('isolation_groups')
         result = {}
@@ -103,6 +106,10 @@ def isolation_groups(account, inherited=(), timeout_ms=5000):
             values = data.get('dsAttrTypeStandard:' + key, [])
             if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
                 raise ValueError('isolation_groups')
+            if key in ('GeneratedUID', 'GroupMembers', 'NestedGroups'):
+                if any(re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', value) is None for value in values):
+                    raise ValueError('isolation_groups')
+                values = [value.upper() for value in values]
             result[key] = values
         return result
 
@@ -111,26 +118,42 @@ def isolation_groups(account, inherited=(), timeout_ms=5000):
             or not user['GeneratedUID'][0] or user['UniqueID'] != [str(account.pw_uid)]
             or user['PrimaryGroupID'] != [str(primary)]):
         raise ValueError('isolation_groups')
-    records = []
-    for name, gid in DARWIN_IMPLICIT_GROUPS.items():
+    account_ids = {value.casefold() for value in user['RecordName'] + user['GeneratedUID']}
+
+    def checked_group(name, gid):
         group = grp.getgrgid(gid)
+        named = grp.getgrnam(name)
         data = record('/Groups/' + name, ['RecordName', 'GeneratedUID', 'PrimaryGroupID',
                                         'GroupMembership', 'GroupMembers', 'NestedGroups'])
-        if (group.gr_name != name or grp.getgrnam(name).gr_gid != gid
+        if (group.gr_name != name or group.gr_gid != gid or named.gr_name != name or named.gr_gid != gid
                 or data['RecordName'] != [name] or data['PrimaryGroupID'] != [str(gid)]
                 or len(data['GeneratedUID']) != 1 or not data['GeneratedUID'][0]
-                or set(user['RecordName']) & (set(group.gr_mem) | set(data['GroupMembership']))
-                or {value.upper() for value in user['GeneratedUID']} &
-                   {value.upper() for value in data['GroupMembers'] + data['NestedGroups']}):
+                or account_ids & {value.casefold() for value in
+                    group.gr_mem + data['GroupMembership'] + data['GroupMembers'] + data['NestedGroups']}
+                or run(['/usr/bin/dsmemberutil', 'getuuid', '-G', name], timeout_ms).upper() != data['GeneratedUID'][0]):
             raise ValueError('isolation_groups')
-        records.append(data)
-    implicit_ids = {data['GeneratedUID'][0].upper() for data in records}
-    if len(implicit_ids) != len(records) or user['GeneratedUID'][0].upper() in implicit_ids:
+        return data
+
+    records = {name: checked_group(name, gid) for name, gid in DARWIN_IMPLICIT_GROUPS.items()}
+    implicit_ids = {data['GeneratedUID'][0] for data in records.values()}
+    if len(implicit_ids) != len(records) or user['GeneratedUID'][0] in implicit_ids:
         raise ValueError('isolation_groups')
-    # Only nesting among these built-ins is implicit. A private/custom group
-    # nested into an exempt group must not launder explicit membership.
-    if any(not {value.upper() for value in data['NestedGroups']} <= implicit_ids for data in records):
+    roots = {records[name]['GeneratedUID'][0] for name in ('everyone', 'localaccounts')}
+    # The two universal groups are roots, not custom/recursive membership paths.
+    if (any(records[name]['NestedGroups'] for name in ('everyone', 'localaccounts'))
+            or not set(records['_lpoperator']['NestedGroups']) <= roots):
         raise ValueError('isolation_groups')
+    seen_ids = implicit_ids | set(user['GeneratedUID'])
+    for gid in sorted(extra - set(DARWIN_IMPLICIT_GROUPS.values())):
+        name = grp.getgrgid(gid).gr_name
+        # Q-870: public-folder SACL groups only; no generic implicit-group exemption.
+        if re.fullmatch(r'com\.apple\.sharepoint\.group\.[0-9]+', name) is None:
+            raise ValueError('isolation_groups')
+        data = checked_group(name, gid)
+        nested = set(data['NestedGroups'])
+        if not nested or not nested <= roots or data['GeneratedUID'][0] in seen_ids:
+            raise ValueError('isolation_groups')
+        seen_ids.add(data['GeneratedUID'][0])
 
 
 def isolation_account(request, inherited=()):

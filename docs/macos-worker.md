@@ -98,11 +98,13 @@ sudo install -d -o root -g cg_example -m 0750 /System/Volumes/Data/Users/cg_exam
 sudo install -d -o cg_example -g cg_example -m 0700 /System/Volumes/Data/Users/cg_example/.config /System/Volumes/Data/Users/cg_example/.cache /System/Volumes/Data/Users/cg_example/.local/state /System/Volumes/Data/Users/cg_example/.local/share
 ```
 
-账号使用独占主组；macOS 目录服务会自动附带 `everyone`（GID 12）、`localaccounts`（61）、`_lpoperator`（100）。`id -Gn` 出现这三组本身不会阻塞接入，无需删除系统默认成员关系。向导、安装器和运行时隔离检查共用规则：同时核对组名与 GID、目录服务账号与组记录；`GroupMembership` 中显式列出账号（含别名）、`GroupMembers` / `NestedGroups` 中列出账号 UUID 都拒绝，三组之外的嵌套组也拒绝。目录服务不可读、字段缺失或身份不符时拒绝，不仅凭组名放行。Linux 仍只允许主组。
+账号使用独占主组；macOS 目录服务会自动附带 `everyone`（GID 12）、`localaccounts`（61）、`_lpoperator`（100）。`id -Gn` 出现这三组本身不会阻塞接入，无需删除系统默认成员关系。向导、安装器和运行时隔离检查共用规则：核对系统账号库及本地 `dscl` 记录的组名、GID，并用 `dsmemberutil getuuid -G` 交叉核对 UUID；`GroupMembership` 中显式列出账号（含别名）、`GroupMembers` / `NestedGroups` 中列出账号 UUID 都拒绝。everyone/localaccounts 为隐式根组，不接受嵌套；_lpoperator 只接受这两个根组的直接嵌套。目录服务不可读、必要身份字段缺失或身份不符时拒绝，不仅凭组名放行。Linux 仍只允许主组。
 
-账号不得属于 admin、wheel、staff、com.apple.access_ssh、com.apple.sharepoint.group.*、其它项目组或有 sudo 授权。SSH 远程登录策略如额外加入组会被检查拒绝，应由管理员调整授权方式，不能绕过专用组检查。将控制主机公钥安装为 `.ssh/authorized_keys`，root:cg_example、0640，建议加 `restrict`。账号登录、模型订阅登录由人在现场完成，不在命令行或项目中保存密码。
+按 Q-870，另允许系统公共文件夹组 `com.apple.sharepoint.group.<数字>`，编号和 GID 可因机器而异。必须通过上述组名/GID/UUID 身份核验，无本账号名、别名或 UUID 的直接成员关系，且 `NestedGroups` 非空、仅直接引用已核验的 everyone/localaccounts。显式加入共享组、空或未知嵌套、混合其它组、循环、自定义递归或经过 _lpoperator 间接继承都拒绝；不自动修改共享配置。
 
-这三组表示系统默认的通用、本地账号及打印服务成员关系，不是管理员授权；`_lpoperator` 的系统打印权限仍然存在，不能视作“无任何系统权限”。它们不能用作项目目录的共享组或 ACL 授权依据。项目命名空间仍须独占主组、0750，私有目录仍须 0700 且无 ACL；不得给这三组增设 sudo、远程访问或其它特权授权。元数据检查不能证明整台机器无额外授权，现场仍须核对系统策略，并按既有 B8 流程以合成目录完成同机项目账号双向读、列举、写和 socket 拒绝实测；未实测不登记隔离通过。
+账号不得属于 admin、wheel、staff、com.apple.access_ssh、其它项目组或有 sudo 授权；这些组即使嵌套 everyone 也不放行。SSH 远程登录策略如额外加入组会被检查拒绝，应由管理员调整授权方式，不能绕过专用组检查。将控制主机公钥安装为 `.ssh/authorized_keys`，root:cg_example、0640，建议加 `restrict`。账号登录、模型订阅登录由人在现场完成，不在命令行或项目中保存密码。
+
+这些组表示系统默认的通用、本地账号、打印及公共文件夹共享成员关系，不是管理员授权；系统打印和公共共享访问能力仍然存在，不能视作“无任何系统权限”。它们不能用作项目私有目录的共享组或 ACL 授权依据。项目命名空间仍须独占主组、0750，私有目录仍须 0700 且无 ACL；不得给这些组增设 sudo、远程访问或其它特权授权。元数据检查不能证明整台机器无额外授权，现场仍须核对系统策略，并按既有 B8 流程以合成目录完成同机项目账号双向读、列举、写和 socket 拒绝实测；未实测不登记隔离通过。
 
 `dscl` 与系统账号库、实际进程 UID/GID/组必须一致；sudo 只执行 `sudo -n -l` 查询，并要求明确拒绝。目录通过 stat/openat 和 Darwin ACL API 核验；不使用 Linux ACL 工具。HOME 与命名空间为 root 持有，私有状态/项目叶目录为专用 UID 持有。遇到 ACL 或父链冲突先核对，不递归改写已有个人目录。
 
