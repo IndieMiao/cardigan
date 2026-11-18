@@ -32,6 +32,7 @@ export {
   retireReconcileNotifications,
   routerCursor,
 } from "./inbox.js";
+export * from "./machine-capabilities.js";
 export { updateMachineDescription } from "./machines.js";
 export { persistMemberEffect } from "./members.js";
 export {
