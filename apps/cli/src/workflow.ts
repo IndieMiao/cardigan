@@ -660,16 +660,15 @@ function workItemCommand(args: readonly string[], io: CliIo): number {
     const project_id = resolveProject(store, io, optional(flags, "project"));
     const identity = resolveCommandIdentity(io, project_id, store);
     if (action === "show") {
-      const result = store.uow.read(
-        (tx) =>
-          unwrap(
-            getWorkItem(
-              loadCommandState(tx, project_id),
-              identity.actor,
-              parseWorkItem(positionals[0]),
-            ),
-          ).data,
-      );
+      const itemId = parseWorkItem(positionals[0]);
+      const result = runCommand(store, {
+        operation: "读取工作项",
+        target: itemId,
+        project_id,
+        ...identity,
+        reduce: (state, actor, ports) =>
+          getWorkItem(state, actor, itemId, ports),
+      });
       io.stdout(JSON.stringify(result, null, 2));
       return EXIT.ok;
     }

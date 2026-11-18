@@ -45,6 +45,7 @@ import {
 } from "../templates.js";
 import {
   type CommandDraft,
+  type CommandPorts,
   type CommandState,
   command,
   ensure,
@@ -1060,23 +1061,28 @@ function selectNeedsYou<T>(
   };
 }
 
-/** CLI item view uses the existing card scope and get_card permission. */
-export function getWorkItem(state: CommandState, actor: Actor, id: WorkItemId) {
-  return command(state, actor, "get_card", undefined, (d) => {
-    const item = d.work(id);
+/** Persist the audit and return the item from the same fresh transaction. */
+export function getWorkItem(
+  state: CommandState,
+  actor: Actor,
+  id: WorkItemId,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "get_card", ports, (d) => {
+    const item = d.get("work_items", id);
+    const card = d.get("cards", item.card_id);
     ensure(
-      actor.kind === "human" ||
-        cardReadAccess({
-          project_id: state.project_id,
-          assignment: d.assignment,
-          card: d.card(item.card_id),
-          work_items: state.work_items,
-          preferences: state.project_preferences?.find(
-            (p) => p.id === state.project_id,
-          ),
-        }) === "full",
+      card.project_id === state.project_id &&
+        (actor.kind === "human" ||
+          cardReadAccess({
+            project_id: state.project_id,
+            assignment: d.assignment,
+            card,
+            work_items: state.work_items,
+            preferences: projectPreferences(state),
+          }) === "full"),
       "unauthorized",
-      "此卡仅可查看摘要，不能读取工作项详情",
+      "工作项不存在或无权读取详情",
     );
     const assignment = state.assignments.find(
       (a) => a.id === item.assignment_id,
@@ -1098,6 +1104,24 @@ export function getWorkItem(state: CommandState, actor: Actor, id: WorkItemId) {
       "validation_failed",
       effective.ok ? "" : effective.error.message,
     );
-    return { ...item, effective_requirements: effective.value };
+    const reference =
+      d.assignment && isReferenceCard(d.assignment, card, state.work_items);
+    if (reference && d.assignment)
+      d.emit("cross_card_read", undefined, {
+        card_id: card.id,
+        tool: "get_card",
+        assignment_id: d.assignment.id,
+        employee_id: d.assignment.employee_id ?? null,
+      });
+    return {
+      ...item,
+      effective_requirements: effective.value,
+      ...(reference
+        ? {
+            source_card_id: card.id,
+            reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+          }
+        : {}),
+    };
   });
 }
