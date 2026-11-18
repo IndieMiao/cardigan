@@ -34,7 +34,11 @@ export function configureMachinePlacement(
         /* Invalid private configuration never authorizes a remote worker. */
       }
     }
-    const { occupied } = runCapacitySnapshot(store, tx);
+    const { occupied, resourcesForMachine } = runCapacitySnapshot(
+      store,
+      tx,
+      limits.resourcesForMachine,
+    );
     return new Map(
       machines.map((machine) => {
         const { id } = machine;
@@ -55,6 +59,7 @@ export function configureMachinePlacement(
               limits.maxForMachine,
             ),
             occupied: occupied.get(id) ?? 0,
+            resources: resourcesForMachine(id),
           } satisfies MachinePlacement,
         ];
       }),

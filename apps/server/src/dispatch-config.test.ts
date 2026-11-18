@@ -41,6 +41,20 @@ test("missing file/machine defaults to four; CARDIGAN_CONFIG_DIR is read once pe
 });
 
 test.each([
+  ...[
+    "null",
+    "[]",
+    "1",
+    "{godot: null}",
+    "{godot: 0}",
+    "{godot: -1}",
+    "{godot: 1.5}",
+    "{godot: '1'}",
+    "{godot: 9007199254740992}",
+    "{'godot>=4': 1}",
+    "{'': 1}",
+    "{godot: 1, godot: 2}",
+  ].map((resources) => `machines: { local: { resources: ${resources} } }`),
   "machines: { local: 17 }",
   "machines: { local: { limit: 5, max_limit: 4 } }",
   "machines: { local: { max_limit: 0 } }",
@@ -80,7 +94,7 @@ test("per-machine ceilings and names coexist with legacy defaults and load once"
   expect(absent.displayNameForMachine("local")).toBeUndefined();
   await write(`machines:
   local: { limit: 24, max_limit: 24, display_name: " Workstation " }
-  worker: { limit: 2, max_limit: 8 }
+  worker: { limit: 2, max_limit: 8, resources: { android.emulator: 1, custom-tool: 2 } }
   named: { display_name: "Worker" }
   legacy: 16
 `);
@@ -90,6 +104,12 @@ test("per-machine ceilings and names coexist with legacy defaults and load once"
   expect(config.maxForMachine("local")).toBe(24);
   expect(config.displayNameForMachine("local")).toBe("Workstation");
   expect(config.maxForMachine("worker")).toBe(8);
+  expect([...config.resourcesForMachine("worker")]).toEqual([
+    ["android.emulator", 1],
+    ["custom-tool", 2],
+  ]);
+  expect(config.resourcesForMachine("legacy").size).toBe(0);
+  expect(config.resourcesForMachine("omitted").size).toBe(0);
   expect(config.forMachine("named")).toBe(4);
   expect(config.maxForMachine("legacy")).toBe(16);
   expect(config.maxForMachine("omitted")).toBe(16);
