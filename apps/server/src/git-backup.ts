@@ -5,7 +5,6 @@ import type {
   CentralRepositoryService,
   RepositoryLock,
 } from "@cardigan/git-service";
-import type { CentralGitTransport } from "@cardigan/git-transport";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 
 export const backupWriter = (a: Assignment) =>
@@ -24,13 +23,12 @@ export async function backupBranches(
     currentProject: () => CentralProject | undefined;
     central: CentralRepositoryService;
     validateTarget?: (tx?: StoreTransactionContext) => void;
-    transport: CentralGitTransport;
     lock: RepositoryLock;
     uow: Store["uow"];
   },
   job: Job,
 ) {
-  const { project, central, transport, uow } = input;
+  const { project, central, uow } = input;
   const id = project.project_id as ProjectId;
   const a = "assignment" in job ? job.assignment : undefined;
   const machine = a?.machine_id ?? "local";
@@ -47,49 +45,22 @@ export async function backupBranches(
   const optionalSource = !a && (await central.backupSource(project, machine));
   if (!a && !optionalSource) return;
   const repository = await central.ensureCentral(project);
-  const previous = new Map<string, string>();
-  for (const ns of [prefix, `refs/cardigan/backup-generations/${machine}/`]) {
-    if (branch) {
-      const old = await central.git.readRef(repository, ns + branch);
-      if (old) previous.set(ns + branch, old);
-    } else {
-      for (const { ref, sha } of await central.git.listRefs(
-        repository,
-        `${ns}agent/`,
-      ))
-        previous.set(ref, sha);
-    }
-  }
   const source =
     optionalSource || (await central.agentSource(project, machine));
-  const { edits, generations } = await transport.stageBackup(
+  const transaction = await central.git.prepareBranchBackup(
     repository,
-    async (stage) => {
-      const exclusions = "excludedBranches" in job ? job.excludedBranches : [];
-      // Validate exact names before interpreting them as fetch refspecs.
-      for (const name of exclusions)
-        await central.git.readRef(stage, `refs/heads/${name}`);
-      const head = `refs/heads/${branch ?? "agent/*"}`;
-      await central.git.fetchRefs(
-        stage,
-        source.address,
-        [
-          `+${head}:${head}`,
-          ...exclusions.map((name) => `^refs/heads/${name}`),
-        ],
-        source.uploadPack,
-      );
+    source.address,
+    {
+      machine,
+      ...(branch ? { branch } : {}),
+      excludedBranches: "excludedBranches" in job ? job.excludedBranches : [],
+      ...(source.uploadPack ? { uploadPack: source.uploadPack } : {}),
     },
-    previous,
-    machine,
   );
+  const edits = transaction.refs;
   if (a && (edits.length !== 1 || edits[0]?.ref !== prefix + branch))
     throw new Error("Missing staged Assignment branch");
   if (!edits.length) return;
-  const transaction = await transport.backupRefTransaction(repository, [
-    ...edits,
-    ...generations,
-  ]);
   await input.lock({ project_id: id, repository }, async () => {
     let published = false;
     const commit = (tx: StoreTransactionContext) => {

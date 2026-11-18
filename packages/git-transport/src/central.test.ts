@@ -131,6 +131,32 @@ test("backup polls every agent branch, retries failed transfers, restores lost r
   expect(f.calls.some((c) => c.args.includes("fetch"))).toBe(false);
   expect(await git(repo, "rev-parse", ref)).toBe(first);
 });
+test("a local unchanged probe never aliases invalid bytes onto a confirmed UTF-8 backup", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const base = join(f.dataDir, "agent", "repos", f.project.project_id);
+  await new LocalGitTransport().ensureClone(repo, base);
+  const name = "agent/caf\ufffd";
+  await git(base, "branch", name);
+  await f.central.backupAgentBranches(f.project, "local");
+  const refs = () =>
+    git(
+      repo,
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/cardigan/",
+    );
+  const before = await refs();
+  const invalid = Buffer.concat([
+    Buffer.from(join(base, ".git/refs/heads/agent/caf")),
+    Buffer.from([0xe9]),
+  ]);
+  await writeFile(invalid, `${f.initial}\n`);
+  await expect(
+    f.central.backupAgentBranches(f.project, "local"),
+  ).rejects.toThrow(/utf-?8/i);
+  expect(await refs()).toBe(before);
+});
+
 test("a bound upload-pack bypasses the refs probe even without an Agent root", async () => {
   const repo = await f.central.ensureCentral(f.project);
   f.calls.length = 0;

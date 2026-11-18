@@ -77,7 +77,9 @@ test.each(failures)(
 
     expect(await git(repo, "rev-parse", ref)).toBe(sha);
     expect(f.calls.filter((c) => c.args.includes("ls-remote"))).toHaveLength(1);
-    expect(f.calls.filter((c) => c.args.includes("fetch"))).toHaveLength(1);
+    expect(
+      f.calls.filter((c) => c.args.includes("fetch") && c.args.includes(base)),
+    ).toHaveLength(1);
     expect(report.mock.calls).toEqual([
       [`Git refs preflight failed (${reason}); falling back to fetch`],
     ]);
@@ -136,6 +138,8 @@ test("a real fallback fetch failure still rejects and preserves the previous bac
     stderr: expect.stringContaining("cannot lock ref"),
   });
   expect(await git(repo, "rev-parse", ref)).toBe(first);
-  expect(f.calls.filter((c) => c.args.includes("fetch"))).toHaveLength(1);
+  expect(
+    f.calls.filter((c) => c.args.includes("fetch") && c.args.includes(base)),
+  ).toHaveLength(1);
   expect(report).toHaveBeenCalledTimes(1);
 });

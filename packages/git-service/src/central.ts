@@ -640,19 +640,17 @@ export class CentralRepositoryService {
     const source = await this.backupSource(project, machine_id);
     if (!source) return;
     const repository = await this.ensureCentral(project);
-    for (const branch of excludedBranches)
-      await this.git.readRef(repository, `refs/heads/${branch}`);
-    await this.git.fetchRefs(
+    const backup = await this.git.prepareBranchBackup(
       repository,
       source.address,
-      [
-        `+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`,
-        // Exact negative refspecs leave transactional backups untouched, including rewrites.
-        ...excludedBranches.map((branch) => `^refs/heads/${branch}`),
-      ],
-      source.uploadPack,
-      true,
+      {
+        machine: machine_id,
+        excludedBranches,
+        ...(source.uploadPack ? { uploadPack: source.uploadPack } : {}),
+        skipIfUnchanged: true,
+      },
     );
     this.validateSource();
+    backup.publish();
   }
 }

@@ -883,7 +883,6 @@ export class ServerGit implements GitBinding {
     const context = {
       project,
       currentProject: () => this.projectOf(projectId),
-      transport: this.transport,
       lock: this.lock,
       uow,
     };

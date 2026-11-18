@@ -9,8 +9,11 @@ import {
   developmentCardTemplate,
   type EmployeeId,
   formatId,
+  type GitBackupSelection,
   type GitCentralPort,
+  type GitPreparedBackup,
   type GitPublicationGuard,
+  type GitRef,
   type GitRepositoryAddress,
   type GitWorkspaceFiles,
   type GitWorktreePort,
@@ -179,6 +182,22 @@ test("invariants 9, 14: central ref writes require an expected value and expose 
       boolean?,
     ]
   >();
+});
+
+test("invariants 9, 14: backup preparation yields a synchronous, local publication only", () => {
+  expectTypeOf<
+    GitCentralPort["prepareBranchBackup"]
+  >().parameters.toEqualTypeOf<
+    [string, GitRepositoryAddress, GitBackupSelection]
+  >();
+  expectTypeOf<GitCentralPort["prepareBranchBackup"]>().returns.toEqualTypeOf<
+    Promise<GitPreparedBackup>
+  >();
+  expectTypeOf<GitPreparedBackup>().toEqualTypeOf<{
+    readonly refs: readonly GitRef[];
+    publish(): void;
+    rollback(): void;
+  }>();
 });
 
 test("invariant 14: central verification reports object format, type and commit distance", () => {

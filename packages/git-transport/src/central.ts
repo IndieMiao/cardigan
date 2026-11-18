@@ -22,9 +22,11 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import type {
+  GitBackupSelection,
   GitCentralPort,
   GitCommitTreeInput,
   GitFileDiff,
+  GitPreparedBackup,
   GitPublicationGuard,
   GitRef,
   GitRepositoryAddress,
@@ -53,6 +55,8 @@ import {
 } from "./timeouts.js";
 
 const exec = promisify(execFile);
+// Git refnames are bytes. Never map an undecodable name onto a genuine U+FFFD ref.
+const refDecoder = new TextDecoder("utf-8", { fatal: true });
 const exists = async (path: string) => {
   try {
     await lstat(path);
@@ -151,7 +155,7 @@ export class CentralGitTransport
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
-    preserveOutput = false,
+    preserveOutput: boolean | "ref-inventory" = false,
   ) {
     if (repository !== this.root && dirname(repository) !== this.root)
       throw new Error("Git command escaped central root");
@@ -160,31 +164,40 @@ export class CentralGitTransport
     const command = [...gitSafetyArguments, "-C", repository, ...args];
     this.options.onCommand?.(repository, command);
     try {
+      const refInventory = preserveOutput === "ref-inventory";
       const r = await withGitTimeout(args[0], this.options, (timeout) =>
         exec("git", command, {
           env: { ...gitEnvironment(), ...extraEnv },
+          encoding: "buffer",
           timeout,
           killSignal: "SIGKILL",
           maxBuffer: 4 * 1024 * 1024,
         }),
       );
+      const stdout = refInventory
+        ? refDecoder.decode(r.stdout)
+        : r.stdout.toString();
       return {
         code: 0,
-        stdout: preserveOutput ? r.stdout : r.stdout.trimEnd(),
-        stderr: r.stderr,
+        stdout: refInventory
+          ? stdout.replace(/\n$/u, "")
+          : preserveOutput
+            ? stdout
+            : stdout.trimEnd(),
+        stderr: r.stderr.toString(),
       };
     } catch (error) {
       const e = error as {
         code?: number;
-        stdout?: string;
-        stderr?: string;
+        stdout?: Buffer;
+        stderr?: Buffer;
         killed?: boolean;
       };
       if (typeof e.code !== "number" || e.killed) throw error;
       return {
         code: e.code,
-        stdout: e.stdout?.trimEnd() ?? "",
-        stderr: e.stderr ?? "Git failed",
+        stdout: e.stdout?.toString().trimEnd() ?? "",
+        stderr: e.stderr?.toString() ?? "Git failed",
       };
     }
   }
@@ -323,7 +336,7 @@ export class CentralGitTransport
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
-    preserveOutput = false,
+    preserveOutput: boolean | "ref-inventory" = false,
   ) {
     const r = await this.command(repository, args, extraEnv, preserveOutput);
     // execFile-shaped, so callers can classify by exit status and stderr.
@@ -511,12 +524,9 @@ export class CentralGitTransport
       ? this.workerEndpoint(push)
       : push(path));
   }
-  async fetchRefs(
-    repository: string,
+  private async fetchSource(
     source: string | GitRepositoryAddress,
-    refspecs: readonly string[],
     uploadPack?: string,
-    skipIfUnchanged = false,
   ) {
     const remote =
       typeof source !== "string" && source.kind === "worker-remote";
@@ -534,31 +544,23 @@ export class CentralGitTransport
     const local = remote ? path : await this.source(path);
     if (!remote && (await this.agentSource(path, local)) && !uploadPack)
       throw new Error("Agent fetch requires an Agent upload-pack entry");
-    // Bound Agent transports keep one streaming upload-pack per fetch.
-    // A refs probe would add another SSH call and a query-timeout failure mode.
-    if (skipIfUnchanged && !uploadPack) {
-      try {
-        if (await this.refsUnchanged(repository, local, refspecs)) return;
-      } catch (error) {
-        // The probe is only an optimization. Report a bounded classification,
-        // never raw diagnostics (which can contain source paths or credentials).
-        const cause = (
-          error instanceof Error ? (error.cause ?? error) : error
-        ) as { code?: unknown; killed?: boolean; signal?: string } | null;
-        const reason =
-          cause?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
-            ? "output_limit"
-            : cause?.code === "runtime_timeout" ||
-                (cause?.killed &&
-                  cause.signal === "SIGKILL" &&
-                  cause.code == null)
-              ? "timeout"
-              : "query_failed";
-        console.warn(
-          `Git refs preflight failed (${reason}); falling back to fetch`,
-        );
-      }
-    }
+    return { remote, local };
+  }
+  async fetchRefs(
+    repository: string,
+    source: string | GitRepositoryAddress,
+    refspecs: readonly string[],
+    uploadPack?: string,
+    skipIfUnchanged = false,
+  ) {
+    const { remote, local } = await this.fetchSource(source, uploadPack);
+    // A bound upload-pack is the only operation that can contact an Agent.
+    if (
+      skipIfUnchanged &&
+      !uploadPack &&
+      (await this.probeUnchanged(repository, local, refspecs))
+    )
+      return;
     // Keep real transfer failures outside the optional probe's catch.
     const fetch = (endpoint: string) =>
       this.checked(repository, [
@@ -575,58 +577,127 @@ export class CentralGitTransport
       ]);
     await (remote ? this.workerEndpoint(fetch) : fetch(local));
   }
+  private async backupInventory(repository: string, ...prefixes: string[]) {
+    const raw = await this.checked(
+      repository,
+      [
+        "for-each-ref",
+        "--format=%(refname) %(objectname) %(objecttype)",
+        ...prefixes,
+      ],
+      {},
+      "ref-inventory",
+    );
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [ref, sha, type] = line.split(" ");
+        if (!ref || !sha || !fullSha.test(sha) || !type)
+          throw new Error("Invalid backup ref record");
+        return { ref, sha, type };
+      });
+  }
   /** Private refs per transfer. Borrow center objects for negotiation; import
    * only the validated tips, without creating any ref (including FETCH_HEAD).
    * Unpublished objects are not recovery roots and can be collected by Git. */
-  async stageBackup(
+  async prepareBranchBackup(
     repository: string,
-    fetch: (stage: string) => Promise<void>,
-    previous: ReadonlyMap<string, string>,
-    machine: string,
-  ) {
-    const format = await this.objectFormat(repository);
+    source: GitRepositoryAddress,
+    {
+      machine,
+      branch,
+      excludedBranches = [],
+      uploadPack,
+      skipIfUnchanged,
+    }: GitBackupSelection,
+  ): Promise<GitPreparedBackup> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(machine))
+      throw new Error("Invalid backup machine");
+    for (const name of [
+      ...(branch === undefined ? [] : [branch]),
+      ...excludedBranches,
+    ]) {
+      if (!name.startsWith("agent/")) throw new Error("Invalid backup branch");
+      await this.checked(repository, [
+        "check-ref-format",
+        `refs/heads/${name}`,
+      ]);
+    }
+    const prefix = `refs/cardigan/backups/${machine}/`;
+    const suffix = branch ?? "agent/";
+    const inventory = await this.backupInventory(
+      repository,
+      prefix + suffix,
+      `refs/cardigan/backup-generations/${machine}/${suffix}`,
+    );
+    const previous = new Map(inventory.map(({ ref, sha }) => [ref, sha]));
+    const head = `refs/heads/${branch ?? "agent/*"}`;
+    let confirmed: readonly GitRef[] | undefined;
+    if (skipIfUnchanged && !uploadPack && !excludedBranches.length) {
+      const { local } = await this.fetchSource(source, uploadPack);
+      confirmed = await this.probeUnchanged(
+        repository,
+        local,
+        [`+${head}:${prefix}${branch ?? "agent/*"}`],
+        previous,
+      );
+    }
     const stage = await mkdtemp(join(this.root, ".backup-"));
     try {
-      await this.checked(stage, [
-        "init",
-        "--bare",
-        "--template=",
-        `--object-format=${format}`,
-      ]);
-      // Relative to the stage object directory; only a validated project basename
-      // enters this one-line alternates file (never an Agent path).
-      await writeFile(
-        join(stage, "objects/info/alternates"),
-        `../../${basename(repository)}/objects\n`,
-      );
-      await fetch(stage);
-      const raw = await this.checked(stage, [
-        "for-each-ref",
-        "--format=%(refname) %(objectname) %(objecttype)",
-        "refs/heads/agent/",
-      ]);
-      const edits = raw
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-          const [name, sha, type] = line.split(" ");
-          if (
-            !name?.startsWith("refs/heads/agent/") ||
-            !sha ||
-            !fullSha.test(sha) ||
-            type !== "commit"
-          )
-            throw new Error("Invalid staged backup commit");
-          const ref = `refs/cardigan/backups/${machine}/${name.slice("refs/heads/".length)}`;
-          return { ref, sha, old: previous.get(ref) ?? null };
-        });
+      let refs: readonly GitRef[];
+      if (confirmed) {
+        // The local probe observed these exact tips. Even here publication
+        // must advance their generations, not those of absent branches.
+        const commits = new Set(
+          inventory.filter((r) => r.type === "commit").map((r) => r.sha),
+        );
+        if (confirmed.some((r) => !commits.has(r.sha)))
+          throw new Error("Invalid backup commit");
+        refs = confirmed;
+      } else {
+        const format = await this.objectFormat(repository);
+        await this.checked(stage, [
+          "init",
+          "--bare",
+          "--template=",
+          `--object-format=${format}`,
+        ]);
+        // Relative to the stage object directory; only a validated project basename
+        // enters this one-line alternates file (never an Agent path).
+        await writeFile(
+          join(stage, "objects/info/alternates"),
+          `../../${basename(repository)}/objects\n`,
+        );
+        await this.fetchRefs(
+          stage,
+          source,
+          [
+            `+${head}:${head}`,
+            ...excludedBranches.map((name) => `^refs/heads/${name}`),
+          ],
+          uploadPack,
+        );
+        refs = (await this.backupInventory(stage, "refs/heads/agent/")).map(
+          ({ ref, sha, type }) => {
+            if (!ref.startsWith("refs/heads/agent/") || type !== "commit")
+              throw new Error("Invalid staged backup commit");
+            return { ref: prefix + ref.slice("refs/heads/".length), sha };
+          },
+        );
+      }
+      const edits = refs.map(({ ref, sha }) => ({
+        ref,
+        sha,
+        old: previous.get(ref) ?? null,
+      }));
       const tips = [
         ...new Set(edits.filter((e) => e.sha !== e.old).map((e) => e.sha)),
       ];
       if (tips.length) await this.fetchRefs(repository, stage, tips);
       // A successful poll of the very same SHA is still newer evidence. Fence
       // it too, so an older in-flight rewrite cannot win an ABA race.
-      if (!edits.length) return { edits, generations: [] };
+      if (!edits.length) return { refs, publish() {}, rollback() {} };
       const nonce = join(stage, "generation");
       await writeFile(nonce, randomUUID());
       const generation = await this.checked(repository, [
@@ -642,14 +713,20 @@ export class CentralGitTransport
         );
         return { ref: key, sha: generation, old: previous.get(key) ?? null };
       });
-      return { edits, generations };
+      return {
+        refs,
+        ...(await this.backupRefTransaction(repository, [
+          ...edits,
+          ...generations,
+        ])),
+      };
     } finally {
       await rm(stage, { recursive: true, force: true });
     }
   }
   /** Prepare local CAS before entering the short authorization/SQLite section.
    * One update-ref transaction protects wildcard publication and its rollback. */
-  async backupRefTransaction(
+  private async backupRefTransaction(
     repository: string,
     edits: readonly { ref: string; sha: string; old: string | null }[],
   ) {
@@ -689,42 +766,81 @@ export class CentralGitTransport
         "-z",
       ];
       this.options.onCommand?.(repository, args);
-      execFileSync("git", args, {
-        env: gitEnvironment(),
-        timeout: gitTimeoutMs("update-ref", this.options),
-        killSignal: "SIGKILL",
-        input: commands.join(""),
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      try {
+        execFileSync("git", args, {
+          env: gitEnvironment(),
+          timeout: gitTimeoutMs("update-ref", this.options),
+          killSignal: "SIGKILL",
+          input: commands.join(""),
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (error) {
+        // Match the checked Git command error contract used by worktree callers.
+        const status = (error as { status?: number }).status;
+        if (typeof status === "number")
+          Object.assign(error as Error, { code: status });
+        throw error;
+      }
     };
     return { publish: () => run(forward), rollback: () => run(reverse) };
   }
-  /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
-  private async refsUnchanged(
+  private async probeUnchanged(
     repository: string,
     source: string,
     refspecs: readonly string[],
-  ): Promise<boolean> {
+    previous?: ReadonlyMap<string, string>,
+  ) {
+    try {
+      return await this.unchangedRefs(repository, source, refspecs, previous);
+    } catch (error) {
+      // The probe is only an optimization. Report a bounded classification,
+      // never raw diagnostics (which can contain source paths or credentials).
+      const cause = (
+        error instanceof Error ? (error.cause ?? error) : error
+      ) as { code?: unknown; killed?: boolean; signal?: string } | null;
+      const reason =
+        cause?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+          ? "output_limit"
+          : cause?.code === "runtime_timeout" ||
+              (cause?.killed &&
+                cause.signal === "SIGKILL" &&
+                cause.code == null)
+            ? "timeout"
+            : "query_failed";
+      console.warn(
+        `Git refs preflight failed (${reason}); falling back to fetch`,
+      );
+    }
+    return undefined;
+  }
+  /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
+  private async unchangedRefs(
+    repository: string,
+    source: string,
+    refspecs: readonly string[],
+    previous?: ReadonlyMap<string, string>,
+  ): Promise<readonly GitRef[] | undefined> {
     // Optimize the two polling shapes only. SHA fetches and other refspecs
     // keep the ordinary transfer path, including Git's validation/errors.
-    if (refspecs.length !== 1) return false;
+    if (refspecs.length !== 1) return undefined;
     const match =
       /^\+?(refs\/[A-Za-z0-9._/-]+)(\*)?:(refs\/[A-Za-z0-9._/-]+)(\*)?$/u.exec(
         refspecs[0] ?? "",
       );
-    if (!match || match[2] !== match[4]) return false;
+    if (!match || match[2] !== match[4]) return undefined;
     const from = match[1] as string,
       to = match[3] as string;
-    if (from.includes("..") || to.includes("..")) return false;
+    if (from.includes("..") || to.includes("..")) return undefined;
     const wildcard = match[2] === "*";
-    if (wildcard && (!from.endsWith("/") || !to.endsWith("/"))) return false;
-    const raw = await this.checked(repository, [
-      "ls-remote",
-      "--refs",
-      "--",
-      source,
-      `${from}${wildcard ? "*" : ""}`,
-    ]);
+    if (wildcard && (!from.endsWith("/") || !to.endsWith("/")))
+      return undefined;
+    const raw = await this.checked(
+      repository,
+      ["ls-remote", "--refs", "--", source, `${from}${wildcard ? "*" : ""}`],
+      {},
+      "ref-inventory",
+    );
     const advertised = raw
       .split("\n")
       .filter(Boolean)
@@ -738,11 +854,15 @@ export class CentralGitTransport
       });
     // A missing exact source ref must still fail in fetch; an empty agent/*
     // set is normal and never prunes existing backups.
-    if (!advertised.length) return wildcard;
-    const current = new Map(
-      (await this.listRefs(repository, to)).map(({ ref, sha }) => [ref, sha]),
-    );
-    return advertised.every(({ ref, sha }) => current.get(ref) === sha);
+    if (!advertised.length) return wildcard ? [] : undefined;
+    const current =
+      previous ??
+      new Map(
+        (await this.listRefs(repository, to)).map(({ ref, sha }) => [ref, sha]),
+      );
+    return advertised.every(({ ref, sha }) => current.get(ref) === sha)
+      ? advertised
+      : undefined;
   }
   async readRef(repository: string, ref: string) {
     await this.checked(repository, ["check-ref-format", ref]);
@@ -1311,11 +1431,12 @@ export class CentralGitTransport
   ): Promise<readonly GitRef[]> {
     if (!/^refs\/[A-Za-z0-9._/-]+$/u.test(prefix) || prefix.includes(".."))
       throw new Error("Invalid ref prefix");
-    const raw = await this.checked(repository, [
-      "for-each-ref",
-      "--format=%(refname) %(objectname)",
-      prefix,
-    ]);
+    const raw = await this.checked(
+      repository,
+      ["for-each-ref", "--format=%(refname) %(objectname)", prefix],
+      {},
+      "ref-inventory",
+    );
     return raw
       .split("\n")
       .filter(Boolean)

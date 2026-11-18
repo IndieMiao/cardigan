@@ -749,6 +749,119 @@ async function localBackupFixture(configured: boolean) {
   return { a, path };
 }
 
+test.each(["unchanged diff", "diff then cleanup"])(
+  "a late background transfer cannot supersede a worktree confirmation (%s)",
+  async (writer) => {
+    const { a, path } = await localBackupFixture(false);
+    const tree = join(dataDir, "agent", "worktrees", f.project_id, a.id);
+    const branch = required(a.branch),
+      assignment = { ...a, worktree_path: tree };
+    git(path, "checkout", "main");
+    git(path, "worktree", "add", tree, branch);
+    f.store.uow.run((tx) => tx.assignments.put(f.project_id, assignment));
+    const project = required(service.projectOf(f.project_id));
+    const ref = `refs/cardigan/backups/local/${branch}`;
+    const accepted = commit(tree, "A");
+    await service.backup(project);
+    const evidence = () =>
+      events().filter(
+        (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+      );
+    const before = evidence();
+    expect(before.at(-1)?.payload).toMatchObject({ sha: accepted });
+    git(tree, "reset", "--hard", initial);
+    const staleHead = commit(tree, "B");
+    const ready = Promise.withResolvers<void>(),
+      resume = Promise.withResolvers<void>();
+    const fetch = CentralGitTransport.prototype.fetchRefs;
+    vi.spyOn(CentralGitTransport.prototype, "fetchRefs").mockImplementation(
+      async function (...args) {
+        await fetch.apply(this, args);
+        if (
+          args[2][0] !== `+refs/heads/${branch}:refs/heads/${branch}` ||
+          typeof args[1] === "string" ||
+          args[1].kind !== "host-local"
+        )
+          return;
+        expect(git(args[0], "rev-parse", branch)).toBe(staleHead);
+        ready.resolve();
+        await resume.promise;
+      },
+    );
+    const pending = service.backup(project);
+    try {
+      await Promise.race([
+        ready.promise,
+        pending.then(() => {
+          throw new Error("Capture was not intercepted");
+        }),
+      ]);
+      git(tree, "reset", "--hard", accepted);
+      if (writer === "diff then cleanup") {
+        const changed = commit(tree, "C");
+        expect(
+          await service.diffWorktree({ project, assignment }),
+        ).toMatchObject({ head_sha: changed, reachable: true });
+        expect(git(center(), "rev-parse", ref)).toBe(changed);
+        git(tree, "reset", "--hard", accepted);
+        expect(
+          await service.removeWorktree({ project, assignment, force: false }),
+        ).toMatchObject({ status: "removed" });
+      } else {
+        expect(
+          await service.diffWorktree({ project, assignment }),
+        ).toMatchObject({ head_sha: accepted, reachable: true });
+      }
+      expect(git(center(), "rev-parse", ref)).toBe(accepted);
+      resume.resolve();
+      await expect(pending).rejects.toThrow(/local/);
+      expect(git(center(), "rev-parse", ref)).toBe(accepted);
+      expect(evidence()).toEqual(before);
+    } finally {
+      resume.resolve();
+      await pending.catch(() => {});
+    }
+  },
+);
+
+test("wildcard capture rejects invalid ref bytes before publishing any ref and accepts a literal replacement character", async () => {
+  const { a, path } = await localBackupFixture(false);
+  // Leave only the unbound wildcard job on local so its error is directly observable.
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project_id, { ...a, status: "released" }),
+  );
+  const project = required(service.projectOf(f.project_id));
+  const valid = "agent/caf\ufffd";
+  git(path, "branch", valid);
+  git(path, "branch", "agent/other");
+  await service.backup(project);
+  const inventory = () =>
+    execFileSync("git", [
+      "-C",
+      center(),
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/cardigan/backups/local",
+      "refs/cardigan/backup-generations/local",
+    ]);
+  const before = inventory();
+  const updated = commit(path, "second");
+  git(path, "branch", "-f", "agent/other", updated);
+  const bad = Buffer.concat([
+    Buffer.from(join(path, ".git/refs/heads/agent/caf")),
+    Buffer.from([0xe9]),
+  ]);
+  writeFileSync(bad, `${updated}\n`);
+  await expect(service.backup(project)).rejects.toThrow(/utf-?8/i);
+  expect(inventory()).toEqual(before);
+  rmSync(bad);
+  git(path, "branch", "-f", valid, updated);
+  await service.backup(project);
+  expect(
+    git(center(), "rev-parse", `refs/cardigan/backups/local/${valid}`),
+  ).toBe(updated);
+});
+
 test.each([false, true])(
   "local wildcard backup cannot overwrite transactional branches on DB failure (configured=%s)",
   async (configured) => {
