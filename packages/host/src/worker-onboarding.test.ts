@@ -252,6 +252,34 @@ test("confirmed configuration archives old evidence, replaces only its draft and
   expect(await onboardWorker(resume)).toBe(true);
 });
 
+test.each([undefined, true, false])(
+  "check and resume preserve the live allow_remote_launch setting (%s) when rebaselining",
+  async (allowRemoteLaunch) => {
+    const o = options();
+    expect(await onboardWorker(o)).toBe(true);
+    const next = input();
+    first(first(next.runtime.machines).projects).session = "short";
+    const config = parseWorkerOnboarding(next, dataDir);
+    const live = join(root, "runtime-workers.yaml");
+    const applied = structuredClone(next.runtime);
+    if (allowRemoteLaunch !== undefined)
+      Object.assign(first(first(applied.machines).projects), {
+        allow_remote_launch: allowRemoteLaunch,
+      });
+    const yaml = stringify(applied);
+    writeFileSync(live, yaml, { mode: 0o600 });
+
+    const resume = { ...o, config, mode: "resume" as const };
+    expect(
+      await onboardWorker({ ...resume, confirmConfig: config.digest }),
+    ).toBe(true);
+    expect(await onboardWorker(resume)).toBe(true);
+    expect(await onboardWorker({ ...o, config, mode: "check" })).toBe(true);
+    expect(readFileSync(live, "utf8")).toBe(yaml);
+    expect(readOnboardingYaml(draftPath())).toEqual(next.runtime);
+  },
+);
+
 test("confirmation never bypasses physical or live binding conflicts, and failed rechecks clear passed steps", async () => {
   const o = options();
   await onboardWorker(o);
@@ -270,7 +298,11 @@ test("confirmation never bypasses physical or live binding conflicts, and failed
   first(first(changed.runtime.machines).projects).session = "short";
   config = parseWorkerOnboarding(changed, dataDir);
   const live = join(root, "runtime-workers.yaml");
-  writeFileSync(live, stringify(input().runtime), { mode: 0o600 });
+  const applied = input().runtime;
+  Object.assign(first(first(applied.machines).projects), {
+    allow_remote_launch: true,
+  });
+  writeFileSync(live, stringify(applied), { mode: 0o600 });
   await expect(
     onboardWorker({
       ...o,
@@ -279,7 +311,7 @@ test("confirmation never bypasses physical or live binding conflicts, and failed
       confirmConfig: config.digest,
     }),
   ).rejects.toThrow("worker_config_conflict");
-  expect(readOnboardingYaml(live)).toEqual(input().runtime);
+  expect(readOnboardingYaml(live)).toEqual(applied);
   writeFileSync(live, stringify(changed.runtime));
   expect(
     await onboardWorker({

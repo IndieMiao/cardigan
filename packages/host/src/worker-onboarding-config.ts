@@ -279,6 +279,15 @@ export function parseWorkerOnboarding(
   }
 }
 
+// Launch permission belongs to the operator, not to the onboarding binding.
+function onboardingBindingDigest({
+  allow_remote_launch: _allowRemoteLaunch,
+  mcp_url,
+  ...binding
+}: Record<string, unknown>): string {
+  return onboardingDigest({ ...binding, mcp_url: mcpUrl(mcp_url) });
+}
+
 /** Validate a hypothetical merge, but never write the live configuration. */
 export function checkWorkerDraft(
   config: WorkerOnboardingConfig,
@@ -308,10 +317,10 @@ export function checkWorkerDraft(
       const old = projects.find(
         (p) => p.project_id === config.worker.project_id,
       );
-      const comparable = old
-        ? { ...old, mcp_url: mcpUrl(old.mcp_url) }
-        : undefined;
-      if (old && onboardingDigest(comparable) !== onboardingDigest(binding))
+      if (
+        old &&
+        onboardingBindingDigest(old) !== onboardingBindingDigest(binding)
+      )
         onboardingFail("worker_config_conflict");
       if (!old) projects.push(binding);
       existing.projects = projects;
