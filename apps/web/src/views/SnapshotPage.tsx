@@ -1,52 +1,86 @@
 import { useCallback } from "react";
 import type { CardiganClient, CardView, SnapshotData } from "../api.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
+import { FilterSelect } from "../components/FilterSelect.js";
 import {
   EmptyState,
   IdTag,
-  PageTitle,
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { GroupedTableBody } from "../components/GroupedTableBody.js";
+import {
+  DataTableCell,
+  DataTableLayout,
+} from "../components/layout/DataTableLayout.js";
+import { PageHeader } from "../components/layout/PageHeader.js";
+import { PageStat, PageStats } from "../components/layout/PageStatsLayout.js";
 import { CardLink, Feedback } from "../components/Operations.js";
+import { PageToolbar } from "../components/PageToolbar.js";
+import { RefreshGroup } from "../components/RefreshGroup.js";
 import { Tooltip } from "../components/Tooltip.js";
-import { routeHash } from "../route.js";
+import { SearchInput } from "../components/ui/input.js";
+import {
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table.js";
+import { routeHash, useRouteFilters } from "../route.js";
 import { SNAPSHOT_GROUPS } from "../snapshot-groups.js";
+import { useRefreshInterval } from "../useRefreshInterval.js";
 import { useResource } from "../useResource.js";
 
-function Cards({
-  title,
-  cards,
-  projectId,
-}: {
-  title: string;
-  cards: readonly CardView[];
-  projectId: string;
-}) {
-  if (!cards.length) return null;
-  return (
-    <section aria-label={title}>
-      <h2>
-        {title}（{cards.length}）
-      </h2>
-      <ul className="overview-list">
-        {cards.map((c) => (
-          <li key={c.id}>
-            <CardLink projectId={projectId} id={c.id} label={c.title} />{" "}
-            <StatusTag status={c.status} />
-            <p>
-              <span>
-                下一步：
-                <NextOwners owners={c.next_owners} />
-              </span>{" "}
-              <span>原因：{c.why}</span>
-            </p>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
+type Group = (typeof SNAPSHOT_GROUPS)[number]["value"];
+interface SnapshotRow {
+  readonly group: Group;
+  readonly key: string;
+  readonly cardId: string;
+  readonly card: CardView | undefined;
+  /** Card reason, or the blocked work item's label. */
+  readonly reason: string;
 }
+const groupLabel = (group: string) =>
+  SNAPSHOT_GROUPS.find((g) => g.value === group)?.label ?? group;
+const groupOptions = SNAPSHOT_GROUPS.map(({ value, label }) => ({
+  value,
+  label,
+}));
+
+/** The existing sections in their existing order; groups may overlap. */
+function snapshotRows(data: SnapshotData): SnapshotRow[] {
+  const byId = new Map(data.cards.map((card) => [card.id, card]));
+  const cardRows = (group: Group, cards: readonly CardView[]) =>
+    cards.map((card) => ({
+      group,
+      key: `${group}/${card.id}`,
+      cardId: card.id,
+      card,
+      reason: card.why,
+    }));
+  return [
+    ...cardRows(
+      "human",
+      data.cards.filter((c) => data.waiting.human.includes(c.id)),
+    ),
+    ...cardRows(
+      "agent",
+      data.cards.filter((c) => data.waiting.agent.includes(c.id)),
+    ),
+    ...cardRows("progress", data.in_progress),
+    ...cardRows("review", data.in_review),
+    ...data.blocked.map((b) => ({
+      group: "blocked" as const,
+      key: `blocked/${b.card_id}/${b.work_item_id}/${b.label}`,
+      cardId: b.card_id,
+      card: byId.get(b.card_id),
+      reason: b.label,
+    })),
+  ];
+}
+const matches = (query: string, ...values: (string | null | undefined)[]) =>
+  !query || values.some((value) => value?.toLocaleLowerCase().includes(query));
+
 export function SnapshotPage({
   client,
   projectId,
@@ -56,169 +90,244 @@ export function SnapshotPage({
   projectId: string;
   revision?: number;
 }) {
+  const [filters, setFilters] = useRouteFilters({
+    kind: "snapshot",
+    projectId,
+  });
   const load = useCallback(
     () => client.snapshot(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload, interactive } = useResource(
+  const { data, pending, error, reload, refresh, interactive } = useResource(
     load,
     revision,
   );
-  const hasItems =
+  const [interval, setRefreshInterval] = useRefreshInterval(
+    `cardigan.snapshot.refresh.${projectId}`,
+    pending,
+    refresh,
+  );
+  const query = filters.q?.trim().toLocaleLowerCase() ?? "";
+  const group = filters.group ?? "";
+  const filtered = Boolean(query || group);
+  const allRows = data ? snapshotRows(data) : [];
+  const rows = allRows.filter(
+    (row) =>
+      (!group || row.group === group) &&
+      matches(query, row.cardId, row.card?.title, row.reason),
+  );
+  const titleOf = (id: string | null) =>
+    data?.cards.find((c) => c.id === id)?.title;
+  const deliveries = (group ? [] : (data?.recent_deliveries ?? [])).filter(
+    (d) =>
+      matches(
+        query,
+        d.id,
+        d.card_id,
+        titleOf(d.card_id),
+        d.work_item_id,
+        d.work_item_title,
+        d.summary,
+      ),
+  );
+  const empty =
     data &&
-    data.waiting.human.length +
-      data.waiting.agent.length +
-      data.in_progress.length +
-      data.in_review.length +
-      data.blocked.length +
-      data.recent_deliveries.length >
-      0;
+    (!data.cards.length
+      ? "没有卡片"
+      : rows.length + deliveries.length === 0
+        ? filtered
+          ? "没有匹配的卡片"
+          : "没有进行中的工作"
+        : undefined);
   return (
-    <section aria-label="项目快照">
-      <PageTitle title="项目快照" />
+    <section className="ui-workspace" aria-label="项目快照">
+      <PageHeader
+        title="项目快照"
+        actions={data && <Overview data={data} projectId={projectId} />}
+      />
+      <PageToolbar
+        fields={[
+          {
+            key: "group",
+            label: "分组",
+            options: groupOptions,
+            render: (value, setValue) => (
+              <FilterSelect
+                label="分组"
+                value={value}
+                options={groupOptions}
+                onChange={setValue}
+              />
+            ),
+          },
+          {
+            key: "q",
+            label: "搜索",
+            grow: true,
+            render: (value, setValue) => (
+              <SearchInput
+                aria-label="搜索标题或编号"
+                placeholder="搜索标题或编号"
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
+              />
+            ),
+          },
+        ]}
+        values={filters}
+        onChange={setFilters}
+      >
+        <RefreshGroup
+          interval={interval}
+          onIntervalChange={setRefreshInterval}
+          pending={pending}
+          onRefresh={reload}
+        />
+      </PageToolbar>
       <Feedback
         pending={pending}
         interactive={interactive}
         error={error}
         retry={reload}
       />
-      {data && <Overview data={data} projectId={projectId} />}
-      {data &&
-        (!data.cards.length ? (
-          <EmptyState>
-            这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。
-          </EmptyState>
-        ) : (
-          <>
-            {!hasItems && (
-              <EmptyState>
-                目前没有进行中、待审核或阻塞的工作。新进展会出现在这里。
-              </EmptyState>
+      {empty && <EmptyState>{empty}</EmptyState>}
+      {data && rows.length > 0 && (
+        <DataTableLayout records label="卡片分组">
+          <TableHeader>
+            <TableRow>
+              <TableHead>编号</TableHead>
+              <TableHead>标题</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>下一步</TableHead>
+              <TableHead>原因</TableHead>
+            </TableRow>
+          </TableHeader>
+          <GroupedTableBody
+            rows={rows}
+            groupBy={(row) => row.group}
+            groupName={(g) => groupLabel(g.id)}
+            columns={5}
+            countLabel="项"
+            renderRow={(row) => (
+              <TableRow key={row.key}>
+                <TableCell data-record="lead">
+                  <IdTag
+                    id={row.cardId}
+                    label="卡片"
+                    href={routeHash({
+                      kind: "card",
+                      projectId,
+                      cardId: row.cardId,
+                    })}
+                    {...(row.card ? { detail: row.card.title } : {})}
+                  />
+                </TableCell>
+                <TableCell>
+                  {row.card ? (
+                    <a
+                      className="ui-data-title"
+                      href={routeHash({
+                        kind: "card",
+                        projectId,
+                        cardId: row.cardId,
+                      })}
+                    >
+                      {row.card.title}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
+                <DataTableCell nowrap>
+                  {row.card ? <StatusTag status={row.card.status} /> : "—"}
+                </DataTableCell>
+                <TableCell data-label="下一步">
+                  {row.card?.next_owners.length ? (
+                    <NextOwners owners={row.card.next_owners} />
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
+                <TableCell data-label="原因">{row.reason || "—"}</TableCell>
+              </TableRow>
             )}
-            <div className="overview-grid">
-              <Cards
-                title="等你处理"
-                cards={data.cards.filter((c) =>
-                  data.waiting.human.includes(c.id),
-                )}
-                projectId={projectId}
-              />
-              <Cards
-                title="等 Agent 处理"
-                cards={data.cards.filter((c) =>
-                  data.waiting.agent.includes(c.id),
-                )}
-                projectId={projectId}
-              />
-            </div>
-            <div className="overview-grid">
-              <Cards
-                title="进行中"
-                cards={data.in_progress}
-                projectId={projectId}
-              />
-              <Cards
-                title="审核与待合并"
-                cards={data.in_review}
-                projectId={projectId}
-              />
-            </div>
-            {!!data.blocked.length && (
-              <section aria-label="阻塞事项">
-                <h2>阻塞事项（{data.blocked.length}）</h2>
-                <ul>
-                  {data.blocked.map((b) => (
-                    <li key={`${b.card_id}/${b.work_item_id}/${b.label}`}>
-                      <CardLink projectId={projectId} id={b.card_id} />{" "}
-                      {b.label}
-                    </li>
-                  ))}
-                </ul>
-              </section>
+          />
+        </DataTableLayout>
+      )}
+      {deliveries.length > 0 && (
+        <DataTableLayout records label="最近交付">
+          <TableHeader>
+            <TableRow>
+              <TableHead>卡片</TableHead>
+              <TableHead>工作项</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>提交时间</TableHead>
+              <TableHead>摘要</TableHead>
+            </TableRow>
+          </TableHeader>
+          <GroupedTableBody
+            rows={deliveries}
+            groupBy={() => "recent"}
+            groupName={() => "最近交付"}
+            columns={5}
+            countLabel="项"
+            renderRow={(d) => (
+              <TableRow key={d.id}>
+                <TableCell data-record="lead">
+                  <CardLink
+                    projectId={projectId}
+                    id={d.card_id}
+                    label={titleOf(d.card_id) ?? "卡片"}
+                  />
+                </TableCell>
+                <TableCell>
+                  {d.work_item_id ? (
+                    <IdTag
+                      id={d.work_item_id}
+                      label={d.work_item_title ?? "工作项"}
+                      href={
+                        d.card_id
+                          ? routeHash({
+                              kind: "card",
+                              projectId,
+                              cardId: d.card_id,
+                              anchor: `work-item-${d.work_item_id}`,
+                            })
+                          : undefined
+                      }
+                    />
+                  ) : (
+                    "工作项未记录"
+                  )}
+                </TableCell>
+                <DataTableCell nowrap>
+                  <StatusTag status={d.status} />
+                </DataTableCell>
+                <DataTableCell data-label="提交时间" nowrap>
+                  <Time value={d.submitted_at} />
+                </DataTableCell>
+                <TableCell>
+                  <IdTag
+                    id={d.id}
+                    label="交付"
+                    href={
+                      d.card_id
+                        ? routeHash({
+                            kind: "card",
+                            projectId,
+                            cardId: d.card_id,
+                            anchor: `delivery-${d.id}`,
+                          })
+                        : undefined
+                    }
+                  />{" "}
+                  {d.summary}
+                </TableCell>
+              </TableRow>
             )}
-            {!!data.recent_deliveries.length && (
-              <section aria-label="最近交付">
-                <h2>最近交付</h2>
-                <table className="card-table delivery-table">
-                  <thead>
-                    <tr>
-                      {["卡片", "工作项", "状态", "提交时间", "摘要"].map(
-                        (label) => (
-                          <th scope="col" key={label}>
-                            {label}
-                          </th>
-                        ),
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.recent_deliveries.map((d) => (
-                      <tr key={d.id}>
-                        <td>
-                          <CardLink
-                            projectId={projectId}
-                            id={d.card_id}
-                            label={
-                              data.cards.find((c) => c.id === d.card_id)
-                                ?.title ?? "卡片"
-                            }
-                          />
-                        </td>
-                        <td>
-                          {d.work_item_id ? (
-                            <IdTag
-                              id={d.work_item_id}
-                              label={d.work_item_title ?? "工作项"}
-                              href={
-                                d.card_id
-                                  ? routeHash({
-                                      kind: "card",
-                                      projectId,
-                                      cardId: d.card_id,
-                                      anchor: `work-item-${d.work_item_id}`,
-                                    })
-                                  : undefined
-                              }
-                            />
-                          ) : (
-                            "工作项未记录"
-                          )}
-                        </td>
-                        <td>
-                          <StatusTag status={d.status} />
-                        </td>
-                        <td>
-                          <Time value={d.submitted_at} />
-                        </td>
-                        <td>
-                          <div className="delivery-summary">
-                            <IdTag
-                              id={d.id}
-                              label="交付"
-                              href={
-                                d.card_id
-                                  ? routeHash({
-                                      kind: "card",
-                                      projectId,
-                                      cardId: d.card_id,
-                                      anchor: `delivery-${d.id}`,
-                                    })
-                                  : undefined
-                              }
-                            />
-                            <span className="summary-text" title={d.summary}>
-                              {d.summary}
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </section>
-            )}
-          </>
-        ))}
+          />
+        </DataTableLayout>
+      )}
     </section>
   );
 }
@@ -238,7 +347,7 @@ function Overview({
     blocked: new Set(data.blocked.map((b) => b.card_id)).size,
   };
   return (
-    <nav className="snapshot-overview" aria-label="项目概览">
+    <PageStats aria-label="项目概览">
       {SNAPSHOT_GROUPS.map((group) => (
         <Tooltip
           key={group.value}
@@ -248,17 +357,17 @@ function Overview({
               : "按卡片计数，各分组可能重叠"
           }
         >
-          <a
+          <PageStat
             href={routeHash({
               kind: "cards",
               projectId,
               filters: { view: "list", overview: group.value },
             })}
-          >
-            <span>{group.label}</span> <strong>{counts[group.value]}</strong>
-          </a>
+            label={group.label}
+            value={counts[group.value]}
+          />
         </Tooltip>
       ))}
-    </nav>
+    </PageStats>
   );
 }

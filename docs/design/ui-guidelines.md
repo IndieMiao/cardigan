@@ -91,6 +91,19 @@
 | Tooltip | `Tooltip` / 状态专用提示；鼠标悬停和键盘聚焦均可达，Escape 关闭，深底浅字（亮色主题 `#262626` 底 / `#f6f6f6` 字）。完整标题/原因不能只靠省略号丢失；长状态详情使用既有可滚动提示 | 图 5；键盘焦点参考（`reference-focus-1440-light.png`） |
 | 容量详情浮层 | `CapacitySummary` 使用 Popover，背景和文字沿用 `--surface` / `--text`；亮色为白底 `#ffffff`、深字 `#262626`，暗色为 `#222222` 底、`#dddddd` 字。不要按通用 Tooltip 的深底浅字标准验收 | 图 6 |
 
+### 列表型观察页（C-458）
+
+项目动态、项目快照按卡片页列表（图 2、3、7）组合，规范此前未覆盖的四种模式如下。
+
+| 模式 | 唯一入口与可测规则 |
+|---|---|
+| 无视图切换的页面 | 右组只放 `RefreshGroup`；刷新周期按页、按项目保存在 `cardigan.<页>.refresh.<项目>`，由 `useRefreshInterval` 调度（默认 30 秒，pending 或页面隐藏时跳过）。左组只用 `FilterSelect` / `SearchInput`；“清除筛选”仅在有筛选时作为最后一个字段出现 |
+| 页头统计 | `layout/PageStatsLayout` 的 `PageStats` / `PageStat`，放在 `PageHeader actions`：无边框、13px/20px、标签 `--text-muted`、数值 `--text` 常规字重，可点击跳转到对应筛选；窄屏整组换行。计数口径写在 tooltip，不写说明小字 |
+| 分组与记录式表格 | `DataTableLayout records`（可选 `label` 生成命名区域，相邻表格间距 24px）+ `GroupedTableBody` 分组行。`records` 在 `stacked` 的纵向记录基础上扩展：折叠的分组保持隐藏，`data-record="lead"` / `"aside"` 占首行左/右，每条记录只画一条分隔线、不画单元格分隔线（卡片页列表因旧样式层叠仍有，属历史差异）。状态、时间等短单元格同样用 `DataTableCell nowrap`，长文本列自然换行，不用省略号截断 |
+| 次要信息折叠 | 原始记录放在行下方的整行 `DataTableDetail`（12px/18px 等宽、最高 50vh 内部滚动），由行尾“详情 / 收起”按钮控制，`aria-expanded` + `aria-controls`；折叠时保留在 DOM 中但 `hidden` |
+
+空状态：动态“没有事件” / 筛选后“没有匹配的事件”；快照“没有卡片” / “没有进行中的工作” / 筛选后“没有匹配的卡片”。
+
 ## Needs You 行模式
 
 C-459 起，Needs You 各标签页（待拍板、合并确认、待你执行、稍后、知会）共用同一页头（`PageTitle`）和标签栏，标签内容只用 `components/layout/NeedsRowLayout.tsx` 组合；页面不另写列表、分组或空状态的样式。

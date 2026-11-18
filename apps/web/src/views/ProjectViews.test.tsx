@@ -90,19 +90,21 @@ test("snapshot separates human/agent waits, shows next owners, blocked work and 
       projectId="p-1"
     />,
   );
-  const human = within(await screen.findByRole("region", { name: "等你处理" })),
-    agent = within(screen.getByRole("region", { name: "等 Agent 处理" }));
+  const human = within(
+      await screen.findByRole("rowgroup", { name: "等你处理" }),
+    ),
+    agent = within(screen.getByRole("rowgroup", { name: "等 Agent 处理" }));
   expect(human.getByRole("link", { name: /^C-1 / }).getAttribute("href")).toBe(
     "#/p/p-1/cards/C-1",
   );
   expect(human.queryByRole("link", { name: /^C-2 / })).toBeNull();
   expect(agent.getByRole("link", { name: /^C-2 / })).toBeTruthy();
   expect(
-    screen.getByRole("region", { name: "审核与待合并" }).textContent,
+    screen.getByRole("rowgroup", { name: "审核与待合并" }).textContent,
   ).toContain("未命名的 未知角色");
-  expect(
-    screen.getByRole("region", { name: "阻塞事项" }).textContent,
-  ).toContain("等待权限");
+  expect(screen.getByRole("rowgroup", { name: "阻塞" }).textContent).toContain(
+    "等待权限",
+  );
   expect(
     screen.getByRole("region", { name: "最近交付" }).textContent,
   ).toContain("待审核");
@@ -383,9 +385,7 @@ test.each(["snapshot", "execution"] as const)(
     await screen.findByText("读取失败");
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await screen.findByText(
-      kind === "snapshot"
-        ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
-        : "没有匹配的执行记录",
+      kind === "snapshot" ? "没有卡片" : "没有匹配的执行记录",
     );
   },
 );
@@ -773,10 +773,8 @@ test("U1 a project with only inactive cards explains its empty snapshot without 
       projectId="p-1"
     />,
   );
-  await screen.findByText(
-    "目前没有进行中、待审核或阻塞的工作。新进展会出现在这里。",
-  );
-  expect(document.querySelectorAll("h2")).toHaveLength(0);
+  await screen.findByText("没有进行中的工作");
+  expect(screen.queryAllByRole("table")).toHaveLength(0);
 });
 
 test.each([null, assignment.runtime_ref])(

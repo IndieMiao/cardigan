@@ -168,27 +168,6 @@
     "count": 1
   },
   {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "311cbfff1aea7554",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setFilters({})}>",
-    "count": 1
-  },
-  {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "e5f1860995c3e6e8",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={pending} onClick={() => { if (data.next_before) setFilters({ ...filters, before: data.next_before }); }} >",
-    "count": 1
-  },
-  {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "60c89a8ccadd1c3c",
-    "text": "<button type=\"button\" onClick={() => setFilters({ ...filters, before: \"\" })} >",
-    "count": 1
-  },
-  {
     "path": "views/CapacitySettings.tsx",
     "kind": "native-input",
     "hash": "78590324b18cae90",

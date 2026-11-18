@@ -1,12 +1,28 @@
-import { useCallback } from "react";
+import { Fragment, useCallback, useId, useState } from "react";
 import type { ActivityData, CardiganClient } from "../api.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
-import { FilterBar } from "../components/FilterBar.js";
-import { EmptyState, PageTitle, Time } from "../components/Foundation.js";
-import { IdentityRow } from "../components/IdentityRow.js";
+import { FilterSelect } from "../components/FilterSelect.js";
+import { EmptyState, Time } from "../components/Foundation.js";
+import { GroupedTableBody } from "../components/GroupedTableBody.js";
+import {
+  DataTableCell,
+  DataTableDetail,
+  DataTableLayout,
+} from "../components/layout/DataTableLayout.js";
+import { PageHeader } from "../components/layout/PageHeader.js";
 import { CardLink, Feedback } from "../components/Operations.js";
+import { PageToolbar } from "../components/PageToolbar.js";
+import { RefreshGroup } from "../components/RefreshGroup.js";
+import { Button } from "../components/ui/button.js";
+import {
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table.js";
 import { eventLabel } from "../events.js";
 import { useRouteFilters } from "../route.js";
+import { useRefreshInterval } from "../useRefreshInterval.js";
 import { useResource } from "../useResource.js";
 
 const ACTOR_LABELS: Readonly<Record<string, string>> = {
@@ -115,114 +131,111 @@ function groupedLabel(type: string, count: number): string {
       return `${suffix} ${count} 次 ${label.slice(prefix.length)}`;
   return `${label} ${count} 次`;
 }
-function DayGroup({
-  day,
-  events,
+const options = (labels: Readonly<Record<string, string>>) =>
+  Object.entries(labels).map(([value, label]) => ({ value, label }));
+const COLUMNS = 5;
+
+function ActivityRow({
+  row,
   projectId,
+  open,
+  onToggle,
 }: {
-  readonly day: string;
-  readonly events: readonly ActivityEvent[];
+  readonly row: Row;
   readonly projectId: string;
+  readonly open: boolean;
+  readonly onToggle: () => void;
 }) {
+  const detailId = useId();
+  const first = row.kind === "event" ? row.event : row.events[0];
+  const audit =
+    row.kind === "event" &&
+    row.event.type === "cross_card_read" &&
+    row.event.payload !== null &&
+    typeof row.event.payload === "object"
+      ? (row.event.payload as Record<string, unknown>)
+      : undefined;
+  const targets = auditTargets(audit);
+  const cardId = row.kind === "event" ? row.event.card_id : row.card_id;
+  const cardTitle =
+    row.kind === "event" ? row.event.card_title : row.card_title;
   return (
-    <section className="activity-day" aria-label={dayLabel(day)}>
-      <h2>{dayLabel(day)}</h2>
-      <ol className="activity-list">
-        {rowsOf(events).map((row) => {
-          if (row.kind === "event") {
-            const event = row.event;
-            const audit =
-              event.type === "cross_card_read" &&
-              event.payload !== null &&
-              typeof event.payload === "object"
-                ? (event.payload as Record<string, unknown>)
-                : undefined;
-            const targets = auditTargets(audit);
-            return (
-              <li key={event.id}>
-                <details className="event-details">
-                  <IdentityRow as="summary" className="activity-summary">
-                    <span className="activity-time">
-                      <Time value={event.created_at} />
-                    </span>
-                    <EmployeeIdentity
-                      {...event}
-                      author={event.actor.kind}
-                      author_role={event.role}
-                      showTitle={false}
-                    />
-                    <span className="activity-action">
-                      {eventLabel(event.type)}
-                      {typeof audit?.tool === "string" && audit.tool && (
-                        <span className="activity-audit-tool">
-                          工具：{audit.tool}
-                        </span>
-                      )}
-                    </span>
-                    <span className="activity-card">
-                      {targets.length > 0 ? (
-                        <>
-                          {targets
-                            .slice(0, AUDIT_TARGET_PREVIEW_LIMIT)
-                            .map((id) => (
-                              <CardLink
-                                key={id}
-                                projectId={projectId}
-                                id={id}
-                                label={targets.length === 1 ? "目标卡片" : ""}
-                              />
-                            ))}
-                          {targets.length > AUDIT_TARGET_PREVIEW_LIMIT && (
-                            <span>等 {targets.length} 张卡片</span>
-                          )}
-                        </>
-                      ) : (
-                        <CardLink
-                          projectId={projectId}
-                          id={event.card_id}
-                          label={event.card_title ?? "卡片"}
-                        />
-                      )}
-                    </span>
-                  </IdentityRow>
-                  <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-                </details>
-              </li>
-            );
-          }
-          const first = row.events[0];
-          return (
-            <li key={first?.id}>
-              <details className="event-details">
-                <IdentityRow as="summary" className="activity-summary">
-                  <span className="activity-time">
-                    <Time value={first?.created_at} />
-                  </span>
-                  <EmployeeIdentity author="system" showTitle={false} />
-                  <span className="activity-action">
-                    {groupedLabel(row.type, row.events.length)}
-                  </span>
-                  <span className="activity-card">
-                    <CardLink
-                      projectId={projectId}
-                      id={row.card_id}
-                      label={row.card_title ?? "卡片"}
-                    />
-                  </span>
-                </IdentityRow>
-                <pre>
-                  {JSON.stringify(
-                    row.events.map((event) => event.payload),
-                    null,
-                    2,
-                  )}
-                </pre>
-              </details>
-            </li>
-          );
-        })}
-      </ol>
-    </section>
+    <>
+      <TableRow data-activity-row="">
+        <DataTableCell data-record="lead" nowrap>
+          <Time value={first?.created_at} />
+        </DataTableCell>
+        <TableCell>
+          {row.kind === "event" ? (
+            <EmployeeIdentity
+              {...row.event}
+              author={row.event.actor.kind}
+              author_role={row.event.role}
+              showTitle={false}
+            />
+          ) : (
+            <EmployeeIdentity author="system" showTitle={false} />
+          )}
+        </TableCell>
+        <TableCell>
+          {row.kind === "event"
+            ? eventLabel(row.event.type)
+            : groupedLabel(row.type, row.events.length)}
+          {typeof audit?.tool === "string" && audit.tool && (
+            <div>工具：{audit.tool}</div>
+          )}
+        </TableCell>
+        <TableCell>
+          {targets.length > 0 ? (
+            <>
+              {targets.slice(0, AUDIT_TARGET_PREVIEW_LIMIT).map((id, i) => (
+                <Fragment key={id}>
+                  {i > 0 && " "}
+                  <CardLink
+                    projectId={projectId}
+                    id={id}
+                    label={targets.length === 1 ? "目标卡片" : ""}
+                  />
+                </Fragment>
+              ))}
+              {targets.length > AUDIT_TARGET_PREVIEW_LIMIT && (
+                <span> 等 {targets.length} 张卡片</span>
+              )}
+            </>
+          ) : (
+            <CardLink
+              projectId={projectId}
+              id={cardId}
+              label={cardTitle ?? "卡片"}
+            />
+          )}
+        </TableCell>
+        <TableCell data-record="aside">
+          <Button
+            type="button"
+            className="quiet"
+            aria-expanded={open}
+            aria-controls={detailId}
+            onClick={onToggle}
+          >
+            {open ? "收起" : "详情"}
+          </Button>
+        </TableCell>
+      </TableRow>
+      <TableRow id={detailId} hidden={!open}>
+        <TableCell colSpan={COLUMNS}>
+          <DataTableDetail>
+            {JSON.stringify(
+              row.kind === "event"
+                ? row.event.payload
+                : row.events.map((event) => event.payload),
+              null,
+              2,
+            )}
+          </DataTableDetail>
+        </TableCell>
+      </TableRow>
+    </>
   );
 }
 export function ActivityPage({
@@ -242,60 +255,95 @@ export function ActivityPage({
     () => client.activity(projectId, filters),
     [client, projectId, filters],
   );
-  const { data, pending, error, reload, interactive } = useResource(
+  const { data, pending, error, reload, refresh, interactive } = useResource(
     load,
     revision,
   );
+  const [interval, setRefreshInterval] = useRefreshInterval(
+    `cardigan.activity.refresh.${projectId}`,
+    pending,
+    refresh,
+  );
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (id: string) =>
+    setOpened((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const days = new Map<string, ActivityEvent[]>();
   for (const event of data?.events ?? []) {
     const key = dayKey(event.created_at);
     days.set(key, [...(days.get(key) ?? []), event]);
   }
+  // System runs collapse within a day only, as before.
+  const rows = [...days].flatMap(([day, events]) =>
+    rowsOf(events).map((row) => ({ day, row })),
+  );
+  const rowId = (row: Row) =>
+    (row.kind === "event" ? row.event.id : row.events[0]?.id) ?? "";
+  const filtered = Object.entries(filters).some(
+    ([key, value]) => key !== "before" && value,
+  );
+  const cardOptions = (data?.cards ?? []).map((card) => ({
+    value: card.id,
+    label: `${card.id} ${card.title}`,
+  }));
+  const select = (
+    key: string,
+    label: string,
+    choices: readonly { value: string; label: string }[],
+  ) => ({
+    key,
+    label,
+    options: choices,
+    render: (value: string, setValue: (value: string) => void) => (
+      <FilterSelect
+        label={label}
+        value={value}
+        options={choices}
+        onChange={setValue}
+      />
+    ),
+  });
   return (
-    <section className="activity-page" aria-label="项目动态">
-      <PageTitle title="项目动态" />
-      <FilterBar
+    <section className="ui-workspace" aria-label="项目动态">
+      <PageHeader title="项目动态" />
+      <PageToolbar
         fields={[
-          {
-            key: "card_id",
-            label: "卡片",
-            options: (data?.cards ?? []).map((card) => ({
-              value: card.id,
-              label: `${card.id} ${card.title}`,
-            })),
-          },
-          {
-            key: "actor",
-            label: "发言方",
-            options: Object.entries(ACTOR_LABELS).map(([value, label]) => ({
-              value,
-              label,
-            })),
-          },
-          {
-            key: "category",
-            label: "事件类别",
-            options: Object.entries(CATEGORY_LABELS).map(([value, label]) => ({
-              value,
-              label,
-            })),
-          },
-          {
-            key: "range",
-            label: "时间范围",
-            options: Object.entries(RANGE_LABELS).map(([value, label]) => ({
-              value,
-              label,
-            })),
-          },
+          select("card_id", "卡片", cardOptions),
+          select("actor", "发言方", options(ACTOR_LABELS)),
+          select("category", "事件类别", options(CATEGORY_LABELS)),
+          select("range", "时间范围", options(RANGE_LABELS)),
+          ...(filtered
+            ? [
+                {
+                  key: "clear",
+                  label: "清除筛选",
+                  render: () => (
+                    <Button
+                      type="button"
+                      className="quiet"
+                      onClick={() => setFilters({})}
+                    >
+                      清除筛选
+                    </Button>
+                  ),
+                },
+              ]
+            : []),
         ]}
         values={filters}
         onChange={(next) => setFilters({ ...next, before: "" })}
       >
-        <button type="button" className="quiet" onClick={() => setFilters({})}>
-          清除筛选
-        </button>
-      </FilterBar>
+        <RefreshGroup
+          interval={interval}
+          onIntervalChange={setRefreshInterval}
+          pending={pending}
+          onRefresh={reload}
+        />
+      </PageToolbar>
       <Feedback
         pending={pending}
         interactive={interactive}
@@ -304,31 +352,59 @@ export function ActivityPage({
       />
       {data && (
         <>
-          <p className="metadata">
-            <span>{filters.before ? "正在查看更早的事件" : "最新事件"}</span>
-            <span>本页：{data.counts.returned} 条</span>
-          </p>
-          {!data.events.length && (
-            <EmptyState>
-              没有符合条件的事件。调整筛选，或等待新的项目动态。
-            </EmptyState>
+          {data.events.length === 0 ? (
+            <EmptyState>{filtered ? "没有匹配的事件" : "没有事件"}</EmptyState>
+          ) : (
+            <DataTableLayout records label="事件列表">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>时间</TableHead>
+                  <TableHead>发言方</TableHead>
+                  <TableHead>事件</TableHead>
+                  <TableHead>卡片</TableHead>
+                  <TableHead>详情</TableHead>
+                </TableRow>
+              </TableHeader>
+              <GroupedTableBody
+                rows={rows}
+                groupBy={(entry) => entry.day}
+                groupName={(group) => dayLabel(group.id)}
+                columns={COLUMNS}
+                countLabel="条"
+                renderRow={({ row }) => (
+                  <ActivityRow
+                    key={rowId(row)}
+                    row={row}
+                    projectId={projectId}
+                    open={opened.has(rowId(row))}
+                    onToggle={() => toggle(rowId(row))}
+                  />
+                )}
+              />
+            </DataTableLayout>
           )}
-          {[...days].map(([day, events]) => (
-            <DayGroup
-              key={day}
-              day={day}
-              events={events}
-              projectId={projectId}
-            />
-          ))}
-          {data.events.length > 0 && !data.next_before && (
-            <p className="pagination-end" role="status">
-              已经到底了
-            </p>
-          )}
-          <div className="action-row">
+          <nav
+            className="timeline-controls card-list-pagination ui-inline-items"
+            aria-label="动态分页"
+          >
+            <span className="timeline-count">
+              {filters.before ? "更早的事件" : "最新事件"} · 本页{" "}
+              {data.counts.returned} 条
+            </span>
+            {data.events.length > 0 && !data.next_before && (
+              <span role="status">已经到底了</span>
+            )}
+            {filters.before && (
+              <Button
+                type="button"
+                className="quiet"
+                onClick={() => setFilters({ ...filters, before: "" })}
+              >
+                返回最新
+              </Button>
+            )}
             {data.next_before && (
-              <button
+              <Button
                 type="button"
                 className="quiet"
                 disabled={pending}
@@ -338,17 +414,9 @@ export function ActivityPage({
                 }}
               >
                 更早的事件
-              </button>
+              </Button>
             )}
-            {filters.before && (
-              <button
-                type="button"
-                onClick={() => setFilters({ ...filters, before: "" })}
-              >
-                返回最新
-              </button>
-            )}
-          </div>
+          </nav>
         </>
       )}
     </section>
