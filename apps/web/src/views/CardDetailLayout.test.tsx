@@ -525,3 +525,49 @@ test("U6d the wheel over the card sidebar reaches the page or the drawer", async
   expect(column.className).toContain("card-sidebar");
   expect(column.closest(".card-page-drawer")).toBeTruthy();
 });
+test("C-463 the card drawer has its final width class before the card loads", async () => {
+  const { cardDetailDrawerClassName } = await import(
+    "../components/layout/CardDetailLayout.js"
+  );
+  const read = (path: string) =>
+    readFileSync(new NodeURL(path, import.meta.url), "utf8").replaceAll(
+      /\/\*[\s\S]*?\*\//g,
+      "",
+    );
+  const layout = read("../components/layout/CardDetailLayout.module.css");
+  const start = layout.indexOf(".drawer {");
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(layout.slice(start, layout.indexOf("}", start))).toContain(
+    "width: min(var(--ui-detail-drawer-width), 100vw);",
+  );
+  expect(read("../components/ui/theme.css")).toContain(
+    "--ui-detail-drawer-width: 760px;",
+  );
+  // Width must not wait for loaded content to match a selector.
+  expect(read("../styles.css")).not.toMatch(/\.drawer-content[^{]*:has\(/);
+  let release: (() => void) | undefined;
+  window.location.hash = "#/p/p-1/cards?card=C-1";
+  render(
+    <App
+      client={fakeClient({
+        card: () =>
+          new Promise<CardDetail>((resolve) => {
+            release = () => resolve(detail());
+          }),
+      })}
+    />,
+  );
+  const drawer = await screen.findByRole("dialog");
+  await waitFor(() => expect(release).toBeDefined());
+  expect(cardDetailDrawerClassName).toBeTruthy();
+  expect(drawer.classList).toContain("drawer-content");
+  expect(drawer.classList).toContain(cardDetailDrawerClassName);
+  expect(drawer.querySelector(".card-page-drawer")).toBeNull();
+  const loading = drawer.className;
+  await act(async () => release?.());
+  await waitFor(() =>
+    expect(drawer.querySelector(".card-page-drawer")).toBeTruthy(),
+  );
+  expect(drawer.isConnected).toBe(true);
+  expect(drawer.className).toBe(loading);
+});

@@ -3215,11 +3215,6 @@ body[data-lightbox="open"] .drawer-overlay {
   text-decoration: underline;
 }
 
-/* Keep the reading column about 40 Han characters wide at desktop sizes. */
-.drawer-content:has(.card-page-drawer) {
-  width: min(760px, 100vw);
-}
-
 .system-line .attachment-preview {
   width: 40px;
   height: 40px;
