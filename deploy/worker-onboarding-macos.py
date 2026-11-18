@@ -90,6 +90,10 @@ def process_credentials(pid, identity):
 
 
 def macos_resources(c):
+    # No XDG/HC_SOCKET overrides in the supported LaunchDaemon environment.
+    base = c['home'] + '/.local/state/herdr-core/' + c['session'] + '/' + c['session']
+    require(all(len(path.encode('utf-8')) <= 103 for path in
+                (base + '.sock', base + '.holder.00000000.sock')))
     service = c['launchd']
     label = service['label']
     path = '/Library/LaunchDaemons/' + label + '.plist'
@@ -102,7 +106,8 @@ def macos_resources(c):
     require(plist.get('Label') == label and plist.get('ProgramArguments') == arguments)
     require(plist.get('Program', CORE) == CORE and plist.get('UserName') == c['user'])
     require(plist.get('WorkingDirectory') == c['home'])
-    require(plist.get('EnvironmentVariables') == dict(PATH=c['path'], HOME=c['home']))
+    environment = dict(PATH=c['path'], HOME=c['home'], HC_SESSION=c['session'], HC_RUNTIME='1')
+    require(plist.get('EnvironmentVariables') == environment)
     require(plist.get('RunAtLoad') is True and plist.get('KeepAlive') is True)
     require(plist.get('InitGroups') is False and plist.get('ProcessType') == 'Background')
     require(not any(key in plist for key in ('RootDirectory', 'GroupName', 'LimitLoadToSessionType', 'Disabled')))
@@ -119,8 +124,9 @@ def macos_resources(c):
     require(args is not None and [line.strip() for line in args[1].splitlines()] == arguments)
     env = re.search(r'^\tenvironment = \{\n(.*?)^\t\}', output, re.M | re.S)
     require(env is not None)
-    for key, value in [('PATH', c['path']), ('HOME', c['home'])]:
+    for key, value in environment.items():
         require(re.findall(r'^\s+' + key + r' => (.+)$', env[1], re.M) == [value])
+    require(not re.search(r'^\s+(?:HC_SOCKET|XDG_RUNTIME_DIR|XDG_STATE_HOME|XDG_CONFIG_HOME) =>', env[1], re.M))
     pid = int(field('pid'))
     require(pid > 0)
     process_group = os.getpgid(pid)

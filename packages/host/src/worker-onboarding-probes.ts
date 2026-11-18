@@ -190,6 +190,7 @@ export function workerProbeInput(
     gid: e.gid,
     home: config.home,
     project: config.worker.project_id,
+    session: config.worker.session,
     arch: config.worker.arch,
     os: config.worker.os,
     path: e.path,

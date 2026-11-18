@@ -15,7 +15,7 @@ export type WorkerReadinessFailure =
 
 /** Fixed, read-only probe. No project code, credentials or raw diagnostics are returned. */
 export const workerReadinessScript = `
-import importlib.util,json,os,pathlib,stat,subprocess,sys
+import importlib.util,json,os,pathlib,platform,pwd,stat,subprocess,sys
 r=json.loads(sys.argv[1])
 failures=[]
 def require(value):
@@ -45,7 +45,10 @@ except Exception:
 try:
     uid,gid=os.getuid(),os.getgid()
     require(uid>0 and gid==r['gid'] and os.geteuid()==uid and os.getegid()==gid)
-    require(set(native.process_groups()) <= {gid})
+    if platform.system() == 'Darwin':
+        native.isolation_groups(pwd.getpwuid(uid), native.process_groups())
+    else:
+        require(set(native.process_groups()) <= {gid})
     root=r['root']
     os.close(native.isolation_directory(root,0,gid,0o750,True))
     os.close(git.check_layout(root,r['project']))

@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -67,6 +73,88 @@ test.each(["label", "hc_path", "path"])(
   },
 );
 
+test("macOS generates a short session only when omitted; explicit sessions stay bound", () => {
+  const source = input();
+  delete source.runtime.machines[0].projects[0].session;
+  const generated = parseWorkerOnboarding(source, "/controller/data");
+  expect(generated.worker.session).toBe("cg");
+  expect(generated.runtime.machines[0]).toMatchObject({
+    projects: [{ session: "cg" }],
+  });
+  expect(workerProbeInput("resources", generated).session).toBe("cg");
+  source.runtime.machines[0].projects[0].session = "other";
+  expect(parseWorkerOnboarding(source, "/controller/data").worker.session).toBe(
+    "other",
+  );
+  source.runtime.machines[0].os = "linux";
+  delete source.runtime.machines[0].projects[0].session;
+  delete source.launchd;
+  expect(() => parseWorkerOnboarding(source, "/controller/data")).toThrow(
+    "worker_config_invalid",
+  );
+});
+
+test.each([
+  [52, true], // main socket 87 bytes, holder 103 bytes
+  [53, false], // main socket still fits; holder is 104 bytes
+  [69, false], // main socket itself exceeds 103 bytes
+] as const)(
+  "socket limits use the complete HOME (%i bytes)",
+  (length, accepted) => {
+    const source = input();
+    source.home = `/${"h".repeat(length - 1)}`;
+    source.launchd.hc_path = `${source.home}/.local/bin/hc`;
+    const parseConfig = () => parseWorkerOnboarding(source, "/controller/data");
+    if (accepted) expect(parseConfig).not.toThrow();
+    else expect(parseConfig).toThrow("worker_macos_socket_path_too_long");
+    source.runtime.machines[0].os = "linux";
+    delete source.launchd;
+    expect(parseConfig).not.toThrow();
+  },
+);
+
+test("the observed macOS layout rejects a 103-byte socket with a 119-byte holder", () => {
+  const source = input();
+  source.home += "x"; // Synthetic HOME of 38 bytes.
+  source.launchd.hc_path = `${source.home}/.local/bin/hc`;
+  source.runtime.machines[0].projects[0].session = "example-worker-aa";
+  expect(() => parseWorkerOnboarding(source, "/controller/data")).toThrow(
+    "worker_macos_socket_path_too_long",
+  );
+});
+
+test("draft refuses oversized sockets before publishing or probing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mac-worker-"));
+  roots.push(root);
+  const c = config(),
+    report = vi.fn(),
+    probe = vi.fn(async () => true);
+  // Exercise the durable step even if a caller bypasses configuration parsing.
+  expect(
+    await onboardWorker({
+      config: { ...c, home: `/${"h".repeat(52)}` },
+      configRoot: root,
+      dataDir: "/controller/data",
+      mode: "add",
+      registration: async () => true,
+      report,
+      probe,
+    }),
+  ).toBe(false);
+  expect(report).toHaveBeenCalledWith(
+    "draft",
+    "blocked",
+    "worker_macos_socket_path_too_long",
+    expect.any(String),
+  );
+  expect(probe).not.toHaveBeenCalled();
+  expect(
+    existsSync(
+      join(root, "worker-onboarding/worker-a/example.runtime-workers.yaml"),
+    ),
+  ).toBe(false);
+});
+
 test.each([
   undefined,
   {},
@@ -114,6 +202,9 @@ function probe(
 ) {
   const c = config();
   const request = workerProbeInput(step, c);
+  if (fixture === "socket-limit") request.home = `/${"h".repeat(51)}`;
+  if (fixture === "holder-too-long") request.home = `/${"h".repeat(52)}`;
+  if (fixture === "socket-too-long") request.home = `/${"h".repeat(68)}`;
   const contents = Object.fromEntries(
     Object.keys(request.helpers).map((path) => [
       path,
@@ -250,6 +341,15 @@ test.each([
   "UserName",
   "WorkingDirectory",
   "EnvironmentVariables",
+  "holder-too-long",
+  "socket-too-long",
+  "loaded-socket-override",
+  ...["HC_SESSION", "HC_RUNTIME"].flatMap((key) => [
+    `missing-${key}`,
+    `wrong-${key}`,
+    `loaded-missing-${key}`,
+    `loaded-wrong-${key}`,
+  ]),
   "InitGroups",
   "KeepAlive",
   "loaded-path",
@@ -274,6 +374,8 @@ test.each([
 ])("LaunchDaemon must match the installed and running service: %s", (fixture) =>
   probe("resources", fixture),
 );
+test("LaunchDaemon accepts the 103-byte holder boundary", () =>
+  probe("resources", "socket-limit", true));
 test.each(["safe", "forbidden"])(
   "Darwin MCP requires unauthenticated refusal: %s",
   (fixture) => probe("mcp", fixture),
