@@ -449,6 +449,8 @@ test.each([
   "missing",
   "timeout",
   "effective-root",
+  "implicit-groups",
+  "process-implicit-groups",
 ])("actual account probe requires an explicit sudo denial: %s", (fixture) => {
   const result = pythonProbe("account", workerObservations, { fixture });
   const passed = fixture.startsWith("safe");

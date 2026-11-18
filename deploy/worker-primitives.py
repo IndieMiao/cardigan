@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import plistlib
 import pwd
 import grp
 import re
@@ -70,17 +71,102 @@ def directory(path, uid, private=False):
         raise
 
 
-def isolation_account(request):
+# Darwin built-in group IDs; C-437 reports their implicit membership on a Mac.
+# These are exact name/GID pairs, never a general exemption for system groups.
+DARWIN_IMPLICIT_GROUPS = {'everyone': 12, 'localaccounts': 61, '_lpoperator': 100}
+
+
+def isolation_groups(account, inherited=(), timeout_ms=5000):
+    """Accept only the private primary group and verified Darwin implicit groups."""
+    primary = account.pw_gid
+    membership = set(os.getgrouplist(account.pw_name, primary))
+    extra = (membership | set(inherited)) - {primary}
+    if primary not in membership:
+        raise ValueError('isolation_groups')
+    if platform.system() != 'Darwin':
+        if extra:
+            raise ValueError('isolation_groups')
+        return
+    primary_name = grp.getgrgid(primary).gr_name
+    if (primary in (0, 20, 80, *DARWIN_IMPLICIT_GROUPS.values())
+            or primary_name in ('root', 'wheel', 'admin', 'staff', 'sudo', *DARWIN_IMPLICIT_GROUPS)
+            or primary_name.startswith('com.apple.') or extra & {0, 20, 80}):
+        raise ValueError('isolation_groups')
+
+    def record(path, attributes):
+        # Group membership attributes are optional. Asking dscl for an absent
+        # key can emit "No such key" instead of a plist; read the group record.
+        # User reads remain restricted to identity fields, never authentication data.
+        query = attributes if path.startswith('/Users/') else []
+        data = plistlib.loads(run(['/usr/bin/dscl', '-plist', '.', '-read', path, *query], timeout_ms).encode())
+        if not isinstance(data, dict):
+            raise ValueError('isolation_groups')
+        result = {}
+        for key in attributes:
+            values = data.get('dsAttrTypeStandard:' + key, [])
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise ValueError('isolation_groups')
+            if key in ('GeneratedUID', 'GroupMembers', 'NestedGroups'):
+                if any(re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', value) is None for value in values):
+                    raise ValueError('isolation_groups')
+                values = [value.upper() for value in values]
+            result[key] = values
+        return result
+
+    user = record('/Users/' + account.pw_name, ['RecordName', 'GeneratedUID', 'UniqueID', 'PrimaryGroupID'])
+    if (account.pw_name not in user['RecordName'] or len(user['GeneratedUID']) != 1
+            or not user['GeneratedUID'][0] or user['UniqueID'] != [str(account.pw_uid)]
+            or user['PrimaryGroupID'] != [str(primary)]):
+        raise ValueError('isolation_groups')
+    account_ids = {value.casefold() for value in user['RecordName'] + user['GeneratedUID']}
+
+    def checked_group(name, gid):
+        group = grp.getgrgid(gid)
+        named = grp.getgrnam(name)
+        data = record('/Groups/' + name, ['RecordName', 'GeneratedUID', 'PrimaryGroupID',
+                                        'GroupMembership', 'GroupMembers', 'NestedGroups'])
+        if (group.gr_name != name or group.gr_gid != gid or named.gr_name != name or named.gr_gid != gid
+                or data['RecordName'] != [name] or data['PrimaryGroupID'] != [str(gid)]
+                or len(data['GeneratedUID']) != 1 or not data['GeneratedUID'][0]
+                or account_ids & {value.casefold() for value in
+                    group.gr_mem + data['GroupMembership'] + data['GroupMembers'] + data['NestedGroups']}
+                or run(['/usr/bin/dsmemberutil', 'getuuid', '-G', name], timeout_ms).upper() != data['GeneratedUID'][0]):
+            raise ValueError('isolation_groups')
+        return data
+
+    records = {name: checked_group(name, gid) for name, gid in DARWIN_IMPLICIT_GROUPS.items()}
+    implicit_ids = {data['GeneratedUID'][0] for data in records.values()}
+    if len(implicit_ids) != len(records) or user['GeneratedUID'][0] in implicit_ids:
+        raise ValueError('isolation_groups')
+    roots = {records[name]['GeneratedUID'][0] for name in ('everyone', 'localaccounts')}
+    # The two universal groups are roots, not custom/recursive membership paths.
+    if (any(records[name]['NestedGroups'] for name in ('everyone', 'localaccounts'))
+            or not set(records['_lpoperator']['NestedGroups']) <= roots):
+        raise ValueError('isolation_groups')
+    seen_ids = implicit_ids | set(user['GeneratedUID'])
+    for gid in sorted(extra - set(DARWIN_IMPLICIT_GROUPS.values())):
+        name = grp.getgrgid(gid).gr_name
+        # Q-870: public-folder SACL groups only; no generic implicit-group exemption.
+        if re.fullmatch(r'com\.apple\.sharepoint\.group\.[0-9]+', name) is None:
+            raise ValueError('isolation_groups')
+        data = checked_group(name, gid)
+        nested = set(data['NestedGroups'])
+        if not nested or not nested <= roots or data['GeneratedUID'][0] in seen_ids:
+            raise ValueError('isolation_groups')
+        seen_ids.add(data['GeneratedUID'][0])
+
+
+def isolation_account(request, inherited=()):
     """Directory-service facts, including aliases and primary-group occupants."""
     account = pwd.getpwnam(request['account'])
     group = grp.getgrgid(account.pw_gid)
     if (account.pw_uid != request['uid'] or account.pw_uid <= 0 or account.pw_gid <= 0
             or group.gr_name in ('root', 'wheel', 'admin', 'sudo')
-            or set(os.getgrouplist(account.pw_name, account.pw_gid)) != {account.pw_gid}
             or set(group.gr_mem) - {account.pw_name}
             or any(p.pw_name != account.pw_name and (p.pw_uid == account.pw_uid or p.pw_gid == account.pw_gid)
                    for p in pwd.getpwall())):
         raise ValueError('isolation_account')
+    isolation_groups(account, inherited, request.get('timeout_ms', 5000))
     return account
 
 
@@ -124,12 +210,12 @@ def process_groups():
 
 def project_isolation(request):
     """Read-only B8 entry, run under the selected project UID; no credentials read."""
-    account = isolation_account(request)
+    account = isolation_account(request, process_groups())
     uid, gid = account.pw_uid, account.pw_gid
     # Removing membership from the account database does not revoke old hc/login
     # processes' groups. Keep this check here: the installer inspects accounts as root.
     if (os.getuid() != uid or os.geteuid() != uid or os.getgid() != gid or os.getegid() != gid
-            or set(process_groups()) - {gid} or request['home'] != account.pw_dir):
+            or request['home'] != account.pw_dir):
         raise ValueError('isolation_identity')
     home, root = Path(account.pw_dir), Path(request['root'])
     if home == root or home in root.parents or root in home.parents:

@@ -85,7 +85,6 @@ def preflight(config, system='Darwin'):
     require(re.fullmatch(r'[a-z_][a-z0-9_-]*', config['account']) is not None)
     account = pwd.getpwnam(config['account'])
     require(account.pw_uid == config['uid'] and account.pw_uid > 0)
-    require(set(os.getgrouplist(account.pw_name, account.pw_gid)) == {account.pw_gid})
     native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
     native['isolation_account'](config)
     # HOME is obtained from directory services, never inherited from the controller.

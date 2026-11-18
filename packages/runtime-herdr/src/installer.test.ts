@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
 import { HC_RELEASE } from "./hc-version.js";
 
 const exec = promisify(execFile);
@@ -384,7 +386,15 @@ test.each(
   },
 );
 
-const macFixture = `import importlib.util,sys,os,json,stat
+const groupObservations = readFileSync(
+  new URL(
+    "../../../test-support/worker-account-observations.py",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const macFixture = `${groupObservations}
+import importlib.util,sys,os,json,stat
 from pathlib import Path
 from types import SimpleNamespace as Record
 spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -413,11 +423,13 @@ m.os.fstat=fstat
 # Root ownership, account lookup and ACLs are synthetic; never sudo/chown real accounts.
 m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
 m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
+native=m.runpy.run_path(str(Path(sys.argv[1]).with_name('worker-primitives.py')))
+install_group_observations(native, account, fault)
 m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
 m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
 m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
 m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
- 'isolation_account':lambda config:account,'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
+ 'isolation_account':native['isolation_account'],'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
 if fault=='uid':config['uid']+=1
 if fault=='groups':m.os.getgrouplist=lambda *a:[account.pw_gid,9999]
 if fault=='marker':marker.write_text('{}')
@@ -433,9 +445,10 @@ if fault=='helper':
  (root/'libexec').mkdir(mode=0o750)
  (root/'libexec/worker-primitives.py').write_text('unmanaged helper');(root/'libexec/worker-primitives.py').chmod(0o750)
 before=sorted(str(p) for p in base.rglob('*'))
+accepted=fault.startswith('apply') or fault=='check' or (len(sys.argv)>4 and sys.argv[4]=='accepted')
 try:
  user,location=m.preflight(config)
- assert fault.startswith('apply') or fault=='check',fault
+ assert accepted,fault
  if fault.startswith('apply'):
   os.umask(int(fault.split('-')[1],8) if '-' in fault else 0o022)
   m.apply(user,location);inode=(root/'locks/tests.lock').stat().st_ino
@@ -444,8 +457,8 @@ try:
   assert sorted(str(p) for p in base.rglob('*'))==names
  else:assert sorted(str(p) for p in base.rglob('*'))==before
  print('passed '+fault)
-except ValueError:
- assert not fault.startswith('apply') and fault!='check',fault
+except (ValueError,OSError,KeyError):
+ assert not accepted,fault
  assert sorted(str(p) for p in base.rglob('*'))==before
  print('blocked '+fault)
 `;
@@ -495,6 +508,14 @@ test.each([
   "check",
   "uid",
   "groups",
+  "admin",
+  "primary-staff",
+  "primary-sharepoint",
+  "staff",
+  "sharepoint",
+  "explicit-everyone:GroupMembership",
+  "explicit-localaccounts:GroupMembers",
+  "nested-project",
   "marker",
   "claim",
   "sudo",
@@ -518,6 +539,31 @@ test.each([
     );
     expect(result.stdout.trim()).toBe(
       `${fault.startsWith("apply") || fault === "check" ? "passed" : "blocked"} ${fault}`,
+    );
+  },
+);
+
+test.each(darwinSharedGroupCases)(
+  "Q-870 public-folder group installer: %s",
+  async (fault, accepted) => {
+    const macScript = fileURLToPath(
+      new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+    );
+    const result = await exec(
+      "python3",
+      [
+        "-B",
+        "-c",
+        macFixture,
+        macScript,
+        root,
+        fault,
+        accepted ? "accepted" : "blocked",
+      ],
+      { timeout: 10000 },
+    );
+    expect(result.stdout.trim()).toBe(
+      `${accepted ? "passed" : "blocked"} ${fault}`,
     );
   },
 );

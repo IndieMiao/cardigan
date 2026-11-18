@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
+import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
 import { fixture } from "../../../test-support/worker-capabilities.js";
 import {
   projectIsolationCombination,
@@ -11,6 +12,64 @@ import {
 } from "./worker-preflight.js";
 
 const native = resolve("deploy/worker-primitives.py");
+const groupObservations = readFileSync(
+  new URL(
+    "../../../test-support/worker-account-observations.py",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
+test.each([
+  ["Darwin", "safe", true],
+  ["Darwin", "empty-process", true],
+  ["Darwin", "process-implicit", true],
+  ["Darwin", "process-admin", false],
+  ["Darwin", "admin", false],
+  ["Darwin", "staff", false],
+  ["Darwin", "sharepoint", false],
+  ["Darwin", "nested-project", false],
+  ["Darwin", "explicit-everyone:GroupMembership", false],
+  ["Darwin", "explicit-localaccounts:GroupMembers", false],
+  ["Darwin", "explicit-_lpoperator:NestedGroups", false],
+  ["Linux", "safe", true],
+  ["Linux", "linux-implicit", false],
+  ["Linux", "linux-share", false],
+  ["Linux", "process-admin", false],
+  ...darwinSharedGroupCases.map(
+    ([fixture, accepted]) => ["Darwin", fixture, accepted] as const,
+  ),
+] as const)(
+  "native isolation group policy on %s: %s",
+  (system, fault, accepted) => {
+    const source = `${groupObservations}
+import runpy,sys
+from types import SimpleNamespace as R
+m=runpy.run_path(sys.argv[1])
+account=R(pw_name='fixture',pw_uid=2201,pw_gid=2201,pw_dir='/fixture')
+install_group_observations(m, account, sys.argv[3], sys.argv[2])
+m['os'].getuid=m['os'].geteuid=lambda:2201
+m['os'].getgid=m['os'].getegid=lambda:2201
+# Equal roots stop the real entry point immediately AFTER identity/group checks;
+# no filesystem observations are fabricated and no privileged IO is attempted.
+try:
+ m['project_isolation'](dict(account='fixture',uid=2201,home='/fixture',root='/fixture'))
+ raise AssertionError('overlapping roots passed')
+except (ValueError,OSError) as error:
+ print('accepted' if str(error)=='isolation_roots' else 'blocked')
+`;
+    expect(
+      execFileSync(
+        "python3",
+        ["-I", "-B", "-c", source, native, system, fault],
+        {
+          encoding: "utf8",
+          timeout: 5000,
+        },
+      ).trim(),
+    ).toBe(accepted ? "accepted" : "blocked");
+  },
+);
 // Real openat/mode/ACL/socket operations; directory services, process credentials
 // and root ownership are synthetic. This does not claim cross-UID field acceptance.
 const probe = `import runpy,sys,os,stat,json,socket

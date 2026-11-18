@@ -22,8 +22,8 @@ if request['step'] == 'account':
     os.getuid = lambda: uid
     os.geteuid = lambda: 0 if scenario == 'effective-root' else uid
     os.getgid = os.getegid = lambda: gid
-    os.getgroups = lambda: [gid]
-    os.getgrouplist = lambda *args: [gid]
+    os.getgroups = lambda: [gid, 12, 61, 100] if scenario == 'process-implicit-groups' else [gid]
+    os.getgrouplist = lambda *args: [gid, 12, 61, 100] if scenario == 'implicit-groups' else [gid]
     account = types.SimpleNamespace(pw_name=user, pw_uid=uid, pw_gid=gid, pw_dir=home)
     pwd.getpwuid = lambda _: account
     pwd.getpwall = lambda: [account]
