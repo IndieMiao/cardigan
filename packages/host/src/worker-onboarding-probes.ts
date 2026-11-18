@@ -28,9 +28,10 @@ export const WORKER_PROBE_SCRIPT = `
 import grp, hashlib, json, os, pathlib, platform, pwd, re, stat, subprocess, sys, urllib.error, urllib.request
 def require(ok):
     if not ok: raise ValueError()
+def acl_safe(fd):
+    return native['acl_safe'](fd) if platform.system() == 'Darwin' else not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd))
 def protected(path, uid, gid, mode, regular=False):
-    # Linux counterpart of worker-primitives.directory/acl_safe: anchor each
-    # ancestor with openat, and reject access/default ACLs or unknown observations.
+    # Anchor each ancestor with openat; Darwin uses the existing native ACL API.
     p = pathlib.Path(path)
     require(p.is_absolute() and os.path.normpath(str(p)) == str(p))
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -40,7 +41,7 @@ def protected(path, uid, gid, mode, regular=False):
         for index, part in enumerate(parts):
             s = os.fstat(fd)
             require(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022)
-            require(not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd)))
+            require(acl_safe(fd))
             leaf = index == len(parts) - 1
             child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
                             (0 if leaf and regular else os.O_DIRECTORY), dir_fd=fd)
@@ -48,17 +49,22 @@ def protected(path, uid, gid, mode, regular=False):
         s = os.fstat(fd)
         require(s.st_uid == uid and s.st_gid == gid and stat.S_IMODE(s.st_mode) == mode)
         require((stat.S_ISREG(s.st_mode) and s.st_nlink == 1) if regular else stat.S_ISDIR(s.st_mode))
-        require(not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd)))
+        require(acl_safe(fd))
     finally:
         os.close(fd)
 def main():
     c = json.loads(sys.argv[1]); step = c['step']; root = pathlib.Path(c['root'])
+    mac = c.get('os') == 'darwin'
+    if mac:
+        require(platform.system() == 'Darwin' and platform.machine() == 'arm64')
     if step == 'account':
         a = pwd.getpwuid(os.getuid()); g = grp.getgrgid(os.getgid())
-        require(platform.system() == 'Linux' and platform.machine() == {'x64':'x86_64','arm64':'aarch64'}[c['arch']])
+        if not mac: require(platform.system() == 'Linux' and platform.machine() == {'x64':'x86_64','arm64':'aarch64'}[c['arch']])
+        if mac: macos_account(c)
         require(a.pw_name == c['user'] and a.pw_uid == c['uid'] and a.pw_uid > 0 and a.pw_gid == c['gid'] == os.getgid() and a.pw_dir == c['home'])
         require(os.geteuid() == c['uid'] and os.getegid() == c['gid'])
-        require(set(os.getgroups()) <= {c['gid']} and set(os.getgrouplist(a.pw_name, a.pw_gid)) == {c['gid']})
+        groups = native['process_groups']() if mac else os.getgroups()
+        require(set(groups) <= {c['gid']} and set(os.getgrouplist(a.pw_name, a.pw_gid)) == {c['gid']})
         require(g.gr_name not in ('root','sudo','wheel','admin','docker') and set(g.gr_mem) <= {a.pw_name})
         require(not any(p.pw_name != a.pw_name and (p.pw_uid == a.pw_uid or p.pw_gid == a.pw_gid) for p in pwd.getpwall()))
         # Query policy only; never execute a privileged command or prompt for a password.
@@ -85,6 +91,7 @@ def main():
         for name in ('git','tests'):
             protected(root / 'locks' / (name + '.lock'), 0, c['gid'], 0o660, True)
     elif step == 'tools':
+        if mac: macos_tools(c)
         env = dict(PATH=os.environ['PATH'], HOME=c['home'], LC_ALL='C')
         def version(command):
             r = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=c['timeout'])
@@ -102,6 +109,9 @@ def main():
             require(hashlib.sha256(data).hexdigest() == digest)
             compile(data, path, 'exec')
     elif step == 'resources':
+        if mac:
+            macos_resources(c)
+            return
         base = pathlib.Path('/sys/fs/cgroup')
         require((base / 'cgroup.controllers').is_file())
         lines = pathlib.Path('/proc/self/cgroup').read_text().splitlines()
@@ -134,6 +144,17 @@ try:
 except Exception:
     sys.exit(1)
 `;
+
+/** Ship controller-owned code inline; never import an unverified worker helper. */
+export function workerProbeScript(config: WorkerOnboardingConfig): string {
+  if (config.worker.os !== "darwin") return WORKER_PROBE_SCRIPT;
+  const source = (name: string) =>
+    readFileSync(
+      new URL(`../../../deploy/${name}.py`, import.meta.url),
+      "utf8",
+    );
+  return `native = {'__name__': 'worker_native'}\nexec(${JSON.stringify(source("worker-primitives"))}, native)\n${source("worker-onboarding-macos")}\n${WORKER_PROBE_SCRIPT}`;
+}
 
 export function workerProbeInput(
   step: WorkerProbe,
@@ -169,6 +190,10 @@ export function workerProbeInput(
     home: config.home,
     project: config.worker.project_id,
     arch: config.worker.arch,
+    os: config.worker.os,
+    path: e.path,
+    python: e.fileHelper?.python,
+    launchd: config.launchd,
     hc_version: config.hc_version,
     timeout: config.timeout_ms / 1000,
     mcp_url: config.mcp_url,
@@ -178,18 +203,29 @@ export function workerProbeInput(
 
 export const probeWorker: WorkerProbeRunner = async (step, config) => {
   try {
+    const python =
+      config.worker.execution.fileHelper?.python ?? "/usr/bin/python3";
+    const args = [
+      python,
+      "-I",
+      "-B",
+      "-c",
+      workerProbeScript(config),
+      JSON.stringify(workerProbeInput(step, config)),
+    ];
     const command = await agentProcessCommand(
       config.worker.execution,
       step === "ssh"
         ? ["printf", "worker_probe_ok\\n"]
-        : [
-            config.worker.execution.fileHelper?.python ?? "/usr/bin/python3",
-            "-I",
-            "-B",
-            "-c",
-            WORKER_PROBE_SCRIPT,
-            JSON.stringify(workerProbeInput(step, config)),
-          ],
+        : config.worker.os === "darwin"
+          ? [
+              "/bin/sh",
+              "-c",
+              '[ "$(/usr/bin/uname -m)" = arm64 ] && { /usr/bin/lipo -verify_arch arm64 "$1" >/dev/null 2>&1 || /usr/bin/lipo -verify_arch arm64e "$1" >/dev/null 2>&1; } || exit 1; exec "$@"',
+              "worker-probe",
+              ...args,
+            ]
+          : args,
     );
     return await new Promise<boolean>((resolve) => {
       const child = spawn(command.file, command.args, {
@@ -237,12 +273,30 @@ export function workerNextAction(
   config: WorkerOnboardingConfig,
 ): string {
   const e = config.worker.execution;
+  if (step === "helpers") {
+    const guide = config.worker.os === "darwin" ? "macos" : "linux";
+    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;
+  }
+  if (config.worker.os === "darwin") {
+    const actions: Record<WorkerProbe, string> = {
+      ssh: WORKER_NEXT_ACTION.ssh,
+      account:
+        "按 docs/macos-worker.md 用 dscl 核对专用非管理员账号、UID/GID、HOME 和 sudo 拒绝；仅支持原生 arm64。",
+      directories:
+        "由管理员按 docs/macos-worker.md 预置目录和标记，再运行 install-macos-worker.py --check/--apply；不要修改已有账号或目录的归属。",
+      tools:
+        "worker_macos_app_setup_required：按 docs/macos-worker.md 使用 deploy/hc-version.json 的 macos-aarch64 归档；由人在 Mac 现场安装并验证签名 App、为专用账号确认首次局域网许可。核对 arm64 工具和 /opt/homebrew/bin PATH，不使用 Rosetta。",
+      helpers: WORKER_NEXT_ACTION.helpers,
+      resources:
+        "worker_macos_launchd_or_capacity_required：按 docs/macos-worker.md 设置 run-capacity.yaml 的机器 limit/max_limit 并重载控制主机；核对系统 LaunchDaemon 的 ProgramArguments、UserName、WorkingDirectory、PATH 和实际 hc UID/GID。macOS 无 cgroup 硬隔离。",
+      mcp: `${WORKER_NEXT_ACTION.mcp} Mac 首次局域网许可需在专用账号现场确认；原因码 worker_macos_local_network_required。`,
+    };
+    return actions[step];
+  }
   if (step === "account")
     return `${WORKER_NEXT_ACTION[step]}\n新账号才执行：\nsudo groupadd --gid ${e.gid} ${e.user}\nsudo useradd --uid ${config.uid} --gid ${e.gid} --home-dir ${config.home} --no-create-home --shell /bin/sh ${e.user}`;
   if (step === "resources")
     return WORKER_NEXT_ACTION[step].replace("<UID>", String(config.uid));
-  if (step === "helpers")
-    return `${WORKER_NEXT_ACTION[step]}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;
   if (step === "tools")
     return `${WORKER_NEXT_ACTION[step]}\n安装 Node 24 后：sudo npm install --global pnpm@11.7.0`;
   return WORKER_NEXT_ACTION[step];

@@ -781,7 +781,7 @@ process.exit(child.status ?? 98);
     await expect(lstat(repository)).rejects.toThrow();
     expect(await readdir(join(config.agentRoot, "repos"))).toEqual([]);
   });
-  test("worker clones and builds use independent disks with the same path, preserving writer state", async () => {
+  test("synthetic Darwin writer and Linux reviewer clone, build and return deliveries on independent disks", async () => {
     const bin = join(root, "default-bin");
     await writeFile(
       join(bin, "ssh"),
@@ -793,7 +793,7 @@ process.exit(result.status ?? 98);
 `,
       { mode: 0o700 },
     );
-    const a = await workerGitFixture(root, config, "worker-a");
+    const a = await workerGitFixture(root, config, "worker-a", "darwin");
     const b = await workerGitFixture(root, config, "worker-b");
     const commands: string[] = [];
     let valid = true;

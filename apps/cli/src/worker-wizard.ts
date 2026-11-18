@@ -19,7 +19,7 @@ import { runWorkflowCommand } from "./workflow.js";
 const USAGE = `用法：cardigan worker add|resume|check|status --project <项目> --machine <机器>
   add|resume|check [--host <SSH 主机>] [--config <私有 YAML>] [--dry-run]
   通用：[--data-dir <目录>]；配置目录由 CARDIGAN_CONFIG_DIR 指定。
-  默认配置：worker-<机器>-<项目>.yaml；详见 docs/linux-worker.md。
+  默认配置：worker-<机器>-<项目>.yaml；详见 docs/linux-worker.md、docs/macos-worker.md。
   dry-run 只显示步骤，不读配置、不建子进程、不写文件、不联网。`;
 
 export async function runWorkerCommand(
@@ -117,7 +117,7 @@ export async function runWorkerCommand(
         if (
           machines.some(
             (m) =>
-              m.machine.os !== "linux" ||
+              m.machine.os !== config.worker.os ||
               m.machine.arch !== config.worker.arch ||
               m.machine.herdr_machine !== machine,
           )
@@ -144,7 +144,7 @@ export async function runWorkerCommand(
             "--label",
             label,
             "--os",
-            "linux",
+            config.worker.os,
             "--arch",
             config.worker.arch,
             "--status",
@@ -175,7 +175,9 @@ export async function runWorkerCommand(
         ? error.code
         : "worker_operation_failed",
       EXIT.failure,
-      ["参见 docs/linux-worker.md；核对私有配置和权限后重试。"],
+      [
+        "参见 docs/linux-worker.md 或 docs/macos-worker.md；核对私有配置和权限后重试。",
+      ],
     );
   }
 }

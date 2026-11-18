@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
@@ -28,9 +28,9 @@ beforeEach(() => {
   vi.mocked(spawn).mockReset();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
-function config() {
+function config(platform = "linux") {
   const guide = readFileSync(
-    new URL("../../../docs/linux-worker.md", import.meta.url),
+    new URL(`../../../docs/${platform}-worker.md`, import.meta.url),
     "utf8",
   );
   const yaml = /```yaml\n([\s\S]*?)```/u.exec(guide)?.[1];
@@ -122,6 +122,83 @@ test("Python probes ignore worker site customizations and never write bytecode",
   const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
   expect(args.at(-1)).toContain("'-I' '-B' '-c'");
 });
+
+test("macOS checks the bootstrap Python architecture before executing the isolated probe", async () => {
+  const c = config("macos");
+  output("worker_probe_ok\n");
+  expect(await probeWorker("tools", c)).toBe(true);
+  const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
+  const remote = args.at(-1) ?? "";
+  expect(remote).toContain("/opt/homebrew/bin");
+  expect(remote).toContain("/usr/bin/lipo -verify_arch arm64");
+  expect(remote.indexOf("/usr/bin/lipo")).toBeLessThan(remote.indexOf("exec"));
+  expect(remote).toContain("'-I' '-B' '-c'");
+});
+
+test.each([
+  ["arm64", "arm64", true],
+  ["arm64", "arm64e", true],
+  ["arm64", "x86_64", false],
+  ["arm64", "arm64_unknown", false],
+  ["x86_64", "arm64e", false],
+] as const)(
+  "bootstrap on %s inspects %s before execution (synthetic)",
+  async (machine, architecture, accepted) => {
+    output("worker_probe_ok\n");
+    await probeWorker("tools", config("macos"));
+    const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
+    const remote: string[] = JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          "-I",
+          "-B",
+          "-c",
+          "import json,shlex,sys;print(json.dumps(shlex.split(sys.argv[1])))",
+          args.at(-1) ?? "",
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+    const bootstrap = remote[remote.indexOf("/bin/sh") + 2];
+    if (!bootstrap) throw new Error("Missing bootstrap");
+    const uname = join(root, "uname"),
+      lipo = join(root, "lipo"),
+      python = join(root, "python");
+    writeFileSync(uname, `#!/bin/sh\nprintf '%s\\n' '${machine}'\n`, {
+      mode: 0o700,
+    });
+    writeFileSync(
+      lipo,
+      `#!/bin/sh\n[ "$1" = -verify_arch ] && [ "$2" = '${architecture}' ]\n`,
+      { mode: 0o700 },
+    );
+    writeFileSync(python, "#!/bin/sh\nprintf 'executed\\n'\n", { mode: 0o700 });
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        bootstrap
+          .replaceAll("/usr/bin/uname", '"$WORKER_TEST_UNAME"')
+          .replaceAll("/usr/bin/lipo", '"$WORKER_TEST_LIPO"'),
+        "worker-probe",
+        python,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: "/usr/bin:/bin",
+          WORKER_TEST_UNAME: uname,
+          WORKER_TEST_LIPO: lipo,
+        },
+        timeout: 3000,
+      },
+    );
+    expect(result.status).toBe(accepted ? 0 : 1);
+    expect(result.stdout).toBe(accepted ? "executed\n" : "");
+    expect(result.stderr).toBe("");
+  },
+);
 
 test.each(["file-git", "file-primitives", "git-primitives"])(
   "probe rejects a bypassed configuration with helper collision before SSH: %s",

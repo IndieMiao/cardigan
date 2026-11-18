@@ -125,7 +125,7 @@ export function parseRuntimeWorkers(
         return invalid();
       machines.add(machine_id);
       endpoints.add(endpoint);
-      if (!["linux", "darwin"].includes(str(m.os))) return invalid();
+      if (!["linux", "darwin", "macos"].includes(str(m.os))) return invalid();
       const users = new Set<string>(),
         groups = new Set<number>(),
         projects = new Set<string>(),
@@ -213,7 +213,7 @@ export function parseRuntimeWorkers(
         workers.push({
           machine_id,
           project_id,
-          os: m.os as Machine["os"],
+          os: (m.os === "macos" ? "darwin" : m.os) as Machine["os"],
           arch: id(m.arch),
           session,
           generation: id(p.generation),
