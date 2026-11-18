@@ -123,26 +123,28 @@ test("execution defaults to working and switches between all, working, released 
       projectId="p-1"
     />,
   );
-  expect(screen.getByLabelText("筛选").textContent).toBe("筛选：工作中");
+  expect(screen.getByRole("combobox", { name: /^筛选：/ }).textContent).toBe(
+    "筛选：工作中",
+  );
   expect(
     await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "查看 A-2 详情" })).toBeNull();
   expect(screen.queryByRole("button", { name: "查看 A-3 详情" })).toBeNull();
-  changeControl(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
     target: { value: "released" },
   });
   expect(
     await screen.findByRole("button", { name: "查看 A-3 详情" }),
   ).toBeTruthy();
-  changeControl(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
     target: { value: "lost" },
   });
   expect(
     await screen.findByRole("button", { name: "查看 A-2 详情" }),
   ).toBeTruthy();
-  changeControl(screen.getByLabelText("筛选"), {
-    target: { value: "all" },
+  changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
+    target: { value: "" },
   });
   expect(
     await screen.findByRole("button", { name: "查看 A-1 详情" }),
@@ -338,8 +340,8 @@ test.each([
         projectId="p-1"
       />,
     );
-    changeControl(screen.getByLabelText("筛选"), {
-      target: { value: "all" },
+    changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
+      target: { value: "" },
     });
     fireEvent.click(
       await screen.findByRole("button", { name: "查看 A-1 详情" }),
@@ -383,7 +385,7 @@ test.each(["snapshot", "execution"] as const)(
     await screen.findByText(
       kind === "snapshot"
         ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
-        : "没有符合条件的 Assignment",
+        : "没有匹配的执行记录",
     );
   },
 );

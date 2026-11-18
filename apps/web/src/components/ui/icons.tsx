@@ -1,4 +1,7 @@
-export { ChevronDown as ChevronDownIcon } from "lucide-react";
+export {
+  ChevronDown as ChevronDownIcon,
+  Ellipsis as MoreHorizontalIcon,
+} from "lucide-react";
 
 export function ListIcon() {
   return (

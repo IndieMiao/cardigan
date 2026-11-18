@@ -154,6 +154,7 @@ export function CapacitySummary({
         <Button
           type="button"
           variant="ghost"
+          size="content"
           className="capacity-status quiet ui-page-capacity"
           aria-label={`${summary}，查看并发与容量详情`}
           aria-describedby={open ? id : undefined}
