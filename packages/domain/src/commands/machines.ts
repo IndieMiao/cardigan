@@ -1,4 +1,5 @@
 import type { Actor, Machine, RoleWorktree, WorkItem } from "../entities.js";
+import { remainingResourceRatio } from "../machine-placement.js";
 import {
   parseCapabilityRequirement,
   type WorkItemRequirements,
@@ -83,6 +84,7 @@ export function selectMachine(
     raw,
     ...unwrap(parseCapabilityRequirement(raw)),
   }));
+  const keys = [...new Set(constraints.map((req) => req.key))];
   const preferLocal = item.kind === "verify" && !constraints.length;
   const producers = new Set(
     d
@@ -146,13 +148,23 @@ export function selectMachine(
       continue;
     }
     const rank = preference.indexOf(machine_id);
+    const resources = keys.flatMap((key) => {
+      const slot = f?.resources?.get(key);
+      return slot ? [{ key, ...slot }] : [];
+    });
     candidates.push({
       machine_id,
       affinity: item.kind === "produce" && affinity.has(machine_id),
       control_host: preferLocal && machine_id === "local",
       limit: f?.limit ?? null,
       occupied: f?.occupied ?? null,
-      remaining_ratio: f ? (f.limit - f.occupied) / f.limit : null,
+      remaining_ratio: f
+        ? Math.min(
+            (f.limit - f.occupied) / f.limit,
+            remainingResourceRatio(keys, f.resources),
+          )
+        : null,
+      ...(resources.length ? { resources } : {}),
       preference_rank: rank < 0 ? null : rank,
     });
   }

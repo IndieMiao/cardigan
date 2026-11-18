@@ -51,7 +51,6 @@ export function ExecutionToolbar({
         {
           key: "view",
           label: "筛选",
-          clearValue: "all",
           options: views,
           render: (value, setValue) => (
             <FilterSelect
