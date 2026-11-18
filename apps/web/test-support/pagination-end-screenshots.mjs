@@ -82,7 +82,7 @@ for (const stage of ["before", "after"]) {
               state === "empty"
                 ? ".empty"
                 : page === "activity"
-                  ? ".activity-list"
+                  ? "main table, .activity-list"
                   : ".decision-records";
             const deadline = Date.now() + 15000;
             while (
@@ -98,7 +98,7 @@ for (const stage of ["before", "after"]) {
               const button = (text) => [...document.querySelectorAll('button')].some(el => el.textContent.trim() === text);
               return {
                 overflow: document.documentElement.scrollWidth > innerWidth,
-                end: document.querySelector('.pagination-end')?.textContent.trim() ?? null,
+                end: document.querySelector('.pagination-end, nav [role=status]')?.textContent.trim() ?? null,
                 empty: Boolean(document.querySelector('.empty')),
                 more: button('更早的事件') || button('加载更多'),
                 returnToLatest: button('返回最新'),

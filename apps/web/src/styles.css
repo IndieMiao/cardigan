@@ -2319,147 +2319,8 @@ fieldset.filters {
   background: var(--surface-muted);
 }
 
-.overview-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 24px;
-}
-.overview-list {
-  list-style: none;
-  padding: 0;
-}
-.overview-list li {
-  padding: 12px;
-  margin: 8px 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.overview-list p {
-  margin: 6px 0 0;
-  color: var(--text-muted);
-}
 .needs-item dd {
   overflow-wrap: anywhere;
-}
-
-.activity-page {
-  container-type: inline-size;
-}
-.activity-page .filter-controls {
-  display: grid;
-  grid-template-columns: minmax(10rem, 2fr) repeat(3, minmax(7rem, 1fr)) max-content;
-}
-.activity-page :where(.filter-controls) > label {
-  min-width: 0;
-}
-.activity-page .filter-controls :is(select, button) {
-  width: 100%;
-  max-width: none;
-  height: 36px;
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-.activity-day {
-  margin: 24px 0;
-}
-.activity-day h2 {
-  margin: 0 0 8px;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.activity-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.activity-summary.identity-row {
-  display: grid;
-  /* Reserve room for older timestamps as well as relative times. */
-  grid-template-columns: 9.5em 10em 16em minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  line-height: 24px;
-  cursor: pointer;
-}
-.activity-summary > * {
-  min-width: 0;
-}
-.activity-audit-tool {
-  display: block;
-  color: var(--text-muted);
-  overflow-wrap: anywhere;
-}
-.activity-time {
-  text-align: right;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-.activity-summary :where(.employee-label) strong,
-.activity-card .id-description {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.activity-card {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.activity-card .id-tag {
-  min-width: 0;
-  font-size: inherit;
-}
-@container (max-width: 760px) {
-  .activity-page .filter-controls {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .activity-summary.identity-row {
-    grid-template-columns: 9.5em 10em minmax(0, 1fr);
-  }
-  .activity-card {
-    grid-column: 2 / -1;
-  }
-}
-@container (max-width: 540px) {
-  .activity-summary.identity-row {
-    grid-template-columns: 9.5em minmax(0, 1fr);
-  }
-  .activity-action {
-    grid-column: 2;
-  }
-}
-.activity-filters {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: end;
-  margin: 16px 0;
-}
-.activity-filters label {
-  display: grid;
-  gap: 4px;
-}
-.activity-filters input {
-  font: inherit;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  padding: 6px;
-}
-.event-details {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px;
-  margin: 8px 0;
-}
-.event-details pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 400px;
-  overflow: auto;
 }
 
 /* Radix-backed interaction primitives (U5-0); colours stay in the tokens above.
@@ -2770,24 +2631,6 @@ body[data-lightbox="open"] .drawer-overlay {
   gap: 8px;
   flex-wrap: wrap;
 }
-.event-details {
-  background: var(--surface);
-}
-.event-details summary {
-  cursor: pointer;
-}
-.activity-list .event-details {
-  margin: 0;
-  padding: 6px 0;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-}
-.activity-list .event-details pre {
-  max-height: 260px;
-  margin: 6px 0 0;
-}
 
 .long-content-4 .long-body.collapsed {
   max-height: 6.6em;
@@ -2865,63 +2708,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-tile > .id-tag {
   align-self: flex-start;
 }
-.snapshot-overview {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  margin: 0 0 24px;
-}
-.snapshot-overview a {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  flex: 1 1 160px;
-  padding: 12px 16px;
-  text-decoration: none;
-  border-right: 1px solid var(--border);
-}
-.snapshot-overview a:last-child {
-  border-right: 0;
-}
-.snapshot-overview strong {
-  font-size: var(--text-page);
-}
-.delivery-table {
-  table-layout: fixed;
-}
-.delivery-table th:nth-child(1),
-.delivery-table th:nth-child(2) {
-  width: 22%;
-}
-.delivery-table th:nth-child(3) {
-  width: 11%;
-}
-.delivery-table th:nth-child(4) {
-  width: 15%;
-}
-.delivery-table .id-tag {
-  max-width: 100%;
-}
-.delivery-summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.delivery-summary .id-tag {
-  flex: none;
-}
-.summary-text {
-  display: block;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 .board-column-collapsed .status {
   writing-mode: vertical-rl;
@@ -2957,13 +2743,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .board-column .lane-fold:hover,
 .board-column .lane-strip:hover .lane-toggle-icon {
   color: var(--text);
-}
-.delivery-table .id-tag > span:first-child {
-  white-space: nowrap;
-  flex: none;
-}
-.delivery-table .id-description {
-  min-width: 0;
 }
 
 .cards-page .filter-bar .filter-controls {
@@ -3070,16 +2849,6 @@ body[data-lightbox="open"] .drawer-overlay {
   .timeline-controls {
     flex-wrap: wrap;
     white-space: normal;
-  }
-  .delivery-table {
-    display: block;
-    overflow-x: auto;
-  }
-  .delivery-table :is(th, td) {
-    min-width: 7rem;
-  }
-  .delivery-table :is(th, td):last-child {
-    min-width: 16rem;
   }
   .timeline-head {
     grid-template-columns: minmax(0, 1fr);
