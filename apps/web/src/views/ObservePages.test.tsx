@@ -141,7 +141,11 @@ test("activity toolbar uses labelled single-choice filters and shows clear only 
     expect(activity).toHaveBeenLastCalledWith("p-1", { actor: "pm" }),
   );
   await screen.findByText("没有匹配的事件");
-  expect(screen.getByRole("button", { name: "移除发言方筛选" })).toBeTruthy();
+  // The current value shows in its own control; no chip row below the toolbar.
+  expect(screen.getByRole("combobox", { name: "发言方：PM" }).textContent).toBe(
+    "发言方：PM",
+  );
+  expect(screen.queryByRole("button", { name: /^移除.*筛选$/u })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
   await waitFor(() => expect(activity).toHaveBeenLastCalledWith("p-1", {}));
 });

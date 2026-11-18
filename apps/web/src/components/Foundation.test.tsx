@@ -351,7 +351,7 @@ test("U1 activity restores filters and pagination without losing project identit
       before: "e/2",
     }),
   );
-  changeControl(screen.getByRole("combobox", { name: "发言方" }), {
+  changeControl(screen.getByRole("combobox", { name: /^发言方：/u }), {
     target: { value: "" },
   });
   expect(parseRoute(window.location.hash)).toEqual({
