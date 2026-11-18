@@ -120,6 +120,19 @@ export function alertAudience(
   return "ops";
 }
 /** Reuse the normal inbox/bell/ACK path; never send recovery work to its subject. */
+export function hostOpsAlertRecipient(
+  state: CommandState,
+  assignment: Assignment,
+) {
+  if (assignment.status !== "active" || assignment.external) return;
+  return state.assignments.find(
+    (a) =>
+      a.scope === "standing" &&
+      a.role_id === "host_ops" &&
+      a.status === "active" &&
+      a.id !== assignment.id,
+  );
+}
 export function recordHostOpsAlert(
   store: Store,
   state: CommandState,
@@ -127,19 +140,8 @@ export function recordHostOpsAlert(
   assignment: Assignment,
   event: Event,
 ) {
-  if (
-    !isStandingPm(assignment) ||
-    assignment.status !== "active" ||
-    assignment.external
-  )
-    return;
-  const hostOps = state.assignments.find(
-    (a) =>
-      a.scope === "standing" &&
-      a.role_id === "host_ops" &&
-      a.status === "active" &&
-      a.id !== assignment.id,
-  );
+  if (!isStandingPm(assignment)) return;
+  const hostOps = hostOpsAlertRecipient(state, assignment);
   if (!hostOps) return;
   recordNotification(store.database, {
     project_id: state.project_id,
@@ -161,11 +163,12 @@ export function dispatchAlert(
     assignment: Assignment;
     type: string;
     reason: string;
-    audience: AlertAudience;
+    audience: AlertAudience | "host_ops_only";
     card_id?: CardId | undefined;
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
     mark?: boolean;
+    notifyHostOps?: boolean;
     activity_source?: string;
     activity_status?: HarnessActivityStatus;
     activity_check?: "completed" | "read_failed" | "timeout" | "unavailable";
@@ -173,6 +176,9 @@ export function dispatchAlert(
   },
 ) {
   const project = state.project_id;
+  const unknownRecipient =
+    input.notifyHostOps && hostOpsAlertRecipient(state, input.assignment);
+  if (input.audience === "host_ops_only" && !unknownRecipient) return;
   const item = state.work_items.find(
     (w) =>
       w.id === input.assignment.work_item_id && w.card_id === input.card_id,
@@ -206,6 +212,9 @@ export function dispatchAlert(
       ...(input.activity_source
         ? { activity_source: input.activity_source }
         : {}),
+      ...(unknownRecipient
+        ? { activity_forwarded_to: unknownRecipient.id }
+        : {}),
       ...(input.activity_status
         ? { activity_status: input.activity_status }
         : {}),
@@ -229,6 +238,9 @@ export function dispatchAlert(
           : "run_attention",
       at,
     }).notification;
+  if (unknownRecipient)
+    record({ kind: "assignment", assignment_id: unknownRecipient.id });
+  if (input.audience === "host_ops_only") return;
   if (input.mark) {
     const n = record({
       kind: "assignment",
@@ -247,5 +259,6 @@ export function dispatchAlert(
     record({ kind: "needs_you" });
     if (input.audience === "human") record({ kind: "pm_office" });
   }
-  recordHostOpsAlert(store, state, at, input.assignment, event);
+  if (!unknownRecipient)
+    recordHostOpsAlert(store, state, at, input.assignment, event);
 }
