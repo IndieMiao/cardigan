@@ -79,12 +79,12 @@ import {
   withPreparationQueue,
 } from "./preparation-queue.js";
 import {
-  assignmentResourceKeys,
   effectiveRunLimit,
   hasEarlierCapacityWait,
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
+import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,

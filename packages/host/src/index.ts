@@ -199,7 +199,6 @@ export {
   repositoryLockPath,
 } from "./repository-lock.js";
 export {
-  assignmentResourceKeys,
   effectiveRunLimit,
   hasEarlierCapacityWait,
   MERGE_CHECK_RUN_SLOTS,
@@ -213,6 +212,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { assignmentResourceKeys } from "./run-resources.js";
 export {
   deferTargetAttempt,
   RunTargetDeferred,

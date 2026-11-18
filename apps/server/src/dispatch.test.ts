@@ -12,9 +12,11 @@ import type {
 import {
   acknowledgeRun,
   assign,
+  beginHostOpsAction,
   createCard,
   dispatchRun,
   finishRun,
+  HOST_OPS_ROLE_TOOLS,
   postComment,
   queueRun,
   requestDecision,
@@ -645,10 +647,11 @@ const requireCapabilities = (
 
 test("MC-4 a missing slot holds the entire Run without reserving an unrelated free resource", async () => {
   const busy = f.create();
-  f.session(busy.assignment, false);
+  requireCapabilities(busy.item, ["godot=4"]);
+  const legacy = f.session(busy.assignment, false);
+  expect(legacy.resource_keys).toBeUndefined();
   const independent = f.create();
   f.session(independent.assignment);
-  requireCapabilities(busy.item, ["godot=4"]);
   requireCapabilities(target.item, ["godot>=4", "blender"]);
   requireCapabilities(independent.item, ["blender"]);
   const settings = {
@@ -667,6 +670,15 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
     assignment_id: target.assignment.id,
     machine_id: "local",
   });
+  // MC-4 upgrade: neither clearing the old item's requirements nor replacing
+  // them grants a second godot slot or charges blender to the still-running Run.
+  requireCapabilities(busy.item, []);
+  requireCapabilities(busy.item, ["blender"]);
+  await new Dispatcher(settings).tick();
+  expect(f.state().runs.find((r) => r.id === legacy.id)?.status).toBe(
+    "running",
+  );
+  expect(readRunQueue(f.store)).toEqual([waiting]);
   f.advance(100);
   f.apply((s, a, p) =>
     postComment(
@@ -706,6 +718,82 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
     resource_keys: ["godot", "blender"],
     assignment_id: target.assignment.id,
   });
+});
+
+test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaimed resources", async () => {
+  const busy = f.create();
+  requireCapabilities(busy.item, ["godot"]);
+  f.session(busy.assignment, false);
+  requireCapabilities(target.item, ["godot", "blender"]);
+  const other = f.create();
+  requireCapabilities(other.item, ["blender"]);
+  f.session(other.assignment);
+  const ops = standingSession("host_ops");
+  f.store.uow.run((tx) => {
+    const role = tx.roles.get(f.project, ops);
+    if (!role) throw new Error("Missing operator role");
+    tx.roles.put(f.project, { ...role, allowed_tools: HOST_OPS_ROLE_TOOLS });
+  });
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["blender", 1],
+    ]);
+  const dispatcher = new Dispatcher({
+    ...options,
+    runLimit: () => 4,
+    resourceLimits,
+  });
+  comment();
+  await dispatcher.tick();
+  const wait = f
+    .state()
+    .runs.find(
+      (r) => r.status === "queued" && r.assignment_id === target.assignment.id,
+    );
+  if (!wait) throw new Error("Missing queued Run");
+  f.apply(
+    (s, a, p) =>
+      beginHostOpsAction(
+        s,
+        a,
+        {
+          tool: "host_ops_cancel_run",
+          target_id: wait.id,
+          reason: "Cancel the unstarted follow-up",
+        },
+        p,
+      ),
+    f.actorFor(ops),
+  );
+  const capacity = f.store.uow.read((tx) =>
+    runCapacitySnapshot(f.store, tx, resourceLimits),
+  );
+  expect(capacity.occupied.get("local")).toBe(2); // busy Run + terminal stop reservation
+  expect(capacity.resourcesForMachine("local").get("blender")?.occupied).toBe(
+    0,
+  );
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      {
+        card_id: other.card.id,
+        work_item_id: other.item.id,
+        body: "Blender task",
+      },
+      p,
+    ),
+  );
+  await dispatcher.tick();
+  expect(
+    f
+      .state()
+      .runs.find(
+        (r) =>
+          r.status === "dispatched" && r.assignment_id === other.assignment.id,
+      )?.resource_keys,
+  ).toEqual(["blender"]);
 });
 
 test("cross-project event FIFO survives full ticks, changed limits, restart, and projects with identical IDs", async () => {
@@ -1293,10 +1381,10 @@ test.each(["system", "human"] as const)(
   "%s host launches respect capacity and the Dispatcher resumes the same queued Run",
   async (kind) => {
     const busy = f.create();
-    f.session(busy.assignment, false);
     if (kind === "human")
       for (const item of [busy.item, target.item])
         requireCapabilities(item, ["ios.simulator"]);
+    f.session(busy.assignment, false);
     const limits = {
       runLimit: () => (kind === "system" ? 1 : 4),
       resourceLimits: () => new Map([["ios.simulator", 1]]),

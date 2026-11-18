@@ -3,6 +3,7 @@ import { beginLaunchAttempt, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   assignment,
+  card,
   fixture,
   now,
   role as roleFixture,
@@ -25,12 +26,16 @@ function standing(n: number, role = "pm"): Assignment {
 function seed(owner: Assignment, execution: Run, project = "first") {
   store.uow.run((tx) => {
     tx.assignments.put(project, owner);
+    const card =
+      owner.work_item_id &&
+      tx.work_items.get(project, owner.work_item_id)?.card_id;
     const event = {
+      ...(card ? { card_id: card } : {}),
       id: tx.ids.nextEventId(),
       seq: tx.ids.nextEventSequence(project),
       type: "run_queued",
       actor: { kind: "system" as const, project_id: project },
-      payload: {},
+      payload: { run_id: execution.id, assignment_id: owner.id },
       created_at: new Date(
         Date.parse(now) + Number(owner.id.slice(2)) * 1000,
       ).toISOString(),
@@ -94,6 +99,7 @@ test.each(["coder", "pm", "host_ops"])(
     store.uow.run((tx) => {
       const item = fixture().work_items[0];
       if (!item) throw new Error("Missing fixture");
+      tx.cards.put("first", { ...card(), project_id: "first" });
       tx.work_items.put("first", {
         ...item,
         requirements: {
@@ -187,6 +193,7 @@ test.each(["coder", "pm", "host_ops"])(
     );
     expect(counts()).toEqual([0, 0, 0]);
     const action = store.uow.run((tx) => {
+      tx.runs.put("first", { ...execution, started_at: now });
       const id = tx.ids.nextEventId();
       tx.events.append("first", {
         id,
@@ -194,16 +201,27 @@ test.each(["coder", "pm", "host_ops"])(
         type: "host_ops_action_taken",
         actor: { kind: "system", project_id: "first" },
         created_at: now,
-        payload: { execution: true, assignment_id: owner.id, runtime_ref: ref },
+        payload: {
+          execution: true,
+          assignment_id: owner.id,
+          run_id: execution.id,
+          runtime_ref: ref,
+        },
       });
       return id;
     });
-    expect(counts()).toEqual([1, limited, limited]);
-    store.uow.run((tx) => tx.runs.put("first", execution));
     expect(counts()).toEqual([1, limited, limited]); // intent and Run overlap
+    expect(slots()).toEqual([limited, limited, 0]);
+    // Reporting completion does not confirm exit for the pending stop.
     store.uow.run((tx) =>
-      tx.runs.put("first", { ...execution, status: "completed" }),
+      tx.runs.put("first", {
+        ...execution,
+        started_at: now,
+        status: "completed",
+      }),
     );
+    expect(counts()).toEqual([1, limited, limited]);
+    expect(slots()).toEqual([limited, limited, 0]);
     store.uow.run((tx) =>
       tx.events.append("first", {
         id: tx.ids.nextEventId(),
@@ -218,6 +236,34 @@ test.each(["coder", "pm", "host_ops"])(
     expect(slots()).toEqual([0, 0, 0]);
   },
 );
+
+test("a legacy occupant without admission history conservatively holds one of each configured resource; a known empty snapshot holds none", () => {
+  const owner = assignment(1);
+  seed(owner, run()); // project-only legacy journal, no trustworthy work-item history
+  const slots = () =>
+    store.uow.read((tx) =>
+      [
+        ...runCapacitySnapshot(
+          store,
+          tx,
+          () =>
+            new Map([
+              ["godot", 2],
+              ["blender", 3],
+            ]),
+        )
+          .resourcesForMachine("local")
+          .values(),
+      ].map((s) => s.occupied),
+    );
+  expect(slots()).toEqual([1, 1]);
+  store.uow.run((tx) =>
+    tx.runs.put("first", { ...run(), status: "completed" }),
+  );
+  expect(slots()).toEqual([0, 0]);
+  seed(owner, { ...run(2, 1), resource_keys: [] });
+  expect(slots()).toEqual([0, 0]);
+});
 
 test("C-296 legacy capacity waits of exempt owners never affect ordinary queue positions", () => {
   for (const owner of [

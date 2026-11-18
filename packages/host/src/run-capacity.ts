@@ -13,7 +13,6 @@ import {
   isRunCapacityExempt,
   type MachineResources,
   type MachineRunCapacity,
-  parseCapabilityRequirement,
   pendingHostOpsActions,
   type QueuedRun,
   type Run,
@@ -27,9 +26,13 @@ import {
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-
 import { runningMergeChecks } from "./merge-check-capacity.js";
 import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
+import {
+  assignmentResourceKeys,
+  legacyResourceKeys,
+  wasDispatched,
+} from "./run-resources.js";
 
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
@@ -211,30 +214,6 @@ const pendingActions = new WeakMap<
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
-/** The work item's template defaults are already persisted; use the pinned role, not the latest. */
-export function assignmentResourceKeys(
-  tx: ReadRepositories,
-  project: string,
-  owner: Assignment,
-): string[] {
-  if (!owner.work_item_id) return [];
-  const item = tx.work_items.get(project, owner.work_item_id);
-  const role = tx.roles.get(project, {
-    role_id: owner.role_id,
-    role_version: owner.role_version,
-  });
-  const keys = new Set<string>();
-  for (const constraint of [
-    ...(item?.requirements?.capabilities ?? []),
-    ...(role?.required_capabilities ?? []),
-  ]) {
-    const parsed = parseCapabilityRequirement(constraint);
-    if (!parsed.ok) throw new Error("Invalid stored capability requirement");
-    keys.add(parsed.value.key);
-  }
-  return [...keys];
-}
-
 /** Keep the existing order among runnable waiters, without blocking other resources. */
 export function hasEarlierCapacityWait(
   tx: ReadRepositories,
@@ -330,7 +309,15 @@ export function runCapacitySnapshot(
       if (!allAgentOccupied.has(machine_id))
         allAgentOccupied.set(machine_id, 0);
     }
-    const count = (assignmentId: AssignmentId, run?: Run) => {
+    const historyFor = (owner: Assignment) => {
+      const card =
+        owner.work_item_id &&
+        tx.work_items.get(project.id, owner.work_item_id)?.card_id;
+      return (
+        streams?.get(card ?? "") ?? tx.events.listAfter(project.id, card, 0)
+      );
+    };
+    const count = (assignmentId: AssignmentId, run?: Run, stopOnly = false) => {
       const owner = owners.get(assignmentId);
       if (!owner) return;
       const machine = owner.machine_id;
@@ -338,10 +325,24 @@ export function runCapacitySnapshot(
       if (!isRunCapacityExempt(owner))
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
       const slots = resourceSlots(machine);
-      if (slots.size && owner.work_item_id) {
-        // Pre-MC-4 Runs have no pinned keys: derive from their existing owner.
-        for (const key of run?.resource_keys ??
-          assignmentResourceKeys(tx, project.id, owner)) {
+      // Stop intents keep their existing machine slot. An idle terminal is not
+      // proof that its queued follow-up acquired any resources. Active Runs and
+      // in-flight startup reservations have already been counted in the Run loop.
+      if (
+        slots.size &&
+        owner.work_item_id &&
+        run &&
+        (!stopOnly || wasDispatched(historyFor(owner), run))
+      ) {
+        for (const key of run.resource_keys ??
+          legacyResourceKeys(
+            tx,
+            project.id,
+            owner,
+            run,
+            historyFor(owner),
+            slots.keys(),
+          )) {
           const slot = slots.get(key);
           if (slot) slot.occupied++;
         }
@@ -362,6 +363,7 @@ export function runCapacitySnapshot(
         count(
           action.assignment_id,
           action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
+          true,
         );
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
