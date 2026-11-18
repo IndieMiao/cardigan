@@ -14,7 +14,7 @@ import {
   LocalGitTransport,
   type WorkspaceGit,
 } from "@cardigan/git-transport";
-import { RuntimeTargets } from "@cardigan/host";
+import { hostRepositoryLock, RuntimeTargets } from "@cardigan/host";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
@@ -187,6 +187,7 @@ function worktrees(
       central,
       {
         dataDir,
+        lock: hostRepositoryLock(dataDir),
         ...(execution.mode === "agent-ssh"
           ? {
               repositoriesRoot: `${execution.agentRoot}/repos`,

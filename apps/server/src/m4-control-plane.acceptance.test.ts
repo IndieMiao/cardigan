@@ -4,11 +4,14 @@
  * that waits on a loop carries an explicit 120 s budget, because on a saturated
  * host one loop round is several seconds of real Git work.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CentralGitTransport } from "@cardigan/git-transport";
+import { repositoryLockPath } from "@cardigan/host";
 import { listBellAttempts } from "@cardigan/store";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { git, type M4Cross, m4Cross } from "../test-support/m4-cross.js";
 import { waitFor } from "../test-support/waits.js";
 import { CleanupExecutor } from "./cleanup-loop.js";
@@ -233,6 +236,46 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
   expect(readFileSync(join(path, "shared.txt"), "utf8")).toBe("unfinished\n");
   expect(events(s, "card_merged")).toHaveLength(1);
 }, 120_000);
+
+test.skipIf(process.platform !== "linux")(
+  "worktree diff holds the server's project flock from backup preparation through publication",
+  async () => {
+    const s = await m4Cross();
+    f = s;
+    await s.start(s.primary.owner);
+    const path = repositoryLockPath(s.dataDir, s.project.project_id);
+    const probe = () => spawnSync("flock", ["--nonblock", path, "true"]).status;
+    const observed: (number | null)[] = [];
+    const transport = CentralGitTransport.prototype;
+    const prepare = transport.prepareBranchBackup;
+    const spy = vi
+      .spyOn(transport, "prepareBranchBackup")
+      .mockImplementationOnce(async function (
+        this: CentralGitTransport,
+        ...args
+      ) {
+        observed.push(probe());
+        const prepared = await prepare.apply(this, args);
+        return {
+          ...prepared,
+          publish() {
+            observed.push(probe());
+            prepared.publish();
+          },
+        };
+      });
+    try {
+      expect(await s.cli("worktree", "diff", s.primary.owner.id)).toContain(
+        "HEAD",
+      );
+      expect(observed).toEqual([1, 1]); // A separate process could not enter.
+      expect(probe()).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  },
+  60_000,
+);
 
 test("E05 §3.6: force-clean records the human decision and saves a private patch", async () => {
   const { s } = await accepted();
