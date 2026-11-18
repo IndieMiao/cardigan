@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { centralFixture } from "../test-support/git.js";
 import { CentralGitTransport } from "./central.js";
 import { LocalGitTransport } from "./index.js";
-import { withGitTimeout } from "./timeouts.js";
+import { withGitTimeout, withMergeTransferBudget } from "./timeouts.js";
 
 let f: Awaited<ReturnType<typeof centralFixture>>;
 beforeEach(async () => {
@@ -136,4 +136,34 @@ test("an hc timeout does not claim that the remote Git process exited", async ()
       });
     }),
   ).rejects.toMatchObject({ executionExited: false });
+});
+
+test("C-466: merge fetch and push are capped without lengthening configured budgets or changing unrelated transfers", async () => {
+  const budget = (command: string, options = {}) =>
+    withGitTimeout(command, options, async (ms) => ms);
+  const entered = Promise.withResolvers<void>();
+  const proceed = Promise.withResolvers<void>();
+  const merging = withMergeTransferBudget(async () => {
+    entered.resolve();
+    await proceed.promise;
+    return Promise.all([
+      budget("fetch"),
+      budget("push"),
+      budget("push", { transferTimeoutMs: 300 }),
+      budget("rev-parse"),
+    ]);
+  });
+  await entered.promise;
+  try {
+    expect(await budget("fetch")).toBe(1_800_000);
+  } finally {
+    proceed.resolve();
+  }
+  expect(await merging).toEqual([180_000, 180_000, 300, 30_000]);
+  vi.stubEnv("CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS", "2000");
+  expect(await withMergeTransferBudget(() => budget("fetch"))).toBe(2000);
+  vi.stubEnv("CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS", "invalid");
+  await expect(withMergeTransferBudget(() => budget("push"))).rejects.toThrow(
+    /CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS/,
+  );
 });

@@ -777,3 +777,54 @@ test.each([0, -1, 1.5, "123", null])(
     expect(f.fetcher.mock.calls).toHaveLength(2);
   },
 );
+
+test.each(["headers", "body"])(
+  "C-466: abort-ignoring %s cannot hold the REST client after its deadline",
+  async (stage) => {
+    const f = await setup();
+    await f.client.token();
+    const held = Promise.withResolvers<Response>();
+    f.fetcher.mockImplementationOnce(async () =>
+      stage === "headers" ? held.promise : new Response(new ReadableStream()),
+    );
+    vi.useFakeTimers();
+    try {
+      const failure = expect(f.client.run(123)).rejects.toMatchObject({
+        category: "api",
+        diagnostic: "GitHub operation timed out",
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await failure;
+      expect(f.fetcher.mock.calls.at(-1)?.[1]?.signal?.aborted).toBe(true);
+      f.fetcher.mockResolvedValueOnce(Response.json({ id: 124 }));
+      await expect(f.client.run(124)).resolves.toEqual({ id: 124 });
+    } finally {
+      held.resolve(new Response(null, { status: 204 }));
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("C-466: discovery distinguishes TLS and invalid JSON without exposing provider text", async () => {
+  const f = await setup();
+  await f.client.token();
+  const secret = "ghs_private_diagnostic_fixture";
+  f.fetcher.mockRejectedValueOnce(
+    new TypeError(secret, {
+      cause: { code: "CERT_HAS_EXPIRED", message: secret },
+    }),
+  );
+  f.fetcher.mockResolvedValueOnce(new Response(secret));
+  for (const diagnostic of [
+    "CERT_HAS_EXPIRED",
+    "Invalid GitHub response JSON",
+  ]) {
+    await expect(
+      f.client.runs("main", "2026-11-15T00:00:00Z"),
+    ).rejects.toMatchObject({
+      category: "api",
+      diagnostic,
+      message: "Check executor unavailable: api",
+    });
+  }
+});
