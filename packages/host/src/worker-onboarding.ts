@@ -186,6 +186,7 @@ export async function onboardWorker(
       config,
       readOnboardingYaml(join(configRoot, "runtime-workers.yaml")),
       dataDir,
+      "applied",
     );
     // Drafts for other projects also bind this physical machine before activation.
     for (const machineName of root
