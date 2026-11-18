@@ -69,7 +69,7 @@ test("compact filters default to working, expose all only once, and clearing app
   show();
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const select = screen.getByRole("combobox", {
-    name: "筛选",
+    name: /^筛选：/,
   });
   expect(select.textContent).toBe("筛选：工作中");
   fireEvent.keyDown(select, { key: "ArrowDown" });
@@ -77,7 +77,8 @@ test("compact filters default to working, expose all only once, and clearing app
   fireEvent.keyDown(document, { key: "Escape" });
   const bar = select.closest(".filter-bar");
   expect(bar?.querySelector(".filter-chips")).toBeTruthy();
-  expect(bar?.querySelector(".filter-summary")?.textContent).toContain("6 / 8");
+  expect(bar?.querySelector(".filter-summary")).toBeNull();
+  expect(document.querySelector(".ui-page-count")?.textContent).toBe("6 / 8");
   click("卡片");
   click("移除筛选筛选");
   expect(select.textContent).toBe("筛选：全部");
@@ -87,7 +88,7 @@ test("compact filters default to working, expose all only once, and clearing app
   expect(ids()).toEqual(["A-6"]);
   click("表格");
   click("按员工分组");
-  expect(screen.getByText("1 个 Assignment · 0 个运行中")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "折叠赵云分组" })).toBeTruthy();
 });
 
 test("state buckets cover existing runtime values without treating historical success as termination", () => {
@@ -177,7 +178,7 @@ test.each([false, true])(
     // Working excludes lost/released but retains standing and external identities.
     expect(ids()).toEqual(["A-8", "A-7", "A-5", "A-4", "A-2", "A-1"]);
     click("按员工分组");
-    expect(screen.getByText("2 个 Assignment · 1 个运行中")).toBeTruthy();
+    expect(screen.queryByText(/个 Assignment ·/)).toBeNull();
     const toggle = screen.getByRole("button", { name: "折叠赵云分组" });
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
@@ -221,7 +222,7 @@ test("equal employee names stay separate, absent identities get a fallback, and 
       })}
     />,
   );
-  expect(await screen.findByText(/没有符合条件的 Assignment/)).toBeTruthy();
+  expect(await screen.findByText(/没有匹配的执行记录/)).toBeTruthy();
   expect(screen.queryByRole("region", { name: "员工泳道" })).toBeNull();
 });
 
@@ -235,15 +236,9 @@ test("display and sort survive remount, are project/browser local, and ignore br
   view.unmount();
   const again = show();
   await screen.findByRole("region", { name: "员工泳道" });
-  fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
-    key: "ArrowDown",
-  });
   expect(
-    screen
-      .getByRole("menuitemcheckbox", { name: "运行状态升序" })
-      .getAttribute("aria-checked"),
-  ).toBe("true");
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    screen.getByRole("combobox", { name: "排序：运行状态升序" }),
+  ).toBeTruthy();
   again.unmount();
   const other = show("p-2");
   await screen.findByRole("table");

@@ -35,11 +35,25 @@ const server = await createServer({
 let browser;
 const records = [];
 const interactions = [];
+let browserVersion;
 try {
   await mkdir(output, { recursive: true });
   await server.listen();
-  browser = await chromium();
+  browser = await chromium({
+    args: [
+      "--run-all-compositor-stages-before-draw",
+      "--disable-new-content-rendering-timeout",
+      "--disable-threaded-animation",
+      "--disable-threaded-scrolling",
+      "--disable-partial-raster",
+      "--disable-gpu",
+      "--disable-skia-runtime-opts",
+      "--force-color-profile=srgb",
+      "--num-raster-threads=1",
+    ],
+  });
   const { send, evaluate } = browser;
+  browserVersion = await send("Browser.getVersion");
   const until = async (expression) => {
     const deadline = Date.now() + 15000;
     while (!(await evaluate(expression).catch(() => false))) {
@@ -141,6 +155,8 @@ try {
           controls:[...document.querySelectorAll('.ui-filter-row button')].filter(e=>e.getClientRects().length).map(e=>({name:e.getAttribute('aria-label')||e.textContent,height:e.getBoundingClientRect().height})),
           ids:[...document.querySelectorAll('[data-ui="id-badge"]')].filter(e=>e.getClientRects().length).map(e=>e.getBoundingClientRect().height),
           title:document.querySelector('.ui-page-header h1') ? getComputedStyle(document.querySelector('.ui-page-header h1')).fontSize : null,
+          typography:[...document.querySelectorAll('.ui-page-header h1,.ui-table-head,.ui-table-cell,.employee-avatar,.ui-filter-row svg')].slice(0,35).map(e=>{const s=getComputedStyle(e);return {selector:e.className?.baseVal ?? e.className,fontSize:s.fontSize,lineHeight:s.lineHeight,padding:s.padding,verticalAlign:s.verticalAlign,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height};}),
+          toolbarOverlap:(() => {const boxes=[...document.querySelectorAll('.ui-filter-row button,.ui-filter-row input[type=search]')].filter(e=>e.getClientRects().length).map(e=>e.getBoundingClientRect()); return boxes.some((a,i)=>boxes.some((b,j)=>i<j && Math.min(a.right,b.right)>Math.max(a.left,b.left) && Math.min(a.bottom,b.bottom)>Math.max(a.top,b.top)));})(),
           taskTitles:[...document.querySelectorAll('.execution-task-title')].map(e=>{const r=e.getBoundingClientRect(),style=getComputedStyle(e),row=e.closest('tr');return {text:e.textContent,height:r.height,minHeight:style.minHeight,paddingTop:style.paddingTop,paddingBottom:style.paddingBottom,inTable:!!row,rowHeight:row?.getBoundingClientRect().height??null};}) };
       })()`);
         if (axe) {
@@ -151,6 +167,7 @@ try {
         }
         records.push({ mode, width, theme, ...metrics });
         if (stage === "after") {
+          assert(!metrics.toolbarOverlap, `${mode}: toolbar overlaps`);
           assert(!metrics.overflow, `${mode} ${width} ${theme}: overflow`);
           assert(
             metrics.controls.every((c) => c.height === 28),
@@ -228,12 +245,13 @@ try {
         );
         await screenshot(`machine-cards-${theme}-${width}`);
         await evaluate(
-          "document.querySelector('button[aria-label=机器]').focus()",
+          "document.querySelector('button[aria-label=\"机器：全部\"]').focus()",
         );
         await key("ArrowDown", 40);
         await until(
           "!!document.querySelector('[role=option][data-value=worker]')",
         );
+        await screenshot(`machine-filter-${theme}-${width}`);
         await evaluate(
           "document.querySelector('[role=option][data-value=worker]').focus()",
         );
@@ -299,6 +317,7 @@ try {
         const capacity = await evaluate(
           "document.querySelector('.capacity-tooltip').textContent",
         );
+        await screenshot(`capacity-${theme}-${width}`);
         assert(
           capacity.includes("local · Agent") &&
             capacity.includes("cardigan-ci · Agent") &&
@@ -364,9 +383,31 @@ try {
         reference.actions.right,
         "right edge agrees with cards page",
       );
-      assert.deepEqual(r.axe, [], "no accessibility violations");
+      if (axe) assert.deepEqual(r.axe, [], "no accessibility violations");
     }
   }
+  // Compare equal viewports without resizing either page: execution left, cards right.
+  for (const width of [1440, 390])
+    for (const theme of ["light", "dark"]) {
+      for (const mode of ["table", "groups", "cards"]) {
+        const sources = await Promise.all(
+          [mode, "reference"].map(
+            async (view) =>
+              `data:image/png;base64,${(await readFile(resolve(output, `${stage}-${view}-${theme}-${width}.png`))).toString("base64")}`,
+          ),
+        );
+        const joined = await evaluate(`(async () => {
+        const images = await Promise.all(${JSON.stringify(sources)}.map(src => new Promise(resolve => { const image=new Image(); image.onload=()=>resolve(image); image.src=src; })));
+        const canvas=document.createElement('canvas'); canvas.width=images[0].width*2; canvas.height=images[0].height;
+        const context=canvas.getContext('2d'); images.forEach((image,index)=>context.drawImage(image,index*image.width,0));
+        return canvas.toDataURL('image/png').split(',')[1];
+      })()`);
+        await writeFile(
+          resolve(output, `${stage}-compare-${mode}-${theme}-${width}.png`),
+          Buffer.from(joined, "base64"),
+        );
+      }
+    }
   assert.deepEqual(browser.errors, []);
 } finally {
   try {
@@ -378,6 +419,10 @@ try {
 await writeFile(
   resolve(output, `${stage}-measurements.json`),
   `${JSON.stringify(records, null, 2)}\n`,
+);
+await writeFile(
+  resolve(output, `${stage}-environment.json`),
+  `${JSON.stringify({ browser: browserVersion, fixture: "8 assignments, 4 runs, 4 cards, 2 machines; synthetic, not production scale", clock: "2026-11-15T07:47:30Z", dpr: 1, fonts: ["Inter Variable", "Noto Sans SC Variable", "JetBrains Mono Variable"], capture: "viewport only" }, null, 2)}\n`,
 );
 console.log(`${stage}: ${records.length} screenshots and measurements`);
 

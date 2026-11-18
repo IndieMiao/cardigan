@@ -133,7 +133,7 @@ test.each([false, true])(
       .getByRole("button", { name: "查看 A-5 详情" })
       .closest("tr,li") as HTMLElement;
     expect(within(ops).getByLabelText("机器：工作机")).toBeTruthy();
-    changeControl(screen.getByRole("combobox", { name: "机器" }), {
+    changeControl(screen.getByRole("combobox", { name: /^机器：/ }), {
       target: { value: "remote" },
     });
     expect(ids()).toEqual(["A-8", "A-6", "A-4", "A-2"]);
@@ -180,30 +180,65 @@ test("Run history uses its dispatch machine even after the Assignment moves; mis
   expect(dialog.textContent).not.toContain("runtime-host");
 });
 
-test("refresh is opt-in, remembered by project, and still supports manual refresh", async () => {
+test("refresh defaults to 30 seconds, is remembered by project, and supports manual refresh", async () => {
+  vi.useFakeTimers();
   const execution = vi.fn(async () => fixture());
   const client = fakeClient({ execution });
   const view = render(<ExecutionPage projectId="p-1" client={client} />);
-  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  await act(async () => {});
   expect(screen.getByRole("combobox", { name: "自动刷新" }).textContent).toBe(
-    "关闭",
+    "30 秒",
   );
   fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await act(async () => {});
   expect(execution).toHaveBeenCalledTimes(2);
-  vi.useFakeTimers();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(30000);
+  });
+  expect(execution).toHaveBeenCalledTimes(3);
   changeControl(screen.getByRole("combobox", { name: "自动刷新" }), {
     target: { value: "10000" },
   });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10000);
   });
-  expect(execution).toHaveBeenCalledTimes(3);
+  expect(execution).toHaveBeenCalledTimes(4);
   view.unmount();
   render(<ExecutionPage projectId="p-2" client={client} />);
   await act(async () => {});
   expect(screen.getByRole("combobox", { name: "自动刷新" }).textContent).toBe(
-    "关闭",
+    "30 秒",
   );
   expect(localStorage.getItem("cardigan.execution.refresh.p-1")).toBe("10000");
+});
+
+test("saved refresh-off survives remount and pending refresh keeps focus without duplicate requests", async () => {
+  localStorage.setItem("cardigan.execution.refresh.p-1", "0");
+  const request = Promise.withResolvers<ExecutionData>();
+  const execution = vi
+    .fn()
+    .mockResolvedValueOnce(fixture())
+    .mockReturnValue(request.promise);
+  render(<ExecutionPage projectId="p-1" client={fakeClient({ execution })} />);
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  expect(screen.getByRole("combobox", { name: "自动刷新" }).textContent).toBe(
+    "关闭",
+  );
+  vi.useFakeTimers();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60000);
+  });
+  expect(execution).toHaveBeenCalledTimes(1);
+  const refresh = screen.getByRole("button", { name: "立即刷新" });
+  refresh.focus();
+  fireEvent.click(refresh);
+  expect(refresh.getAttribute("aria-disabled")).toBe("true");
+  expect(document.activeElement).toBe(refresh);
+  fireEvent.click(refresh);
+  expect(execution).toHaveBeenCalledTimes(2);
+  await act(async () => {
+    request.resolve(fixture());
+  });
+  expect(refresh.getAttribute("aria-disabled")).toBe("false");
+  expect(document.activeElement).toBe(refresh);
 });
