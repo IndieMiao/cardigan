@@ -3,6 +3,7 @@ import {
   onboardWorker,
   parseWorkerOnboarding,
   readOnboardingYaml,
+  refreshMachineObservations,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
@@ -179,6 +180,32 @@ export async function runWorkerCommand(
       report: (step, state, reason, next) =>
         io.stdout(`${step}: ${state} (${reason})${next ? `\n${next}` : ""}`),
     });
+    const store = openStore({ dataDir });
+    try {
+      const registered = store.uow.read((tx) =>
+        tx.machines.get(project, machine),
+      );
+      if (registered) {
+        const observations = await refreshMachineObservations({
+          store,
+          project,
+          machine,
+          env: io.env,
+          target: () => ({
+            execution: config.worker.execution,
+            machine: registered,
+          }),
+          check: async () => ({
+            blockers: passed ? [] : ["worker_check_failed"],
+            launch_enabled: false,
+          }),
+        });
+        if (passed && !observations.health?.available)
+          throw new WorkerOnboardingError("worker_capability_check_failed");
+      }
+    } finally {
+      store.close();
+    }
     if (passed)
       io.stdout(
         "接入检查通过；未启用远程派发。MCP 已验证 HTTPS 可达和未鉴权拒绝，启动鉴权由运行目标检查负责。",

@@ -156,6 +156,7 @@ const factory = vi.fn(async (options: HerdrOptions) => {
       retire_idle: call("retire_idle", { exited: true }),
       probeTerminal: call("probeTerminal", "alive" as const),
       captureAgent: call("captureAgent", "fixture 1.0"),
+      checkLocalHealth: call("checkLocalHealth", undefined),
       async *events() {
         calls(target?.machine_id, "events");
         yield {
@@ -837,6 +838,63 @@ test("checks are live, and disabled launch is distinct from a passing machine ch
   expect(calls.mock.calls.filter((c) => c[1] === "captureAgent")).toHaveLength(
     3,
   );
+});
+
+test("legacy local health uses the real adapter, refreshes capabilities, and observes lost liveness", async () => {
+  const exec = vi.fn(async (args: readonly string[]) => {
+    if (args.join(" ") === "--version") return `hc ${HC_RELEASE.version}`;
+    if (args.join(" ") === "ls --json") return '{"terminals":[]}';
+    throw new Error("Unexpected hc command");
+  });
+  const available = vi.fn(async () => true);
+  const local = value(
+    await RuntimeTargets.create({
+      store,
+      execution: { mode: "local", dataDir: root },
+      workers: () => [],
+      factory: HerdrRuntime.create,
+      client: { exec, available, async *lines() {} },
+      session: "local-health",
+      socketPath: join(root, "local-health.sock"),
+    }),
+  );
+  const probe = vi.fn(async () => ({ ok: true, output: "v24.0.0" }));
+  const options = {
+    catalog: () => [
+      {
+        key: "node",
+        os: ["linux", "darwin"] as const,
+        check: ["node", "--version"],
+        version: ["node", "--version"],
+        parseVersion: () => "24.0.0",
+      },
+    ],
+    probe,
+  };
+  expect(value(await local.check("fixture", "local"))).toMatchObject({
+    blockers: [],
+    launch_enabled: true,
+  });
+  const first = await local.refreshMachine("fixture", "local", options);
+  expect(first.health).toMatchObject({ status: "passed", available: true });
+  expect(first.capabilities).toEqual([
+    expect.objectContaining({ key: "node", available: true }),
+  ]);
+  expect(probe).toHaveBeenCalledTimes(1);
+  expect(exec.mock.calls.map(([args]) => args)).toEqual([
+    ["--version"],
+    ["ls", "--json"],
+    ["ls", "--json"],
+  ]);
+  available.mockResolvedValue(false);
+  const failed = await local.refreshMachine("fixture", "local", options);
+  expect(failed.health).toMatchObject({
+    status: "failed",
+    available: false,
+    blockers: ["runtime_unavailable"],
+  });
+  expect(failed.capabilities).toEqual([]);
+  expect(probe).toHaveBeenCalledTimes(1);
 });
 
 test.each(["configuration", "permission", "status"])(

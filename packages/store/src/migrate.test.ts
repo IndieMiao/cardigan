@@ -162,6 +162,7 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 37, name: "merge_batch_checks" },
       { version: 38, name: "notification_status" },
       { version: 39, name: "ui_template" },
+      { version: 40, name: "machine_capabilities" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

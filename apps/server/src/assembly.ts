@@ -5,6 +5,7 @@ import type {
   ProjectId,
 } from "@cardigan/domain";
 import { standingModeFromTools } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import { type Store, tokensForAssignment } from "@cardigan/store";
 import { type AttachmentGc, startAttachmentLoop } from "./attachment-loop.js";
@@ -21,6 +22,7 @@ import {
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
 import type { GitPhases } from "./git.js";
+import { startMachineCapabilityLoop } from "./machine-capability-loop.js";
 import type { MergeCheckOptions } from "./merge-checks.js";
 import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import {
@@ -273,6 +275,14 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   };
   const loop: DispatchLoop = startDispatchLoop(loopOptions);
   const report = (error: unknown) => options.onError?.(error);
+  const machineCapabilities =
+    options.runtime instanceof RuntimeTargets
+      ? startMachineCapabilityLoop({
+          store: options.store,
+          runtime: options.runtime,
+          onError: report,
+        })
+      : undefined;
   const merge =
     options.git === undefined
       ? undefined
@@ -365,6 +375,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     reconcile?.loop.done,
     backup?.loop.done,
     attachments?.loop.done,
+    machineCapabilities?.done,
   ].filter((entry): entry is Promise<void> => entry !== undefined);
   return {
     done: Promise.all(loops).then(() => undefined),
@@ -378,6 +389,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       // Cancel checks promptly; wait below before closing the shared Store.
       merge?.executor.stop();
       push?.executor.stop();
+      const stopMachineCapabilities = machineCapabilities?.stop();
       // Dispatcher first (no new work), then the phases in a fixed order; each
       // stop waits for its current tick, so SIGTERM never cuts a merge or a
       // worktree removal in half.
@@ -389,6 +401,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       await backup?.loop.stop();
       // The blob sweep last: it only touches files no record references.
       await attachments?.loop.stop();
+      await stopMachineCapabilities;
     },
   };
 }
