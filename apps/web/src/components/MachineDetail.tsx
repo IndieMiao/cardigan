@@ -117,8 +117,9 @@ export function MachineDetail({
                   <span className="execution-run-head metadata">
                     <span>{resource.key}</span>
                     <StatusTag
+                      // A full slot is normal queueing, not a fault.
                       status={
-                        resource.occupied >= resource.limit ? "blocked" : "idle"
+                        resource.occupied >= resource.limit ? "running" : "idle"
                       }
                       label={`${resource.occupied}/${resource.limit}`}
                       subdued={resource.occupied < resource.limit}
@@ -138,7 +139,7 @@ export function MachineDetail({
             {capabilities.length > 0 && (
               <span className="hint">
                 {" "}
-                {capabilities.filter((c) => c.available).length} /{" "}
+                {capabilities.filter((c) => c.state === "verified").length} /{" "}
                 {capabilities.length}
               </span>
             )}

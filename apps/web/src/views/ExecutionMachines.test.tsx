@@ -374,7 +374,8 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
   const row = open.closest("li") as HTMLElement;
   expect(within(row).getByText("健康")).toBeTruthy();
   await waitFor(() => expect(row.textContent).toContain("容量 2/4"));
-  expect(row.textContent).toContain("能力 1");
+  // Same count as the drawer heading: verified / listed.
+  expect(row.textContent).toContain("能力 1 / 3");
   const remote = screen
     .getByRole("button", { name: "查看 远端构建机 机器详情" })
     .closest("li") as HTMLElement;
@@ -394,6 +395,10 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
     name: "工作机 资源占用",
   });
   expect(resources.textContent).toContain("blender2/2");
+  // A full slot reads as in use, not as an error.
+  expect(
+    within(resources).getByText("2/2").closest(".status")?.className,
+  ).toContain("status-running");
   expect(resources.textContent).toContain("ios.simulator0/1");
   const capabilities = within(drawer).getByRole("region", {
     name: "工作机 能力",
