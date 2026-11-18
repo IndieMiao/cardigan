@@ -4,12 +4,15 @@ export function PageHeader({
   title,
   count,
   actions,
+  status,
   showCapacity = true,
   capacityByMachine = false,
 }: {
   title: ReactNode;
   count?: ReactNode;
   actions?: ReactNode;
+  /** Compact borderless summary item placed before capacity on the right. */
+  status?: ReactNode;
   showCapacity?: boolean;
   capacityByMachine?: boolean;
 }) {
@@ -23,6 +26,7 @@ export function PageHeader({
       </div>
       <PageSummary
         actions={actions}
+        status={status}
         showCapacity={showCapacity}
         capacityByMachine={capacityByMachine}
       />

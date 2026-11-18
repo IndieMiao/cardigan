@@ -8,13 +8,13 @@ import type {
 } from "@cardigan/domain";
 import {
   claimInactiveRunStop,
-  currentHarnessActivity,
   finishInactiveRunStop,
   type HarnessActivity,
-  harnessActivityTime,
   inactiveRunDue,
+  lastInactiveStopActivity,
   startInactiveRunStop,
 } from "@cardigan/domain";
+import type { HarnessActivityInspection } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
@@ -27,6 +27,16 @@ interface ReaperOptions {
   clock: Clock;
   afterMs: number | null;
   inspectionPending?: (project: ProjectId, run: Run["id"]) => boolean;
+  inspectHarnessActivity?: (
+    project: ProjectId,
+    assignment: Assignment["id"],
+  ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
+  onUnknown?: (
+    project: ProjectId,
+    assignment: Assignment,
+    run: Run,
+    inspection: HarnessActivityInspection,
+  ) => void;
   harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -60,18 +70,9 @@ export class InactiveRunReaper {
         )
           continue;
         const a = owners.get(run.assignment_id);
-        const sample = () =>
+        const cached = () =>
           this.options.harnessActivity?.(project, run.assignment_id);
-        const harnessAt =
-          a &&
-          harnessActivityTime(
-            currentHarnessActivity(
-              state,
-              a,
-              this.options.clock.now(),
-              sample(),
-            ),
-          );
+        const now = this.options.clock.now();
         if (
           !a ||
           a.external ||
@@ -79,12 +80,36 @@ export class InactiveRunReaper {
             !inactiveRunDue(
               run,
               a,
-              this.options.clock.now(),
+              now,
               afterMs,
-              harnessAt,
+              lastInactiveStopActivity(state, run, a, now, cached()),
             ))
         )
           continue;
+        let inspected: HarnessActivity | undefined;
+        const refresh = async () => {
+          inspected = undefined;
+          let row: HarnessActivityInspection | undefined;
+          try {
+            row = (
+              await this.options.inspectHarnessActivity?.(project, a.id)
+            )?.get(a.id);
+          } catch {
+            row = { status: "read_failed" };
+          }
+          if (row?.status === "stale" || row?.status === "fresh")
+            inspected = row.activity;
+          else
+            this.options.onUnknown?.(
+              project,
+              a,
+              run,
+              row ?? { status: "missing" },
+            );
+        };
+        const claude = run.harness === "claude-code";
+        if (claude) await refresh();
+        const sample = () => (claude ? inspected : cached());
         const actor = { kind: "system" as const, project_id: project };
         await runStopWorkflow(this.options, project, {
           claim: (s, p) =>
@@ -94,6 +119,7 @@ export class InactiveRunReaper {
               { run_id: run.id, after_ms: afterMs, harness_activity: sample() },
               p,
             ),
+          ...(claude ? { beforeStart: refresh } : {}),
           fence: (r) => r.inactivity_stop,
           start: (s, p, r, stop) =>
             startInactiveRunStop(
