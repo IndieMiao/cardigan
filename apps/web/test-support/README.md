@@ -65,3 +65,5 @@ C-411 模板标记：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support
 C-411 悬停提示回归（V-1862）：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c411-hover-escape.mjs <新输出目录>`。沿同一固定12卡夹具，覆盖1440/390亮暗页面与抽屉八场景；保留自然焦点（抽屉关闭按钮），只移动鼠标悬停模板图标，核第一次Escape收提示且保留焦点/抽屉、第二次关闭抽屉。输出16张前后状态图和绑定当前SHA的JSON，不使用生产数据或真实业务API。
 
 C-436 执行视图迁移：`CHROMIUM_PATH=<Chromium> AXE_PATH=<axe.min.js> node apps/web/test-support/execution-migration-layout.mjs <输出目录> after`。使用固定内存夹具（8 个 Assignment、4 个 Run、4 张卡、2 台机器，非生产规模），覆盖表格/分组/卡片及卡片页/详情页对照，1440/390 亮暗主题；另核对机器筛选/分组、状态鼠标与 Tab 提示、容量、抽屉焦点返回、28px 控件与 axe。`before` 参数只用于在改前源码上采集基线，不自动检出历史提交；正式报告应注明基线和产出 SHA。旧 execution-display/compact 截图脚本只保留历史证据，当前迁移验证用本脚本。
+
+C-438 执行工具组：`CHROMIUM_PATH=<Chromium> node apps/web/test-support/execution-toolbar-layout.mjs <输出目录> before`，再用 `after` 运行。改前通过 Vite 加载固定基线的 ExecutionPage，不修改工作树；两阶段均复用 C-436 内存夹具（固定时钟 2026-11-15T07:47:30Z、8 个 Assignment、4 个 Run、4 张卡、2 台机器，非生产规模）。覆盖 1440/390×亮暗×表格/分组/卡片和卡片页对照、五种刷新周期与实际鼠标切换/立即刷新、键盘选择周期；每阶段 32 张截图和边界测量。改后断言文字容纳、中心点击命中、相邻 8/8/0px 间距、右对齐、控件不换行、页面无横溢。本地 Chromium 的改前状态未复现用户重叠，不将此回归当作现场问题已复现的证据；不连接生产服务。
