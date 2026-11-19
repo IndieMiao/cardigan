@@ -54,8 +54,9 @@ const providerSchema = z.strictObject({
     .enum(["openai-responses", "anthropic-messages", "openai-completions"])
     .optional(),
   base_url: endpoint.optional(),
-  /** Pi models.json can read its endpoint from this variable. */
+  /** Optional additional export; Pi reads the literal URL from its registry. */
   base_url_env: envVarSchema.optional(),
+  pi: z.strictObject({ env_key: envVarSchema }).optional(),
   codex: z
     .strictObject({
       name: z.string().min(1).optional(),
@@ -125,6 +126,7 @@ const launchConfigSchema = z.strictObject({
     .strictObject({
       max_age_ms: positiveMillis.optional(),
       max_bytes: z.number().int().positive().optional(),
+      cache_max_bytes: z.number().int().positive().optional(),
       timeout_ms: positiveMillis.optional(),
     })
     .optional(),
@@ -166,8 +168,16 @@ const launchConfigSchema = z.strictObject({
 });
 
 export type ProviderDefinition = z.infer<typeof providerSchema>;
-export type LaunchProfileDefinition = z.infer<typeof profileSchema>;
-export type LaunchConfig = z.infer<typeof launchConfigSchema>;
+export type LaunchProfileDefinition = z.infer<typeof profileSchema> & {
+  /** Derived metadata for this exact alias, not a user-supplied registry. */
+  pi_model?: z.infer<typeof modelMetadata>;
+};
+export type LaunchConfig = Omit<
+  z.infer<typeof launchConfigSchema>,
+  "profiles"
+> & {
+  profiles: Record<string, LaunchProfileDefinition>;
+};
 export type BrowserLaunchDefinition = z.infer<typeof browserSchema>;
 
 export interface ResolvedProfile {
@@ -228,8 +238,7 @@ function inlineCodexProvider(
 ) {
   const config: NonNullable<LaunchProfileDefinition["config"]> = {};
   if (name && provider?.base_url) {
-    // A dot belongs to the provider name, not to another nested TOML key.
-    const key = `model_providers.${name.includes(".") ? JSON.stringify(name) : name}`;
+    const key = `model_providers.${name}`;
     config.model_provider = name;
     config[`${key}.name`] = provider.codex?.name ?? name;
     config[`${key}.base_url`] = provider.base_url;
@@ -260,6 +269,7 @@ function validateRoute(
   at: string,
   harness: LaunchProfileDefinition["harness"],
   provider: ProviderDefinition,
+  name: string,
   details: string[],
 ) {
   if (
@@ -268,12 +278,36 @@ function validateRoute(
       (harness === "claude-code" && provider.api !== "anthropic-messages"))
   )
     details.push(`${at}.api 与 harness.${harness} 不兼容`);
-  if (!provider.base_url || harness === "codex") return;
+  if (!provider.base_url) return;
+  if (harness === "codex") {
+    if (
+      name.includes(".") ||
+      ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(name)
+    )
+      details.push(`${at}: 内联 Codex 接入点名不能含点或使用内置名称 ${name}`);
+    if (provider.codex?.requires_openai_auth && provider.codex.env_key)
+      details.push(`${at}.codex: requires_openai_auth 与 env_key 不能同时使用`);
+  }
+  if (harness === "pi" && !provider.api)
+    details.push(`${at}: Pi 内联端点需要 api`);
+  if (harness !== "claude-code") {
+    const selected =
+      harness === "pi" ? provider.pi?.env_key : provider.codex?.env_key;
+    if (selected && !Object.hasOwn(provider.secret_env, selected))
+      details.push(`${at}.${harness}.env_key 必须引用此接入点的 secret_env`);
+    if (
+      !selected &&
+      !(harness === "codex" && provider.codex?.requires_openai_auth) &&
+      Object.keys(provider.secret_env).length > 1
+    )
+      details.push(`${at}.${harness}.env_key: 多个凭据引用需要显式选择`);
+  }
+  if (harness === "codex") return;
   const key = endpointEnvKey(harness, provider);
-  if (!key) details.push(`${at}: pi 的 base_url 需要指定 base_url_env`);
-  else if (
-    key in provider.secret_env ||
-    (key in provider.env && provider.env[key] !== provider.base_url)
+  if (
+    key &&
+    (key in provider.secret_env ||
+      (key in provider.env && provider.env[key] !== provider.base_url))
   )
     details.push(`${at}: base_url 与 ${key} 的定义冲突`);
 }
@@ -288,7 +322,11 @@ function normalizeConfig(
     if (!provider.harness && !provider.api)
       details.push(`${at}: 接入点需要 harness，跨 harness 共用时需要 api`);
     if (provider.harness)
-      validateRoute(at, provider.harness, provider, details);
+      validateRoute(at, provider.harness, provider, name, details);
+    else {
+      if (provider.codex) validateRoute(at, "codex", provider, name, details);
+      if (provider.pi) validateRoute(at, "pi", provider, name, details);
+    }
     if (
       provider.codex &&
       ((provider.harness && provider.harness !== "codex") ||
@@ -296,6 +334,11 @@ function normalizeConfig(
         (provider.api && provider.api !== "openai-responses"))
     )
       details.push(`${at}.codex 需要 codex 接入点和 base_url`);
+    if (
+      provider.pi &&
+      (!provider.base_url || (provider.harness && provider.harness !== "pi"))
+    )
+      details.push(`${at}.pi 只用于 Pi 内联端点`);
     if (
       provider.base_url_env &&
       ((provider.harness && provider.harness !== "pi") || !provider.base_url)
@@ -353,6 +396,25 @@ function normalizeConfig(
         profile.provider && Object.hasOwn(config.providers, profile.provider)
           ? config.providers[profile.provider]
           : undefined;
+      if (provider?.base_url) {
+        // Inline routing has one owner. Free-form TOML/CLI overrides remain
+        // available in legacy external profiles; other config is still allowed.
+        if (
+          Object.keys(profile.config ?? {}).some(
+            (key) =>
+              !/^[\w-]+(?:\.[\w-]+)*$/.test(key) ||
+              /^(model_provider|model_providers|profiles|profile)(\.|$)/.test(
+                key,
+              ),
+          ) ||
+          profile.args?.some((arg) =>
+            /^(-[cp]|--(config|profile|oss|local-provider)(=|$))/.test(arg),
+          )
+        )
+          details.push(
+            `${at}: 内联 Codex 路线不能由 config 或 args 重选接入点或凭据`,
+          );
+      }
       if (provider?.base_url || model || profile.effort) {
         profile.config = {
           ...inlineCodexProvider(profile.provider, provider),
@@ -399,8 +461,28 @@ function normalizeConfig(
         : undefined;
       if (provider === undefined) {
         details.push(`${at}: 引用了不存在的接入点 ${profile.provider}`);
+      } else if (profile.harness === "pi" && provider.base_url) {
+        if (provider.harness && provider.harness !== "pi")
+          details.push(`${at}: 与接入点的 harness 不一致`);
+        if (!provider.harness)
+          validateRoute(at, "pi", provider, profile.provider, details);
+        if (
+          !profile.model ||
+          profile.agent_dir ||
+          "PI_CODING_AGENT_DIR" in provider.env ||
+          "PI_CODING_AGENT_DIR" in provider.secret_env ||
+          provider.base_url_env === "PI_CODING_AGENT_DIR"
+        )
+          details.push(`${at}: Pi 内联端点需要模型并独占此启动的模型目录`);
+        profile.provider_flag ??= profile.provider;
+        if (model)
+          profile.pi_model = {
+            context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
+            reasoning_efforts: model.reasoning_efforts,
+          };
       } else if (!provider.harness) {
-        validateRoute(at, profile.harness, provider, details);
+        validateRoute(at, profile.harness, provider, profile.provider, details);
       } else if (provider.harness !== profile.harness) {
         details.push(
           `${at}: harness 是 ${profile.harness}，但接入点 ${profile.provider} 是 ${provider.harness}`,

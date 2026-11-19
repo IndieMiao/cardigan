@@ -46,14 +46,15 @@ profiles:
 ```
 
 - `model` 命中别名时，取该模型的具体 `id` 和接入点。未命中仍按旧格式解释为字面 ID，因此可逐份迁移；不要用现有字面 ID 为别的模型命名。重复写 `profile.provider` 时必须与模型的 provider 一致。
-- Codex 的内联端点展开为 `model_provider`、`model_providers.<名字>.*`。只有原来需要 `--profile` 时才填写 `codex.profile`；内联端点不依赖外部命名配置。`codex.env_key` 是环境变量名，不是值（只有一个 `secret_env` 且不走 `requires_openai_auth` 时可省略）。模型窗口和 profile 的 `effort` 生成对应的 `-c` 参数；旧的显式 `config`、最后的 `args` 仍可覆盖，迁移时移走重复的覆盖项。
-- Claude Code 用 `base_url` 生成 settings 的 `ANTHROPIC_BASE_URL`，`effort` 生成 `--effort`。Pi 用 `provider_flag`（引用别名时默认用 provider 名）和 `--model`；`effort` 对应 `--thinking`。Pi 的自定义端点须在其私有 models.json 中引用 `base_url_env` 指定的变量，本卡不改写 Pi 配置。声明 `api` 后可以省略 provider 的 `harness`，让兼容同一协议的 profile 复用端点和凭据映射。没有新协议或新机器能力。
+- Codex 的内联端点展开为 `model_provider`、`model_providers.<名字>.*`。内联名不能含点，也不能用 Codex 自带的 `openai`、`ollama`、`lmstudio`、`amazon-bedrock`；旧格式外部 `--profile` 的名字不受此限。原来需要 `--profile` 时才填 `codex.profile`。`codex.env_key` 必须是本接入点 `secret_env` 中的变量名；只有一个引用时可自动选取，多个必须显式选择。无凭据或选择 Codex 登录认证（`requires_openai_auth: true`）时不自动生成 `env_key`。不要在内联 profile 的 `config` 或 `args` 里重选端点、认证或外部配置；非路由参数仍可设置，例如 `model_reasoning_effort`。
+- Claude Code 用 `base_url` 生成 settings 的 `ANTHROPIC_BASE_URL`，`effort` 生成 `--effort`。Pi 用 `provider_flag`（引用别名时默认用 provider 名）、`--model` 和 `--thinking`。同一协议的多个 harness 可共用一个不带 `harness` 的 provider，例如上例的 `relay` 去掉 `harness` 后，可新增 `pi-astra: {harness: pi, model: astra}`。
+- **Pi 内联端点**：须给 provider 填 `api`、给 profile 选模型。Cardigan 在此次启动的私有 Pi 目录生成 `models.json`，写入实际 URL、协议和选中的具体 ID，凭据只写 `$环境变量名`。多个引用用 `pi.env_key` 选择；无引用时使用不含凭据的占位符。`base_url_env` 只作可选的环境导出，不用于 URL 插值。直接 CLI 使用每次启动独立的 Pi 目录，不载入个人 Pi 配置；不能同时指定 `agent_dir`。Assignment 沿用原有隔离目录，远程启动将注册表与 MCP 配置一同发布到会话目录。没有内联端点时，Pi 仍使用原有目录和注册表，不生成新文件。离线实机库核对可在增量构建后运行 `node test-support/pi-model-registry.mjs <已安装的 Pi 1.4.0 包目录>`，不向模型发请求。
 - `secret_env` 仍然只是**环境变量名 → secrets.env 的键名**。只有启动时读取私有 `secrets.env`，原有权限检查不变。不要将生产的 YAML、settings 或密钥放进仓库。
 
 ## 模型目录和离线启动
 
 有别名的配置按 `(catalog_provider 或 provider, id)` 精确匹配 `models.dev/api.json`；本地 provider 名不同于目录中的厂商名时，在模型上填 `catalog_provider`。不跨线路猜测同名模型的窗口。`limit.context`、`limit.output` 和 `reasoning_options` 中明确列出的 effort 值分别映射为 `context_window`、`max_output_tokens`、`reasoning_efforts`。三项均可本地逐字段覆盖；元数据不全时不从名字或推理开关猜数值或强度。
 
-CLI 与 server 共用数据目录下的 `models-dev.json`，只保存获取时间和公开元数据，不保存原始响应、私有配置、主机端点或凭据。缓存新鲜时不发请求，过期后只向固定的公开地址刷新；不可达、超时、无效响应均退回已有缓存。缓存缺失或损坏时仍可用本地显式值。别名最终没有窗口（尤其是目录中没有的中转模型）时，校验报告缺少 `models.<别名>.context_window`，不会带着猜测的默认值启动。同步只读命令只用缓存和本地值，不联网。
+CLI 与 server 共用数据目录下的 `models-dev.json`，只保存获取时间和公开元数据，不保存原始响应、私有配置、主机端点或凭据。缓存新鲜时不发请求，过期后只向固定的公开地址刷新；不可达、超时、无效响应均退回已有缓存。返回的模型只提供部分字段时仍采用其中有效的字段。若同一条记录损坏，使用它上次可用的字段且不覆盖好缓存；新目录中已不存在的模型不复用旧窗口。先校验所有别名和 profile，再替换缓存。缓存缺失、超限或损坏时仍可用本地显式值。别名最终没有窗口（尤其是目录中没有的中转模型）时，校验报告缺少 `models.<别名>.context_window`，不会带着猜测的默认值启动。同步只读命令只用缓存和本地值，不联网。
 
-`model_catalog.max_age_ms` 默认 86400000（一天），`timeout_ms` 默认 5000（五秒），`max_bytes` 默认 33554432（解压后 32 MiB，超限按刷新失败处理），均可在同一 YAML 的 `model_catalog` 下覆盖。部署后由维护者在私有主机对照五个既有 profile；本卡的测试使用脱敏配置、临时数据目录与内存中的目录响应，不访问生产文件或模型服务。
+`model_catalog.max_age_ms` 默认 86400000（一天），`timeout_ms` 默认 5000（五秒），`max_bytes` 默认 33554432（解压后的网络响应），`cache_max_bytes` 独立默认为 33554432（32 MiB，含时间戳、标点、转义和全部投影行的 UTF-8 字节）。额度恰好用满可接受；刷新超出任一额度均不替换旧缓存，读取超过缓存额度的文件会跳过。四项均可在同一 YAML 的 `model_catalog` 下覆盖。部署后由维护者在私有主机对照五个既有 profile；本卡的测试使用脱敏配置、临时数据目录与内存中的目录响应，不访问生产文件或模型服务。

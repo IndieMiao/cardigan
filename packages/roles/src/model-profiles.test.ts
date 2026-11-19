@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { compileLaunch, parseLaunchConfig, resolveProfile } from "./index.js";
+import {
+  compileAssignmentLaunch,
+  compileLaunch,
+  parseLaunchConfig,
+  resolveProfile,
+} from "./index.js";
 
 // Sanitized launch shapes, not host configuration. The old side spells out the
 // overrides independently of the new provider/model expansion.
@@ -208,7 +213,54 @@ test("a Pi and a Codex profile can use one Responses route and secret reference"
     'model_providers.relay.env_key="OPENAI_API_KEY"',
   );
   expect(codex.env).toEqual({ OPENAI_API_KEY: "one" });
-  expect(pi.env).toEqual({ OPENAI_API_KEY: "one", PI_RELAY_URL: base });
+  expect(pi.env).toMatchObject({ OPENAI_API_KEY: "one", PI_RELAY_URL: base });
+  const assignment = compileAssignmentLaunch({
+    assignment: {
+      assignment_id: "A-1",
+      run_id: "R-1",
+      card_id: "C-1",
+      work_item_id: "W-1",
+      project_id: "fixture",
+    },
+    role: {
+      role_id: "coder",
+      harness: "pi",
+      launch_profile: "pi",
+      worktree: "write",
+      allowed_tools: [],
+    },
+    launch: parseLaunchConfig(shared),
+    mcp: { url: "https://fixture.invalid/mcp" },
+    run_dir: "/fixture/run",
+    work_dir: "/fixture/work",
+    first_prompt: "fixture",
+    secrets: { GATEWAY_KEY: "one" },
+  });
+  for (const launch of [pi, assignment]) {
+    const file = launch.files.find(
+      (f) => f.path === `${launch.env.PI_CODING_AGENT_DIR}/models.json`,
+    );
+    expect(file?.mode).toBe(0o600);
+    const registry = JSON.parse(file?.content ?? "null");
+    const route =
+      registry.providers[
+        launch.args[launch.args.indexOf("--provider") + 1] ?? ""
+      ];
+    expect(route).toMatchObject({
+      api: "openai-responses",
+      baseUrl: base,
+      apiKey: "$OPENAI_API_KEY",
+    });
+    expect(route.models).toEqual([
+      {
+        id: launch.args[launch.args.indexOf("--model") + 1],
+        contextWindow: 1000000,
+      },
+    ]);
+    expect(file?.content).not.toContain('"one"');
+  }
+  expect(assignment.env).not.toHaveProperty("OPENAI_API_KEY");
+  expect(assignment.secret_env.OPENAI_API_KEY).toBe("one");
   expect(pi.args).toEqual([
     "--provider",
     "relay",
@@ -216,3 +268,56 @@ test("a Pi and a Codex profile can use one Responses route and secret reference"
     "gpt-fixture-sol",
   ]);
 });
+
+test("inline Codex validates credential ownership and refuses competing route overrides", () => {
+  const input = (
+    secret_env: Record<string, string>,
+    codex: Record<string, unknown>,
+    extra = {},
+  ) => ({
+    providers: {
+      relay: { harness: "codex", base_url: base, secret_env, codex },
+    },
+    profiles: { active: { harness: "codex", provider: "relay", ...extra } },
+  });
+  const two = { RELAY: "GATEWAY_KEY", EXTRA: "MSG_AUTH" };
+  for (const cfg of [
+    input(two, {}),
+    input(two, { env_key: "OTHER_ROUTE_KEY" }),
+    input({}, { env_key: "RELAY" }),
+    input(two, { env_key: "RELAY", requires_openai_auth: true }),
+    input(
+      two,
+      { env_key: "RELAY" },
+      { config: { "model_providers.relay.env_key": "OTHER_ROUTE_KEY" } },
+    ),
+    input(
+      two,
+      { env_key: "RELAY" },
+      { args: ["-c", 'model_provider="other"'] },
+    ),
+  ])
+    expect(() => parseLaunchConfig(cfg)).toThrow();
+  expect(compile(input(two, { env_key: "RELAY" }), "active").args).toContain(
+    'model_providers.relay.env_key="RELAY"',
+  );
+  for (const cfg of [input({}, {}), input(two, { requires_openai_auth: true })])
+    expect(compile(cfg, "active").args.join(" ")).not.toContain("env_key=");
+});
+
+test.each(["relay.v1", "openai", "ollama", "lmstudio", "amazon-bedrock"])(
+  "rejects unsupported inline Codex key %s without restricting external profile names",
+  (name) => {
+    const profiles = { p: { harness: "codex", provider: name } };
+    expect(() =>
+      parseLaunchConfig({
+        providers: { [name]: { harness: "codex", base_url: base } },
+        profiles,
+      }),
+    ).toThrow();
+    expect(
+      compile({ providers: { [name]: { harness: "codex" } }, profiles }, "p")
+        .args,
+    ).toEqual(["--profile", name]);
+  },
+);

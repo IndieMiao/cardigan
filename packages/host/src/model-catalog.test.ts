@@ -133,3 +133,140 @@ test("legacy profiles need neither a model catalog nor a network request", async
   );
   expect(fetch).not.toHaveBeenCalled();
 });
+
+test("partial metadata complements local fields and enforces known effort", async () => {
+  const local = {
+    ...config,
+    models: { active: { ...config.models.active, context_window: 12345 } },
+  };
+  for (const context of [undefined, 0]) {
+    const fetch = async () =>
+      Response.json({
+        native: {
+          models: {
+            v1: {
+              limit: { context, output: 1500 },
+              reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+            },
+          },
+        },
+      });
+    expect(
+      (await loadModelLaunchConfig(local, dir, { fetch })).models?.active,
+    ).toMatchObject({
+      context_window: 12345,
+      max_output_tokens: 1500,
+      reasoning_efforts: ["low", "high"],
+    });
+    expect(() =>
+      parseCachedLaunchConfig(
+        {
+          ...local,
+          profiles: { coder: { ...config.profiles.coder, effort: "other" } },
+        },
+        dir,
+      ),
+    ).toThrow();
+  }
+});
+
+test("damaged fields recover only from the same row, preserving the good offline cache", async () => {
+  const cache = join(dir, "models-dev.json");
+  const good = await loadModelLaunchConfig(config, dir, {
+    now,
+    fetch: async () => Response.json(fixture),
+  });
+  const saved = await readFile(cache, "utf8");
+  for (const v1 of [
+    { limit: { context: 0, output: 501 } },
+    {
+      limit: { context: 8000, output: 501 },
+      reasoning_options: [{ type: "effort", values: [] }],
+    },
+  ]) {
+    const result = await loadModelLaunchConfig(config, dir, {
+      now: stale,
+      fetch: async () =>
+        Response.json({
+          native: { models: { v1, v2: { limit: { context: 9000 } } } },
+        }),
+    });
+    expect(result.models?.active).toMatchObject({
+      context_window: 8000,
+      max_output_tokens: 501,
+    });
+    expect(await readFile(cache, "utf8")).toBe(saved);
+    expect(parseCachedLaunchConfig(config, dir)).toEqual(good);
+    expect(
+      await loadModelLaunchConfig(config, dir, {
+        now: stale,
+        fetch: async () => new Response(null, { status: 503 }),
+      }),
+    ).toEqual(good);
+  }
+  // A healthy response without the model is not a transient damaged row.
+  await expect(
+    loadModelLaunchConfig(config, dir, {
+      now: stale,
+      fetch: async () =>
+        Response.json({
+          native: { models: { v2: { limit: { context: 9000 } } } },
+        }),
+    }),
+  ).rejects.toMatchObject({
+    details: [expect.stringContaining("models.active.context_window")],
+  });
+  expect(await readFile(cache, "utf8")).toBe(saved);
+});
+
+test("enforces exact cache bytes independently on projection, publication and both read paths", async () => {
+  const online = async () => Response.json(fixture);
+  const good = await loadModelLaunchConfig(config, dir, { now, fetch: online });
+  const cache = join(dir, "models-dev.json");
+  const saved = await readFile(cache, "utf8");
+  const localized = {
+    ...config,
+    models: { active: { ...config.models.active, context_window: 321 } },
+  };
+  const bounded = (cache_max_bytes: number) => ({
+    ...localized,
+    model_catalog: { cache_max_bytes },
+  });
+  const exact = Buffer.byteLength(saved);
+  await rm(cache);
+  await loadModelLaunchConfig(bounded(exact), dir, { now, fetch: online });
+  expect(await readFile(cache, "utf8")).toBe(saved);
+  expect(
+    parseCachedLaunchConfig(bounded(exact), dir).models?.active
+      .max_output_tokens,
+  ).toBe(500);
+  const expanded = {
+    ...fixture,
+    ["中".repeat(20)]: {
+      models: Object.fromEntries(
+        Array.from({ length: 5 }, (_, i) => [i, { limit: { context: 1 } }]),
+      ),
+    },
+  };
+  await loadModelLaunchConfig(bounded(exact), dir, {
+    now: stale,
+    fetch: async () => Response.json(expanded),
+  });
+  expect(await readFile(cache, "utf8")).toBe(saved);
+  expect(parseCachedLaunchConfig(config, dir)).toEqual(good);
+  const offline = vi.fn(async () => new Response(null, { status: 503 }));
+  for (const result of [
+    parseCachedLaunchConfig(bounded(exact - 1), dir),
+    await loadModelLaunchConfig(bounded(exact - 1), dir, {
+      now,
+      fetch: offline,
+    }),
+  ]) {
+    expect(result.models?.active.context_window).toBe(321);
+    expect(result.models?.active.max_output_tokens).toBeUndefined();
+  }
+  expect(offline).toHaveBeenCalledOnce();
+  await rm(cache);
+  await loadModelLaunchConfig(bounded(exact - 1), dir, { now, fetch: online });
+  await expect(stat(cache)).rejects.toMatchObject({ code: "ENOENT" });
+});

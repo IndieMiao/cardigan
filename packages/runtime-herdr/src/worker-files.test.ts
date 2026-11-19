@@ -703,7 +703,11 @@ test("the receiver's explicit deadline also covers a peer withholding the header
     receiving.kill("SIGKILL");
   }
 });
-test("native wrapper waits for this generation, consumes credentials once and preserves separate session state", async () => {
+test.each(["codex", "pi"])(
+  "native %s wrapper preserves its isolated session state",
+  checkNativeSession,
+);
+async function checkNativeSession(harnessName: string) {
   const path = disk();
   const workerPolicy = {
     ...policy,
@@ -711,14 +715,19 @@ test("native wrapper waits for this generation, consumes credentials once and pr
     batch_max_bytes: 16384,
   };
   const envelope = {
-    harness: "codex",
+    harness: harnessName,
     command: "/usr/bin/python3",
     args: [
       "-c",
       "import os,stat; from pathlib import Path; assert os.environ['MCP_TOKEN']=='SYNTHETIC-TOKEN'; assert os.environ['SYNTHETIC_PROVIDER']=='fixture-only'; base=Path.cwd(); assert Path(os.environ['TMPDIR'])==base/'temporary'; assert Path(os.environ['XDG_CACHE_HOME'])==base/'cache'; assert os.environ['TMP']==os.environ['TEMP']==os.environ['TMPDIR']; assert Path(os.environ['npm_config_store_dir'])==base/'cache/pnpm'; assert stat.S_IMODE((base/'temporary').stat().st_mode)==0o700; print('ok')",
     ],
     env: {
-      CODEX_HOME: join(path, "sessions", identity.generation, "codex"),
+      [harnessName === "pi" ? "PI_CODING_AGENT_DIR" : "CODEX_HOME"]: join(
+        path,
+        "sessions",
+        identity.generation,
+        harnessName,
+      ),
       TMPDIR: "/shared/temporary",
       XDG_CACHE_HOME: "/shared/cache",
     },
@@ -727,6 +736,28 @@ test("native wrapper waits for this generation, consumes credentials once and pr
   };
   const contents = [
     ...files,
+    ...(harnessName === "pi"
+      ? [
+          {
+            path: `${remote}/pi/models.json`,
+            content: JSON.stringify({
+              providers: {
+                relay: {
+                  baseUrl: "https://fixture.invalid",
+                  api: "openai-responses",
+                  models: [{ id: "fixture-model" }],
+                },
+              },
+            }),
+            mode: 0o600,
+          },
+          {
+            path: `${remote}/pi/extensions/cardigan-context-usage.js`,
+            content: "// fixture",
+            mode: 0o600,
+          },
+        ]
+      : []),
     {
       path: `${remote}/launch.json`,
       content: JSON.stringify(envelope),
@@ -783,12 +814,25 @@ test("native wrapper waits for this generation, consumes credentials once and pr
     expect(output).toBe("ok\n");
     expect(existsSync(join(generationDir(path), "token"))).toBe(false);
     expect(existsSync(join(generationDir(path), "secrets.env"))).toBe(false);
-    expect(
-      readFileSync(
-        join(path, "sessions", identity.generation, "codex", "config.toml"),
-        "utf8",
-      ),
-    ).toBe("synthetic = true");
+    if (harnessName === "pi") {
+      expect(
+        JSON.parse(
+          readFileSync(
+            join(envelope.env.PI_CODING_AGENT_DIR ?? "", "models.json"),
+            "utf8",
+          ),
+        ).providers.relay,
+      ).toMatchObject({
+        baseUrl: "https://fixture.invalid",
+        models: [{ id: "fixture-model" }],
+      });
+    } else
+      expect(
+        readFileSync(
+          join(path, "sessions", identity.generation, "codex", "config.toml"),
+          "utf8",
+        ),
+      ).toBe("synthetic = true");
     expect(JSON.parse(run(path, request("status")).stdout)).toMatchObject({
       phase: "running",
       observed: "exited",
@@ -797,4 +841,4 @@ test("native wrapper waits for this generation, consumes credentials once and pr
   } finally {
     child.kill("SIGKILL");
   }
-});
+}

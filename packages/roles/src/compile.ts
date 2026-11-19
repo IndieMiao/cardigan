@@ -37,6 +37,8 @@ export interface CompileLaunchInput {
    * compiled output (e.g. a dry run).
    */
   readonly instanceId?: string;
+  /** Assignment publication stages this registry under run_dir/pi. */
+  readonly piRegistryDir?: string;
   /** Arguments after `--`, passed through to the harness CLI. */
   readonly extraArgs?: readonly string[];
 }
@@ -176,13 +178,56 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
       env.PI_CODING_AGENT_DIR = resolved.profile.agent_dir;
     }
 
+    const files: CompiledFile[] = [];
+    const route = resolved.provider?.definition;
+    if (
+      route?.base_url &&
+      resolved.profile.provider_flag &&
+      resolved.profile.model
+    ) {
+      const dir =
+        input.piRegistryDir ??
+        join(
+          input.runtimeDir,
+          `cardigan-${input.instanceId ?? "static"}.${resolved.name}.pi`,
+        );
+      const key = route.pi?.env_key ?? Object.keys(route.secret_env)[0];
+      const meta = resolved.profile.pi_model;
+      const registry = {
+        providers: {
+          [resolved.profile.provider_flag]: {
+            baseUrl: route.base_url,
+            api: route.api,
+            apiKey: key ? `$${key}` : "cardigan-no-auth",
+            models: [
+              {
+                id: resolved.profile.model,
+                contextWindow: meta?.context_window,
+                maxTokens: meta?.max_output_tokens,
+                reasoning: meta?.reasoning_efforts
+                  ? meta.reasoning_efforts.some(
+                      (e) => e !== "off" && e !== "none",
+                    )
+                  : undefined,
+              },
+            ],
+          },
+        },
+      };
+      files.push({
+        path: join(dir, "models.json"),
+        content: `${JSON.stringify(registry)}\n`,
+        mode: 0o600,
+      });
+      env.PI_CODING_AGENT_DIR = dir;
+    }
     return {
       harness: "pi",
       profile: resolved.name,
       command: HARNESS_BINARY.pi,
       args,
       env,
-      files: [],
+      files,
       secretEnvKeys: Object.keys(secretEnv),
     };
   }

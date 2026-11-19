@@ -229,6 +229,7 @@ export function compileAssignmentLaunch(
     secrets: input.secrets,
     runtimeDir: input.run_dir,
     instanceId: "assignment",
+    piRegistryDir: join(input.run_dir, "pi"),
   });
 
   if (
