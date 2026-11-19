@@ -221,17 +221,18 @@ export function hasEarlierCapacityWait(
   order: DispatchOrder,
   machine: string,
   resources: MachineResources,
+  now: string,
   eligible?: (project: string, owner: Assignment) => boolean,
 ): boolean {
   return queue.some((entry) => {
     if (entry.machine_id !== machine || compareDispatchOrder(entry, order) >= 0)
       return false;
-    if (!resources.size && !eligible) return true;
     const owner = tx.assignments
       .list(entry.project_id)
       .find((a) => a.id === entry.assignment_id);
     return (
       !!owner &&
+      (!owner.snapshot_retry || owner.snapshot_retry.ready_at <= now) &&
       (!eligible || eligible(entry.project_id, owner)) &&
       (!resources.size ||
         remainingResourceRatio(

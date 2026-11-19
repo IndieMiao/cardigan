@@ -90,7 +90,7 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
@@ -100,7 +100,11 @@ import {
   preparationExecutionExited,
   preparationUnavailable,
 } from "./wake-preparation.js";
-import { checkWorkerMcp, workerMcpConfig } from "./worker-mcp.js";
+import {
+  checkWorkerMcp,
+  WorkerMcpError,
+  workerMcpConfig,
+} from "./worker-mcp.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -159,6 +163,9 @@ export interface LaunchHost {
   readonly report?: ((message: string) => void) | undefined;
 }
 
+/** No delivery was possible and any issued credential has been revoked. */
+export class RunPreflightDeferred extends Error {}
+
 export interface LaunchRunInput {
   readonly project: ProjectId;
   readonly assignment_id: Assignment["id"];
@@ -175,6 +182,8 @@ export interface LaunchRunInput {
   readonly replacement?: DispatchRunParams["replacement"];
   /** Explicit assignment start can wake an existing idle business session. */
   readonly reuse_session?: boolean;
+  /** Dispatcher owns bounded retry of proven pre-delivery target failures. */
+  readonly retry_target_preflight?: true;
 }
 
 export interface LaunchedRun {
@@ -372,6 +381,7 @@ async function launchWithClaim(
               position,
               assignment.machine_id,
               slots,
+              clock.now(),
             ))))
     ) {
       return undefined;
@@ -482,8 +492,19 @@ async function launch(
     project,
     input.assignment_id,
   );
-  if (host.runtime instanceof RuntimeTargets)
-    execution = (await host.runtime.forLaunch(project, assignment)).execution;
+  if (host.runtime instanceof RuntimeTargets) {
+    try {
+      execution = (await host.runtime.forLaunch(project, assignment)).execution;
+    } catch (error) {
+      if (
+        input.retry_target_preflight &&
+        error instanceof RuntimeTargetError &&
+        error.transient
+      )
+        throw new RunPreflightDeferred(error.message, { cause: error });
+      throw error;
+    }
+  }
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );
@@ -1034,16 +1055,23 @@ async function launch(
         host.launch.secrets,
         launchToken,
       );
+      const retry =
+        input.retry_target_preflight &&
+        step === "MCP preflight" &&
+        error instanceof WorkerMcpError &&
+        new RuntimeTargetError(error.code).transient;
       let exited = false;
       try {
         exited = await publication.stop(
-          deferred,
-          deferred ? undefined : reason,
+          deferred || retry,
+          deferred || retry ? undefined : reason,
         );
       } catch {
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
+      if (retry && exited)
+        throw new RunPreflightDeferred(error.code, { cause: error });
       throw new HostLaunchError(
         step,
         `${reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`,

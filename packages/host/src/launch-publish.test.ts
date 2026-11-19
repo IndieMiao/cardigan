@@ -21,7 +21,12 @@ import { workerFileRequest, workerFiles } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
-import { launchRun, scrubRunCredentials } from "./launch.js";
+import { HostLaunchError } from "./errors.js";
+import {
+  launchRun,
+  RunPreflightDeferred,
+  scrubRunCredentials,
+} from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
@@ -277,13 +282,14 @@ function fixture(
       secrets: {},
     },
   };
-  const start = () =>
+  const start = (retry = false) =>
     launchRun(host, {
       project: "fixture",
       assignment_id: assignment.id,
       actor,
       run,
       reuse_session: true,
+      ...(retry ? { retry_target_preflight: true as const } : {}),
       worktree: {
         path: "/independent-worker/worktrees/fixture/A-1",
         base_sha: "a".repeat(40),
@@ -297,6 +303,35 @@ function fixture(
     latest: () => store.uow.read((tx) => tx.runs.get("fixture", run.id)),
   };
 }
+
+test.each(["clean", "unconfirmed", "auth"])(
+  "authenticated worker preflight only defers a fully withdrawn transient launch: %s",
+  async (mode) => {
+    const f = fixture();
+    if (mode === "unconfirmed") failAt = "clear_fail";
+    vi.mocked(checkWorkerMcp).mockRejectedValueOnce(
+      new WorkerMcpError(
+        mode === "auth" ? "mcp_auth_failed" : "mcp_gateway_error",
+      ),
+    );
+    await expect(f.start(true)).rejects.toBeInstanceOf(
+      mode === "clean" ? RunPreflightDeferred : HostLaunchError,
+    );
+    expect(order).not.toContain("provision");
+    expect(f.latest()).toMatchObject({
+      status: mode === "auth" ? "cancelled" : "queued",
+      launch_publication: {
+        phase: mode === "unconfirmed" ? "stopping" : "exited",
+      },
+    });
+    const tokens = store.uow.run((tx) =>
+      tx.tokensForAssignment("fixture", "A-1"),
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]?.revoked_at).not.toBeNull();
+    if (mode === "clean") expect((await f.start(true)).run.id).toBe(f.run.id);
+  },
+);
 
 test.each(["codex", "pi", "claude-code"] as const)(
   "%s material is generation-private and start follows durable dispatch",

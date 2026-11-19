@@ -72,13 +72,16 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
 }
 export class RuntimeTargetError extends Error {
+  readonly code = "invalid_launch" as const;
   get transient(): boolean {
     return [
       "mcp_timeout",
       "mcp_protocol_error",
+      "mcp_gateway_error",
       "mcp_unreachable",
       "worker_unreachable",
       "machine_check_runtime_timeout",
+      "machine_check_runtime_queue_timeout",
       "machine_check_runtime_unavailable",
     ].includes(this.reason);
   }
@@ -729,7 +732,10 @@ export class RuntimeTargets implements Runtime {
     try {
       checked = await this.forLaunch(project, assignment);
     } catch (error) {
-      return failure<string>(error);
+      // Version discovery keeps the typed cause; other invalid launches remain permanent.
+      return error instanceof RuntimeTargetError
+        ? { ok: false as const, error }
+        : failure<string>(error);
     }
     return this.invoke(
       () => this.checkedTarget(checked, project, assignment),
