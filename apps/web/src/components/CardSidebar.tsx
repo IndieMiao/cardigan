@@ -7,13 +7,18 @@ import {
   type WorkItemView,
 } from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
+import {
+  exclusionReason,
+  requirementParts,
+  selectionSummary,
+} from "../machine-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionRouting } from "./DecisionRouting.js";
 import { NextOwners } from "./EmployeeIdentity.js";
-import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
+import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { Prose } from "./ui/prose.js";
@@ -239,6 +244,7 @@ export function CardWorkItems({
                       `尚未指派 ${item.role_id}`
                     )}
                   </p>
+                  <MachinePlacement item={item} />
                   {client &&
                     !["done", "cancelled"].includes(detail.card.status) && (
                       <ManualAssignControl
@@ -272,6 +278,42 @@ export function CardWorkItems({
         </ul>
       </div>
     </section>
+  );
+}
+
+/** MC-5: what the work item asks of a machine and where it was placed, and why. */
+function MachinePlacement({ item }: { readonly item: WorkItemView }) {
+  const requirements = requirementParts(item.requirements);
+  const selection = item.machine_selection;
+  const excluded =
+    selection && selection.status !== "deferred"
+      ? (selection.excluded ?? [])
+      : [];
+  return (
+    <>
+      {requirements.length > 0 && <p>运行需求：{requirements.join("；")}</p>}
+      {selection && (
+        <p>
+          选机：{selectionSummary(selection)}
+          {selection.status !== "deferred" && (
+            <>
+              {" "}
+              <Time value={selection.at} />
+            </>
+          )}
+        </p>
+      )}
+      {excluded.length > 0 && (
+        <ul className="plain-list" aria-label={`${item.id} 未选机器`}>
+          {excluded.map((machine) => (
+            <li key={machine.machine_id}>
+              未选 {machine.machine_id}：
+              {machine.reasons.map(exclusionReason).join("；")}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 

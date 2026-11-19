@@ -709,3 +709,16 @@ test("Flow Lite: human CLI persists audited auto-merge and configurable high-ris
     await run(["preference", "set", "high-risk-paths", '["../escape"]']),
   ).not.toBe(0);
 });
+
+test("machine preference is neutral by default and retains operator order", async () => {
+  const get = ["preference", "get", "machine-preference"],
+    set = ["preference", "set", "machine-preference"];
+  expect(await run(get)).toBe(0);
+  expect(output).toContain("machine-preference: []");
+  for (const list of [["worker", "local"], ["local", "worker"], []]) {
+    expect(await run([...set, JSON.stringify(list)])).toBe(0);
+    expect(await run(get)).toBe(0);
+    expect(output).toContain(`machine-preference: ${JSON.stringify(list)}`);
+  }
+  expect(await run([...set, '["worker","worker"]'])).not.toBe(0);
+});

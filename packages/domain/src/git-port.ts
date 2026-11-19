@@ -95,6 +95,19 @@ export interface GitFileDiff {
   readonly before?: string;
   readonly after?: string;
 }
+export interface GitBackupSelection {
+  readonly machine: string;
+  readonly branch?: string;
+  readonly excludedBranches?: readonly string[];
+  readonly uploadPack?: string;
+  readonly skipIfUnchanged?: boolean;
+}
+export interface GitPreparedBackup {
+  readonly refs: readonly GitRef[];
+  /** Local synchronous CAS only; preparation cannot publish recovery refs. */
+  publish(): void;
+  rollback(): void;
+}
 export interface GitCentralPort {
   /** Full raw inventory; renames are delete + add, including mode-only changes. */
   fileDiffs?(
@@ -120,6 +133,12 @@ export interface GitCentralPort {
     /** Polling only: skip transfer when all advertised refs already match. */
     skipIfUnchanged?: boolean,
   ): Promise<void>;
+  /** Every backup writer, including worktree cleanup, confirms refs and generations together. */
+  prepareBranchBackup(
+    repository: string,
+    source: GitRepositoryAddress,
+    selection: GitBackupSelection,
+  ): Promise<GitPreparedBackup>;
   readRef(repository: string, ref: string): Promise<string | undefined>;
   isAncestor(
     repository: string,

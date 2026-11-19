@@ -480,7 +480,10 @@ test("§3.4/§14 agent-ssh: upload-pack runs through the Agent entry and host Gi
   await f.central.backupAgentBranches(f.project, "local");
   expect(f.agentCalls).toHaveLength(3);
   expect(f.calls.filter((call) => call.args.includes("ls-remote"))).toEqual([]);
-  const transfers = f.calls.filter((call) => call.args.includes("fetch"));
+  // A ref-free import from the private stage is local; it does not contact the Agent.
+  const transfers = f.calls.filter(
+    (call) => call.args.includes("fetch") && call.args.includes(f.base),
+  );
   expect(transfers).toHaveLength(3);
   for (const call of transfers) {
     expect(call.args).toContain(f.base);

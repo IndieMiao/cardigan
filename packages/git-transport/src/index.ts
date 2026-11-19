@@ -17,7 +17,11 @@ export {
   type TreeEntry,
 } from "./central.js";
 export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
-export { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
+export {
+  type GitTimeoutOptions,
+  withGitTimeout,
+  withMergeTransferBudget,
+} from "./timeouts.js";
 
 const exists = (path: string) =>
   access(path).then(

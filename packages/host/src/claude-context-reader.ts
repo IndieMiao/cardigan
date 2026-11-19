@@ -77,7 +77,7 @@ async function read() {
     const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
     const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
     if (start) lines.shift();
-    let activity;
+    let activity, progress;
     // With no trusted session ID, a late write to an older file cannot revive it.
     const byCreation = candidates.slice().sort((a, b) => b.born - a.born);
     const latest = byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born ? byCreation[0] : undefined;
@@ -101,6 +101,8 @@ async function read() {
           Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
         activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
           updated_at: timestamp, ...(apiError ? { error } : {}) };
+        if (!apiError) progress = activity;
+        else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
       }
     }
     for (let i = lines.length - 1; i >= 0; i--) {

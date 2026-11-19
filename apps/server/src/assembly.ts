@@ -57,6 +57,7 @@ export interface ControlPlaneOptions {
   readonly snapshot: DispatcherOptions["snapshot"];
   readonly toolCatalog?: DispatcherOptions["toolCatalog"];
   readonly runLimit?: DispatcherOptions["runLimit"];
+  readonly resourceLimits?: DispatcherOptions["resourceLimits"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
   readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
@@ -83,6 +84,7 @@ export interface ControlPlaneOptions {
    */
   readonly git?: GitPhases;
   readonly mergeGate?: MergeCheckOptions;
+  readonly mergeWatchdogMs?: number;
   readonly mergeIntervalMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
@@ -210,6 +212,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
+    ...(options.resourceLimits
+      ? { resourceLimits: options.resourceLimits }
+      : {}),
     ...(options.runLimitMaximum
       ? { runLimitMaximum: options.runLimitMaximum }
       : {}),
@@ -291,6 +296,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           git: options.git,
           clock,
           ...(options.mergeGate ? { gate: options.mergeGate } : {}),
+          ...(options.mergeWatchdogMs === undefined
+            ? {}
+            : { watchdogMs: options.mergeWatchdogMs }),
           ...(options.mergeBlockedReminderMs === undefined
             ? {}
             : { mergeBlockedReminderMs: options.mergeBlockedReminderMs }),

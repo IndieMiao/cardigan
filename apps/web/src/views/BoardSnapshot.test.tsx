@@ -188,11 +188,11 @@ test.each([
       ).toEqual(expect.arrayContaining(ids)),
     );
     expect(table.querySelectorAll("tbody tr")).toHaveLength(ids.length);
-    expect(screen.getByRole("button", { name: "移除概览筛选" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "概览" })).toBeTruthy();
   },
 );
 
-test("U4b recent deliveries are a five-column table with full safe summary text available on hover", async () => {
+test("U4b recent deliveries are a five-column table with the full safe summary text", async () => {
   const { container } = render(
     <SnapshotPage
       client={fakeClient({ snapshot: async () => snapshot })}
@@ -208,9 +208,14 @@ test("U4b recent deliveries are a five-column table with full safe summary text 
   expect(region.querySelector("time")?.getAttribute("datetime")).toBe(
     active.updated_at,
   );
-  const summary = region.querySelector(".summary-text");
-  expect(summary?.textContent).toBe(snapshot.recent_deliveries[0]?.summary);
-  expect(summary?.getAttribute("title")).toBe(summary?.textContent);
+  // C-458: the summary wraps in full instead of an ellipsis with a title.
+  // The first body row is the group heading.
+  const summary = region
+    .querySelectorAll("tbody tr")[1]
+    ?.querySelector("td:last-child");
+  expect(summary?.textContent).toContain(
+    snapshot.recent_deliveries[0]?.summary,
+  );
   expect(container.querySelector("img")).toBeNull();
 });
 

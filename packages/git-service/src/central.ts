@@ -1,7 +1,6 @@
 import { access, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
-  type Assignment,
   type GitCentralPort,
   type GitPublicationGuard,
   type GitRepositoryAddress,
@@ -613,16 +612,13 @@ export class CentralRepositoryService {
       sha,
     );
   }
-  async backupAgentBranches(
-    project: CentralProject,
-    machine_id: string,
-    excludedBranches: readonly string[] = [],
-  ) {
+  /** Legacy local polling skips a base clone that does not exist yet. */
+  async backupSource(project: CentralProject, machine_id: string) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(machine_id))
       throw new Error("Invalid backup machine");
     if (machine_id !== "local" && !this.options.agentSource)
       throw new Error("Worker source is not configured");
-    let source = this.options.agentSource
+    const source = this.options.agentSource
       ? await this.agentSource(project, machine_id)
       : undefined;
     // No base clone before the first worktree is normal. Only this missing
@@ -634,52 +630,27 @@ export class CentralRepositoryService {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    source ??= await this.agentSource(project, machine_id);
-    const repository = await this.ensureCentral(project);
-    for (const branch of excludedBranches)
-      await this.git.readRef(repository, `refs/heads/${branch}`);
-    await this.git.fetchRefs(
-      repository,
-      source.address,
-      [
-        `+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`,
-        // Exact negative refspecs leave transactional backups untouched, including rewrites.
-        ...excludedBranches.map((branch) => `^refs/heads/${branch}`),
-      ],
-      source.uploadPack,
-      true,
-    );
-    this.validateSource();
+    return source ?? this.agentSource(project, machine_id);
   }
-  /** Fetch one recorded branch; a missing/deleted branch never refreshes old success evidence. */
-  async backupAssignmentBranch(
+  async backupAgentBranches(
     project: CentralProject,
-    assignment: Assignment,
+    machine_id: string,
+    excludedBranches: readonly string[] = [],
   ) {
-    if (
-      !parseId("assignment", assignment.id).ok ||
-      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(assignment.machine_id) ||
-      !assignment.branch?.startsWith("agent/")
-    )
-      throw new Error("Invalid backup Assignment");
+    const source = await this.backupSource(project, machine_id);
+    if (!source) return;
     const repository = await this.ensureCentral(project);
-    const source = await this.agentSource(project, assignment.machine_id);
-    await this.git.readRef(repository, `refs/heads/${assignment.branch}`);
-    const incoming = `refs/cardigan/incoming/backups/${assignment.machine_id}/${assignment.id}`;
-    await this.git.fetchRefs(
+    const backup = await this.git.prepareBranchBackup(
       repository,
       source.address,
-      [`+refs/heads/${assignment.branch}:${incoming}`],
-      source.uploadPack,
+      {
+        machine: machine_id,
+        excludedBranches,
+        ...(source.uploadPack ? { uploadPack: source.uploadPack } : {}),
+        skipIfUnchanged: true,
+      },
     );
     this.validateSource();
-    const sha = await this.git.readRef(repository, incoming);
-    if (!sha || (await this.git.objectType(repository, sha)) !== "commit")
-      throw new Error("Backup HEAD is not a commit");
-    const ref = `refs/cardigan/backups/${assignment.machine_id}/${assignment.branch}`;
-    const old = await this.git.readRef(repository, ref);
-    if (old !== sha)
-      await this.git.compareAndSwapRef(repository, ref, sha, old ?? null);
-    return { sha, ref, previous_sha: old ?? null };
+    backup.publish();
   }
 }

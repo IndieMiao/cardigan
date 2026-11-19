@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { withActiveOptions } from "./FilterSelect.js";
 import { Button, ButtonLabel } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { ChevronDownIcon } from "./ui/icons.js";
@@ -17,7 +18,7 @@ export interface MultiSelectProps {
   readonly emptyLabel?: string;
 }
 
-/** A filter-style multi-select dropdown sharing the existing form styling. */
+/** A filter-style multi-select dropdown; its leading empty-label row clears the selection. */
 export function MultiSelect({
   label,
   options,
@@ -27,7 +28,8 @@ export function MultiSelect({
 }: MultiSelectProps) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const selected = options.filter((option) => values.includes(option.value));
+  const shown = withActiveOptions(options, values);
+  const selected = shown.filter((option) => values.includes(option.value));
   const text =
     selected.length === 0
       ? emptyLabel
@@ -61,7 +63,16 @@ export function MultiSelect({
           sideOffset={6}
           aria-label={label}
         >
-          {options.map((option) => {
+          <label className="multiselect-option ui-checkbox-row">
+            <Checkbox
+              checked={values.length === 0}
+              onCheckedChange={() => {
+                if (values.length > 0) onChange([]);
+              }}
+            />
+            {emptyLabel}
+          </label>
+          {shown.map((option) => {
             const checked = values.includes(option.value);
             return (
               <label

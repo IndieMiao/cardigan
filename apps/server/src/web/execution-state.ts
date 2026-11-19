@@ -1,5 +1,8 @@
-import type { CommandState, ProjectId } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import type { CommandState, Machine, ProjectId } from "@cardigan/domain";
+import {
+  readMachineObservationsInTransaction,
+  type Store,
+} from "@cardigan/store";
 import { HttpRejection } from "./http.js";
 import { PAGE_LIMITS, pageLimit } from "./pagination.js";
 import { readWorkbenchQueue } from "./queue-state.js";
@@ -32,6 +35,86 @@ export function runEvents(
   );
 }
 
+export type MachineCapabilityState = "verified" | "expired" | "unverified";
+
+/**
+ * MC-5: display fields only. Evidence references and launch flags stay on the
+ * host; availability is derived per read so the 24-hour expiry is never cached.
+ * `declared` is the host catalog for this machine's OS: a declared key with no
+ * successful record is shown as unverified, never with an invented time.
+ */
+export function machineObservationView(
+  store: Store,
+  project: ProjectId,
+  machine: Machine,
+  now: string,
+  declared: readonly string[] = [],
+) {
+  const { capabilities, health } = readMachineObservationsInTransaction(
+    store,
+    project,
+    machine.id,
+    now,
+  );
+  const recorded = new Set(capabilities.map((c) => c.key));
+  return {
+    ...machine,
+    capabilities: [
+      ...capabilities.map(({ key, version, verified_at, available }) => ({
+        key,
+        version,
+        verified_at: verified_at as string | null,
+        available,
+        state: (available ? "verified" : "expired") as MachineCapabilityState,
+      })),
+      ...[...new Set(declared)]
+        .filter((key) => !recorded.has(key))
+        .map((key) => ({
+          key,
+          version: null,
+          verified_at: null,
+          available: false,
+          state: "unverified" as MachineCapabilityState,
+        })),
+    ],
+    health: health
+      ? {
+          status: health.status,
+          checked_at: health.checked_at,
+          blockers: health.blockers,
+          available: health.available,
+        }
+      : null,
+  };
+}
+/**
+ * Catalog keys that apply to a machine's OS. An unreadable catalog yields
+ * nothing declared rather than failing the execution read.
+ */
+export function declaredCapabilities(
+  catalog:
+    | (() => readonly {
+        readonly key: string;
+        readonly os: readonly string[];
+      }[])
+    | undefined,
+): ((machine: Machine) => readonly string[]) | undefined {
+  if (!catalog) return undefined;
+  let entries: readonly {
+    readonly key: string;
+    readonly os: readonly string[];
+  }[];
+  try {
+    entries = catalog();
+  } catch {
+    return undefined;
+  }
+  return (machine) =>
+    entries.filter((c) => c.os.includes(machine.os)).map((c) => c.key);
+}
+
+export type MachineObservationView = ReturnType<typeof machineObservationView>;
+
 export function readExecution(
   store: Store,
   project: ProjectId,
@@ -39,6 +122,7 @@ export function readExecution(
   now: string,
   warning?: number,
   contexts?: ExecutionContexts,
+  declaredCapabilities?: (machine: Machine) => readonly string[],
 ) {
   const limit = pageLimit(url.searchParams.get("limit"), "execution");
   return store.uow.read((tx) => {
@@ -136,7 +220,17 @@ export function readExecution(
     const view = executionView(
       state,
       now,
-      tx.machines.list(project),
+      tx.machines
+        .list(project)
+        .map((machine) =>
+          machineObservationView(
+            store,
+            project,
+            machine,
+            now,
+            declaredCapabilities?.(machine),
+          ),
+        ),
       readWorkbenchQueue(store, tx),
       warning,
       contexts,

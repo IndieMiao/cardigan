@@ -17,6 +17,7 @@ import { useResource } from "../useResource.js";
 import { PageTitle } from "./Foundation.js";
 import { Feedback } from "./Operations.js";
 import { RequestFeedbackScope } from "./RequestFeedback.js";
+import { Skeleton } from "./ui/skeleton.js";
 
 const tabs = [
   ["decisions", "待拍板"],
@@ -152,17 +153,8 @@ function Tabs(props: Props & { counts: NeedsCountsResource }) {
             )}
           </div>
         ))}
-      {!counts.data && counts.pending && <NeedsSkeleton />}
+      {!counts.data && counts.pending && <Skeleton />}
     </section>
-  );
-}
-export function NeedsSkeleton() {
-  return (
-    <div className="needs-skeleton" aria-hidden="true">
-      <div />
-      <div />
-      <div />
-    </div>
   );
 }
 function Panel({

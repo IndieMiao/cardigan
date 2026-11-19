@@ -127,7 +127,7 @@ test("Needs You notices resolved by the system show the gear", async () => {
     />,
   );
   const article = await screen.findByRole("article", { name: "知会 Q-7" });
-  const identity = within(article.querySelector("header") as HTMLElement)
+  const identity = within(article.querySelector(".needs-meta") as HTMLElement)
     .getByText("系统")
     .closest(".employee-identity");
   expect(identity).toBeTruthy();
@@ -163,12 +163,12 @@ test("activity shows the gear for single and grouped system events", async () =>
     />,
   );
   await screen.findAllByText("系统");
-  const rows = [...document.querySelectorAll(".activity-summary")];
+  const rows = [...document.querySelectorAll("tr[data-activity-row]")];
   expect(rows).toHaveLength(2);
   for (const row of rows) expectSystem(row);
-  expect(document.querySelectorAll(".activity-summary > strong")).toHaveLength(
-    0,
-  );
+  expect(
+    document.querySelectorAll("tr[data-activity-row] > td > strong"),
+  ).toHaveLength(0);
 });
 
 test("system icon is a token-coloured rounded square, not a person circle", () => {

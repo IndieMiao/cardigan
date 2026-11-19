@@ -1,6 +1,8 @@
 export {
   ChevronDown as ChevronDownIcon,
+  ChevronRight as ChevronRightIcon,
   Ellipsis as MoreHorizontalIcon,
+  TriangleAlert as AlertIcon,
 } from "lucide-react";
 
 export function ListIcon() {

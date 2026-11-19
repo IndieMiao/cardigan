@@ -5,10 +5,12 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { ExecutionAssignment, ExecutionData, RunView } from "../api.js";
+import { CapacityProvider } from "../components/Capacity.js";
 import {
   assignmentMachine,
   machineLabel,
@@ -148,7 +150,9 @@ test.each([false, true])(
     expect(within(lane).getAllByRole("listitem")).toHaveLength(4);
     const pmCard = within(lane).getByRole("listitem", { name: "王熙凤 A-4" });
     expect(within(pmCard).getByText("王熙凤")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "移除机器筛选" }));
+    changeControl(screen.getByRole("combobox", { name: /^机器：/ }), {
+      target: { value: "" },
+    });
     expect(screen.getByRole("region", { name: "工作机泳道" })).toBeTruthy();
     fireEvent.change(screen.getByRole("searchbox"), {
       target: { value: "主机运维" },
@@ -241,4 +245,255 @@ test("saved refresh-off survives remount and pending refresh keeps focus without
   });
   expect(refresh.getAttribute("aria-disabled")).toBe("false");
   expect(document.activeElement).toBe(refresh);
+});
+
+test("a retired machine from an old link stays visible in the machine dropdown and clears there", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all&machine=retired-worker";
+  show();
+  const machine = await screen.findByRole("combobox", {
+    name: "机器：retired-worker",
+  });
+  await waitFor(() =>
+    expect(document.querySelector(".ui-page-count")?.textContent).toBe("0 / 8"),
+  );
+  expect(machine.textContent).toContain("retired-worker");
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(machine, { target: { value: "" } });
+  await waitFor(() => expect(ids()).toHaveLength(8));
+  expect(screen.getByRole("combobox", { name: "机器：全部" })).toBeTruthy();
+  expect(location.hash).not.toContain("machine=");
+});
+
+test("MC-5 machine list shows health and capacity; the drawer lists tags, resources and verified/expired/unverified capabilities", async () => {
+  const data = fixture();
+  const machines: ExecutionData["machines"] = [
+    {
+      id: "local",
+      label: "工作机",
+      status: "online",
+      os: "linux",
+      arch: "x64",
+      tags: ["fast-disk", "office"],
+      health: {
+        status: "passed",
+        checked_at: "2026-01-01T00:00:00.000Z",
+        blockers: [],
+        available: true,
+      },
+      capabilities: [
+        {
+          key: "node",
+          version: "24.22.2",
+          verified_at: "2026-01-01T00:00:00.000Z",
+          available: true,
+        },
+        {
+          key: "blender",
+          version: "4.2.0",
+          verified_at: "2025-12-30T00:00:00.000Z",
+          available: false,
+        },
+        {
+          key: "godot",
+          version: null,
+          verified_at: null,
+          available: false,
+          state: "unverified",
+        },
+      ],
+    },
+    {
+      id: "remote",
+      label: "远端构建机",
+      status: "draining",
+      health: {
+        status: "failed",
+        checked_at: "2026-01-01T00:00:00.000Z",
+        blockers: ["machine_not_ready", "custom_code"],
+        available: false,
+      },
+      capabilities: [],
+    },
+    { id: "spare", label: "备用机", status: "online" },
+  ];
+  render(
+    <CapacityProvider
+      client={fakeClient({
+        executionCapacity: async () => ({
+          agents: [
+            {
+              machine_id: "local",
+              label: "工作机",
+              running: 2,
+              total_running: 3,
+              limit: 4,
+              max_limit: 8,
+              queued: 1,
+              merge_check_slots: 0,
+              resources: [
+                { key: "blender", occupied: 2, limit: 2 },
+                { key: "ios.simulator", occupied: 0, limit: 1 },
+              ],
+            },
+            {
+              machine_id: "spare",
+              label: "备用机",
+              running: 0,
+              total_running: 0,
+              limit: 2,
+              max_limit: 8,
+              queued: 0,
+              merge_check_slots: 0,
+              resources: [],
+            },
+          ],
+          merge_checks: [],
+          merge_config_invalid: false,
+        }),
+      })}
+      projectId="p-1"
+      revision={0}
+      canEdit={false}
+    >
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({
+          execution: async () => ({ ...data, machines }),
+          executionRuns: async () => ({
+            runs: [],
+            total: 0,
+            next_cursor: null,
+          }),
+        })}
+      />
+    </CapacityProvider>,
+  );
+  const open = await screen.findByRole("button", {
+    name: "查看 工作机 机器详情",
+  });
+  const row = open.closest("li") as HTMLElement;
+  expect(within(row).getByText("健康")).toBeTruthy();
+  await waitFor(() => expect(row.textContent).toContain("容量 2/4"));
+  // Same count as the drawer heading: verified / listed.
+  expect(row.textContent).toContain("能力 1 / 3");
+  const remote = screen
+    .getByRole("button", { name: "查看 远端构建机 机器详情" })
+    .closest("li") as HTMLElement;
+  expect(within(remote).getByText("健康检查失败")).toBeTruthy();
+  expect(within(remote).getByText("停止接收新任务")).toBeTruthy();
+
+  open.focus();
+  fireEvent.click(open);
+  const drawer = await screen.findByRole("dialog", {
+    name: "工作机 机器详情",
+  });
+  expect(open.getAttribute("aria-expanded")).toBe("true");
+  expect(within(drawer).getByText("linux / x64")).toBeTruthy();
+  expect(within(drawer).getByText("fast-disk、office")).toBeTruthy();
+  expect(drawer.textContent).toContain("非常驻 2 / 上限 4 · 全部 3 · 排队 1");
+  const resources = within(drawer).getByRole("region", {
+    name: "工作机 资源占用",
+  });
+  expect(resources.textContent).toContain("blender2/2");
+  // A full slot reads as in use, not as an error.
+  expect(
+    within(resources).getByText("2/2").closest(".status")?.className,
+  ).toContain("status-running");
+  expect(resources.textContent).toContain("ios.simulator0/1");
+  const capabilities = within(drawer).getByRole("region", {
+    name: "工作机 能力",
+  });
+  const items = within(capabilities).getAllByRole("listitem");
+  // Verified first, then expired, then declared-but-never-verified; the last
+  // two are greyed and only real checks carry a verification time.
+  expect(capabilities.textContent).toContain("能力 1 / 3");
+  expect(items[0]?.textContent).toContain("已验证node 24.22.2验证于");
+  expect(items[1]?.textContent).toContain("已过期blender 4.2.0验证于");
+  expect(items[2]?.textContent).toBe("未验证godot");
+  for (const [item, label] of [
+    [items[1], "已过期"],
+    [items[2], "未验证"],
+  ] as const)
+    expect(
+      within(item as HTMLElement)
+        .getByText(label)
+        .classList.contains("status-subdued"),
+    ).toBe(true);
+  // Read-only: the drawer offers no configuration controls.
+  expect(within(drawer).queryByRole("textbox")).toBeNull();
+  expect(within(drawer).queryByRole("combobox")).toBeNull();
+
+  fireEvent.keyDown(drawer, { key: "Escape" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "工作机 机器详情" }),
+    ).toBeNull(),
+  );
+  await waitFor(() => expect(document.activeElement).toBe(open));
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "查看 远端构建机 机器详情" }),
+  );
+  const failed = await screen.findByRole("dialog", {
+    name: "远端构建机 机器详情",
+  });
+  expect(failed.textContent).toContain("机器未就绪、custom_code");
+  expect(failed.textContent).toContain("没有已验证能力");
+  // No capacity row for this machine: unknown, not "nothing configured".
+  const unknown = within(failed).getByRole("region", {
+    name: "远端构建机 资源占用",
+  });
+  expect(unknown.textContent).toBe("资源占用未知");
+  expect(failed.textContent).not.toContain("未配置资源上限");
+  fireEvent.keyDown(failed, { key: "Escape" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "远端构建机 机器详情" }),
+    ).toBeNull(),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "查看 备用机 机器详情" }));
+  const spare = await screen.findByRole("dialog", { name: "备用机 机器详情" });
+  expect(
+    within(spare).getByRole("region", { name: "备用机 资源占用" }).textContent,
+  ).toBe("资源占用未配置资源上限");
+});
+
+test("MC-5 the drawer does not claim no resource limits before or without capacity data", async () => {
+  const data = fixture();
+  render(
+    <CapacityProvider
+      client={fakeClient({
+        executionCapacity: async () => {
+          throw new Error("capacity unavailable");
+        },
+      })}
+      projectId="p-1"
+      revision={0}
+      canEdit={false}
+    >
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({
+          execution: async () => ({
+            ...data,
+            machines: [{ id: "local", label: "工作机", status: "online" }],
+          }),
+          executionRuns: async () => ({
+            runs: [],
+            total: 0,
+            next_cursor: null,
+          }),
+        })}
+      />
+    </CapacityProvider>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看 工作机 机器详情" }),
+  );
+  const drawer = await screen.findByRole("dialog", { name: "工作机 机器详情" });
+  const resources = within(drawer).getByRole("region", {
+    name: "工作机 资源占用",
+  });
+  expect(resources.textContent).toBe("资源占用未知");
 });

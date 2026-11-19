@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   type Assignment,
@@ -289,7 +289,11 @@ async function claude(
   onReadFailure: () => void,
   signal?: AbortSignal,
 ): Promise<
-  | { usage: ContextSample | undefined; activity: ActivityMetadata | undefined }
+  | {
+      usage: ContextSample | undefined;
+      activity: ActivityMetadata | undefined;
+      progress: ActivityMetadata | undefined;
+    }
   | undefined
 > {
   try {
@@ -330,6 +334,7 @@ async function claude(
               claudeContextWindow(model),
             ),
             activity: parseActivityMetadata(event.activity),
+            progress: parseActivityMetadata(object(event.activity)?.progress),
           }
         : undefined;
     } finally {
@@ -430,6 +435,7 @@ export async function readSessionContexts(
           other.external && (other.worktree_path ?? projectCwd) === cwd,
       ).length === 1;
     let usage: ContextSample | undefined;
+    let progress: ActivityMetadata | undefined;
     let activityMetadata: ActivityMetadata | undefined;
     let activityReadFailed = false;
     const readFailed = () => {
@@ -473,6 +479,7 @@ export async function readSessionContexts(
         );
         usage = sample?.usage;
         activityMetadata = sample?.activity;
+        progress = sample?.progress;
         source = "claude_transcript:last_usage";
       }
     }
@@ -491,18 +498,29 @@ export async function readSessionContexts(
       source = "claude_statusline_cache";
       if (usage && measured(usage)) consumed.add(usage);
     }
-    const activity: HarnessActivity | undefined =
-      activityMetadata &&
-      run &&
-      source &&
+    // Claude reports the current directory (e.g. apps/web), not necessarily
+    // the launch cwd. Only its private transcript may use a worktree descendant.
+    const worktree = a.worktree_path ?? a.runtime_ref?.worktree_path;
+    const matchesCwd = (dir: string) =>
       cwd &&
-      resolve(activityMetadata.cwd) === resolve(cwd)
+      (resolve(dir) === resolve(cwd) ||
+        (harness === "claude-code" &&
+          worktree &&
+          resolve(dir).startsWith(resolve(worktree) + sep)));
+    const activity: HarnessActivity | undefined =
+      activityMetadata && run && source && matchesCwd(activityMetadata.cwd)
         ? {
             assignment_id: a.id,
             runtime_key: JSON.stringify(a.runtime_ref),
             run_id: run.id,
             session_id: activityMetadata.session_id,
             updated_at: activityMetadata.updated_at,
+            ...(activityMetadata.error &&
+            progress &&
+            progress.session_id === activityMetadata.session_id &&
+            matchesCwd(progress.cwd)
+              ? { last_progress_at: progress.updated_at }
+              : {}),
             stale_after_ms: staleMs,
             source: `${harness}:session_metadata`,
             ...(activityMetadata.error

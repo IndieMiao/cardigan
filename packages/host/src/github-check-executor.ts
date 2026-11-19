@@ -14,12 +14,18 @@ import {
   type GithubRun,
   sameGithubRun,
 } from "./github-client.js";
+import { githubDeadline } from "./github-deadline.js";
 import type {
   ExternalGithubRun,
   GithubDispatchIntent,
   GithubDispatchJournal,
+  RetryBinding,
 } from "./github-dispatch-journal.js";
-import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
+import {
+  GITHUB_POLL_DEFAULTS,
+  GithubRetryLater,
+  nextMaintenanceRetry,
+} from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { boundedCheckSummary, safeCheckDiagnostic } from "./merge-gate-log.js";
 import { validPushBranch } from "./merge-push-config.js";
@@ -47,6 +53,7 @@ export interface GithubCheckLifecycle {
     identity: GithubRun,
     onTerminal?: () => void,
     boundByDispatchId?: boolean,
+    retry?: RetryBinding,
   ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
@@ -71,7 +78,10 @@ export class GithubCheckExecutor implements CheckExecutor {
       client: Pick<GithubClient, "token" | "dispatch" | "run" | "runs">;
       journal: GithubDispatchJournal;
       context: (request: CheckRequest) => GithubCheckContext;
-      push: (request: CandidatePushRequest) => Promise<PushResult>;
+      /** Only the trusted Git adapter can prove that transport was never entered. */
+      push: (
+        request: CandidatePushRequest,
+      ) => Promise<PushResult | { status: "not_started" }>;
       /** Must check the central repository's exact configured baseline ref. */
       isBaselineAncestor: (sha: string, branch: string) => Promise<boolean>;
       lifecycle: GithubCheckLifecycle;
@@ -85,7 +95,10 @@ export class GithubCheckExecutor implements CheckExecutor {
     request: CheckRequest,
     intent: GithubDispatchIntent,
   ): Promise<CheckHandle> {
-    return this.request(request, intent);
+    return githubDeadline(
+      (signal) => this.request({ ...request, signal }, intent),
+      request.signal,
+    );
   }
   private request(
     request: CheckRequest,
@@ -171,7 +184,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     key: string,
     abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle> {
-    let recoveringBound = false;
+    let claimedIntent: GithubDispatchIntent | undefined;
     let dispatchToken = "";
     try {
       const startedAt = new Date(
@@ -205,8 +218,13 @@ export class GithubCheckExecutor implements CheckExecutor {
             this.options.config.maxConcurrent,
           );
       const intent = claimed.intent;
+      claimedIntent = intent;
+      if (
+        intent.maintenanceRetry &&
+        (this.options.now?.() ?? Date.now()) < intent.maintenanceRetry.retryAt
+      )
+        throw new GithubRetryLater(intent.maintenanceRetry.retryAt, "attempt");
       let boundByDispatchId = intent.boundByDispatchId === true;
-      recoveringBound = intent.externalRun !== undefined;
       let run: GithubRun;
       if (intent.externalRun) {
         run = await this.options.client.run(intent.externalRun.run_id);
@@ -224,8 +242,8 @@ export class GithubCheckExecutor implements CheckExecutor {
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
           if (this.options.journal.beginPublication(intent)) {
-            let pushed = false,
-              dispatch = false;
+            let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
+            let dispatch: boolean;
             try {
               const result = await this.options.push({
                 repo: this.options.config.repo,
@@ -234,14 +252,16 @@ export class GithubCheckExecutor implements CheckExecutor {
                 token,
                 ...(request.signal ? { signal: request.signal } : {}),
               });
-              pushed = result.status === "pushed";
+              if (result.status === "not_started") {
+                outcome = "not_started";
+                throw new CheckExecutorSuspended();
+              }
+              if (result.status === "pushed" && !request.signal?.aborted)
+                outcome = "pushed";
             } finally {
               // Settle every push outcome before releasing its writer fence.
               // Only a successful, still-current publication may cross POST.
-              dispatch = this.options.journal.beginDispatch(
-                intent,
-                !pushed || request.signal?.aborted,
-              );
+              dispatch = this.options.journal.beginDispatch(intent, outcome);
             }
             if (!dispatch) throw new GithubExecutorError("dispatch_unknown");
             runId = await this.options.client.dispatch(
@@ -267,12 +287,16 @@ export class GithubCheckExecutor implements CheckExecutor {
                     request.totalTimeoutMs ?? 60 * 60_000,
                   ))
           )
-            throw new GithubRetryLater(now + interval);
+            throw new GithubRetryLater(now + interval, "attempt");
           throw new GithubExecutorError("dispatch_unknown");
         };
         if (runId !== undefined) {
           try {
-            run = await this.options.client.run(runId);
+            // Already-dispatched live attempts need a late cancellation handle.
+            // Only read-only abandoned maintenance can abandon this exact read.
+            run = abandoned
+              ? await this.options.client.run(runId, request.signal)
+              : await this.options.client.run(runId);
           } catch (error) {
             // The dispatch response can precede REST visibility of its run.
             if (error instanceof GithubNotFoundError) deferDiscovery();
@@ -315,6 +339,7 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Keep the host's dispatch inputs for recovery routing. The provider's
       // mutable display title is not identity evidence for a dispatch response ID.
       const identity = { ...run, display_title: githubCheckRunName(inputs) };
+      if (abandoned) request.signal?.throwIfAborted();
       const current = this.options.journal.bind(
         intent,
         external,
@@ -327,6 +352,13 @@ export class GithubCheckExecutor implements CheckExecutor {
         identity,
         () => this.options.journal.finish(intent),
         boundByDispatchId,
+        this.options.journal.retryBinding({
+          ...intent,
+          externalRun: external,
+          maintenanceRetry: intent.externalRun
+            ? intent.maintenanceRetry
+            : undefined,
+        }),
       );
       // A late dispatch still returns a cancellable handle, without publishing
       // readiness or domain callbacks after the supervisor has closed.
@@ -339,13 +371,34 @@ export class GithubCheckExecutor implements CheckExecutor {
       this.handles.set(handle, { run: external, intent });
       return handle;
     } catch (error) {
+      // Only a matching durable claim can record a failed identity check.
+      // Abandoned discovery records its own deadline and backoff at the caller.
+      if (
+        claimedIntent &&
+        !abandoned &&
+        !request.signal?.aborted &&
+        error instanceof GithubExecutorError &&
+        error.category === "security"
+      ) {
+        this.options.journal
+          .retryBinding(claimedIntent)
+          .save(
+            nextMaintenanceRetry(
+              claimedIntent.maintenanceRetry,
+              this.options.now?.() ?? Date.now(),
+              this.options.config.pollIntervalMs ??
+                GITHUB_POLL_DEFAULTS.pollIntervalMs,
+              "identity_mismatch",
+            ),
+          );
+      }
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
       if (
         error instanceof CheckExecutorSuspended ||
         error instanceof GithubExecutorError ||
         (error instanceof GithubRetryLater &&
-          (recoveringBound ||
+          (claimedIntent?.externalRun ||
             this.options.journal.hasUnboundIntent(
               request.project,
               context.card,

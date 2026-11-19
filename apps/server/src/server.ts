@@ -7,10 +7,12 @@ import {
 import {
   acquireRepositoryFlock,
   CpuProfileController,
+  configureMachinePlacement,
   ExtMessageSender,
   executorExecution,
   HostOpsService,
   loadExtMessageConfig,
+  loadMachineCapabilityCatalog,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   loadRuntimeWorkers,
@@ -292,6 +294,12 @@ async function assembleServer(
   const runCapacity = await loadRunCapacityConfig({
     env: { ...(options.env ?? process.env) },
   });
+  configureMachinePlacement(
+    store,
+    config.dataDir,
+    { ...runtimeEnv },
+    runCapacity,
+  );
   for (const message of [...mergeGate.errors, ...runCapacity.errors])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       message,
@@ -555,6 +563,9 @@ async function assembleServer(
               }
             : {}),
           machineDisplayName: runCapacity.displayNameForMachine,
+          resourceLimits: runCapacity.resourcesForMachine,
+          capabilityCatalog: () =>
+            loadMachineCapabilityCatalog({ ...runtimeEnv }),
           runLimit: runCapacity.forMachine,
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
@@ -617,6 +628,8 @@ async function assembleServer(
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
+        mergeWatchdogMs =
+          options.dispatcher.mergeWatchdogMs ?? config.mergeWatchdogMs,
         mergeBlockedReminderMs =
           options.dispatcher.mergeBlockedReminderMs ??
           config.mergeBlockedReminderMs,
@@ -675,8 +688,10 @@ async function assembleServer(
         ...(hostOps
           ? {
               hostOpsTick: () => hostOps.tick(),
-              inspectHarnessActivity: (project: ProjectId) =>
-                hostOps.inspectHarnessActivity(project),
+              inspectHarnessActivity: (
+                project: ProjectId,
+                stopTarget?: Assignment["id"],
+              ) => hostOps.inspectHarnessActivity(project, stopTarget),
               harnessActivity: (
                 project: ProjectId,
                 assignment: Assignment["id"],
@@ -716,9 +731,11 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        resourceLimits: runCapacity.resourcesForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
+        ...(mergeWatchdogMs === undefined ? {} : { mergeWatchdogMs }),
         ...(mergeBlockedReminderMs === undefined
           ? {}
           : { mergeBlockedReminderMs }),

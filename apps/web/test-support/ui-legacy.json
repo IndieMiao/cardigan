@@ -168,27 +168,6 @@
     "count": 1
   },
   {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "311cbfff1aea7554",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setFilters({})}>",
-    "count": 1
-  },
-  {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "e5f1860995c3e6e8",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={pending} onClick={() => { if (data.next_before) setFilters({ ...filters, before: data.next_before }); }} >",
-    "count": 1
-  },
-  {
-    "path": "views/ActivityPage.tsx",
-    "kind": "native-button",
-    "hash": "60c89a8ccadd1c3c",
-    "text": "<button type=\"button\" onClick={() => setFilters({ ...filters, before: \"\" })} >",
-    "count": 1
-  },
-  {
     "path": "views/CapacitySettings.tsx",
     "kind": "native-input",
     "hash": "78590324b18cae90",
@@ -214,34 +193,6 @@
     "kind": "native-button",
     "hash": "dc949adede235904",
     "text": "<button type=\"button\" className=\"quiet\" onClick={reload}>",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "d1afff0816395040",
-    "text": "<input placeholder=\"C-1\" value={filters.card_id ?? \"\"} onChange={(e) => select(\"card_id\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "a8dc63aff544f0e3",
-    "text": "<input type=\"date\" value={filters.from ?? \"\"} onChange={(e) => select(\"from\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "6361dc785b167f27",
-    "text": "<input type=\"date\" value={filters.to ?? \"\"} onChange={(e) => select(\"to\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-button",
-    "hash": "ff7a743408238629",
-    "text": "<button type=\"button\" className=\"decision-records-more\" disabled={loadingMore} onClick={more} >",
     "count": 1
   },
   {
@@ -443,13 +394,6 @@
   {
     "path": "views/NeedsYouPage.tsx",
     "kind": "native-button",
-    "hash": "3aee9c0310605610",
-    "text": "<button type=\"button\" className=\"quiet\" data-close-action={item.id} aria-label={`关闭 ${item.id}（不再需要）`} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
     "hash": "b159db275e48c14b",
     "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy}>",
     "count": 1
@@ -459,27 +403,6 @@
     "kind": "native-button",
     "hash": "a87a97267f97ed36",
     "text": "<button type=\"submit\" disabled={action.busy || !text.trim()}>",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "dcc7c8f8ade37e09",
-    "text": "<button type=\"button\" disabled={busy} onClick={() => mark(unread.map((n) => n.id))} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "4b98ce14af1819e5",
-    "text": "<button type=\"button\" disabled={busy} onClick={() => mark([n.id])} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "309e2f3c26c2e091",
-    "text": "<button type=\"button\" disabled={loadingMore} onClick={more}>",
     "count": 1
   },
   {

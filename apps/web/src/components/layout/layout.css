@@ -43,6 +43,22 @@
     font-size: var(--ui-text-xs);
     white-space: nowrap;
   }
+  .ui-page-status {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    margin-inline-start: auto;
+    min-width: 0;
+  }
+  .ui-page-status:empty {
+    display: none;
+  }
+  .ui-page-header > .ui-page-status:not(:empty) + .ui-page-capacity {
+    margin-inline-start: 0;
+  }
+  .ui-page-status-trigger {
+    white-space: nowrap;
+  }
   .ui-page-count {
     font-size: var(--ui-text-sm);
     color: var(--text-muted);
@@ -73,9 +89,6 @@
     margin-block: 0 var(--ui-space-3);
     padding: 0;
     border: 0;
-  }
-  .ui-filter-chips {
-    min-inline-size: 0;
   }
   .ui-filter-row {
     display: flex;

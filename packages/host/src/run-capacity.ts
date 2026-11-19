@@ -1,17 +1,22 @@
 import {
+  type Assignment,
   type AssignmentId,
   assignmentDependenciesAllowStart,
   cardDependencyDispatchOrder,
   compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
+  type DispatchOrder,
   dispatchTier,
   type Event,
   type HostOpsExecution,
   isRunCapacityExempt,
+  type MachineResources,
   type MachineRunCapacity,
   pendingHostOpsActions,
   type QueuedRun,
+  type Run,
+  remainingResourceRatio,
   runOccupiesSlot,
   runQueuePositions,
 } from "@cardigan/domain";
@@ -21,9 +26,13 @@ import {
   type Store,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-
 import { runningMergeChecks } from "./merge-check-capacity.js";
 import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
+import {
+  assignmentResourceKeys,
+  legacyResourceKeys,
+  wasDispatched,
+} from "./run-resources.js";
 
 // P2a-9 / phase-2 §2.1: merge checks build and test the entire repository.
 // Reserve the suggested two slots while actually running; tune after measurement.
@@ -205,8 +214,58 @@ const pendingActions = new WeakMap<
   WeakMap<readonly object[], readonly HostOpsExecution[]>
 >();
 
+/** Keep the existing order among runnable waiters, without blocking other resources. */
+export function hasEarlierCapacityWait(
+  tx: ReadRepositories,
+  queue: readonly QueuedRun[],
+  order: DispatchOrder,
+  machine: string,
+  resources: MachineResources,
+  eligible?: (project: string, owner: Assignment) => boolean,
+): boolean {
+  return queue.some((entry) => {
+    if (entry.machine_id !== machine || compareDispatchOrder(entry, order) >= 0)
+      return false;
+    if (!resources.size && !eligible) return true;
+    const owner = tx.assignments
+      .list(entry.project_id)
+      .find((a) => a.id === entry.assignment_id);
+    return (
+      !!owner &&
+      (!eligible || eligible(entry.project_id, owner)) &&
+      (!resources.size ||
+        remainingResourceRatio(
+          assignmentResourceKeys(tx, entry.project_id, owner),
+          resources,
+        ) > 0)
+    );
+  });
+}
+
+export type ReadResourceLimits = (
+  machine: string,
+) => ReadonlyMap<string, number>;
+
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
-export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
+export function runCapacitySnapshot(
+  store: Store,
+  tx: ReadRepositories,
+  limits?: ReadResourceLimits,
+) {
+  const machines = new Map<
+    string,
+    Map<string, { limit: number; occupied: number }>
+  >();
+  const resourceSlots = (machine: string) => {
+    let slots = machines.get(machine);
+    if (!slots) {
+      slots = new Map();
+      for (const [key, limit] of limits?.(machine) ?? [])
+        slots.set(key, { limit, occupied: 0 });
+      machines.set(machine, slots);
+    }
+    return slots;
+  };
   // Both views share the exact same effective Run/reservation set. Only the
   // trusted Assignment scope and role determine exemption, never Run labels.
   const agentOccupied = new Map<string, number>();
@@ -250,13 +309,44 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
       if (!allAgentOccupied.has(machine_id))
         allAgentOccupied.set(machine_id, 0);
     }
-    const count = (assignmentId: AssignmentId) => {
+    const historyFor = (owner: Assignment) => {
+      const card =
+        owner.work_item_id &&
+        tx.work_items.get(project.id, owner.work_item_id)?.card_id;
+      return (
+        streams?.get(card ?? "") ?? tx.events.listAfter(project.id, card, 0)
+      );
+    };
+    const count = (assignmentId: AssignmentId, run?: Run, stopOnly = false) => {
       const owner = owners.get(assignmentId);
       if (!owner) return;
       const machine = owner.machine_id;
       allAgentOccupied.set(machine, (allAgentOccupied.get(machine) ?? 0) + 1);
       if (!isRunCapacityExempt(owner))
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
+      const slots = resourceSlots(machine);
+      // Stop intents keep their existing machine slot. An idle terminal is not
+      // proof that its queued follow-up acquired any resources. Active Runs and
+      // in-flight startup reservations have already been counted in the Run loop.
+      if (
+        slots.size &&
+        owner.work_item_id &&
+        run &&
+        (!stopOnly || wasDispatched(historyFor(owner), run))
+      ) {
+        for (const key of run.resource_keys ??
+          legacyResourceKeys(
+            tx,
+            project.id,
+            owner,
+            run,
+            historyFor(owner),
+            slots.keys(),
+          )) {
+          const slot = slots.get(key);
+          if (slot) slot.occupied++;
+        }
+      }
       countedOwners.add(owner.id);
     };
     for (const run of runs)
@@ -264,13 +354,17 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
         runOccupiesSlot(run) ||
         (run.status === "queued" && reserved.has(run.id))
       )
-        count(run.assignment_id);
+        count(run.assignment_id, run);
     for (const action of actions)
       if (
         action.runtime_ref !== null &&
         !countedOwners.has(action.assignment_id)
       )
-        count(action.assignment_id);
+        count(
+          action.assignment_id,
+          action.run_id ? tx.runs.get(project.id, action.run_id) : undefined,
+          true,
+        );
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.
@@ -288,6 +382,8 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
     occupied,
     agentOccupied,
     allAgentOccupied,
+    resourcesForMachine: (machine: string): MachineResources =>
+      resourceSlots(machine),
     mergeChecks,
     queue: queueSnapshot(store, tx, reservedRuns),
   };

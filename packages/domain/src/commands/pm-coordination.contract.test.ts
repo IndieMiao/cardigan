@@ -6,6 +6,7 @@ import {
   type DecisionCategory,
   type Employee,
   listNeedsYou,
+  type MachinePlacement,
   maintainPmCoordination,
   notices,
   OFFICE_WAIT_MS,
@@ -25,6 +26,7 @@ import {
   fixture,
   human,
   id,
+  machine,
   now,
   ports,
   run,
@@ -332,6 +334,73 @@ test("first producer selects a qualified employee and never creates a second per
       ports(),
     ).ok,
   ).toBe(false);
+});
+
+test("automatic first producer skips the idle remote worker for worktree roles and defers if local cannot run", () => {
+  const base = producerState();
+  const available: MachinePlacement = {
+    remote_binding: "allowed",
+    health: { status: "passed", available: true },
+    capabilities: [],
+    occupied: 0,
+    limit: 4,
+  };
+  const remote = {
+    ...machine(),
+    id: "remote-a",
+    herdr_machine: "remote-a",
+    tags: ["gpu"],
+  };
+  const state: CommandState = {
+    ...base,
+    roles: base.roles.map((r) => ({ ...r, worktree: "write" })),
+    machines: [remote, machine()],
+    read_machine_placement: () =>
+      new Map([
+        [remote.id, available],
+        ["local", { ...available, occupied: 3 }],
+      ]),
+  };
+  const effect = auto(state);
+  expect(effect.data?.machine_id).toBe("local");
+  expect(effect.events.at(-1)).toMatchObject({
+    type: "machine_selected",
+    payload: {
+      excluded: [
+        {
+          machine_id: remote.id,
+          reasons: [expect.stringContaining("远程 Git 工作树准备尚未验证")],
+        },
+      ],
+    },
+  });
+  const verified = auto({
+    ...state,
+    read_machine_placement: () =>
+      new Map([
+        [remote.id, { ...available, worktree_preparation: "verified" }],
+        ["local", { ...available, occupied: 3 }],
+      ]),
+  });
+  expect(verified.data?.machine_id).toBe(remote.id);
+  const gap = auto({
+    ...state,
+    work_items: state.work_items.map((w) => ({
+      ...w,
+      requirements: { tags: ["gpu"] },
+    })),
+  });
+  expect(gap.data).toBeNull();
+  expect(gap.token_requests).toEqual([]);
+  expect(gap.changes).toEqual([]);
+  expect(gap.events).toMatchObject([
+    {
+      type: "system_assignment_deferred",
+      payload: {
+        reason: expect.stringContaining("远程 Git 工作树准备尚未验证"),
+      },
+    },
+  ]);
 });
 
 test.each([

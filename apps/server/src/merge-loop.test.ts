@@ -55,6 +55,7 @@ import {
   mergeConfirmation,
 } from "./m4-fixtures.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
+import { withPublication } from "./publication-lock.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -1194,6 +1195,18 @@ test("C-391: recovery records all cards after CAS succeeded but recording crashe
     0,
   );
   expect(mergeBatches(f.state().events)[0]?.status).toBe("publishing");
+  // C-466: recovery cannot proceed (or abort the publishing family as stale)
+  // while a push is checking the publication record. Retry after it releases.
+  const held = Promise.withResolvers<void>();
+  const lock = withPublication(f.project_id, () => held.promise);
+  try {
+    await new MergeExecutor(options).tick();
+    expect(mergeBatches(f.state().events)[0]?.status).toBe("publishing");
+    expect(errors).toEqual([]);
+  } finally {
+    held.resolve();
+    await lock;
+  }
   await new MergeExecutor(options).tick();
   expect(errors).toEqual([]);
   expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(

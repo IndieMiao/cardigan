@@ -116,7 +116,7 @@ test.each([
 
 test("the observed macOS layout rejects a 103-byte socket with a 119-byte holder", () => {
   const source = input();
-  source.home += "x"; // Synthetic HOME of 38 bytes.
+  source.home = `/${"h".repeat(37)}`; // Synthetic HOME of 38 bytes.
   source.launchd.hc_path = `${source.home}/.local/bin/hc`;
   source.runtime.machines[0].projects[0].session = "example-worker-aa";
   expect(() => parseWorkerOnboarding(source, "/controller/data")).toThrow(
@@ -206,6 +206,10 @@ function probe(
   if (fixture === "socket-limit") request.home = `/${"h".repeat(51)}`;
   if (fixture === "holder-too-long") request.home = `/${"h".repeat(52)}`;
   if (fixture === "socket-too-long") request.home = `/${"h".repeat(68)}`;
+  if (fixture === "firmlink-root" || fixture === "firmlink-home") {
+    const key = fixture === "firmlink-root" ? "root" : "home";
+    request[key] = `/System/Volumes/Data${request[key]}`;
+  }
   const contents = Object.fromEntries(
     Object.keys(request.helpers).map((path) => [
       path,
@@ -308,6 +312,8 @@ test.each([
 );
 test.each([
   "safe",
+  "firmlink-root",
+  "firmlink-home",
   "ancestor-acl",
   "keys-acl",
   "acl-error",

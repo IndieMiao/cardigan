@@ -1,0 +1,80 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .scroll + .scroll {
+    margin-block-start: var(--ui-space-6);
+  }
+  .nowrap,
+  .nowrap :where(*) {
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+  .detail {
+    margin: 0;
+    max-block-size: 50vh;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+  }
+  /* Same narrow record layout as the cards list: one labelled line per cell. */
+  @media (max-width: 640px) {
+    .stacked {
+      display: block;
+      min-width: 0;
+    }
+    .stacked thead {
+      position: absolute;
+      width: var(--ui-stroke);
+      height: var(--ui-stroke);
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .stacked tbody {
+      display: block;
+    }
+    .stacked tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      padding: var(--ui-space-2);
+    }
+    .stacked .nowrap,
+    .stacked .nowrap :where(*) {
+      white-space: revert-layer;
+      overflow-wrap: revert-layer;
+    }
+    .stacked td {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .stacked td[data-label]::before {
+      content: attr(data-label) "：";
+      color: var(--text-muted);
+    }
+    /* `records` extends `stacked`: grouped bodies, a lead/aside first line and
+       one divider per record instead of per cell. */
+    .records tbody[hidden],
+    .records tr[hidden] {
+      display: none;
+    }
+    .records tr {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      padding: var(--ui-space-2) calc(var(--ui-space-2) + var(--ui-space-1) / 2);
+      border-bottom: var(--ui-stroke) solid var(--border);
+    }
+    .records td {
+      grid-column: 1 / -1;
+      border: 0;
+      padding: calc(var(--ui-space-1) / 2) 0;
+    }
+    .records td[data-record="aside"] {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .records td[data-record="lead"] {
+      grid-column: 1;
+      grid-row: 1;
+    }
+  }
+}

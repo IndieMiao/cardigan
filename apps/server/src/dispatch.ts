@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setImmediate as yieldToLoop } from "node:timers/promises";
 import type {
   Assignment,
   Clock,
@@ -38,6 +39,7 @@ import {
   queueRun,
   refreshRunTargetWait,
   refreshTestReviewLimits,
+  remainingResourceRatio,
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
@@ -48,12 +50,15 @@ import {
   unreadableCommentTrigger,
 } from "@cardigan/domain";
 import {
+  assignmentResourceKeys,
   deferTargetAttempt,
   effectiveRunLimit,
   failAutomaticContextRun,
   type HarnessActivityInspection,
   HostLaunchError,
+  hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  type ReadResourceLimits,
   RunPreparationDeferred,
   RunTargetDeferred,
   redactFailureLine,
@@ -63,6 +68,7 @@ import {
   testReviewRunPrompt,
   tryHostOpsLock,
   upgradeIdleAssignmentRoles,
+  WORKTREE_LAUNCH_LEASE_MS,
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -77,6 +83,7 @@ import {
   beginBellAttempt,
   beginLaunchAttempt,
   finishBellAttempt,
+  getRoleVersion,
   moveNotification,
   type Store,
   type StoreTransactionContext,
@@ -144,6 +151,7 @@ export interface DispatcherOptions {
   ) => HarnessActivity | undefined;
   readonly inspectHarnessActivity?: (
     project: ProjectId,
+    stopTarget?: Assignment["id"],
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsTick?: () => Promise<void>;
@@ -164,6 +172,7 @@ export interface DispatcherOptions {
   readonly maxRetries?: number;
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
+  readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
@@ -313,6 +322,20 @@ export class Dispatcher {
       runtime: options.runtime,
       clock: this.clock,
       afterMs: cancelAfterMs,
+      onUnknown: (project, assignment, run, row) =>
+        this.inactivityAlerts.publish(
+          project,
+          [{ assignment, run }],
+          new Map([[assignment.id, row]]),
+          !options.inspectHarnessActivity
+            ? "unavailable"
+            : row.status === "read_failed"
+              ? "read_failed"
+              : "completed",
+        ),
+      ...(options.inspectHarnessActivity
+        ? { inspectHarnessActivity: options.inspectHarnessActivity }
+        : {}),
       ...(options.harnessActivity
         ? { harnessActivity: options.harnessActivity }
         : {}),
@@ -509,6 +532,9 @@ export class Dispatcher {
         }
       }
     }
+    // Awaiting an already-resolved promise does not run timers or socket IO.
+    // These boundaries hold no transaction; all consumers recheck revisions.
+    await yieldToLoop();
     let waitBaseline: { branch: string; sha: string } | undefined;
     const waitState = this.state(project);
     if (
@@ -542,6 +568,7 @@ export class Dispatcher {
         this.options.baselineConflictMaxResumes,
       ),
     );
+    await yieldToLoop();
     const pmRecoveryAt = Date.parse(this.clock.now());
     if (
       !this.closing &&
@@ -1208,7 +1235,13 @@ export class Dispatcher {
         return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
-        const capacity = runCapacitySnapshot(store, tx);
+        const capacity = runCapacitySnapshot(
+          store,
+          tx,
+          this.options.resourceLimits,
+        );
+        const slots = capacity.resourcesForMachine(a.machine_id);
+        const keys = assignmentResourceKeys(tx, project, a);
         const trigger = state.events.find(
           (e) => e.id === run?.trigger_event_id,
         );
@@ -1221,20 +1254,20 @@ export class Dispatcher {
           created_at: trigger?.created_at ?? a.created_at,
           trigger_event_id: run.trigger_event_id,
         };
-        const earlier = capacity.queue.some(
-          (entry) =>
-            entry.machine_id === a.machine_id &&
-            compareDispatchOrder(entry, order) < 0 &&
-            tx.assignments.list(entry.project_id).some(
-              (owner) =>
-                owner.id === entry.assignment_id &&
-                hasRunTarget(owner, {
-                  work_items: tx.work_items.list(entry.project_id),
-                  deliveries: tx.deliveries.list(entry.project_id),
-                }),
-            ),
+        const earlier = hasEarlierCapacityWait(
+          tx,
+          capacity.queue,
+          order,
+          a.machine_id,
+          slots,
+          (p, owner) =>
+            hasRunTarget(owner, {
+              work_items: tx.work_items.list(p),
+              deliveries: tx.deliveries.list(p),
+            }),
         );
         if (
+          remainingResourceRatio(keys, slots) <= 0 ||
           (!isRunCapacityExempt(a) && earlier) ||
           !canDispatchRun(
             effectiveRunLimit(
@@ -1253,7 +1286,7 @@ export class Dispatcher {
         }
         // A pending launch is reserved by its BellAttempt until dispatchRun
         // commits. It must no longer appear as a capacity wait in read views.
-        const cleared = { ...run };
+        const cleared = { ...run, resource_keys: keys };
         delete cleared.queue_reason;
         run = cleared;
         tx.runs.put(project, run);
@@ -1303,6 +1336,18 @@ export class Dispatcher {
             })?.text
           : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
       if (!bell) throw new Error("Missing bell");
+      // Set the budget on the durable intent *before* publication copies it.
+      // Live wakes (including retries), local starts and no-checkout roles keep the bell lease.
+      const worktree =
+        !live &&
+        a.machine_id !== "local" &&
+        runCard &&
+        state.cards.find((c) => c.id === runCard)?.repo &&
+        getRoleVersion(tx, project, a.role_id, a.role_version)?.worktree;
+      const leaseMs =
+        worktree === "write" || worktree === "readonly"
+          ? Math.max(this.leaseMs, WORKTREE_LAUNCH_LEASE_MS)
+          : this.leaseMs;
       const attempt: BellAttempt = {
         id: randomUUID(),
         project_id: project,
@@ -1310,7 +1355,7 @@ export class Dispatcher {
         run_id: run.id,
         notification_ids: ready.map((n) => n.id),
         started_at: at,
-        lease_until: new Date(Date.parse(at) + this.leaseMs).toISOString(),
+        lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
         finished_at: null,
         outcome: null,
       };
@@ -1580,10 +1625,10 @@ export class Dispatcher {
         );
         state = this.loadState(tx, project);
       }
-      const ids = new Set(attempt.notification_ids);
-      const notes = store
-        .listNotifications({ project_id: project })
-        .filter((n) => ids.has(n.id));
+      const notes = store.listNotifications({
+        project_id: project,
+        ids: attempt.notification_ids,
+      });
       let failed = !sent && notes.length === 0;
       for (const n of notes) {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
@@ -1668,10 +1713,11 @@ export class Dispatcher {
   ) {
     const { store } = this.options;
     store.uow.run((tx) => {
-      const ids = new Set(notes.map((n) => n.id)),
-        current = store
-          .listNotifications({ project_id: project })
-          .filter((n) => ids.has(n.id) && n.status === "pending");
+      const current = store.listNotifications({
+        project_id: project,
+        ids: notes.map((n) => n.id),
+        status: "pending",
+      });
       const queued = tx.runs
         .list(project)
         .find(

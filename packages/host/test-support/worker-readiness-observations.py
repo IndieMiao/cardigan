@@ -1,7 +1,7 @@
 """Synthetic readiness observations; group policy runs the real shared primitive."""
 import types
 
-account = types.SimpleNamespace(pw_name='cg_example', pw_uid=2201, pw_gid=r['gid'])
+account = types.SimpleNamespace(pw_name='cg_example', pw_uid=2201, pw_gid=r['gid'], pw_dir='/Users/cg_example')
 native = types.ModuleType('worker_native')
 exec(r['native_source'], native.__dict__)
 exec(r['group_fixture'])
@@ -15,5 +15,10 @@ files = types.SimpleNamespace(namespace=lambda: None)
 module = lambda path, name: git if name == 'worker_git' else files
 pathlib.Path.lstat = lambda path: types.SimpleNamespace(st_mode=stat.S_IFREG | 0o660,
                                                         st_uid=0, st_gid=r['gid'], st_nlink=1)
-subprocess.run = lambda *args, **kwargs: types.SimpleNamespace(returncode=0)
+def run(argv, **kwargs):
+    if argv == ['git', '--version']:
+        return types.SimpleNamespace(returncode=0)
+    assert argv == ['/bin/pwd', '-P'] and r['system'] == 'Darwin'
+    return types.SimpleNamespace(stdout=os.fsencode(kwargs['cwd'].removeprefix('/System/Volumes/Data')) + b'\n')
+subprocess.run = run
 subprocess.check_output = lambda *args, **kwargs: r['version'].encode()

@@ -115,12 +115,26 @@ export function worktreeProvider(
         if (
           machineId !== assignment.machine_id ||
           (execution.target && execution.target.project_id !== project_id) ||
+          (defaultExecution.target &&
+            machineId !== "local" &&
+            defaultExecution.target.machine_id === machineId &&
+            defaultExecution.target.fingerprint !==
+              execution.target?.fingerprint) ||
           (target &&
             !request.role.required_machine_tags.every((tag) =>
               target.machine.tags.includes(tag),
             ))
         )
           throw new Error("Workspace target does not match Assignment");
+        // The legacy agent-ssh transport assumes a shared disk. A remote
+        // assignment can only use the host-driven worker Git helper.
+        if (
+          machineId !== "local" &&
+          (execution.mode !== "agent-ssh" || !execution.gitHelper)
+        )
+          throw new Error(
+            "Remote worktree requires a configured worker Git helper",
+          );
         const dataDir = execution.dataDir;
         const transport =
           execution.mode === "local"

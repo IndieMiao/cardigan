@@ -1,5 +1,6 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import {
+  associatedHarnessActivity,
   currentHarnessActivity,
   type HarnessActivity,
   harnessActivityTime,
@@ -47,12 +48,57 @@ export function lastRunActivity(
     ),
   );
 }
+/** No stop deadline exists for Claude without a sample from this Run/session. */
+export function lastInactiveStopActivity(
+  state: CommandState,
+  run: Run,
+  assignment: Assignment,
+  now: string,
+  sample?: HarnessActivity,
+): number | undefined {
+  if (run.harness === "claude-code") {
+    const associated = associatedHarnessActivity(
+      state,
+      assignment,
+      now,
+      sample,
+    );
+    if (
+      associated?.source !== "claude-code:session_metadata" ||
+      associated.run_id !== run.id
+    )
+      return;
+    if (!associated.error)
+      return lastRunActivity(
+        run,
+        assignment,
+        Date.parse(associated.updated_at),
+      );
+    // An error proves ownership, not progress. Never fall back to MCP alone.
+    const progress = associated.last_progress_at;
+    if (
+      !progress ||
+      Date.parse(progress) > Date.parse(associated.updated_at) ||
+      !associatedHarnessActivity(state, assignment, now, {
+        ...associated,
+        updated_at: progress,
+      })
+    )
+      return;
+    return lastRunActivity(run, assignment, Date.parse(progress));
+  }
+  return lastRunActivity(
+    run,
+    assignment,
+    harnessActivityTime(currentHarnessActivity(state, assignment, now, sample)),
+  );
+}
 export function inactiveRunDue(
   run: Run,
   assignment: Assignment,
   now: string,
   afterMs: number,
-  harnessAt?: number,
+  lastActivity: number | undefined,
 ): boolean {
   return (
     run.status === "running" &&
@@ -60,8 +106,9 @@ export function inactiveRunDue(
     assignment.runtime_ref !== null &&
     Number.isSafeInteger(afterMs) &&
     afterMs > 0 &&
-    Number.isFinite(lastRunActivity(run, assignment, harnessAt)) &&
-    Date.parse(now) - lastRunActivity(run, assignment, harnessAt) >= afterMs
+    lastActivity !== undefined &&
+    Number.isFinite(lastActivity) &&
+    Date.parse(now) - lastActivity >= afterMs
   );
 }
 function clear(d: CommandDraft, run: Run, reason: string) {
@@ -95,8 +142,12 @@ export function claimInactiveRunStop(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
-    const harnessAt = harnessActivityTime(
-      currentHarnessActivity(state, a, d.now, p.harness_activity),
+    const lastActivity = lastInactiveStopActivity(
+      state,
+      run,
+      a,
+      d.now,
+      p.harness_activity,
     );
     if (hostOpsPending(state.events, a.id)) return;
     if (run.dispatch_stop) return undefined;
@@ -104,14 +155,19 @@ export function claimInactiveRunStop(
     if (old && old.lease_until > d.now) return undefined;
     if (old && !sameRef(a.runtime_ref, old.runtime_ref))
       return clear(d, run, "runtime_changed");
-    if (!old && !inactiveRunDue(run, a, d.now, p.after_ms, harnessAt))
-      return undefined;
     if (
-      old &&
-      !old.stopping &&
-      !inactiveRunDue(run, a, d.now, p.after_ms, harnessAt)
+      !old?.stopping &&
+      !inactiveRunDue(run, a, d.now, p.after_ms, lastActivity)
     )
-      return clear(d, run, "activity_resumed");
+      return old
+        ? clear(
+            d,
+            run,
+            lastActivity === undefined
+              ? "activity_unknown"
+              : "activity_resumed",
+          )
+        : undefined;
     const ref = old?.runtime_ref ?? a.runtime_ref;
     if (!ref) return undefined;
     const event = d.emit("run_inactivity_stop_requested", cardOf(d, a), {
@@ -119,7 +175,7 @@ export function claimInactiveRunStop(
       after_ms: p.after_ms,
       retry: !!old,
       last_activity_at: new Date(
-        lastRunActivity(run, a, harnessAt),
+        lastActivity ?? lastRunActivity(run, a),
       ).toISOString(),
     });
     const next: Run = {
@@ -163,17 +219,30 @@ export function startInactiveRunStop(
       "validation_failed",
       "Invalid inactivity grace",
     );
-    const harnessAt = harnessActivityTime(
-      currentHarnessActivity(state, a, d.now, p.harness_activity),
+    const lastActivity = lastInactiveStopActivity(
+      state,
+      run,
+      a,
+      d.now,
+      p.harness_activity,
     );
     const due = stop.stopping
-      ? Number.isFinite(lastRunActivity(run, a, harnessAt)) &&
-        Date.parse(d.now) - lastRunActivity(run, a, harnessAt) >= p.after_ms
-      : inactiveRunDue(run, a, d.now, p.after_ms, harnessAt);
+      ? lastActivity !== undefined &&
+        Number.isFinite(lastActivity) &&
+        Date.parse(d.now) - lastActivity >= p.after_ms
+      : inactiveRunDue(run, a, d.now, p.after_ms, lastActivity);
     if (!due) {
       // Once release has been attempted it may still complete late. Keep the
       // fence until exit is confirmed; fresh activity prevents another kill.
-      return stop.stopping ? undefined : clear(d, run, "activity_resumed");
+      return stop.stopping
+        ? undefined
+        : clear(
+            d,
+            run,
+            lastActivity === undefined
+              ? "activity_unknown"
+              : "activity_resumed",
+          );
     }
     const next: Run = { ...run, inactivity_stop: { ...stop, stopping: true } };
     d.put("runs", next);

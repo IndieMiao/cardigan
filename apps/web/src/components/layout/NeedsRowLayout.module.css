@@ -1,0 +1,196 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* Group panel: same frame as the card table (stroke border, panel radius). */
+  .group {
+    margin: var(--ui-space-3) 0 var(--ui-space-6);
+    min-width: 0;
+    background: var(--surface);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+    overflow: hidden;
+  }
+  .groupHead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ui-space-2);
+    min-height: var(--ui-control-regular);
+    padding: 0 var(--ui-space-2);
+    background: var(--surface-muted);
+    border-bottom: var(--ui-stroke) solid var(--border);
+  }
+  .groupHead h2 {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    font-weight: 600;
+    line-height: var(--ui-leading);
+  }
+  .groupHead h2:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-focus-width);
+  }
+  .batch {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    padding-block: var(--ui-space-1);
+  }
+  .rows > :not(:last-child) {
+    border-bottom: var(--ui-stroke) solid var(--border);
+  }
+  .footer {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-2);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .footer :where(p) {
+    margin: 0;
+  }
+  .notice {
+    margin: var(--ui-space-3) 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .notice :where(p, ul) {
+    margin: 0;
+  }
+
+  /* Row: left ids/title/summary, right time/status/primary action. */
+  .row {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .row[data-urgent] {
+    box-shadow: inset calc(var(--ui-stroke) * 3) 0 0 var(--danger);
+  }
+  .head {
+    display: grid;
+    grid-template-columns: var(--ui-control) minmax(0, 1fr) auto;
+    align-items: start;
+    gap: var(--ui-space-2) var(--ui-space-1);
+    padding: var(--ui-space-2) var(--ui-space-2) var(--ui-space-2)
+      var(--ui-space-1);
+  }
+  .lead {
+    display: grid;
+    gap: var(--ui-space-1);
+    min-width: 0;
+  }
+  .ids {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-height: var(--ui-control);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .title {
+    margin: 0;
+    font-size: var(--ui-text-base);
+    font-weight: 600;
+    line-height: var(--ui-leading);
+  }
+  .row[data-muted] .title {
+    font-weight: 400;
+  }
+  .gutter {
+    display: flex;
+    flex: none;
+    width: var(--ui-control);
+    height: var(--ui-control);
+  }
+  .toggle {
+    color: var(--text-muted);
+  }
+  .toggle[aria-expanded="true"] svg {
+    transform: rotate(90deg);
+  }
+  .summary {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  /* The full plain summary inside the details replaces the one-liner. */
+  .row[data-open] .summary {
+    display: none;
+  }
+  .trail {
+    display: flex;
+    flex-wrap: nowrap;
+    margin-inline-start: var(--ui-space-3);
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--ui-space-2);
+    min-height: var(--ui-control);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .time {
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .status {
+    display: inline-flex;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  .action {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* Details: indented under the title, hidden until the disclosure opens. */
+  .body {
+    display: none;
+    padding: 0 var(--ui-space-2) var(--ui-space-3)
+      calc(var(--ui-space-1) * 2 + var(--ui-control));
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .body[data-open] {
+    display: block;
+  }
+  /* Hidden forms (e.g. merge controls before a PM takeover) stay hidden. */
+  .body :where([hidden]) {
+    display: none;
+  }
+  .body :where(form:not([hidden])) {
+    display: grid;
+    gap: var(--ui-space-2);
+    margin-top: var(--ui-space-3);
+  }
+  .body :where(form label:not([hidden])) {
+    display: grid;
+    gap: var(--ui-space-1);
+  }
+  .body :where(textarea) {
+    font: inherit;
+  }
+  .body > :where(:first-child) {
+    margin-top: 0;
+  }
+
+  @media (max-width: 760px) {
+    .head {
+      grid-template-columns: var(--ui-control) minmax(0, 1fr);
+    }
+    .trail {
+      grid-column: 2;
+      flex-wrap: wrap;
+      margin-inline-start: 0;
+      justify-content: flex-start;
+    }
+    .action {
+      margin-inline-start: auto;
+    }
+  }
+}

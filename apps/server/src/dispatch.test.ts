@@ -7,20 +7,25 @@ import type {
   CommandState,
   ProjectId,
   Result,
+  Run,
   Runtime,
 } from "@cardigan/domain";
 import {
   acknowledgeRun,
   assign,
+  beginHostOpsAction,
   createCard,
   dispatchRun,
   finishRun,
+  HOST_OPS_ROLE_TOOLS,
   postComment,
   queueRun,
+  recordLaunchPublication,
   requestDecision,
   setRunLimit,
   stopWorkItemAssignment,
   updateCard,
+  updateWorkItem,
 } from "@cardigan/domain";
 import {
   acquireMergeCheckCapacity,
@@ -629,6 +634,310 @@ test("capacity preserves queued Run identity and notifications, then dispatches 
   expect(runtime.wake).toHaveBeenCalledOnce();
 });
 
+const requireCapabilities = (
+  item: typeof target.item,
+  capabilities: string[],
+) =>
+  f.apply((s, a, p) =>
+    updateWorkItem(
+      s,
+      a,
+      { work_item_id: item.id, requirements: { capabilities } },
+      p,
+    ),
+  );
+
+test("MC-4 a missing slot holds the entire Run without reserving an unrelated free resource", async () => {
+  const busy = f.create();
+  requireCapabilities(busy.item, ["godot=4"]);
+  const legacy = f.session(busy.assignment, false);
+  expect(legacy.resource_keys).toBeUndefined();
+  const independent = f.create();
+  f.session(independent.assignment);
+  requireCapabilities(target.item, ["godot>=4", "blender"]);
+  requireCapabilities(independent.item, ["blender"]);
+  const settings = {
+    ...options,
+    runLimit: () => 3,
+    resourceLimits: () =>
+      new Map([
+        ["godot", 1],
+        ["blender", 1],
+      ]),
+  };
+  comment();
+  await new Dispatcher(settings).tick();
+  const [waiting] = readRunQueue(f.store);
+  expect(waiting).toMatchObject({
+    assignment_id: target.assignment.id,
+    machine_id: "local",
+  });
+  // MC-4 upgrade: neither clearing the old item's requirements nor replacing
+  // them grants a second godot slot or charges blender to the still-running Run.
+  requireCapabilities(busy.item, []);
+  requireCapabilities(busy.item, ["blender"]);
+  await new Dispatcher(settings).tick();
+  expect(f.state().runs.find((r) => r.id === legacy.id)?.status).toBe(
+    "running",
+  );
+  expect(readRunQueue(f.store)).toEqual([waiting]);
+  f.advance(100);
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      {
+        card_id: independent.card.id,
+        work_item_id: independent.item.id,
+        body: "independent",
+      },
+      p,
+    ),
+  );
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toEqual([waiting]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  const admitted = f
+    .state()
+    .runs.find(
+      (r) =>
+        r.status === "dispatched" &&
+        r.assignment_id === independent.assignment.id,
+    );
+  expect(admitted?.resource_keys).toEqual(["blender"]);
+  finish(busy.assignment);
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store)).toEqual([waiting]); // still needs blender too
+  if (!admitted) throw new Error("Missing admission");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: admitted.id }, p),
+    f.actorFor(independent.assignment),
+  );
+  finish(independent.assignment);
+  await new Dispatcher(settings).tick();
+  expect(f.state().runs.find((r) => r.id === waiting?.run_id)).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["godot", "blender"],
+    assignment_id: target.assignment.id,
+  });
+});
+
+test("MC-4 a withdrawn legacy Run holds its retry's resources before and after redispatch", async () => {
+  const owner = f.create();
+  requireCapabilities(owner.item, ["godot"]);
+  requireCapabilities(target.item, ["blender"]);
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["blender", 1],
+      ["ios.simulator", 1],
+    ]);
+  const occupied = (key: string) =>
+    f.store.uow.read(
+      (tx) =>
+        runCapacitySnapshot(f.store, tx, resourceLimits)
+          .resourcesForMachine("local")
+          .get(key)?.occupied,
+    );
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: owner.assignment.id,
+        model: "fixture",
+        agent_cli_version: "1",
+      },
+      p,
+    ),
+  );
+  const system = { kind: "system", project_id: f.project } as const;
+  const binding = {
+    project_id: f.project,
+    machine_id: "local",
+    session: "fixture",
+    generation: "one",
+    fingerprint: "c".repeat(64),
+  };
+  let expected: string | undefined;
+  function attempt(generation: string) {
+    const ref = {
+      ...f.refFor(owner.assignment),
+      target: binding,
+      launch_generation: { run_id: run.id, generation },
+    };
+    const record = (phase: NonNullable<Run["launch_publication"]>["phase"]) => {
+      f.apply(
+        (s, a, p) =>
+          recordLaunchPublication(
+            s,
+            a,
+            {
+              run_id: run.id,
+              ...(expected ? { expected_generation: expected } : {}),
+              publication: {
+                phase,
+                generation,
+                target: binding,
+                lease_until: "2030-01-01T00:00:00Z",
+                agent_name: "fixture",
+                work_dir: "fixture",
+                sha: null,
+                token_id: null,
+                runtime_ref: [
+                  "preparing",
+                  "published",
+                  "provisioning",
+                ].includes(phase)
+                  ? null
+                  : ref,
+                process: null,
+                log_offset: 0,
+                artifacts: [],
+                wait: phase === "stopping" || phase === "exited",
+                provision_attempted:
+                  phase !== "preparing" && phase !== "published",
+              },
+            },
+            p,
+          ),
+        system,
+      );
+      expected = generation;
+    };
+    record("preparing");
+    return {
+      record,
+      dispatch() {
+        for (const phase of [
+          "published",
+          "provisioning",
+          "provisioned",
+        ] as const)
+          record(phase);
+        f.apply(
+          (s, a, p) =>
+            dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+          system,
+        );
+        record("dispatched");
+      },
+    };
+  }
+  const first = attempt("a".repeat(32));
+  first.dispatch();
+  first.record("stopping");
+  first.record("exited");
+  expect(occupied("godot")).toBe(0);
+
+  requireCapabilities(owner.item, ["blender"]);
+  const retry = attempt("b".repeat(32));
+  expect(occupied("blender")).toBe(1); // no second dispatch event yet
+  requireCapabilities(owner.item, []); // the claim must survive another edit
+  retry.dispatch();
+  retry.record("started");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: run.id }, p),
+    f.actorFor(owner.assignment),
+  );
+  requireCapabilities(owner.item, ["ios.simulator"]);
+  expect(occupied("ios.simulator")).toBe(0); // added only after this dispatch
+  expect(occupied("blender")).toBe(1);
+  comment();
+  const dispatcher = new Dispatcher({
+    ...options,
+    runLimit: () => 3,
+    resourceLimits,
+  });
+  await dispatcher.tick();
+  const [waiting] = readRunQueue(f.store);
+  expect(waiting?.assignment_id).toBe(target.assignment.id);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("running");
+  finish(owner.assignment);
+  expect(occupied("blender")).toBe(0);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === waiting?.run_id)).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["blender"],
+  });
+});
+
+test("MC-4 stopping a queued follow-up reserves the terminal but not its unclaimed resources", async () => {
+  const busy = f.create();
+  requireCapabilities(busy.item, ["godot"]);
+  f.session(busy.assignment, false);
+  requireCapabilities(target.item, ["godot", "blender"]);
+  const other = f.create();
+  requireCapabilities(other.item, ["blender"]);
+  f.session(other.assignment);
+  const ops = standingSession("host_ops");
+  f.store.uow.run((tx) => {
+    const role = tx.roles.get(f.project, ops);
+    if (!role) throw new Error("Missing operator role");
+    tx.roles.put(f.project, { ...role, allowed_tools: HOST_OPS_ROLE_TOOLS });
+  });
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["blender", 1],
+    ]);
+  const dispatcher = new Dispatcher({
+    ...options,
+    runLimit: () => 4,
+    resourceLimits,
+  });
+  comment();
+  await dispatcher.tick();
+  const wait = f
+    .state()
+    .runs.find(
+      (r) => r.status === "queued" && r.assignment_id === target.assignment.id,
+    );
+  if (!wait) throw new Error("Missing queued Run");
+  f.apply(
+    (s, a, p) =>
+      beginHostOpsAction(
+        s,
+        a,
+        {
+          tool: "host_ops_cancel_run",
+          target_id: wait.id,
+          reason: "Cancel the unstarted follow-up",
+        },
+        p,
+      ),
+    f.actorFor(ops),
+  );
+  const capacity = f.store.uow.read((tx) =>
+    runCapacitySnapshot(f.store, tx, resourceLimits),
+  );
+  expect(capacity.occupied.get("local")).toBe(2); // busy Run + terminal stop reservation
+  expect(capacity.resourcesForMachine("local").get("blender")?.occupied).toBe(
+    0,
+  );
+  f.apply((s, a, p) =>
+    postComment(
+      s,
+      a,
+      {
+        card_id: other.card.id,
+        work_item_id: other.item.id,
+        body: "Blender task",
+      },
+      p,
+    ),
+  );
+  await dispatcher.tick();
+  expect(
+    f
+      .state()
+      .runs.find(
+        (r) =>
+          r.status === "dispatched" && r.assignment_id === other.assignment.id,
+      )?.resource_keys,
+  ).toEqual(["blender"]);
+});
+
 test("cross-project event FIFO survives full ticks, changed limits, restart, and projects with identical IDs", async () => {
   const other = secondProject();
   // IDs are project-scoped; equal card tiers keep event creation order.
@@ -678,6 +987,7 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
       limit: 1,
       queued: 2,
       merge_check_slots: 0,
+      resources: [],
     },
   ]);
   const rows = readCardList(f.store, f.project);
@@ -1151,90 +1461,118 @@ test("P2a-12 D: merge checks are counted per execution target across projects an
   }
 });
 
-test("startup reservations prevent concurrent dispatcher instances from claiming the same last slot", async () => {
-  const extra = f.create();
-  comment();
-  f.advance(1);
-  f.apply((s, a, p) =>
-    postComment(
-      s,
-      a,
-      { card_id: extra.card.id, work_item_id: extra.item.id, body: "second" },
-      p,
-    ),
-  );
-  vi.mocked(runtime.status).mockResolvedValue({
-    ok: true,
-    value: { process: "exited", agent: "unknown", observed_seq: 1 },
-  });
-  let release = () => {};
-  const hold = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const original = options.startRun;
-  const startRun = vi.fn(
-    async (input: Parameters<DispatcherOptions["startRun"]>[0]) => {
-      await hold;
-      await original(input);
-    },
-  );
-  const settings = { ...options, startRun, runLimit: () => 1 };
-  const first = new Dispatcher(settings).tick();
-  try {
-    await expect.poll(() => startRun.mock.calls.length).toBe(1);
-    await new Dispatcher(settings).tick();
+test.each(["machine", "resource"])(
+  "startup reservations prevent concurrent dispatchers from claiming the last %s slot",
+  async (kind) => {
+    const extra = f.create();
+    if (kind === "resource")
+      for (const item of [target.item, extra.item])
+        requireCapabilities(item, ["godot", "godot>=4"]);
+    comment();
+    f.advance(1);
+    f.apply((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: extra.card.id, work_item_id: extra.item.id, body: "second" },
+        p,
+      ),
+    );
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "unknown", observed_seq: 1 },
+    });
+    let release = () => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = options.startRun;
+    const startRun = vi.fn(
+      async (input: Parameters<DispatcherOptions["startRun"]>[0]) => {
+        await hold;
+        await original(input);
+      },
+    );
+    const settings = {
+      ...options,
+      startRun,
+      runLimit: () => (kind === "machine" ? 1 : 4),
+      resourceLimits: () => new Map([["godot", 1]]),
+    };
+    const first = new Dispatcher(settings).tick();
+    try {
+      await expect.poll(() => startRun.mock.calls.length).toBe(1);
+      if (kind === "resource") {
+        expect(startRun.mock.calls[0]?.[0].run.resource_keys).toEqual([
+          "godot",
+        ]);
+        // A PM edit during startup must not release the already reserved slot.
+        requireCapabilities(target.item, []);
+      }
+      await new Dispatcher(settings).tick();
+      expect(startRun).toHaveBeenCalledOnce();
+      expect(readRunQueue(f.store)[0]?.assignment_id).toBe(extra.assignment.id);
+    } finally {
+      release();
+      await first;
+    }
     expect(startRun).toHaveBeenCalledOnce();
-    expect(readRunQueue(f.store)[0]?.assignment_id).toBe(extra.assignment.id);
-  } finally {
-    release();
-    await first;
-  }
-  expect(startRun).toHaveBeenCalledOnce();
-});
+  },
+);
 
-test("a system host launch stays capacity-limited and the Dispatcher resumes it without a notification", async () => {
-  const busy = f.create();
-  f.session(busy.assignment, false);
-  const run = f.apply((s, a, p) =>
-    queueRun(
-      s,
-      a,
-      {
-        assignment_id: target.assignment.id,
-        model: "m",
-        agent_cli_version: "1",
-      },
-      p,
-    ),
-  );
-  await expect(
-    launchRun(
-      {
-        store: f.store,
-        runtime,
-        launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
-        mcpUrl: "http://127.0.0.1/mcp",
-        dataDir: f.dataDir,
-        runLimit: () => 1,
-      },
-      {
-        project: f.project,
-        assignment_id: target.assignment.id,
-        run,
-        actor: { kind: "system", project_id: f.project },
-        reuse_session: true,
-      },
-    ),
-  ).rejects.toBeInstanceOf(RunCapacityDeferred);
-  expect(runtime.status).not.toHaveBeenCalled();
-  expect(readRunQueue(f.store)[0]?.run_id).toBe(run.id);
-  finish(busy.assignment);
-  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
-  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
-    "dispatched",
-  );
-});
+test.each(["system", "human"] as const)(
+  "%s host launches respect capacity and the Dispatcher resumes the same queued Run",
+  async (kind) => {
+    const busy = f.create();
+    if (kind === "human")
+      for (const item of [busy.item, target.item])
+        requireCapabilities(item, ["ios.simulator"]);
+    f.session(busy.assignment, false);
+    const limits = {
+      runLimit: () => (kind === "system" ? 1 : 4),
+      resourceLimits: () => new Map([["ios.simulator", 1]]),
+    };
+    const run = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: target.assignment.id,
+          model: "m",
+          agent_cli_version: "1",
+        },
+        p,
+      ),
+    );
+    await expect(
+      launchRun(
+        {
+          store: f.store,
+          runtime,
+          launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
+          mcpUrl: "http://127.0.0.1/mcp",
+          dataDir: f.dataDir,
+          ...limits,
+        },
+        {
+          project: f.project,
+          assignment_id: target.assignment.id,
+          run,
+          actor: { kind, project_id: f.project },
+          reuse_session: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(RunCapacityDeferred);
+    expect(runtime.status).not.toHaveBeenCalled();
+    expect(readRunQueue(f.store)[0]?.run_id).toBe(run.id);
+    finish(busy.assignment);
+    await new Dispatcher({ ...options, ...limits }).tick();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);
 
 test("ACK while waiting neither loses nor recreates the queued Run", async () => {
   const busy = f.create();

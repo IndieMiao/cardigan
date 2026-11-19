@@ -149,7 +149,9 @@ jobs:
           PY
       - name: build
         id: build
-        run: pnpm build
+        run: |
+          pnpm build
+          sh apps/web/test-support/ci-page-skeleton.sh
       - name: test
         id: test
         if: steps.scope.outputs.skip_test != 'true'

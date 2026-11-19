@@ -14,12 +14,20 @@ import type {
 } from "@cardigan/store";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
-import { GithubRetryLater } from "./github-rate-limit.js";
+import {
+  GithubRetryLater,
+  type MaintenanceRetry,
+} from "./github-rate-limit.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
 export type ExternalGithubRun = NonNullable<MergeCheckView["external_run"]>;
+export interface RetryBinding {
+  readonly current?: MaintenanceRetry;
+  save(retry: MaintenanceRetry | undefined): void;
+}
 export interface GithubDispatchIntent {
+  readonly maintenanceRetry?: MaintenanceRetry | undefined;
   readonly project: string;
   readonly card: string;
   readonly attempt: string;
@@ -29,7 +37,7 @@ export interface GithubDispatchIntent {
   readonly executor?: string;
   readonly identity?: GithubRun;
   readonly phase: "reserved" | "publishing" | "dispatching";
-  /** A confirmed undispatched hold releases admission only, never execution identity. */
+  /** A hold or proven pre-transport wait releases admission, not execution identity. */
   readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
@@ -586,6 +594,36 @@ export class GithubDispatchJournal {
       return current;
     });
   }
+  /** Only update investigation state on the exact, still-live reservation. Never finish it. */
+  retryBinding(intent: GithubDispatchIntent): RetryBinding {
+    let expected = intent.maintenanceRetry;
+    return {
+      ...(intent.maintenanceRetry ? { current: intent.maintenanceRetry } : {}),
+      save: (retry) =>
+        this.store.uow.run((tx) => {
+          const current = this.current(tx, intent.project, intent.card).find(
+            (v) => v.attempt === intent.attempt,
+          );
+          if (
+            !current ||
+            current.key !== intent.key ||
+            current.finished ||
+            current.deleting ||
+            current.phase !== "dispatching" ||
+            current.externalRun?.run_id !== intent.externalRun?.run_id
+          )
+            return;
+          const { maintenanceRetry: old, ...rest } = current;
+          if (
+            old?.retryAt !== expected?.retryAt ||
+            old?.reason !== expected?.reason
+          )
+            return;
+          expected = retry;
+          this.save(tx, retry ? { ...rest, maintenanceRetry: retry } : rest);
+        }),
+    };
+  }
   /** Persist the existing maintenance cadence across controllers and restarts. */
   beginDiscovery(
     intent: GithubDispatchIntent,
@@ -609,7 +647,7 @@ export class GithubDispatchJournal {
         current.nextDiscoveryAt !== undefined &&
         now < current.nextDiscoveryAt
       )
-        throw new GithubRetryLater(current.nextDiscoveryAt);
+        throw new GithubRetryLater(current.nextDiscoveryAt, "attempt");
       if (
         current.dispatchedRunId !== undefined &&
         current.dispatchedRunId !== dispatchedRunId
@@ -660,7 +698,10 @@ export class GithubDispatchJournal {
     return result;
   }
   /** Called only by the publisher after its push has settled, before any POST. */
-  beginDispatch(intent: GithubDispatchIntent, cancelled = false): boolean {
+  beginDispatch(
+    intent: GithubDispatchIntent,
+    outcome: "pushed" | "not_started" | "cancelled" = "pushed",
+  ): boolean {
     const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
@@ -678,11 +719,12 @@ export class GithubDispatchJournal {
         intent.project as ProjectId,
         intent.card as CardId,
       )?.hold;
-      if (current.abandoned || cancelled || held) {
+      if (current.abandoned || outcome !== "pushed" || held) {
         this.save(tx, {
           ...settled,
           phase: "reserved",
-          ...(held && this.unstarted({ ...settled, phase: "reserved" })
+          ...((held || outcome === "not_started") &&
+          this.unstarted({ ...settled, phase: "reserved" })
             ? { admission_suspended: true }
             : {}),
           ...(current.abandoned ? { finished: true } : {}),
@@ -718,6 +760,7 @@ export class GithubDispatchJournal {
       if (!current.externalRun || (!current.identity && identity))
         this.save(tx, {
           ...current,
+          maintenanceRetry: undefined,
           externalRun,
           ...(boundByDispatchId ? { boundByDispatchId: true } : {}),
           ...(identity

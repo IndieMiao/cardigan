@@ -552,12 +552,11 @@ export async function retryDispatchedRuns(
       )
         return;
       const notes = store
-        .listNotifications({ project_id: project })
-        .filter(
-          (n) =>
-            n.run_id === current.run.id &&
-            ["pending", "belled", "delivery_failed"].includes(n.status),
-        );
+        .listNotifications({
+          project_id: project,
+          statuses: ["pending", "belled", "delivery_failed"],
+        })
+        .filter((n) => n.run_id === current.run.id);
       const item = current.state.work_items.find(
         (w) => w.id === current.a.work_item_id,
       );

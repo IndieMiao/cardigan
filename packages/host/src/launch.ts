@@ -22,6 +22,7 @@ import {
   isRunCapacityExempt,
   recoverPreparation,
   recoveryTargetCurrent,
+  remainingResourceRatio,
   standingModeOf,
   standingRunDormant,
 } from "@cardigan/domain";
@@ -70,20 +71,26 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { LaunchPublication } from "./launch-publish.js";
+import { LaunchPublication, launchFailureReason } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {
   preparationPolicy,
   withPreparationQueue,
 } from "./preparation-queue.js";
-import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
+import {
+  effectiveRunLimit,
+  hasEarlierCapacityWait,
+  type ReadResourceLimits,
+  runCapacitySnapshot,
+} from "./run-capacity.js";
+import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
+import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
@@ -93,11 +100,7 @@ import {
   preparationExecutionExited,
   preparationUnavailable,
 } from "./wake-preparation.js";
-import {
-  checkWorkerMcp,
-  WorkerMcpError,
-  workerMcpConfig,
-} from "./worker-mcp.js";
+import { checkWorkerMcp, workerMcpConfig } from "./worker-mcp.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -117,6 +120,9 @@ export type { PreparedWorktree } from "./worktree.js";
  * compensation — exists once, so the two entries cannot drift apart.
  */
 
+/** Bounded startup intent: worktree placement may include a 30-minute Git transfer. */
+export const WORKTREE_LAUNCH_LEASE_MS = 60 * 60_000;
+
 export class RunCapacityDeferred extends Error {
   constructor(
     readonly run_id: string,
@@ -134,6 +140,7 @@ export class RunPreparationDeferred extends Error {
 export interface LaunchHost {
   readonly configDir?: string;
   readonly runLimit?: (machine: string) => number;
+  readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
   readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "captureAgent">>;
@@ -333,7 +340,9 @@ async function launchWithClaim(
     if (!assignment)
       throw new HostLaunchError("dispatch", "Assignment is missing");
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
-    const capacity = runCapacitySnapshot(host.store, tx);
+    const capacity = runCapacitySnapshot(host.store, tx, host.resourceLimits);
+    const slots = capacity.resourcesForMachine(assignment.machine_id);
+    const keys = assignmentResourceKeys(tx, input.project, assignment);
     const manual =
       input.actor.kind === "human" && input.actor.project_id === input.project;
     const limit = effectiveRunLimit(
@@ -345,17 +354,29 @@ async function launchWithClaim(
     const occupied = capacity.occupied.get(assignment.machine_id) ?? 0;
     // Q-88: only the explicit human host entry may bypass machine capacity.
     // PM tools, Dispatcher and recovery callers retain system/assignment actors.
+    const position = capacity.queue.find(
+      (entry) => entry.project_id === input.project && entry.run_id === run.id,
+    );
+    // Resource limits are hard even for a manual launch. A zero total denotes
+    // invalid private configuration, so resource-bearing Runs cannot infer that they're unlimited.
     if (
-      !manual &&
-      (!canDispatchRun(limit, occupied, isRunCapacityExempt(assignment)) ||
-        (!isRunCapacityExempt(assignment) &&
-          (capacity.queue.find(
-            (r) => r.project_id === input.project && r.run_id === run.id,
-          )?.ahead ?? 0) > 0))
+      remainingResourceRatio(keys, slots) <= 0 ||
+      (limit === 0 && keys.length > 0) ||
+      (!manual &&
+        (!canDispatchRun(limit, occupied, isRunCapacityExempt(assignment)) ||
+          (!isRunCapacityExempt(assignment) &&
+            position &&
+            hasEarlierCapacityWait(
+              tx,
+              capacity.queue,
+              position,
+              assignment.machine_id,
+              slots,
+            ))))
     ) {
       return undefined;
     }
-    const cleared = { ...run };
+    const cleared = { ...run, resource_keys: keys };
     delete cleared.queue_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
@@ -366,8 +387,9 @@ async function launchWithClaim(
       run_id: run.id,
       notification_ids: [],
       started_at: at,
-      // Startup can include the host's 30-minute Git transfer timeout.
-      lease_until: new Date(Date.parse(at) + 60 * 60_000).toISOString(),
+      lease_until: new Date(
+        Date.parse(at) + WORKTREE_LAUNCH_LEASE_MS,
+      ).toISOString(),
       finished_at: null,
       outcome: null,
     };
@@ -719,6 +741,7 @@ async function launch(
   let tokenId: string | undefined;
   let ref: RuntimeRef | undefined;
   let publication: LaunchPublication | undefined;
+  let launchToken: string | undefined;
   try {
     if (remote && execution.mode === "agent-ssh") {
       publication = LaunchPublication.begin(
@@ -732,8 +755,6 @@ async function launch(
       );
       runDir = publication.runDir;
       if (!worktree && !assignment.worktree_path) workDir = runDir;
-      if (role.worktree !== "none" && !worktree && !input.prepare_worktree)
-        throw new Error("Remote Git preparation is not configured");
     }
     if (execution.mode === "agent-ssh" && !remote)
       await prepareAgentProject(execution, project, assignment.id);
@@ -758,6 +779,7 @@ async function launch(
       role,
     });
     tokenId = issued.record.id;
+    launchToken = issued.token;
     publication?.update("preparing", { token_id: tokenId });
     if (remote && execution.mode === "agent-ssh") {
       step = "MCP preflight";
@@ -1006,22 +1028,25 @@ async function launch(
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
     if (publication) {
+      const reason = launchFailureReason(
+        step,
+        error,
+        host.launch.secrets,
+        launchToken,
+      );
       let exited = false;
       try {
-        exited = await publication.stop(deferred);
+        exited = await publication.stop(
+          deferred,
+          deferred ? undefined : reason,
+        );
       } catch {
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
       throw new HostLaunchError(
         step,
-        error instanceof WorkerMcpError
-          ? `${error.code}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
-          : error instanceof RuntimeTargetError
-            ? `${error.reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
-            : exited
-              ? "Worker launch failed and was withdrawn"
-              : "Worker launch exit remains unconfirmed",
+        `${reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`,
       );
     }
     await compensate({
