@@ -76,6 +76,9 @@ def main():
         user = re.escape(c['user'])
         require(re.fullmatch(r'(?:User ' + user + r' is not allowed to run sudo on [A-Za-z0-9_.-]+[.]|Sorry, user ' + user + r' may not run sudo on [A-Za-z0-9_.-]+[.]|' + user + r' is not in the sudoers file[.](?:  This incident will be reported[.])?)', message))
     elif step == 'directories':
+        if mac:
+            native['macos_check_directory'](c['home'])
+            native['macos_check_directory'](root)
         protected(c['home'], 0, c['gid'], 0o750)
         protected(root, 0, c['gid'], 0o750)
         home = pathlib.Path(c['home'])

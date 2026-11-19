@@ -46,7 +46,10 @@ try:
     uid,gid=os.getuid(),os.getgid()
     require(uid>0 and gid==r['gid'] and os.geteuid()==uid and os.getegid()==gid)
     if platform.system() == 'Darwin':
-        native.isolation_groups(pwd.getpwuid(uid), native.process_groups())
+        account=pwd.getpwuid(uid)
+        native.isolation_groups(account, native.process_groups())
+        for path in {account.pw_dir, r['root'], os.path.dirname(r['git_helper']), os.path.dirname(r['file_helper'])}:
+            native.macos_check_directory(path)
     else:
         require(set(native.process_groups()) <= {gid})
     root=r['root']
