@@ -1,7 +1,19 @@
-import type { CardView, DependencyCard } from "../api.js";
+import type { CardView } from "../api.js";
+import {
+  dependencyGraphOf,
+  dependencyStatusLabel,
+  layoutDependencyGraph,
+} from "../dependency-graph.js";
 import { routeHash } from "../route.js";
-import { STATUS_LABELS } from "../status.js";
+import { StatusTag } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import {
+  DependencyGraph,
+  DependencyGraphFacts,
+  DependencyGraphNode,
+  DependencyGraphNodeHead,
+  DependencyGraphNodeTitle,
+} from "./layout/DependencyGraphLayout.js";
 
 export function dependencyWaitLabel(
   card: Pick<CardView, "dependency" | "early_start" | "status">,
@@ -21,54 +33,62 @@ export function CardDependencies({
   card: CardView;
   projectId: string;
 }) {
-  const dependency = card.dependency;
-  if (
-    !dependency ||
-    (!dependency.predecessors.length && !dependency.successors.length)
-  )
-    return null;
+  const graph = dependencyGraphOf(card);
+  if (!graph || !card.dependency) return null;
+  const layout = layoutDependencyGraph(graph, card.id);
+  const muted = new Set(
+    layout.nodes.filter((n) => n.muted).map((n) => n.card.id),
+  );
   const wait = dependencyWaitLabel(card);
-  const group = (title: string, cards: readonly DependencyCard[]) =>
-    cards.length > 0 && (
-      <div className="card-dependency-group">
-        <h3>{title}</h3>
-        <ul className="card-dependency-list">
-          {cards.map((item) => (
-            <li key={item.id}>
-              <a href={routeHash({ kind: "card", projectId, cardId: item.id })}>
-                <IdBadge id={item.id} />
-                <span className="card-dependency-title">{item.title}</span>
-                <span>
-                  {item.resolution === "duplicate"
-                    ? "重复"
-                    : item.resolution === "wontdo"
-                      ? "不做"
-                      : (STATUS_LABELS[
-                          (item.resolution && item.resolution !== "done"
-                            ? item.resolution
-                            : item.status) as keyof typeof STATUS_LABELS
-                        ] ?? "状态未知")}
-                  {item.status === "done" &&
-                    !item.satisfied &&
-                    (!item.resolution || item.resolution === "done") &&
-                    "（待核）"}
-                </span>
-              </a>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
+  const facts = [
+    wait ?? (card.early_start ? "提前开工" : null),
+    card.dependency.critical_path_length > 1
+      ? `最长未完成链：${card.dependency.critical_path_length} 张`
+      : null,
+  ].filter((fact): fact is string => !!fact);
   return (
     <section className="card-section card-dependencies" aria-label="卡片依赖">
       <h2>卡片依赖</h2>
-      {wait && <p>{wait}</p>}
-      {card.early_start && !wait && <p>提前开工</p>}
-      {dependency.critical_path_length > 1 && (
-        <p>最长未完成链：{dependency.critical_path_length} 张</p>
+      {facts.length > 0 && (
+        <DependencyGraphFacts>
+          {facts.map((fact) => (
+            <span key={fact}>{fact}</span>
+          ))}
+        </DependencyGraphFacts>
       )}
-      {group("前置", dependency.predecessors)}
-      {group("后续", dependency.successors)}
+      <DependencyGraph
+        label="依赖关系图"
+        edges={layout.edges.map((edge) => ({
+          ...edge,
+          muted: muted.has(edge.from),
+        }))}
+      >
+        {layout.nodes.map(({ card: node, column, row, current, muted }) => {
+          const status = dependencyStatusLabel(node);
+          return (
+            <DependencyGraphNode
+              key={node.id}
+              id={node.id}
+              column={column}
+              row={row}
+              current={current}
+              muted={muted}
+              href={routeHash({ kind: "card", projectId, cardId: node.id })}
+              tooltip={`${node.id} ${node.title} · ${status}`}
+            >
+              <DependencyGraphNodeHead>
+                <IdBadge id={node.id} />
+                <StatusTag
+                  status={node.status}
+                  label={status}
+                  subdued={muted}
+                />
+              </DependencyGraphNodeHead>
+              <DependencyGraphNodeTitle>{node.title}</DependencyGraphNodeTitle>
+            </DependencyGraphNode>
+          );
+        })}
+      </DependencyGraph>
     </section>
   );
 }
