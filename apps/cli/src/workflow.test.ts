@@ -569,6 +569,51 @@ test("card create builds a dev card and lists its work items", async () => {
   expect(errors.join("\n")).toContain("模板不存在");
 });
 
+test("design card create accepts display-only and structured state and save input", async () => {
+  await bootstrap();
+  for (const [id, tool] of [
+    ["design_director", "submit_review"],
+    ["ui_ux_designer", "submit_delivery"],
+  ] as const)
+    expect(
+      await run(["role", "add", "p-work", id, "--allowed-tools", tool]),
+    ).toBe(0);
+  const args = [
+    "card",
+    "create",
+    "--template",
+    "design",
+    "--title",
+    "Settings",
+    "--goal",
+    "Design",
+    "--acceptance",
+    "Review the draft",
+  ];
+  expect(await run(args)).not.toBe(0);
+  expect(errors.join("\n")).toContain("状态与保存");
+  const plan = {
+    save_timing: "按组",
+    leave_behavior: "离开",
+    failure_feedback: "全站提示",
+    consistency: "写后补读",
+  };
+  expect(await run([...args, "--state-and-save", "无写入"])).toBe(0);
+  expect(await run([...args, "--state-and-save", JSON.stringify(plan)])).toBe(
+    0,
+  );
+  const store = Store.open({ dataDir });
+  try {
+    expect(
+      store.uow.read((tx) =>
+        tx.cards.list("p-work").map((c) => c.state_and_save),
+      ),
+    ).toEqual(["无写入", plan]);
+  } finally {
+    store.close();
+  }
+});
+
 test("the project falls back to CARDIGAN_PROJECT and complains when ambiguous", async () => {
   await bootstrap("p-one");
   await bootstrap("p-two");
