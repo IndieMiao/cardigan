@@ -334,3 +334,65 @@ test("cross-card read sits in the caution group with automatic merging", async (
   ).toBeTruthy();
   expect(screen.queryByRole("region", { name: "协作" })).toBeNull();
 });
+
+/** A synthetic timeout-merge preference whose writes take a while. */
+function slowTimeout(initial: number | null) {
+  const s = server({ ...base, auto_merge_after_minutes: initial });
+  const writes: (number | null)[] = [];
+  const setPreferences = vi.fn(async (_p: string, minutes: number | null) => {
+    writes.push(minutes);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    s.patch({ auto_merge_after_minutes: minutes });
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ preferences: s.preferences, setPreferences })}
+    />,
+  );
+  return { s, writes };
+}
+
+test("pressing the timeout switch right after editing minutes only turns it off", async () => {
+  const { s, writes } = slowTimeout(10);
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  minutes.focus();
+  fireEvent.change(minutes, { target: { value: "1" } });
+  // Real order: pointerdown on the switch, then the field blurs, then click.
+  fireEvent.pointerDown(toggle);
+  fireEvent.blur(minutes);
+  fireEvent.pointerUp(toggle);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(on(toggle)).toBe(false));
+  expect(writes).toEqual([null]);
+  expect(s.state.auto_merge_after_minutes).toBeNull();
+});
+
+test("turning the timeout off during a minutes write runs after it, so off wins", async () => {
+  const { s, writes } = slowTimeout(10);
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  // Keyboard: Tab commits the minutes, then Space on the switch while saving.
+  enter(minutes, "1");
+  fireEvent.click(toggle);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(writes).toEqual([1, null]));
+  await waitFor(() => expect(on(toggle)).toBe(false));
+  expect(s.state.auto_merge_after_minutes).toBeNull();
+});
+
+test("an invalid minutes draft left after turning off can be corrected and enabled", async () => {
+  const { s, writes } = slowTimeout(10);
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  fireEvent.change(minutes, { target: { value: "0" } });
+  fireEvent.click(toggle);
+  await waitFor(() => expect(on(toggle)).toBe(false));
+  expect(minutes.disabled).toBe(false);
+  enter(minutes, "120");
+  fireEvent.click(toggle);
+  await waitFor(() => expect(on(toggle)).toBe(true));
+  expect(writes).toEqual([null, 120]);
+  expect(s.state.auto_merge_after_minutes).toBe(120);
+});

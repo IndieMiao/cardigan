@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CardiganClient, PreferencesView } from "../api.js";
 import { PageTitle, StatusTag } from "../components/Foundation.js";
 import {
@@ -391,6 +391,8 @@ function TimeoutMergeSetting({
   if (setting.value !== null && setting.value !== lastMinutes)
     setLastMinutes(setting.value);
   const minutes = useNumberDraft(lastMinutes, 1, 1440);
+  // Pressing the switch blurs the minutes field first; the switch decides.
+  const pressing = useRef(false);
   const toggle = (next: boolean) => {
     if (!next) return setting.save(null);
     if (minutes.valid) return setting.save(Number(minutes.draft));
@@ -413,6 +415,15 @@ function TimeoutMergeSetting({
           aria-labelledby={`${id}-label`}
           aria-describedby={`${id}-help`}
           aria-disabled={setting.busy}
+          onPointerDown={() => {
+            pressing.current = true;
+          }}
+          onPointerUp={() => {
+            pressing.current = false;
+          }}
+          onPointerCancel={() => {
+            pressing.current = false;
+          }}
           onCheckedChange={toggle}
         />
       </SettingsRow>
@@ -431,6 +442,7 @@ function TimeoutMergeSetting({
             setting.clear();
           }}
           onCommit={() => {
+            if (pressing.current) return;
             if (enabled && minutes.valid && minutes.dirty)
               setting.save(Number(minutes.draft));
           }}

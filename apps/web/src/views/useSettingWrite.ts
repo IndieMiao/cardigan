@@ -24,6 +24,8 @@ const same = (a: unknown, b: unknown) =>
  * - A failed write keeps its idempotency key for a retry of the same value; a
  *   different value, a success, or a read showing the value retires the key.
  * - Writes never overlap; callers keep controls focusable (`aria-disabled`).
+ *   A different value chosen during a write runs after it (the latest intent
+ *   wins); repeating the in-flight value is ignored.
  */
 export function useSettingWrite<T>({
   server,
@@ -53,6 +55,8 @@ export function useSettingWrite<T>({
   const [message, setMessage] = useNotice();
   const sending = useRef(false);
   const pending = useRef<{ value: T; key: string } | undefined>(undefined);
+  const inFlight = useRef<{ value: T } | undefined>(undefined);
+  const queued = useRef<{ value: T } | undefined>(undefined);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -68,9 +72,16 @@ export function useSettingWrite<T>({
       setError("");
     }
   }, [source]);
-  const save = async (next: T) => {
-    if (sending.current) return false;
+  const save = async (next: T): Promise<boolean> => {
+    if (sending.current) {
+      queued.current = same(inFlight.current?.value, next)
+        ? undefined
+        : { value: next };
+      return false;
+    }
     sending.current = true;
+    inFlight.current = { value: next };
+    let ok = false;
     setBusy(true);
     setError("");
     setMessage("");
@@ -83,6 +94,7 @@ export function useSettingWrite<T>({
       await write(next, key);
       if (pending.current?.key === key) pending.current = undefined;
       if (!mounted.current) return true;
+      ok = true;
       setValue(next);
       setMessage(success(next));
       saved();
@@ -92,7 +104,12 @@ export function useSettingWrite<T>({
       return false;
     } finally {
       sending.current = false;
+      inFlight.current = undefined;
       if (mounted.current) setBusy(false);
+      const later = queued.current;
+      queued.current = undefined;
+      if (later && mounted.current && !(ok && same(later.value, next)))
+        void save(later.value);
     }
   };
   const clear = () => {

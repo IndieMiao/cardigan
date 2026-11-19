@@ -205,6 +205,7 @@ function ReminderPolicyDialog({
         <form
           onSubmit={async (event) => {
             event.preventDefault();
+            if (busy) return;
             const next = configure
               ? ({
                   ...Object.fromEntries(
