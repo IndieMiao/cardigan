@@ -70,7 +70,9 @@ export function requestReviewLimit(
         g.finding_ids.length === group.finding_ids.length &&
         g.finding_ids.every((id, n) => id === group.finding_ids[n]) &&
         (["open", "snoozed", "provisional"].includes(q.status) ||
-          (q.status === "resolved" && q.resolution?.option === "raise_limit"))
+          (q.status === "resolved" &&
+            !!q.resolution &&
+            q.resolution.option !== "pause"))
       );
     });
   if (item.status !== "waiting_decision")
@@ -122,7 +124,11 @@ export function requestReviewLimit(
         ...recent.map((r) => `${r.id}【${r.category}】${r.summary}`),
         ...(impactSummary ? [impactSummary] : []),
         reason,
-        ...(group ? [`${group.delivery_id} 必改项：${group.finding_ids.join("、")}；两路相同驳回共用本决定。`] : []),
+        ...(group
+          ? [
+              `${group.delivery_id} 必改项：${group.finding_ids.join("、")}；两路相同驳回共用本决定。`,
+            ]
+          : []),
       ].join("\n"),
       options: [
         {
@@ -190,7 +196,8 @@ export function requestReviewLimit(
       );
       // This Run just submitted its verdict; the next delivery wakes the lane.
       resumeWork(d, d.work(item.id));
-      return true;
+      // The resolution already woke the producer (or issued a strategy instruction).
+      return false;
     }
   }
   if (existing) return false;

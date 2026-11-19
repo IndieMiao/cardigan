@@ -238,6 +238,7 @@ export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
 export { sharedMustFixes } from "./shared-findings.js";
+export { reviewWakeBlocked } from "./shared-review-wake.js";
 export * from "./standing.js";
 export * from "./states.js";
 export * from "./system-review-limit.js";

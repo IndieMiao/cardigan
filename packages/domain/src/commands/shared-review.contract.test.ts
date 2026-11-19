@@ -1,12 +1,12 @@
 import { expect, test } from "vitest";
-import { submitReview } from "../index.js";
+import { sharedMustFixes, submitReview, updateWorkItem } from "../index.js";
 import { parallelDelivery } from "./parallel-review/test-fixtures.js";
 import {
   first,
   sharedReviewFixture as fixture,
   second,
 } from "./shared-review/test-fixtures.js";
-import { actor, apply, id } from "./test-fixtures.js";
+import { actor, apply, id, value } from "./test-fixtures.js";
 
 test.each([2, 3])(
   "either lane can publish first (%i); matching sets join one pause, then one raise",
@@ -58,7 +58,7 @@ test.each([2, 3])(
   },
 );
 
-test("a resolved raise covers a later exact match, but does not grant a round before its own fourth rejection", async () => {
+test("a resolved raise covers a later exact match, but does not grant a round before its own rejection reaches the limit", async () => {
   const f = await fixture();
   f.review(3, [first]);
   expect(f.decide(3, "raise_limit").ok).toBe(true);
@@ -209,4 +209,59 @@ test("a late reviewer can substantiate a new-to-them finding without changing it
   expect(f.state.decisions).toMatchObject([
     { affected_work_items: [original.work_item_id, late.work_item_id] },
   ]);
+});
+
+test("legacy findings without an impact cannot enter a new verdict, directly or by reference", async () => {
+  const f = await fixture(0);
+  const original = f.review(2, [first]);
+  const { impact: _impact, ...legacy } = first;
+  const state = { ...f.state, reviews: [{ ...original, issues: [legacy] }] };
+  const [entry] = sharedMustFixes(
+    state.reviews,
+    state.deliveries,
+    state.work_items,
+  );
+  if (!entry) throw Error("Missing legacy finding");
+  for (const result of [
+    f.submit(3, [legacy], [], state),
+    f.submit(3, [], [entry.finding_id], state),
+  ])
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: expect.stringContaining("impact"),
+      },
+    });
+  expect(state.reviews[0]?.issues).toEqual([legacy]);
+});
+
+test("continuing after a new delivery resumes its reviewers, not the old repair", async () => {
+  const f = await fixture();
+  f.review(2, [first]);
+  f.review(3, [], f.refs());
+  expect(f.decide(2, "pause").ok).toBe(true);
+  const newer = apply(f.state, await parallelDelivery(f.state, f.io));
+  const q = newer.decisions[0];
+  if (!q) throw Error("Missing shared pause");
+  const continued = value(
+    updateWorkItem(
+      newer,
+      actor(4, "pm"),
+      {
+        work_item_id: id("work_item", 2),
+        review_limit_decision: {
+          decision_id: q.id,
+          option: "raise_limit",
+          rationale: "已核对本次交付",
+        },
+      },
+      f.io,
+    ),
+  );
+  const event = continued.events.find((e) => e.type === "decision_resolved");
+  expect(event?.payload).toMatchObject({
+    resume_work_items: [id("work_item", 2), id("work_item", 3)],
+  });
+  expect(event?.payload).not.toHaveProperty("rework_work_item_id");
 });

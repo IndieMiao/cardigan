@@ -15,6 +15,7 @@ import {
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewWakeBlocked } from "../shared-review-wake.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
 import {
@@ -91,6 +92,24 @@ function target(d: CommandDraft, id: AssignmentId) {
     );
   }
   return assignment;
+}
+function checkReviewWake(
+  state: CommandState,
+  a: Assignment,
+  trigger?: EventId,
+  alreadyQueued = false,
+) {
+  if (a.scope === "work_item" && trigger)
+    ensure(
+      !reviewWakeBlocked(
+        state,
+        eventById(state.events, trigger),
+        a.work_item_id,
+        alreadyQueued,
+      ),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
+    );
 }
 function requireTestReviewBudget(d: CommandDraft, assignment: Assignment) {
   if (assignment.scope !== "work_item") return;
@@ -284,20 +303,7 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "illegal_transition",
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
-  // An already emitted notification can survive a restart or upgrade. Never
-  // turn a review that explicitly stopped rework into a new producer Run.
-  if (p.kind === "rework" && p.trigger_event_id) {
-    const trigger = eventById(state.events, p.trigger_event_id);
-    ensure(
-      !(
-        trigger?.type === "review_submitted" &&
-        (trigger.payload as { review_limit_wait?: boolean } | null)
-          ?.review_limit_wait === true
-      ),
-      "illegal_transition",
-      "审核已暂停返工，请等待决定",
-    );
-  }
+  checkReviewWake(state, assignment, p.trigger_event_id);
   if (p.reuse_queued) {
     const queued = runnableQueuedRun(assignment, {
       ...d.state,
@@ -494,6 +500,7 @@ export function dispatchRun(
       "illegal_transition",
       "验证工作项尚无当前可审交付，请等待交付后再启动",
     );
+    checkReviewWake(state, assignment, run.trigger_event_id, true);
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
     const ref = p.runtime_ref ?? assignment.runtime_ref;

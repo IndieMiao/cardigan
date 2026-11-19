@@ -22,6 +22,10 @@ export function dispatchRunKind(
     return "fix";
   if (
     event?.type === "review_reuse_invalidated" ||
+    (event?.type === "decision_resolved" &&
+      assignment.scope === "work_item" &&
+      (event.payload as Record<string, unknown> | null)?.rework_work_item_id ===
+        assignment.work_item_id) ||
     (review &&
       ["review_submitted", "completion_reviewed"].includes(event?.type ?? ""))
   )

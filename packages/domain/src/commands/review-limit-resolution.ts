@@ -1,6 +1,7 @@
 import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
+import { sharedReworkItem } from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { verificationTarget } from "../verification-activity.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
@@ -278,6 +279,19 @@ export function recordDecisionResolution(
             reviews: d.list("reviews"),
           })),
     );
+    const rework =
+      q.card_id === card &&
+      resolution.option === "raise_limit" &&
+      q.review_limit_group
+        ? sharedReworkItem(
+            {
+              decisions: d.list("decisions"),
+              deliveries: d.list("deliveries"),
+              work_items: d.list("work_items"),
+            },
+            q,
+          )
+        : undefined;
     const event = d.emit(
       result.status === "provisional"
         ? "decision_provisionally_resolved"
@@ -327,6 +341,7 @@ export function recordDecisionResolution(
           ? { merge_override: resolution.merge_override }
           : {}),
         status: result.status,
+        ...(rework ? { rework_work_item_id: rework.id } : {}),
         resume_work_items: unblocked.map((w) => w.id),
       },
       {

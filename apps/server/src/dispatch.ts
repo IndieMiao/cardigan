@@ -19,12 +19,12 @@ import {
   cardDependencyDispatchOrder,
   compareDispatchOrder,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
-  decisionFollowupBlocked,
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
   dispatchRunKind,
   dispatchTier,
+  eventById,
   expireMergeSnoozes,
   type HarnessActivity,
   hasRunTarget,
@@ -43,6 +43,7 @@ import {
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
+  reviewWakeBlocked,
   runnableQueuedRun,
   runsOf,
   standingRunDormant,
@@ -98,6 +99,7 @@ import {
   CANDIDATE_FEED,
   type Candidate,
   CandidateIndex,
+  notificationBlocked,
 } from "./candidate-index.js";
 import {
   DECISION_FOLLOWUP_FEED,
@@ -1324,7 +1326,7 @@ export class Dispatcher {
           (n) =>
             this.owner(n, state) === a.id &&
             !covered(n, state, a.id) &&
-            !decisionFollowupBlocked(state, n.event_id, a.id) &&
+            !notificationBlocked(state, n.event_id, a.id) &&
             !(
               a.standing_mode === "ops" &&
               newPmNotification(state, n) &&
@@ -1707,8 +1709,17 @@ export class Dispatcher {
   ) {
     if (job.run.status !== "running")
       return (
-        ["queued", "dispatched"].includes(run.status) ||
-        (run.status === "completed" && job.run.status === "completed")
+        !(
+          owner.scope === "work_item" &&
+          reviewWakeBlocked(
+            state,
+            eventById(state.events, run.trigger_event_id),
+            owner.work_item_id,
+            true,
+          )
+        ) &&
+        (["queued", "dispatched"].includes(run.status) ||
+          (run.status === "completed" && job.run.status === "completed"))
       );
     if (
       this.closing ||
@@ -1730,6 +1741,7 @@ export class Dispatcher {
         (n) =>
           n.status === "pending" &&
           !covered(n, state, owner.id) &&
+          !notificationBlocked(state, n.event_id, owner.id) &&
           !state.cards.some((c) => c.id === n.card_id && !!c.hold),
       )
     );

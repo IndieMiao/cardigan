@@ -24,6 +24,7 @@ import {
   sharedMustFixes,
   sharedReviewers,
 } from "../shared-findings.js";
+import { pendingSharedReview } from "../shared-review-wake.js";
 import { isCompletionVerifier } from "../templates.js";
 import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
@@ -979,15 +980,6 @@ export function submitReview(
       "validation_failed",
       "Review issues must describe severity and must_fix",
     );
-    ensure(
-      p.issues.every((i) =>
-        i.impact === undefined
-          ? !i.must_fix
-          : REVIEW_IMPACTS.includes(i.impact),
-      ),
-      "validation_failed",
-      "Every must-fix issue requires a valid impact",
-    );
     const shared =
       flowAtLeast(card, 5) &&
       sharedReviewers(target, d.list("work_items")).includes(item.id);
@@ -1018,6 +1010,15 @@ export function submitReview(
         return { ...issue, proof: ref.proof };
       }),
     ];
+    ensure(
+      issues.every((i) =>
+        i.impact === undefined
+          ? !i.must_fix
+          : REVIEW_IMPACTS.includes(i.impact),
+      ),
+      "validation_failed",
+      "Every must-fix issue requires a valid impact",
+    );
     const calculated = deriveReview(
       issues,
       p.recheck_required ?? false,
@@ -1220,15 +1221,7 @@ export function submitReview(
     // waiting on its peer's decision. Keep its verdict, not a new rework wake.
     const reviewLimitWait =
       (flowLimit && !flowRaised) ||
-      (parallelLate &&
-        d
-          .list("decisions")
-          .some(
-            (q) =>
-              q.review_limit_group?.delivery_id === target.id &&
-              q.blocking &&
-              ["open", "provisional", "snoozed"].includes(q.status),
-          ));
+      (parallelLate && pendingSharedReview(d.list("decisions"), target.id));
     d.emit(
       "review_submitted",
       card.id,

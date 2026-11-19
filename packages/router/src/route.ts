@@ -31,6 +31,7 @@ import {
   precheckConflictHandling,
   requesterNotificationRecipient,
   reviewPassed,
+  reviewWakeBlocked,
   verificationTarget,
 } from "@cardigan/domain";
 import {
@@ -778,7 +779,15 @@ function routeReview(input: RouteInput, draft: Draft): void {
   // Persisted at review submission: replay may see a newer delivery already.
   // Keep the original target in the notice and use the normal busy/queued Run
   // coalescing, without treating a second parallel finding as another failure.
-  if (payload.review_limit_wait === true) return;
+  if (
+    payload.review_limit_wait === true ||
+    reviewWakeBlocked(
+      input.snapshot,
+      input.event,
+      input.snapshot.deliveries.find((v) => v.id === delivery_id)?.work_item_id,
+    )
+  )
+    return;
   if (payload.parallel_late === true) {
     const delivery = input.snapshot.deliveries.find(
       (candidate) => candidate.id === delivery_id,
@@ -1069,6 +1078,7 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
   }
   if (
     input.event.type === "decision_resolved" &&
+    !q?.review_limit_group &&
     q?.raised_by?.startsWith("assignment:") &&
     q.resolution
   ) {
@@ -1099,8 +1109,20 @@ function routeDecisionResolved(input: RouteInput, draft: Draft): void {
       `${q.id} 已选择 ${q.resolution.option}：${option?.description ?? ""}。影响：${option?.impact ?? ""}。请发起人落实，并在时间线引用 ${q.id} 记录执行结果。`,
     );
   }
+  const rework = payloadString(input.event.payload, "rework_work_item_id");
+  if (rework && !reviewWakeBlocked(input.snapshot, input.event, rework))
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, rework as WorkItemId),
+      "review",
+      "6.4/decision resolved",
+      `${decision_id} 已继续，请修复被驳回的交付。`,
+      "rework",
+    );
   const resolved = payloadStrings(input.event.payload, "resume_work_items");
   for (const id of resolved) {
+    if (reviewWakeBlocked(input.snapshot, input.event, id)) continue;
     const item = itemOf(input, id as WorkItemId);
     noteAssignment(
       input,
