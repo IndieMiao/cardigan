@@ -26,14 +26,14 @@ ssh-keygen -t ed25519 -N '' -f "$CARDIGAN_CONFIG_DIR/worker-key"
 ```yaml
 version: 1
 uid: 2201
-home: /System/Volumes/Data/Users/cg_example
+home: /Users/cg_example
 mcp_url: https://control.example.ts.net/mcp
 hc_version: 0.1.21
 # 默认 15000；范围 1000–60000 毫秒
 timeout_ms: 15000
 launchd: # 旧服务标识；仅用于确认它已撤下，不再安装 LaunchDaemon
   label: dev.cardigan.example
-  hc_path: /System/Volumes/Data/Users/cg_example/.local/bin/hc
+  hc_path: /Users/cg_example/.local/bin/hc
 runtime:
   version: 1
   machines:
@@ -52,8 +52,8 @@ runtime:
           alias: example-worker-a
           session: cg
           retired_launchd_label: dev.cardigan.example
-          root: /System/Volumes/Data/Users/cardigan-workers/example
-          path: /System/Volumes/Data/Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+          root: /Users/cardigan-workers/example
+          path: /Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
           generation: initial
           mcp_url: https://control.example.ts.net/mcp
           mcp_timeout_ms: 10000
@@ -63,8 +63,8 @@ runtime:
             batch_max_bytes: 8388608
             timeout_ms: 30000
           python: /opt/homebrew/bin/python3
-          file_helper: /System/Volumes/Data/Users/cardigan-workers/example/libexec/worker-files.py
-          git_helper: /System/Volumes/Data/Users/cardigan-workers/example/libexec/worker-git.py
+          file_helper: /Users/cardigan-workers/example/libexec/worker-files.py
+          git_helper: /Users/cardigan-workers/example/libexec/worker-git.py
 ```
 
 将身份文件改为真实绝对路径；YAML 不展开变量、`~` 或 shell rc。`--host` 必须与配置一致。PATH 必须显式包含 `/opt/homebrew/bin`；hc 与 herdr-core 都指向下一节安装的签名 App 可执行文件。发布限额仅约束启动材料，沿用 Linux 向导合同；两处 MCP 地址必须一致。
@@ -94,13 +94,13 @@ sudo dscl . -create /Groups/cg_example PrimaryGroupID 2201
 sudo dscl . -create /Users/cg_example
 sudo dscl . -create /Users/cg_example UniqueID 2201
 sudo dscl . -create /Users/cg_example PrimaryGroupID 2201
-sudo dscl . -create /Users/cg_example NFSHomeDirectory /System/Volumes/Data/Users/cg_example
+sudo dscl . -create /Users/cg_example NFSHomeDirectory /Users/cg_example
 sudo dscl . -create /Users/cg_example UserShell /bin/sh
-sudo install -d -o root -g cg_example -m 0750 /System/Volumes/Data/Users/cg_example
-sudo install -d -o root -g wheel -m 0755 /System/Volumes/Data/Users/cardigan-workers
-sudo install -d -o root -g cg_example -m 0750 /System/Volumes/Data/Users/cardigan-workers/example
-sudo install -d -o root -g cg_example -m 0750 /System/Volumes/Data/Users/cg_example/.ssh /System/Volumes/Data/Users/cg_example/.local /System/Volumes/Data/Users/cg_example/.local/bin
-sudo install -d -o cg_example -g cg_example -m 0700 /System/Volumes/Data/Users/cg_example/.config /System/Volumes/Data/Users/cg_example/.cache /System/Volumes/Data/Users/cg_example/.local/state /System/Volumes/Data/Users/cg_example/.local/share
+sudo install -d -o root -g cg_example -m 0750 /Users/cg_example
+sudo install -d -o root -g wheel -m 0755 /Users/cardigan-workers
+sudo install -d -o root -g cg_example -m 0750 /Users/cardigan-workers/example
+sudo install -d -o root -g cg_example -m 0750 /Users/cg_example/.ssh /Users/cg_example/.local /Users/cg_example/.local/bin
+sudo install -d -o cg_example -g cg_example -m 0700 /Users/cg_example/.config /Users/cg_example/.cache /Users/cg_example/.local/state /Users/cg_example/.local/share
 ```
 
 账号使用独占主组；macOS 目录服务会自动附带 `everyone`（GID 12）、`localaccounts`（61）、`_lpoperator`（100）。`id -Gn` 出现这三组本身不会阻塞接入，无需删除系统默认成员关系。向导、安装器和运行时隔离检查共用规则：核对系统账号库及本地 `dscl` 记录的组名、GID，并用 `dsmemberutil getuuid -G` 交叉核对 UUID；`GroupMembership` 中显式列出账号（含别名）、`GroupMembers` / `NestedGroups` 中列出账号 UUID 都拒绝。组记录允许包含系统别名（如 everyone 的 BUILTIN\Everyone），但必须含预期组名。everyone/localaccounts 为隐式根组，不接受嵌套；_lpoperator 至少直接嵌套其中一个根组，其它嵌套组（如 _lpadmin→admin）用 `dsmemberutil checkmembership` 按 UUID 核查递归成员关系，只有明确确认账号不是成员才接受。目录服务不可读、必要身份字段缺失或身份不符时拒绝，不仅凭组名放行。Linux 仍只允许主组。
@@ -119,14 +119,14 @@ sudo install -d -o cg_example -g cg_example -m 0700 /System/Volumes/Data/Users/c
 sudo install -d -o root -g wheel -m 0700 /Library/Cardigan
 sudo /opt/homebrew/bin/python3 - <<'PY'
 import json, os
-root = '/System/Volumes/Data/Users/cardigan-workers/example'
+root = '/Users/cardigan-workers/example'
 def create(path, value, mode):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     os.fchmod(fd, mode)
     with os.fdopen(fd, 'w') as out:
         json.dump(value, out)
-create('/System/Volumes/Data/Users/cg_example/.cardigan-project', {'project': 'example', 'uid': 2201}, 0o644)
-create(root + '/.cardigan-worker', {'project': 'example', 'uid': 2201, 'home': '/System/Volumes/Data/Users/cg_example'}, 0o600)
+create('/Users/cg_example/.cardigan-project', {'project': 'example', 'uid': 2201}, 0o644)
+create(root + '/.cardigan-worker', {'project': 'example', 'uid': 2201, 'home': '/Users/cg_example'}, 0o600)
 # APFS 的 /Users 位于 Data 卷；mount 填实际挂载点，volume 取该挂载点的 f_fsid。
 mount = '/System/Volumes/Data'
 create('/Library/Cardigan/worker.json', {
@@ -140,9 +140,9 @@ sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --co
 sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --config /Library/Cardigan/worker.json --apply
 ```
 
-安装器核对挂载/卷、空间、账号、认领标记及文件冲突，创建项目目录、锁和基础 helper，重复执行不替换锁 inode。示例使用 Data 卷下的规范物理路径，避免 `/var`、`/etc` 符号链接及 `/Users/Shared` 的可写 sticky 父链；实际卷布局不同则同步调整 HOME、root、mount 和认领标记，不更改系统共享目录权限。
+安装器核对挂载/卷、空间、账号、认领标记及文件冲突，创建项目目录、锁和基础 helper，重复执行不替换锁 inode。示例使用 Git 所见的 `/Users/...` 规范目录名，避免 `/var`、`/etc` 符号链接及 `/Users/Shared` 的可写 sticky 父链；实际卷布局不同则同步调整 HOME、root、mount 和认领标记，不更改系统共享目录权限。
 
-`mount` 必须是工作根实际所在卷的挂载点，可先用 `/sbin/mount` 核对；`volume` 填在本机对该挂载点读取的 `str(os.statvfs(mount).f_fsid)`，不要照搬其它机器或卷的值。APFS firmlink 下 `/`、`/System/Volumes/Data` 与 `/Users` 的 `st_dev` 可能相同，Python `os.path.ismount('/System/Volumes/Data')` 也可能返回假；安装器因此用系统 `statfs64` 的挂载点及 `f_fsid` 核验。Data 卷工作根应继续填写 `/System/Volumes/Data`，不能改填 `/` 和系统卷编号来绕过检查。外置卷须已挂载，工作根须位于声明的挂载点之下且属于同一卷；卷身份不符或根盘、工作盘任一空间不足都会停止。
+`mount` 必须是工作根实际所在卷的挂载点，可先用 `/sbin/mount` 核对；`volume` 填在本机对该挂载点读取的 `str(os.statvfs(mount).f_fsid)`，不要照搬其它机器或卷的值。APFS firmlink 下 `/`、`/System/Volumes/Data` 与 `/Users` 的 `st_dev` 可能相同，Python `os.path.ismount('/System/Volumes/Data')` 也可能返回假；安装器和运行时路径检查因此在打开的目录上核对系统报告的挂载点及 `f_fsid`。**工作根和 HOME 用 `/Users/...`，只有 `mount` 填 `/System/Volumes/Data`**；不能用 `/` 和系统卷编号来绕过检查。外置卷也须已挂载且确为工作根所在卷；卷身份不符或根盘、工作盘任一空间不足都会停止。
 
 ## 3. worker：工具和 helper
 
@@ -172,10 +172,10 @@ PY
 ```sh
 codesign --verify --deep --strict -R '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"' '/Applications/Herdr Core.app'
 # 仅创建缺失链接；已存在时先核对，ln 不加 -f
-sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/hc
-sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/herdr-core
-sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-files.py /System/Volumes/Data/Users/cardigan-workers/example/libexec/worker-files.py
-sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /System/Volumes/Data/Users/cardigan-workers/example/libexec/worker-git.py
+sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /Users/cg_example/.local/bin/hc
+sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /Users/cg_example/.local/bin/herdr-core
+sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-files.py /Users/cardigan-workers/example/libexec/worker-files.py
+sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /Users/cardigan-workers/example/libexec/worker-git.py
 ```
 
 `worker-primitives.py` 由安装器安装，三个 helper 必须为不同路径且与控制主机发行文件摘要一致。App 首装及首次局域网许可必须由人在**专用账号**的现场会话完成；允许局域网访问后再验证无头服务。原因码 `worker_macos_app_setup_required` / `worker_macos_local_network_required` 指向这一步。向导不点击许可、不关闭 Gatekeeper/SIP、不申请无关的录屏或辅助功能权限；检查通过不表示模型账号已登录。
@@ -249,6 +249,15 @@ cardigan worker check --project example --machine worker-a
 新机器登记为 offline；已有身份/状态/容量/标签保持原值。`resume`、重复 `add` 和 `check` 都重新核验事实，`status` 只显示 journal 历史。配置摘要改变会拒绝续跑并给出 `worker resume --confirm-config <当前完整摘要>`。先核对新旧配置、确认没有旧目标的活跃引用；如已应用的 runtime-workers.yaml 与新配置冲突，先由操作员按停派发/清退旧会话流程核对并同步，确认参数不会绕过冲突。再执行打印的确认命令：旧 journal 与草案保存为新的 `*.history.json`，仅替换本项目草案，全部步骤重查；不能用旧 passed 代替现场事实。确认后的中途失败可 resume；若写草案前进程崩溃，重新执行同一确认命令。`check` 不登记、不发布草案、不启用远程派发。
 
 journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录 0700、文件 0600，沿用 [Linux 向导的恢复合同](linux-worker.md#5-控制主机add续跑check-和-status)。管理员核对草案后才合入 `runtime-workers.yaml`，保留其它机器/项目；`allow_remote_launch` 仍须按远程启动门禁显式启用。检查通过不会自动启用机器或改变 Assignment。
+
+### 从 Data 卷旧路径原地迁移（现有 Mac）
+
+1. **控制主机停派发。** `cardigan machine drain worker-a --project example`，等旧 Assignment、Run、终端、清理和 Git 操作全部结束；不能确认退出就停在这里。关闭此绑定的远程启动，备份私有向导 YAML 和正式配置。用旧 HOME/session 正常停止空闲的 hc 核心（见第 4 节）；不删除锁、仓库、工作树或上次失败的 `.clone-*`。如仍有旧路径绑定的工作树，先按原流程收尾，不手改 Git 注册记录。
+2. **唯一需 Mac 管理员用 sudo 完成的一项：同步账号、标记、安装配置和 helper。** 在一次维护窗口内，按实际账号、组和目录替换下例。先核对两种拼法的 HOME 和工作根各自是同一目录（`test "$old" -ef "$new"`），从新路径运行 `/bin/pwd -P` 应原样返回；备份下面的原值、root 所有的文件和旧 helper 到受保护目录。任何不符均停止，不搬目录或递归改权限。
+   - 已是规范路径的值跳过不改。用 `sudo dscl . -change /Users/cg_example NFSHomeDirectory /System/Volumes/Data/Users/cg_example /Users/cg_example` 更换已有值。`sudoedit /Library/Cardigan/worker.json /Users/cardigan-workers/example/.cardigan-worker`：前者只改 `root`，后者只改 `home`，分别使用第 2 节的 `/Users/...` 值；`mount`、`volume`、项目、UID 及 HOME 内的 `.cardigan-project` 不变，保留原文件属主/权限。
+   - 确认 `/opt/cardigan/deploy` 是与控制主机同版本的受保护发行文件。核对现有文件为预期受保护的普通文件后，执行 `sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-primitives.py /Users/cardigan-workers/example/libexec/worker-primitives.py`；另两个 helper 若与该发行不一致，按第 3 节同步。最后执行第 2 节安装器的 `--check`；不要依赖 `--apply` 覆盖旧 helper，它会拒绝内容冲突。
+3. **控制主机同步绑定。** 在向导 YAML 中改 `home`、`launchd.hc_path`、项目 `root`、`path` 中的账号 bin、`file_helper` 和 `git_helper`；在 `runtime-workers.yaml` 同步该项目对应字段，其它机器/项目和容量不动。若有独立的路径采样清单，也把目录及 `common_dir` 改为规范路径，保留真实 `mount` 和 `volume`。重载配置；若本地 hc 登记仍指向旧入口，按第 4 节在无活跃引用后移除旧 alias 再检查，不改绑旧 Run。
+4. **验证后再试派。** 按第 5 节用新摘要确认 `worker resume` 并跑 `cardigan worker check --project example --machine worker-a`、`cardigan machine check worker-a --project example`。目录或 helper 阻塞时保持停派，回查 `pwd -P`、保护权限及发行版本；回退须成组还原备份，不混用两套配置。停派期间预期仍提示机器未就绪或不允许启动。目录、helper 等检查通过后，按既有门禁仅为试点恢复显式绑定，由张良用 C-472 记录服务端首发收到基线、建立工作树及 Run 的证据。检查绿灯不等于实机派发通过，不据此开放自动分流。
 
 ## 6. 常见阻塞与现场跟进
 
