@@ -798,6 +798,8 @@ export const reviewImpactLabel: Readonly<Record<ReviewImpact, string>> = {
   ux_only: "仅提示或体验",
 };
 export interface ReviewIssue {
+  /** Server-owned ID of a shared must-fix on this delivery. */
+  readonly finding_id?: string;
   /** Required for newly submitted must-fix issues; absent on legacy records. */
   readonly impact?: ReviewImpact;
   readonly severity: "critical" | "major" | "minor";
@@ -975,6 +977,13 @@ interface DecisionFields {
     | "worktree_cleanup"
     | "completion_review"
     | "accepted_delivery_rework";
+  /** Scope explicitly authorized by a shared review-limit decision. Only matching rejections consume it. */
+  readonly review_limit_group?: {
+    readonly delivery_id: DeliveryId;
+    readonly target_sha: string;
+    readonly finding_ids: readonly string[];
+    readonly candidate_items: readonly WorkItemId[];
+  };
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
   readonly category?: DecisionCategory;

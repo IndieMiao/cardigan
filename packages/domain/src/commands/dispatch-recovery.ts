@@ -12,6 +12,7 @@ import {
   recoveryTargetCurrent,
 } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewRunWakeDisposition } from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -68,7 +69,7 @@ export function unreadableCommentTrigger(state: CommandState, run: Run) {
 }
 
 /** Host must also exclude in-flight BellAttempts in the same store transaction. */
-export function retireUnreadableQueuedRun(
+export function retireObsoleteQueuedRun(
   state: CommandState,
   actor: Actor,
   p: { run_id: RunId },
@@ -79,7 +80,7 @@ export function retireUnreadableQueuedRun(
       a = d.get("assignments", run.assignment_id);
     const source = unreadableCommentTrigger(state, run);
     if (
-      !source ||
+      (!source && reviewRunWakeDisposition(state, a, run) !== "obsolete") ||
       a.external ||
       run.status !== "queued" ||
       run.started_at ||
@@ -88,7 +89,9 @@ export function retireUnreadableQueuedRun(
     )
       return;
     const { queue_reason: _queue, ...rest } = run;
-    const body = `${a.id}（${run.id}）无权读取触发评论所在卡片 ${source.card_id}，已取消尚未派发的执行，不再重排。`;
+    const body = source
+      ? `${a.id}（${run.id}）无权读取触发评论所在卡片 ${source.card_id}，已取消尚未派发的执行，不再重排。`
+      : `${a.id}（${run.id}）的审核目标已变更，不再派发。`;
     // A queued Run owns no terminal. Preserve the Assignment's existing idle session.
     d.put("runs", {
       ...rest,
@@ -98,18 +101,23 @@ export function retireUnreadableQueuedRun(
       finished_at: d.now,
     });
     d.emit(
-      "run_unreadable_trigger_cancelled",
-      source.card_id,
+      source
+        ? "run_unreadable_trigger_cancelled"
+        : "run_obsolete_review_cancelled",
+      source?.card_id ?? assignmentCardId(a, state, run.trigger_event_id),
       {
         run_id: run.id,
         assignment_id: a.id,
-        source_event_id: source.id,
-        reason: "recipient_cannot_read_card",
+        source_event_id: source?.id ?? run.trigger_event_id,
+        reason: source
+          ? "recipient_cannot_read_card"
+          : "obsolete_review_target",
       },
       { type: "system", body, run_id: run.id },
     );
   });
 }
+export const retireUnreadableQueuedRun = retireObsoleteQueuedRun;
 export const dispatchedAt = (state: CommandState, run: Run) =>
   state.events.findLast(
     (e) => e.type === "run_dispatched" && field(e.payload, "run_id") === run.id,
@@ -191,10 +199,13 @@ export function recoverDispatch(
     const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     if (hostOpsPending(state.events, a.id)) return;
     const policy = recoveryPolicy(state, run);
-    const targetCurrent = !policy || recoveryTargetCurrent(state, run);
+    const reviewWake = reviewRunWakeDisposition(state, a, run);
+    const targetCurrent =
+      !reviewWake && (!policy || recoveryTargetCurrent(state, run));
     const stop = run.dispatch_stop;
     if (p.stop_id !== undefined && stop?.attempt_id !== p.stop_id) return;
     const stopping = !!(p.stop_id && stop?.stopping);
+    if (reviewWake === "paused" && !stopping) return;
     const exitRecovery = stop?.reason === "runtime_exited";
     if (exitRecovery && !policy) return;
     const stopped = stopping && "stopped_runtime" in p;
@@ -269,7 +280,10 @@ export function recoverDispatch(
     const minutes = Math.max(0, Math.floor(waitedMs / 60000));
     const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${exitRecovery ? "原终端已异常退出" : startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
     if (
-      (!recovered || unreadable || (stopped && policy)) &&
+      (!recovered ||
+        unreadable ||
+        reviewWake === "obsolete" ||
+        (stopped && policy)) &&
       !p.stop_failed &&
       !startupFailed
     ) {
@@ -288,7 +302,9 @@ export function recoverDispatch(
           unfenced,
           unreadable
             ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
-            : `${context}；${reason}，确认终端退出后自动重排一次。`,
+            : reviewWake
+              ? `${context}；审核目标已暂停或变更，确认终端退出后不再重排。`
+              : `${context}；${reason}，确认终端退出后自动重排一次。`,
         );
       // Preserve any host-recorded terminal outcome, but always settle credentials.
       if (["unknown", "lost"].includes(a.runtime_state))

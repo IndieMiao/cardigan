@@ -19,6 +19,12 @@ import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { hasProbeEvidence } from "../probes.js";
+import {
+  bindSharedFindings,
+  sharedMustFixes,
+  sharedReviewers,
+} from "../shared-findings.js";
+import { pendingSharedReview } from "../shared-review-wake.js";
 import { isCompletionVerifier } from "../templates.js";
 import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
@@ -852,8 +858,12 @@ export function systemCompletionSubmission(
 export type SubmitReviewParams = Pick<
   Review,
   "delivery_id" | "target_sha" | "kind" | "issues"
-> &
-  Partial<
+> & {
+  readonly issue_refs?: readonly (
+    | string
+    | { readonly finding_id: string; readonly proof: string }
+  )[];
+} & Partial<
     Pick<
       Review,
       | "attachments"
@@ -960,6 +970,7 @@ export function submitReview(
           (i) =>
             i &&
             ["critical", "major", "minor"].includes(i.severity) &&
+            i.finding_id === undefined &&
             typeof i.must_fix === "boolean" &&
             typeof i.pre_existing === "boolean" &&
             typeof i.description === "string" &&
@@ -969,8 +980,38 @@ export function submitReview(
       "validation_failed",
       "Review issues must describe severity and must_fix",
     );
+    const shared =
+      flowAtLeast(card, 5) &&
+      sharedReviewers(target, d.list("work_items")).includes(item.id);
+    const existing = shared
+      ? sharedMustFixes(d.list("reviews"), [target], d.list("work_items"))
+      : [];
+    const refs = p.issue_refs ?? [];
     ensure(
-      p.issues.every((i) =>
+      Array.isArray(refs),
+      "validation_failed",
+      "Expected an array of issue references",
+    );
+    const seenRefs = new Set<string>();
+    const issues = [
+      ...p.issues,
+      ...refs.map((ref) => {
+        const findingId = typeof ref === "string" ? ref : ref?.finding_id;
+        const source = existing.find((i) => i.finding_id === findingId);
+        ensure(
+          source && !seenRefs.has(source.finding_id),
+          "validation_failed",
+          "Duplicate or unknown must-fix reference on this delivery and SHA",
+        );
+        seenRefs.add(source.finding_id);
+        const { delivery_id: _delivery, target_sha: _sha, ...issue } = source;
+        if (typeof ref === "string") return issue;
+        text(ref.proof, "proof");
+        return { ...issue, proof: ref.proof };
+      }),
+    ];
+    ensure(
+      issues.every((i) =>
         i.impact === undefined
           ? !i.must_fix
           : REVIEW_IMPACTS.includes(i.impact),
@@ -979,7 +1020,7 @@ export function submitReview(
       "Every must-fix issue requires a valid impact",
     );
     const calculated = deriveReview(
-      p.issues,
+      issues,
       p.recheck_required ?? false,
       p.followup_card_id,
     );
@@ -1050,7 +1091,7 @@ export function submitReview(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     if (prior && !testReview)
       ensure(
-        p.issues.every(
+        issues.every(
           (issue) =>
             issue.pre_existing ||
             prior.issues.some(
@@ -1083,14 +1124,18 @@ export function submitReview(
     const reuseContext = deliveryTree(target)
       ? reviewReuseContext(d, target, item, d.assignment.id)
       : undefined;
+    const id = d.ids.next(state.project_id, "review");
     const value: Review = {
-      id: d.ids.next(state.project_id, "review"),
+      id,
       delivery_id: target.id,
       target_sha: p.target_sha,
       work_item_id: item.id,
       run_id: run.id,
       kind: p.kind,
       ...calculated,
+      ...(shared
+        ? { issues: bindSharedFindings(calculated.issues, id, existing) }
+        : {}),
       ...(p.rejection_category
         ? { rejection_category: p.rejection_category.trim() }
         : {}),
@@ -1170,8 +1215,13 @@ export function submitReview(
         reviewRejectionsNeedAttention(d, item));
     const flowLimit = limitReached;
     const flowRaised = flowLimit
-      ? requestReviewLimit(d, d.work(item.id))
+      ? requestReviewLimit(d, d.work(item.id), value)
       : false;
+    // A late lane can be below its own limit while the delivery is already
+    // waiting on its peer's decision. Keep its verdict, not a new rework wake.
+    const reviewLimitWait =
+      (flowLimit && !flowRaised) ||
+      (parallelLate && pendingSharedReview(d.list("decisions"), target.id));
     d.emit(
       "review_submitted",
       card.id,
@@ -1185,9 +1235,8 @@ export function submitReview(
           : {}),
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
-          (value.blocking || value.recheck_required) &&
-          (!limitReached || flowRaised === true),
-        ...(flowLimit && !flowRaised ? { review_limit_wait: true } : {}),
+          (value.blocking || value.recheck_required) && !reviewLimitWait,
+        ...(reviewLimitWait ? { review_limit_wait: true } : {}),
         ...(parallelLate ? { parallel_late: true } : {}),
       },
       {

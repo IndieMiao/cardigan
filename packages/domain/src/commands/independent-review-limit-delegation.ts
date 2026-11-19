@@ -11,14 +11,17 @@ export const INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON =
 
 export function independentReviewLimitItem(
   d: CommandDraft,
-  q: Pick<Decision, "trigger"> & Partial<Pick<Decision, "affected_work_items">>,
+  q: Pick<Decision, "trigger"> &
+    Partial<Pick<Decision, "affected_work_items" | "review_limit_group">>,
 ) {
-  return q.trigger === "review_limit" && q.affected_work_items?.length === 1
+  const ids = q.affected_work_items;
+  return q.trigger === "review_limit" &&
+    (q.review_limit_group || ids?.length === 1)
     ? d
         .list("work_items")
         .find(
           (w) =>
-            w.id === q.affected_work_items?.[0] &&
+            ids?.includes(w.id) &&
             w.kind === "verify" &&
             w.role_id === "independent_reviewer",
         )

@@ -16,6 +16,7 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
+  reviewWakeBlocked,
   runById,
   runnableQueuedRun,
   unreadableCommentTrigger,
@@ -23,6 +24,24 @@ import {
 } from "@cardigan/domain";
 import type { ChangeCursor, ChangeSet } from "@cardigan/store";
 import type { StandingResolver } from "./dispatch-inbox.js";
+
+/** Evaluate pending bells against the same business target as queueRun. */
+export function notificationBlocked(
+  state: CommandState,
+  eventId: string,
+  owner: AssignmentId,
+) {
+  const a = assignmentIndex(state.assignments).first.get(owner);
+  return (
+    decisionFollowupBlocked(state, eventId, owner) ||
+    (a?.scope === "work_item" &&
+      reviewWakeBlocked(
+        state,
+        eventById(state.events, eventId),
+        a.work_item_id,
+      ))
+  );
+}
 
 export interface Candidate {
   project: ProjectId;
@@ -350,16 +369,17 @@ export class CandidateIndex {
       if (!run) return undefined;
       dirty.add(run.assignment_id);
     }
+    const cards = new Set<string>();
     const decisions = decisionIndex(state.decisions);
     for (const id of changed.get("decisions") ?? []) {
       const q = decisions.get(id);
       if (!q) return undefined;
+      if (q.review_limit_group && q.card_id) cards.add(q.card_id);
       if (q.raised_by.startsWith("assignment:"))
         dirty.add(q.raised_by.slice("assignment:".length) as AssignmentId);
     }
     const items = workItemIndex(state.work_items);
     const owners = assignmentIndex(state.assignments).byWorkItem;
-    const cards = new Set<string>();
     const touchItem = (id: string) => {
       const holders = items.cardsOf.get(id);
       if (!holders) return false;
@@ -413,7 +433,7 @@ export class CandidateIndex {
           owner,
           blocked:
             owner !== undefined &&
-            decisionFollowupBlocked(state, n.event_id, owner),
+            notificationBlocked(state, n.event_id, owner),
         };
         cache.info.set(n.id, info);
       }

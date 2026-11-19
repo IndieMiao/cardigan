@@ -1,11 +1,13 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CardId, Run } from "@cardigan/domain";
+import type { CardId, DeliveryId, Run } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   advanceRouterCursor,
   beginBellAttempt,
   beginDispatchRetry,
+  bindReviewWake,
+  confirmReviewNotSent,
   defaultMigrationsDir,
   finishBellAttempt,
   listBellAttempts,
@@ -14,7 +16,9 @@ import {
   moveNotification,
   recordNotification,
   Store,
+  settleWakeWithdrawal,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "./index.js";
 import {
   assignment,
@@ -468,5 +472,121 @@ test("a logical PM notification cannot be claimed by another Assignment while de
         }),
       ),
     ).toThrow(/already in flight/);
+  });
+});
+
+test("a review send boundary survives restart and only its unsent owner can withdraw", () => {
+  withTempStore((store, dataDir) => {
+    const { input } = seed(store);
+    const note = store.recordNotification(input).notification;
+    const attempt = store.uow.run(() =>
+      beginBellAttempt(store.database, claim(note.id)),
+    );
+    const binding = {
+      delivery_id: "D-1" as DeliveryId,
+      target_sha: "a".repeat(40),
+    };
+    store.uow.run(() =>
+      expect(bindReviewWake(store.database, attempt, binding)).toBe(true),
+    );
+    const other = Store.open({ dataDir });
+    try {
+      other.uow.run(() => {
+        expect(
+          bindReviewWake(
+            other.database,
+            attempt,
+            { ...binding, target_sha: "b".repeat(40) },
+            at,
+          ),
+        ).toBe(false);
+        expect(bindReviewWake(other.database, attempt, binding, at)).toBe(true);
+      });
+    } finally {
+      other.close();
+    }
+    store.uow.run(() => {
+      expect(bindReviewWake(store.database, attempt, binding, at)).toBe(false);
+      expect(withdrawBellAttempt(store.database, project_id, attempt.id)).toBe(
+        false,
+      );
+      expect(
+        listBellAttempts(store.database, project_id, attempt.run_id)[0]
+          ?.review_wake,
+      ).toEqual({ ...binding, sending_at: at });
+      confirmReviewNotSent(store.database, attempt);
+      expect(withdrawBellAttempt(store.database, project_id, attempt.id)).toBe(
+        true,
+      );
+      expect(bindReviewWake(store.database, attempt, binding, at)).toBe(false);
+    });
+  });
+});
+
+// The target daemon can refuse a queued send after the local guard allows it.
+// A late, positive receipt can clarify only the same unacknowledged attempt.
+test.each([
+  "current",
+  "expired",
+  "new claim",
+  "ack",
+  "other SHA",
+  "other Run",
+] as const)("final refusal is fenced: %s", (phase) => {
+  withTempStore((store) => {
+    const { run } = seed(store);
+    store.uow.run((tx) => {
+      tx.runs.put(project_id, { ...run, kind: "rework", status: "dispatched" });
+      const attempt = {
+        ...claim("unused"),
+        notification_ids: [],
+        outcome: null,
+        finished_at: null,
+      };
+      beginDispatchRetry(store.database, attempt);
+      const binding = {
+        delivery_id: "D-1" as DeliveryId,
+        target_sha: "a".repeat(40),
+      };
+      expect(bindReviewWake(store.database, attempt, binding)).toBe(true);
+      expect(bindReviewWake(store.database, attempt, binding, at)).toBe(true);
+      if (phase === "expired" || phase === "new claim")
+        finishBellAttempt(
+          store.database,
+          project_id,
+          attempt.id,
+          "failed",
+          lease,
+        );
+      if (phase === "new claim")
+        beginDispatchRetry(store.database, {
+          ...claim("unused"),
+          id: "next",
+          notification_ids: [],
+        });
+      if (phase === "ack")
+        tx.runs.put(project_id, { ...run, status: "running", started_at: at });
+      const receipt = {
+        ...attempt,
+        run_id: phase === "other Run" ? ("R-2" as Run["id"]) : run.id,
+        review_wake: {
+          ...binding,
+          target_sha:
+            phase === "other SHA" ? "b".repeat(40) : binding.target_sha,
+        },
+      };
+      const matched = phase === "current" || phase === "expired";
+      expect(settleWakeWithdrawal(store.database, receipt, lease)).toBe(
+        matched,
+      );
+      expect(
+        listBellAttempts(store.database, project_id, run.id)[0]?.review_wake,
+      ).toEqual(
+        matched
+          ? { ...binding, refused_at: lease }
+          : { ...binding, sending_at: at },
+      );
+      expect(settleWakeWithdrawal(store.database, receipt, lease)).toBe(false);
+    });
   });
 });

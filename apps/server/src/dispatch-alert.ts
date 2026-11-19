@@ -74,6 +74,7 @@ export function deliveryAttemptFailed(
     run_id: RunId;
     reason: string;
     error: DeliveryFailure;
+    unconfirmed_attempt_id?: string;
     notification_ids: readonly string[];
     card_id?: CardId | undefined;
   },
@@ -91,6 +92,9 @@ export function deliveryAttemptFailed(
       run_id: input.run_id,
       reason: input.reason,
       error: { ...input.error },
+      ...(input.unconfirmed_attempt_id
+        ? { unconfirmed_attempt_id: input.unconfirmed_attempt_id }
+        : {}),
       notification_ids: [...input.notification_ids],
     },
   });
@@ -167,6 +171,7 @@ export function dispatchAlert(
     card_id?: CardId | undefined;
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
+    review?: { delivery_id: string; target_sha: string; body: string };
     mark?: boolean;
     notifyHostOps?: boolean;
     activity_source?: string;
@@ -207,6 +212,7 @@ export function dispatchAlert(
     payload: {
       assignment_id: input.assignment.id,
       reason: input.reason,
+      ...input.review,
       ...(inactiveProducer ? { work_item_id: item.id } : {}),
       ...(product ? { delivery_id: product.id } : {}),
       ...(input.activity_source

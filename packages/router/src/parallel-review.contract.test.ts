@@ -1,10 +1,19 @@
-import { submitReview } from "@cardigan/domain";
+import {
+  dispatchRun,
+  dispatchRunKind,
+  queueRun,
+  submitReview,
+} from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   parallelBug,
   parallelDelivery,
   rejectedParallel,
 } from "../../domain/src/commands/parallel-review/test-fixtures.js";
+import {
+  first as sharedBug,
+  sharedReviewFixture,
+} from "../../domain/src/commands/shared-review/test-fixtures.js";
 import {
   actor,
   apply,
@@ -193,5 +202,162 @@ test.each(
         (n) => n.rule === "7.2/delivery rejected twice",
       ),
     ).toHaveLength(0);
+  },
+);
+
+test.each([2, 3])(
+  "a late rejection after %i prior rounds respects the pause without routing or dispatching rework",
+  async (rounds) => {
+    const f = await sharedReviewFixture(3, [sharedBug], rounds);
+    f.review(2, [sharedBug]);
+    expect(f.decide(2, "pause").ok).toBe(true);
+    f.review(3, [], f.refs());
+    const event = f.state.events.findLast((e) => e.type === "review_submitted");
+    const producer = f.state.assignments.find(
+      (a) => a.id === id("assignment", 1),
+    );
+    if (!event || !producer) throw Error("Missing late review or producer");
+    expect(event.payload).toMatchObject({
+      parallel_late: true,
+      review_limit_wait: true,
+      rework_allowed: false,
+    });
+    const idle = {
+      ...f.state,
+      runs: f.state.runs.filter((r) => r.assignment_id !== producer.id),
+    };
+    expect(routeEvent({ event, snapshot: idle }).notifications).toEqual([]);
+    const kind = dispatchRunKind(event, producer, true);
+    expect(kind).toBe("rework");
+    expect(
+      queueRun(
+        idle,
+        { kind: "system", project_id: idle.project_id },
+        {
+          assignment_id: producer.id,
+          kind,
+          trigger_event_id: event.id,
+          model: "fixture",
+          agent_cli_version: "1",
+        },
+        f.io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("暂停返工"),
+      },
+    });
+  },
+);
+
+test.each([1, 2])(
+  "the decision owns the next wake, including delayed bells (%i prior rejections in first lane)",
+  async (prior) => {
+    const f = await sharedReviewFixture(prior, [sharedBug], 2);
+    const author = id("assignment", 1);
+    const system = { kind: "system" as const, project_id: f.state.project_id };
+    f.review(2, [sharedBug]);
+    const first = f.state.events.findLast((e) => e.type === "review_submitted");
+    if (!first) throw Error("Missing review");
+    expect(
+      routeEvent({ event: first, snapshot: f.state }).notifications,
+    ).toHaveLength(prior === 1 ? 1 : 0);
+    f.review(3, [], f.refs());
+    expect(f.decide(3, "pause").ok).toBe(true);
+    const idle = () => ({
+      ...f.state,
+      runs: f.state.runs.filter((r) => r.assignment_id !== author),
+    });
+    const queue = (state: typeof f.state, event: typeof first, n = 1) => {
+      const a = state.assignments.find((a) => a.id === id("assignment", n));
+      if (!a) throw Error("Missing owner");
+      return queueRun(
+        state,
+        system,
+        {
+          assignment_id: a.id,
+          kind: dispatchRunKind(event, a, true),
+          trigger_event_id: event.id,
+          model: "fixture",
+          agent_cli_version: "1",
+        },
+        f.io,
+      );
+    };
+    expect(
+      routeEvent({ event: first, snapshot: idle() }).notifications,
+    ).toEqual([]);
+    if (prior === 1) {
+      const producerRun = f.state.runs.find((r) => r.assignment_id === author);
+      if (!producerRun) throw Error("Missing producer Run");
+      const queuedBeforePause = {
+        ...idle(),
+        runs: [
+          ...idle().runs,
+          {
+            ...producerRun,
+            trigger_event_id: first.id,
+            kind: "rework" as const,
+            status: "queued" as const,
+          },
+        ],
+      };
+      expect(
+        dispatchRun(
+          queuedBeforePause,
+          system,
+          { run_id: producerRun.id },
+          f.io,
+        ),
+      ).toMatchObject({
+        ok: false,
+        error: {
+          code: "illegal_transition",
+          message: expect.stringContaining("暂停返工"),
+        },
+      });
+    }
+    expect(queue(idle(), first)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    expect(f.decide(3, "raise_limit").ok).toBe(true);
+    const resumed = f.state.events.findLast(
+      (e) => e.type === "decision_resolved",
+    );
+    if (!resumed) throw Error("Missing resume");
+    const state = idle();
+    const wakes = state.events
+      .filter(
+        (e) => e.type === "review_submitted" || e.type === "decision_resolved",
+      )
+      .flatMap((event) => routeEvent({ event, snapshot: state }).notifications);
+    expect(wakes).toMatchObject([
+      {
+        recipient: { assignment_id: author },
+        event_id: resumed.id,
+        run_kind: "rework",
+      },
+    ]);
+    const queued = value(queue(state, resumed));
+    expect(queued.data.kind).toBe("rework");
+    expect(queue(apply(state, queued), resumed)).toMatchObject({
+      ok: false,
+      error: { code: "idempotency_conflict" },
+    });
+    expect(queue(state, resumed, 3)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    const newer = apply(f.state, await parallelDelivery(f.state, f.io));
+    expect(
+      routeEvent({ event: resumed, snapshot: newer }).notifications,
+    ).toEqual([]);
+    expect(queue({ ...newer, runs: state.runs }, resumed)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
   },
 );
