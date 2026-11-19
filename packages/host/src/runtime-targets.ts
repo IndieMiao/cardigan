@@ -89,6 +89,27 @@ export class RuntimeTargetError extends Error {
     super(`Runtime target rejected: ${reason}`);
   }
 }
+/** Only constructed by the router before it delegates this exact launch. An
+ * adapter failure (even with the same code or text) is not such a receipt. */
+class ProvisionTargetRefusal extends RuntimeTargetError {
+  readonly #launch: RuntimeLaunch;
+  constructor(launch: RuntimeLaunch, error: unknown) {
+    super(
+      error instanceof RuntimeTargetError ? error.reason : "target_invalid",
+    );
+    this.#launch = launch;
+  }
+  matches(launch: RuntimeLaunch) {
+    return this.#launch === launch;
+  }
+}
+
+export type { ProvisionTargetRefusal };
+export function provisionRefusalFor(error: unknown, launch: RuntimeLaunch) {
+  return error instanceof ProvisionTargetRefusal && error.matches(launch)
+    ? error
+    : undefined;
+}
 const rejected = (reason = "target_mismatch"): never => {
   throw new RuntimeTargetError(reason);
 };
@@ -533,7 +554,8 @@ export class RuntimeTargets implements Runtime {
     role: Role,
     machine: Machine,
     launch: RuntimeLaunch,
-  ) {
+    beforeAdapter?: () => void,
+  ): Promise<RuntimeResult<RuntimeRef>> {
     let checked: Target;
     try {
       checked = await this.forLaunch(
@@ -541,7 +563,7 @@ export class RuntimeTargets implements Runtime {
         assignment,
       );
     } catch (error) {
-      return failure<RuntimeRef>(error);
+      return { ok: false, error: new ProvisionTargetRefusal(launch, error) };
     }
     return this.invoke(
       () => {
@@ -553,16 +575,14 @@ export class RuntimeTargets implements Runtime {
         if (machine.id !== target.machine.id) return rejected();
         return target;
       },
-      (runtime) =>
-        runtime.provision(
-          assignment,
-          role,
-          this.resolve(
-            launch.labels.project as ProjectId,
-            assignment.machine_id,
-          ).machine,
-          launch,
-        ),
+      (runtime) => {
+        const current = this.resolve(
+          launch.labels.project as ProjectId,
+          assignment.machine_id,
+        ).machine;
+        beforeAdapter?.();
+        return runtime.provision(assignment, role, current, launch);
+      },
     );
   }
   wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
@@ -624,7 +644,11 @@ export class RuntimeTargets implements Runtime {
   interrupt(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.interrupt(ref));
   }
-  async resume_or_replace(ref: RuntimeRef, launch: RuntimeLaunch) {
+  async resume_or_replace(
+    ref: RuntimeRef,
+    launch: RuntimeLaunch,
+    beforeAdapter?: () => void,
+  ): Promise<RuntimeResult<RuntimeRef>> {
     const project = launch.labels.project as ProjectId;
     const assignment = { machine_id: ref.machine_id, runtime_ref: ref };
     let checked: Target | undefined;
@@ -632,7 +656,7 @@ export class RuntimeTargets implements Runtime {
       try {
         checked = await this.forLaunch(project, assignment);
       } catch (error) {
-        return failure<RuntimeRef>(error);
+        return { ok: false, error: new ProvisionTargetRefusal(launch, error) };
       }
     }
     return this.invoke(
@@ -640,7 +664,10 @@ export class RuntimeTargets implements Runtime {
         checked
           ? this.checkedTarget(checked, project, assignment)
           : this.targetForRef(ref, project),
-      (runtime) => runtime.resume_or_replace(ref, launch),
+      (runtime) => {
+        beforeAdapter?.();
+        return runtime.resume_or_replace(ref, launch);
+      },
     );
   }
   human_entry(ref: RuntimeRef) {

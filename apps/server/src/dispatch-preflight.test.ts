@@ -1,4 +1,9 @@
-import { type Assignment, postComment, queueRun } from "@cardigan/domain";
+import {
+  type Assignment,
+  postComment,
+  queueRun,
+  type RuntimeResult,
+} from "@cardigan/domain";
 import {
   agentCliVersion,
   RuntimeTargetError,
@@ -105,6 +110,123 @@ test.each(["mcp_timeout", "remote_launch_disabled"])(
     f.advance(1);
     await d.tick();
     expect(f.options.startRun).toHaveBeenCalledTimes(transient ? 1 : 0);
+  },
+);
+
+test.each(["recover", "exhaust", "command_failed"])(
+  "cold --version slot: %s",
+  async (outcome) => {
+    const target = create();
+    notify(target);
+    const version = vi.fn(
+      async (): Promise<RuntimeResult<string>> => ({
+        ok: true,
+        value: "fixture",
+      }),
+    );
+    const failure = {
+      ok: false as const,
+      error: {
+        code:
+          outcome === "command_failed"
+            ? ("invalid_launch" as const)
+            : ("runtime_queue_timeout" as const),
+        message: "runtime_queue_timeout",
+      },
+    };
+    if (outcome === "recover") version.mockResolvedValueOnce(failure);
+    else version.mockResolvedValue(failure);
+    const targets = await RuntimeTargets.create({
+      store: f.store,
+      execution: { mode: "local", dataDir: f.dataDir },
+      workers: () => [
+        {
+          project_id: f.project,
+          machine_id: "worker",
+          os: "linux",
+          arch: "x64",
+          session: "fixture",
+          generation: "one",
+          allow_remote_launch: true,
+          execution: {
+            ...execution,
+            path: "/bin",
+            gitHelper: { python: "python3", path: "/worker/git" },
+            fileHelper: { python: "python3", path: "/worker/files" },
+            publication: {
+              header_max_bytes: 4096,
+              file_max_bytes: 4096,
+              batch_max_bytes: 8192,
+              timeout_ms: 2000,
+            },
+            mcp: { url: "https://worker.example.ts.net/mcp", timeoutMs: 1000 },
+          },
+        },
+      ],
+      workerReadiness: async () => [],
+      workerMcpReachability: vi.fn(),
+      factory: async () => ({
+        ok: true,
+        value: {
+          ...f.runtime,
+          checkLocalHealth: vi.fn(),
+          probeTerminal: vi.fn(),
+          async *events() {},
+          captureAgent: async (command) =>
+            command === "git" ? { ok: true, value: "fixture" } : version(),
+        },
+      }),
+    });
+    if (!targets.ok) throw new Error("Missing target fixture");
+    const rt = targets.value,
+      checks = vi.spyOn(rt, "forLaunch");
+    const opts = {
+      ...testOptions(),
+      snapshot: async (a: Assignment, p: typeof f.project) => {
+        const { execution } = await rt.forLaunch(p, a);
+        return {
+          model: "fixture",
+          agent_cli_version: await agentCliVersion(
+            {
+              execution,
+              captureLocal: vi.fn(),
+              captureAgent: (c, args) => rt.captureFor(p, a, c, args),
+            },
+            "pi",
+          ),
+        };
+      },
+    };
+    await new Dispatcher(opts).tick();
+    expect(checks).toHaveBeenCalledTimes(2);
+    expect(version).toHaveBeenCalledTimes(1);
+    if (outcome === "command_failed") {
+      expect(alerts()).toHaveLength(1);
+      expect(retry(target.assignment)).toBeUndefined();
+      return;
+    }
+    expect(alerts()).toHaveLength(0);
+    expect(retry(target.assignment)?.failures).toBe(1);
+    expect(
+      f.store.listNotifications({
+        project_id: f.project,
+        assignment_id: target.assignment.id,
+        status: "pending",
+      }).length,
+    ).toBeGreaterThan(0);
+    const d = new Dispatcher(opts);
+    f.advance(99);
+    await d.tick();
+    expect(version).toHaveBeenCalledTimes(1);
+    f.advance(1);
+    await d.tick();
+    f.advance(1);
+    await d.tick();
+    expect(version).toHaveBeenCalledTimes(2);
+    expect(alerts()).toHaveLength(outcome === "exhaust" ? 1 : 0);
+    expect(f.options.startRun).toHaveBeenCalledTimes(
+      outcome === "recover" ? 1 : 0,
+    );
   },
 );
 

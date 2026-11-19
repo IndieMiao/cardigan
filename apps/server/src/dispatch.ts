@@ -881,10 +881,17 @@ export class Dispatcher {
       } else snapshot = await this.options.snapshot(a, project);
     } catch (error) {
       if (this.closing) return;
-      const cause =
-        error instanceof HostLaunchError && error.step === "cli version"
-          ? error.cause
-          : error;
+      const versionProbe =
+        error instanceof HostLaunchError && error.step === "cli version";
+      const cause = versionProbe ? error.cause : error;
+      // hc returned before executing --version. Do not retry general CLI or
+      // adapter errors, even if their diagnostic mentions a queue timeout.
+      const versionNotExecuted =
+        versionProbe &&
+        typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        cause.code === "runtime_queue_timeout";
       if (
         !this.reject(
           project,
@@ -892,7 +899,8 @@ export class Dispatcher {
           a,
           "snapshot_unavailable",
           queued?.id,
-          cause instanceof RuntimeTargetError && cause.transient,
+          versionNotExecuted ||
+            (cause instanceof RuntimeTargetError && cause.transient),
         )
       )
         return;
