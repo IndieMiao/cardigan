@@ -39,6 +39,7 @@ import {
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
+  beginBellAttempt,
   listBellAttempts,
   PROJECT_EVENT_STREAM,
   persistRunLimitEffect,
@@ -50,6 +51,7 @@ import { startAssignmentCommand } from "../../cli/src/assignment.js";
 import { attentionCommand } from "../../cli/src/inbox.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
+import { routeProjectEvents } from "./dispatch-inbox.js";
 import {
   acceptThroughMergeGate,
   m4Fixture,
@@ -403,6 +405,80 @@ test.each([false, true])(
     expect(delivered).toBeDefined();
     if (finished) expect(delivered).not.toBe(run.id);
     else expect(delivered).toBe(run.id);
+  },
+);
+
+test.each([false, true])(
+  "C-475: lease recovery after the original Run finishes preserves unread work and honors ACK (acked=%s)",
+  async (acked) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    routeProjectEvents(f.store, f.project, { clock: f.clock });
+    const note = ownNotes().find((n) => n.kind === "comment");
+    if (!note?.card_id) throw new Error("Missing comment");
+    // Crash boundary: the intent committed, but its wake and settlement did not.
+    f.store.uow.run(() =>
+      beginBellAttempt(f.store.database, {
+        project_id: f.project,
+        id: "interrupted",
+        assignment_id: target.assignment.id,
+        run_id: run.id,
+        notification_ids: [note.id],
+        started_at: f.clock.now(),
+        lease_until: new Date(Date.parse(f.clock.now()) + 1000).toISOString(),
+      }),
+    );
+    if (acked)
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: target.assignment.id,
+        card_id: note.card_id,
+        up_to_seq: note.seq,
+      });
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: run.id,
+            outcome: "completed",
+            summary: "Original turn finished",
+          },
+          p,
+        ),
+      f.actorFor(target.assignment),
+    );
+    const reopened = Store.open({ dataDir: f.dataDir, clock: f.clock });
+    try {
+      const restarted = new Dispatcher({
+        ...options,
+        store: reopened,
+        retryBaseMs: 100,
+      });
+      const row = () =>
+        reopened.listNotifications({
+          project_id: f.project,
+          ids: [note.id],
+        })[0];
+      f.advance(1001);
+      await restarted.tick();
+      if (acked) expect(row()?.status).toBe("acked");
+      else {
+        expect(row()).toMatchObject({ status: "delivery_failed", attempts: 1 });
+        expect(row()?.run_id).toBeUndefined();
+      }
+      f.advance(101);
+      await restarted.tick();
+      if (acked) expect(row()?.status).toBe("acked");
+      else {
+        expect(row()).toMatchObject({ status: "belled", attempts: 2 });
+        expect(row()?.run_id).toBeDefined();
+        expect(row()?.run_id).not.toBe(run.id);
+      }
+    } finally {
+      reopened.close();
+    }
   },
 );
 

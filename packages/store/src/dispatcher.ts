@@ -12,13 +12,18 @@ export interface BellAttempt {
   readonly id: string;
   readonly assignment_id: AssignmentId;
   readonly run_id: RunId;
+  /** The Run was already running when this inbox intent was claimed. */
+  readonly continuation?: true;
   readonly notification_ids: readonly string[];
   readonly started_at: string;
   readonly lease_until: string;
   readonly finished_at: string | null;
   readonly outcome: "sent" | "failed" | null;
 }
-export type BeginBellAttempt = Omit<BellAttempt, "finished_at" | "outcome">;
+export type BeginBellAttempt = Omit<
+  BellAttempt,
+  "finished_at" | "outcome" | "continuation"
+>;
 const requireTransaction = (db: DatabaseSync) => {
   if (!db.isTransaction)
     throw new Error("Bell attempts require an open transaction");
@@ -33,16 +38,16 @@ const timestamp = (value: string) => {
 export function beginBellAttempt(
   db: DatabaseSync,
   input: BeginBellAttempt,
-): void {
-  beginAttempt(db, input, false);
+): BellAttempt {
+  return beginAttempt(db, input, false);
 }
 
 /** An explicit host launch has no inbox notification but shares its exclusion. */
 export function beginLaunchAttempt(
   db: DatabaseSync,
   input: Omit<BeginBellAttempt, "notification_ids">,
-): void {
-  beginAttempt(db, { ...input, notification_ids: [] }, true);
+): BellAttempt {
+  return beginAttempt(db, { ...input, notification_ids: [] }, true);
 }
 
 function beginAttempt(
@@ -50,7 +55,7 @@ function beginAttempt(
   input: BeginBellAttempt,
   launch: boolean,
   retry = false,
-): void {
+): BellAttempt {
   requireTransaction(db);
   if (
     !input.id ||
@@ -69,11 +74,11 @@ function beginAttempt(
   const row = db
     .prepare("SELECT doc FROM runs WHERE project_id = ? AND id = ?")
     .get(input.project_id, input.run_id);
+  const run = row && (JSON.parse(String(row.doc)) as Run);
   if (
-    !row ||
-    (JSON.parse(String(row.doc)) as Run).assignment_id !==
-      input.assignment_id ||
-    (launch && (JSON.parse(String(row.doc)) as Run).status !== "queued")
+    !run ||
+    run.assignment_id !== input.assignment_id ||
+    (launch && run.status !== "queued")
   )
     throw new Error("Bell Run does not belong to its Assignment");
   const read = db.prepare(
@@ -96,9 +101,11 @@ function beginAttempt(
     )
       throw new Error("Bell notification belongs to another Assignment");
   }
+  // Persist the claim-time fact, never infer it from the Run at lease expiry.
+  const continuation = run.status === "running";
   db.prepare(`INSERT INTO bell_attempts
-    (project_id, id, assignment_id, run_id, notification_ids, started_at, lease_until)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    (project_id, id, assignment_id, run_id, notification_ids, started_at, lease_until, continuation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
     input.project_id,
     input.id,
     input.assignment_id,
@@ -106,7 +113,14 @@ function beginAttempt(
     JSON.stringify(input.notification_ids),
     input.started_at,
     input.lease_until,
+    Number(continuation),
   );
+  return {
+    ...input,
+    ...(continuation ? { continuation: true } : {}),
+    finished_at: null,
+    outcome: null,
+  };
 }
 /** A late completion cannot overwrite recovery's already-settled outcome. */
 export function finishBellAttempt(
@@ -182,6 +196,7 @@ function readAttempts(
       assignment_id: String(row.assignment_id) as AssignmentId,
       run_id: String(row.run_id) as RunId,
       notification_ids: JSON.parse(String(row.notification_ids)) as string[],
+      ...(row.continuation === 1 ? { continuation: true as const } : {}),
       started_at: String(row.started_at),
       lease_until: String(row.lease_until),
       finished_at: row.finished_at === null ? null : String(row.finished_at),

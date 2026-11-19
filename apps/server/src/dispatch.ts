@@ -1107,7 +1107,7 @@ export class Dispatcher {
           }),
         ),
       );
-    this.settle(job.attempt, sent, reason, job.bell, failure, !!continuing);
+    this.settle(job.attempt, sent, reason, job.bell, failure);
   }
   private turnEndCurrent(
     state: CommandState,
@@ -1467,7 +1467,7 @@ export class Dispatcher {
         worktree === "write" || worktree === "readonly"
           ? Math.max(this.leaseMs, WORKTREE_LAUNCH_LEASE_MS)
           : this.leaseMs;
-      const attempt: BellAttempt = {
+      const intent = {
         id: randomUUID(),
         project_id: project,
         assignment_id: a.id,
@@ -1475,11 +1475,10 @@ export class Dispatcher {
         notification_ids: ready.map((n) => n.id),
         started_at: at,
         lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
-        finished_at: null,
-        outcome: null,
       };
-      if (ready.length) beginBellAttempt(store.database, attempt);
-      else beginLaunchAttempt(store.database, attempt);
+      const attempt = ready.length
+        ? beginBellAttempt(store.database, intent)
+        : beginLaunchAttempt(store.database, intent);
       // Keep producer/standing dispatch timing unchanged. Only verification
       // needs to remain queued until asynchronous target preparation finishes.
       if (
@@ -1739,10 +1738,9 @@ export class Dispatcher {
     reason: string,
     bell?: string,
     failure?: DeliveryFailure,
-    continuation = false,
   ) {
     const { store } = this.options,
-      project = attempt.project_id;
+      { project_id: project, continuation } = attempt;
     store.uow.run((tx) => {
       const at = this.clock.now();
       // A FIFO/slot timeout is proven pre-send. Keep the notification's failed
@@ -1790,8 +1788,7 @@ export class Dispatcher {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
         const acked = covered(n, state, attempt.assignment_id);
-        const failedContinuation =
-          !sent && !acked && (continuation || run?.status === "running");
+        const failedContinuation = !sent && !acked && continuation === true;
         moveNotification(store.database, {
           project_id: project,
           id: n.id,

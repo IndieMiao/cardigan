@@ -485,17 +485,26 @@ export class HerdrRuntime implements Runtime {
           guard &&
             (async (raw) => {
               try {
-                // Use the reserved slot directly; requeueing get here would deadlock at capacity one.
-                const t: Terminal = JSON.parse(
-                  await raw.exec(["get", ref.terminal_ref, "--json"]),
+                // Read through the reserved slot, not the queue (capacity may be one).
+                const matchesTerminal = async () => {
+                  const t: Terminal = JSON.parse(
+                    await raw.exec(["get", ref.terminal_ref, "--json"]),
+                  );
+                  this.checkTerminal(ref, t);
+                  if (t.address !== ref.terminal_ref || t.state !== "live")
+                    return false;
+                  return guard.state === "done"
+                    ? t.status?.state === "done"
+                    : t.status?.state == null || t.status.state === "unknown";
+                };
+                if (!(await matchesTerminal())) return false;
+                // The transcript may be sampled over SSH. A newer busy terminal
+                // must veto that sample before we check authority and send.
+                return (
+                  guard.state === "done" ||
+                  ((await guard.confirm_turn_end()) &&
+                    (await matchesTerminal()))
                 );
-                this.checkTerminal(ref, t);
-                if (t.address !== ref.terminal_ref || t.state !== "live")
-                  return false;
-                if (guard.state === "done") return t.status?.state === "done";
-                if (t.status?.state != null && t.status.state !== "unknown")
-                  return false;
-                return await guard.confirm_turn_end();
               } catch {
                 return false; // A failed observation proves nothing about idleness.
               }

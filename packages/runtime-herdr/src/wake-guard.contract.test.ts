@@ -166,7 +166,11 @@ test.each([
         send ? { sent: true } : { sent: false, withdrawn: true },
       );
       expect(calls.slice(1).map((args) => args[0])).toEqual(
-        send ? ["get", "send"] : ["get"],
+        mode === "same_turn"
+          ? ["get", "get", "send"]
+          : send
+            ? ["get", "send"]
+            : ["get"],
       );
       if (send)
         expect(calls.at(-1)).toEqual([
@@ -182,3 +186,42 @@ test.each([
     }
   },
 );
+
+test("withdraws if the terminal reports work while the transcript response is in flight", async () => {
+  const raw = client(),
+    sampled = gate(),
+    response = gate();
+  const runtime = value(await HerdrRuntime.create({ client: raw }));
+  let state = "unknown";
+  raw.exec = vi.fn(async (args) =>
+    args[0] === "get"
+      ? JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: { state },
+        })
+      : "{}",
+  );
+  const sending = runtime.wake(ref, "bell", {
+    observed_guard: {
+      state: "unknown",
+      confirm_turn_end: async () => {
+        sampled.release();
+        await response.pending;
+        return true;
+      },
+    },
+  });
+  try {
+    await sampled.pending;
+    state = "working";
+    response.release();
+    expect(value(await sending)).toEqual({ sent: false, withdrawn: true });
+    expect(
+      vi.mocked(raw.exec).mock.calls.some(([args]) => args[0] === "send"),
+    ).toBe(false);
+  } finally {
+    response.release();
+    await sending;
+  }
+});
