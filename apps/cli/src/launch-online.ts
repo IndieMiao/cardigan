@@ -1,5 +1,7 @@
 import type { LaunchConfig, ResolvedProfile } from "@cardigan/roles";
 
+class ResponseLimit extends Error {}
+
 /** An opt-in probe of the explicit provider only. Never follow redirects or echo bodies. */
 export async function probeModel(
   resolved: ResolvedProfile,
@@ -75,16 +77,38 @@ export async function probeModel(
       size += r.value.length;
       if (size > (limits?.max_bytes ?? 2 * 1024 * 1024)) {
         await reader.cancel();
-        throw new Error();
+        throw new ResponseLimit();
       }
       chunks.push(r.value);
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   };
   try {
-    const data = (await call("models"))?.data;
-    if (!Array.isArray(data) || !data.some((item) => item?.id === model))
-      return "接入点未列出此模型";
+    let route = "models";
+    const cursors = new Set<string>();
+    for (let page = 1; ; page++) {
+      const list = await call(route).catch((error) => {
+        if (error instanceof ResponseLimit) return null;
+        throw error;
+      });
+      if (list === null) return "模型列表未查完（响应超过读取上限）";
+      if (!Array.isArray(list.data)) throw new Error();
+      if (list.data.some((item: { id?: string } | null) => item?.id === model))
+        break;
+      if (list.has_more === undefined || list.has_more === false)
+        return "接入点未列出此模型";
+      const cursor = list.last_id ?? list.data.at(-1)?.id;
+      if (
+        list.has_more !== true ||
+        page >= (limits?.max_pages ?? 16) ||
+        typeof cursor !== "string" ||
+        !cursor ||
+        cursors.has(cursor)
+      )
+        return "模型列表未查完（分页上限或游标无效）";
+      cursors.add(cursor);
+      route = `models?${new URLSearchParams({ [anthropic ? "after_id" : "after"]: cursor })}`;
+    }
     if (smoke) {
       const responses = p.api === "openai-responses";
       const result = await call(

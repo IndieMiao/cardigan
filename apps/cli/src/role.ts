@@ -29,7 +29,7 @@ import {
   persistRoleEffect,
   Store,
 } from "@cardigan/store";
-import { loadOptionalConfigSync } from "./config.js";
+import { validProfileNames } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
@@ -233,10 +233,8 @@ export async function runRoleCommand(
       return EXIT.ok;
     }
     const checkProfile = (role: RoleDefinition) => {
-      const config = loadOptionalConfigSync(
-        cliLaunchPaths(io, flags["data-dir"]),
-      );
-      if (!Object.hasOwn(config?.profiles ?? {}, role.launch_profile_ref))
+      const config = validProfileNames(cliLaunchPaths(io, flags["data-dir"]));
+      if (!config.has(role.launch_profile_ref))
         fail(
           `角色 ${role.role_id} 引用的启动配置 ${role.launch_profile_ref} 不存在于 launch.yaml；请添加配置或选用已有配置`,
         );

@@ -125,6 +125,7 @@ const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
   launch_check: z
     .strictObject({
+      max_pages: z.number().int().positive().optional(),
       timeout_ms: positiveMillis.optional(),
       max_bytes: z.number().int().positive().optional(),
     })

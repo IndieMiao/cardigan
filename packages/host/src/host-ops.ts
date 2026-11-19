@@ -465,14 +465,20 @@ export class HostOpsService {
     only?: AssignmentId,
     samples?: SessionContextDiagnostic[] | Promise<SessionContextDiagnostic[]>,
   ) {
-    if (!this.upstream) return {};
+    const upstream = this.upstream;
+    if (!upstream) return {};
     const state = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
     const [activity, sessions] = await Promise.all([
-      this.upstream.observe(state, only),
+      upstream.observe(state, only),
       samples ?? this.sessions(project),
     ]);
+    if (this.closing || this.upstream !== upstream)
+      throw new ToolError(
+        "stale_target",
+        "线路采样期间配置已更换，请重新读取诊断",
+      );
     const current = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
@@ -583,10 +589,13 @@ export class HostOpsService {
       this.sessions(project, true),
     )
       .then((activity) => {
-        if (!this.closing)
+        if (!this.closing && this.upstream === upstream)
           upstream.reconcile(this.options.store, project, activity);
       })
-      .catch(() => upstream.observationFailed(project))
+      .catch(() => {
+        if (!this.closing && this.upstream === upstream)
+          upstream.observationFailed(project);
+      })
       .finally(() => this.upstreamPolls.delete(project));
     this.upstreamPolls.set(project, poll);
   }
@@ -1011,6 +1020,7 @@ export class HostOpsService {
       if (!current()) return;
       let activity: SessionActivity | undefined;
       let freshUsage = action.context_usage;
+      const observationMonitor = this.upstream;
       if (action.tool !== "host_ops_cancel_run") {
         try {
           const samples = action.automatic_context_restart
@@ -1034,7 +1044,8 @@ export class HostOpsService {
             samples,
           );
         } catch {
-          this.upstream?.observationFailed(project);
+          if (this.upstream === observationMonitor)
+            observationMonitor?.observationFailed(project);
           fail("upstream_observation_failed");
           return;
         }
@@ -1042,6 +1053,10 @@ export class HostOpsService {
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (action.tool === "host_ops_cancel_run") return true;
+        if (this.upstream !== observationMonitor) {
+          fail("upstream_configuration_changed");
+          return false;
+        }
         if (
           action.automatic_context_restart &&
           (!freshUsage ||

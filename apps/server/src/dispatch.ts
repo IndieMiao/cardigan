@@ -141,7 +141,12 @@ import { profileSpan, profileSpanSync } from "./tick-profile.js";
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
 export type LaunchSnapshot = Pick<
   Run,
-  "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
+  | "model"
+  | "agent_cli_version"
+  | "launch_profile_ref"
+  | "launch_fingerprint"
+  | "harness"
+  | "effort"
 >;
 
 export interface DispatcherOptions {
@@ -864,7 +869,11 @@ export class Dispatcher {
           live &&
           snapshot.launch_profile_ref !== undefined &&
           (prior?.launch_profile_ref !== snapshot.launch_profile_ref ||
-            prior.model !== snapshot.model);
+            prior.model !== snapshot.model ||
+            (snapshot.launch_fingerprint !== undefined
+              ? prior.launch_fingerprint !== snapshot.launch_fingerprint
+              : prior.effort !== snapshot.effort ||
+                prior.harness !== snapshot.harness));
         if (replaceProfile) {
           live = false;
           if (a.runtime_ref)
@@ -1422,6 +1431,9 @@ export class Dispatcher {
         run = {
           ...rest,
           ...launchSettings(snapshot),
+          ...(snapshot.launch_fingerprint
+            ? { launch_fingerprint: snapshot.launch_fingerprint }
+            : {}),
           model: snapshot.model,
           agent_cli_version: snapshot.agent_cli_version,
           launch_profile_ref: snapshot.launch_profile_ref,

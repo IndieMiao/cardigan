@@ -157,12 +157,24 @@ test("unknown publication defers a suspected conflict; no-op publication restore
     expect(f.state().assignments[0]?.session_maintenance?.reason).toBe(
       "publication_pending",
     );
-    upgradeDeployedRoles(f.store, f.project, [], {
-      coder: deploymentRolePolicyHash(f.source),
-    });
-    upgradeDeployedRoles(f.store, f.project, [], {
-      coder: deploymentRolePolicyHash(f.source),
-    });
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      {
+        coder: deploymentRolePolicyHash(f.source),
+      },
+      new Set(["fixture"]),
+    );
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      {
+        coder: deploymentRolePolicyHash(f.source),
+      },
+      new Set(["fixture"]),
+    );
     expect(
       f.state().events.filter((e) => e.type === "host_role_pack_published"),
     ).toHaveLength(1);
@@ -203,9 +215,15 @@ test("an old process or interrupted publication cannot decide conflicts, even wh
       "publication_pending",
     );
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
-    upgradeDeployedRoles(f.store, f.project, [], {
-      coder: deploymentRolePolicyHash(f.source),
-    });
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      {
+        coder: deploymentRolePolicyHash(f.source),
+      },
+      new Set(["fixture"]),
+    );
     expect(
       f
         .state()
@@ -227,9 +245,15 @@ test("an old process or interrupted publication cannot decide conflicts, even wh
 test("a fresh role snapshot after an awaited observation cannot create a stale conflict", async () => {
   const f = setup(":memory:", 1, true);
   try {
-    upgradeDeployedRoles(f.store, f.project, [], {
-      coder: deploymentRolePolicyHash(f.source),
-    });
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      {
+        coder: deploymentRolePolicyHash(f.source),
+      },
+      new Set(["fixture"]),
+    );
     f.runtime.status.mockImplementation(async () => {
       f.store.uow.run((tx) => {
         if (
@@ -466,9 +490,15 @@ test("an interrupted earlier publication stays unverified even when the next pac
     // The DB still contains the previous default, rather than a human edit.
     const previousDefault = { ...f.source, instructions: "Manual rule" };
     expect(oldHash).not.toBe(deploymentRolePolicyHash(previousDefault));
-    upgradeDeployedRoles(f.store, f.project, [], {
-      coder: deploymentRolePolicyHash(previousDefault),
-    });
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      {
+        coder: deploymentRolePolicyHash(previousDefault),
+      },
+      new Set(["fixture"]),
+    );
     await f.tick();
     expect(f.state().human_actions).toHaveLength(0);
     expect(f.state().assignments[0]?.session_maintenance?.reason).toBe(
@@ -476,9 +506,15 @@ test("an interrupted earlier publication stays unverified even when the next pac
     );
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
     // A later successful publication fixes the DB and receipt atomically.
-    upgradeDeployedRoles(f.store, f.project, ["coder"], {
-      coder: deploymentRolePolicyHash(previousDefault),
-    });
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      ["coder"],
+      {
+        coder: deploymentRolePolicyHash(previousDefault),
+      },
+      new Set(["fixture"]),
+    );
     await f.tick();
     expect(f.state().assignments[0]?.role_version).toBe(3);
   } finally {
@@ -493,12 +529,18 @@ test("failure to persist the publication receipt rolls back role writes", () => 
       WHEN NEW.type = 'host_role_pack_published' BEGIN SELECT RAISE(ABORT, 'publication interrupted'); END`);
     const before = f.state();
     expect(() =>
-      upgradeDeployedRoles(f.store, f.project, ["coder"], {
-        coder: deploymentRolePolicyHash({
-          ...f.source,
-          instructions: "Manual rule",
-        }),
-      }),
+      upgradeDeployedRoles(
+        f.store,
+        f.project,
+        ["coder"],
+        {
+          coder: deploymentRolePolicyHash({
+            ...f.source,
+            instructions: "Manual rule",
+          }),
+        },
+        new Set(["fixture"]),
+      ),
     ).toThrow("publication interrupted");
     expect(f.state().roles).toEqual(before.roles);
     expect(f.state().events).toEqual(before.events);

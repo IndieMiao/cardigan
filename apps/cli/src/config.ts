@@ -1,9 +1,14 @@
-import { readFileSync } from "node:fs";
-import { loadModelLaunchConfig, parseCachedLaunchConfig } from "@cardigan/host";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import {
+  launchFilesStamp,
+  loadModelLaunchConfig,
+  parseCachedLaunchConfig,
+} from "@cardigan/host";
 import {
   type LaunchConfig,
   parseSecretsText,
   reportLaunchWarnings,
+  validateLaunchSecrets,
 } from "@cardigan/roles";
 import { parse as parseYaml } from "yaml";
 import { CliError, EXIT } from "./errors.js";
@@ -62,4 +67,31 @@ export async function loadSecrets(
 ): Promise<Record<string, string>> {
   const text = await readSecretsFile(paths.secretsFile, io.platform);
   return text === undefined ? {} : parseSecretsText(text);
+}
+
+/** Fail closed on a partial candidate. Read only local cache and check permissions on the opened secret file. */
+export function validProfileNames(paths: LaunchPaths): ReadonlySet<string> {
+  const before = launchFilesStamp(paths.configDir);
+  const config = loadOptionalConfigSync(paths);
+  if (!config) return new Set();
+  let secrets: Record<string, string> = {};
+  let fd: number | undefined;
+  try {
+    fd = openSync(paths.secretsFile, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (fd !== undefined) {
+    try {
+      if ((fstatSync(fd).mode & 0o777) !== 0o600)
+        throw new CliError("密钥文件权限必须为 0600", EXIT.usage);
+      secrets = parseSecretsText(readFileSync(fd, "utf8"));
+    } finally {
+      closeSync(fd);
+    }
+  }
+  validateLaunchSecrets(config, secrets);
+  if (before !== launchFilesStamp(paths.configDir))
+    throw new CliError("启动配置已变化，请重试", EXIT.usage);
+  return new Set(Object.keys(config.profiles));
 }

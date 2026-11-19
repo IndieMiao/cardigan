@@ -80,9 +80,15 @@ test.each([false, true])(
         });
       });
       // A stable, completed publication is required before declaring a manual conflict.
-      upgradeDeployedRoles(store, human.project_id, [], {
-        coder: deploymentRolePolicyHash(source),
-      });
+      upgradeDeployedRoles(
+        store,
+        human.project_id,
+        [],
+        {
+          coder: deploymentRolePolicyHash(source),
+        },
+        new Set(["fixture"]),
+      );
       let exited = false;
       let confirmExit!: () => void;
       const release = vi.fn();

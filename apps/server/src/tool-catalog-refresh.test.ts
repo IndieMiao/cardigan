@@ -357,3 +357,50 @@ test.each([true, false])(
     expect(f.latest()).toMatchObject({ model: "after" });
   },
 );
+
+test.each(["changed effort", "rotated secret", "unchanged"])(
+  "same-model natural wake: %s",
+  async (variation) => {
+    const f = fixture({ employee: true, recorded: "catalog-v2" });
+    const signature = "a".repeat(64);
+    f.store.uow.run((tx) => {
+      const r = tx.runs.get(f.project, f.previous.id);
+      if (!r) throw new Error("Missing previous Run");
+      tx.runs.put(f.project, {
+        ...r,
+        effort: "low",
+        ...(variation !== "changed effort"
+          ? { launch_fingerprint: signature }
+          : {}),
+      });
+    });
+    vi.mocked(f.dispatcher.snapshot).mockResolvedValue({
+      model: "session-model",
+      agent_cli_version: "session-cli",
+      launch_profile_ref: "profile",
+      effort: variation === "changed effort" ? "high" : "low",
+      ...(variation === "changed effort"
+        ? {}
+        : {
+            launch_fingerprint:
+              variation === "rotated secret" ? "b".repeat(64) : signature,
+          }),
+    });
+    f.wake();
+    await new Dispatcher(f.dispatcher).tick();
+    expect(f.runtime.wake).toHaveBeenCalledTimes(
+      variation === "unchanged" ? 1 : 0,
+    );
+    if (variation !== "unchanged")
+      expect(f.dispatcher.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replacement: expect.objectContaining({
+            reason: "launch_profile_changed",
+          }),
+        }),
+      );
+    expect(f.latest()?.effort).toBe(
+      variation === "changed effort" ? "high" : "low",
+    );
+  },
+);

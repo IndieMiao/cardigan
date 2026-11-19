@@ -172,3 +172,43 @@ test("host ops returns deployment and upstream diagnostics together and revalida
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("discard the retired monitor's late observation before reconcile", async () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  store.createProject({ id: "fixture" });
+  const config = () =>
+    parseLaunchConfig({ profiles: { p: { harness: "codex", model: "m" } } });
+  let current = config();
+  const scheduled = Promise.withResolvers<Record<string, never>>();
+  const observe = vi
+    .spyOn(UpstreamHealthMonitor.prototype, "observe")
+    .mockImplementationOnce(async () => scheduled.promise);
+  const reconcile = vi.spyOn(UpstreamHealthMonitor.prototype, "reconcile");
+  const failed = vi.spyOn(UpstreamHealthMonitor.prototype, "observationFailed");
+  const svc = new HostOpsService({
+    store,
+    get upstream() {
+      return current;
+    },
+    runtime: {} as Runtime,
+    snapshot: async () => ({ model: "m", agent_cli_version: "1" }),
+  });
+  try {
+    await svc.tick();
+    expect(observe).toHaveBeenCalledOnce();
+    current = config();
+    await svc.tick();
+    scheduled.resolve({});
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+    await svc.tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reconcile).toHaveBeenCalledOnce();
+  } finally {
+    scheduled.resolve({});
+    await svc.close();
+    store.close();
+    vi.restoreAllMocks();
+  }
+});

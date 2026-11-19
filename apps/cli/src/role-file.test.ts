@@ -570,3 +570,23 @@ test("unknown file and default-pack profiles cannot create a role version", asyn
   expect(await run(["role", "show", "coder", "--history"])).toBe(0);
   expect(JSON.parse(printed())).toHaveLength(1);
 });
+
+test("a role file cannot reference a profile from a rejected config/secrets generation", async () => {
+  writeFileSync(
+    join(root, "config", "launch.yaml"),
+    JSON.stringify({
+      providers: { p: { harness: "codex", secret_env: { TOKEN: "MISSING" } } },
+      profiles: {
+        "codex-agent": { harness: "codex", model: "m", provider: "p" },
+      },
+    }),
+  );
+  expect(await run(["role", "add", "--file", roleFile])).not.toBe(0);
+  expect(errors.join("\n")).toContain("缺少所需的密钥");
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => listRoleVersions(tx, "p-roles"))).toEqual([]);
+  } finally {
+    store.close();
+  }
+});

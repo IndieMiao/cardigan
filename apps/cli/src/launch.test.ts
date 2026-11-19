@@ -746,3 +746,44 @@ test("set-model preflights a private backup, atomically updates the alias and re
     vi.unstubAllGlobals();
   }
 });
+
+test("a failed COMMIT after publication is repaired on same-model retry, exactly once", async () => {
+  harness = await makeHarness({ launchYaml: aliasConfig });
+  const dataDir = join(harness.root, "data");
+  harness.io.env.CARDIGAN_DATA_DIR = dataDir;
+  const store = Store.open({ dataDir });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({})),
+  );
+  try {
+    store.createProject({ id: "p" });
+    store.database.exec(`CREATE TABLE fake_parent (id INTEGER PRIMARY KEY);
+      CREATE TABLE fake_child (id REFERENCES fake_parent(id) DEFERRABLE INITIALLY DEFERRED);
+      CREATE TRIGGER fail_commit AFTER INSERT ON events WHEN NEW.type='launch_model_changed'
+      BEGIN INSERT INTO fake_child VALUES (1); END;`);
+    const change = () =>
+      harness.run(["launch", "set-model", "current", "next"]);
+    const notices = () =>
+      store.uow.read((tx) =>
+        tx.events
+          .listAfter("p", undefined, 0)
+          .filter((e) => e.type === "launch_model_changed"),
+      );
+    expect(await change()).not.toBe(0);
+    expect(
+      await readFile(join(harness.root, "config", "launch.yaml"), "utf8"),
+    ).toContain("id: next");
+    expect(notices()).toHaveLength(0);
+    store.database.exec("DROP TRIGGER fail_commit");
+    expect(await change()).toBe(0);
+    expect(await change()).toBe(0);
+    expect(notices()).toHaveLength(1);
+    expect(
+      store.database.prepare("SELECT * FROM launch_model_intents").all(),
+    ).toEqual([]);
+  } finally {
+    store.close();
+    vi.unstubAllGlobals();
+  }
+});

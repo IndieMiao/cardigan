@@ -13,6 +13,7 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
+  launchFingerprint,
   loadModelLaunchConfig,
   type PreparationRetryOptions,
   prepareRoleWorktree,
@@ -274,6 +275,12 @@ export async function createHostWiring(options: {
         ));
       versions.set(versionKey, version);
       const snapshot = {
+        launch_fingerprint: launchFingerprint(
+          options.store,
+          launch,
+          profileRef,
+          role.capabilities.includes("browser"),
+        ),
         model: profile.model,
         agent_cli_version: version,
         launch_profile_ref: profileRef,
