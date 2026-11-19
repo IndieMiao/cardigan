@@ -24,7 +24,11 @@ import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
-import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
+import {
+  trackSettingsRead,
+  useNumberDraft,
+  useSettingWrite,
+} from "./useSettingWrite.js";
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -59,7 +63,7 @@ export function SettingsPage({
   }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
-    () => client.preferences(projectId),
+    () => trackSettingsRead(client.preferences(projectId)),
     [client, projectId],
   );
   const resource = useResource(load, revision);

@@ -35,13 +35,27 @@ interface Channel {
   pending: { value: unknown; key: string } | undefined;
   unseenError: string | undefined;
   /**
-   * A write confirmed while no view listened. The next view may hold a read
-   * that started before it, so it shows this value and reads again.
+   * A write confirmed while no view listened, stamped with the confirmation
+   * time. The next view applies it only over a read that started earlier.
    */
-  unseenDone: { value: unknown } | undefined;
+  unseenDone: { value: unknown; at: number } | undefined;
   listeners: Set<Listener>;
 }
 const channels = new Map<string, Channel>();
+/** Orders read starts against off-page confirmations. */
+let clock = 0;
+const readStarts = new WeakMap<object, number>();
+/**
+ * Stamps a settings read with its start time, so a write confirmed while no
+ * view listened overrides only reads that started before it.
+ */
+export function trackSettingsRead<T extends object>(read: Promise<T>) {
+  const at = clock;
+  return read.then((data) => {
+    readStarts.set(data, at);
+    return data;
+  });
+}
 const channel = (id: string) => {
   let found = channels.get(id);
   if (!found) {
@@ -78,7 +92,7 @@ async function run(c: Channel, next: unknown, write: Write<unknown>) {
     ok = true;
     if (c.pending?.key === key) c.pending = undefined;
     c.unseenError = undefined;
-    c.unseenDone = c.listeners.size ? undefined : { value: next };
+    c.unseenDone = c.listeners.size ? undefined : { value: next, at: ++clock };
     for (const l of c.listeners) l.done(next);
   } catch (cause) {
     const message = describeWriteError(cause);
@@ -141,8 +155,8 @@ export function useSettingWrite<T>({
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
   // Completions reach whichever render is current.
-  const latest = useRef({ saved, success });
-  latest.current = { saved, success };
+  const latest = useRef({ saved, success, source });
+  latest.current = { saved, success, source };
   useEffect(() => {
     const listener: Listener = {
       start() {
@@ -169,8 +183,15 @@ export function useSettingWrite<T>({
       c.unseenError = undefined;
     }
     const unseen = c.unseenDone;
-    if (unseen) {
-      c.unseenDone = undefined;
+    c.unseenDone = undefined;
+    // A read that started after the confirmation already includes it (or a
+    // later change); an older or unstamped read is replaced and read again.
+    const shown = latest.current.source;
+    const readAt =
+      typeof shown === "object" && shown !== null
+        ? readStarts.get(shown)
+        : undefined;
+    if (unseen && (readAt === undefined || readAt < unseen.at)) {
       setValue(unseen.value as T);
       latest.current.saved();
     }

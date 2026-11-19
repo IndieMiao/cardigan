@@ -9,7 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { PreferencesView } from "../api.js";
+import type { PreferencesView, SystemReminderPolicy } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
@@ -855,3 +855,84 @@ test("a queued off confirmed during the first read on return is not undone by th
   expect(back.getAttribute("aria-checked")).toBe("false");
   expect(writes).toEqual([1, null]);
 });
+
+// C-455 review (V-2184): an off-page confirmation must not override a read
+// that started after it.
+// Only the first save's acknowledgement differs between the two cases.
+// All writes finish before the next editor starts; no concurrent editing.
+for (const background of [false, true])
+  test(`a fresh read after an ${background ? "off-page" : "on-page"} acknowledgement supplies the next policy draft`, async () => {
+    let policy: SystemReminderPolicy = {
+      min_minutes: 1,
+      max_minutes: 60,
+      min_count: 1,
+      max_count: 4,
+      unassigned_ready_after_minutes: 15,
+      pre_merge_check_pending_after_minutes: 20,
+      repeat: false,
+      repeat_interval_minutes: null,
+      max_reminders: 1,
+    };
+    const heldWrite = Promise.withResolvers<void>(),
+      extraRead = Promise.withResolvers<void>();
+    const readsOnReturn: number[] = [];
+    let returning = false,
+      writes = 0;
+    const client = fakeClient({
+      preferences: async () => {
+        const snapshot = { ...policy };
+        if (returning) {
+          readsOnReturn.push(snapshot.max_minutes);
+          if (readsOnReturn.length === 2) await extraRead.promise;
+        }
+        return {
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          system_reminder_policy: snapshot,
+        };
+      },
+      setSystemRules: async (_project, patch) => {
+        if (++writes === 1) await heldWrite.promise;
+        policy = { ...(patch.system_reminder_policy as SystemReminderPolicy) };
+      },
+    });
+    const page = () => <SettingsPage client={client} projectId="p-1" />;
+    const open = async () => {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "编辑催办阈值" }),
+      );
+      return within(await screen.findByRole("dialog", { name: "催办阈值" }));
+    };
+    const view = render(page());
+    let dialog = await open();
+    fireEvent.change(dialog.getByLabelText(/就绪未指派：等待分钟数/), {
+      target: { value: "18" },
+    });
+    fireEvent.click(dialog.getByRole("button", { name: "保存催办阈值" }));
+    expect(writes).toBe(1);
+    if (background) view.unmount();
+    await act(async () => heldWrite.resolve());
+    if (!background) view.unmount();
+    expect(policy.unassigned_ready_after_minutes).toBe(18);
+    // Another settings window completes its save while this one is away.
+    policy = { ...policy, max_minutes: 120 };
+    returning = true;
+    render(page());
+    dialog = await open();
+    expect(readsOnReturn[0]).toBe(120);
+    // Release any additional refresh *before* the user changes anything.
+    await act(async () => extraRead.resolve());
+    const shown = Number(
+      (dialog.getByLabelText("允许的最多分钟数") as HTMLInputElement).value,
+    );
+    fireEvent.change(dialog.getByLabelText(/就绪未指派：等待分钟数/), {
+      target: { value: "25" },
+    });
+    fireEvent.click(dialog.getByRole("button", { name: "保存催办阈值" }));
+    await act(async () => {});
+    expect({
+      shown,
+      storedMax: policy.max_minutes,
+      storedWait: policy.unassigned_ready_after_minutes,
+    }).toEqual({ shown: 120, storedMax: 120, storedWait: 25 });
+  });
