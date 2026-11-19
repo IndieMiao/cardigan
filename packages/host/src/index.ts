@@ -133,6 +133,9 @@ export {
   VERIFIER_LAUNCH_REVISION,
   WORKTREE_LAUNCH_LEASE_MS,
 } from "./launch.js";
+export { launchFilesStamp } from "./launch-files-stamp.js";
+export { launchFingerprint } from "./launch-fingerprint.js";
+export { recordLaunchNotice } from "./launch-notice.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";

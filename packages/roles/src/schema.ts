@@ -123,6 +123,13 @@ const browserSchema = z.strictObject({
 
 const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
+  launch_check: z
+    .strictObject({
+      max_pages: z.number().int().positive().optional(),
+      timeout_ms: positiveMillis.optional(),
+      max_bytes: z.number().int().positive().optional(),
+    })
+    .optional(),
   model_catalog: z
     .strictObject({
       max_age_ms: positiveMillis.optional(),
@@ -573,6 +580,24 @@ export function requiredSecretKeys(
     keys.add(key);
   }
   return [...keys];
+}
+
+/** Check the complete candidate before either file becomes active. */
+export function validateLaunchSecrets(
+  config: LaunchConfig,
+  secrets: Readonly<Record<string, string>>,
+) {
+  for (const profile of Object.keys(config.profiles)) {
+    if (
+      requiredSecretKeys(config, profile).some(
+        (key) => !Object.hasOwn(secrets, key) || !secrets[key],
+      )
+    )
+      throw new LaunchConfigError(
+        "missing_secret",
+        `启动配置 ${profile} 缺少所需的密钥`,
+      );
+  }
 }
 
 /**

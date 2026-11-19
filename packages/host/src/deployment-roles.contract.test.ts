@@ -70,9 +70,15 @@ test.each(["pm", "host_ops"] as const)(
           role: { role_version: 1, allowed_tools: previous.allowed_tools },
         });
       });
-      upgradeDeployedRoles(store, project, [roleId], {
-        [roleId]: deploymentRolePolicyHash(previous),
-      });
+      upgradeDeployedRoles(
+        store,
+        project,
+        [roleId],
+        {
+          [roleId]: deploymentRolePolicyHash(previous),
+        },
+        new Set(["fixture"]),
+      );
       store.uow.read((tx) => {
         expect(getRoleVersion(tx, project, roleId)?.version).toBe(2);
         expect(tx.assignments.get(project, owner.id)?.status).toBe("active");
@@ -160,9 +166,15 @@ test.each(["frontend_engineer", "design_director"] as const)(
         });
       });
       for (let i = 0; i < 2; i++) {
-        upgradeDeployedRoles(store, project, [roleId], {
-          [roleId]: deploymentRolePolicyHash(previous),
-        });
+        upgradeDeployedRoles(
+          store,
+          project,
+          [roleId],
+          {
+            [roleId]: deploymentRolePolicyHash(previous),
+          },
+          new Set(["fixture"]),
+        );
         rotateIdleDeployedRoles(store, project);
       }
       store.uow.read((tx) => {

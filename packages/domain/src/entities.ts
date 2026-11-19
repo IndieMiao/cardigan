@@ -641,6 +641,8 @@ export interface Run {
     readonly elapsed_ms: number;
   };
   readonly employee_id?: EmployeeId;
+  /** Opaque host-keyed identity of the configuration used by the session. */
+  readonly launch_fingerprint?: string;
   /** Actual launch profile; absent on legacy runs. */
   readonly launch_profile_ref?: string;
   /**

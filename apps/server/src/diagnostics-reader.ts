@@ -15,7 +15,7 @@ import type { LaunchConfig } from "@cardigan/roles";
 
 export interface DiagnosticsOptions {
   dbPath: string;
-  upstream?: LaunchConfig;
+  upstream?: LaunchConfig | undefined;
   contextUsage?: Omit<
     NonNullable<
       ConstructorParameters<typeof HostOpsService>[0]["contextUsage"]
@@ -27,6 +27,7 @@ export interface DiagnosticsOptions {
 /** One private reader connection; no command state is decoded on the Web thread. */
 export class DiagnosticsReader {
   private worker: Worker | undefined;
+  private generation?: LaunchConfig | undefined;
   private closed = false;
   private serial = 0;
   private readonly pending = new Map<
@@ -47,7 +48,17 @@ export class DiagnosticsReader {
   private start() {
     if (this.closed)
       throw new ToolError("illegal_transition", "Diagnostics reader is closed");
-    if (this.worker) return this.worker;
+    if (this.worker) {
+      if (this.generation !== this.options.upstream) {
+        this.worker.postMessage({
+          kind: "upstream",
+          upstream: this.options.upstream,
+        });
+        this.generation = this.options.upstream;
+      }
+      return this.worker;
+    }
+    this.generation = this.options.upstream;
     const worker = new Worker(
       new URL("../dist/diagnostics-worker.js", import.meta.url),
       {

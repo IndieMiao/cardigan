@@ -147,7 +147,12 @@ import { profileSpan, profileSpanSync } from "./tick-profile.js";
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
 export type LaunchSnapshot = Pick<
   Run,
-  "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
+  | "model"
+  | "agent_cli_version"
+  | "launch_profile_ref"
+  | "launch_fingerprint"
+  | "harness"
+  | "effort"
 >;
 
 export interface DispatcherOptions {
@@ -211,6 +216,7 @@ export interface DispatcherOptions {
     assignment: Assignment;
     run: Run;
     bell: string;
+    snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
   /** Prepare Git after claiming an idle Run; append current baseline to its prompt. */
@@ -863,13 +869,17 @@ export class Dispatcher {
         queued.recovery_policy.root_run_id !== queued.id
       ) {
         snapshot = queued;
-      } else if (a.employee_id) {
+      } else if (a.employee_id || (live && prior?.launch_profile_ref)) {
         snapshot = await this.options.snapshot(a, project);
         replaceProfile =
           live &&
           snapshot.launch_profile_ref !== undefined &&
           (prior?.launch_profile_ref !== snapshot.launch_profile_ref ||
-            prior.model !== snapshot.model);
+            prior.model !== snapshot.model ||
+            (snapshot.launch_fingerprint !== undefined
+              ? prior.launch_fingerprint !== snapshot.launch_fingerprint
+              : prior.effort !== snapshot.effort ||
+                prior.harness !== snapshot.harness));
         if (replaceProfile) {
           live = false;
           if (a.runtime_ref)
@@ -1059,7 +1069,9 @@ export class Dispatcher {
             { force: true },
           );
           if (!released.ok)
-            throw new Error("Previous employee session could not be released");
+            throw new Error(
+              "Previous launch profile session could not be released",
+            );
         }
         await profileSpan("deliver.start_run", () =>
           this.options.startRun({
@@ -1067,6 +1079,7 @@ export class Dispatcher {
             assignment: job.assignment,
             run: job.run,
             bell: job.bell,
+            snapshot,
             ...(replacement ? { replacement } : {}),
           }),
         );
@@ -1431,6 +1444,9 @@ export class Dispatcher {
         run = {
           ...rest,
           ...launchSettings(snapshot),
+          ...(snapshot.launch_fingerprint
+            ? { launch_fingerprint: snapshot.launch_fingerprint }
+            : {}),
           model: snapshot.model,
           agent_cli_version: snapshot.agent_cli_version,
           launch_profile_ref: snapshot.launch_profile_ref,

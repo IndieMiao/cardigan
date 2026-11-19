@@ -19,6 +19,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import type { StartById } from "./assignment.js";
 import { CLI_TOOLS } from "./command-access.js";
 import { issueTokenForAssignment, runCommand } from "./host.js";
@@ -45,7 +46,11 @@ beforeEach(async () => {
   errors = [];
   io = {
     cwd: dir,
-    env: { CARDIGAN_DATA_DIR: dir, CARDIGAN_RUNTIME_MODE: "local" },
+    env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(dir, "fixture"),
+      CARDIGAN_DATA_DIR: dir,
+      CARDIGAN_RUNTIME_MODE: "local",
+    },
     platform: "linux",
     stdout: (line) => output.push(line),
     stderr: (line) => errors.push(line),

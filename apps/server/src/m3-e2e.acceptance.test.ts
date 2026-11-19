@@ -24,6 +24,7 @@ import { parseLaunchConfig } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -321,6 +322,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     );
     writeFile(join(root, "agent.mjs"), AGENT);
 
+    roleConfig(root, "pi-agent");
     expect((await cardigan(["init"])).code).toBe(0);
     expect((await cardigan(["project", "create", project_id])).code).toBe(0);
     expect(

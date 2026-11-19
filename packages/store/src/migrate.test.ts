@@ -166,6 +166,7 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 41, name: "precheck_head_proofs" },
       { version: 42, name: "bell_continuation" },
       { version: 43, name: "review_wake_boundary" },
+      { version: 44, name: "launch_generations" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { type CliIo, main, resolveDataDir } from "./index.js";
 
 let root: string, io: CliIo, out: string[], err: string[];
@@ -13,7 +14,10 @@ beforeEach(() => {
   out = [];
   err = [];
   io = {
-    env: { HOME: join(root, "home") },
+    env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(root, "codex-agent"),
+      HOME: join(root, "home"),
+    },
     cwd: join(root, "repo"),
     platform: "linux",
     stdout: (s) => out.push(s),

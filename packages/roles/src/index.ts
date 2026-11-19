@@ -98,6 +98,7 @@ export {
   type ResolvedProfile,
   requiredSecretKeys,
   resolveProfile,
+  validateLaunchSecrets,
 } from "./schema.js";
 export {
   compiledLaunchSettings,

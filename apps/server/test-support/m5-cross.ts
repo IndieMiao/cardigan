@@ -43,6 +43,7 @@ export async function m5Cross(
     }
   })();
   const web = await startWebServer({
+    launchProfiles: () => ["fixture", "codex-agent"],
     ...options,
     store,
     dataDir: f.dataDir,

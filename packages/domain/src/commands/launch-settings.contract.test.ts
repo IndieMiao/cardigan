@@ -18,7 +18,11 @@ beforeEach(setup);
 const runOf = (runId: string) => f.state.runs.find((r) => r.id === runId);
 const launch = (
   runId: string,
-  settings: { harness?: "claude-code" | "codex" | "pi"; effort?: string },
+  settings: {
+    harness?: "claude-code" | "codex" | "pi";
+    effort?: string;
+    launch_fingerprint?: string;
+  },
   runtime_ref = ref,
 ) =>
   commit(
@@ -113,7 +117,11 @@ test("C-106: a launch snapshot replaces the queued settings as a whole", () => {
 
 test("C-106: a Run on the existing terminal takes its session's settings, not later config", () => {
   const first = commit(queue());
-  launch(first.id, { harness: "codex", effort: "high" });
+  launch(first.id, {
+    harness: "codex",
+    effort: "high",
+    launch_fingerprint: "a".repeat(64),
+  });
   finish(first.id);
   // Queued later with different values (e.g. after launch.yaml changed); the
   // live session still runs with what it was started with.
@@ -134,6 +142,8 @@ test("C-106: a Run on the existing terminal takes its session's settings, not la
   commit(dispatchRun(f.state, human, { run_id: next.id }, f.io));
   expect(runOf(next.id)).toMatchObject({ harness: "codex", effort: "high" });
 
+  expect(runOf(next.id)?.launch_fingerprint).toBe("a".repeat(64));
+
   // A new terminal records the new launch's values.
   finish(next.id);
   const replaced = commit(queue());
@@ -145,6 +155,7 @@ test("C-106: a Run on the existing terminal takes its session's settings, not la
       terminal_ref: "t2",
     },
   );
+  expect(runOf(replaced.id)).not.toHaveProperty("launch_fingerprint");
   expect(runOf(replaced.id)).toMatchObject({ harness: "codex", effort: "low" });
 });
 

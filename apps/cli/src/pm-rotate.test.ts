@@ -20,6 +20,7 @@ import {
   tokensForAssignment,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { stopAssignment } from "./assignment.js";
 import { humanActor, runCommand } from "./host.js";
 import { main } from "./index.js";
@@ -44,6 +45,7 @@ beforeEach(() => {
   errors = [];
   io = {
     env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(root, "claude-pm"),
       CARDIGAN_RUNTIME_MODE: "local",
       CARDIGAN_DATA_DIR: join(root, "data"),
     },

@@ -82,8 +82,20 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
       const before = store.uow.read((tx) =>
         getRoleVersion(tx, project, "host_ops"),
       );
-      upgradeDeployedRoles(store, project, ["host_ops"], baseline);
-      upgradeDeployedRoles(store, project, ["host_ops"], baseline);
+      upgradeDeployedRoles(
+        store,
+        project,
+        ["host_ops"],
+        baseline,
+        new Set(["fixture", "project-host-ops"]),
+      );
+      upgradeDeployedRoles(
+        store,
+        project,
+        ["host_ops"],
+        baseline,
+        new Set(["fixture", "project-host-ops"]),
+      );
       store.uow.read((tx) => {
         const after = getRoleVersion(tx, project, "host_ops");
         if (mode === "launch_only") {
@@ -197,12 +209,24 @@ test.each(["safe", "widening", "manual"] as const)(
         });
       });
       expect(
-        upgradeDeployedRoles(store, project, [], baseline),
+        upgradeDeployedRoles(
+          store,
+          project,
+          [],
+          baseline,
+          new Set(["fixture", "project-host-ops"]),
+        ),
       ).toBeUndefined();
       expect(
         store.uow.read((tx) => getRoleVersion(tx, project, "pm")?.version),
       ).toBe(1);
-      const next = upgradeDeployedRoles(store, project, ["pm"], baseline);
+      const next = upgradeDeployedRoles(
+        store,
+        project,
+        ["pm"],
+        baseline,
+        new Set(["fixture", "project-host-ops"]),
+      );
       store.uow.read((tx) => {
         expect(getRoleVersion(tx, project, "pm")?.version).toBe(
           blocked ? 1 : 2,
@@ -238,7 +262,13 @@ test.each(["safe", "widening", "manual"] as const)(
           );
         }
       });
-      upgradeDeployedRoles(store, project, ["pm"], baseline);
+      upgradeDeployedRoles(
+        store,
+        project,
+        ["pm"],
+        baseline,
+        new Set(["fixture", "project-host-ops"]),
+      );
       expect(
         store.uow.read((tx) => tx.human_actions.list(project)),
       ).toHaveLength(blocked ? 1 : 0);
@@ -290,9 +320,15 @@ test("MC-2 deployed machine capabilities append a role version while keeping wor
         role: { role_version: 1, allowed_tools: old.allowed_tools },
       });
     });
-    upgradeDeployedRoles(store, project, ["frontend_engineer"], {
-      frontend_engineer: deploymentRolePolicyHash(old),
-    });
+    upgradeDeployedRoles(
+      store,
+      project,
+      ["frontend_engineer"],
+      {
+        frontend_engineer: deploymentRolePolicyHash(old),
+      },
+      new Set(["fixture", "project-host-ops"]),
+    );
     store.uow.read((tx) => {
       expect(getRoleVersion(tx, project, "frontend_engineer")).toMatchObject({
         version: 2,

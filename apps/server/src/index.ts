@@ -114,6 +114,7 @@ export async function runServer(
   // Each role owns a connection to the same WAL database.
   const store = Store.open({ dataDir: config.dataDir });
   let server: CardiganServer | undefined;
+  let refresh: () => Promise<unknown>;
   try {
     const host = await createHostWiring({
       env,
@@ -126,6 +127,7 @@ export async function runServer(
         ? {}
         : { execution: config.execution }),
     });
+    refresh = host.refreshLaunch;
     server = await startCardiganServer({
       role: options.role ?? "web",
       config,
@@ -140,7 +142,9 @@ export async function runServer(
       web: { config: webConfig },
       dispatcher: {
         runtime: host.runtime,
-        upstream: host.upstream,
+        get upstream() {
+          return host.upstream;
+        },
         snapshot: host.snapshot,
         startRun: host.startRun,
         recoverLaunches: host.recoverLaunches,
@@ -162,8 +166,22 @@ export async function runServer(
 
   // A supervisor may send SIGTERM as soon as it reads ready. Install the
   // handlers before publishing it, even if stdout wakes the parent immediately.
+  let polling: Promise<unknown> | undefined;
+  const timer = setInterval(() => {
+    polling ??= refresh()
+      .catch(() => write("启动配置重载告警未能记录"))
+      .finally(() => {
+        polling = undefined;
+      });
+  }, config.launchReloadIntervalMs).unref();
+  const running = server;
   const shutdown = awaitShutdown({
-    server,
+    server: {
+      close: async () => {
+        clearInterval(timer);
+        await Promise.all([running.close(), polling]);
+      },
+    },
     store,
     write,
     graceMs: config.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,

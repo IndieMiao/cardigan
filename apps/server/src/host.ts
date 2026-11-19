@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -13,10 +13,12 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
+  launchFingerprint,
   loadModelLaunchConfig,
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
+  recordLaunchNotice,
   recoverLaunchPublications,
   resolveMcpUrl,
   withPreparationQueue,
@@ -29,6 +31,7 @@ import {
   profileLaunchSettings,
   reportLaunchWarnings,
   resolveProfile,
+  validateLaunchSecrets,
 } from "@cardigan/roles";
 import {
   type ExecutionConfig,
@@ -43,6 +46,8 @@ import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
+import { liveLaunch } from "./live-launch.js";
+
 const exec = promisify(execFile);
 
 /**
@@ -52,6 +57,7 @@ const exec = promisify(execFile);
  */
 export interface HostWiring {
   readonly recoverLaunches: (project: ProjectId) => Promise<void>;
+  readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
@@ -64,6 +70,7 @@ export interface HostWiring {
     assignment: Assignment;
     run: Run;
     bell: string;
+    snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
   readonly standing: ReturnType<typeof standingResolver>;
@@ -79,7 +86,7 @@ export interface HostEnv extends ServerEnv {
 export const configDir = (env: HostEnv): string =>
   env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan");
 
-/** `launch.yaml` and `secrets.env` are read once at startup, like the CLI does. */
+/** Load a complete generation; never publish individual file changes. */
 export async function loadLaunchFiles(
   dir: string,
   report: (message: string) => void = console.warn,
@@ -98,18 +105,24 @@ export async function loadLaunchFiles(
       `找不到启动配置：${launchFile}（先运行 cardigan launch import-claude-settings 或手写）`,
     );
   }
-  const config = await loadModelLaunchConfig(parseYaml(text) ?? {}, dataDir);
+  const raw = parseYaml(text, { prettyErrors: false });
+  if (raw == null) throw new Error("启动配置为空");
+  const config = await loadModelLaunchConfig(raw, dataDir);
   reportLaunchWarnings(config, report);
   let secrets: Readonly<Record<string, string>> = {};
   try {
-    const entry = await stat(secretsFile);
-    // The host never sources a credential file other users can read (§9.1).
-    if ((entry.mode & 0o077) !== 0)
-      throw new Error(`${secretsFile} 的权限必须收紧到 600（chmod 600）`);
-    secrets = parseSecretsText(await readFile(secretsFile, "utf8"));
+    const file = await open(secretsFile, "r");
+    try {
+      if (((await file.stat()).mode & 0o777) !== 0o600)
+        throw new Error(`${secretsFile} 的权限必须收紧到 600（chmod 600）`);
+      secrets = parseSecretsText(await file.readFile("utf8"));
+    } finally {
+      await file.close();
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  validateLaunchSecrets(config, secrets);
   return { config, secrets };
 }
 
@@ -169,17 +182,32 @@ export async function createHostWiring(options: {
       `运行时不可用：${created.error.code} ${created.error.message}`,
     );
   const runtime = created.value;
-  const launch = await loadLaunchFiles(
-    configDir(env),
-    undefined,
-    options.dataDir,
+  const dir = configDir(env);
+  const live = await liveLaunch(
+    dir,
+    () => loadLaunchFiles(dir, undefined, options.dataDir),
+    () => {
+      const message =
+        "主机启动配置重载失败，继续使用上一版。请检查 launch.yaml、secrets.env 及其权限。";
+      console.warn(message);
+      options.store.uow.run((tx) =>
+        recordLaunchNotice(options.store, tx, "launch_reload_failed", message),
+      );
+    },
   );
+  const generations = new WeakMap<
+    LaunchSnapshot,
+    Awaited<ReturnType<typeof loadLaunchFiles>>
+  >();
   const mcpUrl = hostMcpUrl(options.url, env);
   const versions = new Map<string, string>();
 
   return {
     runtime,
-    upstream: launch.config,
+    get upstream() {
+      return live.current().config;
+    },
+    refreshLaunch: live.refresh,
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
@@ -225,6 +253,7 @@ export async function createHostWiring(options: {
       );
       const profileRef =
         employee?.launch_profile_ref ?? role.launch_profile_ref;
+      const launch = await live.refresh();
       const profile = resolveProfile(launch.config, profileRef).profile;
       if (profile.model === undefined)
         throw new Error("The launch profile has no model");
@@ -245,13 +274,21 @@ export async function createHostWiring(options: {
           binary,
         ));
       versions.set(versionKey, version);
-      return {
+      const snapshot = {
+        launch_fingerprint: launchFingerprint(
+          options.store,
+          launch,
+          profileRef,
+          role.capabilities.includes("browser"),
+        ),
         model: profile.model,
         agent_cli_version: version,
         launch_profile_ref: profileRef,
         // C-106: the launch replaces these with the compiled arguments' values.
         ...profileLaunchSettings(profile),
       };
+      generations.set(snapshot, launch);
+      return snapshot;
     },
     recoverLaunches: (project) =>
       recoverLaunchPublications(
@@ -263,12 +300,14 @@ export async function createHostWiring(options: {
         },
         project,
       ),
-    startRun: (input) =>
+    startRun: async (input) =>
       startQueuedRun(
         {
           store: options.store,
           runtime,
-          launch,
+          launch:
+            (input.snapshot && generations.get(input.snapshot)) ??
+            (await live.refresh()),
           mcpUrl: mcpUrl(),
           dataDir: options.dataDir,
           configDir: configDir(env),

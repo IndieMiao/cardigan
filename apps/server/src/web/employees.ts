@@ -10,6 +10,7 @@ import {
   MAX_AVATAR_BYTES,
   parseAvatarReference,
   type Result,
+  updateEmployee,
 } from "@cardigan/domain";
 import {
   fileAvatarStore,
@@ -30,6 +31,7 @@ import {
 } from "./http.js";
 
 interface EmployeeContext {
+  readonly launchProfiles?: (() => readonly string[]) | undefined;
   readonly req: IncomingMessage;
   readonly res: ServerResponse;
   readonly store: Store;
@@ -55,6 +57,7 @@ const employeeInput = z
     name: boundedEmployeeText(40),
     title: boundedEmployeeText(40),
     role_id: z.string(),
+    launch_profile_ref: z.string().nullable().optional(),
     bio: boundedEmployeeText(200).optional(),
     avatar: z.string().optional(),
     avatar_file: z.string().min(1).max(maxBase64).optional(),
@@ -91,12 +94,29 @@ function must<T>(result: Result<T>): T {
   );
 }
 
+/** A null override selects the project role; it must still resolve after a reload. */
+function checkInheritedProfile(
+  c: EmployeeContext,
+  tx: Pick<ReadRepositories, "roles">,
+  roleId: string,
+) {
+  const role = getRoleVersion(tx, c.project_id, roleId);
+  if (!role || !c.launchProfiles?.().includes(role.launch_profile_ref))
+    throw new HttpRejection(
+      400,
+      "validation_failed",
+      `员工角色 ${roleId} 的启动配置 ${role?.launch_profile_ref ?? ""} 不存在，请选用已有配置`,
+    );
+}
+
 /** Only owner sessions reach this transport; the global domain command audits human writes. */
 export async function serveEmployees(
   c: EmployeeContext,
   rest: string,
 ): Promise<boolean> {
-  if (rest !== "/employees/options" && rest !== "/employees") return false;
+  const update = /^\/employees\/(E-[1-9]\d*)\/update$/u.exec(rest)?.[1];
+  if (!update && rest !== "/employees/options" && rest !== "/employees")
+    return false;
   c.store.uow.read((tx) => owner(c, tx));
   if (rest === "/employees/options") {
     if (c.req.method !== "GET") methodNotAllowed(["GET"]);
@@ -141,25 +161,12 @@ export async function serveEmployees(
     .min(1)
     .max(256)
     .safeParse(c.req.headers["idempotency-key"]);
-  const parsed = employeeInput.safeParse(body);
-  if (!key.success || !parsed.success)
+  if (!key.success)
     throw new HttpRejection(
       400,
       "validation_failed",
       "提交的内容不完整，请刷新页面后重试",
     );
-  const { avatar_file, avatar: requestedAvatar, ...fields } = parsed.data;
-  if (
-    requestedAvatar !== undefined &&
-    (avatar_file !== undefined ||
-      parseAvatarReference(requestedAvatar)?.kind !== "library")
-  )
-    throw new HttpRejection(
-      400,
-      "validation_failed",
-      "请选择人物库中的人物，或上传自定义头像，不能同时使用",
-    );
-
   const execute = <T>(operation: (tx: StoreTransactionContext) => T): T => {
     // Check again even on an idempotent replay; body/blob IO may have outlived the session.
     c.store.uow.read((tx) => owner(c, tx));
@@ -177,6 +184,58 @@ export async function serveEmployees(
       ),
     ).value;
   };
+  if (update) {
+    const parsed = z
+      .object({ launch_profile_ref: z.string().nullable() })
+      .strict()
+      .safeParse(body);
+    if (!parsed.success)
+      throw new HttpRejection(400, "validation_failed", "请指定启动配置");
+    const result = execute((tx) => {
+      const effect = must(
+        updateEmployee(
+          tx.employees.list(),
+          { kind: "human" },
+          update as EmployeeId,
+          parsed.data,
+          {
+            clock: c.clock,
+            ids: tx.global_ids,
+            launch_profiles: c.launchProfiles?.() ?? [],
+          },
+        ),
+      );
+      if (effect.data.launch_profile_ref === null) {
+        checkInheritedProfile(c, tx, effect.data.role_id);
+      }
+      persistEmployeeEffect(tx, effect);
+      return {
+        id: effect.data.id,
+        launch_profile_ref: effect.data.launch_profile_ref,
+      };
+    });
+    sendJson(c.res, 200, result);
+    return true;
+  }
+  const parsed = employeeInput.safeParse(body);
+  if (!parsed.success)
+    throw new HttpRejection(
+      400,
+      "validation_failed",
+      "提交的内容不完整，请刷新页面后重试",
+    );
+  const { avatar_file, avatar: requestedAvatar, ...fields } = parsed.data;
+  if (
+    requestedAvatar !== undefined &&
+    (avatar_file !== undefined ||
+      parseAvatarReference(requestedAvatar)?.kind !== "library")
+  )
+    throw new HttpRejection(
+      400,
+      "validation_failed",
+      "请选择人物库中的人物，或上传自定义头像，不能同时使用",
+    );
+
   const missing = Symbol("uncached employee creation");
   try {
     const cached = execute(() => {
@@ -200,6 +259,8 @@ export async function serveEmployees(
         "validation_failed",
         "请选择本项目已启用的角色",
       );
+    if (fields.launch_profile_ref == null)
+      checkInheritedProfile(c, tx, fields.role_id);
     return must(
       createEmployee(
         tx.employees.list(),
@@ -208,10 +269,13 @@ export async function serveEmployees(
           name: fields.name,
           title: fields.title,
           role_id: fields.role_id,
+          ...(fields.launch_profile_ref === undefined
+            ? {}
+            : { launch_profile_ref: fields.launch_profile_ref }),
           ...(fields.bio === undefined ? {} : { bio: fields.bio }),
           ...(avatar === undefined ? {} : { avatar }),
         },
-        { clock: c.clock, ids },
+        { clock: c.clock, ids, launch_profiles: c.launchProfiles?.() ?? [] },
       ),
     );
   };
