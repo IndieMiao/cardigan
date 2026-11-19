@@ -223,12 +223,25 @@ HC_SESSION=cg HC_SOCKET="$HOME/.local/state/herdr-core/cg/cg.sock" \
 
 控制主机用**与服务相同的本地 hc 环境**查看 `hc machine ls --json`。旧 Darwin alias 的 target 与新入口不同，会故意报 `invalid_launch`，不会自动覆盖。确认该 alias 没有任何活跃引用后执行 `hc machine rm example-worker-a`（仅忘记连接登记，不停止远端终端），重载控制主机配置，再执行 `cardigan machine check worker-a --project example`，由新入口登记。不要执行 `hc machine update`，它会尝试安装/升级远端二进制；本卡没有更改 hc 版本。
 
+#### 迁移收尾
+
+1. 确认第 5 节的配置核对已完成。由人本人在控制主机私有 `runtime-workers.yaml` 中，给本机对应的项目绑定加回迁移期间删除的 `allow_remote_launch: true`，然后重载配置。向导不写这个字段；自 C-451 起，单独加回它不会触发 `worker_config_conflict`。
+2. 在控制主机恢复接单并依次检查（沿用本节示例机器和项目）：
+
+   ```sh
+   cardigan machine update worker-a --project example --status online
+   cardigan worker check --project example --machine worker-a
+   cardigan machine check worker-a --project example
+   ```
+
+3. `worker check` 的九项检查全部通过且 `machine check` 显示 `launch_enabled=true` 后，用一张真实小卡验证远程派发、提交回传、预检、审核与合并。小卡通过且无活跃 Run 后，再由人在 Mac 前分别锁屏、注销、重启各一次；每次从控制主机重跑上面的 `machine check`，确认无须桌面登录或手工启动核心。
+
 ### 现场验收与预期输出
 
 1. `cardigan worker check --project example --machine worker-a`：九步均 passed；resources 不再要求常驻 LaunchDaemon。`launchctl print system/<旧 label>` 仍是明确的 113。保留失败原始日志供排查，不把任意非零当成服务不存在。
-2. 完成远程启动原有前置并启用私有开关后，用 `cardigan machine update worker-a --project example --status online` 恢复接单，连续执行三次 `cardigan machine check worker-a --project example`：均 `launch_enabled=true`，不出现 runtime_timeout/runtime_unavailable。关闭所有管理 SSH 连接再检查一次；用专用账号 `ps -u <账号> -o pid,ppid,command` 核对该 session 只有一个 serve 核心（connect 可有多个，holder 不是重复核心），core.log 没有本次新增 GUI bootstrap 125。不同 session 不算同一核心。
+2. 恢复接单后，连续执行三次 `cardigan machine check worker-a --project example`：均 `launch_enabled=true`，不出现 runtime_timeout/runtime_unavailable。关闭所有管理 SSH 连接再检查一次；用专用账号 `ps -u <账号> -o pid,ppid,command` 核对该 session 只有一个 serve 核心（connect 可有多个，holder 不是重复核心），core.log 没有本次新增 GUI bootstrap 125。不同 session 不算同一核心。
 3. 仅在无活跃终端时，用专用账号的同 HOME/session/socket 环境执行 `hc server stop`，再运行 machine check：恢复成功，新核心唯一。不要手工制造或删除生产 socket；残留 socket 与锁争用由确定性夹具覆盖。
-4. 发起一个正常空 Run，确认模型凭据、MCP、工作目录和完成回报均正常；保留 run_id。待该 Run 完整退出后测试锁屏、注销和重启，再 machine check；重启后首次连接按需启动，不要求开机预先运行 hc。
+4. 发起一个正常空 Run，确认模型凭据、MCP、工作目录和完成回报均正常；保留 run_id。空 Run 不替代迁移收尾的真实小卡验收；重启后首次连接按需启动，不要求开机预先运行 hc。
 5. 修改向导私有 YAML 的合法配置后先 resume：预期 worker_config_changed 和带新摘要的确认命令；核对后执行该命令，旧记录留档、所有步骤重查。错误摘要不能通过，物理机器/已应用配置冲突不能绕过。
 
 现场结果须记录软件 SHA、hc 版本、命令/退出码、三次检查与断开 SSH/重启的结果；本卡本地的 Python/Unix socket 合成夹具不等于真实 Mac 实测通过。
