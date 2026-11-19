@@ -33,6 +33,8 @@ import {
   withdrawDispatchStop,
 } from "@cardigan/domain";
 import {
+  bindRepairAttempt,
+  crossRepairSendBoundary,
   deferIfTargetWait,
   failAutomaticContextRun,
   refreshTargetWait,
@@ -44,6 +46,7 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
   beginDispatchRetry,
+  confirmReviewNotSent,
   listBellAttempts,
   moveNotification,
   recordNotification,
@@ -507,27 +510,46 @@ export async function retryDispatchedRuns(
       // the withdrawal proof. Empty legacy history alone authorizes nothing.
       const fromWithdrawal = resumableReviewWithdrawal(state, a, run);
       const withdrawn = !last && fromWithdrawal;
+      const binding = last?.review_wake;
+      const target = binding && repairWakeTarget(state, run);
+      const sameTarget =
+        !!binding &&
+        target?.id === binding.delivery_id &&
+        target.subject.value === binding.target_sha &&
+        target.status !== "superseded" &&
+        !state.deliveries.some((d) => d.supersedes === target.id);
+      const disposition = reviewRunWakeDisposition(state, a, run);
+      const shared =
+        sameTarget &&
+        !disposition &&
+        state.decisions.some(
+          (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
+        );
       const unconfirmed =
         last?.outcome === "failed" &&
-        unconfirmedReviewSend(state, run, last.id);
+        (binding
+          ? shared && !!binding.sending_at
+          : unconfirmedReviewSend(state, run, last.id));
+      // A wait finishing is not a send. Only an actual boundary (or a legacy
+      // result) starts the restored ack window. Clear failures still back off.
+      const noSendYet =
+        withdrawn ||
+        (shared && last?.outcome === "failed" && !binding.sending_at);
+      const ackSince = shared
+        ? (binding.sending_at ??
+          (last?.outcome === "sent" ? last.finished_at : undefined))
+        : fromWithdrawal
+          ? last?.finished_at
+          : undefined;
       const timedOut =
         started &&
         Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
           policy.timeoutMs;
-      // Preparation before the first withdrawal may itself have lasted longer
-      // than the ack timeout. Give the restored send its own ack window.
-      const restoredAt =
-        timedOut && fromWithdrawal
-          ? (last?.finished_at ??
-            eventsOfType(state.events, "run_target_wait_finished").findLast(
-              (e) =>
-                (e.payload as { run_id?: unknown } | null)?.run_id === run.id,
-            )?.created_at)
-          : undefined;
       const recover =
         (timedOut &&
-          (!restoredAt ||
-            Date.parse(at) - Date.parse(restoredAt) >= policy.timeoutMs)) ||
+          !noSendYet &&
+          (!ackSince ||
+            Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
         failures >= policy.maxRetries + 1;
       const retry =
         run.status === "dispatched" &&
@@ -549,7 +571,8 @@ export async function retryDispatchedRuns(
         retry:
           (withdrawn || (retry && !unconfirmed)) &&
           !unreadable &&
-          !reviewRunWakeDisposition(state, a, run),
+          (!binding || sameTarget) &&
+          !disposition,
         at,
         last,
       };
@@ -625,7 +648,11 @@ export async function retryDispatchedRuns(
         outcome: null,
       };
       beginDispatchRetry(store.database, attempt);
-      return { ...current, attempt, bell };
+      return {
+        ...current,
+        attempt: bindRepairAttempt(store, current.state, current.run, attempt),
+        bell,
+      };
     });
     if (!job?.a.runtime_ref) continue;
     const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
@@ -697,6 +724,18 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
+              if (job.attempt.review_wake)
+                return (
+                  !options.closing?.() &&
+                  scope() === reviewPrompt &&
+                  crossRepairSendBoundary(
+                    store,
+                    job.attempt,
+                    job.a,
+                    clock,
+                    job.withdrawn,
+                  ) === "send"
+                );
               if (deferIfTargetWait(store, job.attempt, clock)) {
                 return false;
               }
@@ -714,6 +753,10 @@ export async function retryDispatchedRuns(
           );
           continue;
         }
+        if (result.ok && !result.value.sent && job.attempt.review_wake)
+          store.uow.run(() =>
+            confirmReviewNotSent(store.database, job.attempt),
+          );
         sent = result.ok && result.value.sent;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));

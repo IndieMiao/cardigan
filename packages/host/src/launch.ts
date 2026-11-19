@@ -56,7 +56,9 @@ import {
   writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
 import {
+  type BellAttempt,
   beginLaunchAttempt,
+  confirmReviewNotSent,
   finishBellAttempt,
   type Store,
   unfinishedBellAttempts,
@@ -78,6 +80,7 @@ import {
   preparationPolicy,
   withPreparationQueue,
 } from "./preparation-queue.js";
+import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
   hasEarlierCapacityWait,
@@ -434,7 +437,7 @@ async function launchWithClaim(
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
-    const result = await launch(host, input);
+    const result = await launch(host, input, attempt);
     sent = true;
     return result;
   } catch (error) {
@@ -463,6 +466,7 @@ async function launchWithClaim(
 async function launch(
   host: LaunchHost,
   input: LaunchRunInput,
+  attempt?: BellAttempt,
 ): Promise<LaunchedRun> {
   const clock = host.clock ?? wallClock;
   let execution: ExecutionConfig = host.execution ?? {
@@ -487,7 +491,7 @@ async function launch(
           "Automatic recovery business target changed",
         );
     }
-    if (refreshTargetWait(host.store, project, input.run.id, clock))
+    if (refreshTargetWait(host.store, project, input.run.id, clock, attempt))
       throw new RunTargetDeferred();
   };
   requireTarget();
@@ -652,12 +656,25 @@ async function launch(
         );
       // The persistent attempt excludes concurrent starts throughout preparation.
       const dispatch = () =>
-        applyCommand(host.store, {
-          project,
-          actor: input.actor,
-          clock,
-          reduce: (state, actor, ports) =>
-            dispatchRun(state, actor, { run_id: current.id }, ports),
+        host.store.uow.run((tx) => {
+          const state = loadCommandState(tx, project);
+          const effect = unwrap(
+            dispatchRun(
+              state,
+              input.actor,
+              { run_id: current.id },
+              { clock, ids: tx.ids },
+            ),
+          );
+          persistEffect(tx, project, effect);
+          if (attempt)
+            attempt = bindRepairAttempt(
+              host.store,
+              state,
+              effect.data,
+              attempt,
+            );
+          return effect.data;
         });
       let run: Run | undefined =
         workItem?.kind === "verify" ? undefined : dispatch();
@@ -690,6 +707,16 @@ async function launch(
             .join("\n"),
           {
             before_send: () => {
+              if (attempt?.review_wake) {
+                const gate = crossRepairSendBoundary(
+                  host.store,
+                  attempt,
+                  assignment,
+                  clock,
+                );
+                targetDeferred = gate === "deferred";
+                return gate === "send";
+              }
               targetDeferred = refreshTargetWait(
                 host.store,
                 project,
@@ -708,6 +735,12 @@ async function launch(
           if (targetDeferred) throw new RunTargetDeferred();
           throw new RunWakeWithdrawn();
         }
+        if (result.ok && !result.value.sent && attempt?.review_wake) {
+          const unsent = attempt;
+          host.store.uow.run(() =>
+            confirmReviewNotSent(host.store.database, unsent),
+          );
+        }
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
@@ -717,8 +750,8 @@ async function launch(
         )
           throw error;
         if (!waking) {
-          requireWakeCurrent();
           requireTarget();
+          requireWakeCurrent();
           // Genuine preparation failures keep the established retry protocol.
           run ??= dispatch();
         }

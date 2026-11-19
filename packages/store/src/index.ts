@@ -9,8 +9,11 @@ export {
   beginBellAttempt,
   beginDispatchRetry,
   beginLaunchAttempt,
+  bindReviewWake,
+  confirmReviewNotSent,
   finishBellAttempt,
   listBellAttempts,
+  type ReviewWakeBinding,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "./dispatcher.js";

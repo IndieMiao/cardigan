@@ -51,6 +51,8 @@ import {
 } from "@cardigan/domain";
 import {
   assignmentResourceKeys,
+  bindRepairAttempt,
+  crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
   deferTargetInTransaction,
@@ -85,6 +87,7 @@ import {
   type BellAttempt,
   beginBellAttempt,
   beginLaunchAttempt,
+  confirmReviewNotSent,
   finishBellAttempt,
   getRoleVersion,
   moveNotification,
@@ -1017,8 +1020,15 @@ export class Dispatcher {
                 : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
-                this.activate(job) &&
-                scope() === reviewPrompt,
+                scope() === reviewPrompt &&
+                (job.attempt.review_wake
+                  ? crossRepairSendBoundary(
+                      this.options.store,
+                      job.attempt,
+                      job.assignment,
+                      this.clock,
+                    ) === "send"
+                  : this.activate(job)),
             },
           ),
         );
@@ -1031,6 +1041,12 @@ export class Dispatcher {
             ),
           );
           return;
+        }
+        if (result.ok && !result.value.sent && job.attempt.review_wake) {
+          const unsent = job.attempt;
+          this.options.store.uow.run(() =>
+            confirmReviewNotSent(this.options.store.database, unsent),
+          );
         }
         sent = result.ok && result.value.sent;
         if (!result.ok) ({ reason, failure } = wakeFailure(result.error));
@@ -1474,7 +1490,7 @@ export class Dispatcher {
         started_at: at,
         lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
       };
-      const attempt = ready.length
+      let attempt = ready.length
         ? beginBellAttempt(store.database, intent)
         : beginLaunchAttempt(store.database, intent);
       // Keep producer/standing dispatch timing unchanged. Only verification
@@ -1483,12 +1499,14 @@ export class Dispatcher {
         live &&
         run.status === "queued" &&
         state.work_items.find((w) => w.id === a.work_item_id)?.kind !== "verify"
-      )
-        persistEffect(
-          tx,
-          project,
-          unwrap(dispatchRun(state, actor, { run_id: run.id }, ports)),
+      ) {
+        const effect = unwrap(
+          dispatchRun(state, actor, { run_id: run.id }, ports),
         );
+        persistEffect(tx, project, effect);
+        attempt = bindRepairAttempt(store, state, effect.data, attempt);
+      } else if (live) attempt = bindRepairAttempt(store, state, run, attempt);
+
       const followup = decisionFollowupPrompt(
         state,
         [...new Set([run.trigger_event_id, ...ready.map((n) => n.event_id)])],
@@ -1850,6 +1868,7 @@ export class Dispatcher {
       // A lost acknowledgement (including a crashed sender) cannot certify a
       // failed physical send. Keep attempt-specific evidence for shared review.
       const unconfirmed =
+        !attempt.review_wake &&
         !sent &&
         run?.kind === "rework" &&
         (reason === "interrupted_delivery" ||

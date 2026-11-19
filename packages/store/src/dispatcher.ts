@@ -1,13 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
 import type {
   AssignmentId,
+  DeliveryId,
   Notification,
   ProjectId,
   Run,
   RunId,
 } from "@cardigan/domain";
 
+export interface ReviewWakeBinding {
+  readonly delivery_id: DeliveryId;
+  readonly target_sha: string;
+  /** Written before external IO. Absence on a tracked intent proves pre-send. */
+  readonly sending_at?: string;
+}
 export interface BellAttempt {
+  readonly review_wake?: ReviewWakeBinding;
   readonly project_id: ProjectId;
   readonly id: string;
   readonly assignment_id: AssignmentId;
@@ -22,7 +30,7 @@ export interface BellAttempt {
 }
 export type BeginBellAttempt = Omit<
   BellAttempt,
-  "finished_at" | "outcome" | "continuation"
+  "finished_at" | "outcome" | "continuation" | "review_wake"
 >;
 const requireTransaction = (db: DatabaseSync) => {
   if (!db.isTransaction)
@@ -122,6 +130,50 @@ function beginAttempt(
     outcome: null,
   };
 }
+/** Annotate only an unfinished, owned intent. A replayed callback cannot cross
+ * twice, change the target, or resurrect an intent withdrawn by another tick. */
+export function bindReviewWake(
+  db: DatabaseSync,
+  attempt: BellAttempt,
+  binding: ReviewWakeBinding,
+  sendingAt?: string,
+) {
+  requireTransaction(db);
+  const target = {
+    delivery_id: binding.delivery_id,
+    target_sha: binding.target_sha,
+  };
+  const before = JSON.stringify(target);
+  const after =
+    sendingAt === undefined
+      ? before
+      : JSON.stringify({ ...target, sending_at: sendingAt });
+  return (
+    Number(
+      db
+        .prepare(
+          `UPDATE bell_attempts SET review_wake = ? WHERE project_id = ? AND id = ? AND assignment_id = ? AND run_id = ? AND finished_at IS NULL AND review_wake IS ?`,
+        )
+        .run(
+          after,
+          attempt.project_id,
+          attempt.id,
+          attempt.assignment_id,
+          attempt.run_id,
+          sendingAt === undefined ? null : before,
+        ).changes,
+    ) === 1
+  );
+}
+/** A positive adapter acknowledgement of non-delivery supersedes the send intent. */
+export function confirmReviewNotSent(db: DatabaseSync, attempt: BellAttempt) {
+  requireTransaction(db);
+  db.prepare(`UPDATE bell_attempts SET review_wake=json_remove(review_wake,'$.sending_at')
+      WHERE project_id=? AND id=? AND finished_at IS NULL AND review_wake IS NOT NULL`).run(
+    attempt.project_id,
+    attempt.id,
+  );
+}
 /** A late completion cannot overwrite recovery's already-settled outcome. */
 export function finishBellAttempt(
   db: DatabaseSync,
@@ -150,7 +202,8 @@ export function withdrawBellAttempt(
     Number(
       db
         .prepare(
-          "DELETE FROM bell_attempts WHERE project_id = ? AND id = ? AND finished_at IS NULL",
+          `DELETE FROM bell_attempts WHERE project_id = ? AND id = ? AND finished_at IS NULL
+           AND json_extract(review_wake, '$.sending_at') IS NULL`,
         )
         .run(project, id).changes,
     ) === 1
@@ -196,6 +249,13 @@ function readAttempts(
       assignment_id: String(row.assignment_id) as AssignmentId,
       run_id: String(row.run_id) as RunId,
       notification_ids: JSON.parse(String(row.notification_ids)) as string[],
+      ...(row.review_wake
+        ? {
+            review_wake: JSON.parse(
+              String(row.review_wake),
+            ) as ReviewWakeBinding,
+          }
+        : {}),
       ...(row.continuation === 1 ? { continuation: true as const } : {}),
       started_at: String(row.started_at),
       lease_until: String(row.lease_until),

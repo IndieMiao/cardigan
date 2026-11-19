@@ -204,6 +204,7 @@ export {
   hostRepositoryLock,
   repositoryLockPath,
 } from "./repository-lock.js";
+export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   effectiveRunLimit,
   hasEarlierCapacityWait,

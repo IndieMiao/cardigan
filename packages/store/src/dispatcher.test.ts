@@ -1,11 +1,13 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CardId, Run } from "@cardigan/domain";
+import type { CardId, DeliveryId, Run } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   advanceRouterCursor,
   beginBellAttempt,
   beginDispatchRetry,
+  bindReviewWake,
+  confirmReviewNotSent,
   defaultMigrationsDir,
   finishBellAttempt,
   listBellAttempts,
@@ -15,6 +17,7 @@ import {
   recordNotification,
   Store,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "./index.js";
 import {
   assignment,
@@ -468,5 +471,53 @@ test("a logical PM notification cannot be claimed by another Assignment while de
         }),
       ),
     ).toThrow(/already in flight/);
+  });
+});
+
+test("a review send boundary survives restart and only its unsent owner can withdraw", () => {
+  withTempStore((store, dataDir) => {
+    const { input } = seed(store);
+    const note = store.recordNotification(input).notification;
+    const attempt = store.uow.run(() =>
+      beginBellAttempt(store.database, claim(note.id)),
+    );
+    const binding = {
+      delivery_id: "D-1" as DeliveryId,
+      target_sha: "a".repeat(40),
+    };
+    store.uow.run(() =>
+      expect(bindReviewWake(store.database, attempt, binding)).toBe(true),
+    );
+    const other = Store.open({ dataDir });
+    try {
+      other.uow.run(() => {
+        expect(
+          bindReviewWake(
+            other.database,
+            attempt,
+            { ...binding, target_sha: "b".repeat(40) },
+            at,
+          ),
+        ).toBe(false);
+        expect(bindReviewWake(other.database, attempt, binding, at)).toBe(true);
+      });
+    } finally {
+      other.close();
+    }
+    store.uow.run(() => {
+      expect(bindReviewWake(store.database, attempt, binding, at)).toBe(false);
+      expect(withdrawBellAttempt(store.database, project_id, attempt.id)).toBe(
+        false,
+      );
+      expect(
+        listBellAttempts(store.database, project_id, attempt.run_id)[0]
+          ?.review_wake,
+      ).toEqual({ ...binding, sending_at: at });
+      confirmReviewNotSent(store.database, attempt);
+      expect(withdrawBellAttempt(store.database, project_id, attempt.id)).toBe(
+        true,
+      );
+      expect(bindReviewWake(store.database, attempt, binding, at)).toBe(false);
+    });
   });
 });
