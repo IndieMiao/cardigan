@@ -188,14 +188,14 @@ const cases: Case[] = [
     name: "roles",
     method: "roles",
     component: (p) => <SettingsPage {...p} />,
-    target: ".role-table",
+    target: "#roles table",
     tab: "角色",
   },
   {
     name: "templates",
     method: "templates",
     component: (p) => <SettingsPage {...p} />,
-    target: ".template-table-scroll",
+    target: "#templates table",
     tab: "卡片模板",
   },
   {

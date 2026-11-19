@@ -1,9 +1,18 @@
 import { CircleHelp, TriangleAlert } from "lucide-react";
-import { type ComponentProps, type ReactNode, useId } from "react";
+import {
+  type ComponentProps,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+} from "react";
 import { cn } from "../../lib/utils.js";
 import { Tooltip } from "../Tooltip.js";
 import { IconButton } from "../ui/button.js";
 import { Input } from "../ui/input.js";
+import { cardDetailDrawerClassName } from "./CardDetailLayout.js";
+import { DataTableLayout } from "./DataTableLayout.js";
 import styles from "./SettingsLayout.module.css";
 
 /**
@@ -19,11 +28,10 @@ export function SettingsLayout({
   nav: ReactNode;
   children: ReactNode;
 }) {
-  // `settings-layout` keeps the legacy panels (roles, templates…) styled until migrated.
   return (
     <div className={cn("ui-workspace", styles.workspace)}>
       {header}
-      <div className={cn("settings-layout", styles.layout)}>
+      <div className={styles.layout}>
         <nav aria-label="设置分栏" className={styles.nav}>
           {nav}
         </nav>
@@ -54,12 +62,15 @@ export function SettingsPanel({
   title,
   titleId,
   help,
+  actions,
   children,
   ...props
 }: Omit<ComponentProps<"section">, "title" | "className"> & {
   title: ReactNode;
   titleId: string;
   help?: ReactNode;
+  /** Panel-wide actions (search, "新建…") at the right of the title. */
+  actions?: ReactNode;
 }) {
   return (
     <section
@@ -71,6 +82,7 @@ export function SettingsPanel({
       <div className={styles.panelHeading}>
         <h2 id={titleId}>{title}</h2>
         {help && <SettingsHelp label={`${title}说明`}>{help}</SettingsHelp>}
+        {actions && <div className={styles.panelActions}>{actions}</div>}
       </div>
       {children}
     </section>
@@ -132,7 +144,7 @@ export function SettingsRow({
   help?: ReactNode;
   warning?: ReactNode;
   status?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   return (
     <div className={styles.row} data-settings-row="">
@@ -159,12 +171,19 @@ export function SettingsRow({
           </p>
         )}
       </div>
-      <div className={styles.control}>
-        {status}
-        {children}
-      </div>
+      {(status || children) && (
+        <div className={styles.control}>
+          {status}
+          {children}
+        </div>
+      )}
     </div>
   );
+}
+
+/** A read-only value in a row's control column (13px/20px, like descriptions). */
+export function SettingsValue({ children }: { children: ReactNode }) {
+  return <span className={styles.value}>{children}</span>;
 }
 
 /**
@@ -232,4 +251,151 @@ export function SettingsDialogFields({ children }: { children: ReactNode }) {
 }
 export function SettingsDialogActions({ children }: { children: ReactNode }) {
   return <div className={styles.dialogActions}>{children}</div>;
+}
+
+/**
+ * List settings (roles, templates, people) use the shared data table, fitted
+ * to the settings column instead of the cards list's 48rem minimum; ≤640px
+ * shows `records`: the `data-record="lead"` / `"aside"` cells share the first
+ * line, the rest follow as labelled lines, one divider per record.
+ */
+export function SettingsTable(props: ComponentProps<typeof DataTableLayout>) {
+  return <DataTableLayout records {...props} className={styles.table} />;
+}
+
+/** Read-only name/value pairs in a settings drawer (role or template detail). */
+export function SettingsFacts({ children }: { children: ReactNode }) {
+  return <dl className={styles.facts}>{children}</dl>;
+}
+export function SettingsFact({
+  label,
+  children,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className={styles.fact}>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+/** A titled block inside a settings drawer (diff, history, work items). */
+export function SettingsSection({
+  title,
+  children,
+}: {
+  title: ReactNode;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className={styles.section}>
+      <h3 id={id}>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+/** Long text (instructions, JSON, line diffs): monospace, scrolls inside. */
+export function SettingsText(props: Omit<ComponentProps<"pre">, "className">) {
+  return <pre {...props} className={styles.longText} />;
+}
+/** One diff line or value; additions and removals use the status colours. */
+export function SettingsDiff({
+  op,
+  ...props
+}: Omit<ComponentProps<"span">, "className"> & {
+  op?: "add" | "remove" | undefined;
+}) {
+  return <span {...props} className={styles.diff} data-op={op} />;
+}
+
+/** A risk or validation note inside a settings form: danger colour, icon first. */
+export function SettingsWarning({
+  children,
+  ...props
+}: Omit<ComponentProps<"div">, "className">) {
+  return (
+    <div {...props} className={styles.notice}>
+      <TriangleAlert aria-hidden="true" />
+      <div>{children}</div>
+    </div>
+  );
+}
+
+/** Library portrait or uploaded avatar at identity size (24px, 64px preview). */
+export function SettingsAvatar({
+  large = false,
+  ...props
+}: Omit<ComponentProps<"img">, "className" | "width" | "height"> & {
+  large?: boolean;
+}) {
+  return (
+    <img
+      alt=""
+      {...props}
+      className={styles.avatar}
+      data-large={large || undefined}
+    />
+  );
+}
+/** Avatar and name on one line, wrapping the name when narrow. */
+export function SettingsIdentity({ children }: { children: ReactNode }) {
+  return <span className={styles.identity}>{children}</span>;
+}
+
+/**
+ * Settings drawers use the card detail drawer frame. While one is open the
+ * request feedback stacks (the drawer's own and the page's) start below the
+ * drawer header, so a toast never covers its actions or the close button.
+ */
+export const settingsDrawerClassName = cn(
+  cardDetailDrawerClassName,
+  styles.drawer,
+);
+
+/**
+ * Drawers opened from a table row or a panel button are controlled (no Radix
+ * trigger): remember the opener when opening and give it focus back once the
+ * drawer is gone. An opener removed meanwhile (a person now taken) gives way
+ * to `fallback`. Call `remember` right before opening; `forget` when the
+ * opener is known to disappear.
+ */
+export function useDrawerReturnFocus(
+  open: boolean,
+  /** Where focus goes when the opener is gone (e.g. a row that changed). */
+  fallback?: () => HTMLElement | null | undefined,
+) {
+  const fallbackRef = useRef(fallback);
+  fallbackRef.current = fallback;
+  const opener = useRef<HTMLElement | null>(null);
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    if (wasOpen.current && !open) {
+      const target = opener.current;
+      opener.current = null;
+      // After the dialog's own focus restoration, which runs on unmount.
+      window.setTimeout(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body && active.isConnected) return;
+        if (target?.isConnected) target.focus();
+        else fallbackRef.current?.()?.focus();
+      }, 0);
+    }
+    wasOpen.current = open;
+  }, [open]);
+  const remember = useCallback(() => {
+    if (wasOpen.current) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body)
+      opener.current = active;
+  }, []);
+  /** The opener is about to go away (e.g. the person was just taken): use the fallback. */
+  const forget = useCallback(() => {
+    opener.current = null;
+  }, []);
+  return { remember, forget };
 }

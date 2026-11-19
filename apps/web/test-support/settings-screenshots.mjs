@@ -7,10 +7,13 @@ import { createServer } from "vite";
 import { chromium } from "./chromium.mjs";
 
 // C-455 evidence: settings fixture only (no backend, live data or e2e suite).
-// Usage: node settings-screenshots.mjs <output-dir> [--card-page]
+// Usage: node settings-screenshots.mjs <output-dir> [--card-page] [--panels]
+// C-479: --panels captures only the capacity, roles, templates and employee
+// panels and their drawers (preferences/authorization are the default run).
 const root = fileURLToPath(new URL("../", import.meta.url));
 const output = resolve(process.argv[2] ?? "../../artifacts/settings");
 const cardPage = process.argv.includes("--card-page");
+const panels = process.argv.includes("--panels");
 await mkdir(output, { recursive: true });
 const server = await createServer({
   root,
@@ -88,7 +91,8 @@ try {
       const q = (selector) => box(document.querySelector(selector));
       const content =
         document.querySelector("[data-settings-content]:not([hidden])") ??
-        document.querySelector(".settings-layout section:not([hidden])");
+        document.querySelector(".settings-layout section:not([hidden])") ??
+        document.querySelector(".settings-layout > div > section");
       const limit = content
         ? content.getBoundingClientRect().right + 0.5
         : innerWidth;
@@ -125,6 +129,10 @@ try {
         ),
         help: box(content?.querySelector("[aria-label$='说明']")),
         statusTag: box(content?.querySelector("[data-ui='badge']")),
+        table: box(content?.querySelector("table")),
+        tableHead: box(content?.querySelector("th")),
+        tableCell: box(content?.querySelector("td")),
+        avatar: box(content?.querySelector("td img")),
         content: box(content),
         overflowing,
       };
@@ -132,7 +140,12 @@ try {
   const capture = async (name, width, theme) => {
     await settle();
     const metrics = await measure();
-    assert.equal(metrics.scrollWidth, width, `${name}: horizontal overflow`);
+    // The "before" run of the legacy panels records overflow instead of stopping.
+    if (
+      !panels ||
+      !(await evaluate("!!document.querySelector('.settings-layout')"))
+    )
+      assert.equal(metrics.scrollWidth, width, `${name}: horizontal overflow`);
     report.scenes[`${name}-${width}-${theme}`] = metrics;
     const { data } = await send("Page.captureScreenshot", {
       format: "png",
@@ -204,6 +217,150 @@ try {
         "#/p/p-1/settings",
         "!!document.querySelector('[role=switch], .settings-layout input[type=checkbox]')",
       );
+      if (panels) {
+        const drawer = async (name, trigger) => {
+          await run((text) => {
+            const target = [
+              ...document.querySelectorAll("main button, main a"),
+            ].find(
+              (b) =>
+                b.offsetParent &&
+                (b.textContent.trim() === text ||
+                  b.getAttribute("aria-label") === text),
+            );
+            if (!target) throw new Error(`Missing trigger: ${text}`);
+            // Keyboard path: focus the opener, open it, later close with Escape.
+            window.__settingsOpener = target;
+            target.focus();
+            target.click();
+          }, trigger);
+          await until(
+            "!!document.querySelector('[role=dialog] form, [role=dialog] section, [role=dialog] dl')",
+          );
+          await delay(300);
+          await settle();
+          const shot = await send("Page.captureScreenshot", { format: "png" });
+          report.scenes[`${name}-${width}-${theme}`] = await run(() => {
+            const d = document.querySelector("[role=dialog]");
+            const r = d.getBoundingClientRect();
+            const font = (e) => {
+              if (!e) return null;
+              const s = getComputedStyle(e),
+                b = e.getBoundingClientRect();
+              return {
+                text: e.textContent.trim().slice(0, 24),
+                font: `${s.fontSize}/${s.lineHeight} ${s.fontWeight}`,
+                h: Math.round(b.height * 10) / 10,
+              };
+            };
+            // Real hit testing (C-479 review): the centre of every header
+            // action and of the close button must reach that control, also
+            // while a feedback toast (e.g. connecting to live updates) shows.
+            const hits = [...d.querySelectorAll(".drawer-actions button")].map(
+              (button) => {
+                const b = button.getBoundingClientRect();
+                const top = document.elementFromPoint(
+                  b.left + b.width / 2,
+                  b.top + b.height / 2,
+                );
+                return {
+                  name:
+                    button.getAttribute("aria-label") ??
+                    button.textContent.trim(),
+                  hit: !!top && button.contains(top),
+                  topmost: top?.closest(".request-feedback")
+                    ? "request-feedback"
+                    : top?.tagName,
+                };
+              },
+            );
+            const toasts = [...document.querySelectorAll(".request-feedback")]
+              .filter((t) => t.textContent.trim())
+              .map((t) => {
+                const b = t.getBoundingClientRect();
+                return {
+                  text: t.textContent.trim(),
+                  y: Math.round(b.top),
+                  bottom: Math.round(b.bottom),
+                };
+              });
+            return {
+              hits,
+              toasts,
+              drawer: { x: r.left, y: r.top, w: r.width, h: r.height },
+              drawerScrollWidth: d.scrollWidth,
+              drawerClientWidth: d.clientWidth,
+              title: font(d.querySelector("h2")),
+              section: font(d.querySelector("section h3")),
+              fact: font(d.querySelector("dt")),
+              input: font(d.querySelector("input")),
+              button: font(d.querySelector("form [data-ui='button']")),
+              scrollWidth: document.documentElement.scrollWidth,
+            };
+          });
+          await writeFile(
+            resolve(output, `${name}-${width}-${theme}.png`),
+            Buffer.from(shot.data, "base64"),
+          );
+          for (const hit of report.scenes[`${name}-${width}-${theme}`].hits)
+            assert(
+              hit.hit,
+              `${name}-${width}-${theme}: ${hit.name} is covered by ${hit.topmost}`,
+            );
+          // A real Escape key press closes it; focus must return to the opener.
+          for (const type of ["keyDown", "keyUp"])
+            await send("Input.dispatchKeyEvent", {
+              type,
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            });
+          await until("!document.querySelector('[role=dialog]')");
+          await delay(100);
+          const returned = await evaluate(
+            "document.activeElement === window.__settingsOpener",
+          );
+          report.scenes[`${name}-${width}-${theme}`].focusReturned = returned;
+          assert(
+            returned,
+            `${name}-${width}-${theme}: focus not returned to ${trigger}`,
+          );
+        };
+        // Mouse users see no focus ring on the panel focused after a nav
+        // click; the scripted click has no pointer, so drop the focus.
+        const blur = () =>
+          run(
+            () =>
+              new Promise((done) =>
+                requestAnimationFrame(() => {
+                  document.activeElement?.blur?.();
+                  done();
+                }),
+              ),
+          );
+        const isNew = await evaluate(
+          "!document.querySelector('.settings-layout')",
+        );
+        await click("并发与容量");
+        await until(
+          "[...document.querySelectorAll('h2')].some((h) => h.textContent.includes('并发与容量') && h.offsetParent) && document.body.textContent.includes('本机')",
+        );
+        await capture("capacity", width, theme);
+        await click("角色");
+        await until("document.body.textContent.includes('文档写手')");
+        await blur();
+        await capture("roles", width, theme);
+        if (isNew) await drawer("role-drawer", "开发工程师");
+        await click("卡片模板");
+        await until("document.body.textContent.includes('调研卡')");
+        await capture("templates", width, theme);
+        if (isNew) await drawer("template-drawer", "dev");
+        await click("员工");
+        await until("document.body.textContent.includes('孙悟空')");
+        await capture("employees", width, theme);
+        if (isNew) await drawer("employee-drawer", "选用孙悟空");
+        continue;
+      }
       await capture("preferences", width, theme);
       await click("授权");
       await until(

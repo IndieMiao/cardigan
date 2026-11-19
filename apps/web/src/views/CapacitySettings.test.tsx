@@ -12,6 +12,7 @@ import type { CardiganClient, ExecutionCapacity } from "../api.js";
 import { CapacityProvider } from "../components/Capacity.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { CapacitySettings } from "./CapacitySettings.js";
+import { resetSettingWrites } from "./useSettingWrite.js";
 
 function Settings({
   client,
@@ -39,6 +40,7 @@ function Settings({
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  resetSettingWrites();
 });
 const agent: ExecutionCapacity["agents"][number] = {
   machine_id: "local",
@@ -79,15 +81,14 @@ test.each([16, 8, 24])(
     expect(input.max).toBe(String(maximum));
     fireEvent.change(input, { target: { value: String(maximum + 1) } });
     expect(screen.getByText(`并发上限不能超过 ${maximum}。`)).toBeTruthy();
-    expect(
-      screen.getByRole<HTMLButtonElement>("button", { name: "保存" }).disabled,
-    ).toBe(true);
-    fireEvent.submit(screen.getByRole("form", { name: "local Agent 并发" }));
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.blur(input);
+    fireEvent.keyDown(input, { key: "Enter" });
     expect(setRunLimit).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: String(maximum) } });
     expect(screen.queryByText(`并发上限不能超过 ${maximum}。`)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await screen.findByText("已保存，下一轮调度生效。");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByText("并发上限已保存，下一轮调度生效");
     expect(setRunLimit).toHaveBeenCalledWith(
       "p",
       "local",
@@ -97,7 +98,7 @@ test.each([16, 8, 24])(
   },
 );
 
-test("distinct machine counts, human save, validation and a stable key after uncertain failure", async () => {
+test("distinct machine counts, instant save, validation and a stable key after uncertain failure", async () => {
   let current = structuredClone(capacity);
   const setRunLimit = vi
     .fn()
@@ -110,23 +111,27 @@ test("distinct machine counts, human save, validation and a stable key after unc
     setRunLimit,
   });
   render(<Settings client={client} projectId="p" revision={0} />);
-  const input = await screen.findByRole("spinbutton", {
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
     name: "Workstation Agent 并发上限",
   });
   expect(screen.getByText("全部 7 · 非常驻 5 / 上限 6 / 排队 2")).toBeTruthy();
-  expect(screen.getByText("运行中 1 / 上限 3 / 排队 4")).toBeTruthy();
-  expect(screen.getByText("需要主机预置，找张良")).toBeTruthy();
+  expect(screen.getByText("运行中 1 / 排队 4")).toBeTruthy();
+  expect(screen.getByText("上限 3")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "test-ci说明" })).toBeTruthy();
   expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
+  // A blur without an edit writes nothing; 0 is not a valid limit.
+  fireEvent.blur(input);
   fireEvent.change(input, { target: { value: "0" } });
-  expect(
-    screen.getByRole<HTMLButtonElement>("button", { name: "保存" }).disabled,
-  ).toBe(true);
+  expect(screen.getByText("并发上限必须为正整数。")).toBeTruthy();
+  fireEvent.blur(input);
+  expect(setRunLimit).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "2" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await screen.findByRole("alert");
-  expect((input as HTMLInputElement).value).toBe("2");
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await screen.findByText("已保存，下一轮调度生效。");
+  fireEvent.blur(input);
+  await screen.findByText(/未能保存“Workstation Agent 并发上限”/);
+  expect(input.value).toBe("2");
+  // The failed edit stays for another commit with the same key.
+  fireEvent.keyDown(input, { key: "Enter" });
+  await screen.findByText("并发上限已保存，下一轮调度生效");
   await screen.findByText("全部 7 · 非常驻 5 / 上限 2 / 排队 2");
   expect(setRunLimit.mock.calls).toEqual([
     ["p", "local", 2, expect.any(String)],
@@ -183,10 +188,11 @@ test("loading failures can retry and invalid host configuration cannot be saved"
       true,
     ),
   );
+  expect(screen.getByText("主机并发配置无效，请联系主机管理员")).toBeTruthy();
   expect(screen.getByText("合并检查配置无效，请联系主机管理员。")).toBeTruthy();
 });
 
-test("cancel restores the saved limit and a read-only session has no write control", async () => {
+test("an unchanged value writes nothing and a read-only session has no write control", async () => {
   const setRunLimit = vi.fn();
   const client = fakeClient({
     executionCapacity: async () => capacity,
@@ -195,13 +201,93 @@ test("cancel restores the saved limit and a read-only session has no write contr
   const view = render(<Settings client={client} projectId="p" revision={0} />);
   const input = await screen.findByRole<HTMLInputElement>("spinbutton");
   fireEvent.change(input, { target: { value: "9" } });
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  expect(input.value).toBe("6");
+  fireEvent.change(input, { target: { value: "6" } });
+  fireEvent.blur(input);
+  expect(setRunLimit).not.toHaveBeenCalled();
   view.rerender(
     <Settings client={client} projectId="p" revision={0} canEdit={false} />,
   );
   expect(screen.queryByRole("spinbutton")).toBeNull();
-  expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
+  expect(screen.getByText("上限 6")).toBeTruthy();
   expect(screen.getByText("仅人类登录会话可修改并发上限。")).toBeTruthy();
   expect(setRunLimit).not.toHaveBeenCalled();
+});
+
+test("a limit already shown by a newer read is not reported as failed when only the reply is lost", async () => {
+  let current = capacity;
+  const write = Promise.withResolvers<void>();
+  const setRunLimit = vi.fn(() => write.promise);
+  const read = vi.fn(async () => current);
+  const client = fakeClient({ executionCapacity: read, setRunLimit });
+  const view = render(<Settings client={client} projectId="p" revision={0} />);
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: "Workstation Agent 并发上限",
+  });
+  fireEvent.change(input, { target: { value: "9" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledOnce();
+  // The server applied it; a live update reads 9 before the reply is lost.
+  current = { ...capacity, agents: [{ ...agent, limit: 9 }] };
+  view.rerender(<Settings client={client} projectId="p" revision={1} />);
+  await screen.findByText("全部 7 · 非常驻 5 / 上限 9 / 排队 2");
+  await act(async () => write.reject(new Error("reply lost")));
+  await waitFor(() => expect(input.readOnly).toBe(false));
+  expect(screen.queryByText(/未能保存/)).toBeNull();
+  expect(input.value).toBe("9");
+});
+
+test("a failed limit write reads the counts again before the field can be edited", async () => {
+  const setRunLimit = vi.fn().mockRejectedValue(new Error("offline"));
+  const read = vi.fn(async () => capacity);
+  render(
+    <Settings
+      client={fakeClient({ executionCapacity: read, setRunLimit })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton");
+  expect(read).toHaveBeenCalledTimes(1);
+  fireEvent.change(input, { target: { value: "8" } });
+  fireEvent.blur(input);
+  await screen.findByText(/未能保存“Workstation Agent 并发上限”/);
+  // The write may have taken effect: the shared read runs again.
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(input.readOnly).toBe(false));
+  expect(input.value).toBe("8");
+});
+
+test("machines sharing a label keep separate saves", async () => {
+  const write = Promise.withResolvers<void>();
+  const setRunLimit = vi.fn(() => write.promise);
+  render(
+    <Settings
+      client={fakeClient({
+        executionCapacity: async () => ({
+          ...capacity,
+          agents: [
+            { ...agent, machine_id: "a", label: "同名", limit: 6 },
+            { ...agent, machine_id: "b", label: "同名", limit: 9 },
+          ],
+        }),
+        setRunLimit,
+      })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  const [first, second] = await screen.findAllByRole<HTMLInputElement>(
+    "spinbutton",
+    { name: "同名 Agent 并发上限" },
+  );
+  if (!first || !second) throw new Error("two machines expected");
+  fireEvent.change(first, { target: { value: "9" } });
+  fireEvent.keyDown(first, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledWith("p", "a", 9, expect.any(String));
+  expect(first.readOnly).toBe(true);
+  expect(second.readOnly).toBe(false);
+  fireEvent.change(second, { target: { value: "3" } });
+  fireEvent.keyDown(second, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledWith("p", "b", 3, expect.any(String));
+  await act(async () => write.resolve());
 });

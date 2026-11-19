@@ -9,7 +9,9 @@ import {
   useState,
 } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
+import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { useResource } from "../useResource.js";
+
 import { Button } from "./ui/button.js";
 import * as Popover from "./ui/popover.js";
 
@@ -32,8 +34,19 @@ export function CapacityProvider({
   canEdit: boolean;
   children: ReactNode;
 }) {
+  // Ordered against the settings page's limit writes (instant save, C-479);
+  // each machine's limit confirms its write even with the settings page left.
   const load = useCallback(
-    () => client.executionCapacity(projectId),
+    () =>
+      trackSettingsRead(client.executionCapacity(projectId), (data) =>
+        data.agents.map(
+          (agent) =>
+            [
+              settingKey(projectId, runLimitSetting(agent.machine_id)),
+              agent.limit,
+            ] as const,
+        ),
+      ),
     [client, projectId],
   );
   const resource = useResource(load, revision);
@@ -45,6 +58,9 @@ export function CapacityProvider({
 }
 
 export const useCapacity = () => useContext(CapacityContext);
+
+/** The settings identity of one machine's Agent limit (its machine id). */
+export const runLimitSetting = (machineId: string) => `run-limit:${machineId}`;
 
 export function checkCapacityPolicy(
   target: ExecutionCapacity["merge_checks"][number],

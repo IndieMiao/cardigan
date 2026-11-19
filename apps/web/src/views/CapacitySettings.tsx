@@ -1,195 +1,182 @@
-import { useId, useRef, useState } from "react";
+import { useId } from "react";
+import type { CardiganClient, ExecutionCapacity } from "../api.js";
 import {
-  type CardiganClient,
-  describeError,
-  type ExecutionCapacity,
-} from "../api.js";
-import { checkCapacityPolicy, useCapacity } from "../components/Capacity.js";
+  checkCapacityPolicy,
+  runLimitSetting,
+  useCapacity,
+} from "../components/Capacity.js";
+import {
+  SettingsGroup,
+  SettingsNumberField,
+  SettingsPanel,
+  SettingsRow,
+  SettingsValue,
+} from "../components/layout/SettingsLayout.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
+import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
 
+/** One machine's Agent limit, saved on blur or Enter (instant save, C-455). */
 function AgentLimit({
   machine,
   client,
   projectId,
   saved,
+  source,
 }: {
   machine: ExecutionCapacity["agents"][number];
   client: CardiganClient;
   projectId: string;
   saved: () => void;
+  source: ExecutionCapacity;
 }) {
-  const inputId = useId();
-  const [draft, setDraft] = useState<string | undefined>();
-  const [pending, setPending] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const request = useRef<{ limit: number; key: string } | undefined>(undefined);
-  const value = draft ?? String(machine.limit);
-  const positiveInteger =
-    /^\d+$/.test(value) &&
-    Number.isSafeInteger(Number(value)) &&
-    Number(value) > 0;
-  const exceedsMaximum = positiveInteger && Number(value) > machine.max_limit;
-  const valid = positiveInteger && !exceedsMaximum;
-  const save = async () => {
-    if (pending || !valid) return;
-    const limit = Number(value);
-    if (request.current?.limit !== limit)
-      request.current = { limit, key: crypto.randomUUID() };
-    setPending(true);
-    setError("");
-    setMessage("");
-    try {
-      await client.setRunLimit(
-        projectId,
-        machine.machine_id,
-        limit,
-        request.current.key,
-      );
-      request.current = undefined;
-      setDraft(undefined);
-      setMessage("已保存，下一轮调度生效。");
-      saved();
-    } catch (reason) {
-      setError(`保存失败：${describeError(reason)}`);
-    } finally {
-      setPending(false);
-    }
-  };
+  const id = useId();
+  const name = `${machine.label} Agent 并发上限`;
+  const setting = useSettingWrite({
+    name,
+    // Labels may repeat; each machine's limit is its own setting.
+    id: runLimitSetting(machine.machine_id),
+    sharedSource: true,
+    server: machine.limit,
+    source,
+    write: (limit, key) =>
+      client.setRunLimit(projectId, machine.machine_id, limit, key),
+    saved,
+    success: () => "并发上限已保存，下一轮调度生效",
+  });
+  const max = machine.max_limit;
+  const draft = useNumberDraft(setting.value, 1, max);
+  const invalidConfig = machine.limit === 0;
+  const tooLarge = /^\d+$/.test(draft.draft) && Number(draft.draft) > max;
   return (
-    <form
-      className="execution-capacity-row"
-      aria-label={`${machine.label} Agent 并发`}
-      onSubmit={(event) => {
-        event.preventDefault();
-        void save();
-      }}
+    <SettingsRow
+      label={machine.label}
+      htmlFor={id}
+      description={`全部 ${machine.total_running} · 非常驻 ${machine.running} / 上限 ${machine.limit || "不可用"} / 排队 ${machine.queued}`}
+      help={
+        machine.merge_check_slots > 0
+          ? `本机合并检查另占 ${machine.merge_check_slots} 个 Agent 名额。`
+          : undefined
+      }
+      warning={invalidConfig ? "主机并发配置无效，请联系主机管理员" : undefined}
     >
-      <div className="execution-capacity-count">
-        <strong>{machine.label} · Agent</strong>
-        <span>
-          全部 {machine.total_running} · 非常驻 {machine.running} / 上限{" "}
-          {machine.limit || "不可用"} / 排队 {machine.queued}
-        </span>
-      </div>
-      <div className="execution-capacity-edit">
-        <label htmlFor={inputId}>上限</label>
-        <input
-          id={inputId}
-          aria-label={`${machine.label} Agent 并发上限`}
-          type="number"
-          min="1"
-          step="1"
-          max={machine.max_limit}
-          aria-describedby={`${inputId}-validation`}
-          aria-invalid={!valid}
-          value={value}
-          disabled={pending || machine.limit === 0}
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setMessage("");
-            setError("");
-          }}
-        />
-        <button
-          type="submit"
-          disabled={pending || !valid || machine.limit === 0}
-        >
-          {pending ? "保存中…" : "保存"}
-        </button>
-        {draft !== undefined && !pending && (
-          <button
-            type="button"
-            className="quiet"
-            onClick={() => {
-              setDraft(undefined);
-              setError("");
-              setMessage("");
-            }}
-          >
-            取消
-          </button>
-        )}
-      </div>
-      {!valid && (
-        <span id={`${inputId}-validation`} className="hint">
-          {exceedsMaximum
-            ? `并发上限不能超过 ${machine.max_limit}。`
-            : "并发上限必须为正整数。"}
-        </span>
-      )}
-      {machine.limit === 0 && (
-        <span role="alert">主机并发配置无效，请联系主机管理员。</span>
-      )}
-      {machine.merge_check_slots > 0 && (
-        <span className="hint">
-          本机合并检查另占 {machine.merge_check_slots} 个 Agent 名额。
-        </span>
-      )}
-      {error && <span role="alert">{error}</span>}
-      {message && <span role="status">{message}</span>}
-    </form>
+      <SettingsNumberField
+        id={id}
+        aria-label={name}
+        unit="个"
+        min={1}
+        max={max}
+        dirty={draft.dirty}
+        invalid={!draft.valid}
+        value={draft.draft}
+        disabled={invalidConfig}
+        readOnly={setting.busy}
+        onChange={(event) => {
+          draft.setDraft(event.target.value);
+          setting.clear();
+        }}
+        onCommit={() => draft.commit(setting.save)}
+      />
+      <RequestFeedback
+        error={
+          invalidConfig || draft.valid
+            ? undefined
+            : tooLarge
+              ? `并发上限不能超过 ${max}。`
+              : "并发上限必须为正整数。"
+        }
+      />
+      <RequestFeedback
+        interactive
+        pending={setting.saving}
+        pendingMessage="保存中…"
+        error={setting.error}
+        message={setting.message}
+      />
+    </SettingsRow>
   );
 }
 
 export function CapacitySettings({
   client,
   projectId,
+  hidden = false,
 }: {
   client: CardiganClient;
   projectId: string;
+  hidden?: boolean;
 }) {
   const resource = useCapacity();
   const { data, error, reload, canEdit } = resource ?? {};
   return (
-    <section
-      className="capacity-settings"
-      aria-labelledby="capacity-settings-title"
+    <SettingsPanel
+      hidden={hidden}
+      id="capacity"
+      tabIndex={-1}
+      title="并发与容量"
+      titleId="capacity-settings-title"
+      help="全项目共用。调低上限不会停止已运行的任务。"
     >
-      <h2 id="capacity-settings-title">并发与容量</h2>
-      <p className="hint">全项目共用。调低上限不会停止已运行的任务。</p>
-      {!canEdit && <p>仅人类登录会话可修改并发上限。</p>}
-      {!data && !error && resource && <p>正在读取并发信息…</p>}
-      {error && (
-        <p role="alert">
-          读取并发信息失败：{error}{" "}
-          <button type="button" className="quiet" onClick={reload}>
-            重试
-          </button>
-        </p>
+      {resource && (
+        <RequestFeedback
+          pending={!data && !error}
+          pendingMessage="正在读取并发信息…"
+          error={error ? `读取并发信息失败：${error}` : undefined}
+          retry={reload}
+        />
       )}
-      {!error &&
-        data?.agents.map((machine) =>
-          canEdit && reload ? (
-            <AgentLimit
+      {data && !error && (
+        <SettingsGroup
+          title="Agent 并发"
+          description={canEdit ? undefined : "仅人类登录会话可修改并发上限。"}
+        >
+          {data.agents.length === 0 && <SettingsRow label="暂无 Agent 机器" />}
+          {data.agents.map((machine) =>
+            canEdit && reload ? (
+              <AgentLimit
+                key={`${projectId}:${machine.machine_id}`}
+                machine={machine}
+                client={client}
+                projectId={projectId}
+                saved={reload}
+                source={data}
+              />
+            ) : (
+              <SettingsRow
+                key={machine.machine_id}
+                label={machine.label}
+                description={`全部 ${machine.total_running} · 非常驻 ${machine.running} / 排队 ${machine.queued}`}
+              >
+                <SettingsValue>上限 {machine.limit || "不可用"}</SettingsValue>
+              </SettingsRow>
+            ),
+          )}
+        </SettingsGroup>
+      )}
+      {data && (data.merge_checks.length > 0 || data.merge_config_invalid) && (
+        <SettingsGroup title="合并检查">
+          {data.merge_checks.map((machine) => (
+            <SettingsRow
               key={machine.machine_id}
-              machine={machine}
-              client={client}
-              projectId={projectId}
-              saved={reload}
+              label={machine.machine_id}
+              description={[
+                checkCapacityPolicy(machine),
+                `运行中 ${machine.running} / 排队 ${machine.queued}`,
+              ]
+                .filter(Boolean)
+                .join("；")}
+              help="需要主机预置，找张良"
+            >
+              <SettingsValue>上限 {machine.limit || "不可用"}</SettingsValue>
+            </SettingsRow>
+          ))}
+          {data.merge_config_invalid && (
+            <SettingsRow
+              label="合并检查配置"
+              warning="合并检查配置无效，请联系主机管理员。"
             />
-          ) : (
-            <p key={machine.machine_id}>
-              {machine.label} · Agent 上限 {machine.limit || "不可用"}
-            </p>
-          ),
-        )}
-      {!error && data?.agents.length === 0 && <p>暂无 Agent 机器</p>}
-      {data?.merge_checks.map((machine) => (
-        <div key={machine.machine_id} className="execution-capacity-row">
-          <div className="execution-capacity-count">
-            <strong>{machine.machine_id} · 合并检查</strong>
-            <span>{checkCapacityPolicy(machine)}</span>
-            <span>
-              运行中 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
-              {machine.queued}
-            </span>
-          </div>
-          <span className="hint">需要主机预置，找张良</span>
-        </div>
-      ))}
-      {data?.merge_config_invalid && (
-        <p role="alert">合并检查配置无效，请联系主机管理员。</p>
+          )}
+        </SettingsGroup>
       )}
-    </section>
+    </SettingsPanel>
   );
 }

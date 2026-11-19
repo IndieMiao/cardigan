@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   HttpCardiganClient,
@@ -22,6 +22,17 @@ import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
 afterEach(cleanup);
+// Radix Checkbox measures itself; jsdom has no ResizeObserver.
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 
 const allowlists = {
   produce: ["whoami", "get_card", "submit_delivery", "post_comment"],
@@ -160,21 +171,29 @@ test("roles tab lists name, kind, version and status", async () => {
 test("detail shows every field, the version-pin notice, the diff and history", async () => {
   await openRoles();
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
+  const drawer = await screen.findByRole("dialog");
+  // The version-pin notice is the hover/focus help next to the version.
+  fireEvent.focus(
+    await within(drawer).findByRole("button", { name: "版本说明" }),
+  );
   expect(
-    await screen.findByText(
-      /内部工作项 Assignment 空闲且旧终端退出后会分批升级/,
-    ),
-  ).toBeTruthy();
-  const fields = document.querySelector(".role-fields") as HTMLElement;
+    (
+      await screen.findAllByText(
+        /内部工作项 Assignment 空闲且旧终端退出后会分批升级/,
+      )
+    ).length,
+  ).toBeGreaterThan(0);
+  const fields = drawer.querySelector("dl") as HTMLElement;
   expect(fields.textContent).toContain("whoami、get_card");
   expect(fields.textContent).toContain("只读");
   expect(fields.textContent).toContain("gpu");
   expect(fields.textContent).toContain("produce");
   expect(fields.textContent).toContain("pi / fixture");
-  const diff = screen.getByLabelText("差异 v1 → v2");
+  const diff = screen.getByRole("region", { name: "与上一版本的差异" });
+  expect(diff.textContent).toContain("v1 → v2");
   expect(diff.textContent).toContain("+ 也写发布说明。");
   expect(diff.textContent).toContain("新增 release");
-  const historyList = await screen.findByRole("list", { name: "版本历史" });
+  const historyList = await screen.findByRole("table", { name: "版本历史" });
   expect(historyList.textContent).toContain(
     "编辑：改动 instructions、abilities",
   );
@@ -230,9 +249,6 @@ test("edit offers only allowlisted tools, explains widened permissions without a
   await openRoles(client({ updateRole }));
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
   fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
-  expect(
-    screen.getByText(/内部工作项 Assignment 空闲且旧终端退出后会分批升级/),
-  ).toBeTruthy();
   const tools = screen.getByRole("group", { name: /可用工具/ });
   const boxes = within(tools)
     .getAllByRole("checkbox")
@@ -291,12 +307,10 @@ test("changing kind narrows the tool list and flags tools outside the new allowl
     within(tools).getByRole("checkbox", { name: "submit_review" }),
   ).toBeTruthy();
   expect(
-    (
-      within(tools).getByRole("checkbox", {
-        name: "submit_delivery",
-      }) as HTMLInputElement
-    ).checked,
-  ).toBe(true);
+    within(tools)
+      .getByRole("checkbox", { name: "submit_delivery" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
   expect(
     screen.getByText(/submit_delivery 不在验证型角色的工具白名单内/),
   ).toBeTruthy();
@@ -319,7 +333,10 @@ test("legacy roles prefill converted instructions and warn about the new format"
     }),
   );
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
-  expect(await screen.findByText(/旧格式角色：只有 core_prompt/)).toBeTruthy();
+  expect(
+    await screen.findByRole("button", { name: "旧格式角色说明" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("dialog").textContent).toContain("旧提示词");
   fireEvent.click(screen.getByRole("button", { name: "编辑" }));
   expect(screen.getByText(/保存后将转换为新格式/)).toBeTruthy();
   expect(screen.getByText("无法按默认角色包结构拆出角色说明")).toBeTruthy();
@@ -396,10 +413,15 @@ test("new role copies from the default pack or from an existing role in another 
   ]);
   expect(await screen.findByText("已创建角色 designer-x v1")).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: "← 返回角色列表" }));
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
   const second = screen.getByRole("form", { name: "新建角色" });
-  fireEvent.click(within(second).getByLabelText("从现有角色复制"));
+  const fromProject = within(second).getByRole("button", {
+    name: "从现有角色复制",
+  });
+  fireEvent.click(fromProject);
+  expect(fromProject.getAttribute("aria-pressed")).toBe("true");
   fireEvent.keyDown(within(second).getByLabelText("来源项目"), {
     key: "ArrowDown",
   });
@@ -491,4 +513,70 @@ test("HTTP role client uses encoded role routes and the idempotency header", asy
   const last = fetcher.mock.calls.at(-1)?.[1];
   expect(new Headers(last?.headers).get("Idempotency-Key")).toBe("k5");
   expect(last?.body).toBe('{"version":2}');
+});
+
+test("a role being created keeps its drawer: close, Escape and the overlay wait for the reply", async () => {
+  const reply = Promise.withResolvers<RoleDefinitionView>();
+  const copyRole = vi.fn(() => reply.promise);
+  await openRoles(client({ copyRole }));
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  changeControl(within(form).getByLabelText("新角色编号"), {
+    target: { value: "tester-x" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
+  await waitFor(() => expect(copyRole).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.getByRole("form", { name: "新建角色" })).toBeTruthy();
+  expect(
+    (within(form).getByRole("button", { name: "取消" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  reply.resolve({ ...v1, role_id: "tester-x" });
+  expect(await screen.findByText("已创建角色 tester-x v1")).toBeTruthy();
+});
+
+test("a role status change in flight keeps the detail drawer open", async () => {
+  const reply = Promise.withResolvers<RoleDefinitionView>();
+  await openRoles(client({ setRoleActive: vi.fn(() => reply.promise) }));
+  fireEvent.click(await screen.findByRole("button", { name: "写手" }));
+  fireEvent.click(await screen.findByRole("button", { name: "停用" }));
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  // No edit draft can start that the status change would then discard.
+  expect(
+    (screen.getByRole("button", { name: "编辑" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  reply.resolve({ ...v2, version: 3, status: "inactive" });
+  expect(await screen.findByText("角色已停用，不能再被新指派")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("closing a role drawer returns focus to the row that opened it", async () => {
+  await openRoles();
+  const row = await screen.findByRole("button", { name: "写手" });
+  row.focus();
+  fireEvent.click(row);
+  await screen.findByRole("dialog");
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "写手" }),
+    ),
+  );
+});
+
+test("closing the new-role drawer with Escape returns focus to 新建角色", async () => {
+  await openRoles();
+  const opener = await screen.findByRole("button", { name: "新建角色" });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(opener));
 });

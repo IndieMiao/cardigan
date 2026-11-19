@@ -535,7 +535,7 @@ test("preferences, authorization, roles and templates coexist as separate settin
   expect(screen.queryByRole("switch", { name: "超时自动合并" })).toBeNull();
   expect(screen.getByRole("switch", { name: "流程 由 PM 代拍" })).toBeTruthy();
   fireEvent.click(roles);
-  await screen.findByText("本项目还没有登记角色。");
+  await screen.findByText("没有角色");
   expect(roles.getAttribute("aria-current")).toBe("page");
   expect(
     screen.getByRole("heading", { name: "角色", exact: true }),
@@ -545,7 +545,7 @@ test("preferences, authorization, roles and templates coexist as separate settin
     screen.queryByRole("heading", { name: "授权", exact: true }),
   ).toBeNull();
   fireEvent.click(templates);
-  await screen.findByRole("table", { name: "项目卡片模板" });
+  await screen.findByText("没有模板");
   expect(screen.queryByRole("button", { name: "新建角色" })).toBeNull();
   expect(templates.getAttribute("aria-current")).toBe("page");
   expect(
@@ -554,9 +554,9 @@ test("preferences, authorization, roles and templates coexist as separate settin
   fireEvent.click(preferences);
   expect(preferences.getAttribute("aria-current")).toBe("page");
   expect(screen.getByRole("switch", { name: "超时自动合并" })).toBeTruthy();
-  expect(screen.queryByRole("table", { name: "项目卡片模板" })).toBeNull();
+  expect(screen.queryByText("没有模板")).toBeNull();
   fireEvent.click(roles);
-  await screen.findByText("本项目还没有登记角色。");
+  await screen.findByText("没有角色");
   expect(screen.queryByRole("switch", { name: "超时自动合并" })).toBeNull();
   fireEvent.click(authorization);
   expect(screen.getByRole("switch", { name: "流程 由 PM 代拍" })).toBeTruthy();

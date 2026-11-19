@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -61,30 +62,44 @@ function fields() {
 const submit = () =>
   fireEvent.click(screen.getByRole("button", { name: "创建员工" }));
 
-test("settings groups searchable characters, disables active and inactive occupants, and submits editable selected identity", async () => {
+/** Pick a library person in the open form's person select. */
+const person = (value: string) =>
+  changeControl(screen.getByLabelText("人物"), { target: { value } });
+
+test("settings lists searchable characters with their occupants, offers only free ones, and submits the edited identity", async () => {
   const createEmployee = vi
     .fn()
     .mockResolvedValue({ id: "E-3", name: "悟空", role_id: "coder" });
   await open({ createEmployee });
-  const three = screen.getByRole("region", { name: "三国演义" });
-  for (const name of [/关羽.*云长.*E-1/, /诸葛亮.*孔明.*已离职/]) {
-    const button = within(three).getByRole("button", {
-      name,
-    }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    fireEvent.click(button);
-    expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe("");
+  const table = screen.getByRole("table", { name: "人物库" });
+  for (const [name, occupant] of [
+    ["关羽", /云长（E-1）/],
+    ["诸葛亮", /孔明（E-2，已离职）/],
+  ] as const) {
+    const row = within(table).getByRole("row", { name });
+    expect(row.textContent).toMatch(occupant);
+    expect(within(row).queryByRole("button")).toBeNull();
   }
   const search = screen.getByLabelText("搜索人物或出处");
   changeControl(search, { target: { value: "西游" } });
-  expect(screen.queryByRole("region", { name: "三国演义" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "孙悟空" }));
-  expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe(
+  expect(within(table).queryByRole("row", { name: "关羽" })).toBeNull();
+  changeControl(search, { target: { value: "没有这个人" } });
+  expect(screen.getByText("没有找到匹配的人物。")).toBeTruthy();
+  changeControl(search, { target: { value: "西游" } });
+  fireEvent.click(screen.getByRole("button", { name: "选用孙悟空" }));
+  const form = await screen.findByRole("form", { name: "新建员工" });
+  expect((within(form).getByLabelText("名字") as HTMLInputElement).value).toBe(
     "孙悟空",
   );
   expect(screen.getByRole("img", { name: "孙悟空" }).getAttribute("src")).toBe(
     "/avatars/v1/sun-wukong/head-128.webp",
   );
+  // Occupied people are not offered in the form either.
+  person("sun-wukong");
+  expect(() => person("guan-yu")).toThrow("Missing select option guan-yu");
+  fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+  expect(screen.getByRole("form", { name: "新建员工" })).toBeTruthy();
   changeControl(screen.getByLabelText("名字"), {
     target: { value: "悟空" },
   });
@@ -107,6 +122,7 @@ test("settings groups searchable characters, disables active and inactive occupa
     ),
   );
   expect(await screen.findByText("已创建员工 悟空（E-3）")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("custom upload sends only bytes and preserves retry keys and fields after uncertain failures", async () => {
@@ -115,7 +131,12 @@ test("custom upload sends only bytes and preserves retry keys and fields after u
     .mockRejectedValueOnce(new TypeError("offline"))
     .mockResolvedValue({ id: "E-3", name: "自定义", role_id: "coder" });
   await open({ createEmployee });
-  fireEvent.click(screen.getByLabelText("自定义名字和头像"));
+  fireEvent.click(screen.getByRole("button", { name: "新建员工" }));
+  const custom = await screen.findByRole("button", {
+    name: "自定义名字和头像",
+  });
+  fireEvent.click(custom);
+  expect(custom.getAttribute("aria-pressed")).toBe("true");
   changeControl(screen.getByLabelText("名字"), {
     target: { value: "自定义" },
   });
@@ -166,7 +187,10 @@ test("oversized file prevents submitting and server occupancy conflicts refresh 
       })),
     });
   await open({ createEmployee, employeeOptions });
-  fireEvent.click(screen.getByLabelText("自定义名字和头像"));
+  fireEvent.click(screen.getByRole("button", { name: "新建员工" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "自定义名字和头像" }),
+  );
   changeControl(screen.getByLabelText(/上传头像/), {
     target: {
       files: [new File([new Uint8Array(2 * 1024 * 1024 + 1)], "large.png")],
@@ -178,19 +202,18 @@ test("oversized file prevents submitting and server occupancy conflicts refresh 
       .disabled,
   ).toBe(true);
   expect(createEmployee).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByLabelText("从人物库选择"));
-  fireEvent.click(screen.getByRole("button", { name: "孙悟空" }));
+  fireEvent.click(screen.getByRole("button", { name: "从人物库选择" }));
+  person("sun-wukong");
   fields();
   submit();
   expect(await screen.findByText(/人物已被员工占用/)).toBeTruthy();
   await waitFor(() => expect(employeeOptions).toHaveBeenCalledTimes(2));
-  expect(
-    (
-      screen.getByRole("button", {
-        name: /孙悟空.*新同事/,
-      }) as HTMLButtonElement
-    ).disabled,
-  ).toBe(true);
+  // The list behind the drawer now shows the new occupant.
+  await waitFor(() =>
+    expect(
+      screen.getByRole("row", { name: "孙悟空", hidden: true }).textContent,
+    ).toContain("新同事"),
+  );
   expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe(
     "孙悟空",
   );
@@ -203,8 +226,11 @@ test("empty roles prevent creation and changing projects discards the previous d
   });
   const view = render(<SettingsPage projectId="p-1" client={client} />);
   fireEvent.click(screen.getByRole("button", { name: "员工" }));
-  fireEvent.click(await screen.findByRole("button", { name: "孙悟空" }));
+  fireEvent.click(await screen.findByRole("button", { name: "选用孙悟空" }));
+  await screen.findByRole("form", { name: "新建员工" });
   view.rerender(<SettingsPage projectId="p-2" client={client} />);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.click(await screen.findByRole("button", { name: "新建员工" }));
   await screen.findByText(/本项目还没有已启用的角色/);
   expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe("");
   expect(
@@ -241,4 +267,122 @@ test("HTTP employee creation uses owner cookies and an idempotency key with the 
       headers: expect.objectContaining({ "Idempotency-Key": "employee-key" }),
     }),
   ]);
+});
+
+test("an employee being created keeps its drawer until the reply, then focus goes to 新建员工", async () => {
+  const reply = Promise.withResolvers<{
+    id: string;
+    name: string;
+    role_id: string;
+  }>();
+  await open({ createEmployee: vi.fn(() => reply.promise) });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.getByRole("form", { name: "新建员工" })).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "取消" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  reply.resolve({ id: "E-3", name: "孙悟空", role_id: "coder" });
+  expect(await screen.findByText("已创建员工 孙悟空（E-3）")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // The person is taken once created: focus goes to the 新建员工 fallback.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "新建员工" }),
+    ),
+  );
+});
+
+test("closing the new-employee drawer with Escape returns focus to 新建员工", async () => {
+  await open();
+  const opener = screen.getByRole("button", { name: "新建员工" });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});
+
+test("after creating from 选用 the person is taken: focus falls back to 新建员工", async () => {
+  const employeeOptions = vi
+    .fn()
+    .mockResolvedValueOnce(options)
+    .mockResolvedValue({
+      ...options,
+      library: options.library.map((item) =>
+        item.id === "sun-wukong"
+          ? {
+              ...item,
+              occupied_by: { id: "E-3", name: "悟空", status: "active" },
+            }
+          : item,
+      ),
+    });
+  await open({
+    employeeOptions,
+    createEmployee: vi
+      .fn()
+      .mockResolvedValue({ id: "E-3", name: "悟空", role_id: "coder" }),
+  });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  await screen.findByText("已创建员工 悟空（E-3）");
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "选用孙悟空" })).toBeNull(),
+  );
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "新建员工" }),
+    ),
+  );
+});
+
+test("focus goes to 新建员工 after creating from 选用 even when the refresh is slow", async () => {
+  const refresh = Promise.withResolvers<EmployeeOptions>();
+  const employeeOptions = vi
+    .fn()
+    .mockResolvedValueOnce(options)
+    .mockImplementation(() => refresh.promise);
+  await open({
+    employeeOptions,
+    createEmployee: vi
+      .fn()
+      .mockResolvedValue({ id: "E-3", name: "悟空", role_id: "coder" }),
+  });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  await screen.findByText("已创建员工 悟空（E-3）");
+  const fallback = screen.getByRole("button", { name: "新建员工" });
+  await waitFor(() => expect(document.activeElement).toBe(fallback));
+  await act(async () =>
+    refresh.resolve({
+      ...options,
+      library: options.library.map((item) =>
+        item.id === "sun-wukong"
+          ? {
+              ...item,
+              occupied_by: { id: "E-3", name: "悟空", status: "active" },
+            }
+          : item,
+      ),
+    }),
+  );
+  expect(screen.queryByRole("button", { name: "选用孙悟空" })).toBeNull();
+  expect(document.activeElement).toBe(fallback);
 });

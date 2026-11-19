@@ -67,13 +67,42 @@
     min-width: 0;
   }
   .panelHeading {
+    flex-wrap: wrap;
     min-height: var(--ui-control);
+  }
+  .panelActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    margin-inline-start: auto;
   }
   .panelHeading h2 {
     margin: 0;
     font-size: var(--ui-text-section);
     line-height: var(--ui-leading-section);
     font-weight: 600;
+  }
+  .section {
+    display: grid;
+    gap: var(--ui-space-2);
+    min-width: 0;
+  }
+  .section ~ .section {
+    margin-block-start: var(--ui-space-6);
+  }
+  .section > h3 {
+    margin: 0;
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+    font-weight: 600;
+  }
+  .section > p {
+    margin: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
   }
   .group {
     display: grid;
@@ -159,6 +188,10 @@
     max-width: 100%;
     margin-inline-start: auto;
   }
+  .value {
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
   .number {
     display: inline-flex;
     align-items: center;
@@ -181,7 +214,8 @@
     color: var(--text-muted);
   }
   /* Keep the control-sized hit area without growing the label line. */
-  .label .help {
+  .label .help,
+  .dialogFields legend .help {
     margin-block: calc((var(--ui-leading) - var(--ui-control)) / 2);
   }
   .dialogFields {
@@ -201,6 +235,54 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
+  .dialogFields fieldset {
+    display: grid;
+    gap: var(--ui-space-3);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .dialogFields fieldset fieldset {
+    padding: var(--ui-space-3);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .dialogFields [data-ui="toggle-group"] {
+    justify-self: start;
+    max-width: 100%;
+  }
+  .dialogFields legend {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    padding: 0;
+    margin-block-end: var(--ui-space-2);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    font-weight: 400;
+  }
+  /* A checkbox and its name share one line; a list of them wraps in columns. */
+  .dialogFields label:has([role="checkbox"]) {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  .dialogFields [data-choices] {
+    display: grid;
+    grid-template-columns: repeat(
+        auto-fill,
+        minmax(calc(var(--ui-search-max) - var(--ui-space-6)), 1fr)
+      );
+    gap: 0 var(--ui-space-3);
+  }
+  .dialogFields [data-choices] label[data-outside] {
+    color: var(--danger);
+  }
+  .dialogFields input[type="file"] {
+    height: auto;
+    padding-block: var(--ui-space-1);
+  }
   .dialog :global(.request-feedback-region) {
     position: static;
     align-items: stretch;
@@ -210,8 +292,111 @@
   }
   .dialogActions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: var(--ui-space-2);
+  }
+  /* Below the drawer header (padding, close button, gap) on every width. */
+  .drawer :global(.request-feedback-region),
+  :global(body):has(.drawer) > :global(.request-feedback-region) {
+    top: calc(var(--ui-space-6) + var(--ui-control) + var(--ui-space-4));
+    max-height: calc(
+      100vh -
+      var(--ui-space-6) -
+      var(--ui-control) -
+      var(--ui-space-4) -
+      var(--ui-space-4)
+    );
+  }
+  /* Fitted to the settings column; the cards list keeps its own minimum. */
+  .table {
+    min-width: 0;
+  }
+  .facts {
+    display: grid;
+    gap: var(--ui-space-2);
+    margin: 0;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .fact {
+    display: grid;
+    grid-template-columns: calc(var(--ui-settings-nav) - var(--ui-space-6)) minmax(
+        0,
+        1fr
+      );
+    gap: var(--ui-space-3);
+    min-width: 0;
+  }
+  .fact dt {
+    color: var(--text-muted);
+  }
+  .fact dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .longText {
+    margin: 0;
+    max-block-size: 50vh;
+    overflow: auto;
+    padding: var(--ui-space-2);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+  }
+  .diff[data-op="add"] {
+    color: var(--status-done);
+  }
+  .diff[data-op="remove"] {
+    color: var(--danger);
+  }
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    color: var(--danger);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .notice > :global(.lucide) {
+    flex: none;
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+    margin-block-start: calc((var(--ui-leading) - var(--ui-icon)) / 2);
+  }
+  .notice > div {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .notice :where(p, ul) {
+    margin: 0;
+  }
+  .notice ul {
+    padding-inline-start: var(--ui-space-4);
+  }
+  .avatar {
+    flex: none;
+    width: var(--ui-avatar-compact);
+    height: var(--ui-avatar-compact);
+    border-radius: var(--ui-pill-radius);
+    object-fit: cover;
+  }
+  .avatar[data-large] {
+    width: calc(var(--ui-avatar-size) * 2);
+    height: calc(var(--ui-avatar-size) * 2);
+  }
+  .identity {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-width: 0;
   }
   @media (max-width: 760px) {
     .layout {
@@ -229,6 +414,10 @@
     }
     .row {
       padding: var(--ui-space-3);
+    }
+    .fact {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
     }
   }
 }

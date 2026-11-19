@@ -14,6 +14,14 @@ import {
   useFeedbackVisible,
 } from "../components/RequestFeedback.js";
 import { parseRoute, routeHash } from "../route.js";
+import {
+  onSettingsRead,
+  readStart,
+  settingKey,
+  settingsTick,
+} from "../settings-clock.js";
+
+export { trackSettingsRead } from "../settings-clock.js";
 
 /** Success notices leave the shared feedback stack after a short while. */
 export function useNotice() {
@@ -41,32 +49,10 @@ const subscribe = (listener: () => void) => {
   return () => listeners.delete(listener);
 };
 
-/**
- * Ordering instead of server versions (C-455, Q-928): a logical clock stamps
- * when each settings read starts and when each write starts and ends. A read
- * that started before a setting's last write ended is old for that setting;
- * the view reads again. A failure is void when a read that started after the
- * write began already shows its value.
- */
-let clock = 0;
-const readStarts = new WeakMap<object, number>();
 /** Last write end per project and setting. */
 const writeEnds = new Map<string, number>();
 /** Newest read per project and setting: when it started and what it showed. */
 const confirmed = new Map<string, { at: number; value: unknown }>();
-/** Wraps a settings read so its start can be compared with writes. */
-export function trackSettingsRead<T extends object>(read: Promise<T>) {
-  const at = ++clock;
-  return read.then((data) => {
-    readStarts.set(data, at);
-    return data;
-  });
-}
-const readStart = (source: unknown) =>
-  typeof source === "object" && source !== null
-    ? readStarts.get(source)
-    : undefined;
-
 /**
  * Saves in flight per project and setting, shared by every view of it: a
  * page shown again while the first request runs cannot send a second one.
@@ -95,7 +81,7 @@ const UNSEEN_MS = 500;
 /** The settings panel a setting is shown in (provided by SettingsPage). */
 export interface SettingPlace {
   project: string;
-  panel: "preferences" | "authorization";
+  panel: "preferences" | "authorization" | "capacity";
   /** Shows the panel when it is hidden behind another one. */
   reveal: () => void;
 }
@@ -117,6 +103,8 @@ interface SaveNotice {
   cause: string;
   /** The value that was not saved; a read showing it retires the notice. */
   value: unknown;
+  /** When the failed write started: only a read started later can retire it. */
+  since: number;
   project: string;
   panel: SettingPlace["panel"];
 }
@@ -131,6 +119,26 @@ function clearNotice(key: string) {
   notices = notices.filter((n) => n.key !== key);
   emit();
 }
+/**
+ * A read proves a failed write's value only when it started after that write
+ * began. Untracked reads (no start time) keep comparing the value alone.
+ */
+const proves = (at: number | undefined, since: number) =>
+  at === undefined || at > since;
+/**
+ * Record what a read shows (also with no row mounted). A read superseded by a
+ * newer one, or one that started before the failed write, says nothing about
+ * it: a late, older response cannot retire a real failure (C-479 V-2220).
+ */
+function confirmRead(key: string, at: number, value: unknown) {
+  const known = confirmed.get(key);
+  if (known && at <= known.at) return;
+  confirmed.set(key, { at, value });
+  const reported = notices.find((n) => n.key === key);
+  if (reported && proves(at, reported.since) && same(reported.value, value))
+    clearNotice(key);
+}
+onSettingsRead(confirmRead);
 
 /** Rendered once by the app shell, outside any page: one entry per failure. */
 export function SettingsSaveNotice() {
@@ -143,9 +151,9 @@ export function SettingsSaveNotice() {
     window.location.hash = routeHash({
       kind: "settings",
       projectId: failed.project,
-      ...(failed.panel === "authorization"
-        ? { filters: { tab: "authorization" } }
-        : {}),
+      ...(failed.panel === "preferences"
+        ? {}
+        : { filters: { tab: failed.panel } }),
     });
   };
   return createElement(
@@ -191,16 +199,20 @@ export function resetSettingWrites() {
  */
 export function useSettingWrite<T>({
   name,
+  id = name,
   failure,
   server,
   source,
   confirmable = true,
+  sharedSource = false,
   write,
   saved,
   success,
 }: {
   /** The setting's name, for a failure reported away from it. */
   name: string;
+  /** Stable identity when the name is only a display label (defaults to it). */
+  id?: string;
   /** What did not happen, e.g. 未能撤销“对外发布”授权; defaults to 未能保存“name”. */
   failure?: (value: T) => string;
   server: T;
@@ -208,6 +220,11 @@ export function useSettingWrite<T>({
   source: unknown;
   /** False when `server` is a derived default that cannot confirm a write. */
   confirmable?: boolean;
+  /**
+   * The read outlives this page (the shared capacity read): a write ending
+   * after the view is gone reads it again via `saved`.
+   */
+  sharedSource?: boolean;
   write: Write<T>;
   saved: () => void;
   success: (value: T) => string;
@@ -232,6 +249,8 @@ export function useSettingWrite<T>({
         text: string;
         cause: string;
         value: unknown;
+        /** When the failed write started (logical clock). */
+        since: number;
         at: number;
         seen: boolean;
         reported: boolean;
@@ -241,7 +260,7 @@ export function useSettingWrite<T>({
   const pending = useRef<{ value: T; key: string } | undefined>(undefined);
   const place = useContext(SettingPlaceContext);
   const visible = useFeedbackVisible();
-  const key = `${place?.project ?? ""}:${name}`;
+  const key = settingKey(place?.project ?? "", id);
   // Completions reach whichever render is current.
   const latest = useRef({
     saved,
@@ -249,9 +268,18 @@ export function useSettingWrite<T>({
     failure,
     visible,
     server,
+    source,
     stale: false,
   });
-  latest.current = { saved, success, failure, visible, server, stale: false };
+  latest.current = {
+    saved,
+    success,
+    failure,
+    visible,
+    server,
+    source,
+    stale: false,
+  };
   const current = useSyncExternalStore(subscribe, () =>
     notices.find((n) => n.key === key),
   );
@@ -295,6 +323,7 @@ export function useSettingWrite<T>({
           message: last.text,
           cause: last.cause,
           value: last.value,
+          since: last.since,
           project: place.project,
           panel: place.panel,
         });
@@ -308,12 +337,18 @@ export function useSettingWrite<T>({
     if (shown.current) shown.current.seen = true;
     if (current?.key !== key || !inView()) return;
     clearNotice(key);
-    if (confirmable && same(current.value, latest.current.server)) return;
+    if (
+      confirmable &&
+      proves(readStart(latest.current.source), current.since) &&
+      same(current.value, latest.current.server)
+    )
+      return;
     setError(current.cause);
     shown.current = {
       text: current.message,
       cause: current.cause,
       value: current.value,
+      since: current.since,
       at: performance.now(),
       seen: true,
       reported: false,
@@ -323,19 +358,24 @@ export function useSettingWrite<T>({
   useEffect(() => {
     if (!confirmable) return;
     const at = readStart(source);
-    const known = confirmed.get(key);
-    if (at !== undefined && (!known || at > known.at))
-      confirmed.set(key, { at, value: server });
+    if (at !== undefined) confirmRead(key, at, server);
     // A read showing the value confirms the write even if its response was lost.
     if (pending.current && same(pending.current.value, server))
       pending.current = undefined;
-    // ...and retires its failure here and in the shared notice.
-    if (shown.current && same(shown.current.value, server)) {
+    // ...and retires its failure here (the shared notice: `confirmRead`),
+    // when the read started after the failed write began.
+    if (
+      shown.current &&
+      proves(at, shown.current.since) &&
+      same(shown.current.value, server)
+    ) {
       shown.current = undefined;
       setError("");
     }
-    const reported = notices.find((n) => n.key === key);
-    if (reported && same(reported.value, server)) clearNotice(key);
+    if (at === undefined) {
+      const reported = notices.find((n) => n.key === key);
+      if (reported && same(reported.value, server)) clearNotice(key);
+    }
   }, [source]);
   /** Still on this project's settings with the panel shown (URL already counts). */
   const inView = () => {
@@ -347,7 +387,7 @@ export function useSettingWrite<T>({
   };
   const save = async (next: T): Promise<boolean> => {
     if (inflight.has(key) || latest.current.stale) return false;
-    const startedAt = ++clock;
+    const startedAt = settingsTick();
     beginSave(key);
     setError("");
     setMessage("");
@@ -390,6 +430,7 @@ export function useSettingWrite<T>({
           text,
           cause,
           value: next,
+          since: startedAt,
           at: performance.now(),
           seen: !away,
           reported: away && !!place,
@@ -401,15 +442,20 @@ export function useSettingWrite<T>({
           message: text,
           cause,
           value: next,
+          since: startedAt,
           project: place.project,
           panel: place.panel,
         });
     } finally {
-      const end = ++clock;
+      const end = settingsTick();
       // Only an acknowledged write tells this view the value: after a failure
       // it may still have taken effect, so the view waits for the read again.
       if (ok && alive.current) setOwnEnd(end);
       endSave(key, end);
+      // With no view mounted, nothing reacts to the write's end. A source
+      // that outlives the page (the shared capacity read) is read again here
+      // so it shows the result and confirms or keeps a failure (C-479).
+      if (!alive.current && sharedSource) latest.current.saved();
     }
     return ok;
   };
