@@ -19,6 +19,11 @@ import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { hasProbeEvidence } from "../probes.js";
+import {
+  bindSharedFindings,
+  sharedMustFixes,
+  sharedReviewers,
+} from "../shared-findings.js";
 import { isCompletionVerifier } from "../templates.js";
 import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
@@ -850,8 +855,7 @@ export function systemCompletionSubmission(
 export type SubmitReviewParams = Pick<
   Review,
   "delivery_id" | "target_sha" | "kind" | "issues"
-> &
-  Partial<
+> & { readonly issue_refs?: readonly string[] } & Partial<
     Pick<
       Review,
       | "attachments"
@@ -956,6 +960,7 @@ export function submitReview(
           (i) =>
             i &&
             ["critical", "major", "minor"].includes(i.severity) &&
+            i.finding_id === undefined &&
             typeof i.must_fix === "boolean" &&
             typeof i.pre_existing === "boolean" &&
             typeof i.description === "string" &&
@@ -974,8 +979,40 @@ export function submitReview(
       "validation_failed",
       "Every must-fix issue requires a valid impact",
     );
+    const shared =
+      flowAtLeast(card, 5) &&
+      sharedReviewers(target, d.list("work_items")).includes(item.id);
+    const existing = shared
+      ? sharedMustFixes(
+          d
+            .list("reviews")
+            .filter(
+              (r) =>
+                r.delivery_id === target.id && r.target_sha === p.target_sha,
+            ),
+        )
+      : [];
+    const refs = p.issue_refs ?? [];
+    ensure(
+      Array.isArray(refs) && new Set(refs).size === refs.length,
+      "validation_failed",
+      "Issue references must be unique",
+    );
+    const issues = [
+      ...p.issues,
+      ...refs.map((ref) => {
+        const source = existing.find((i) => i.finding_id === ref);
+        ensure(
+          source,
+          "validation_failed",
+          "Unknown must-fix reference on this delivery and SHA",
+        );
+        const { delivery_id: _delivery, target_sha: _sha, ...issue } = source;
+        return issue;
+      }),
+    ];
     const calculated = deriveReview(
-      p.issues,
+      issues,
       p.recheck_required ?? false,
       p.followup_card_id,
     );
@@ -1046,7 +1083,7 @@ export function submitReview(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     if (prior && !testReview)
       ensure(
-        p.issues.every(
+        issues.every(
           (issue) =>
             issue.pre_existing ||
             prior.issues.some(
@@ -1069,14 +1106,18 @@ export function submitReview(
     const reuseContext = deliveryTree(target)
       ? reviewReuseContext(d, target, item, d.assignment.id)
       : undefined;
+    const id = d.ids.next(state.project_id, "review");
     const value: Review = {
-      id: d.ids.next(state.project_id, "review"),
+      id,
       delivery_id: target.id,
       target_sha: p.target_sha,
       work_item_id: item.id,
       run_id: run.id,
       kind: p.kind,
       ...calculated,
+      ...(shared
+        ? { issues: bindSharedFindings(calculated.issues, id, existing) }
+        : {}),
       ...(p.followup_card_id ? { followup_card_id: p.followup_card_id } : {}),
       recheck_required: p.recheck_required ?? false,
       ...(testReview ? { test_review: testReview } : {}),
@@ -1153,7 +1194,7 @@ export function submitReview(
         reviewRejectionsNeedAttention(d, item));
     const flowLimit = limitReached;
     const flowRaised = flowLimit
-      ? requestReviewLimit(d, d.work(item.id))
+      ? requestReviewLimit(d, d.work(item.id), value)
       : false;
     d.emit(
       "review_submitted",

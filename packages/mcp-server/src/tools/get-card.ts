@@ -25,6 +25,7 @@ import {
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
+  sharedMustFixes,
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -334,6 +335,7 @@ export const getCardTool = defineTool({
         subject: delivery.subject,
         role_rule_inventory: roleRuleInventory(delivery) ?? null,
       })),
+      shared_must_fixes: sharedMustFixes(reviews),
       reviews: reviews.map((review) => ({
         ...review,
         ...runAuthorView(authors, review.run_id),

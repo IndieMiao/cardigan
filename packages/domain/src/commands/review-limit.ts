@@ -1,13 +1,17 @@
 import {
   type Decision,
+  type Review,
   reviewImpactLabel,
   type WorkItem,
 } from "../entities.js";
+import { sharedReviewers } from "../shared-findings.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
+import { queueResumedRun, resumeWork } from "./resumption.js";
+import { raiseVerifierLimit } from "./review-limit-resolution.js";
 import {
   consecutiveReviewRejects,
   currentReviewTarget,
@@ -25,13 +29,53 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
     );
 }
 
+function sharedGroup(
+  d: CommandDraft,
+  review?: Review,
+): Decision["review_limit_group"] {
+  if (!review) return;
+  const ids = review.issues
+    .filter((i) => i.must_fix && !i.pre_existing)
+    .map((i) => i.finding_id);
+  if (!ids.length || !ids.every((id): id is string => !!id)) return;
+  const target = d.get("deliveries", review.delivery_id);
+  return {
+    delivery_id: target.id,
+    target_sha: review.target_sha,
+    finding_ids: [...new Set(ids)].sort(),
+    candidate_items: sharedReviewers(target, d.list("work_items")),
+  };
+}
+
 // Both a final non-pass review and a new target with no remaining budget use this path.
-export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
+export function requestReviewLimit(
+  d: CommandDraft,
+  item: WorkItem,
+  review?: Review,
+) {
   if (!reviewRejectionsNeedAttention(d, item))
     return applyFlowReviewLimit(d, item);
+  const group = sharedGroup(d, review);
+  const sibling =
+    group &&
+    d.list("decisions").find((q) => {
+      const g = q.review_limit_group;
+      return (
+        q.trigger === "review_limit" &&
+        q.card_id === item.card_id &&
+        g?.delivery_id === group.delivery_id &&
+        g.target_sha === group.target_sha &&
+        g.candidate_items.includes(item.id) &&
+        !q.affected_work_items.includes(item.id) &&
+        g.finding_ids.length === group.finding_ids.length &&
+        g.finding_ids.every((id, n) => id === group.finding_ids[n]) &&
+        (["open", "snoozed", "provisional"].includes(q.status) ||
+          (q.status === "resolved" && q.resolution?.option === "raise_limit"))
+      );
+    });
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
-  const existing = pendingReviewLimit(d, item);
+  const existing = sibling ?? pendingReviewLimit(d, item);
   const prior = d
     .list("reviews")
     .filter((r) => r.work_item_id === item.id)
@@ -72,8 +116,9 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       kind: "choose",
       category: "general",
       trigger: "review_limit",
-      question: `连续驳回 ${consecutiveReviewRejects(d, item)} 次，请 PM 排查：${item.id}`,
-      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${impactSummary}${reason}。`,
+      ...(group ? { review_limit_group: group } : {}),
+      question: `连续驳回 ${consecutiveReviewRejects(d, item)} 次，请 PM 排查：${item.id}${group ? `（${group.delivery_id}；${group.candidate_items.join("、")} 若因同一组必改项触发上限，共用本决定）` : ""}`,
+      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${impactSummary}${reason}。${group ? `必改项：${group.finding_ids.join("、")}。` : ""}`,
       options: [
         {
           key: "raise_limit",
@@ -105,6 +150,38 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       reason: "review_limit",
       decision_id: id,
     });
+  if (sibling && review) {
+    const affected = [...sibling.affected_work_items, item.id];
+    d.put("decisions", { ...sibling, affected_work_items: affected });
+    const joined = d.emit(
+      "review_limit_group_joined",
+      item.card_id,
+      {
+        decision_id: sibling.id,
+        work_item_id: item.id,
+        review_id: review.id,
+        affected_work_items: affected,
+      },
+      {
+        type: "status_change",
+        decision_id: sibling.id,
+        work_item_id: item.id,
+        body: `${item.id} 对同一组必改项的驳回共用 ${sibling.id}。`,
+      },
+    );
+    if (sibling.status === "resolved" && sibling.resolution) {
+      raiseVerifierLimit(
+        d,
+        d.work(item.id),
+        sibling.id,
+        sibling.resolution,
+        sibling.resolution.resolved_by,
+      );
+      const waiting = d.work(item.id);
+      if (resumeWork(d, waiting)) queueResumedRun(d, waiting, joined);
+      return true;
+    }
+  }
   if (existing) return false;
   d.put("decisions", decision);
   d.emit(

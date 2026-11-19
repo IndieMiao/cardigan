@@ -126,6 +126,7 @@ type DelegationSubject = Pick<
     Pick<
       Decision,
       | "affected_work_items"
+      | "review_limit_group"
       | "role_rule_basis"
       | "kind"
       | "source_unrelated_human_required"
@@ -211,6 +212,12 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
   if (independent)
     return (
       !q.human_required_reason &&
+      (!q.review_limit_group ||
+        categoryDelegated(
+          projectPreference(d),
+          [...d.state.events, ...d.events],
+          "general",
+        )) &&
       !["done", "cancelled"].includes(
         d.get("cards", independent.card_id).status,
       )

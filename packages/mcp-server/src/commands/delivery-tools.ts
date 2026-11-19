@@ -88,6 +88,12 @@ const reviewInput = z.object({
       proof: z.string().optional(),
     }),
   ),
+  issue_refs: z
+    .array(z.string().min(1))
+    .optional()
+    .describe(
+      "同一交付的已有必改项：引用 get_card.shared_must_fixes 的 finding_id，不要在 issues 中重复新建。仍须自行审核当前交付。",
+    ),
   recheck_required: z.boolean().optional(),
   followup_card_id: id("card")
     .optional()

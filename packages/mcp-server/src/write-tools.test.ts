@@ -744,8 +744,19 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
     tx.cards.put(project_id, { ...serverCard, flow_version: 5 });
     const item = tx.work_items.get(project_id, "W-3" as never);
     if (item?.kind !== "verify") throw new Error("Missing parallel verifier");
+    const owner = tx.assignments.get(project_id, "A-3" as never);
+    if (!owner) throw new Error("Missing parallel assignment");
+    const role_id = "independent_reviewer";
+    tx.roles.put(project_id, {
+      role_id,
+      role_version: 1,
+      allowed_tools: allowed,
+      capabilities: [],
+    });
+    tx.assignments.put(project_id, { ...owner, role_id });
     tx.work_items.put(project_id, {
       ...item,
+      role_id,
       template_key: "parallel",
       target_work_item_id: "W-1" as never,
     });
@@ -777,13 +788,36 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
       })
     ).isError,
   ).not.toBe(true);
-  const args = { ...review, idempotency_key: "parallel-late" };
+  const card = await call(parallel, "get_card", { card_id });
+  const fixes = card.structuredContent?.shared_must_fixes as {
+    finding_id: string;
+  }[];
+  expect(fixes).toMatchObject([
+    {
+      delivery_id: review.delivery_id,
+      target_sha: review.target_sha,
+      description: "Bug",
+    },
+  ]);
+  const args = {
+    ...review,
+    issue_refs: fixes.map((i) => i.finding_id),
+    idempotency_key: "parallel-late",
+  };
   const results = await Promise.all([
     call(parallel, "submit_review", args),
     call(parallel, "submit_review", args),
   ]);
   expect(results[0]?.isError).not.toBe(true);
   expect(results[0]?.structuredContent).toEqual(results[1]?.structuredContent);
+  expect(results[0]?.structuredContent).toMatchObject({
+    verdict: "reject",
+    issues: [{ finding_id: fixes[0]?.finding_id }],
+  });
+  expect(
+    (await call(reviewer, "get_card", { card_id })).structuredContent
+      ?.shared_must_fixes,
+  ).toEqual(fixes);
   expect(counts().reviews).toBe(2);
   expect(
     store.uow.read((tx) => tx.deliveries.get(project_id, "D-1" as never))
