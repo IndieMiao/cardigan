@@ -1,13 +1,23 @@
 import type { DatabaseSync } from "node:sqlite";
 import type {
   AssignmentId,
+  DeliveryId,
   Notification,
   ProjectId,
   Run,
   RunId,
 } from "@cardigan/domain";
 
+export interface ReviewWakeBinding {
+  readonly delivery_id: DeliveryId;
+  readonly target_sha: string;
+  /** Written before external IO. Absence on a tracked intent proves pre-send. */
+  readonly sending_at?: string;
+  /** Final adapter guard positively refused this attempt after the caller allowed it. */
+  readonly refused_at?: string;
+}
 export interface BellAttempt {
+  readonly review_wake?: ReviewWakeBinding;
   readonly project_id: ProjectId;
   readonly id: string;
   readonly assignment_id: AssignmentId;
@@ -22,7 +32,7 @@ export interface BellAttempt {
 }
 export type BeginBellAttempt = Omit<
   BellAttempt,
-  "finished_at" | "outcome" | "continuation"
+  "finished_at" | "outcome" | "continuation" | "review_wake"
 >;
 const requireTransaction = (db: DatabaseSync) => {
   if (!db.isTransaction)
@@ -122,6 +132,89 @@ function beginAttempt(
     outcome: null,
   };
 }
+/** Annotate only an unfinished, owned intent. A replayed callback cannot cross
+ * twice, change the target, or resurrect an intent withdrawn by another tick. */
+export function bindReviewWake(
+  db: DatabaseSync,
+  attempt: BellAttempt,
+  binding: ReviewWakeBinding,
+  sendingAt?: string,
+) {
+  requireTransaction(db);
+  const target = {
+    delivery_id: binding.delivery_id,
+    target_sha: binding.target_sha,
+  };
+  const before = JSON.stringify(target);
+  const after =
+    sendingAt === undefined
+      ? before
+      : JSON.stringify({ ...target, sending_at: sendingAt });
+  return (
+    Number(
+      db
+        .prepare(
+          `UPDATE bell_attempts SET review_wake = ? WHERE project_id = ? AND id = ? AND assignment_id = ? AND run_id = ? AND finished_at IS NULL AND review_wake IS ?`,
+        )
+        .run(
+          after,
+          attempt.project_id,
+          attempt.id,
+          attempt.assignment_id,
+          attempt.run_id,
+          sendingAt === undefined ? null : before,
+        ).changes,
+    ) === 1
+  );
+}
+/** A positive adapter acknowledgement of non-delivery supersedes the send intent. */
+export function confirmReviewNotSent(db: DatabaseSync, attempt: BellAttempt) {
+  requireTransaction(db);
+  db.prepare(`UPDATE bell_attempts SET review_wake=json_remove(review_wake,'$.sending_at')
+      WHERE project_id=? AND id=? AND finished_at IS NULL AND review_wake IS NOT NULL`).run(
+    attempt.project_id,
+    attempt.id,
+  );
+}
+/** A final adapter refusal is stronger than the local permission to send.
+ * Keep the receipt on its exact claim. After lease expiry it can clarify that
+ * claim only while it is still the latest, unacknowledged, unfenced repair. */
+export function settleWakeWithdrawal(
+  db: DatabaseSync,
+  attempt: BellAttempt,
+  at: string,
+) {
+  requireTransaction(db);
+  if (!attempt.review_wake)
+    return withdrawBellAttempt(db, attempt.project_id, attempt.id);
+  timestamp(at);
+  return (
+    Number(
+      db
+        .prepare(`UPDATE bell_attempts SET outcome='failed', finished_at=?,
+    review_wake=json_set(json_remove(review_wake,'$.sending_at'),'$.refused_at',?)
+    WHERE project_id=? AND id=? AND assignment_id=? AND run_id=? AND started_at <= ?
+      AND json_extract(review_wake,'$.delivery_id')=? AND json_extract(review_wake,'$.target_sha')=?
+      AND (finished_at IS NULL OR (outcome='failed' AND json_extract(review_wake,'$.sending_at') IS NOT NULL))
+      AND NOT EXISTS (SELECT 1 FROM bell_attempts later WHERE later.project_id=bell_attempts.project_id
+        AND later.run_id=bell_attempts.run_id AND later.rowid > bell_attempts.rowid)
+      AND EXISTS (SELECT 1 FROM runs r WHERE r.project_id=bell_attempts.project_id AND r.id=bell_attempts.run_id
+        AND json_extract(r.doc,'$.status')='dispatched' AND json_extract(r.doc,'$.started_at') IS NULL
+        AND json_extract(r.doc,'$.dispatch_stop') IS NULL AND json_extract(r.doc,'$.inactivity_stop') IS NULL)`)
+        .run(
+          at,
+          at,
+          attempt.project_id,
+          attempt.id,
+          attempt.assignment_id,
+          attempt.run_id,
+          at,
+          attempt.review_wake.delivery_id,
+          attempt.review_wake.target_sha,
+        ).changes,
+    ) === 1
+  );
+}
 /** A late completion cannot overwrite recovery's already-settled outcome. */
 export function finishBellAttempt(
   db: DatabaseSync,
@@ -150,7 +243,8 @@ export function withdrawBellAttempt(
     Number(
       db
         .prepare(
-          "DELETE FROM bell_attempts WHERE project_id = ? AND id = ? AND finished_at IS NULL",
+          `DELETE FROM bell_attempts WHERE project_id = ? AND id = ? AND finished_at IS NULL
+           AND json_extract(review_wake, '$.sending_at') IS NULL`,
         )
         .run(project, id).changes,
     ) === 1
@@ -196,6 +290,13 @@ function readAttempts(
       assignment_id: String(row.assignment_id) as AssignmentId,
       run_id: String(row.run_id) as RunId,
       notification_ids: JSON.parse(String(row.notification_ids)) as string[],
+      ...(row.review_wake
+        ? {
+            review_wake: JSON.parse(
+              String(row.review_wake),
+            ) as ReviewWakeBinding,
+          }
+        : {}),
       ...(row.continuation === 1 ? { continuation: true as const } : {}),
       started_at: String(row.started_at),
       lease_until: String(row.lease_until),

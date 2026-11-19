@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   type Assignment,
-  assignmentCardHeld,
   type Clock,
   type CommandEffect,
   type CommandState,
@@ -21,15 +20,21 @@ import {
   recoverDispatch,
   recoveryChainUsed,
   refreshRunTargetWait,
+  repairWakeTarget,
+  resumableReviewWithdrawal,
+  retireObsoleteQueuedRun,
   retireRecoveryQueuedRun,
-  retireUnreadableQueuedRun,
+  reviewRunWakeDisposition,
+  runTargetWaitReason,
   startDispatchStop,
   stoppedByHuman,
   unreadableCommentTrigger,
   withdrawDispatchStop,
 } from "@cardigan/domain";
 import {
-  deferTargetAttempt,
+  bindRepairAttempt,
+  crossRepairSendBoundary,
+  deferIfTargetWait,
   failAutomaticContextRun,
   refreshTargetWait,
   testReviewRunPrompt,
@@ -40,11 +45,13 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
   beginDispatchRetry,
+  confirmReviewNotSent,
   listBellAttempts,
   moveNotification,
   recordNotification,
   type Store,
   type StoreTransactionContext,
+  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -53,11 +60,16 @@ import {
   type DeliveryStage,
   deliveryFailure,
   deliveryFailureLine,
+  dispatchAlert,
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
+import {
+  legacyRepairAuthority,
+  legacyRepairWake,
+} from "./legacy-repair-wake.js";
 
 export interface DispatchRecoveryPolicy {
   timeoutMs: number;
@@ -339,7 +351,10 @@ export async function retryDispatchedRuns(
     }
     if (
       candidate.status === "queued" &&
-      unreadableCommentTrigger(candidates, candidate)
+      (unreadableCommentTrigger(candidates, candidate) ||
+        (owner &&
+          reviewRunWakeDisposition(candidates, owner, candidate) ===
+            "obsolete"))
     ) {
       store.uow.run((tx) => {
         if (
@@ -352,7 +367,7 @@ export async function retryDispatchedRuns(
           tx,
           project,
           unwrap(
-            retireUnreadableQueuedRun(
+            retireObsoleteQueuedRun(
               loadState(tx, project),
               actor,
               { run_id: candidate.id },
@@ -411,28 +426,15 @@ export async function retryDispatchedRuns(
     }
     if (!["dispatched", "queued"].includes(candidate.status)) continue;
     if (
-      (candidate.dispatch_target_wait ||
-        (owner &&
-          (!hasRunTarget(owner, candidates) ||
-            (candidate.status === "queued" &&
-              assignmentCardHeld(
-                owner,
-                candidates,
-                candidate.trigger_event_id,
-              ))))) &&
+      (candidate.dispatch_target_wait?.since ||
+        (owner && runTargetWaitReason(candidates, owner, candidate))) &&
       refreshTargetWait(store, project, candidate.id, clock)
     )
       continue;
     const inspect = (state = read(), tx?: StoreTransactionContext) => {
       const run = state.runs.find((r) => r.id === candidate.id);
       const a = state.assignments.find((a) => a.id === run?.assignment_id);
-      if (
-        run &&
-        a &&
-        (!hasRunTarget(a, state) ||
-          (run.status === "queued" &&
-            assignmentCardHeld(a, state, run.trigger_event_id)))
-      ) {
+      if (run && a && runTargetWaitReason(state, a, run)) {
         // Persist the pause at the observation, including after awaited status.
         // A restart must not count the intervening target wait as a timeout.
         if (tx)
@@ -477,29 +479,87 @@ export async function retryDispatchedRuns(
         return;
       const history = listBellAttempts(store.database, project, run.id);
       const last = history.at(-1);
-      const failures =
-        last?.outcome === "failed"
-          ? history.slice(
-              history.findLastIndex((t) => t.outcome === "sent") + 1,
-            ).length
-          : 0;
       const at = clock.now(),
         started =
           dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
+      // An unfinished claim excludes its peers; any settled attempt supersedes
+      // the withdrawal proof. Empty legacy history alone authorizes nothing.
+      const fromWithdrawal = resumableReviewWithdrawal(state, a, run);
+      const withdrawn = !last && fromWithdrawal;
+      const binding = last?.review_wake;
+      const target = repairWakeTarget(state, run);
+      const sameTarget =
+        !!binding &&
+        target?.id === binding.delivery_id &&
+        target.subject.value === binding.target_sha &&
+        target.status !== "superseded" &&
+        !state.deliveries.some((d) => d.supersedes === target.id);
+      const disposition = reviewRunWakeDisposition(state, a, run);
+      const shared =
+        sameTarget &&
+        !disposition &&
+        state.decisions.some(
+          (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
+        );
+      // Keep every receipt for audit. A positive refusal for this shared target
+      // neither spends nor resets the ordinary failure budget since the last send.
+      let failures = 0;
+      for (let i = history.length - 1; i >= 0; i--) {
+        const attempt = history[i];
+        if (attempt?.outcome !== "failed") break;
+        const receipt = attempt.review_wake;
+        if (
+          shared &&
+          receipt?.refused_at &&
+          !receipt.sending_at &&
+          receipt.delivery_id === binding.delivery_id &&
+          receipt.target_sha === binding.target_sha
+        )
+          continue;
+        failures++;
+      }
+      const legacy =
+        !withdrawn && !disposition && target
+          ? legacyRepairWake(state, a, run, target, history)
+          : undefined;
+      const reconcile = legacy === "reconcile" ? target : undefined;
+      const unconfirmed = !!reconcile || (shared && !!binding?.sending_at);
+      // A wait finishing is not a send. Only an actual boundary (or a legacy
+      // result) starts the restored ack window. Clear failures still back off.
+      const noSendYet =
+        withdrawn ||
+        legacy === "unsent" ||
+        (!reconcile &&
+          shared &&
+          last?.outcome === "failed" &&
+          !binding.sending_at);
+      const ackSince = reconcile
+        ? last?.finished_at
+        : shared
+          ? (binding.sending_at ??
+            (last?.outcome === "sent" ? last.finished_at : undefined))
+          : fromWithdrawal
+            ? last?.finished_at
+            : undefined;
+      const timedOut =
+        started &&
+        Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
+          policy.timeoutMs;
       const recover =
-        (started &&
-          Date.parse(at) -
-            Date.parse(started) -
-            dispatchTargetWaitMs(run, at) >=
-            policy.timeoutMs) ||
-        failures >= policy.maxRetries + 1;
+        (timedOut &&
+          !noSendYet &&
+          (!ackSince ||
+            Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
+        (!unconfirmed && failures >= policy.maxRetries + 1);
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
         last.finished_at &&
         Date.parse(at) >=
           Date.parse(last.finished_at) +
-            policy.retryBaseMs * 2 ** Math.max(0, failures - 1);
+            policy.retryBaseMs *
+              2 **
+                (shared && binding?.refused_at ? 0 : Math.max(0, failures - 1));
       // C-120: an obsolete cross-card bell cannot be retried as an empty launch.
       // Timeout recovery safely stops its terminal, then cancels without requeueing.
       const unreadable = unreadableCommentTrigger(state, run);
@@ -509,7 +569,14 @@ export async function retryDispatchedRuns(
         a,
         failures,
         recover,
-        retry: retry && !unreadable,
+        reconcile,
+        legacyRetry: legacy === "unsent",
+        withdrawn,
+        retry:
+          (withdrawn || (retry && !unconfirmed)) &&
+          !unreadable &&
+          (!binding || sameTarget) &&
+          !disposition,
         at,
         last,
       };
@@ -517,10 +584,38 @@ export async function retryDispatchedRuns(
     const observed = inspect();
     if (!observed) continue;
     if (observed.recover) {
+      if (observed.reconcile) {
+        store.uow.run((tx) => {
+          const fresh = inspect(loadState(tx, project), tx);
+          if (!fresh?.recover || !fresh.reconcile) return;
+          const { state, run, a, reconcile: target, at } = fresh;
+          dispatchAlert(tx, store, state, at, {
+            assignment: a,
+            run_id: run.id,
+            card_id: state.work_items.find((w) => w.id === target.work_item_id)
+              ?.card_id,
+            type: "run_dispatch_stalled",
+            reason: "legacy_repair_ack_unknown",
+            audience: "ops",
+            notifyHostOps: true,
+            review: {
+              delivery_id: target.id,
+              target_sha: target.subject.value,
+              body: `旧版返工通知 ${run.id}（${target.id} / ${target.subject.value}）无法确认送达。请核对原会话与回执；未证实未发前不要补投。`,
+            },
+          });
+        });
+        continue;
+      }
       const used =
         dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
         recoveryChainUsed(observed.state, observed.run);
-      if (used && !unreadableCommentTrigger(observed.state, observed.run))
+      if (
+        used &&
+        !unreadableCommentTrigger(observed.state, observed.run) &&
+        reviewRunWakeDisposition(observed.state, observed.a, observed.run) !==
+          "obsolete"
+      )
         store.uow.run((tx) => {
           const current = inspect(loadState(tx, project), tx);
           if (current?.recover)
@@ -580,7 +675,11 @@ export async function retryDispatchedRuns(
         outcome: null,
       };
       beginDispatchRetry(store.database, attempt);
-      return { ...current, attempt, bell };
+      return {
+        ...current,
+        attempt: bindRepairAttempt(store, current.state, current.run, attempt),
+        bell,
+      };
     });
     if (!job?.a.runtime_ref) continue;
     const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
@@ -597,8 +696,11 @@ export async function retryDispatchedRuns(
     const currentWakeRun = () =>
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
+        const run = state.runs.find((r) => r.id === job.run.id);
         if (
+          !run ||
           !wakeIsCurrent(state, job.a, job.run.id) ||
+          (job.withdrawn && !resumableReviewWithdrawal(state, job.a, run)) ||
           !unfinishedBellAttempts(store.database, project).some(
             (attempt) => attempt.id === job.attempt.id,
           )
@@ -606,7 +708,7 @@ export async function retryDispatchedRuns(
           withdrawBellAttempt(store.database, project, job.attempt.id);
           return undefined;
         }
-        return state.runs.find((run) => run.id === job.run.id);
+        return run;
       });
     try {
       // C-68: beforeWake already retries lock/network failures for a few
@@ -615,8 +717,7 @@ export async function retryDispatchedRuns(
         project,
         assignment: job.a,
       });
-      if (refreshTargetWait(store, project, job.run.id, clock)) {
-        deferTargetAttempt(store, job.attempt, clock);
+      if (deferIfTargetWait(store, job.attempt, clock)) {
         continue;
       }
       // C-247: nothing was sent yet, so withdraw the retry and leave it to
@@ -650,8 +751,20 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
-              if (refreshTargetWait(store, project, job.run.id, clock)) {
-                deferTargetAttempt(store, job.attempt, clock);
+              if (job.attempt.review_wake)
+                return (
+                  !options.closing?.() &&
+                  scope() === reviewPrompt &&
+                  crossRepairSendBoundary(
+                    store,
+                    job.attempt,
+                    job.a,
+                    clock,
+                    job.withdrawn,
+                    job.legacyRetry ? legacyRepairAuthority : undefined,
+                  ) === "send"
+                );
+              if (deferIfTargetWait(store, job.attempt, clock)) {
                 return false;
               }
               return (
@@ -664,23 +777,25 @@ export async function retryDispatchedRuns(
         );
         if (result.ok && result.value.withdrawn) {
           store.uow.run(() =>
-            withdrawBellAttempt(store.database, project, job.attempt.id),
+            settleWakeWithdrawal(store.database, job.attempt, clock.now()),
           );
           continue;
         }
+        if (result.ok && !result.value.sent && job.attempt.review_wake)
+          store.uow.run(() =>
+            confirmReviewNotSent(store.database, job.attempt),
+          );
         sent = result.ok && result.value.sent;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));
       }
     } catch (error) {
-      if (stage === "before_wake" && !currentWakeRun()) continue;
       if (
         stage === "before_wake" &&
-        refreshTargetWait(store, project, job.run.id, clock)
-      ) {
-        deferTargetAttempt(store, job.attempt, clock);
+        deferIfTargetWait(store, job.attempt, clock)
+      )
         continue;
-      }
+      if (stage === "before_wake" && !currentWakeRun()) continue;
       // The reason stays a stable code; the cause is sanitized (C-68).
       ({ reason, failure } = deliveryFailure(stage, error));
     } finally {

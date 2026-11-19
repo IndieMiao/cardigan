@@ -1,12 +1,16 @@
 import {
   type Decision,
+  type Review,
   reviewImpactLabel,
   type WorkItem,
 } from "../entities.js";
+import { sharedReviewers } from "../shared-findings.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
+import { resumeWork } from "./resumption.js";
+import { raiseVerifierLimit } from "./review-limit-resolution.js";
 import {
   currentReviewTarget,
   rejectionStreak,
@@ -25,13 +29,55 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
     );
 }
 
+function sharedGroup(
+  d: CommandDraft,
+  review?: Review,
+): Decision["review_limit_group"] {
+  if (!review) return;
+  const ids = review.issues
+    .filter((i) => i.must_fix && !i.pre_existing)
+    .map((i) => i.finding_id);
+  if (!ids.length || !ids.every((id): id is string => !!id)) return;
+  const target = d.get("deliveries", review.delivery_id);
+  return {
+    delivery_id: target.id,
+    target_sha: review.target_sha,
+    finding_ids: [...new Set(ids)].sort(),
+    candidate_items: sharedReviewers(target, d.list("work_items")),
+  };
+}
+
 // Both a final non-pass review and a new target with no remaining budget use this path.
-export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
+export function requestReviewLimit(
+  d: CommandDraft,
+  item: WorkItem,
+  review?: Review,
+) {
   if (!reviewRejectionsNeedAttention(d, item))
     return applyFlowReviewLimit(d, item);
+  const group = sharedGroup(d, review);
+  const sibling =
+    group &&
+    d.list("decisions").find((q) => {
+      const g = q.review_limit_group;
+      return (
+        q.trigger === "review_limit" &&
+        q.card_id === item.card_id &&
+        g?.delivery_id === group.delivery_id &&
+        g.target_sha === group.target_sha &&
+        g.candidate_items.includes(item.id) &&
+        !q.affected_work_items.includes(item.id) &&
+        g.finding_ids.length === group.finding_ids.length &&
+        g.finding_ids.every((id, n) => id === group.finding_ids[n]) &&
+        (["open", "snoozed", "provisional"].includes(q.status) ||
+          (q.status === "resolved" &&
+            !!q.resolution &&
+            q.resolution.option !== "pause"))
+      );
+    });
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
-  const existing = pendingReviewLimit(d, item);
+  const existing = sibling ?? pendingReviewLimit(d, item);
   const streak = rejectionStreak(d, item);
   const prior = streak[0];
   ensure(prior, "invariant_violation", "缺少连续驳回依据");
@@ -67,6 +113,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       kind: "choose",
       category: "general",
       trigger: "review_limit",
+      ...(group ? { review_limit_group: group } : {}),
       question: `连续驳回 ${streak.length} 次，请 PM 排查：${item.id}`,
       review_intervention: {
         review_id: prior.id,
@@ -77,6 +124,11 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
         ...recent.map((r) => `${r.id}【${r.category}】${r.summary}`),
         ...(impactSummary ? [impactSummary] : []),
         reason,
+        ...(group
+          ? [
+              `${group.delivery_id} 必改项：${group.finding_ids.join("、")}；两路相同驳回共用本决定。`,
+            ]
+          : []),
       ].join("\n"),
       options: [
         {
@@ -109,11 +161,45 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
     .filter(
       (r) => r.assignment_id === item.assignment_id && r.status === "running",
     );
-  for (const run of runs)
-    endRun(d, run, "blocked", decision.question, {
-      reason: "review_limit",
-      decision_id: id,
-    });
+  if (decision.status !== "resolved")
+    for (const run of runs)
+      endRun(d, run, "blocked", decision.question, {
+        reason: "review_limit",
+        decision_id: id,
+      });
+  if (sibling && review) {
+    const affected = [...sibling.affected_work_items, item.id];
+    d.put("decisions", { ...sibling, affected_work_items: affected });
+    d.emit(
+      "review_limit_group_joined",
+      item.card_id,
+      {
+        decision_id: sibling.id,
+        work_item_id: item.id,
+        review_id: review.id,
+        affected_work_items: affected,
+      },
+      {
+        type: "status_change",
+        decision_id: sibling.id,
+        work_item_id: item.id,
+        body: `${item.id} 对同一组必改项的驳回共用 ${sibling.id}。`,
+      },
+    );
+    if (sibling.status === "resolved" && sibling.resolution) {
+      raiseVerifierLimit(
+        d,
+        d.work(item.id),
+        sibling.id,
+        sibling.resolution,
+        sibling.resolution.resolved_by,
+      );
+      // This Run just submitted its verdict; the next delivery wakes the lane.
+      resumeWork(d, d.work(item.id));
+      // The resolution already woke the producer (or issued a strategy instruction).
+      return false;
+    }
+  }
   if (existing) return false;
   d.put("decisions", decision);
   d.emit(

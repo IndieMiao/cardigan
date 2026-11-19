@@ -6,6 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import { eventById } from "../event-index.js";
 import {
   automaticContextActionForRun,
   hostOpsPending,
@@ -14,6 +15,10 @@ import {
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
+import {
+  reviewRunWakeDisposition,
+  reviewWakeBlocked,
+} from "../shared-review-wake.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
 import {
@@ -90,6 +95,22 @@ function target(d: CommandDraft, id: AssignmentId) {
     );
   }
   return assignment;
+}
+function checkReviewWake(
+  state: CommandState,
+  a: Assignment,
+  trigger?: EventId,
+) {
+  if (a.scope === "work_item" && trigger)
+    ensure(
+      !reviewWakeBlocked(
+        state,
+        eventById(state.events, trigger),
+        a.work_item_id,
+      ),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
+    );
 }
 function requireTestReviewBudget(d: CommandDraft, assignment: Assignment) {
   if (assignment.scope !== "work_item") return;
@@ -283,6 +304,7 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "illegal_transition",
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
+  checkReviewWake(state, assignment, p.trigger_event_id);
   if (p.reuse_queued) {
     const queued = runnableQueuedRun(assignment, {
       ...d.state,
@@ -505,6 +527,11 @@ export function dispatchRun(
       "illegal_transition",
       "验证工作项尚无当前可审交付，请等待交付后再启动",
     );
+    ensure(
+      !reviewRunWakeDisposition(state, assignment, run),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
+    );
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
     const ref = p.runtime_ref ?? assignment.runtime_ref;
@@ -705,6 +732,11 @@ export function acknowledgeRun(
         recoveryTargetCurrent(state, run),
       "stale_target",
       "Automatic recovery business target changed",
+    );
+    ensure(
+      !reviewRunWakeDisposition(state, assignment, run),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
     );
     requireTestReviewBudget(d, assignment);
     exclusive(d, assignment, run.id);

@@ -211,6 +211,7 @@ export {
   hostRepositoryLock,
   repositoryLockPath,
 } from "./repository-lock.js";
+export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   effectiveRunLimit,
   hasEarlierCapacityWait,
@@ -227,7 +228,9 @@ export {
 } from "./run-capacity-config.js";
 export { assignmentResourceKeys } from "./run-resources.js";
 export {
+  deferIfTargetWait,
   deferTargetAttempt,
+  deferTargetInTransaction,
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";

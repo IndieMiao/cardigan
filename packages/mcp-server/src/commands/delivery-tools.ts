@@ -88,6 +88,22 @@ const reviewInput = z.object({
       proof: z.string().optional(),
     }),
   ),
+  issue_refs: z
+    .array(
+      z.union([
+        z.string().min(1),
+        z
+          .object({
+            finding_id: z.string().min(1),
+            proof: z.string().trim().min(1),
+          })
+          .strict(),
+      ]),
+    )
+    .optional()
+    .describe(
+      "同一交付的已有必改项：引用 get_card.shared_must_fixes 的 finding_id，补充本次审核证据时传 {finding_id, proof}，不要在 issues 中重复新建。仍须自行审核当前交付。",
+    ),
   rejection_category: z
     .string()
     .trim()

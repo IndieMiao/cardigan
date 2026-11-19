@@ -3,6 +3,7 @@ import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { c3ExitCandidate } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewRunWakeDisposition } from "../shared-review-wake.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -56,7 +57,11 @@ export function claimDispatchStop(
     const card = cardOf(d, run);
     const closed =
       card && ["done", "cancelled"].includes(d.get("cards", card).status);
-    if (!old?.stopping && !hasRunTarget(a, state)) {
+    if (
+      !old?.stopping &&
+      (!hasRunTarget(a, state) ||
+        reviewRunWakeDisposition(state, a, run) === "paused")
+    ) {
       if (old) clear(d, run, "review_target_unavailable");
       return;
     }
@@ -118,7 +123,11 @@ export function startDispatchStop(
       stop = run.dispatch_stop;
     if (!stop || stop.attempt_id !== p.attempt_id || stop.lease_until <= d.now)
       return false;
-    if (!stop.stopping && !hasRunTarget(a, state)) {
+    if (
+      !stop.stopping &&
+      (!hasRunTarget(a, state) ||
+        reviewRunWakeDisposition(state, a, run) === "paused")
+    ) {
       clear(d, run, "review_target_unavailable");
       return false;
     }

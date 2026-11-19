@@ -4,6 +4,7 @@ import {
   hostOpsPending,
   type RunId,
   recoveryTargetCurrent,
+  reviewRunWakeDisposition,
   stoppedByHuman,
 } from "@cardigan/domain";
 import { HostLaunchError } from "./errors.js";
@@ -29,6 +30,7 @@ export function wakeIsCurrent(
       recoveryTargetCurrent(state, run)) &&
     owner?.status === "active" &&
     !owner.external &&
+    !reviewRunWakeDisposition(state, owner, run) &&
     owner.role_id === expected.role_id &&
     owner.role_version === expected.role_version &&
     owner.machine_id === expected.machine_id &&

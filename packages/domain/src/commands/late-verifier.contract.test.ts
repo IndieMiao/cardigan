@@ -15,6 +15,7 @@ import {
   prepareDelivery,
   queueRun,
   refreshRequiredVerifiers,
+  sharedMustFixes,
   submitDelivery,
   submitReview,
   systemCompleteCard,
@@ -705,3 +706,76 @@ test.each(["card", "project", "kind"])(
     expect(JSON.stringify(f.state)).toBe(before);
   },
 );
+
+test("a late required verifier can cite a solo review on the same accepted delivery", async () => {
+  const f = setup();
+  const delivery = await f.deliver();
+  const review = {
+    delivery_id: delivery.id,
+    target_sha: delivery.subject.value,
+    kind: "code" as const,
+  };
+  const solo = f.commit(
+    submitReview(
+      f.state,
+      actor(2, "reviewer"),
+      {
+        ...review,
+        issues: [
+          {
+            severity: "minor",
+            description: "Label is ambiguous",
+            must_fix: true,
+            pre_existing: false,
+            impact: "ux_only",
+          },
+        ],
+        followup_card_id: id("card", 2),
+      },
+      f.io,
+    ),
+  );
+  expect(f.current(delivery)?.status).toBe("accepted");
+  const fixes = () =>
+    sharedMustFixes(f.state.reviews, f.state.deliveries, f.state.work_items);
+  expect(fixes()).toEqual([]);
+  const item = f.add({ required: false });
+  f.state = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item.id ? { ...w, required: true } : w,
+    ),
+  };
+  f.commit(refreshRequiredVerifiers(f.state, system, f.io));
+  const ref = `${solo.id}:1`;
+  expect(fixes()).toMatchObject([
+    {
+      delivery_id: delivery.id,
+      target_sha: review.target_sha,
+      finding_id: ref,
+    },
+  ]);
+  const owner = f.commit(
+    assign(
+      f.state,
+      human,
+      { work_item_id: item.id, role_id: item.role_id },
+      f.io,
+    ),
+  );
+  f.start(owner);
+  const late = f.commit(
+    submitReview(
+      f.state,
+      actor(Number(owner.id.slice(2)), owner.role_id),
+      { ...review, issues: [], issue_refs: [ref] },
+      f.io,
+    ),
+  );
+  expect(late).toMatchObject({
+    verdict: "reject",
+    issues: [{ finding_id: ref }],
+  });
+  expect(fixes()).toHaveLength(1);
+  expect(f.state.reviews.find((r) => r.id === solo.id)).toEqual(solo);
+});

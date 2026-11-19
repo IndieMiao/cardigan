@@ -59,6 +59,7 @@ function eligible(
     q.human_required_reason ||
     q.category !== "general" ||
     !q.blocking ||
+    q.review_limit_group ||
     q.affected_work_items.length !== 1 ||
     !q.card_id ||
     !delegationAllowed(d, q) ||
