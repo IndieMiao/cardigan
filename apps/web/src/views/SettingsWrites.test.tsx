@@ -809,3 +809,49 @@ test("a reminder threshold write rejected off-page remains visible on return", a
   expect(onPage).toContain("threshold write rejected");
   expect(alerts()).toContain("threshold write rejected");
 });
+
+test("a queued off confirmed during the first read on return is not undone by the older snapshot", async () => {
+  let reads = 0,
+    minutes: number | null = 120;
+  const writes: (number | null)[] = [];
+  const read = Promise.withResolvers<void>(),
+    one = Promise.withResolvers<void>(),
+    off = Promise.withResolvers<void>();
+  const client = fakeClient({
+    preferences: async () => {
+      const snapshot = {
+        auto_merge_after_minutes: minutes,
+        merge_gate_enabled: true,
+      };
+      if (++reads === 2) await read.promise;
+      return snapshot;
+    },
+    setPreferences: async (_p, v) => {
+      writes.push(v);
+      await (v === null ? off.promise : one.promise);
+      minutes = v;
+    },
+  });
+  const page = () => <SettingsPage client={client} projectId="p-1" />;
+  const view = render(page());
+  const toggle = await screen.findByRole("switch", { name: timeoutName });
+  const input = screen.getByLabelText("等待分钟数");
+  act(() => input.focus());
+  fireEvent.change(input, { target: { value: "1" } });
+  act(() => toggle.focus()); // blur commits 1
+  fireEvent.click(toggle); // off queues behind the 1
+  expect(writes).toEqual([1]);
+  view.unmount();
+  await act(async () => one.resolve());
+  expect(writes).toEqual([1, null]);
+  render(page());
+  expect(reads).toBe(2); // the return read sees 1
+  await act(async () => off.resolve());
+  expect(minutes).toBe(null);
+  await act(async () => read.resolve());
+  const back = await screen.findByRole("switch", { name: timeoutName });
+  expect(back.getAttribute("aria-checked")).toBe("false");
+  await waitFor(() => expect(reads).toBe(3));
+  expect(back.getAttribute("aria-checked")).toBe("false");
+  expect(writes).toEqual([1, null]);
+});
