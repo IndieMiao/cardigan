@@ -17,10 +17,18 @@ export function remainingResourceRatio(
   return ratio;
 }
 
+export type WorktreePreparation =
+  | "missing"
+  | "invalid"
+  | "expired"
+  | "verified";
+
 /** Transaction-local host evidence. Contains neither worker configuration nor other projects' identities. */
 export interface MachinePlacement {
   /** Current project opt-in and platform match; a past health check is not a binding. */
   readonly remote_binding: "disabled" | "platform_mismatch" | "allowed";
+  /** Host-attested server dispatch on this exact binding, independent of ordinary health. */
+  readonly worktree_preparation?: WorktreePreparation;
   readonly health: {
     readonly status: string;
     readonly available: boolean;

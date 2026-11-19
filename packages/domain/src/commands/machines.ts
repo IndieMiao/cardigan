@@ -114,12 +114,22 @@ export function selectMachine(
       f = facts?.get(machine_id),
       reasons = registryReasons(machine);
     if (machine_id !== "local") {
-      // C-461: do not infer server-side Git preparation from worker health.
-      // Only lift this guard after the dispatch path is verified end to end.
-      if (worktree !== "none")
-        reasons.push(
-          `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree ?? "未声明"}）`,
-        );
+      if (worktree === "write" || worktree === "readonly") {
+        const proof = f?.worktree_preparation;
+        if (proof !== "verified") {
+          const reason =
+            proof === "expired"
+              ? "证据已过期"
+              : proof === "invalid"
+                ? "证据无效"
+                : "尚未验证";
+          reasons.push(
+            `服务端远程 Git 工作树准备${reason}（角色工作树策略：${worktree}）`,
+          );
+        }
+      } else if (worktree !== "none") {
+        reasons.push("角色工作树策略未知，无法确定远程 Git 工作树准备要求");
+      }
       if (f?.remote_binding === "platform_mismatch")
         reasons.push("远程绑定的 OS 或架构与机器登记不一致");
       else if (f?.remote_binding !== "allowed")
