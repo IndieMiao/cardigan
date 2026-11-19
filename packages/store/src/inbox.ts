@@ -192,6 +192,8 @@ export interface MoveNotificationInput {
   readonly id: string;
   readonly event: NotificationEvent;
   readonly at?: string;
+  /** A failed in-turn send is an undelivered inbox item, not a Run-owned incident. */
+  readonly unbind_continuation?: boolean;
   /** Extra facts the dispatcher writes in the same step (attempts, bell…). */
   readonly patch?: Partial<
     Pick<Notification, "attempts" | "next_attempt_at" | "bell" | "run_id">
@@ -211,8 +213,13 @@ export function moveNotification(
   const current = decode(row);
   const transition = nextNotificationStatus(current.status, input.event);
   if (!transition.ok) throw new Error(transition.error.message);
+  const { run_id, ...rest } = current;
   const next: Notification = {
-    ...current,
+    ...rest,
+    ...(run_id &&
+    !(input.event === "deliver_failed" && input.unbind_continuation)
+      ? { run_id }
+      : {}),
     ...input.patch,
     status: transition.value,
     updated_at: input.at ?? now(),

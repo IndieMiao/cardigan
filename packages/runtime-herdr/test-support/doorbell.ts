@@ -8,13 +8,16 @@ export const DOORBELL = "[bell] card=C-1 wi=W-1";
 export const OBSERVED = "fixture:working-observed";
 
 /** Hold working until the observer acknowledges it, irrespective of latency. */
-export function doorbellAgent(directory: string) {
+export function doorbellAgent(
+  directory: string,
+  initial: "idle" | "done" = "idle",
+) {
   const script = join(directory, "agent.sh");
   const receipt = join(directory, "received.txt");
   writeFileSync(
     script,
     `#!/bin/sh
-printf '\\033]7501;state=idle\\007'
+printf '\\033]7501;state=${initial}\\007'
 while IFS= read -r line; do
   printf '%s' "$line" > "$1" || exit 1
   printf '\\033]7501;state=working\\007'
@@ -32,6 +35,7 @@ export async function checkDoorbell(
   runtime: Pick<Runtime, "status" | "wake" | "release">,
   ref: RuntimeRef,
   received: () => string,
+  initial: "idle" | "done" = "idle",
 ): Promise<void> {
   const failures: unknown[] = [];
   async function waitForAgent(
@@ -49,9 +53,17 @@ export async function checkDoorbell(
     }
   }
   try {
-    await waitForAgent("idle", "before doorbell");
+    await waitForAgent(initial, "before doorbell");
     assert.equal(
-      value(await runtime.wake(ref, DOORBELL, { if_idle: true })).sent,
+      value(
+        await runtime.wake(
+          ref,
+          DOORBELL,
+          initial === "idle"
+            ? { if_idle: true }
+            : { observed_guard: { state: "done" } },
+        ),
+      ).sent,
       true,
       "doorbell was not sent",
     );

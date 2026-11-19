@@ -471,6 +471,7 @@ export class HerdrRuntime implements Runtime {
         this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
       this.invalidateStatus(ref);
       try {
+        const guard = options?.observed_guard;
         const sent = await this.client.execIfCurrent(
           [
             "send",
@@ -481,6 +482,24 @@ export class HerdrRuntime implements Runtime {
             doorbell,
           ],
           options?.before_send ?? (() => true),
+          guard &&
+            (async (raw) => {
+              try {
+                // Use the reserved slot directly; requeueing get here would deadlock at capacity one.
+                const t: Terminal = JSON.parse(
+                  await raw.exec(["get", ref.terminal_ref, "--json"]),
+                );
+                this.checkTerminal(ref, t);
+                if (t.address !== ref.terminal_ref || t.state !== "live")
+                  return false;
+                if (guard.state === "done") return t.status?.state === "done";
+                if (t.status?.state != null && t.status.state !== "unknown")
+                  return false;
+                return await guard.confirm_turn_end();
+              } catch {
+                return false; // A failed observation proves nothing about idleness.
+              }
+            }),
         );
         return sent ? { sent: true } : { sent: false, withdrawn: true };
       } finally {

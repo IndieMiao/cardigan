@@ -108,3 +108,77 @@ test("Runtime contract: stopping after send starts cannot turn an uncertain fail
     await sending;
   }
 });
+
+test.each([
+  "done",
+  "resumed",
+  "same_turn",
+  "new_turn",
+  "osc_changed",
+  "read_failure",
+] as const)(
+  "in-turn wake checks %s evidence inside the acquired hc slot",
+  async (mode) => {
+    const raw = client(),
+      entered = gate(),
+      release = gate();
+    const runtime = value(
+      await HerdrRuntime.create({
+        client: raw,
+        env: { CARDIGAN_HC_CONCURRENCY: "1" },
+      }),
+    );
+    let state = mode === "done" || mode === "resumed" ? "done" : "unknown";
+    let ended = true;
+    const calls: string[][] = [];
+    raw.exec = async (args) => {
+      calls.push([...args]);
+      if (args[0] === "send" && args.at(-1) === "hold") {
+        entered.release();
+        await release.pending;
+      }
+      if (args[0] === "get") {
+        if (mode === "read_failure") throw new Error("status unavailable");
+        return JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: { state },
+        });
+      }
+      return "{}";
+    };
+    const holder = runtime.wake(ref, "hold");
+    try {
+      await entered.pending;
+      const sending = runtime.wake(ref, "bell", {
+        observed_guard:
+          state === "done"
+            ? { state: "done" }
+            : { state: "unknown", confirm_turn_end: async () => ended },
+      });
+      await expect.poll(() => runtime.diagnostics().queued).toBe(1);
+      expect(calls).toHaveLength(1);
+      if (mode === "resumed" || mode === "osc_changed") state = "working";
+      if (mode === "new_turn") ended = false;
+      release.release();
+      const send = mode === "done" || mode === "same_turn";
+      expect(value(await sending)).toEqual(
+        send ? { sent: true } : { sent: false, withdrawn: true },
+      );
+      expect(calls.slice(1).map((args) => args[0])).toEqual(
+        send ? ["get", "send"] : ["get"],
+      );
+      if (send)
+        expect(calls.at(-1)).toEqual([
+          "send",
+          "--json",
+          "--",
+          ref.terminal_ref,
+          "bell",
+        ]);
+    } finally {
+      release.release();
+      await holder;
+    }
+  },
+);

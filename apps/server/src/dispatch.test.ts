@@ -223,7 +223,9 @@ test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
       expect(vi.mocked(runtime.wake).mock.calls[0]).toMatchObject([
         expect.anything(),
         expect.stringContaining(`run=${run.id}`),
-        { if_idle: true },
+        agent === "done"
+          ? { observed_guard: { state: "done" } }
+          : { if_idle: true },
       ]);
       expect(ownNotes()[0]).toMatchObject({
         status: "belled",
@@ -244,7 +246,14 @@ test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
   },
 );
 
-test.each(["same", "resumed", "unassociated", "read_failed"] as const)(
+test.each([
+  "same",
+  "resumed",
+  "unassociated",
+  "read_failed",
+  "queue_timeout",
+  "ambiguous_timeout",
+] as const)(
   "C-475: Claude without OSC needs a rechecked end of this turn (%s)",
   async (mode) => {
     const run = f.session(target.assignment, false);
@@ -265,12 +274,13 @@ test.each(["same", "resumed", "unassociated", "read_failed"] as const)(
       turn_ended: true as const,
     };
     const { turn_ended: _ended, ...active } = sample;
-    const inspected =
-      mode === "same"
-        ? sample
-        : mode === "unassociated"
-          ? { ...sample, runtime_key: "another" }
-          : active;
+    const inspected = ["same", "queue_timeout", "ambiguous_timeout"].includes(
+      mode,
+    )
+      ? sample
+      : mode === "unassociated"
+        ? { ...sample, runtime_key: "another" }
+        : active;
     const read = vi.fn(
       async () =>
         new Map([
@@ -296,9 +306,47 @@ test.each(["same", "resumed", "unassociated", "read_failed"] as const)(
       ok: true,
       value: { process: "alive", agent: "unknown", observed_seq: 1 },
     });
+    let sends = 0;
+    const wake = vi
+      .mocked(runtime.wake)
+      .mockImplementation(async (_ref, _bell, opts) => {
+        const guard = opts?.observed_guard;
+        if (
+          guard?.state !== "unknown" ||
+          !(await guard.confirm_turn_end()) ||
+          !opts?.before_send?.()
+        )
+          return { ok: true, value: { sent: false, withdrawn: true } };
+        sends++;
+        return { ok: true, value: { sent: true } };
+      });
+    const firstTimeout =
+      mode === "queue_timeout" || mode === "ambiguous_timeout";
+    if (firstTimeout)
+      wake.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code:
+            mode === "queue_timeout"
+              ? "runtime_queue_timeout"
+              : "runtime_timeout",
+          message: "timeout",
+        },
+      });
     await new Dispatcher(opts).tick();
+    if (firstTimeout) {
+      expect(ownNotes()[0]?.status).toBe("delivery_failed");
+      f.advance(61_000);
+      await new Dispatcher(opts).tick();
+      await new Dispatcher(opts).tick();
+      expect(sends).toBe(mode === "queue_timeout" ? 1 : 0);
+      expect(ownNotes()[0]?.status).toBe(
+        mode === "queue_timeout" ? "belled" : "pending",
+      );
+      return;
+    }
     expect(read).toHaveBeenCalledWith(f.project, target.assignment.id);
-    expect(runtime.wake).toHaveBeenCalledTimes(mode === "same" ? 1 : 0);
+    expect(sends).toBe(mode === "same" ? 1 : 0);
     expect(ownNotes()[0]?.status).toBe(mode === "same" ? "belled" : "pending");
     expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
     if (mode === "same") {
@@ -309,32 +357,96 @@ test.each(["same", "resumed", "unassociated", "read_failed"] as const)(
   },
 );
 
-test("C-475: an ambiguous busy wake stays bound to the running Run and retries with backoff", async () => {
-  const run = f.session(target.assignment, false);
-  comment();
+test.each([false, true])(
+  "C-475: retry unread notifications even if the original Run ends (finished=%s)",
+  async (finished) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
+    vi.mocked(runtime.wake).mockResolvedValueOnce({
+      ok: false,
+      error: { code: "runtime_conflict", message: "busy" },
+    });
+    const opts = { ...options, retryBaseMs: 100 };
+    await new Dispatcher(opts).tick();
+    const note = ownNotes()[0];
+    expect(note).toMatchObject({ status: "delivery_failed", attempts: 1 });
+    expect(note?.run_id).toBeUndefined();
+    if (finished)
+      f.apply(
+        (s, a, p) =>
+          finishRun(
+            s,
+            a,
+            {
+              run_id: run.id,
+              outcome: "completed",
+              summary: "previous turn finished",
+            },
+            p,
+          ),
+        f.actorFor(target.assignment),
+      );
+    await new Dispatcher(opts).tick();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    f.advance(101);
+    await new Dispatcher(opts).tick();
+    expect(ownNotes()[0]).toMatchObject({
+      id: note?.id,
+      status: "belled",
+      attempts: 2,
+    });
+    const delivered = ownNotes()[0]?.run_id;
+    expect(delivered).toBeDefined();
+    if (finished) expect(delivered).not.toBe(run.id);
+    else expect(delivered).toBe(run.id);
+  },
+);
+
+test("C-475: a failed project-stream bell on a running standing session retries after backoff", async () => {
+  const owner = standingSession("host_ops");
+  const run = f.session(owner, false);
+  const event = f.state().events.findLast((e) => !e.card_id);
+  if (!event) throw new Error("missing project event");
+  const { notification } = f.store.recordNotification({
+    project_id: f.project,
+    event_id: event.id,
+    seq: event.seq,
+    recipient: { kind: "assignment", assignment_id: owner.id },
+    kind: "human_action",
+  });
+  const row = () =>
+    f.store.listNotifications({
+      project_id: f.project,
+      ids: [notification.id],
+    })[0];
   vi.mocked(runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "idle", observed_seq: 1 },
   });
-  vi.mocked(runtime.wake).mockResolvedValueOnce({
-    ok: false,
-    error: { code: "runtime_conflict", message: "busy" },
+  vi.mocked(runtime.wake).mockImplementation(async (ref) => {
+    if (
+      ref.terminal_ref === f.refFor(owner).terminal_ref &&
+      row()?.attempts === 0
+    )
+      return {
+        ok: false,
+        error: { code: "runtime_conflict", message: "temporarily busy" },
+      };
+    return { ok: true, value: { sent: true } };
   });
   const opts = { ...options, retryBaseMs: 100 };
   await new Dispatcher(opts).tick();
-  expect(ownNotes()[0]).toMatchObject({
-    run_id: run.id,
-    status: "delivery_failed",
-    attempts: 1,
-  });
-  await new Dispatcher(opts).tick();
-  expect(runtime.wake).toHaveBeenCalledOnce();
+  expect(row()).toMatchObject({ status: "delivery_failed", attempts: 1 });
   f.advance(101);
   await new Dispatcher(opts).tick();
-  expect(ownNotes()[0]).toMatchObject({
-    run_id: run.id,
+  expect(row()).toMatchObject({
     status: "belled",
     attempts: 2,
+    run_id: run.id,
   });
 });
 

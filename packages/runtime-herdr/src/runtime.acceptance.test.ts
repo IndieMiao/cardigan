@@ -378,30 +378,40 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
     }
   }, 60000);
 
-  test(`${name}: a doorbell reaches the agent and status follows it`, async () => {
-    const { runtime } = await create();
-    const directory = mkdtempSync(
-      join(tmpdir(), "cardigan-runtime-acceptance-"),
-    );
-    try {
-      const agent = doorbellAgent(directory);
-      const ref = unwrap(
-        await runtime.provision(
-          assignment,
-          role,
-          machine,
-          launchFor("coder-c1-w1-a3", directory, agent.command, agent.args),
-        ),
+  test.each(
+    name === "herdr" ? (["idle", "done"] as const) : (["idle"] as const),
+  )(
+    `${name}: a doorbell reaches the %s agent and status follows it`,
+    async (initial) => {
+      const { runtime } = await create();
+      const directory = mkdtempSync(
+        join(tmpdir(), "cardigan-runtime-acceptance-"),
       );
-      await checkDoorbell(runtime, ref, () =>
-        runtime instanceof MemoryRuntime
-          ? (runtime.received.get(ref.terminal_ref) ?? "")
-          : readFileSync(agent.receipt, "utf8"),
-      );
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
-    }
-  }, 90000);
+      try {
+        const agent = doorbellAgent(directory, initial);
+        const ref = unwrap(
+          await runtime.provision(
+            assignment,
+            role,
+            machine,
+            launchFor("coder-c1-w1-a3", directory, agent.command, agent.args),
+          ),
+        );
+        await checkDoorbell(
+          runtime,
+          ref,
+          () =>
+            runtime instanceof MemoryRuntime
+              ? (runtime.received.get(ref.terminal_ref) ?? "")
+              : readFileSync(agent.receipt, "utf8"),
+          initial,
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    90000,
+  );
 
   test(`${name}: human_entry is a paste-able command naming the terminal`, async () => {
     const { runtime } = await create();

@@ -88,6 +88,7 @@ import {
   getRoleVersion,
   listBellAttempts,
   moveNotification,
+  PROJECT_EVENT_STREAM,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
@@ -216,11 +217,10 @@ export interface DispatcherOptions {
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
-  n.card_id !== undefined &&
   s.cursors.some(
     (c) =>
       c.assignment_id === owner &&
-      c.card_id === n.card_id &&
+      c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
       c.acked_seq >= n.seq,
   );
 interface Job {
@@ -779,6 +779,7 @@ export class Dispatcher {
     )
       return;
     let live = false;
+    let doneObserved = false;
     let transcriptEnd: string | undefined;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
@@ -788,6 +789,7 @@ export class Dispatcher {
       );
       if (continuing) {
         if (!observed?.ok || observed.value.process !== "alive") return;
+        doneObserved = observed.value.agent === "done";
         if (!["idle", "done"].includes(observed.value.agent)) {
           // Claude/Codex may not publish OSC status. Require positive end-of-turn
           // evidence from the exact Run/session, not mere silence or process life.
@@ -940,26 +942,24 @@ export class Dispatcher {
         );
         if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
-        if (transcriptEnd && continuing) {
-          // Bypass the patrol cache under the launch lock; later input, tools,
-          // read failures and an intervening send all invalidate the old end.
+        const evidenceCurrent = async () => {
+          if (!transcriptEnd || !continuing) return false;
           const fresh = (
             await this.options.inspectHarnessActivity?.(project, a.id)
           )?.get(a.id);
-          if (
-            !fresh ||
-            !["fresh", "stale"].includes(fresh.status) ||
-            fresh.activity?.updated_at !== transcriptEnd ||
-            !this.turnEndCurrent(
+          return (
+            !!fresh &&
+            ["fresh", "stale"].includes(fresh.status) &&
+            fresh.activity?.updated_at === transcriptEnd &&
+            this.turnEndCurrent(
               this.state(project),
               a,
               continuing,
               fresh.activity,
               job.attempt.id,
             )
-          )
-            throw new RunPreparationDeferred();
-        }
+          );
+        };
         const baseline = continuing
           ? undefined
           : await profileSpan("deliver.before_wake", async () =>
@@ -995,7 +995,18 @@ export class Dispatcher {
             runtimeRef,
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
-              ...(continuing && !transcriptEnd ? { if_idle: true } : {}),
+              ...(continuing
+                ? transcriptEnd
+                  ? {
+                      observed_guard: {
+                        state: "unknown" as const,
+                        confirm_turn_end: evidenceCurrent,
+                      },
+                    }
+                  : doneObserved
+                    ? { observed_guard: { state: "done" as const } }
+                    : { if_idle: true }
+                : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
                 this.activate(job) &&
@@ -1096,7 +1107,7 @@ export class Dispatcher {
           }),
         ),
       );
-    this.settle(job.attempt, sent, reason, job.bell, failure);
+    this.settle(job.attempt, sent, reason, job.bell, failure, !!continuing);
   }
   private turnEndCurrent(
     state: CommandState,
@@ -1728,21 +1739,25 @@ export class Dispatcher {
     reason: string,
     bell?: string,
     failure?: DeliveryFailure,
+    continuation = false,
   ) {
     const { store } = this.options,
       project = attempt.project_id;
     store.uow.run((tx) => {
       const at = this.clock.now();
-      if (
-        !finishBellAttempt(
-          store.database,
-          project,
-          attempt.id,
-          sent ? "sent" : "failed",
-          at,
-        )
-      )
-        return;
+      // A FIFO/slot timeout is proven pre-send. Keep the notification's failed
+      // attempt and backoff, without consuming the transcript's end marker.
+      const recorded =
+        !sent && continuation && failure?.category === "runtime_queue_timeout"
+          ? withdrawBellAttempt(store.database, project, attempt.id)
+          : finishBellAttempt(
+              store.database,
+              project,
+              attempt.id,
+              sent ? "sent" : "failed",
+              at,
+            );
+      if (!recorded) return;
       let state = this.loadState(tx, project);
       // A queued Run has never crossed dispatch/sentinel. Fence it atomically
       // with lease recovery so a late provision cannot dispatch after its slot
@@ -1775,16 +1790,19 @@ export class Dispatcher {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
         const acked = covered(n, state, attempt.assignment_id);
+        const failedContinuation =
+          !sent && !acked && (continuation || run?.status === "running");
         moveNotification(store.database, {
           project_id: project,
           id: n.id,
           event: acked ? "ack" : sent ? "bell" : "deliver_failed",
           at,
+          unbind_continuation: failedContinuation,
           patch: {
-            run_id: attempt.run_id,
+            ...(failedContinuation ? {} : { run_id: attempt.run_id }),
             attempts: n.attempts + 1,
             ...(bell ? { bell } : {}),
-            ...((sent || run?.status === "running") && n.card_id
+            ...(failedContinuation || (sent && n.card_id)
               ? {
                   next_attempt_at: new Date(
                     Date.parse(at) + this.retryDelay(n.attempts + 1),
@@ -1810,6 +1828,7 @@ export class Dispatcher {
       // C-56: a dispatched Run is retried with backoff and recovered by
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
+        continuation ||
         state.events.some(
           (e) =>
             ["run_preparation_recovered", "run_preparation_stalled"].includes(
@@ -1983,7 +2002,11 @@ export class Dispatcher {
           project_id: project,
           statuses: ["belled", "delivery_failed"],
         })) {
-          if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
+          if (
+            (!n.card_id && n.status === "belled") ||
+            !n.next_attempt_at ||
+            n.next_attempt_at > at
+          )
             continue;
           const owner = notificationOwner(n, state, standingOnce),
             a = state.assignments.find((a) => a.id === owner);
@@ -1992,7 +2015,8 @@ export class Dispatcher {
             a.external ||
             !hasRunTarget(a, state) ||
             (n.status === "delivery_failed"
-              ? !runsOf(state.runs, a.id).some(
+              ? !!n.run_id &&
+                !runsOf(state.runs, a.id).some(
                   (r) => r.id === n.run_id && r.status === "running",
                 )
               : runsOf(state.runs, a.id).some(unfinishedRun)) ||

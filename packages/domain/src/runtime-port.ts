@@ -41,6 +41,11 @@ export interface RuntimeLaunchRecovery {
 }
 export interface RuntimeWakeOptions {
   readonly if_idle?: boolean;
+  /** For exact states hc cannot compare with --if. Re-read after the send slot is held.
+   * Unknown requires additional positive evidence from this exact harness turn. */
+  readonly observed_guard?:
+    | { state: "done" }
+    | { state: "unknown"; confirm_turn_end: () => Promise<boolean> };
   /** Synchronous fresh authority check after all waits, immediately before IO.
    * The adapter must not await between this check and starting the send.
    */
@@ -48,7 +53,7 @@ export interface RuntimeWakeOptions {
 }
 export type RuntimeWakeResult =
   | { readonly sent: boolean; readonly withdrawn?: never }
-  /** Only a rejected before_send check proves that no send was attempted. */
+  /** A failed pre-send authority or observation check proves no send was attempted. */
   | { readonly sent: false; readonly withdrawn: true };
 export interface RuntimeInteractionReader {
   /** Host-only, fixed target diagnostic. Returns enums, never terminal text. */
