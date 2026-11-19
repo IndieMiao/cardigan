@@ -1,6 +1,7 @@
 import {
   createContext,
   createElement,
+  Fragment,
   useContext,
   useEffect,
   useRef,
@@ -30,20 +31,38 @@ const same = (a: unknown, b: unknown) =>
 
 type Write<T> = (value: T, key: string) => Promise<void>;
 
-/** Closing or reloading the tab asks first while a settings save is in flight. */
-let saving = 0;
+/** Every view of the settings subscribes to saves in flight and notices. */
+const listeners = new Set<() => void>();
+const emit = () => {
+  for (const listener of listeners) listener();
+};
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+};
+
+/**
+ * Saves in flight per project and setting, shared by every view of it: a
+ * page shown again while the first request runs cannot send a second one.
+ * Closing or reloading the tab asks first while any save is in flight.
+ */
+const inflight = new Set<string>();
 const warn = (event: BeforeUnloadEvent) => {
   event.preventDefault();
   event.returnValue = "";
 };
-function beginSave() {
-  if (saving++ === 0) window.addEventListener("beforeunload", warn);
+function beginSave(key: string) {
+  if (inflight.size === 0) window.addEventListener("beforeunload", warn);
+  inflight.add(key);
+  emit();
 }
-function endSave() {
-  if (--saving === 0) window.removeEventListener("beforeunload", warn);
+function endSave(key: string) {
+  inflight.delete(key);
+  if (inflight.size === 0) window.removeEventListener("beforeunload", warn);
+  emit();
 }
 
-/** A failure shown this recently may not have been seen before leaving. */
+/** A failure shown this recently (monotonic clock) may not have been seen before leaving. */
 const UNSEEN_MS = 500;
 
 /** The settings panel a setting is shown in (provided by SettingsPage). */
@@ -59,9 +78,10 @@ export const SettingPlaceContext = createContext<SettingPlace | undefined>(
 
 /**
  * A failed save the reader is not looking at (C-455#326): they left the
- * settings page, or switched to another panel, before it answered. Shown once
- * in the shared feedback stack by `SettingsSaveNotice` until the setting is in
- * view again, saved again, or the action is used.
+ * settings page, or switched to another panel, before it answered. Each
+ * failed setting is listed once in the shared feedback stack by
+ * `SettingsSaveNotice` until it is in view again, saved again, confirmed by a
+ * read, or its action is used.
  */
 interface SaveNotice {
   key: string;
@@ -73,50 +93,55 @@ interface SaveNotice {
   project: string;
   panel: SettingPlace["panel"];
 }
-let notice: SaveNotice | undefined;
-const noticeListeners = new Set<() => void>();
+let notices: readonly SaveNotice[] = [];
 const reveals = new Map<string, () => void>();
-function showNotice(next: SaveNotice | undefined) {
-  notice = next;
-  for (const listener of noticeListeners) listener();
+function showNotice(next: SaveNotice) {
+  notices = [...notices.filter((n) => n.key !== next.key), next];
+  emit();
 }
 function clearNotice(key: string) {
-  if (notice?.key === key) showNotice(undefined);
+  if (!notices.some((n) => n.key === key)) return;
+  notices = notices.filter((n) => n.key !== key);
+  emit();
 }
-const subscribe = (listener: () => void) => {
-  noticeListeners.add(listener);
-  return () => noticeListeners.delete(listener);
-};
 
-/** Rendered once by the app shell, outside any page. */
+/** Rendered once by the app shell, outside any page: one entry per failure. */
 export function SettingsSaveNotice() {
-  const current = useSyncExternalStore(subscribe, () => notice);
-  const back = () => {
-    if (!current) return;
-    showNotice(undefined);
-    const reveal = reveals.get(current.key);
+  const list = useSyncExternalStore(subscribe, () => notices);
+  // The row takes the notice over once it is in view (it shows the failure
+  // itself), so the way back leaves the notice until then.
+  const back = (failed: SaveNotice) => {
+    const reveal = reveals.get(failed.key);
     if (reveal) return reveal();
     window.location.hash = routeHash({
       kind: "settings",
-      projectId: current.project,
-      ...(current.panel === "authorization"
+      projectId: failed.project,
+      ...(failed.panel === "authorization"
         ? { filters: { tab: "authorization" } }
         : {}),
     });
   };
-  return createElement(RequestFeedback, {
-    error: current?.message,
-    retry: current ? back : undefined,
-    retryLabel: "回到设置",
-  });
+  return createElement(
+    Fragment,
+    null,
+    ...list.map((failed) =>
+      createElement(RequestFeedback, {
+        key: failed.key,
+        error: failed.message,
+        retry: () => back(failed),
+        retryLabel: "回到设置",
+      }),
+    ),
+  );
 }
 
 /** Test isolation only: forget saves and notices a test left behind. */
 export function resetSettingWrites() {
-  saving = 0;
+  inflight.clear();
   window.removeEventListener("beforeunload", warn);
   reveals.clear();
-  showNotice(undefined);
+  notices = [];
+  emit();
 }
 
 /**
@@ -125,8 +150,9 @@ export function resetSettingWrites() {
  * - `value` is the last confirmed value: the server value of the newest read,
  *   or the acknowledged write until the next read arrives (`source` changes).
  *   useResource only applies the newest read, which starts after the write.
- * - One save at a time: a change while saving is ignored (callers mark the
- *   control `aria-disabled` and keep it focusable).
+ * - One save at a time per project and setting, across views: a change while
+ *   saving is ignored (callers mark the control `aria-disabled` and keep it
+ *   focusable). A view shown again meanwhile reads again when it ends.
  * - A failed write keeps its idempotency key for a retry of the same value; a
  *   different value, a success, or a read showing the value retires the key.
  * - Leaving never waits: the save still completes. A failure the reader is no
@@ -162,8 +188,6 @@ export function useSettingWrite<T>({
     setRead(source);
     setValue(server);
   }
-  const [busy, setBusy] = useState(false);
-  const sending = useRef(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
   /**
@@ -188,7 +212,21 @@ export function useSettingWrite<T>({
   // Completions reach whichever render is current.
   const latest = useRef({ saved, success, failure, visible, server });
   latest.current = { saved, success, failure, visible, server };
-  const current = useSyncExternalStore(subscribe, () => notice);
+  const current = useSyncExternalStore(subscribe, () =>
+    notices.find((n) => n.key === key),
+  );
+  // Busy while any view's request for this project and setting runs.
+  const busy = useSyncExternalStore(subscribe, () => inflight.has(key));
+  // When another view's request ends, read again to show its outcome.
+  const wasBusy = useRef(busy);
+  const ownEnded = useRef(false);
+  useEffect(() => {
+    if (wasBusy.current && !busy) {
+      if (ownEnded.current) ownEnded.current = false;
+      else latest.current.saved();
+    }
+    wasBusy.current = busy;
+  }, [busy]);
   // A view replaced meanwhile (another project) ignores the response.
   const alive = useRef(true);
   const home = useRef("");
@@ -207,7 +245,7 @@ export function useSettingWrite<T>({
         last &&
         place &&
         !last.reported &&
-        (!last.seen || Date.now() - last.at < UNSEEN_MS)
+        (!last.seen || performance.now() - last.at < UNSEEN_MS)
       )
         showNotice({
           key,
@@ -233,7 +271,7 @@ export function useSettingWrite<T>({
       text: current.message,
       cause: current.cause,
       value: current.value,
-      at: Date.now(),
+      at: performance.now(),
       seen: true,
       reported: false,
     };
@@ -249,7 +287,8 @@ export function useSettingWrite<T>({
       shown.current = undefined;
       setError("");
     }
-    if (notice?.key === key && same(notice.value, server)) clearNotice(key);
+    const reported = notices.find((n) => n.key === key);
+    if (reported && same(reported.value, server)) clearNotice(key);
   }, [source]);
   /** Still on this project's settings with the panel shown (URL already counts). */
   const inView = () => {
@@ -260,9 +299,8 @@ export function useSettingWrite<T>({
     return route?.kind === "settings" && route.projectId === place?.project;
   };
   const save = async (next: T): Promise<boolean> => {
-    if (sending.current) return false;
-    sending.current = true;
-    setBusy(true);
+    if (inflight.has(key)) return false;
+    beginSave(key);
     setError("");
     setMessage("");
     shown.current = undefined;
@@ -272,7 +310,6 @@ export function useSettingWrite<T>({
         ? pending.current.key
         : crypto.randomUUID();
     pending.current = { value: next, key: idempotency };
-    beginSave();
     let ok = false;
     try {
       await write(next, idempotency);
@@ -292,7 +329,7 @@ export function useSettingWrite<T>({
           text,
           cause,
           value: next,
-          at: Date.now(),
+          at: performance.now(),
           seen: !away,
           reported: away && !!place,
         };
@@ -307,9 +344,8 @@ export function useSettingWrite<T>({
           panel: place.panel,
         });
     } finally {
-      sending.current = false;
-      if (alive.current) setBusy(false);
-      endSave();
+      if (alive.current) ownEnded.current = true;
+      endSave(key);
     }
     return ok;
   };

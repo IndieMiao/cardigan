@@ -1141,3 +1141,158 @@ describe("save failure notice lifecycle", () => {
     expect(alerts()).not.toContain(failed);
   });
 });
+
+// C-455 review (V-2195): one request per project and setting across views, and
+// every failed request listed.
+describe("requests across views", () => {
+  afterEach(async () => {
+    cleanup();
+    resetSettingWrites();
+    history.replaceState(null, "", "#/p/p-1/cards");
+    await new Promise((r) => setTimeout(r, 30));
+  });
+  async function start() {
+    history.replaceState(null, "", "#/p/p-1/settings?tab=authorization");
+    const stored: Record<string, boolean> = { spending: false, publish: true };
+    const writes: {
+      p: string;
+      c: string;
+      next: boolean;
+      key?: string;
+      req: ReturnType<typeof Promise.withResolvers<void>>;
+    }[] = [];
+    const reads: string[] = [];
+    const client = fakeClient({
+      preferences: async (p) => {
+        reads.push(p);
+        return {
+          merge_gate_enabled: true,
+          auto_merge_after_minutes: null,
+          decision_delegation: { ...stored },
+        };
+      },
+      setDelegation: async (p, c, next, key) => {
+        const req = Promise.withResolvers<void>();
+        writes.push({ p, c, next, key, req });
+        await req.promise;
+        stored[c] = next;
+      },
+    });
+    render(<App client={client} />);
+    await screen.findByRole("switch", { name: /^对外发布/ });
+    return { stored, writes, reads };
+  }
+  const sw = (name: RegExp) => screen.getByRole("switch", { name });
+  const alerts = () =>
+    screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+  async function leave() {
+    fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "设置", exact: true }),
+      ).toBeNull(),
+    );
+  }
+  async function back() {
+    fireEvent.click(screen.getByRole("link", { name: "设置", exact: true }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "授权", exact: true }),
+    );
+    await screen.findByRole("switch", { name: /^花钱/ });
+  }
+  for (const remount of [false, true])
+    test(`same project and same setting have at most one outstanding grant (leave and return: ${remount})`, async () => {
+      const f = await start();
+      fireEvent.click(sw(/^花钱/));
+      expect(f.writes).toHaveLength(1);
+      if (remount) {
+        await leave();
+        await back();
+      }
+      // Both reads legitimately returned false: the first write has not finished yet.
+      expect(sw(/^花钱/).getAttribute("aria-checked")).toBe("false");
+      fireEvent.click(sw(/^花钱/));
+      const accepted = f.writes.map((w) => [w.p, w.c, w.next]);
+      await act(async () => {
+        f.writes[0]?.req.resolve();
+        await Promise.resolve();
+        for (const w of f.writes.slice(1))
+          w.req.reject(Error("花钱授权未保存"));
+      });
+      expect(f.stored.spending).toBe(true);
+      if (f.writes.length > 1)
+        expect(new Set(f.writes.map((w) => w.key)).size).toBe(2); // observed duplicate has a distinct request key
+      expect(accepted).toEqual([["p-1", "spending", true]]);
+    });
+  for (const both of [false, true])
+    test(`each failed request is identifiable after navigation (second independent setting: ${both})`, async () => {
+      const f = await start();
+      fireEvent.click(sw(/^对外发布/));
+      if (both) fireEvent.click(sw(/^花钱/));
+      expect(f.writes[0]?.c).toBe("publish");
+      await leave();
+      // Record every failure actually rendered; a future UI can combine, stack, or
+      // show notices separately. Only writes which really left the App are counted.
+      const seen = new Set<string>();
+      const record = () => {
+        const t = alerts();
+        if (t) seen.add(t);
+      };
+      const ob = new MutationObserver(record);
+      ob.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+      try {
+        await act(async () => {
+          for (const w of f.writes) w.req.reject(Error(`${w.c} refused`));
+        });
+        record();
+        const text = [...seen].join(" ");
+        expect(f.stored).toMatchObject({ spending: false, publish: true });
+        expect(text).toMatch(/对外发布|publish/);
+        if (f.writes.some((w) => w.c === "spending"))
+          expect(text).toMatch(/花钱|spending/);
+      } finally {
+        ob.disconnect();
+      }
+    });
+
+  test("a view shown again waits for the first request, then shows its outcome", async () => {
+    const f = await start();
+    fireEvent.click(sw(/^花钱/));
+    await leave();
+    await back();
+    expect(sw(/^花钱/).getAttribute("aria-disabled")).toBe("true");
+    await act(async () => f.writes[0]?.req.resolve());
+    await waitFor(() =>
+      expect(sw(/^花钱/).getAttribute("aria-checked")).toBe("true"),
+    );
+    expect(sw(/^花钱/).getAttribute("aria-disabled")).not.toBe("true");
+    expect(f.writes).toHaveLength(1);
+  });
+
+  test("two failed settings are listed separately; each leads back on its own", async () => {
+    const f = await start();
+    fireEvent.click(sw(/^对外发布/));
+    fireEvent.click(sw(/^花钱/));
+    await leave();
+    await act(async () => {
+      for (const w of f.writes) w.req.reject(Error(`${w.c} refused`));
+    });
+    const buttons = await screen.findAllByRole("button", { name: "回到设置" });
+    expect(buttons).toHaveLength(2);
+    expect(alerts()).toContain("未能撤销“对外发布”授权");
+    expect(alerts()).toContain("未能开启“花钱”授权");
+    fireEvent.click(buttons[0] as HTMLElement);
+    await screen.findByRole("switch", { name: /^花钱/ });
+    // Back in view, both rows take their failures over; no reminders remain.
+    await waitFor(() => expect(alerts()).not.toContain("请回到设置重试"));
+    expect(alerts()).toContain("publish refused");
+    expect(alerts()).toContain("spending refused");
+  });
+});

@@ -320,7 +320,9 @@ try {
           Buffer.from(failed.data, "base64"),
         );
         // C-455#326: leave while a save is in flight (1438 fails slowly in
-        // the fixture); the failure is reported once on the next page.
+        // the fixture); the failure is reported once on the next page. Wait
+        // first so the threshold failure above counts as seen.
+        await delay(700);
         await run(() => {
           window.scrollTo(0, 0);
           const input = document.querySelector("input[id$='-minutes']");
