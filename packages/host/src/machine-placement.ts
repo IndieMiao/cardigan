@@ -4,6 +4,7 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { observationFingerprint } from "./machine-capabilities.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
@@ -70,7 +71,10 @@ export function configureMachinePlacement(
                 id,
                 now,
                 worker && id !== "local"
-                  ? runtimeTargetBinding(worker).fingerprint
+                  ? observationFingerprint(
+                      runtimeTargetBinding(worker).fingerprint,
+                      machine,
+                    )
                   : undefined,
               ),
               ...(worker && id !== "local" && preparation

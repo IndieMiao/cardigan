@@ -55,3 +55,24 @@ export function releasedBeforeFirstLaunch(
     })
   );
 }
+
+/** Follow this takeover's predecessors, not an unrelated loss on the same item. */
+export function continuesConfirmedTakeover(
+  d: CommandDraft,
+  retry: Assignment,
+  card: CardId,
+  history: readonly Assignment[],
+  confirmedLoss: (a: Assignment) => boolean,
+): boolean {
+  const predecessors = new Map(history.map((a) => [a.id, a]));
+  let current = retry;
+  while (current.recovery) {
+    predecessors.delete(current.id);
+    const prior = predecessors.get(current.recovery.previous_assignment_id);
+    if (!prior) return false;
+    if (confirmedLoss(prior)) return true;
+    if (!releasedBeforeFirstLaunch(d, prior, card)) return false;
+    current = prior;
+  }
+  return false;
+}

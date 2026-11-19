@@ -8,8 +8,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assignOrDefer } from "@cardigan/domain";
-import { loadCommandState } from "@cardigan/mcp-server";
+import { assignOrDefer, saveMachine } from "@cardigan/domain";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
 import {
   beginMachineObservation,
@@ -473,16 +473,15 @@ test("placement reads current project opt-in and unexpired observations in the c
     );
     for (const p of [project, "other"]) store.createProject({ id: p });
     store.uow.run((tx) => {
-      for (const p of [project, "other"])
-        tx.machines.put(p, {
-          ...machine(),
-          label: "Worker A",
-          id: "worker-a",
-          herdr_machine: "worker-a",
-          os: "darwin",
-          arch: "arm64",
-          tags: ["fixture-only"],
-        });
+      tx.machines.put(project, {
+        ...machine(),
+        label: "Worker A",
+        id: "worker-a",
+        herdr_machine: "worker-a",
+        os: "darwin",
+        arch: "arm64",
+        tags: ["fixture-only"],
+      });
       tx.cards.put(project, { ...card(), project_id: project });
       tx.roles.put(project, {
         ...role("coder"),
@@ -500,8 +499,6 @@ test("placement reads current project opt-in and unexpired observations in the c
         completion_criteria: [],
         depends_on: [],
       });
-      tx.assignments.put("other", { ...assignment(), machine_id: "worker-a" });
-      tx.runs.put("other", { ...run(), resource_keys: ["godot"] });
     });
     const actor = { kind: "system", project_id: project } as const;
     beginMachineObservation(store, actor, project, "worker-a", "check", now);
@@ -550,18 +547,12 @@ test("placement reads current project opt-in and unexpired observations in the c
     expect(read()).toMatchObject({
       remote_binding: "allowed",
       limit: 6,
-      occupied: 1,
-      resources: new Map([["godot", { limit: 2, occupied: 1 }]]),
+      occupied: 0,
       health: { available: true },
       capabilities: [
         { key: "godot", available: true },
         { key: "harness.codex", available: true },
       ],
-    });
-    expect(read("other")).toMatchObject({
-      remote_binding: "disabled",
-      health: null,
-      capabilities: [],
     });
     const select = (required_tags: string[]) =>
       store.uow.run((tx) =>
@@ -589,7 +580,7 @@ test("placement reads current project opt-in and unexpired observations in the c
       env,
     });
     if (!runtime.ok) throw new Error("Invalid fixture runtime");
-    const refresh = () =>
+    const refresh = (hasCodex = true) =>
       refreshMachineObservations({
         store,
         project,
@@ -601,11 +592,83 @@ test("placement reads current project opt-in and unexpired observations in the c
           BUILTIN_MACHINE_CAPABILITIES.filter((c) =>
             ["harness.codex", "godot"].includes(c.key),
           ),
-        probe: async () => ({ ok: true, output: "4.10" }),
+        probe: async (_exec, _os, command) => ({
+          ok: hasCodex || command[0] !== "codex",
+          output: "4.10",
+        }),
       });
     await refresh();
     expect(select(["fixture-only"]).data).toMatchObject({
       machine_id: "worker-a",
+    });
+    // Change the registry and private config together. Neither a shared machine ID
+    // nor the current registry/config agreement proves what was actually probed.
+    for (const platform of [
+      { os: "darwin", arch: "x64" }, // architecture only
+      { os: "linux", arch: "x64" }, // OS only
+      { os: "darwin", arch: "arm64" },
+    ]) {
+      write(true, platform);
+      store.uow.run((tx) => {
+        const machine = tx.machines.get(project, "worker-a");
+        if (!machine) throw new Error("Missing worker fixture");
+        persistEffect(
+          tx,
+          project,
+          value(
+            saveMachine(
+              loadCommandState(tx, project),
+              { kind: "human", project_id: project },
+              { operation: "update", machine: { ...machine, ...platform } },
+              { clock: ports().clock, ids: tx.ids },
+            ),
+          ),
+        );
+      });
+      expect(read()).toMatchObject({
+        remote_binding: "allowed",
+        health: { available: true },
+      });
+      expect(select(["fixture-only"]).data).toMatchObject({
+        deferred: true,
+        reason: expect.stringContaining("harness.codex"),
+      });
+      expect(select([]).events.at(-1)).toMatchObject({
+        type: "machine_selected",
+        payload: {
+          excluded: [
+            {
+              machine_id: "worker-a",
+              reasons: [expect.stringContaining("平台")],
+            },
+          ],
+        },
+      });
+      await refresh(false);
+      expect(select(["fixture-only"]).data).toMatchObject({
+        deferred: true,
+        reason: expect.stringContaining("harness.codex：未验证"),
+      });
+      await refresh();
+      expect(select(["fixture-only"]).data).toMatchObject({
+        machine_id: "worker-a",
+      });
+    }
+    store.uow.run((tx) => {
+      const shared = tx.machines.get(project, "worker-a");
+      if (!shared) throw new Error("Missing worker fixture");
+      tx.machines.put("other", shared);
+      tx.assignments.put("other", { ...assignment(), machine_id: "worker-a" });
+      tx.runs.put("other", { ...run(), resource_keys: ["godot"] });
+    });
+    expect(read()).toMatchObject({
+      occupied: 1,
+      resources: new Map([["godot", { limit: 2, occupied: 1 }]]),
+    });
+    expect(read("other")).toMatchObject({
+      remote_binding: "disabled",
+      health: null,
+      capabilities: [],
     });
     // Exercise the actual transaction reader and employee-over-role profile precedence.
     const employee = {

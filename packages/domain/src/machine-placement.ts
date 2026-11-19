@@ -25,7 +25,7 @@ export type WorktreePreparation =
 
 /** Transaction-local host evidence. Contains neither worker configuration nor other projects' identities. */
 export interface MachinePlacement {
-  /** Does the host observation belong to the current remote worker binding? */
+  /** Does this observation cover the current remote worker binding, OS and architecture? */
   readonly observation_target_matches?: boolean;
   /** Current project opt-in and platform match; a past health check is not a binding. */
   readonly remote_binding: "disabled" | "platform_mismatch" | "allowed";

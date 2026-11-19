@@ -4,7 +4,9 @@ import {
   completeHumanAction,
   finishRun,
   hostOpsPending,
+  issueInstruction,
   queueRun,
+  releaseAssignment,
 } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -374,6 +376,17 @@ test("a reconnecting old process stays lost and asks the human again if observed
   expect(f.state().runs).toHaveLength(1);
 });
 
+const runtimeStub = () => ({
+  ...events.source,
+  status: vi.fn(),
+  wake: vi.fn(),
+  provision: vi.fn(),
+  release: vi.fn(),
+  interrupt: vi.fn(),
+  resume_or_replace: vi.fn(),
+  human_entry: vi.fn(),
+});
+
 test("the production control plane reads RW-1 backup records when it finds a persisted lost worker", async () => {
   await monitor.stop();
   const old = owner();
@@ -383,16 +396,7 @@ test("the production control plane reads RW-1 backup records when it finds a per
     tx.assignments.put(f.project, { ...old, runtime_state: "lost" });
     tx.runs.put(f.project, { ...run, status: "unknown" });
   });
-  const runtime = {
-    ...events.source,
-    status: vi.fn(),
-    wake: vi.fn(),
-    provision: vi.fn(),
-    release: vi.fn(),
-    interrupt: vi.fn(),
-    resume_or_replace: vi.fn(),
-    human_entry: vi.fn(),
-  };
+  const runtime = runtimeStub();
   const startRun = vi.fn(),
     onError = vi.fn();
   const plane = startControlPlane({
@@ -421,6 +425,114 @@ test("the production control plane reads RW-1 backup records when it finds a per
     expect(startRun).not.toHaveBeenCalled();
     expect(runtime.release).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
+  } finally {
+    await plane.stop();
+  }
+});
+
+test("a released backup takeover can continue in-progress work after dispatcher snapshot failure", async () => {
+  await lose();
+  const action = f.state().human_actions[0];
+  if (!action) throw new Error("Missing confirmation");
+  f.apply((s, a, p) =>
+    completeHumanAction(
+      s,
+      a,
+      { human_action_id: action.id, text: "Confirmed stopped" },
+      p,
+    ),
+  );
+  monitor.reconcile();
+  await monitor.stop();
+  expect(owner()?.status).toBe("released");
+  f.store.uow.run((tx) => {
+    const old = tx.machines.get(f.project, "worker-a");
+    if (!old) throw new Error("Missing machine");
+    tx.machines.put(f.project, {
+      ...old,
+      label: "Worker B",
+      id: "worker-b",
+      herdr_machine: "worker-b",
+    });
+  });
+  const params = { work_item_id: target.item.id, role_id: "coder" };
+  const takeover = f.apply((s, a, p) =>
+    assign(
+      s,
+      a,
+      { ...params, machine_id: "worker-b", recovery_source: "backup" },
+      p,
+    ),
+  );
+  const instruct = () =>
+    f.apply((s, a, p) =>
+      issueInstruction(
+        s,
+        a,
+        {
+          card_id: target.card.id,
+          work_item_id: target.item.id,
+          body: "Continue from the confirmed backup",
+        },
+        p,
+      ),
+    );
+  const startRun = vi.fn();
+  const plane = startControlPlane({
+    store: f.store,
+    runtime: runtimeStub(),
+    startRun,
+    clock: f.clock,
+    intervalMs: 5,
+    snapshot: async (assignment) => {
+      if (assignment.id === takeover.id)
+        throw new Error("No launch snapshot on worker-b");
+      return { model: "fixture", agent_cli_version: "fixture" };
+    },
+  });
+  try {
+    instruct();
+    await expect
+      .poll(() => f.state().events)
+      .toContainEqual(
+        expect.objectContaining({
+          type: "bell_delivery_failed",
+          actor: { kind: "system", project_id: f.project },
+          payload: expect.objectContaining({
+            assignment_id: takeover.id,
+            reason: "snapshot_unavailable",
+          }),
+        }),
+      );
+    expect(f.state().runs.some((r) => r.assignment_id === takeover.id)).toBe(
+      false,
+    );
+    f.apply((s, a, p) =>
+      releaseAssignment(s, a, { assignment_id: takeover.id }, p),
+    );
+    const next = f.apply((s, a, p) => assign(s, a, params, p));
+    expect(next).toMatchObject({
+      machine_id: "local",
+      recovery: {
+        previous_assignment_id: takeover.id,
+        source: "backup",
+        backup,
+      },
+    });
+    expect(
+      f.state().work_items.find((w) => w.id === target.item.id),
+    ).toMatchObject({ assignment_id: next.id, status: "in_progress" });
+    instruct();
+    await expect.poll(() => startRun.mock.calls.length).toBe(1);
+    expect(startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignment: expect.objectContaining({
+          id: next.id,
+          recovery: next.recovery,
+        }),
+        run: expect.objectContaining({ assignment_id: next.id }),
+      }),
+    );
   } finally {
     await plane.stop();
   }

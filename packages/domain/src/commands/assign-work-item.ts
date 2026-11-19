@@ -19,7 +19,10 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
-import { releasedBeforeFirstLaunch } from "./failed-placement.js";
+import {
+  continuesConfirmedTakeover,
+  releasedBeforeFirstLaunch,
+} from "./failed-placement.js";
 import { hostOpsExitConfirmation } from "./host-ops-actions.js";
 import { type MachineRequirements, selectMachine } from "./machines.js";
 import { canStartWork } from "./workflow.js";
@@ -78,17 +81,18 @@ export function assignWorkItem(
     )
     .sort((a, b) => b.role_version - a.role_version)[0];
   ensure(role, "not_found", "Role version was not found");
-  const recovery =
-    previous?.status === "released"
+  const confirmedLoss = (a: Assignment | undefined) =>
+    a?.status === "released"
       ? remoteWorkerLosses(d.state.events).find(
           (loss) =>
-            loss.assignment_id === previous.id &&
+            loss.assignment_id === a.id &&
             loss.work_item_id === item.id &&
             remoteWorkerLossReleased(d.state.events, loss.action_id) &&
             hostOpsExitConfirmation(d.state, loss.action_id).status ===
               "confirmed",
         )
       : undefined;
+  const recovery = confirmedLoss(previous);
   if (recovery || retry) {
     ensure(
       !existing.some((a) => hostOpsPending(d.state.events, a.id)),
@@ -111,7 +115,17 @@ export function assignWorkItem(
         "首发失败恢复须保留原工作项和角色，不指定机器重新指派",
       );
       ensure(
-        canStartWork({ item, work_items: d.list("work_items") }),
+        canStartWork({ item, work_items: d.list("work_items") }) ||
+          // A confirmed takeover continues the same in-progress work; it cannot start it again.
+          (item.status === "in_progress" &&
+            !item.reported_blocker &&
+            continuesConfirmedTakeover(
+              d,
+              retry,
+              item.card_id,
+              existing,
+              (a) => !!confirmedLoss(a),
+            )),
         "illegal_transition",
         "工作项尚不可启动，不能重新选机",
       );

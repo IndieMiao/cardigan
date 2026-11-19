@@ -642,11 +642,6 @@ test("a pre-launch failure after confirmed backup takeover retains the chosen co
   const s = {
     ...released,
     machines: [...(released.machines ?? []), { ...machine(), id: "worker-b" }],
-    work_items: released.work_items.map((w) =>
-      w.id === work_item_id && w.kind === "produce"
-        ? { ...w, status: "changes_requested" as const }
-        : w,
-    ),
   };
   const params = { work_item_id, role_id: "coder" };
   const takeover = value(
@@ -682,6 +677,41 @@ test("a pre-launch failure after confirmed backup takeover retains the chosen co
       ),
     ),
   );
+  expect(ready.work_items.find((w) => w.id === work_item_id)?.status).toBe(
+    "in_progress",
+  );
+  // A prior confirmed loss elsewhere in the item's history is not a takeover chain.
+  const unlinked = {
+    ...ready,
+    assignments: ready.assignments.map((a) =>
+      a.id === takeover.data.id && a.recovery
+        ? { ...a, recovery: { ...a.recovery, previous_assignment_id: a.id } }
+        : a,
+    ),
+  };
+  expect(assign(unlinked, human, params, f.io).ok).toBe(false);
+  const late = apply(
+    ready,
+    value(
+      reportRemoteWorkerAlive(ready, system, f.request.data.action_id, f.io),
+    ),
+  );
+  expect(assign(late, human, params, f.io).ok).toBe(false);
+  for (const status of [
+    "accepted",
+    "cancelled",
+    "delivered",
+    "waiting_decision",
+    "blocked",
+  ] as const) {
+    const ineligible = {
+      ...ready,
+      work_items: ready.work_items.map((w) =>
+        w.id === work_item_id && w.kind === "produce" ? { ...w, status } : w,
+      ),
+    };
+    expect(assign(ineligible, human, params, f.io).ok).toBe(false);
+  }
   const retry = value(assign(ready, human, params, f.io));
   expect(retry.data).toMatchObject({
     machine_id: "local",
