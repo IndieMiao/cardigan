@@ -1,6 +1,7 @@
 // C-212: deferred Needs You items ring from their own `needs_you_item_ready`
 // event when they become ready, never from the request or the other card.
 import {
+  type AssignmentId,
   type CardId,
   type Event,
   type HumanAction,
@@ -109,4 +110,19 @@ test("a host action for an external operator rings PM Office only", () => {
     expect(notes.map((n) => n.recipient.kind)).toEqual(["pm_office"]);
     expect(notes[0]?.summary).toContain("外接操作员");
   }
+});
+
+test("a diagnostic handoff names its actual result owner, including fallback PM Ops", () => {
+  const h = action({
+    triage: "host",
+    host_operator: "host_ops",
+    host_diagnostic: true,
+    host_assignment_id: "A-12" as AssignmentId,
+  });
+  const notes = routeEvent({
+    event: event("human_action_requested", { human_action_id: h.id }),
+    snapshot: snapshot({ human_actions: [h] }),
+  }).notifications;
+  expect(notes.map((n) => n.recipient.kind)).toEqual(["pm_office"]);
+  expect(notes[0]?.summary).toContain("A-12");
 });

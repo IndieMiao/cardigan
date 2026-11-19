@@ -471,16 +471,46 @@ export class HerdrRuntime implements Runtime {
         this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
       this.invalidateStatus(ref);
       try {
+        const guard = options?.observed_guard;
         const sent = await this.client.execIfCurrent(
           [
             "send",
             "--json",
-            ...(options?.if_idle ? ["--if", "idle"] : []),
+            ...(options?.if_idle || guard?.state === "unknown"
+              ? ["--if", "idle"]
+              : []),
             "--",
             ref.terminal_ref,
             doorbell,
           ],
           options?.before_send ?? (() => true),
+          guard &&
+            (async (raw) => {
+              try {
+                // Read through the reserved slot, not the queue (capacity may be one).
+                const terminalState = async () => {
+                  const t: Terminal = JSON.parse(
+                    await raw.exec(["get", ref.terminal_ref, "--json"]),
+                  );
+                  this.checkTerminal(ref, t);
+                  return t.address === ref.terminal_ref && t.state === "live"
+                    ? (t.status?.state ?? "unknown")
+                    : undefined;
+                };
+                const before = await terminalState();
+                if (guard.state === "done") return before === "done";
+                if (before !== "unknown" && before !== "idle") return false;
+                // A transcript end is a hint, not a condition hc can enforce.
+                // Only an explicit idle transition can promote this hint to a
+                // send, and --if idle rechecks it when hc actually types.
+                return (
+                  (await guard.confirm_turn_end()) &&
+                  (await terminalState()) === "idle"
+                );
+              } catch {
+                return false; // A failed observation proves nothing about idleness.
+              }
+            }),
         );
         return sent ? { sent: true } : { sent: false, withdrawn: true };
       } finally {

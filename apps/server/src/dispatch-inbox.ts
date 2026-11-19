@@ -162,39 +162,37 @@ export function routeStreamEvents(
       const routed = routeEvent({ event, snapshot });
       // C-212: a host action wakes host_ops once it is shown, unless it names
       // an external operator; a deferred one wakes it when it becomes ready.
-      const ops = snapshot.assignments.find(
-        (a) =>
-          a.scope === "standing" &&
-          a.role_id === "host_ops" &&
-          a.status === "active",
-      );
       const named = (event.payload as { human_action_id?: string })
         .human_action_id;
-      const hostActions =
-        ops &&
+      const internalHost =
         ((event.type === "human_action_requested" &&
           (event.payload as { disposition?: string }).disposition === "host") ||
-          event.type === NEEDS_YOU_ITEM_READY)
-          ? snapshot.human_actions.filter(
-              (h) => h.id === named && needsYouItemReady(snapshot, h),
-            )
-          : [];
-      if (
-        ops &&
-        hostActions.some(
-          (action) =>
-            action.status === "open" &&
-            action.triage === "host" &&
-            action.host_operator !== "external",
-        )
-      )
+          event.type === NEEDS_YOU_ITEM_READY) &&
+        snapshot.human_actions.find(
+          (h) =>
+            h.id === named &&
+            h.status === "open" &&
+            h.triage === "host" &&
+            h.host_operator !== "external" &&
+            needsYouItemReady(snapshot, h),
+        );
+      const owner =
+        internalHost &&
+        (internalHost.host_assignment_id ??
+          snapshot.assignments.find(
+            (a) =>
+              a.scope === "standing" &&
+              a.role_id === "host_ops" &&
+              a.status === "active",
+          )?.id);
+      if (owner)
         recordNotification(store.database, {
           project_id: project,
           event_id: event.id,
           seq: event.seq,
           kind: "human_action",
           at,
-          recipient: { kind: "assignment", assignment_id: ops.id },
+          recipient: { kind: "assignment", assignment_id: owner },
           ...(event.card_id ? { card_id: event.card_id } : {}),
         });
       // C-212: a deferred item this event made ready gets its own readable

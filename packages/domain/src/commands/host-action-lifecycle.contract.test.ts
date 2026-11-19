@@ -5,6 +5,7 @@ import {
   completeHumanAction,
   listNeedsYou,
   notices,
+  postComment,
   refreshCancelledHumanActions,
   requestHumanAction,
   standingTools,
@@ -20,6 +21,7 @@ import {
   id,
   now,
   ports,
+  role,
   value,
 } from "./test-fixtures.js";
 
@@ -347,4 +349,174 @@ test("card cancellation and compensation preserve history, do not resume work, a
     ).events,
   ).toEqual([]);
   expect(refreshCancelledHumanActions(legacy, owner, ports()).ok).toBe(false);
+});
+
+function diagnosticOwners() {
+  const base = setup();
+  const pm = {
+    ...required(base.assignments.find((a) => a.scope === "standing")),
+    scope: "standing" as const,
+    standing_mode: "ops" as const,
+    external: false,
+  };
+  const host = {
+    ...pm,
+    id: id("assignment", 5),
+    role_id: "host_ops",
+    standing_mode: undefined,
+  };
+  const { standing_mode: _mode, ...internal } = host;
+  const state = {
+    ...base,
+    roles: [...base.roles, role("host_ops")],
+    assignments: [...base.assignments.slice(0, 3), pm, internal],
+  };
+  const { host_assignment_id: _office, ...params } = handoff;
+  return { state, pm, host, base, params };
+}
+
+test.each(["human", "host", undefined, "pm_ops"] as const)(
+  "only a human can grant diagnostic authority outside the PM inbox (prior triage: %s)",
+  (triage) => {
+    const { state, pm, host, params } = diagnosticOwners();
+    const {
+      triage: _oldTriage,
+      host_operator: _operator,
+      host_assignment_id: _owner,
+      ...original
+    } = required(state.human_actions[0]);
+    const action = { ...original, ...(triage ? { triage } : {}) };
+    for (const hasHost of [true, false]) {
+      const snapshot = {
+        ...state,
+        human_actions: [action],
+        assignments: state.assignments.filter(
+          (a) => hasHost || a.id !== host.id,
+        ),
+      };
+      const diagnose = (who: Actor) =>
+        triageHumanAction(
+          snapshot,
+          who,
+          { ...params, host_operator: "host_ops", host_diagnostic: true },
+          ports(),
+        );
+      const authorized = {
+        host_diagnostic: true,
+        host_assignment_id: hasHost ? host.id : pm.id,
+      };
+      if (triage === "pm_ops")
+        expect(value(diagnose(owner)).data).toMatchObject(authorized);
+      else
+        expect(diagnose(owner)).toMatchObject({
+          ok: false,
+          error: { code: "unauthorized" },
+        });
+      expect(value(diagnose(human)).data).toMatchObject(authorized);
+    }
+  },
+);
+
+test("internal non-blocking handoff binds a result author; only their explicit final report closes it", () => {
+  const { state, pm, host, base, params } = diagnosticOwners();
+  const assign = (s: CommandState) =>
+    triageHumanAction(
+      s,
+      human,
+      { ...params, host_operator: "host_ops", host_diagnostic: true },
+      ports(),
+    );
+  const assigned = value(assign(state));
+  expect(assigned.data.host_assignment_id).toBe(host.id);
+  const after = apply(state, assigned);
+  const result = {
+    card_id: id("card", 1),
+    body: "H-1: checked the session",
+    host_result_for: target,
+  };
+  const report = (s: CommandState, a = actor(5, "host_ops")) =>
+    postComment(s, a, result, ports());
+  expect(
+    value(
+      postComment(
+        after,
+        actor(5, "host_ops"),
+        { card_id: result.card_id, body: result.body },
+        ports(),
+      ),
+    ).changes.some((c) => c.collection === "human_actions"),
+  ).toBe(false);
+  expect(report(after, actor()).ok).toBe(false);
+  expect(report(after, owner).ok).toBe(false);
+  expect(
+    postComment(
+      after,
+      actor(5, "host_ops"),
+      { ...result, card_id: id("card", 2) },
+      ports(),
+    ).ok,
+  ).toBe(false);
+  for (const patch of [
+    { blocks_merge: true },
+    { requested_by: "system" as const },
+    { host_operator: "external" as const },
+    { ready_when: { kind: "manual" as const } },
+  ]) {
+    expect(
+      report({ ...after, human_actions: [{ ...assigned.data, ...patch }] }).ok,
+    ).toBe(false);
+  }
+  // Rewriting a diagnosis as ordinary host work must revoke the result grant.
+  const ordinary = value(
+    triageHumanAction(
+      after,
+      human,
+      { ...params, host_operator: "host_ops" },
+      ports(),
+    ),
+  );
+  expect(ordinary.data.host_diagnostic).toBeUndefined();
+  expect(ordinary.data.host_assignment_id).toBeUndefined();
+  expect(report(apply(after, ordinary)).ok).toBe(false);
+  for (const overrides of [
+    { disposition: "human" as const },
+    { ...handoff }, // external operator
+    { blocks_merge: true, prerequisite: "credential" as const },
+  ]) {
+    expect(
+      triageHumanAction(
+        state,
+        human,
+        { ...params, ...overrides, host_diagnostic: true },
+        ports(),
+      ).ok,
+    ).toBe(false);
+  }
+  const closed = apply(after, value(report(after)));
+  expect(closed.human_actions[0]).toMatchObject({
+    status: "done",
+    result: { text: result.body },
+  });
+  expect(report(closed).ok).toBe(false);
+  const fallback = {
+    ...state,
+    assignments: state.assignments.filter((a) => a.id !== host.id),
+  };
+  const assignedPm = value(assign(fallback));
+  expect(assignedPm.data.host_assignment_id).toBe(pm.id);
+  expect(
+    value(
+      triageHumanAction(
+        apply(fallback, assignedPm),
+        owner,
+        {
+          human_action_id: target,
+          disposition: "done",
+          rationale: "Result verified",
+        },
+        ports(),
+      ),
+    ).data.status,
+  ).toBe("done");
+  expect(assign(base).ok).toBe(false);
 });

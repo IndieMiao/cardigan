@@ -175,6 +175,10 @@ test("C-90 consecutive human comments merge into one Ops bell and busy Ops reads
     f.actorFor(ops),
   );
 
+  vi.mocked(options.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 2 },
+  });
   const latest = comment("Another comment while Ops is running");
   await dispatcher.tick();
   expect(comments().at(-1)?.status).toBe("pending");

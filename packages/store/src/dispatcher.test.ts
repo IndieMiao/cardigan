@@ -1,11 +1,16 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { CardId, Run } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   advanceRouterCursor,
   beginBellAttempt,
   beginDispatchRetry,
+  defaultMigrationsDir,
   finishBellAttempt,
   listBellAttempts,
+  listMigrations,
+  migrate,
   moveNotification,
   recordNotification,
   Store,
@@ -200,6 +205,49 @@ test("events, stream cursor, inbox, Run changes and delivery intent all roll bac
     expect(store.uow.read((tx) => tx.runs.get(project_id, run.id))).toEqual(
       run,
     );
+  });
+});
+test("upgrading leaves a pre-continuation intent bound to its original Run", () => {
+  withTempStore((_current, dir) => {
+    for (const m of listMigrations(defaultMigrationsDir).filter(
+      (m) => m.version < 42,
+    ))
+      writeFileSync(
+        join(dir, `${String(m.version).padStart(4, "0")}_${m.name}.sql`),
+        m.sql,
+      );
+    const old = Store.open({
+      dbPath: join(dir, "legacy.db"),
+      migrationsDir: dir,
+    });
+    try {
+      const { run, input } = seed(old);
+      const note = old.recordNotification(input).notification;
+      old.database
+        .prepare(
+          `INSERT INTO bell_attempts (project_id, id, assignment_id, run_id, notification_ids, started_at, lease_until) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          project_id,
+          "legacy",
+          run.assignment_id,
+          run.id,
+          JSON.stringify([note.id]),
+          at,
+          lease,
+        );
+      // The Run advancing after claim is not evidence that the intent was a continuation.
+      old.uow.run((tx) =>
+        tx.runs.put(project_id, { ...run, status: "running" }),
+      );
+      migrate(old.database);
+      expect(unfinishedBellAttempts(old.database, project_id)).toEqual([
+        { ...claim(note.id), id: "legacy", finished_at: null, outcome: null },
+      ]);
+      expect(migrate(old.database)).toEqual([]);
+    } finally {
+      old.close();
+    }
   });
 });
 test("delivery intent survives reopening and excludes a competing sender for the Assignment", () => {

@@ -145,6 +145,7 @@ export interface GovernedHcClient extends HcClient {
   execIfCurrent(
     args: readonly string[],
     current: () => boolean,
+    inspect?: (client: Pick<HcClient, "exec">) => Promise<boolean>,
   ): Promise<boolean>;
 }
 export function governHcClient(
@@ -208,10 +209,11 @@ export function governHcClient(
     queue: shared,
     available: () => client.available(),
     lines: (args, signal) => client.lines(args, signal),
-    execIfCurrent: (args, current) =>
+    execIfCurrent: (args, current, inspect) =>
       shared.run(async () => {
         // Both the FIFO and cross-process slot have been acquired. There must
         // be no await between checking fresh authority and starting raw IO.
+        if (inspect && !(await inspect(client))) return false;
         if (!current()) return false;
         await client.exec(args);
         return true;

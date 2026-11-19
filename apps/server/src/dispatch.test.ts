@@ -39,6 +39,7 @@ import {
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
+  beginBellAttempt,
   listBellAttempts,
   PROJECT_EVENT_STREAM,
   persistRunLimitEffect,
@@ -50,6 +51,7 @@ import { startAssignmentCommand } from "../../cli/src/assignment.js";
 import { attentionCommand } from "../../cli/src/inbox.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
+import { routeProjectEvents } from "./dispatch-inbox.js";
 import {
   acceptThroughMergeGate,
   m4Fixture,
@@ -206,19 +208,427 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
     ownNotes().every((n) => n.status === "belled" && n.attempts === 1),
   ).toBe(true);
 });
-test("§3.1 an unfinished business Run holds notifications even if Runtime reports idle", async () => {
-  f.session(target.assignment, false);
+test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
+  "C-475: inbox delivery to a %s harness without finish_run",
+  async (agent) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent, observed_seq: 1 },
+    });
+    const beforeWake = vi.fn(async () => undefined);
+    for (let i = 0; i < 2; i++)
+      await new Dispatcher({ ...options, beforeWake }).tick();
+    if (["idle", "done"].includes(agent)) {
+      expect(runtime.wake).toHaveBeenCalledOnce();
+      expect(vi.mocked(runtime.wake).mock.calls[0]).toMatchObject([
+        expect.anything(),
+        expect.stringContaining(`run=${run.id}`),
+        agent === "done"
+          ? { observed_guard: { state: "done" } }
+          : { if_idle: true },
+      ]);
+      expect(ownNotes()[0]).toMatchObject({
+        status: "belled",
+        run_id: run.id,
+        attempts: 1,
+      });
+    } else {
+      expect(runtime.wake).not.toHaveBeenCalled();
+      expect(ownNotes()[0]?.status).toBe("pending");
+    }
+    expect(beforeWake).not.toHaveBeenCalled(); // Never sync a live worktree to deliver a notification.
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(f.state().runs).toHaveLength(2);
+    expect(f.state().runs.at(-1)).toMatchObject({
+      id: run.id,
+      status: "running",
+    });
+  },
+);
+
+test.each(["codex", "claude-code"] as const)(
+  "C-475: a no-OSC %s Run that never finishes hands its unread note to a followup only after confirmed exit",
+  async (harness) => {
+    const run = f.session(target.assignment, false);
+    f.store.uow.run((tx) => {
+      const current = tx.runs.get(f.project, run.id);
+      if (!current) throw new Error("missing Run");
+      tx.runs.put(f.project, { ...current, harness });
+    });
+    f.advance(1);
+    const sample = {
+      run_id: run.id,
+      assignment_id: target.assignment.id,
+      runtime_key: JSON.stringify(f.refFor(target.assignment)),
+      session_id: "fixture-session",
+      source: `${harness}:session_metadata`,
+      updated_at: f.clock.now(),
+      stale_after_ms: 60_000,
+      turn_ended: true as const,
+    };
+    let exited = false;
+    vi.mocked(runtime.status).mockImplementation(async () => ({
+      ok: true,
+      value: {
+        process: exited ? "exited" : "alive",
+        agent: "unknown",
+        observed_seq: 1,
+      },
+    }));
+    const settings = {
+      ...options,
+      harnessActivity: () => sample,
+      inspectHarnessActivity: async () =>
+        new Map([
+          [
+            target.assignment.id,
+            { status: "stale" as const, activity: sample },
+          ],
+        ]),
+      inactivityGraceMs: 50,
+      inactiveCancelAfterMs: 100,
+    };
+    comment();
+    const dispatcher = new Dispatcher(settings);
+    await dispatcher.tick();
+    const original = ownNotes().find((n) => n.kind === "comment");
+    if (!original) throw new Error("Missing original comment");
+    const row = () => ownNotes().find((n) => n.id === original.id);
+    expect(row()).toMatchObject({ status: "pending", attempts: 0 });
+    expect(listBellAttempts(f.store.database, f.project, run.id)).toEqual([]);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(runtime.release).not.toHaveBeenCalled();
+    f.advance(101);
+    const restarted = new Dispatcher(settings);
+    await restarted.tick();
+    await restarted.tick();
+    // Even a successful release call is not proof that the old terminal exited.
+    expect(runtime.release).toHaveBeenCalled();
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(row()).toMatchObject({ status: "pending", attempts: 0 });
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("running");
+    exited = true;
+    f.advance(120_000);
+    await restarted.tick();
+    await restarted.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)).toMatchObject({
+      status: "cancelled",
+      outcome: "failed",
+    });
+    expect(options.startRun).toHaveBeenCalledTimes(1);
+    expect(row()).toMatchObject({
+      status: "belled",
+      attempts: 1,
+      run_id: vi.mocked(options.startRun).mock.calls[0]?.[0].run.id,
+    });
+    expect(row()?.run_id).not.toBe(run.id);
+    expect(runtime.wake).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["runtime_queue_timeout", "runtime_timeout"] as const)(
+  "C-475: %s retains unread work and distinguishes proven non-delivery",
+  async (code) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
+    vi.mocked(runtime.wake).mockResolvedValueOnce({
+      ok: false,
+      error: { code, message: "timed out" },
+    });
+    const dispatcher = new Dispatcher({ ...options, retryBaseMs: 100 });
+    await dispatcher.tick();
+    expect(ownNotes()[0]).toMatchObject({
+      status: "delivery_failed",
+      attempts: 1,
+    });
+    expect(
+      listBellAttempts(f.store.database, f.project, run.id).map(
+        (a) => a.outcome,
+      ),
+    ).toEqual(code === "runtime_queue_timeout" ? [] : ["failed"]);
+    f.advance(101);
+    await dispatcher.tick();
+    expect(ownNotes()[0]).toMatchObject({
+      status: "belled",
+      attempts: 2,
+      run_id: run.id,
+    });
+  },
+);
+
+test.each([false, true])(
+  "C-475: retry unread notifications even if the original Run ends (finished=%s)",
+  async (finished) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
+    vi.mocked(runtime.wake).mockResolvedValueOnce({
+      ok: false,
+      error: { code: "runtime_conflict", message: "busy" },
+    });
+    const opts = { ...options, retryBaseMs: 100 };
+    await new Dispatcher(opts).tick();
+    const note = ownNotes()[0];
+    expect(note).toMatchObject({ status: "delivery_failed", attempts: 1 });
+    expect(note?.run_id).toBeUndefined();
+    if (finished)
+      f.apply(
+        (s, a, p) =>
+          finishRun(
+            s,
+            a,
+            {
+              run_id: run.id,
+              outcome: "completed",
+              summary: "previous turn finished",
+            },
+            p,
+          ),
+        f.actorFor(target.assignment),
+      );
+    await new Dispatcher(opts).tick();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    f.advance(101);
+    await new Dispatcher(opts).tick();
+    expect(ownNotes()[0]).toMatchObject({
+      id: note?.id,
+      status: "belled",
+      attempts: 2,
+    });
+    const delivered = ownNotes()[0]?.run_id;
+    expect(delivered).toBeDefined();
+    if (finished) expect(delivered).not.toBe(run.id);
+    else expect(delivered).toBe(run.id);
+  },
+);
+
+test.each([false, true])(
+  "C-475: lease recovery after the original Run finishes preserves unread work and honors ACK (acked=%s)",
+  async (acked) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    routeProjectEvents(f.store, f.project, { clock: f.clock });
+    const note = ownNotes().find((n) => n.kind === "comment");
+    if (!note?.card_id) throw new Error("Missing comment");
+    // Crash boundary: the intent committed, but its wake and settlement did not.
+    f.store.uow.run(() =>
+      beginBellAttempt(f.store.database, {
+        project_id: f.project,
+        id: "interrupted",
+        assignment_id: target.assignment.id,
+        run_id: run.id,
+        notification_ids: [note.id],
+        started_at: f.clock.now(),
+        lease_until: new Date(Date.parse(f.clock.now()) + 1000).toISOString(),
+      }),
+    );
+    if (acked)
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: target.assignment.id,
+        card_id: note.card_id,
+        up_to_seq: note.seq,
+      });
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: run.id,
+            outcome: "completed",
+            summary: "Original turn finished",
+          },
+          p,
+        ),
+      f.actorFor(target.assignment),
+    );
+    const reopened = Store.open({ dataDir: f.dataDir, clock: f.clock });
+    try {
+      const restarted = new Dispatcher({
+        ...options,
+        store: reopened,
+        retryBaseMs: 100,
+      });
+      const row = () =>
+        reopened.listNotifications({
+          project_id: f.project,
+          ids: [note.id],
+        })[0];
+      f.advance(1001);
+      await restarted.tick();
+      if (acked) expect(row()?.status).toBe("acked");
+      else {
+        expect(row()).toMatchObject({ status: "delivery_failed", attempts: 1 });
+        expect(row()?.run_id).toBeUndefined();
+      }
+      f.advance(101);
+      await restarted.tick();
+      if (acked) expect(row()?.status).toBe("acked");
+      else {
+        expect(row()).toMatchObject({ status: "belled", attempts: 2 });
+        expect(row()?.run_id).toBeDefined();
+        expect(row()?.run_id).not.toBe(run.id);
+      }
+    } finally {
+      reopened.close();
+    }
+  },
+);
+
+test("C-475: a failed project-stream bell on a running standing session retries after backoff", async () => {
+  const owner = standingSession("host_ops");
+  const run = f.session(owner, false);
+  const event = f.state().events.findLast((e) => !e.card_id);
+  if (!event) throw new Error("missing project event");
+  const { notification } = f.store.recordNotification({
+    project_id: f.project,
+    event_id: event.id,
+    seq: event.seq,
+    recipient: { kind: "assignment", assignment_id: owner.id },
+    kind: "human_action",
+  });
+  const row = () =>
+    f.store.listNotifications({
+      project_id: f.project,
+      ids: [notification.id],
+    })[0];
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 1 },
+  });
+  vi.mocked(runtime.wake).mockImplementation(async (ref) => {
+    if (
+      ref.terminal_ref === f.refFor(owner).terminal_ref &&
+      row()?.attempts === 0
+    )
+      return {
+        ok: false,
+        error: { code: "runtime_conflict", message: "temporarily busy" },
+      };
+    return { ok: true, value: { sent: true } };
+  });
+  const opts = { ...options, retryBaseMs: 100 };
+  await new Dispatcher(opts).tick();
+  expect(row()).toMatchObject({ status: "delivery_failed", attempts: 1 });
+  f.advance(101);
+  await new Dispatcher(opts).tick();
+  expect(row()).toMatchObject({
+    status: "belled",
+    attempts: 2,
+    run_id: run.id,
+  });
+});
+
+test("C-475: withdraw if the running turn finishes while the wake is queued", async () => {
+  const run = f.session(target.assignment, false);
   comment();
   vi.mocked(runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "idle", observed_seq: 1 },
   });
+  vi.mocked(runtime.wake).mockImplementation(async (_ref, _bell, guard) => {
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: run.id, outcome: "completed", summary: "done" },
+          p,
+        ),
+      f.actorFor(target.assignment),
+    );
+    expect(guard?.before_send?.()).toBe(false);
+    return { ok: true, value: { sent: false, withdrawn: true } };
+  });
   await new Dispatcher(options).tick();
-  expect(runtime.status).not.toHaveBeenCalled();
-  expect(runtime.wake).not.toHaveBeenCalled();
-  expect(ownNotes()[0]?.status).toBe("pending");
-  expect(f.state().runs).toHaveLength(2);
+  expect(ownNotes()[0]).toMatchObject({ status: "pending", attempts: 0 });
+  expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
 });
+
+test.each([false, true])(
+  "C-475: a persistently unknown inbox with recovery disabled alerts Ops at the deadline (end record=%s)",
+  async (ended) => {
+    const run = f.session(target.assignment, false);
+    const sample = {
+      run_id: run.id,
+      assignment_id: target.assignment.id,
+      runtime_key: JSON.stringify(f.refFor(target.assignment)),
+      session_id: "fixture-session",
+      updated_at: f.clock.now(),
+      stale_after_ms: 60_000,
+      source: "codex:session_metadata",
+      turn_ended: true as const,
+    };
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "unknown", observed_seq: 1 },
+    });
+    const opts = {
+      ...options,
+      inactiveCancelAfterMs: null,
+      harnessActivity: () => (ended ? sample : undefined),
+    };
+    const alerts = () =>
+      f.state().events.filter((e) => e.type === "run_inbox_stalled");
+    f.advance(2 * 60 * 60_000 - 1);
+    await new Dispatcher(opts).tick();
+    expect(alerts()).toEqual([]);
+    comment();
+    await new Dispatcher(opts).tick();
+    expect(alerts()).toEqual([]);
+    f.advance(1);
+    await new Dispatcher(opts).tick();
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]).toMatchObject({
+      card_id: target.card.id,
+      payload: {
+        assignment_id: target.assignment.id,
+        run_id: run.id,
+        notification_ids: [ownNotes().find((n) => n.status === "pending")?.id],
+      },
+    });
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => n.event_id === alerts()[0]?.id),
+    ).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+    await new Dispatcher(opts).tick();
+    expect(alerts()).toHaveLength(1);
+    expect(
+      (alerts()[0]?.payload as { reason: string } | undefined)?.reason.includes(
+        "会话记录",
+      ),
+    ).toBe(ended);
+    const note = ownNotes().find((n) => n.kind === "comment");
+    expect(note).toMatchObject({ status: "pending", attempts: 0 });
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(runtime.release).not.toHaveBeenCalled();
+    // A later positively guarded wake on the original Run can claim the same row.
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 2 },
+    });
+    await new Dispatcher(opts).tick();
+    expect(ownNotes().find((n) => n.id === note?.id)).toMatchObject({
+      status: "belled",
+      attempts: 1,
+      run_id: run.id,
+    });
+    expect(vi.mocked(runtime.wake).mock.calls[0]?.[2]).toMatchObject({
+      if_idle: true,
+    });
+  },
+);
 test.each(
   (["decision_resumed", "rework", "fix"] as const).flatMap((kind) =>
     [true, false].map((live) => ({ kind, live })),

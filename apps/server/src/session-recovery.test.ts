@@ -236,11 +236,12 @@ test.each(["dispatched", "running", "unknown"])(
       }
       await new Dispatcher(s.options).tick();
       expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
-      // C-247: a fresh process asks once about a dispatched, unstarted Run;
-      // an unreachable runtime leaves it untouched.
+      // Probe unstarted dispatches for recovery and running sessions for idle
+      // inbox delivery. An unreachable runtime must not be woken or replaced.
       expect(s.runtime.status).toHaveBeenCalledTimes(
-        status === "dispatched" ? 1 : 0,
+        status === "unknown" ? 0 : 1,
       );
+      expect(s.runtime.wake).not.toHaveBeenCalled();
       expect(f.state().runs).toHaveLength(2);
     } finally {
       await monitor.stop();
