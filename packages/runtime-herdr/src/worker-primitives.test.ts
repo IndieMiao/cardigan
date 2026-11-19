@@ -15,6 +15,44 @@ const helper = fileURLToPath(
 const load = `import importlib.util,sys,os,json
 spec=importlib.util.spec_from_file_location('worker',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 `;
+test("Darwin samples the canonical Git worktree on its Data volume, not a path prefix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-data-"));
+  try {
+    const { stdout } = await exec("python3", [
+      "-I",
+      "-B",
+      "-c",
+      `${load}
+import shutil,subprocess
+from pathlib import Path
+os.umask(0o077);base=Path(sys.argv[2]).resolve(); repo=base/'Users'/'worker'; data=base/'System/Volumes/Data'
+repo.mkdir(parents=True,mode=0o700);data.mkdir(parents=True)
+git=shutil.which('git');g=lambda *args:subprocess.check_output([git,'-C',str(repo),*args],stderr=subprocess.DEVNULL).decode().strip()
+g('init');g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-m','fixture')
+# Only Darwin ACL/mount observations are synthetic. Exercise the actual cwd,
+# FD traversal, Git top-level/common-dir and volume/space sampling together.
+m.platform.system=lambda:'Darwin';m.acl_safe=lambda fd:True
+m.macos_mount=lambda fd:str(data) if any(os.path.samefile(p,fd) for p in [repo,data]) else '/'
+expected=dict(path=str(repo),kind='worktree',mount=str(data))
+request=dict(paths=[expected],worktree=str(repo),git=git,timeout_ms=3000)
+result=m.paths(request)[0]
+assert result['path']==g('rev-parse','--show-toplevel') and result['realpath']==str(repo)
+assert result['common_dir']==str(repo/'.git') and result['sha']==g('rev-parse','HEAD') and not result['dirty']
+assert result['mounted'] and result['volume']==str(os.statvfs(data).f_fsid)
+expected['mount']='/'
+assert not m.paths(request)[0]['mounted']  # same device, different reported mount
+expected['mount']=str(data);m.platform.system=lambda:'Linux'
+try:m.paths(request);raise AssertionError('Linux accepted a path outside its mount')
+except ValueError as error:assert str(error)=='mount_mismatch'
+print('checked')`,
+      helper,
+      root,
+    ]);
+    expect(stdout.trim()).toBe("checked");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test("review: read-only path sampling must not execute submodule clean filters", async () => {
   const root = await mkdtemp(join(tmpdir(), "review-submodule-"));
   try {

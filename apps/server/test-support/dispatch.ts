@@ -23,6 +23,7 @@ import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 export function dispatchFixture(
   machine_id = "local",
   worktree: "write" | "none" = "none",
+  os: "linux" | "darwin" = "linux",
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
   let time = Date.parse("2030-01-01T00:00:00.000Z");
@@ -36,8 +37,8 @@ export function dispatchFixture(
         id: machine_id,
         label: "Fixture worker",
         herdr_machine: machine_id,
-        os: "linux",
-        arch: "x64",
+        os,
+        arch: os === "darwin" ? "arm64" : "x64",
         tags: [],
         max_assignments: 1,
         status: "online",

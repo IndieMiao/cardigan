@@ -430,36 +430,43 @@ m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
 native=m.runpy.run_path(str(Path(sys.argv[1]).with_name('worker-primitives.py')))
 install_group_observations(native, account, fault, system)
 m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
-# macOS 26: parent, Data mount and work root share st_dev; ismount is false.
-# Only the native ABI is synthetic; execute the installer's real mount checks.
+# The canonical cwd of the work root is *not* below the APFS mount's name.
+data=base/'Data'
+if system=='Darwin':
+ data.mkdir();config['mount']=str(data)
+ctypes=native['ctypes']
 class StatFS:
- def __call__(self,path,buffer):
+ def __call__(self,fd,buffer):
   assert system=='Darwin'
-  assert m.ctypes.sizeof(buffer._obj)==2168
+  assert ctypes.sizeof(buffer._obj)==2168
   assert buffer._obj.__class__.mntonname.offset==88
   if fault=='statfs-error':return -1
-  path=Path(os.fsdecode(path))
-  mount=Path('/') if path==Path('/') else base
-  if fault=='unmounted':mount=base.parent
-  if fault=='root-mount' and path==root:mount=root
+  mount=Path('/') if os.path.samefile('/',fd) else data
+  if fault=='unmounted':mount=base
+  if fault=='root-mount' and os.path.samefile(root,fd):mount=root
   value=b'' if fault=='statfs-empty' else os.fsencode(mount)
   assert len(value)<1024
-  m.ctypes.memmove(m.ctypes.addressof(buffer._obj)+88,value+b'\\0',len(value)+1)
+  ctypes.memmove(ctypes.addressof(buffer._obj)+88,value+b'\\0',len(value)+1)
   return 0
-m.ctypes.CDLL=lambda *a,**k:Record(statfs64=StatFS())
+ctypes.CDLL=lambda *a,**k:Record(fstatfs64=StatFS())
 if system=='Darwin':
- assert root.stat().st_dev==base.stat().st_dev==base.parent.stat().st_dev
+ assert not root.is_relative_to(data) and root.stat().st_dev==data.stat().st_dev
  m.os.path.ismount=lambda path:False
- original_statvfs=os.statvfs
- def statvfs(path):
-  value=original_statvfs(path)
-  fsid=16777235 if Path(path)==Path('/') or (fault=='root-volume' and Path(path)==root) else 16777230
-  return Record(f_fsid=fsid,f_bavail=value.f_bavail,f_frsize=value.f_frsize)
- m.os.statvfs=statvfs
+ original_statvfs,original_fstatvfs=os.statvfs,os.fstatvfs
+ def space(value,system_disk):
+  return Record(f_fsid=16777235 if system_disk else 16777230,f_bavail=value.f_bavail,f_frsize=value.f_frsize)
+ m.os.statvfs=lambda path:space(original_statvfs(path),Path(path)==Path('/'))
+ m.os.fstatvfs=lambda fd:space(original_fstatvfs(fd),os.path.samefile('/',fd) or (fault=='root-volume' and os.path.samefile(root,fd)))
  config['volume']='16777230'
-m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
+def observed_run(argv,**kwargs):
+ if argv==['/bin/pwd','-P']:
+  path=kwargs['cwd'];alias=(fault=='root-alias' and path==root) or (fault=='home-alias' and path==home)
+  return Record(stdout=os.fsencode('/Users/canonical' if alias else path)+b'\\n')
+ assert argv[0]=='/usr/bin/sudo'
+ return Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
+m.subprocess.run=observed_run
 m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
-m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
+m.runpy.run_path=lambda _: {**native,'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
  'isolation_account':native['isolation_account'],'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
 if fault=='uid':config['uid']+=1
 if fault=='groups':m.os.getgrouplist=lambda *a:[account.pw_gid,9999]
@@ -566,6 +573,8 @@ test.each([
   "space",
   "root-space",
   "root-mount",
+  "root-alias",
+  "home-alias",
   "root-volume",
   "system-mount",
   "outside-mount",

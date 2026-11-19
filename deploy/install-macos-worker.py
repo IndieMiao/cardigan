@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Operator-run macOS worker setup. Accounts, App, TCC and login stay manual."""
 import argparse
-import ctypes
 import hashlib
 import json
 import os
@@ -80,26 +79,6 @@ def layout(account, root):
     return entries
 
 
-def macos_mount(path):
-    # Darwin's 64-bit statfs ABI (sys/mount.h); st_dev/ismount cannot identify
-    # APFS firmlinks, which can expose the Data device even on the system root.
-    class StatFS(ctypes.Structure):
-        _fields_ = [('bsize', ctypes.c_uint32), ('iosize', ctypes.c_int32),
-                    ('blocks', ctypes.c_uint64), ('bfree', ctypes.c_uint64),
-                    ('bavail', ctypes.c_uint64), ('files', ctypes.c_uint64),
-                    ('ffree', ctypes.c_uint64), ('fsid', ctypes.c_int32 * 2),
-                    ('owner', ctypes.c_uint32), ('type', ctypes.c_uint32),
-                    ('flags', ctypes.c_uint32), ('fssubtype', ctypes.c_uint32),
-                    ('fstypename', ctypes.c_char * 16), ('mntonname', ctypes.c_char * 1024),
-                    ('mntfromname', ctypes.c_char * 1024), ('reserved', ctypes.c_uint32 * 8)]
-    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
-    libc.statfs64.argtypes = [ctypes.c_char_p, ctypes.POINTER(StatFS)]
-    libc.statfs64.restype = ctypes.c_int
-    info = StatFS()
-    require(libc.statfs64(os.fsencode(path), ctypes.byref(info)) == 0)
-    return os.fsdecode(info.mntonname)
-
-
 def preflight(config, system='Darwin'):
     require(platform.system() == system and system in ('Darwin', 'Linux') and os.geteuid() == 0)
     require(system != 'Darwin' or platform.machine() == 'arm64')
@@ -119,15 +98,24 @@ def preflight(config, system='Darwin'):
     require(denial.returncode in (0, 1) and 'is not allowed to run sudo' in denial.stdout + denial.stderr)
     root, mount = Path(config['root']), Path(config['mount'])
     protected(root)
-    os.close(native['isolation_directory'](str(root), 0, account.pw_gid, 0o750, True))
     require(root != home and root not in home.parents and home not in root.parents)
     require(len(root.parts) >= 3 and root != mount)
-    require(mount == mount.resolve() and root.is_relative_to(mount))
-    if system == 'Darwin':
-        require(macos_mount(mount) == str(mount) and macos_mount(root) == str(mount))
-        require(os.statvfs(root).f_fsid == os.statvfs(mount).f_fsid)
-    else:
-        require(os.path.ismount(mount) and root.stat().st_dev == mount.stat().st_dev)
+    require(mount == mount.resolve())
+    root_fd = native['isolation_directory'](str(root), 0, account.pw_gid, 0o750, True)
+    try:
+        if system == 'Darwin':
+            native['macos_check_directory'](home)
+            native['macos_check_directory'](root)
+            mount_fd = os.open(mount, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                require(not os.path.sameopenfile(root_fd, mount_fd))
+                require(native['macos_on_volume'](root_fd, mount_fd, str(mount)))
+            finally:
+                os.close(mount_fd)
+        else:
+            require(root.is_relative_to(mount) and os.path.ismount(mount) and root.stat().st_dev == mount.stat().st_dev)
+    finally:
+        os.close(root_fd)
     require(str(os.statvfs(mount).f_fsid) == config['volume'])
     for path, key in [(Path('/'), 'root'), (root, 'work')]:
         minimum = config['minimum_free_bytes'][key]

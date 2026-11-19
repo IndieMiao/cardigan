@@ -46,6 +46,42 @@ def acl_safe(fd):
         libc.acl_free(acl)
 
 
+def macos_check_directory(path):
+    # pwd -P observes the kernel cwd as Git does after chdir. realpath alone
+    # can leave the Data-volume spelling of an APFS firmlink unchanged.
+    result = subprocess.run(['/bin/pwd', '-P'], cwd=path, env={'LC_ALL': 'C'},
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=5, check=True)
+    if result.stdout != os.fsencode(path) + b'\n':
+        raise ValueError('noncanonical_directory')
+
+
+def macos_mount(fd):
+    # Darwin's 64-bit statfs ABI (sys/mount.h); st_dev/ismount cannot identify
+    # APFS firmlinks, which can expose the Data device even on the system root.
+    class StatFS(ctypes.Structure):
+        _fields_ = [('bsize', ctypes.c_uint32), ('iosize', ctypes.c_int32),
+                    ('blocks', ctypes.c_uint64), ('bfree', ctypes.c_uint64),
+                    ('bavail', ctypes.c_uint64), ('files', ctypes.c_uint64),
+                    ('ffree', ctypes.c_uint64), ('fsid', ctypes.c_int32 * 2),
+                    ('owner', ctypes.c_uint32), ('type', ctypes.c_uint32),
+                    ('flags', ctypes.c_uint32), ('fssubtype', ctypes.c_uint32),
+                    ('fstypename', ctypes.c_char * 16), ('mntonname', ctypes.c_char * 1024),
+                    ('mntfromname', ctypes.c_char * 1024), ('reserved', ctypes.c_uint32 * 8)]
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    libc.fstatfs64.argtypes = [ctypes.c_int, ctypes.POINTER(StatFS)]
+    libc.fstatfs64.restype = ctypes.c_int
+    info = StatFS()
+    if libc.fstatfs64(fd, ctypes.byref(info)) != 0:
+        raise OSError('mount_unknown')
+    return os.fsdecode(info.mntonname)
+
+
+def macos_on_volume(fd, mount_fd, mount):
+    return (macos_mount(mount_fd) == mount and macos_mount(fd) == mount
+            and os.fstatvfs(fd).f_fsid == os.fstatvfs(mount_fd).f_fsid)
+
+
 def directory(path, uid, private=False):
     """Pin a canonical directory via openat; no writable foreign ancestors/ACLs."""
     if not os.path.isabs(path) or os.path.normpath(path) != path:
@@ -431,13 +467,16 @@ def paths(request):
         context_bound = (workspace_kind in ('repo', 'worktree', 'build') and binding.get('workspace') == request['worktree'] and
                          re.fullmatch(r'A-[0-9]+', binding.get('assignment', '')) and
                          bound(request['worktree'], os.fstat(worktree), workspace_kind))
+        mac = platform.system() == 'Darwin'
         for expected in request['paths']:
             path, kind = expected['path'], expected['kind']
-            if not Path(path).is_relative_to(Path(expected['mount'])):
+            if not mac and not Path(path).is_relative_to(Path(expected['mount'])):
                 raise ValueError('mount_mismatch')
             fd = directory(path, uid, private=True)
             mount = None
             try:
+                if mac:
+                    macos_check_directory(path)
                 mount = directory(expected['mount'], uid)
                 info, disk, root = os.fstat(fd), os.fstatvfs(fd), os.statvfs('/')
                 assignment = binding['assignment'] if context_bound and bound(path, info, kind) else None
@@ -446,7 +485,8 @@ def paths(request):
                 state = git_state(request, path if kind in ('repo', 'worktree', 'build') else request['worktree'])
                 actual = dict(path=path, kind=kind, mount=expected['mount'], assignment=assignment, realpath=os.path.realpath(path), uid=info.st_uid,
                               **state, volume=str(disk.f_fsid),
-                              mounted=os.path.ismount(expected['mount']) and info.st_dev == os.fstat(mount).st_dev,
+                              mounted=(macos_on_volume(fd, mount, expected['mount']) if mac else
+                                       os.path.ismount(expected['mount']) and info.st_dev == os.fstat(mount).st_dev),
                               acl_safe=True, project_private=True, free_bytes=disk.f_bavail * disk.f_frsize,
                               root_free_bytes=root.f_bavail * root.f_frsize, lock_verified=lock is not None)
                 if not os.path.samefile(path, fd):

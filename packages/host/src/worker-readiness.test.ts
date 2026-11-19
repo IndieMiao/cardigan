@@ -130,6 +130,8 @@ test("the actual Python probe refuses worker-writable helpers before importing t
 test.each([
   ["Darwin", "share-everyone", true],
   ["Darwin", "share-process-only", true],
+  ["Darwin", "firmlink-root", false],
+  ["Darwin", "firmlink-helper", false],
   ["Darwin", "process-admin", false],
   ["Darwin", "share-direct-name", false],
   ["Darwin", "membership-unavailable", false],
@@ -171,11 +173,17 @@ test.each([
         "-c",
         source,
         JSON.stringify({
-          root: "/fixture",
+          root:
+            fixture === "firmlink-root"
+              ? "/System/Volumes/Data/Users/fixture"
+              : "/Users/fixture",
           gid: 2201,
           project: "example",
-          git_helper: "/fixture/git.py",
-          file_helper: "/fixture/files.py",
+          git_helper:
+            fixture === "firmlink-helper"
+              ? "/System/Volumes/Data/Users/fixture/git.py"
+              : "/Users/fixture/git.py",
+          file_helper: "/Users/fixture/files.py",
           version: `hc ${HC_RELEASE.version}`,
           system,
           fixture,

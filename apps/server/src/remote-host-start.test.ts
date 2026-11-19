@@ -40,8 +40,8 @@ afterEach(() => {
   f?.close();
 });
 
-async function fixture() {
-  f = dispatchFixture("worker-a", "write");
+async function fixture(os: "linux" | "darwin" = "linux") {
+  f = dispatchFixture("worker-a", "write", os);
   const { project, dataDir, store } = f;
   const { assignment, card, item } = f.create();
   f.apply((s, a, p) =>
@@ -87,7 +87,7 @@ async function fixture() {
       knownHostsFile: join(dataDir, "known"),
     },
     "worker-a",
-    "linux",
+    os,
     project,
   );
   const fileHelper = join(dataDir, "files.py");
@@ -99,6 +99,10 @@ print(json.dumps(dict(r,process=None,observed='unknown',phase={'publish':'publis
   );
   const execution = {
     ...worker.config,
+    agentRoot:
+      os === "darwin"
+        ? `/Users/cardigan-workers/${project}`
+        : worker.config.agentRoot,
     fileHelper: { python: "/usr/bin/python3", path: fileHelper },
     mcp: { url: "https://worker.fixture.ts.net/mcp", timeoutMs: 5000 },
     publication: {
@@ -161,8 +165,8 @@ esac\n`,
       {
         project_id: project,
         machine_id: assignment.machine_id,
-        os: "linux",
-        arch: "x64",
+        os,
+        arch: os === "darwin" ? "arm64" : "x64",
         session: "fixture-worker",
         generation: "one",
         allow_remote_launch: true,
@@ -275,6 +279,20 @@ esac\n`,
     setGitFailure,
   };
 }
+
+test("the dispatcher publishes the baseline and starts in the canonical Darwin worktree", async () => {
+  const { project, assignment, start, initial, onDisk } =
+    await fixture("darwin");
+  expect(await start()).toMatchObject({
+    status: "dispatched",
+    launch_publication: {
+      phase: "started",
+      work_dir: `/Users/cardigan-workers/${project}/worktrees/${project}/${assignment.id}`,
+    },
+  });
+  expect(git(onDisk, "rev-parse", "HEAD")).toBe(initial);
+  expect(git(onDisk, "rev-parse", "refs/remotes/origin/main")).toBe(initial);
+});
 
 test("the dispatcher starts a slow remote checkout and refreshes origin/main on follow-up without moving the writer's HEAD", async () => {
   const {
