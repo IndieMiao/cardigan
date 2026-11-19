@@ -360,9 +360,7 @@ function useNumberSetting({
       draft.setDraft(value);
       setting.clear();
     },
-    commit: async () => {
-      if (draft.valid && draft.dirty) await setting.save(Number(draft.draft));
-    },
+    commit: () => draft.commit(setting.save),
   };
 }
 
@@ -391,8 +389,24 @@ function TimeoutMergeSetting({
   if (setting.value !== null && setting.value !== lastMinutes)
     setLastMinutes(setting.value);
   const minutes = useNumberDraft(lastMinutes, 1, 1440);
-  // Pressing the switch blurs the minutes field first; the switch decides.
+  // A blur caused by pressing the switch leaves the decision to the switch.
+  // The press covers its own gesture (focus move and click) and ends right
+  // after any pointer release, so it never affects later edits.
   const pressing = useRef(false);
+  const skipBlur = useRef(false);
+  useEffect(() => {
+    const release = () => {
+      window.setTimeout(() => {
+        pressing.current = false;
+      });
+    };
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
+    return () => {
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("pointercancel", release, true);
+    };
+  }, []);
   const toggle = (next: boolean) => {
     if (!next) return setting.save(null);
     if (minutes.valid) return setting.save(Number(minutes.draft));
@@ -418,12 +432,6 @@ function TimeoutMergeSetting({
           onPointerDown={() => {
             pressing.current = true;
           }}
-          onPointerUp={() => {
-            pressing.current = false;
-          }}
-          onPointerCancel={() => {
-            pressing.current = false;
-          }}
           onCheckedChange={toggle}
         />
       </SettingsRow>
@@ -441,10 +449,18 @@ function TimeoutMergeSetting({
             minutes.setDraft(e.target.value);
             setting.clear();
           }}
+          onBlur={() => {
+            skipBlur.current = pressing.current;
+          }}
+          onKeyDown={() => {
+            skipBlur.current = false;
+          }}
           onCommit={() => {
-            if (pressing.current) return;
-            if (enabled && minutes.valid && minutes.dirty)
-              setting.save(Number(minutes.draft));
+            if (skipBlur.current) {
+              skipBlur.current = false;
+              return;
+            }
+            if (enabled) minutes.commit(setting.save);
           }}
         />
       </SettingsRow>

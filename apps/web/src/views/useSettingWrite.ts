@@ -122,20 +122,33 @@ export function useSettingWrite<T>({
 /**
  * Integer draft over a confirmed value: follows new confirmed values unless it
  * holds an unsaved edit, and is dirty against the last confirmed write.
+ * Only a user edit commits: a blur or Enter without an edit since the last
+ * commit (for example tabbing through a read-only field) writes nothing.
  */
 export function useNumberDraft(confirmed: number, min: number, max: number) {
   const [draft, setDraft] = useState(String(confirmed));
   const [shown, setShown] = useState(confirmed);
+  const edited = useRef(false);
   if (shown !== confirmed) {
     setShown(confirmed);
     if (draft === String(shown)) setDraft(String(confirmed));
   }
   const valid =
     /^\d+$/.test(draft) && Number(draft) >= min && Number(draft) <= max;
+  const dirty = draft !== String(confirmed);
   return {
     draft,
-    setDraft,
+    setDraft: (value: string) => {
+      edited.current = true;
+      setDraft(value);
+    },
     valid,
-    dirty: draft !== String(confirmed),
+    dirty,
+    commit: async (save: (value: number) => Promise<boolean>) => {
+      if (!edited.current || !valid || !dirty) return;
+      edited.current = false;
+      // A failed or deferred write keeps the edit for the next blur or Enter.
+      if (!(await save(Number(draft)))) edited.current = true;
+    },
   };
 }

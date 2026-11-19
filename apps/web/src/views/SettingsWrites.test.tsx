@@ -396,3 +396,115 @@ test("an invalid minutes draft left after turning off can be corrected and enabl
   expect(writes).toEqual([null, 120]);
   expect(s.state.auto_merge_after_minutes).toBe(120);
 });
+
+/** Timeout merge at 10 minutes whose first write waits for `release`. */
+async function heldTimeout() {
+  let minutes: number | null = 10;
+  const first = Promise.withResolvers<void>();
+  const writes: (number | null)[] = [];
+  const setPreferences = vi.fn(async (_p: string, next: number | null) => {
+    writes.push(next);
+    if (writes.length === 1) await first.promise;
+    minutes = next;
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          ...base,
+          auto_merge_after_minutes: minutes,
+        }),
+        setPreferences,
+      })}
+    />,
+  );
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  const input = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  return {
+    toggle,
+    input,
+    writes,
+    release: () => act(async () => first.resolve()),
+    state: () => minutes,
+  };
+}
+
+test("tabbing through the read-only minutes field does not cancel a queued off", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "1" } });
+  act(() => f.toggle.focus());
+  expect(f.writes).toEqual([1]);
+  fireEvent.click(f.toggle);
+  act(() => f.input.focus());
+  act(() => f.input.blur());
+  await f.release();
+  await waitFor(() => expect(f.writes).toEqual([1, null]));
+  await waitFor(() => expect(on(f.toggle)).toBe(false));
+  expect(f.state()).toBeNull();
+});
+
+test("a press that leaves the switch does not block later minute edits", async () => {
+  const f = await heldTimeout();
+  fireEvent.pointerDown(f.toggle, { button: 0, pointerType: "mouse" });
+  fireEvent.pointerMove(document.body, { buttons: 1, pointerType: "mouse" });
+  fireEvent.pointerUp(document.body, { button: 0, pointerType: "mouse" });
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "120" } });
+  fireEvent.keyDown(f.input, { key: "Enter" });
+  expect(f.writes).toEqual([120]);
+  act(() => f.input.blur());
+  await f.release();
+  await waitFor(() => expect(f.state()).toBe(120));
+  expect(f.writes).toEqual([120]);
+});
+
+test("focus moving onto the switch after release turns it off without the draft", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "1" } });
+  fireEvent.pointerDown(f.toggle, { pointerType: "touch" });
+  fireEvent.pointerUp(f.toggle, { pointerType: "touch" });
+  act(() => f.toggle.focus());
+  fireEvent.click(f.toggle);
+  expect(f.writes).toEqual([null]);
+  await f.release();
+  await waitFor(() => expect(on(f.toggle)).toBe(false));
+  expect(f.state()).toBeNull();
+});
+
+test("a failed minutes write keeps the edit so blurring again retries it", async () => {
+  const setReviewMaxRounds = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ setReviewMaxRounds })}
+    />,
+  );
+  const input = await screen.findByLabelText("普通审核轮数上限（轮）");
+  enter(input, "7");
+  await screen.findByRole("alert");
+  act(() => input.focus());
+  act(() => input.blur());
+  await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(2));
+  expect(setReviewMaxRounds.mock.calls[1]?.[3]).toBe(
+    setReviewMaxRounds.mock.calls[0]?.[3],
+  );
+});
+
+test("after an interrupted press ends, blurring an edited minutes field saves it", async () => {
+  const f = await heldTimeout();
+  fireEvent.pointerDown(f.toggle, { button: 0, pointerType: "mouse" });
+  fireEvent.pointerUp(document.body, { button: 0, pointerType: "mouse" });
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "120" } });
+  act(() => f.input.blur());
+  expect(f.writes).toEqual([120]);
+  await f.release();
+  await waitFor(() => expect(f.state()).toBe(120));
+});
