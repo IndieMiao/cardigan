@@ -11,6 +11,7 @@ import {
   type RuntimeWorker,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
+import { readWorktreePreparation } from "./worktree-preparation.js";
 
 /** Installed by server and standalone CLI; evaluated only during a new implicit assignment. */
 export function configureMachinePlacement(
@@ -34,6 +35,9 @@ export function configureMachinePlacement(
         /* Invalid private configuration never authorizes a remote worker. */
       }
     }
+    const preparation = allowed.size
+      ? readWorktreePreparation(env, now)
+      : undefined;
     const { occupied, resourcesForMachine } = runCapacitySnapshot(
       store,
       tx,
@@ -47,6 +51,9 @@ export function configureMachinePlacement(
           id,
           {
             ...readMachineObservationsInTransaction(store, project, id, now),
+            ...(worker && id !== "local" && preparation
+              ? { worktree_preparation: preparation(worker) }
+              : {}),
             remote_binding: !worker
               ? "disabled"
               : matchesWorkerPlatform(machine, worker)
