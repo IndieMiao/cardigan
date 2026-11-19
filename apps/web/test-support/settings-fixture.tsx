@@ -31,8 +31,13 @@ const update = (patch: Partial<PreferencesView>) => {
 };
 const client = fakeClient({
   preferences: async () => preferences,
-  setPreferences: async (_p, minutes) =>
-    update({ auto_merge_after_minutes: minutes }),
+  setPreferences: async (_p, minutes) => {
+    // Evidence scenes: 1439 saves slowly, 1438 fails slowly (leaving waits).
+    if (minutes === 1439 || minutes === 1438)
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    if (minutes === 1438) throw new Error("合成失败：超时合并未保存");
+    update({ auto_merge_after_minutes: minutes });
+  },
   setSystemRules: async (_p, input) => {
     // Evidence scene: a threshold of 999 minutes is a synthetic failed write.
     if (input.system_reminder_policy?.min_minutes === 999)

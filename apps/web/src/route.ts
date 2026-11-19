@@ -146,6 +146,32 @@ const currentHash = (): string =>
 const isUnparseable = (hash: string): boolean =>
   hash.length > 0 && hash !== "#" && parseRoute(hash) === undefined;
 
+let hold: { home: string } | undefined;
+let resume: { hash: string; go: () => void } | undefined;
+/**
+ * Keeps the reader on the current page until unfinished work there ends
+ * (C-455: a setting that is still saving). Leaving is remembered and carried
+ * out by `release(true)`; `release(false)` stays, e.g. to show a failure.
+ */
+export function holdNavigation(): (proceed: boolean) => void {
+  const mine = { home: currentHash() };
+  hold = mine;
+  return (proceed) => {
+    if (hold !== mine) return;
+    hold = undefined;
+    const next = resume;
+    resume = undefined;
+    if (proceed) next?.go();
+  };
+}
+/** False while held: the target is remembered and the page stays. */
+function mayLeave(hash: string, go: () => void): boolean {
+  if (!hold || hash === hold.home) return true;
+  if (resume?.hash !== hash) resume = { hash, go };
+  if (currentHash() !== hold.home) window.location.replace(hold.home);
+  return false;
+}
+
 /**
  * The route plus an invalid-hash flag.
  *
@@ -173,6 +199,12 @@ export function useRoute(): [
   useEffect(() => {
     const sync = (): void => {
       const hash = currentHash();
+      if (
+        !mayLeave(hash, () => {
+          window.location.hash = hash;
+        })
+      )
+        return;
       const next = parseRoute(hash);
       if (next !== undefined) {
         setRoute(next);
@@ -191,8 +223,12 @@ export function useRoute(): [
     return () => window.removeEventListener("hashchange", sync);
   }, []);
 
-  const navigate = useCallback((next: Route, options?: NavigateOptions) => {
+  const navigate = useCallback(function go(
+    next: Route,
+    options?: NavigateOptions,
+  ) {
     const hash = routeHash(next);
+    if (!mayLeave(hash, () => go(next, options))) return;
     if (window.location.hash !== hash) {
       if (options?.replace) window.location.replace(hash);
       else window.location.hash = hash;

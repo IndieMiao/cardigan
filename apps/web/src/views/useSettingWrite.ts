@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { describeWriteError } from "../api.js";
+import { holdNavigation } from "../route.js";
 
 /** Success notices leave the shared feedback stack after a short while. */
 export function useNotice() {
@@ -16,98 +17,39 @@ const same = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
 
 type Write<T> = (value: T, key: string) => Promise<void>;
-interface Listener {
-  start(): void;
-  idle(): void;
-  done(value: unknown): void;
-  failed(message: string): void;
-}
-/**
- * Write state of one setting of one project, shared by every mounted view of
- * it and kept across navigation: a view that remounts joins the same queue,
- * and a failure nobody saw is shown by the next view of that setting.
- */
-interface Channel {
-  sending: boolean;
-  inFlight: { value: unknown } | undefined;
-  queued: { value: unknown; write: Write<unknown> } | undefined;
-  /** Idempotency key of the newest write not yet confirmed. */
-  pending: { value: unknown; key: string } | undefined;
-  unseenError: string | undefined;
-  /**
-   * A write confirmed while no view listened, stamped with the confirmation
-   * time. The next view applies it only over a read that started earlier.
-   */
-  unseenDone: { value: unknown; at: number } | undefined;
-  listeners: Set<Listener>;
-}
-const channels = new Map<string, Channel>();
-/** Orders read starts against off-page confirmations. */
-let clock = 0;
-const readStarts = new WeakMap<object, number>();
-/**
- * Stamps a settings read with its start time, so a write confirmed while no
- * view listened overrides only reads that started before it.
- */
-export function trackSettingsRead<T extends object>(read: Promise<T>) {
-  const at = clock;
-  return read.then((data) => {
-    readStarts.set(data, at);
-    return data;
-  });
-}
-const channel = (id: string) => {
-  let found = channels.get(id);
-  if (!found) {
-    found = {
-      sending: false,
-      inFlight: undefined,
-      queued: undefined,
-      pending: undefined,
-      unseenError: undefined,
-      unseenDone: undefined,
-      listeners: new Set(),
-    };
-    channels.set(id, found);
-  }
-  return found;
-};
-/** Test isolation only: forget every shared write channel. */
-export function resetSettingWrites() {
-  channels.clear();
-}
 
-async function run(c: Channel, next: unknown, write: Write<unknown>) {
-  c.sending = true;
-  c.inFlight = { value: next };
-  for (const l of c.listeners) l.start();
-  const key =
-    c.pending && same(c.pending.value, next)
-      ? c.pending.key
-      : crypto.randomUUID();
-  c.pending = { value: next, key };
-  let ok = false;
-  try {
-    await write(next, key);
-    ok = true;
-    if (c.pending?.key === key) c.pending = undefined;
-    c.unseenError = undefined;
-    c.unseenDone = c.listeners.size ? undefined : { value: next, at: ++clock };
-    for (const l of c.listeners) l.done(next);
-  } catch (cause) {
-    const message = describeWriteError(cause);
-    if (c.listeners.size) for (const l of c.listeners) l.failed(message);
-    else c.unseenError = message;
-  } finally {
-    c.sending = false;
-    c.inFlight = undefined;
-    const later = c.queued;
-    c.queued = undefined;
-    if (later && !(ok && same(later.value, next)))
-      void run(c, later.value, later.write);
-    else for (const l of c.listeners) l.idle();
-  }
-  return ok;
+/**
+ * Settings saves in flight on this page. While any runs, leaving the page
+ * waits for it (`holdNavigation`): after success the reader moves on, after a
+ * failure they stay and see it. Closing or reloading the tab asks first.
+ */
+let saving = 0;
+let failed = false;
+let release: ((proceed: boolean) => void) | undefined;
+const warn = (event: BeforeUnloadEvent) => {
+  event.preventDefault();
+  event.returnValue = "";
+};
+function beginSave() {
+  if (saving++ > 0) return;
+  failed = false;
+  release = holdNavigation();
+  window.addEventListener("beforeunload", warn);
+}
+/** Test isolation only: forget saves a test left unfinished. */
+export function resetSettingWrites() {
+  saving = 0;
+  window.removeEventListener("beforeunload", warn);
+  release?.(false);
+  release = undefined;
+}
+function endSave(ok: boolean) {
+  if (!ok) failed = true;
+  if (--saving > 0) return;
+  window.removeEventListener("beforeunload", warn);
+  const done = release;
+  release = undefined;
+  done?.(!failed);
 }
 
 /**
@@ -116,16 +58,14 @@ async function run(c: Channel, next: unknown, write: Write<unknown>) {
  * - `value` is the last confirmed value: the server value of the newest read,
  *   or the acknowledged write until the next read arrives (`source` changes).
  *   useResource only applies the newest read, which starts after the write.
+ * - One save at a time: a change while saving is ignored (callers mark the
+ *   control `aria-disabled` and keep it focusable).
  * - A failed write keeps its idempotency key for a retry of the same value; a
  *   different value, a success, or a read showing the value retires the key.
- * - Writes of one setting never overlap, across views and navigation (`id`
- *   names the project and setting). A different value chosen during a write
- *   runs after it (the latest intent wins, including one made in a remounted
- *   view); repeating the in-flight value is ignored. Callers keep controls
- *   focusable (`aria-disabled`).
+ * - State belongs to this view; a page shown again edits what its own read
+ *   returned.
  */
 export function useSettingWrite<T>({
-  id,
   server,
   source,
   confirmable = true,
@@ -133,8 +73,6 @@ export function useSettingWrite<T>({
   saved,
   success,
 }: {
-  /** Project and setting, e.g. `p-1:auto-merge-after`. */
-  id: string;
   server: T;
   /** Identity of the read that produced `server`; a new read resets `value`. */
   source: unknown;
@@ -144,77 +82,65 @@ export function useSettingWrite<T>({
   saved: () => void;
   success: (value: T) => string;
 }) {
-  const c = channel(id);
   const [value, setValue] = useState(server);
   const [read, setRead] = useState(source);
   if (read !== source) {
     setRead(source);
     setValue(server);
   }
-  const [busy, setBusy] = useState(c.sending);
+  const [busy, setBusy] = useState(false);
+  const sending = useRef(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
+  const pending = useRef<{ value: T; key: string } | undefined>(undefined);
   // Completions reach whichever render is current.
-  const latest = useRef({ saved, success, source });
-  latest.current = { saved, success, source };
+  const latest = useRef({ saved, success });
+  latest.current = { saved, success };
+  // A view replaced meanwhile (another project) ignores the response.
+  const alive = useRef(true);
   useEffect(() => {
-    const listener: Listener = {
-      start() {
-        setBusy(true);
-        setError("");
-        setMessage("");
-      },
-      idle() {
-        setBusy(false);
-      },
-      done(next) {
-        setValue(next as T);
-        setMessage(latest.current.success(next as T));
-        latest.current.saved();
-      },
-      failed(text) {
-        setError(text);
-      },
-    };
-    c.listeners.add(listener);
-    setBusy(c.sending);
-    if (c.unseenError) {
-      setError(c.unseenError);
-      c.unseenError = undefined;
-    }
-    const unseen = c.unseenDone;
-    c.unseenDone = undefined;
-    // A read that started after the confirmation already includes it (or a
-    // later change); an older or unstamped read is replaced and read again.
-    const shown = latest.current.source;
-    const readAt =
-      typeof shown === "object" && shown !== null
-        ? readStarts.get(shown)
-        : undefined;
-    if (unseen && (readAt === undefined || readAt < unseen.at)) {
-      setValue(unseen.value as T);
-      latest.current.saved();
-    }
+    alive.current = true;
     return () => {
-      c.listeners.delete(listener);
+      alive.current = false;
     };
-  }, [c, setMessage]);
+  }, []);
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new read is the trigger.
   useEffect(() => {
     // A read showing the value confirms the write even if its response was lost.
-    if (confirmable && c.pending && same(c.pending.value, server)) {
-      c.pending = undefined;
+    if (confirmable && pending.current && same(pending.current.value, server)) {
+      pending.current = undefined;
       setError("");
     }
   }, [source]);
   const save = async (next: T): Promise<boolean> => {
-    if (c.sending) {
-      c.queued = same(c.inFlight?.value, next)
-        ? undefined
-        : { value: next, write: write as Write<unknown> };
-      return false;
+    if (sending.current) return false;
+    sending.current = true;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    const key =
+      pending.current && same(pending.current.value, next)
+        ? pending.current.key
+        : crypto.randomUUID();
+    pending.current = { value: next, key };
+    beginSave();
+    let ok = false;
+    try {
+      await write(next, key);
+      ok = true;
+      if (!alive.current) return ok;
+      pending.current = undefined;
+      setValue(next);
+      setMessage(latest.current.success(next));
+      latest.current.saved();
+    } catch (cause) {
+      if (alive.current) setError(describeWriteError(cause));
+    } finally {
+      sending.current = false;
+      if (alive.current) setBusy(false);
+      endSave(ok);
     }
-    return run(c, next, write as Write<unknown>);
+    return ok;
   };
   const clear = () => {
     setError("");

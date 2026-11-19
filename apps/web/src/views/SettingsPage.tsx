@@ -24,11 +24,7 @@ import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
-import {
-  trackSettingsRead,
-  useNumberDraft,
-  useSettingWrite,
-} from "./useSettingWrite.js";
+import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -63,7 +59,7 @@ export function SettingsPage({
   }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
-    () => trackSettingsRead(client.preferences(projectId)),
+    () => client.preferences(projectId),
     [client, projectId],
   );
   const resource = useResource(load, revision);
@@ -335,7 +331,6 @@ interface SettingProps {
 
 /** Integer setting saved on blur or Enter. */
 function useNumberSetting({
-  id,
   initial,
   min,
   max,
@@ -343,7 +338,6 @@ function useNumberSetting({
   saved,
   source,
 }: {
-  id: string;
   initial: number;
   min: number;
   max: number;
@@ -352,7 +346,6 @@ function useNumberSetting({
   source: unknown;
 }) {
   const setting = useSettingWrite({
-    id,
     server: initial,
     source,
     write,
@@ -385,7 +378,6 @@ function TimeoutMergeSetting({
 }) {
   const id = useId();
   const setting = useSettingWrite<number | null>({
-    id: `${projectId}:auto-merge-after`,
     server: serverMinutes ?? null,
     source,
     write: (value, key) => client.setPreferences(projectId, value, key),
@@ -421,6 +413,8 @@ function TimeoutMergeSetting({
   }, []);
   const toggle = (next: boolean) => {
     pressing.current = false;
+    // While saving the switch is aria-disabled: the press changes nothing.
+    if (setting.busy) return;
     // The switch decides: turning off drops the unsaved minutes as a pending
     // commit (they stay visible for a later activation); turning on writes them.
     minutes.settle();
@@ -518,7 +512,6 @@ function ReviewRoundsSetting({
   const independent = kind === "independent";
   const label = independent ? "独立复核轮数上限" : "普通审核轮数上限";
   const setting = useNumberSetting({
-    id: `${projectId}:review-rounds:${kind}`,
     initial,
     min: 1,
     max: ceiling,
@@ -590,7 +583,6 @@ function MergeMinutesSetting({
   const min = snoozeMax ? 60 : 1;
   const max = snoozeMax ? 10080 : 1440;
   const setting = useNumberSetting({
-    id: `${projectId}:merge-minutes:${kind}`,
     initial,
     min,
     max,
@@ -660,7 +652,6 @@ function PmMergeSetting({
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
-    id: `${projectId}:pm-merge`,
     server: enabled,
     source,
     write: (next, key) => client.setPmMergeConfirmation(projectId, next, key),
@@ -712,7 +703,6 @@ function DelegationSetting({
 }: SettingProps & { category: string; label: string; enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
-    id: `${projectId}:delegation:${category}`,
     server: enabled,
     source,
     write: (next, key) => client.setDelegation(projectId, category, next, key),
@@ -766,7 +756,6 @@ function AutoMergeSetting({
   const id = useId();
   const title = pause ? "暂停自动合并" : "自动合并";
   const setting = useSettingWrite({
-    id: `${projectId}:${pause ? "auto-merge-paused" : "auto-merge"}`,
     server: enabled,
     source,
     // An inherited default is not a stored value and cannot confirm a write.
@@ -841,7 +830,6 @@ function CrossCardReadSetting({
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
-    id: `${projectId}:cross-card-read`,
     server: enabled,
     source,
     write: (next, key) => client.setCrossCardRead(projectId, next, key),

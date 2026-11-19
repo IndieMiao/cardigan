@@ -9,8 +9,9 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { App } from "../App.js";
 import type { PreferencesView, SystemReminderPolicy } from "../api.js";
-import { fakeClient } from "../testing/fixtures.js";
+import { fakeClient, project } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
 
@@ -26,6 +27,7 @@ vi.stubGlobal(
 afterEach(() => {
   cleanup();
   resetSettingWrites();
+  window.location.hash = "";
 });
 
 const on = (control: HTMLElement) =>
@@ -373,16 +375,22 @@ test("pressing the timeout switch right after editing minutes only turns it off"
   expect(s.state.auto_merge_after_minutes).toBeNull();
 });
 
-test("turning the timeout off during a minutes write runs after it, so off wins", async () => {
+test("pressing the timeout switch during a minutes write changes nothing; off afterwards wins", async () => {
   const { s, writes } = slowTimeout(10);
   const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
   const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
   // Keyboard: Tab commits the minutes, then Space on the switch while saving.
   enter(minutes, "1");
+  expect(toggle.getAttribute("aria-disabled")).toBe("true");
   fireEvent.click(toggle);
+  await waitFor(() =>
+    expect(toggle.getAttribute("aria-disabled")).not.toBe("true"),
+  );
+  expect(writes).toEqual([1]);
+  expect(on(toggle)).toBe(true);
   fireEvent.click(toggle);
-  await waitFor(() => expect(writes).toEqual([1, null]));
   await waitFor(() => expect(on(toggle)).toBe(false));
+  expect(writes).toEqual([1, null]);
   expect(s.state.auto_merge_after_minutes).toBeNull();
 });
 
@@ -434,7 +442,7 @@ async function heldTimeout() {
   };
 }
 
-test("tabbing through the read-only minutes field does not cancel a queued off", async () => {
+test("while minutes save, the switch and the read-only field write nothing more", async () => {
   const f = await heldTimeout();
   act(() => f.input.focus());
   fireEvent.change(f.input, { target: { value: "1" } });
@@ -442,11 +450,13 @@ test("tabbing through the read-only minutes field does not cancel a queued off",
   expect(f.writes).toEqual([1]);
   fireEvent.click(f.toggle);
   act(() => f.input.focus());
+  expect(f.input.readOnly).toBe(true);
   act(() => f.input.blur());
   await f.release();
-  await waitFor(() => expect(f.writes).toEqual([1, null]));
-  await waitFor(() => expect(on(f.toggle)).toBe(false));
-  expect(f.state()).toBeNull();
+  await settle();
+  expect(f.writes).toEqual([1]);
+  expect(f.state()).toBe(1);
+  expect(on(f.toggle)).toBe(true);
 });
 
 test("a press that leaves the switch does not block later minute edits", async () => {
@@ -547,17 +557,6 @@ test("an abandoned touch press is ended by the next tap elsewhere", async () => 
   await f.release();
 });
 
-test("a queued off still reaches the original project after leaving the page", async () => {
-  const f = await heldTimeout();
-  enter(f.input, "1");
-  expect(f.writes).toEqual([1]);
-  fireEvent.click(f.toggle);
-  cleanup();
-  await f.release();
-  await waitFor(() => expect(f.writes).toEqual([1, null]));
-  await waitFor(() => expect(f.state()).toBeNull());
-});
-
 test("after turning off with an unsaved draft, tabbing through the minutes field cannot re-enable it", async () => {
   const f = await heldTimeout();
   act(() => f.input.focus());
@@ -580,105 +579,41 @@ test("after turning off with an unsaved draft, tabbing through the minutes field
   await waitFor(() => expect(f.writes).toEqual([null, 1]));
 });
 
-test("a keyboard off with an unsaved draft also drops it as a pending commit", async () => {
-  const f = await heldTimeout();
-  act(() => f.input.focus());
-  fireEvent.change(f.input, { target: { value: "1" } });
-  // Keyboard path without pointer events: the blur commits the edit first.
-  act(() => f.toggle.focus());
-  fireEvent.click(f.toggle);
-  act(() => f.input.focus());
-  act(() => f.input.blur());
-  await f.release();
-  await waitFor(() => expect(f.writes).toEqual([1, null]));
-  await settle();
-  expect(f.writes).toEqual([1, null]);
-  expect(f.state()).toBeNull();
-});
-
-test("a remounted settings page joins the pending queue, so its later edit wins", async () => {
-  let minutes: number | null = 120;
+test("an off after a failed minutes write is not reversed by tabbing through the field", async () => {
+  let minutes: number | null = 10;
   const writes: (number | null)[] = [];
   const first = Promise.withResolvers<void>();
-  const client = fakeClient({
-    preferences: async () => ({ ...base, auto_merge_after_minutes: minutes }),
-    setPreferences: async (_p, next) => {
-      writes.push(next);
-      if (writes.length === 1) await first.promise;
-      minutes = next;
-    },
-  });
-  const view = render(<SettingsPage client={client} projectId="p-1" />);
-  const input = (await screen.findByLabelText(
-    "等待分钟数",
-  )) as HTMLInputElement;
-  enter(input, "1");
-  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
-  expect(writes).toEqual([1]);
-  // Leave and come back to the same project's settings before 1 returns.
-  view.unmount();
-  render(<SettingsPage client={client} projectId="p-1" />);
-  const again = (await screen.findByLabelText(
-    "等待分钟数",
-  )) as HTMLInputElement;
-  fireEvent.change(again, { target: { value: "60" } });
-  fireEvent.keyDown(again, { key: "Enter" });
-  await act(async () => first.resolve());
-  await waitFor(() => expect(writes).toEqual([1, 60]));
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          ...base,
+          auto_merge_after_minutes: minutes,
+        }),
+        setPreferences: async (_p, next) => {
+          writes.push(next);
+          if (writes.length === 1) await first.promise;
+          minutes = next;
+        },
+      })}
+    />,
+  );
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  const input = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  act(() => input.focus());
+  fireEvent.change(input, { target: { value: "1" } });
+  act(() => toggle.focus()); // Tab: blur commits 1
+  fireEvent.click(toggle); // Space while saving: ignored
+  await act(async () => first.reject(new Error("first write rejected")));
+  expect(await screen.findByRole("alert")).toBeTruthy();
+  expect(on(toggle)).toBe(true);
+  fireEvent.click(toggle); // an explicit off once idle
+  await waitFor(() => expect(on(toggle)).toBe(false));
+  act(() => input.focus());
+  act(() => input.blur()); // Tab through; no new edit
   await settle();
-  expect(minutes).toBe(60);
-  expect(writes).toEqual([1, 60]);
-  expect(again.value).toBe("60");
-  expect(on(screen.getByRole("switch", { name: "超时自动合并" }))).toBe(true);
-});
-
-/** Keyboard off queued behind a held 1-minute write; the off is rejected. */
-function rejectedOff() {
-  let minutes: number | null = 120;
-  const writes: (number | null)[] = [];
-  const first = Promise.withResolvers<void>();
-  const off = Promise.withResolvers<void>();
-  const client = fakeClient({
-    preferences: async () => ({ ...base, auto_merge_after_minutes: minutes }),
-    setPreferences: async (_p, next) => {
-      writes.push(next);
-      await (next === null ? off.promise : first.promise);
-      minutes = next;
-    },
-  });
-  return { client, writes, first, off, minutes: () => minutes };
-}
-
-test("a background write that fails while the page is back shows its error there", async () => {
-  const f = rejectedOff();
-  const view = render(<SettingsPage client={f.client} projectId="p-1" />);
-  enter(await screen.findByLabelText("等待分钟数"), "1");
-  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
-  view.unmount();
-  await act(async () => f.first.resolve());
-  await waitFor(() => expect(f.writes).toEqual([1, null]));
-  render(<SettingsPage client={f.client} projectId="p-1" />);
-  await screen.findByRole("switch", { name: "超时自动合并" });
-  await act(async () => f.off.reject(new Error("测试：关闭未保存")));
-  expect((await screen.findByRole("alert")).textContent).toContain(
-    "测试：关闭未保存",
-  );
-  expect(f.minutes()).toBe(1);
-});
-
-test("a background write that failed while nobody watched is shown on return", async () => {
-  const f = rejectedOff();
-  const view = render(<SettingsPage client={f.client} projectId="p-1" />);
-  enter(await screen.findByLabelText("等待分钟数"), "1");
-  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
-  view.unmount();
-  await act(async () => f.first.resolve());
-  await waitFor(() => expect(f.writes).toEqual([1, null]));
-  await act(async () => f.off.reject(new Error("测试：关闭未保存")));
-  render(<SettingsPage client={f.client} projectId="p-1" />);
-  expect((await screen.findByRole("alert")).textContent).toContain(
-    "测试：关闭未保存",
-  );
+  expect({ writes, minutes }).toEqual({ writes: [1, null], minutes: null });
 });
 
 test("another project's settings do not share the queue", async () => {
@@ -701,159 +636,153 @@ test("another project's settings do not share the queue", async () => {
   await act(async () => first.resolve());
 });
 
-// C-455 review (V-2181): a decided switch, a confirmed write during the read
-// on return, and an off-page failure of the reminder threshold.
+// C-455 (Q-920): a save in progress holds the reader on the page; a page shown
+// again edits what its own read returned.
 const timeoutName = "超时自动合并";
+const hashSettled = () => act(() => new Promise((r) => setTimeout(r, 0)));
 
-test("failed older minute write must not revive its edit after an explicit off", async () => {
-  let minutes: number | null = 10;
-  const writes: (number | null)[] = [];
-  const first = Promise.withResolvers<void>(),
-    off = Promise.withResolvers<void>();
-  const client = fakeClient({
-    preferences: async () => ({
-      auto_merge_after_minutes: minutes,
-      merge_gate_enabled: true,
-    }),
-    setPreferences: async (_p, v) => {
-      writes.push(v);
-      if (writes.length === 1) await first.promise;
-      if (v === null) await off.promise;
-      minutes = v;
-    },
-  });
-  render(<SettingsPage client={client} projectId="p-1" />);
-  const toggle = await screen.findByRole("switch", { name: timeoutName });
-  const input = screen.getByLabelText("等待分钟数") as HTMLInputElement;
-  act(() => input.focus());
-  fireEvent.change(input, { target: { value: "1" } });
-  act(() => toggle.focus()); // Tab: blur commits 1
-  fireEvent.click(toggle); // Space activates off while the 1 is in flight
-  expect(writes).toEqual([1]);
-  await act(async () => first.reject(new Error("first write rejected")));
-  expect(writes).toEqual([1, null]);
-  expect(input.readOnly).toBe(true);
-  act(() => input.focus());
-  act(() => input.blur()); // Tab through; no new edit
-  await act(async () => off.resolve());
-  expect({
-    writes,
-    minutes,
-    checked: toggle.getAttribute("aria-checked"),
-  }).toEqual({ writes: [1, null], minutes: null, checked: "false" });
-});
-
-test("a write confirmed during the first read on return must invalidate the pre-write snapshot", async () => {
-  let reads = 0,
-    minutes: number | null = null;
-  const read = Promise.withResolvers<void>(),
-    write = Promise.withResolvers<void>();
-  const client = fakeClient({
-    preferences: async () => {
-      const snapshot = {
-        auto_merge_after_minutes: minutes,
-        merge_gate_enabled: true,
-      };
-      if (++reads === 2) await read.promise;
-      return snapshot;
-    },
-    setPreferences: async (_p, v) => {
-      await write.promise;
-      minutes = v;
-    },
-  });
-  const page = () => <SettingsPage client={client} projectId="p-1" />;
-  const view = render(page());
-  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
-  view.unmount();
-  render(page());
-  expect(reads).toBe(2);
-  await act(async () => write.resolve());
-  expect(minutes).toBe(10);
-  await act(async () => read.resolve());
-  const toggle = await screen.findByRole("switch", { name: timeoutName });
-  expect({ minutes, checked: toggle.getAttribute("aria-checked") }).toEqual({
-    minutes: 10,
-    checked: "true",
-  });
-});
-
-test("a reminder threshold write rejected off-page remains visible on return", async () => {
+function heldApp() {
   const write = Promise.withResolvers<void>();
-  const setSystemRules = vi.fn(() => write.promise);
-  const client = fakeClient({ setSystemRules });
-  const page = () => <SettingsPage client={client} projectId="p-1" />;
-  const view = render(page());
-  fireEvent.click(await screen.findByRole("button", { name: "编辑催办阈值" }));
-  const dialog = await screen.findByRole("dialog", { name: "催办阈值" });
-  fireEvent.click(
-    within(dialog).getByRole("switch", { name: "设置催办阈值和允许范围" }),
+  const setPreferences = vi.fn(() => write.promise);
+  window.location.hash = "#/p/p-1/settings";
+  render(<App client={fakeClient({ setPreferences })} />);
+  return { write, setPreferences };
+}
+
+test("leaving the page while a setting saves waits for it, then leaves", async () => {
+  const f = heldApp();
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  expect(f.setPreferences).toHaveBeenCalledTimes(1);
+  const unload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(true);
+  window.location.hash = "#/p/p-1/help";
+  await hashSettled();
+  await hashSettled();
+  expect(window.location.hash).toBe("#/p/p-1/settings");
+  expect(screen.getByRole("heading", { name: "设置" })).toBeTruthy();
+  await act(async () => f.write.resolve());
+  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/help"));
+  await waitFor(() =>
+    expect(screen.queryByRole("heading", { name: "设置" })).toBeNull(),
   );
-  fireEvent.change(within(dialog).getByLabelText("允许的最少分钟数"), {
+  const later = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(later);
+  expect(later.defaultPrevented).toBe(false);
+});
+
+test("a save that fails while leaving keeps the reader on the page with its error", async () => {
+  const f = heldApp();
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  window.location.hash = "#/p/p-1/help";
+  await hashSettled();
+  await act(async () => f.write.reject(new Error("测试：超时合并未保存")));
+  await hashSettled();
+  expect(window.location.hash).toBe("#/p/p-1/settings");
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "测试：超时合并未保存",
+  );
+  // Leaving again after the failure is not held.
+  window.location.hash = "#/p/p-1/help";
+  await waitFor(() =>
+    expect(screen.queryByRole("heading", { name: "设置" })).toBeNull(),
+  );
+});
+
+test("a reminder threshold save that fails while leaving stays visible in place", async () => {
+  const write = Promise.withResolvers<void>();
+  window.location.hash = "#/p/p-1/settings";
+  render(
+    <App client={fakeClient({ setSystemRules: vi.fn(() => write.promise) })} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "编辑催办阈值" }));
+  const dialog = within(
+    await screen.findByRole("dialog", { name: "催办阈值" }),
+  );
+  fireEvent.click(
+    dialog.getByRole("switch", { name: "设置催办阈值和允许范围" }),
+  );
+  fireEvent.change(dialog.getByLabelText("允许的最少分钟数"), {
     target: { value: "7" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
-  expect(setSystemRules).toHaveBeenCalledTimes(1);
-  view.unmount();
+  fireEvent.click(dialog.getByRole("button", { name: "保存催办阈值" }));
+  window.location.hash = "#/p/p-1/help";
+  await hashSettled();
   await act(async () => write.reject(new Error("threshold write rejected")));
-  render(page());
-  const edit = await screen.findByRole("button", { name: "编辑催办阈值" });
-  const alerts = () =>
-    screen
-      .queryAllByRole("alert")
-      .map((e) => e.textContent)
-      .join(" ");
-  const onPage = alerts();
-  fireEvent.click(edit);
-  await screen.findByRole("dialog", { name: "催办阈值" });
-  expect(onPage).toContain("threshold write rejected");
-  expect(alerts()).toContain("threshold write rejected");
+  await hashSettled();
+  expect(window.location.hash).toBe("#/p/p-1/settings");
+  expect(dialog.getByRole("alert").textContent).toContain(
+    "threshold write rejected",
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("alert").textContent).toContain(
+    "threshold write rejected",
+  );
 });
 
-test("a queued off confirmed during the first read on return is not undone by the older snapshot", async () => {
-  let reads = 0,
-    minutes: number | null = 120;
+test("another project chosen while saving is held too, then opens with its own values", async () => {
+  const write = Promise.withResolvers<void>();
+  const setPreferences = vi.fn(() => write.promise);
+  const f = { write, setPreferences };
+  window.location.hash = "#/p/p-1/settings";
+  render(
+    <App
+      client={fakeClient({
+        projects: async () => [
+          project,
+          { ...project, id: "p-2", name: "其它" },
+        ],
+        setPreferences,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  window.location.hash = "#/p/p-2/settings";
+  await hashSettled();
+  expect(window.location.hash).toBe("#/p/p-1/settings");
+  await act(async () => f.write.resolve());
+  await waitFor(() => expect(window.location.hash).toBe("#/p/p-2/settings"));
+  expect(f.setPreferences.mock.calls.map((c) => c[0])).toEqual(["p-1"]);
+});
+
+// V-2186 (attachment-6495): a read after another window turned it off is what
+// the returning page edits; editing minutes alone writes nothing.
+test("a post-write read of off is not re-enabled by editing minutes alone", async () => {
+  let stored: number | null = null;
+  const snapshots: (number | null)[] = [];
+  const first = Promise.withResolvers<void>();
   const writes: (number | null)[] = [];
-  const read = Promise.withResolvers<void>(),
-    one = Promise.withResolvers<void>(),
-    off = Promise.withResolvers<void>();
   const client = fakeClient({
     preferences: async () => {
-      const snapshot = {
-        auto_merge_after_minutes: minutes,
-        merge_gate_enabled: true,
-      };
-      if (++reads === 2) await read.promise;
-      return snapshot;
+      snapshots.push(stored);
+      return { ...base, auto_merge_after_minutes: stored };
     },
-    setPreferences: async (_p, v) => {
-      writes.push(v);
-      await (v === null ? off.promise : one.promise);
-      minutes = v;
+    setPreferences: async (_project, next) => {
+      writes.push(next);
+      if (writes.length === 1) await first.promise;
+      stored = next;
     },
   });
-  const page = () => <SettingsPage client={client} projectId="p-1" />;
-  const view = render(page());
-  const toggle = await screen.findByRole("switch", { name: timeoutName });
-  const input = screen.getByLabelText("等待分钟数");
-  act(() => input.focus());
-  fireEvent.change(input, { target: { value: "1" } });
-  act(() => toggle.focus()); // blur commits 1
-  fireEvent.click(toggle); // off queues behind the 1
-  expect(writes).toEqual([1]);
+  const settings = () => <SettingsPage client={client} projectId="p-1" />;
+  const view = render(settings());
+  const sw = await screen.findByRole("switch", { name: timeoutName });
+  fireEvent.change(screen.getByLabelText("等待分钟数"), {
+    target: { value: "120" },
+  });
+  fireEvent.click(sw);
+  expect(writes).toEqual([120]);
   view.unmount();
-  await act(async () => one.resolve());
-  expect(writes).toEqual([1, null]);
-  render(page());
-  expect(reads).toBe(2); // the return read sees 1
-  await act(async () => off.resolve());
-  expect(minutes).toBe(null);
-  await act(async () => read.resolve());
+  await act(async () => first.resolve());
+  stored = null; // another window turned it off
+  render(settings());
   const back = await screen.findByRole("switch", { name: timeoutName });
-  expect(back.getAttribute("aria-checked")).toBe("false");
-  await waitFor(() => expect(reads).toBe(3));
-  expect(back.getAttribute("aria-checked")).toBe("false");
-  expect(writes).toEqual([1, null]);
+  expect(on(back)).toBe(false);
+  const input = screen.getByLabelText("等待分钟数");
+  fireEvent.change(input, { target: { value: "60" } });
+  fireEvent.blur(input);
+  await settle();
+  expect({ writes, stored }).toEqual({ writes: [120], stored: null });
 });
 
 // C-455 review (V-2184): an off-page confirmation must not override a read

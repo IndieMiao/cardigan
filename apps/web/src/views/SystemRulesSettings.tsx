@@ -63,7 +63,6 @@ export function SystemRulesSettings({
     field: "system_auto_assign_verifiers" | "system_reminders",
     success: (value: T) => string,
   ) => ({
-    id: `${projectId}:${field}`,
     server,
     source,
     write: (value: T, key: string) =>
@@ -84,7 +83,6 @@ export function SystemRulesSettings({
     ),
   );
   const policy = useSettingWrite<SystemReminderPolicy | null>({
-    id: `${projectId}:system_reminder_policy`,
     server: initial.system_reminder_policy ?? null,
     source,
     write: (value, key) =>
@@ -160,8 +158,8 @@ export function SystemRulesSettings({
 
 /**
  * The dialog stays open while saving, so a failure keeps its error and draft.
- * A failure stays visible (on the row while closed) until the next save, also
- * when it happened while nobody was on the page.
+ * A failure stays visible until the next save: in the dialog while open, in
+ * the shared feedback stack once closed.
  */
 function ReminderPolicyDialog({
   policy,
