@@ -75,7 +75,11 @@ import {
   isReviewLimitOption,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
-import { type ReviewPlanComment, recordReviewPlan } from "./review-strategy.js";
+import {
+  checkPlanSupersession,
+  type ReviewPlanComment,
+  recordReviewPlan,
+} from "./review-strategy.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { suggestSourceMergeUnrelated } from "./source-merge.js";
 import {
@@ -193,12 +197,14 @@ export function postComment(
         "validation_failed",
         "Reply/supersession must stay on this card",
       );
-      if (id === p.supersedes)
+      if (id === p.supersedes) {
         ensure(
           entry.author === d.author,
           "unauthorized",
           "Only the same author can supersede a comment",
         );
+        checkPlanSupersession(d, entry, p.review_plan);
+      }
     }
     const refs = [
       ...new Map(

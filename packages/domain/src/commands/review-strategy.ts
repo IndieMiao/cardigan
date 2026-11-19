@@ -1,5 +1,5 @@
 import type { Decision, Review, TimelineEntry, WorkItem } from "../entities.js";
-import type { DecisionId, WorkItemId } from "../ids.js";
+import type { DecisionId, TimelineEntryId, WorkItemId } from "../ids.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 
@@ -81,7 +81,7 @@ export function applyReviewStrategy(
       d,
       producer,
       q.id,
-      `${q.id} 换做法：${rationale}。先用 post_comment 的 review_plan={decision_id:"${q.id}",step:"propose"} 在本卡提交新方案；收到对应审核员确认指令后再改代码。`,
+      `${q.id} 换做法：${rationale}。先用 post_comment 的 review_plan={decision_id:"${q.id}",step:"propose"} 在本卡提交新方案；等此产出项的所有方案都获确认、收到开工指令后再改代码。`,
     );
     return;
   }
@@ -121,22 +121,41 @@ export function applyReviewStrategy(
   );
 }
 
+// Replacement preserves the original decision's audit trail. Follow only links
+// created by replaceVerificationWorkItem (a fresh verifier at every hop).
+function planVerifier(d: CommandDraft, original: WorkItemId) {
+  let item = d.work(original);
+  while (item.replaced_by_work_item_id)
+    item = d.work(item.replaced_by_work_item_id);
+  return item;
+}
+
+function pendingPlan(
+  d: CommandDraft,
+  producer: WorkItem,
+  verifierId?: WorkItemId,
+) {
+  return d
+    .list("decisions")
+    .find(
+      (q) =>
+        q.card_id === producer.card_id &&
+        q.review_intervention?.producer_id === producer.id &&
+        q.status === "resolved" &&
+        q.resolution?.option === "change_approach" &&
+        !q.review_intervention.confirmation &&
+        (!verifierId ||
+          (q.affected_work_items[0] &&
+            planVerifier(d, q.affected_work_items[0]).id === verifierId)),
+    );
+}
+
 export function checkReviewPlanGate(
   d: CommandDraft,
   producer: WorkItem,
   verifierId?: WorkItemId,
 ) {
-  const gate = d
-    .list("decisions")
-    .find(
-      (q) =>
-        q.card_id === producer.card_id &&
-        (!verifierId || q.affected_work_items.includes(verifierId)) &&
-        q.review_intervention?.producer_id === producer.id &&
-        q.status === "resolved" &&
-        q.resolution?.option === "change_approach" &&
-        !q.review_intervention.confirmation,
-    );
+  const gate = pendingPlan(d, producer, verifierId);
   ensure(
     !gate,
     "illegal_transition",
@@ -148,6 +167,45 @@ export type ReviewPlanComment = {
   decision_id: DecisionId;
   step: "propose" | "confirm";
 };
+// Supersession is a change of meaning, not just a reply. Ordinary comments may
+// discuss a bound plan but cannot silently invalidate a structured agreement.
+export function checkPlanSupersession(
+  d: CommandDraft,
+  entry: TimelineEntry,
+  plan?: ReviewPlanComment,
+) {
+  const bound = d
+    .list("decisions")
+    .find(
+      (q) =>
+        q.card_id === entry.card_id &&
+        (q.review_intervention?.proposal === entry.id ||
+          q.review_intervention?.confirmation === entry.id),
+    );
+  ensure(
+    !bound ||
+      (!bound.review_intervention?.confirmation &&
+        plan?.decision_id === bound.id &&
+        plan.step === "propose"),
+    "illegal_transition",
+    "不能用评论替换已绑定的方案或方向确认；待确认方案可由作者重新提案",
+  );
+}
+
+export function requestPlanConfirmation(
+  d: CommandDraft,
+  verifier: WorkItem,
+  decision: DecisionId,
+  proposal: TimelineEntryId,
+) {
+  instruct(
+    d,
+    verifier,
+    decision,
+    `${decision} 请阅读方案 ${proposal}；同意方向时用 post_comment 回复该条（reply_to），并传 review_plan={decision_id:"${decision}",step:"confirm"}。不同意请说明需调整之处，不作确认。`,
+  );
+}
+
 export function recordReviewPlan(
   d: CommandDraft,
   entry: TimelineEntry,
@@ -168,13 +226,13 @@ export function recordReviewPlan(
     "没有等待方案或方向确认的换做法决定",
   );
   const producer = d.work(bound.producer_id),
-    verifier = d.work(verifierId);
+    verifier = planVerifier(d, verifierId);
   ensure(
     !["done", "cancelled", "awaiting_merge"].includes(
       d.card(entry.card_id).status,
     ) &&
-      verifier.status !== "cancelled" &&
-      !verifier.replaced_by_work_item_id,
+      verifier.kind === "verify" &&
+      verifier.status !== "cancelled",
     "illegal_transition",
     "工作项已关闭或替换",
   );
@@ -184,12 +242,8 @@ export function recordReviewPlan(
       ...q,
       review_intervention: { ...bound, proposal: entry.id },
     });
-    instruct(
-      d,
-      verifier,
-      q.id,
-      `${q.id} 请阅读方案 ${entry.id}；同意方向时用 post_comment 回复该条（reply_to），并传 review_plan={decision_id:"${q.id}",step:"confirm"}。不同意请说明需调整之处，不作确认。`,
-    );
+    d.put("work_items", { ...verifier, review_plan_target: q.id });
+    requestPlanConfirmation(d, verifier, q.id, entry.id);
   } else {
     d.ownWork(verifier.id);
     const proposal = d.state.timeline.find((t) => t.id === bound.proposal);
@@ -213,11 +267,14 @@ export function recordReviewPlan(
       ...q,
       review_intervention: { ...bound, confirmation: entry.id },
     });
-    instruct(
-      d,
-      producer,
-      q.id,
-      `${q.id} 审核员已确认方案 ${proposal.id}，请按该方向修改并重新交付；方向确认不是审核通过。`,
-    );
+    const { review_plan_target: _target, ...cleared } = verifier;
+    d.put("work_items", cleared);
+    if (!pendingPlan(d, producer))
+      instruct(
+        d,
+        producer,
+        q.id,
+        `${q.id} 方案 ${proposal.id} 已确认，此产出项的方案方向均已确认，请按已确认的方向修改并重新交付；方向确认不是审核通过。`,
+      );
   }
 }

@@ -2,8 +2,14 @@ import { expect, test } from "vitest";
 import {
   type Actor,
   type Assignment,
+  assign,
   createCard,
+  createWorkItem,
+  finishRun,
+  hasRunTarget,
   postComment,
+  releaseAssignment,
+  replaceVerificationWorkItem,
   submitReview,
   type TimelineEntryId,
   updateWorkItem,
@@ -181,33 +187,89 @@ test("B6: conditional results reset the rejection streak and consume no round", 
 
 async function intervention(
   categories: (string | undefined)[] = ["权限", "时序", "时序"],
+  parallel = false,
 ) {
   const { f, review } = flowReviewFixture();
   const pm = ops(f);
-  for (const [i, category] of categories.entries()) {
-    review(
-      await f.deliver("code", String(i + 1).repeat(40)),
-      true,
-      category,
-      ["权限未校验", "旧快照写回", "写入顺序错误"][i],
+  let peer: Assignment | undefined;
+  if (parallel) {
+    const item = f.commit(
+      createWorkItem(
+        f.state,
+        pm,
+        {
+          card_id: f.card.id,
+          kind: "verify",
+          role_id: "reviewer",
+          required: true,
+          title: "Second review",
+          completion_criteria: ["Works"],
+          max_review_rounds: 1,
+          target_work_item_id: required(f.coder.work_item_id),
+        },
+        f.io,
+      ),
+    );
+    peer = f.commit(
+      assign(
+        f.state,
+        human,
+        { work_item_id: item.id, role_id: item.role_id },
+        f.io,
+      ),
     );
   }
-  const q = required(f.state.decisions.at(-1));
-  const id = required(f.reviewer.work_item_id);
+  for (const [i, category] of categories.entries()) {
+    const target = await f.deliver("code", String(i + 1).repeat(40));
+    for (const reviewer of peer ? [f.reviewer, peer] : [f.reviewer])
+      review(
+        target,
+        true,
+        category,
+        ["权限未校验", "旧快照写回", "写入顺序错误"][i],
+        reviewer,
+      );
+  }
+  const q = required(
+    f.state.decisions.find(
+      (q) => q.affected_work_items[0] === f.reviewer.work_item_id,
+    ),
+  );
   const resolve = (
     option: ReviewLimitResolution["option"],
     rationale = "导出功能本轮不做",
+    decision = q,
   ) =>
     updateWorkItem(
       f.state,
       pm,
       {
-        work_item_id: id,
-        review_limit_decision: { decision_id: q.id, option, rationale },
+        work_item_id: required(decision.affected_work_items[0]),
+        review_limit_decision: { decision_id: decision.id, option, rationale },
       },
       f.io,
     );
-  return { f, q, resolve };
+  const comment = (
+    owner: Assignment,
+    step: "propose" | "confirm",
+    reply_to?: TimelineEntryId,
+    decision = q,
+  ) =>
+    postComment(
+      f.state,
+      f.actor(owner),
+      {
+        card_id: f.card.id,
+        body:
+          step === "propose"
+            ? "写入带版本号，旧快照不覆盖新值"
+            : "同意用版本校验",
+        review_plan: { decision_id: decision.id, step },
+        ...(reply_to ? { reply_to } : {}),
+      },
+      f.io,
+    );
+  return { f, q, resolve, comment, peer };
 }
 
 test("third reject lists the verifier's three causes and recommends an alternative only for adjacent matching causes", async () => {
@@ -273,26 +335,7 @@ test.each(["narrow_scope", "split_card"] as const)(
 );
 
 test("change approach requires the author's proposal and the designated verifier's confirmation of that exact revision", async () => {
-  const { f, q, resolve } = await intervention();
-  const comment = (
-    owner: Assignment,
-    step: "propose" | "confirm",
-    reply_to?: TimelineEntryId,
-  ) =>
-    postComment(
-      f.state,
-      f.actor(owner),
-      {
-        card_id: f.card.id,
-        body:
-          step === "propose"
-            ? "写入带版本号，旧快照不覆盖新值"
-            : "同意用版本校验",
-        review_plan: { decision_id: q.id, step },
-        ...(reply_to ? { reply_to } : {}),
-      },
-      f.io,
-    );
+  const { f, q, resolve, comment } = await intervention();
   f.commit(resolve("change_approach"));
   expect(
     f.state.timeline.findLast((e) => e.type === "instruction"),
@@ -318,6 +361,139 @@ test("change approach requires the author's proposal and the designated verifier
     confirmation: confirmed.id,
   });
   expect(comment(f.reviewer, "confirm", updated.id).ok).toBe(false);
+  // Neither side can withdraw a bound agreement through plain supersession.
+  for (const [owner, entry] of [
+    [f.coder, updated],
+    [f.reviewer, confirmed],
+  ] as const) {
+    const withdraw = postComment(
+      f.state,
+      f.actor(owner),
+      { card_id: f.card.id, body: "撤回，需再审", supersedes: entry.id },
+      f.io,
+    );
+    expect(withdraw).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+  }
   expect(f.state.reviews).toHaveLength(3);
   expect((await f.deliver("code", "a".repeat(40))).status).toBe("submitted");
+});
+
+test.each([true, false])(
+  "replacing a verifier transfers only the plan obligation (proposed before replacement: %s)",
+  async (before) => {
+    const { f, q, resolve, comment } = await intervention();
+    f.commit(resolve("change_approach"));
+    const first = before
+      ? required(f.commit(comment(f.coder, "propose")))
+      : undefined;
+    const old = required(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
+    );
+    const outdated = required(f.state.deliveries.at(-1));
+    f.start(f.reviewer);
+    const run = required(
+      f.state.runs.find(
+        (r) => r.assignment_id === f.reviewer.id && r.status === "running",
+      ),
+    );
+    f.commit(
+      finishRun(
+        f.state,
+        f.actor(f.reviewer),
+        { run_id: run.id, outcome: "completed", summary: "handoff" },
+        f.io,
+      ),
+    );
+    f.commit(
+      releaseAssignment(f.state, human, { assignment_id: f.reviewer.id }, f.io),
+    );
+    const next = f.commit(
+      replaceVerificationWorkItem(
+        f.state,
+        human,
+        {
+          card_id: f.card.id,
+          work_item_id: old.id,
+          template_key: required(old.template_key),
+          reason: "接手审核",
+        },
+        f.io,
+      ),
+    );
+    const reviewer = f.commit(
+      assign(
+        f.state,
+        human,
+        { work_item_id: next.id, role_id: next.role_id },
+        f.io,
+      ),
+    );
+    expect(f.state.deliveries.find((v) => v.id === outdated.id)?.status).toBe(
+      "superseded",
+    );
+    expect(hasRunTarget(reviewer, f.state)).toBe(before);
+    const proposal = first ?? required(f.commit(comment(f.coder, "propose")));
+    expect(
+      f.state.timeline.findLast(
+        (e) => e.type === "instruction" && e.work_item_id === next.id,
+      )?.body,
+    ).toContain(proposal.id);
+    f.start(reviewer);
+    await expect(f.deliver()).rejects.toThrow(q.id);
+    expect(comment(f.reviewer, "confirm", proposal.id).ok).toBe(false);
+    expect(comment(f.pm, "confirm", proposal.id).ok).toBe(false);
+    f.commit(comment(reviewer, "confirm", proposal.id));
+    expect(hasRunTarget(reviewer, f.state)).toBe(false);
+    expect(
+      submitReview(
+        f.state,
+        f.actor(reviewer),
+        {
+          delivery_id: outdated.id,
+          target_sha: outdated.subject.value,
+          kind: "code",
+          issues: [],
+        },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    expect(f.state.reviews).toHaveLength(3);
+    const delivered = await f.deliver();
+    expect(delivered.requested_verifiers).toEqual([next.id]);
+    expect(hasRunTarget(reviewer, f.state)).toBe(true);
+  },
+);
+
+test("parallel plan decisions retain partial confirmation and issue exactly one start instruction after the last", async () => {
+  const { f, q, peer, comment, resolve } = await intervention(undefined, true);
+  const other = required(
+    f.state.decisions.find(
+      (it) => it.affected_work_items[0] === peer?.work_item_id,
+    ),
+  );
+  for (const decision of [q, other])
+    f.commit(resolve("change_approach", "改用版本校验", decision));
+  const a = required(f.commit(comment(f.coder, "propose")));
+  const b = required(f.commit(comment(f.coder, "propose", undefined, other)));
+  const authorInstructions = () =>
+    f.state.timeline.filter(
+      (t) =>
+        t.type === "instruction" && t.work_item_id === f.coder.work_item_id,
+    );
+  const initial = authorInstructions().length;
+  const ack = required(f.commit(comment(f.reviewer, "confirm", a.id)));
+  expect(
+    f.state.decisions.find((d) => d.id === q.id)?.review_intervention
+      ?.confirmation,
+  ).toBe(ack.id);
+  expect(authorInstructions()).toHaveLength(initial);
+  expect(comment(f.reviewer, "confirm", b.id, other).ok).toBe(false);
+  await expect(f.deliver()).rejects.toThrow(other.id);
+  f.commit(comment(required(peer), "confirm", b.id, other));
+  expect(authorInstructions()).toHaveLength(initial + 1);
+  expect(authorInstructions().at(-1)?.body).toContain("修改并重新交付");
+  expect((await f.deliver()).status).toBe("submitted");
 });

@@ -49,12 +49,13 @@ export function flowReviewFixture(
     reject = true,
     category?: string,
     description = "Required check is missing",
+    reviewer = f.reviewer,
   ) => {
-    f.start(f.reviewer);
+    f.start(reviewer);
     return f.commit(
       submitReview(
         f.state,
-        f.actor(f.reviewer),
+        f.actor(reviewer),
         {
           delivery_id: target.id,
           target_sha: target.subject.value,

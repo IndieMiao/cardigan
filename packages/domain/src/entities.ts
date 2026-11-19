@@ -426,10 +426,13 @@ export type WorkItem = WorkItemFields &
         readonly kind: "produce";
         readonly status: ProduceStatus;
         readonly target_work_item_id?: never;
+        readonly review_plan_target?: never;
       }
     | {
         readonly kind: "verify";
         readonly status: VerifyStatus;
+        /** Pending proposal this verifier can act on even without a current delivery. */
+        readonly review_plan_target?: DecisionId;
         readonly target_work_item_id?: WorkItemId;
         readonly max_review_rounds: number;
       }
