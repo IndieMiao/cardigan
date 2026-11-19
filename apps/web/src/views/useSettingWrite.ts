@@ -14,7 +14,12 @@ import {
   useFeedbackVisible,
 } from "../components/RequestFeedback.js";
 import { parseRoute, routeHash } from "../route.js";
-import { readStart, settingsTick } from "../settings-clock.js";
+import {
+  onSettingsRead,
+  readStart,
+  settingKey,
+  settingsTick,
+} from "../settings-clock.js";
 
 export { trackSettingsRead } from "../settings-clock.js";
 
@@ -112,6 +117,15 @@ function clearNotice(key: string) {
   notices = notices.filter((n) => n.key !== key);
   emit();
 }
+/** Record what a read shows, newest read wins (also with no row mounted). */
+function confirmRead(key: string, at: number, value: unknown) {
+  const known = confirmed.get(key);
+  if (!known || at > known.at) confirmed.set(key, { at, value });
+  // A read showing the value that was not confirmed retires its notice.
+  const reported = notices.find((n) => n.key === key);
+  if (reported && same(reported.value, value)) clearNotice(key);
+}
+onSettingsRead(confirmRead);
 
 /** Rendered once by the app shell, outside any page: one entry per failure. */
 export function SettingsSaveNotice() {
@@ -177,6 +191,7 @@ export function useSettingWrite<T>({
   server,
   source,
   confirmable = true,
+  sharedSource = false,
   write,
   saved,
   success,
@@ -192,6 +207,11 @@ export function useSettingWrite<T>({
   source: unknown;
   /** False when `server` is a derived default that cannot confirm a write. */
   confirmable?: boolean;
+  /**
+   * The read outlives this page (the shared capacity read): a write ending
+   * after the view is gone reads it again via `saved`.
+   */
+  sharedSource?: boolean;
   write: Write<T>;
   saved: () => void;
   success: (value: T) => string;
@@ -225,7 +245,7 @@ export function useSettingWrite<T>({
   const pending = useRef<{ value: T; key: string } | undefined>(undefined);
   const place = useContext(SettingPlaceContext);
   const visible = useFeedbackVisible();
-  const key = `${place?.project ?? ""}:${id}`;
+  const key = settingKey(place?.project ?? "", id);
   // Completions reach whichever render is current.
   const latest = useRef({
     saved,
@@ -307,9 +327,7 @@ export function useSettingWrite<T>({
   useEffect(() => {
     if (!confirmable) return;
     const at = readStart(source);
-    const known = confirmed.get(key);
-    if (at !== undefined && (!known || at > known.at))
-      confirmed.set(key, { at, value: server });
+    if (at !== undefined) confirmRead(key, at, server);
     // A read showing the value confirms the write even if its response was lost.
     if (pending.current && same(pending.current.value, server))
       pending.current = undefined;
@@ -394,6 +412,10 @@ export function useSettingWrite<T>({
       // it may still have taken effect, so the view waits for the read again.
       if (ok && alive.current) setOwnEnd(end);
       endSave(key, end);
+      // With no view mounted, nothing reacts to the write's end. A source
+      // that outlives the page (the shared capacity read) is read again here
+      // so it shows the result and confirms or keeps a failure (C-479).
+      if (!alive.current && sharedSource) latest.current.saved();
     }
     return ok;
   };

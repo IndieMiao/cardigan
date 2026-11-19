@@ -1,6 +1,10 @@
 import { useId } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
-import { checkCapacityPolicy, useCapacity } from "../components/Capacity.js";
+import {
+  checkCapacityPolicy,
+  runLimitSetting,
+  useCapacity,
+} from "../components/Capacity.js";
 import {
   SettingsGroup,
   SettingsNumberField,
@@ -30,7 +34,8 @@ function AgentLimit({
   const setting = useSettingWrite({
     name,
     // Labels may repeat; each machine's limit is its own setting.
-    id: `run-limit:${machine.machine_id}`,
+    id: runLimitSetting(machine.machine_id),
+    sharedSource: true,
     server: machine.limit,
     source,
     write: (limit, key) =>

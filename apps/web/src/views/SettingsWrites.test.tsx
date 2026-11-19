@@ -908,6 +908,105 @@ test("a capacity limit that fails after leaving is reported once and leads back 
   ).toBe("page");
 });
 
+describe("a capacity limit saved and then left (C-479 review V-2216)", () => {
+  const away = "未能保存“本机 Agent 并发上限”，请回到设置重试";
+  /** App on the capacity panel with a 4 → 6 limit write held, then left. */
+  async function leftWhileSaving() {
+    window.location.hash = h("settings", "?tab=capacity");
+    let limit = 4;
+    let stream: StreamCallbacks | undefined;
+    const write = Promise.withResolvers<void>();
+    const executionCapacity = vi.fn(async () => ({
+      agents: [
+        {
+          machine_id: "local",
+          label: "本机",
+          running: 1,
+          total_running: 1,
+          limit,
+          max_limit: 8,
+          queued: 0,
+          merge_check_slots: 0,
+        },
+      ],
+      merge_checks: [],
+      merge_config_invalid: false,
+    }));
+    render(
+      <App
+        client={fakeClient({
+          executionCapacity,
+          setRunLimit: vi.fn(() => write.promise),
+          subscribe: (_, s) => {
+            stream = s;
+            s.status("live");
+            return () => {};
+          },
+        })}
+      />,
+    );
+    const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
+      name: "本机 Agent 并发上限",
+    });
+    fireEvent.change(input, { target: { value: "6" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(helpLink());
+    await waitFor(() => expect(settingsShown()).toBe(false));
+    const shown = async () =>
+      (await executionCapacity.mock.results.at(-1)?.value)?.agents[0]?.limit;
+    return {
+      write,
+      executionCapacity,
+      shown,
+      apply: (next: number) => {
+        limit = next;
+      },
+      liveRead: async () => {
+        const calls = executionCapacity.mock.calls.length;
+        await act(async () => stream?.capacity?.());
+        await waitFor(() =>
+          expect(executionCapacity.mock.calls.length).toBeGreaterThan(calls),
+        );
+        await tick();
+      },
+    };
+  }
+
+  test("a lost reply is not reported when a later read already shows the limit", async () => {
+    const f = await leftWhileSaving();
+    f.apply(6);
+    await f.liveRead();
+    expect(await f.shown()).toBe(6);
+    await act(async () => f.write.reject(new Error("reply lost")));
+    await tick();
+    expect(alerts()).not.toContain(away);
+  });
+
+  test("a real failure is reported away, stays while reads show the old limit, and goes once one shows the new", async () => {
+    const f = await leftWhileSaving();
+    await act(async () => f.write.reject(new Error("测试：上限未保存")));
+    await waitFor(() => expect(alerts()).toContain(away));
+    await f.liveRead();
+    expect(await f.shown()).toBe(4);
+    expect(alerts()).toContain(away);
+    f.apply(6);
+    await f.liveRead();
+    await waitFor(() => expect(alerts()).not.toContain(away));
+  });
+
+  test("a write acknowledged after leaving reads the capacity again without a live event", async () => {
+    const f = await leftWhileSaving();
+    const before = f.executionCapacity.mock.calls.length;
+    f.apply(6);
+    await act(async () => f.write.resolve());
+    await waitFor(() =>
+      expect(f.executionCapacity.mock.calls.length).toBeGreaterThan(before),
+    );
+    await waitFor(async () => expect(await f.shown()).toBe(6));
+    expect(alerts()).not.toContain(away);
+  });
+});
+
 test("a failure answered before the route handles the click is still reported", async () => {
   window.location.hash = h("settings");
   const write = await timeoutApp();
