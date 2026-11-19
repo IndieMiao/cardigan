@@ -79,7 +79,7 @@ beforeEach(async () => {
         kind: "work",
         harness: "codex",
         core_prompt: "Test",
-        launch_profile_ref: "test",
+        launch_profile_ref: "fixture",
         abilities: [],
         capabilities: [],
         required_machine_tags: [],
