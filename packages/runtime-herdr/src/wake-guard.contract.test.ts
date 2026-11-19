@@ -112,7 +112,8 @@ test("Runtime contract: stopping after send starts cannot turn an uncertain fail
 test.each([
   "done",
   "resumed",
-  "same_turn",
+  "steady_unknown",
+  "becomes_idle",
   "new_turn",
   "osc_changed",
   "read_failure",
@@ -154,28 +155,37 @@ test.each([
         observed_guard:
           state === "done"
             ? { state: "done" }
-            : { state: "unknown", confirm_turn_end: async () => ended },
+            : {
+                state: "unknown",
+                confirm_turn_end: async () => {
+                  if (mode === "becomes_idle") state = "idle";
+                  return ended;
+                },
+              },
       });
       await expect.poll(() => runtime.diagnostics().queued).toBe(1);
       expect(calls).toHaveLength(1);
       if (mode === "resumed" || mode === "osc_changed") state = "working";
       if (mode === "new_turn") ended = false;
       release.release();
-      const send = mode === "done" || mode === "same_turn";
+      const send = mode === "done" || mode === "becomes_idle";
       expect(value(await sending)).toEqual(
         send ? { sent: true } : { sent: false, withdrawn: true },
       );
       expect(calls.slice(1).map((args) => args[0])).toEqual(
-        mode === "same_turn"
+        mode === "becomes_idle"
           ? ["get", "get", "send"]
-          : send
-            ? ["get", "send"]
-            : ["get"],
+          : mode === "steady_unknown"
+            ? ["get", "get"]
+            : send
+              ? ["get", "send"]
+              : ["get"],
       );
       if (send)
         expect(calls.at(-1)).toEqual([
           "send",
           "--json",
+          ...(mode === "becomes_idle" ? ["--if", "idle"] : []),
           "--",
           ref.terminal_ref,
           "bell",

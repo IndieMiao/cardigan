@@ -15,7 +15,6 @@ import {
   abortDispatch,
   assignmentCardHeld,
   assignmentDependenciesAllowStart,
-  associatedHarnessActivity,
   canDispatchRun,
   cardDependencyDispatchOrder,
   compareDispatchOrder,
@@ -32,7 +31,6 @@ import {
   hostOpsPending,
   isRunCapacityExempt,
   isStandingPm,
-  lastRunActivity,
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
@@ -86,7 +84,6 @@ import {
   beginLaunchAttempt,
   finishBellAttempt,
   getRoleVersion,
-  listBellAttempts,
   moveNotification,
   PROJECT_EVENT_STREAM,
   type Store,
@@ -780,7 +777,6 @@ export class Dispatcher {
       return;
     let live = false;
     let doneObserved = false;
-    let transcriptEnd: string | undefined;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
@@ -790,18 +786,10 @@ export class Dispatcher {
       if (continuing) {
         if (!observed?.ok || observed.value.process !== "alive") return;
         doneObserved = observed.value.agent === "done";
-        if (!["idle", "done"].includes(observed.value.agent)) {
-          // Claude/Codex may not publish OSC status. Require positive end-of-turn
-          // evidence from the exact Run/session, not mere silence or process life.
-          if (observed.value.agent !== "unknown") return;
-          const cached = this.options.harnessActivity?.(project, a.id);
-          if (
-            !cached?.turn_ended ||
-            !this.turnEndCurrent(state, a, continuing, cached)
-          )
-            return;
-          transcriptEnd = cached.updated_at;
-        }
+        // A completed transcript is historical, not a guard on the current
+        // turn. Leave the original note pending without taking a lease or
+        // polling the transcript. Normal finish/confirmed recovery hands it on.
+        if (!doneObserved && observed.value.agent !== "idle") return;
       }
       if (!observed) {
         this.waitForRuntime(project, a);
@@ -942,24 +930,6 @@ export class Dispatcher {
         );
         if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
-        const evidenceCurrent = async () => {
-          if (!transcriptEnd || !continuing) return false;
-          const fresh = (
-            await this.options.inspectHarnessActivity?.(project, a.id)
-          )?.get(a.id);
-          return (
-            !!fresh &&
-            ["fresh", "stale"].includes(fresh.status) &&
-            fresh.activity?.updated_at === transcriptEnd &&
-            this.turnEndCurrent(
-              this.state(project),
-              a,
-              continuing,
-              fresh.activity,
-              job.attempt.id,
-            )
-          );
-        };
         const baseline = continuing
           ? undefined
           : await profileSpan("deliver.before_wake", async () =>
@@ -996,16 +966,9 @@ export class Dispatcher {
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
               ...(continuing
-                ? transcriptEnd
-                  ? {
-                      observed_guard: {
-                        state: "unknown" as const,
-                        confirm_turn_end: evidenceCurrent,
-                      },
-                    }
-                  : doneObserved
-                    ? { observed_guard: { state: "done" as const } }
-                    : { if_idle: true }
+                ? doneObserved
+                  ? { observed_guard: { state: "done" as const } }
+                  : { if_idle: true }
                 : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
@@ -1108,35 +1071,6 @@ export class Dispatcher {
         ),
       );
     this.settle(job.attempt, sent, reason, job.bell, failure);
-  }
-  private turnEndCurrent(
-    state: CommandState,
-    a: Assignment,
-    run: Run,
-    sample: HarnessActivity,
-    attemptId?: string,
-  ) {
-    const current = state.assignments.find((row) => row.id === a.id);
-    if (
-      !current ||
-      !sample.turn_ended ||
-      sample.source !== `${run.harness}:session_metadata` ||
-      sample.error ||
-      sample.run_id !== run.id ||
-      !associatedHarnessActivity(state, current, this.clock.now(), sample) ||
-      Date.parse(sample.updated_at) < lastRunActivity(run, current)
-    )
-      return false;
-    return !listBellAttempts(
-      this.options.store.database,
-      state.project_id,
-      run.id,
-    ).some(
-      (old) =>
-        old.id !== attemptId &&
-        Date.parse(old.finished_at ?? old.started_at) >=
-          Date.parse(sample.updated_at),
-    );
   }
   private catalog(a: Assignment, project: ProjectId): string | undefined {
     try {
@@ -1744,7 +1678,7 @@ export class Dispatcher {
     store.uow.run((tx) => {
       const at = this.clock.now();
       // A FIFO/slot timeout is proven pre-send. Keep the notification's failed
-      // attempt and backoff, without consuming the transcript's end marker.
+      // attempt and backoff without recording an ambiguous external send.
       const recorded =
         !sent && continuation && failure?.category === "runtime_queue_timeout"
           ? withdrawBellAttempt(store.database, project, attempt.id)

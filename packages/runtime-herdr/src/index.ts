@@ -476,7 +476,9 @@ export class HerdrRuntime implements Runtime {
           [
             "send",
             "--json",
-            ...(options?.if_idle ? ["--if", "idle"] : []),
+            ...(options?.if_idle || guard?.state === "unknown"
+              ? ["--if", "idle"]
+              : []),
             "--",
             ref.terminal_ref,
             doorbell,
@@ -486,24 +488,24 @@ export class HerdrRuntime implements Runtime {
             (async (raw) => {
               try {
                 // Read through the reserved slot, not the queue (capacity may be one).
-                const matchesTerminal = async () => {
+                const terminalState = async () => {
                   const t: Terminal = JSON.parse(
                     await raw.exec(["get", ref.terminal_ref, "--json"]),
                   );
                   this.checkTerminal(ref, t);
-                  if (t.address !== ref.terminal_ref || t.state !== "live")
-                    return false;
-                  return guard.state === "done"
-                    ? t.status?.state === "done"
-                    : t.status?.state == null || t.status.state === "unknown";
+                  return t.address === ref.terminal_ref && t.state === "live"
+                    ? (t.status?.state ?? "unknown")
+                    : undefined;
                 };
-                if (!(await matchesTerminal())) return false;
-                // The transcript may be sampled over SSH. A newer busy terminal
-                // must veto that sample before we check authority and send.
+                const before = await terminalState();
+                if (guard.state === "done") return before === "done";
+                if (before !== "unknown" && before !== "idle") return false;
+                // A transcript end is a hint, not a condition hc can enforce.
+                // Only an explicit idle transition can promote this hint to a
+                // send, and --if idle rechecks it when hc actually types.
                 return (
-                  guard.state === "done" ||
-                  ((await guard.confirm_turn_end()) &&
-                    (await matchesTerminal()))
+                  (await guard.confirm_turn_end()) &&
+                  (await terminalState()) === "idle"
                 );
               } catch {
                 return false; // A failed observation proves nothing about idleness.

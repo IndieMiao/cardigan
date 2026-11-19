@@ -114,6 +114,7 @@ export class InactivityAlerts {
       const assignment = state.assignments.find(
         (a) => a.id === run.assignment_id,
       );
+      const sample = this.options.harnessActivity?.(project, run.assignment_id);
       if (
         assignment?.scope === "work_item" &&
         assignment.status === "active" &&
@@ -136,19 +137,25 @@ export class InactivityAlerts {
             assignment_id: assignment.id,
             statuses: ["pending", "delivery_failed"],
           });
-          if (backlog.length)
+          if (backlog.length) {
+            const ended = associatedHarnessActivity(
+              state,
+              assignment,
+              at,
+              sample,
+            )?.turn_ended;
             dispatchAlert(tx, this.options.store, state, at, {
               type: "run_inbox_stalled",
-              reason: `工作项运行中，已至少 ${Math.ceil(this.stallMs / 60_000)} 分钟没有 MCP 活动，仍有通知待送达`,
+              reason: `工作项运行中，已至少 ${Math.ceil(this.stallMs / 60_000)} 分钟没有 MCP 活动，仍有通知待送达${ended ? "。最近的会话记录显示回合已结束，不能据此确认当前空闲" : ""}`,
               audience: "ops",
               assignment,
               run_id: run.id,
               card_id: item.card_id,
               notification_ids: backlog.map((n) => n.id),
             });
+          }
         }
       }
-      const sample = this.options.harnessActivity?.(project, run.assignment_id);
       if (!assignment || !this.due(state, assignment, run, at, sample))
         continue;
       const prior = alertState(state, run);
