@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+  DEFAULT_INBOX_STALL_AFTER_MS,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
   parseCapabilityRequirement,
@@ -16,6 +17,7 @@ export interface RunCapacityConfiguration {
   resourcesForMachine(machine: string): ReadonlyMap<string, number>;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
+  readonly inboxStallAfterMs: number;
   readonly inactiveCancelAfterMs: number | null;
 }
 
@@ -42,8 +44,12 @@ export async function loadRunCapacityConfig(
   const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
+  let inboxStallAfterMs = DEFAULT_INBOX_STALL_AFTER_MS;
   const result = (): RunCapacityConfiguration => ({
     errors,
+    inboxStallAfterMs: errors.length
+      ? DEFAULT_INBOX_STALL_AFTER_MS
+      : inboxStallAfterMs,
     inactiveCancelAfterMs: errors.length ? null : inactiveCancelAfterMs,
     // Invalid configuration stops automatic work items; standing PMs remain exempt.
     forMachine: (machine) =>
@@ -101,13 +107,22 @@ export async function loadRunCapacityConfig(
     if (
       !object(raw) ||
       Object.keys(raw).some(
-        (key) => !["machines", "inactive_cancel_after_minutes"].includes(key),
+        (key) =>
+          ![
+            "machines",
+            "inactive_cancel_after_minutes",
+            "inbox_stall_after_minutes",
+          ].includes(key),
       ) ||
       !object(raw.machines)
     )
       throw new Error("Invalid machines");
-    if (raw.inactive_cancel_after_minutes !== undefined) {
-      const minutes = raw.inactive_cancel_after_minutes;
+    for (const key of [
+      "inactive_cancel_after_minutes",
+      "inbox_stall_after_minutes",
+    ]) {
+      const minutes = raw[key];
+      if (minutes === undefined) continue;
       if (
         typeof minutes !== "number" ||
         !Number.isSafeInteger(minutes) ||
@@ -115,7 +130,9 @@ export async function loadRunCapacityConfig(
         minutes > Math.floor(2147483647 / 60_000)
       )
         throw new Error("Invalid inactivity grace");
-      inactiveCancelAfterMs = minutes * 60_000;
+      if (key === "inbox_stall_after_minutes")
+        inboxStallAfterMs = minutes * 60_000;
+      else inactiveCancelAfterMs = minutes * 60_000;
     }
     for (const [machine, entry] of Object.entries(raw.machines)) {
       const settings = object(entry) ? entry : { limit: entry };
@@ -179,7 +196,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

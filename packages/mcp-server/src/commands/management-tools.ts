@@ -120,6 +120,11 @@ const schemas = {
     body: text,
     work_item_id: id("work_item").optional(),
     mentions: z.array(text).optional(),
+    host_result_for: id("human_action")
+      .optional()
+      .describe(
+        "Host Ops only: record the final result and complete this assigned internal host diagnostic. Omit on progress comments.",
+      ),
     reply_to: entryId.optional(),
     refs: refs.optional(),
     supersedes: entryId.optional(),
@@ -294,6 +299,12 @@ const schemas = {
       .optional()
       .describe(
         "Required with host/external: exact active external PM Office Assignment; rewriting explicitly transfers responsibility.",
+      ),
+    host_diagnostic: z
+      .literal(true)
+      .optional()
+      .describe(
+        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). PM Ops may only set this on its own untriaged inbox items, not on existing handoffs. Omit for ordinary host work.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])

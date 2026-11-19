@@ -407,7 +407,6 @@ beforeEach(() => {
 });
 afterEach(() => f.close());
 
-const pending = () => f.notes().filter((note) => note.status === "pending");
 const alertsFor = (kind: string) =>
   f.notes().filter((note) => note.recipient.kind === kind);
 
@@ -541,7 +540,7 @@ test("M5.S S6 a verify Assignment assigned before the delivery waits for it", as
 
 // ---------------------------------------------------------------- §3.1 rows
 
-test("§3.1 an unfinished Run keeps the event in the inbox without a bell", async () => {
+test("§3.1 an idle harness receives a new comment on its unfinished Run", async () => {
   const runtime = fakeRuntime();
   withRun(f, f.coder, "running");
   comment(f);
@@ -549,9 +548,14 @@ test("§3.1 an unfinished Run keeps the event in the inbox without a bell", asyn
 
   await dispatcher(f, runtime).tick();
 
-  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(runtime.wake).toHaveBeenCalledOnce();
   expect(f.runs(f.coder)).toHaveLength(1);
-  expect(pending().length).toBeGreaterThan(0);
+  const [run] = f.runs(f.coder);
+  expect(run?.status).toBe("running");
+  expect(f.notes().find((n) => n.kind === "comment")).toMatchObject({
+    status: "belled",
+    run_id: run?.id,
+  });
 });
 
 test("§3.1 an idle terminal gets a new Run and then the bell", async () => {
@@ -695,8 +699,12 @@ test("§3.3 a bell without an ACK is resent with 1/2/4/8 minute backoff, then es
   expect(alertsFor("pm_ops").length).toBeGreaterThan(0);
 }, 30_000);
 
-test("§3.3 no resend while the Assignment still has an unfinished Run", async () => {
+test("§3.3 no resend while the harness is working on its unfinished Run", async () => {
   const runtime = fakeRuntime();
+  runtime.status.mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 2 },
+  });
   withRun(f, f.coder, "running");
   comment(f);
   f.route();
@@ -706,7 +714,7 @@ test("§3.3 no resend while the Assignment still has an unfinished Run", async (
   const attempts = commentNote()?.attempts;
   f.advance(30 * 60_000);
   await d.tick();
-  // The comment notification was never (re)sent while the Run was unfinished.
+  // The comment notification was never (re)sent while the harness was working.
   expect(commentNote()?.attempts).toBe(attempts);
   expect(commentNote()?.status).toBe("pending");
   expect(runtime.wake).not.toHaveBeenCalled();

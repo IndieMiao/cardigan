@@ -85,6 +85,7 @@ import {
   finishBellAttempt,
   getRoleVersion,
   moveNotification,
+  PROJECT_EVENT_STREAM,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
@@ -177,6 +178,7 @@ export interface DispatcherOptions {
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
+  readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
@@ -212,11 +214,10 @@ export interface DispatcherOptions {
 const sameRef = (a: Assignment, b: Assignment) =>
   JSON.stringify(a.runtime_ref) === JSON.stringify(b.runtime_ref);
 const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
-  n.card_id !== undefined &&
   s.cursors.some(
     (c) =>
       c.assignment_id === owner &&
-      c.card_id === n.card_id &&
+      c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
       c.acked_seq >= n.seq,
   );
 interface Job {
@@ -722,7 +723,7 @@ export class Dispatcher {
     // A standing owner can leave held work queued while servicing another card.
     return runnableQueuedRun(a, state);
   }
-  private busy(state: CommandState, a: Assignment) {
+  private busy(state: CommandState, a: Assignment, continuing?: RunId) {
     if (a.role_upgrade || a.idle_retirement?.phase === "stopping") return true;
     if (hostOpsPending(state.events, a.id)) return true;
     // C-211: a stopped Assignment waits for the human's start; its bells stay
@@ -736,7 +737,10 @@ export class Dispatcher {
         r.inactivity_stop ||
         (r.launch_publication &&
           !["started", "exited"].includes(r.launch_publication.phase)) ||
-        (unfinishedRun(r) && r.id !== queued?.id && !standingRunDormant(a, r)),
+        (unfinishedRun(r) &&
+          r.id !== continuing &&
+          r.id !== queued?.id &&
+          !standingRunDormant(a, r)),
     );
   }
   private async deliver(
@@ -752,22 +756,41 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
+    // A finished harness turn is not a finished business Run. Only new inbox
+    // work can continue it; never turn queued-only work into a second launch.
+    const running =
+      notes.length && a.runtime_ref
+        ? runsOf(state.runs, a.id).find((r) => r.status === "running")
+        : undefined;
+    const continuing =
+      running && notes.every((n) => !n.run_id || n.run_id === running.id)
+        ? running
+        : undefined;
     if (
       a.external ||
       a.status !== "active" ||
-      this.busy(state, a) ||
+      this.busy(state, a, continuing?.id) ||
       !assignmentDependenciesAllowStart(state, a) ||
       assignmentCardHeld(a, state) ||
       !hasRunTarget(a, state)
     )
       return;
     let live = false;
+    let doneObserved = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
+      if (continuing) {
+        if (!observed?.ok || observed.value.process !== "alive") return;
+        doneObserved = observed.value.agent === "done";
+        // A completed transcript is historical, not a guard on the current
+        // turn. Leave the original note pending without taking a lease or
+        // polling the transcript. Normal finish/confirmed recovery hands it on.
+        if (!doneObserved && observed.value.agent !== "idle") return;
+      }
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -813,7 +836,8 @@ export class Dispatcher {
       prior?.tool_catalog !== undefined &&
       prior.tool_catalog !== catalog;
     try {
-      if (
+      if (continuing) snapshot = continuing;
+      else if (
         queued?.recovery_policy &&
         queued.recovery_policy.root_run_id !== queued.id
       ) {
@@ -850,7 +874,7 @@ export class Dispatcher {
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
-    if (replaceCatalog && !replaceProfile && a.runtime_ref) {
+    if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
       // Same replacement path as a lost runtime: resume_or_replace force-
       // releases the live terminal and starts a fresh CLI session, so the new
       // session lists the current tools.
@@ -864,7 +888,15 @@ export class Dispatcher {
     let job: Job | undefined;
     try {
       job = profileSpanSync("deliver.claim", () =>
-        this.claim(project, notes, a, snapshot, live, sessionCatalog),
+        this.claim(
+          project,
+          notes,
+          a,
+          snapshot,
+          live,
+          sessionCatalog,
+          continuing,
+        ),
       );
     } catch (error) {
       if (a.role_id === "independent_reviewer")
@@ -898,13 +930,16 @@ export class Dispatcher {
         );
         if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
-        const baseline = await profileSpan("deliver.before_wake", async () =>
-          this.options.beforeWake?.({
-            project,
-            assignment: job.assignment,
-          }),
-        );
+        const baseline = continuing
+          ? undefined
+          : await profileSpan("deliver.before_wake", async () =>
+              this.options.beforeWake?.({
+                project,
+                assignment: job.assignment,
+              }),
+            );
         if (
+          !continuing &&
           refreshTargetWait(this.options.store, project, job.run.id, this.clock)
         ) {
           deferTargetAttempt(this.options.store, job.attempt, this.clock);
@@ -930,6 +965,11 @@ export class Dispatcher {
             runtimeRef,
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
+              ...(continuing
+                ? doneObserved
+                  ? { observed_guard: { state: "done" as const } }
+                  : { if_idle: true }
+                : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
                 this.activate(job) &&
@@ -1079,12 +1119,23 @@ export class Dispatcher {
     snapshot: LaunchSnapshot,
     live: boolean,
     catalog: string | undefined,
+    continuing?: Run,
   ): Job | undefined {
     const { store } = this.options;
     return store.uow.run((tx) => {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      if (
+        continuing &&
+        (a.session_ref !== expected.session_ref ||
+          a.last_mcp_activity_at !== expected.last_mcp_activity_at ||
+          !wakeIsCurrent(state, expected, continuing.id) ||
+          !state.runs.some(
+            (r) => r.id === continuing.id && r.status === "running",
+          ))
+      )
+        return;
       if (
         !assignmentDependenciesAllowStart(state, a) ||
         assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
@@ -1175,7 +1226,8 @@ export class Dispatcher {
         (!ready.length &&
           waiting?.queue_reason === undefined &&
           !waiting?.dispatch_target_wait) ||
-        this.busy(state, a)
+        (continuing && !ready.length) ||
+        this.busy(state, a, continuing?.id)
       )
         return;
       if (
@@ -1189,6 +1241,7 @@ export class Dispatcher {
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
       if (!cause && !waiting) return;
       let run =
+        continuing ??
         this.queued(state, a) ??
         state.runs.find(
           (r) =>
@@ -1348,7 +1401,7 @@ export class Dispatcher {
         worktree === "write" || worktree === "readonly"
           ? Math.max(this.leaseMs, WORKTREE_LAUNCH_LEASE_MS)
           : this.leaseMs;
-      const attempt: BellAttempt = {
+      const intent = {
         id: randomUUID(),
         project_id: project,
         assignment_id: a.id,
@@ -1356,11 +1409,10 @@ export class Dispatcher {
         notification_ids: ready.map((n) => n.id),
         started_at: at,
         lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
-        finished_at: null,
-        outcome: null,
       };
-      if (ready.length) beginBellAttempt(store.database, attempt);
-      else beginLaunchAttempt(store.database, attempt);
+      const attempt = ready.length
+        ? beginBellAttempt(store.database, intent)
+        : beginLaunchAttempt(store.database, intent);
       // Keep producer/standing dispatch timing unchanged. Only verification
       // needs to remain queued until asynchronous target preparation finishes.
       if (
@@ -1538,10 +1590,7 @@ export class Dispatcher {
         !run ||
         !owner ||
         !wakeIsCurrent(state, job.assignment, job.run.id) ||
-        // Existing completed Runs can still own an unread-notification retry.
-        // Only a completion that happened during this preparation is stale.
-        (!["queued", "dispatched"].includes(run.status) &&
-          !(run.status === "completed" && job.run.status === "completed"))
+        !this.wakeStatusCurrent(state, job, owner, run)
       ) {
         withdrawBellAttempt(store.database, project, job.attempt.id);
         return false;
@@ -1582,6 +1631,41 @@ export class Dispatcher {
       return true;
     });
   }
+  private wakeStatusCurrent(
+    state: CommandState,
+    job: Job,
+    owner: Assignment,
+    run: Run,
+  ) {
+    if (job.run.status !== "running")
+      return (
+        ["queued", "dispatched"].includes(run.status) ||
+        (run.status === "completed" && job.run.status === "completed")
+      );
+    if (
+      this.closing ||
+      run.status !== "running" ||
+      run.heartbeat_at !== job.run.heartbeat_at ||
+      owner.last_mcp_activity_at !== job.assignment.last_mcp_activity_at ||
+      this.busy(state, owner, run.id) ||
+      !assignmentDependenciesAllowStart(state, owner) ||
+      assignmentCardHeld(owner, state, run.trigger_event_id)
+    )
+      return false;
+    const notes = this.options.store.listNotifications({
+      project_id: state.project_id,
+      ids: job.attempt.notification_ids,
+    });
+    return (
+      notes.length === job.attempt.notification_ids.length &&
+      notes.every(
+        (n) =>
+          n.status === "pending" &&
+          !covered(n, state, owner.id) &&
+          !state.cards.some((c) => c.id === n.card_id && !!c.hold),
+      )
+    );
+  }
   private settle(
     attempt: BellAttempt,
     sent: boolean,
@@ -1590,19 +1674,22 @@ export class Dispatcher {
     failure?: DeliveryFailure,
   ) {
     const { store } = this.options,
-      project = attempt.project_id;
+      { project_id: project, continuation } = attempt;
     store.uow.run((tx) => {
       const at = this.clock.now();
-      if (
-        !finishBellAttempt(
-          store.database,
-          project,
-          attempt.id,
-          sent ? "sent" : "failed",
-          at,
-        )
-      )
-        return;
+      // A FIFO/slot timeout is proven pre-send. Keep the notification's failed
+      // attempt and backoff without recording an ambiguous external send.
+      const recorded =
+        !sent && continuation && failure?.category === "runtime_queue_timeout"
+          ? withdrawBellAttempt(store.database, project, attempt.id)
+          : finishBellAttempt(
+              store.database,
+              project,
+              attempt.id,
+              sent ? "sent" : "failed",
+              at,
+            );
+      if (!recorded) return;
       let state = this.loadState(tx, project);
       // A queued Run has never crossed dispatch/sentinel. Fence it atomically
       // with lease recovery so a late provision cannot dispatch after its slot
@@ -1625,6 +1712,7 @@ export class Dispatcher {
         );
         state = this.loadState(tx, project);
       }
+      const run = state.runs.find((r) => r.id === attempt.run_id);
       const notes = store.listNotifications({
         project_id: project,
         ids: attempt.notification_ids,
@@ -1634,16 +1722,18 @@ export class Dispatcher {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
           continue;
         const acked = covered(n, state, attempt.assignment_id);
+        const failedContinuation = !sent && !acked && continuation === true;
         moveNotification(store.database, {
           project_id: project,
           id: n.id,
           event: acked ? "ack" : sent ? "bell" : "deliver_failed",
           at,
+          unbind_continuation: failedContinuation,
           patch: {
-            run_id: attempt.run_id,
+            ...(failedContinuation ? {} : { run_id: attempt.run_id }),
             attempts: n.attempts + 1,
             ...(bell ? { bell } : {}),
-            ...(sent && n.card_id
+            ...(failedContinuation || (sent && n.card_id)
               ? {
                   next_attempt_at: new Date(
                     Date.parse(at) + this.retryDelay(n.attempts + 1),
@@ -1666,10 +1756,10 @@ export class Dispatcher {
         )
       )
         return;
-      const run = state.runs.find((r) => r.id === attempt.run_id);
       // C-56: a dispatched Run is retried with backoff and recovered by
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
+        continuation ||
         state.events.some(
           (e) =>
             ["run_preparation_recovered", "run_preparation_stalled"].includes(
@@ -1841,9 +1931,13 @@ export class Dispatcher {
       step("belled", () => {
         for (const n of store.listNotifications({
           project_id: project,
-          status: "belled",
+          statuses: ["belled", "delivery_failed"],
         })) {
-          if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
+          if (
+            (!n.card_id && n.status === "belled") ||
+            !n.next_attempt_at ||
+            n.next_attempt_at > at
+          )
             continue;
           const owner = notificationOwner(n, state, standingOnce),
             a = state.assignments.find((a) => a.id === owner);
@@ -1851,7 +1945,12 @@ export class Dispatcher {
             a?.status !== "active" ||
             a.external ||
             !hasRunTarget(a, state) ||
-            runsOf(state.runs, a.id).some(unfinishedRun) ||
+            (n.status === "delivery_failed"
+              ? !!n.run_id &&
+                !runsOf(state.runs, a.id).some(
+                  (r) => r.id === n.run_id && r.status === "running",
+                )
+              : runsOf(state.runs, a.id).some(unfinishedRun)) ||
             attempts.some(
               (t) =>
                 t.assignment_id === a.id || t.notification_ids.includes(n.id),

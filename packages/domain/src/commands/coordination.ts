@@ -159,8 +159,9 @@ export function issueInstruction(
 export function postComment(
   state: CommandState,
   actor: Actor,
-  p: Pick<TimelineEntry, "card_id" | "body"> &
-    Partial<
+  p: Pick<TimelineEntry, "card_id" | "body"> & {
+    host_result_for?: HumanActionId;
+  } & Partial<
       Pick<
         TimelineEntry,
         "work_item_id" | "mentions" | "reply_to" | "refs" | "supersedes"
@@ -196,10 +197,13 @@ export function postComment(
     }
     const refs = [
       ...new Map(
-        [...(p.refs ?? []), ...extractReferences(p.body)].map((ref) => [
-          JSON.stringify(ref),
-          ref,
-        ]),
+        [
+          ...(p.refs ?? []),
+          ...(p.host_result_for
+            ? [{ kind: "human_action" as const, id: p.host_result_for }]
+            : []),
+          ...extractReferences(p.body),
+        ].map((ref) => [JSON.stringify(ref), ref]),
       ).values(),
     ];
     d.emit(
@@ -221,6 +225,22 @@ export function postComment(
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       },
     );
+    if (p.host_result_for) {
+      const action = d.get("human_actions", p.host_result_for);
+      ensure(
+        d.assignment?.scope === "standing" &&
+          d.assignment.role_id === "host_ops" &&
+          isRoleActive(state.roles, "host_ops") &&
+          !d.assignment.external &&
+          action.host_assignment_id === d.assignment.id &&
+          action.card_id === p.card_id &&
+          internalHostFollowup(action) &&
+          needsYouItemReady(readinessOf(d), action),
+        "unauthorized",
+        "只能回填明确交给当前主机运维且已就绪的非阻塞待办",
+      );
+      completeActionDraft(d, { human_action_id: action.id, text: p.body });
+    }
     return d.timeline[0];
   });
 }
@@ -1443,6 +1463,46 @@ export function requestHumanAction(
     return action;
   });
 }
+// Execution fences and human prerequisites must never be closed with a comment.
+function reportableHostAction(action: HumanAction) {
+  return (
+    action.requested_by !== "system" &&
+    !!action.card_id &&
+    !action.blocks_merge &&
+    !action.prerequisite &&
+    action.blocked_work_items.length === 0
+  );
+}
+function internalHostFollowup(action: HumanAction) {
+  return (
+    action.triage === "host" &&
+    action.host_operator === "host_ops" &&
+    action.host_diagnostic === true &&
+    reportableHostAction(action)
+  );
+}
+function internalHostOwner(d: CommandDraft, role: "host_ops" | "pm") {
+  if (!isRoleActive(d.state.roles, role)) return;
+  return d
+    .list("assignments")
+    .find(
+      (a) =>
+        a.scope === "standing" &&
+        !a.external &&
+        a.status === "active" &&
+        a.role_id === role &&
+        (role === "host_ops" || a.standing_mode === "ops") &&
+        d.state.roles.some(
+          (r) =>
+            r.role_id === role &&
+            r.role_version === a.role_version &&
+            r.allowed_tools.includes(
+              role === "pm" ? "triage_human_action" : "post_comment",
+            ),
+        ),
+    );
+}
+
 /** The owner must still be an authorized external Office identity. */
 function externalHostOwner(d: CommandDraft, id: AssignmentId): Assignment {
   const owner = d.get("assignments", id);
@@ -1568,6 +1628,8 @@ export function triageHumanAction(
     todo?: string;
     /** C-212: with host only; absent means host_ops. */
     host_operator?: "external" | "host_ops";
+    /** Opt in to internal read-only diagnosis, not general host work. */
+    host_diagnostic?: true;
     host_assignment_id?: AssignmentId;
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
@@ -1613,6 +1675,24 @@ export function triageHumanAction(
       "validation_failed",
       "host_assignment_id 只能用于 host/external 交接",
     );
+    ensure(
+      p.host_diagnostic === undefined ||
+        (p.host_diagnostic === true &&
+          p.disposition === "host" &&
+          !external &&
+          reportableHostAction(action)),
+      "validation_failed",
+      "只有非阻塞的内部卡片诊断可以由运维回填结项",
+    );
+    // A diagnostic handoff grants result authority. PM can delegate its own
+    // inbox, not reclaim work already handed to a human or host operator.
+    ensure(
+      !p.host_diagnostic ||
+        actor.kind === "human" ||
+        action.triage === "pm_ops",
+      "unauthorized",
+      "只有人才能把已经交接的待办或旧待办改为主机诊断",
+    );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
       externalHostOwner(d, p.host_assignment_id);
@@ -1645,7 +1725,12 @@ export function triageHumanAction(
     );
     if (p.disposition === "done") {
       ensure(
-        action.triage === "pm_ops",
+        action.triage === "pm_ops" ||
+          (isPmOps(d) &&
+            isRoleActive(state.roles, "pm") &&
+            internalHostFollowup(action) &&
+            action.host_assignment_id === d.assignment?.id &&
+            needsYouItemReady(readinessOf(d), action)),
         "unauthorized",
         "An action already handed to the human cannot be completed by PM",
       );
@@ -1765,20 +1850,35 @@ export function triageHumanAction(
     };
     const {
       host_operator: _operator,
+      host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
       ...rest
     } = classified;
+    let owner = p.host_assignment_id;
+    if (p.host_diagnostic) {
+      ensure(
+        reportableHostAction(classified),
+        "validation_failed",
+        "诊断不能阻塞工作或合并",
+      );
+      owner = (internalHostOwner(d, "host_ops") ?? internalHostOwner(d, "pm"))
+        ?.id;
+      ensure(
+        owner,
+        "validation_failed",
+        "主机待办需要有回填权限的主机运维或后台项目经理",
+      );
+    }
     const next: HumanAction = {
       ...rest,
       triage: p.disposition,
       ...(p.disposition === "host"
         ? {
             host_operator: p.host_operator ?? "host_ops",
-            ...(external && p.host_assignment_id
-              ? { host_assignment_id: p.host_assignment_id }
-              : {}),
+            ...(p.host_diagnostic ? { host_diagnostic: true as const } : {}),
+            ...(owner ? { host_assignment_id: owner } : {}),
           }
         : {}),
       triage_rationale: p.rationale,
@@ -1808,6 +1908,7 @@ export function triageHumanAction(
         previous_host_assignment_id: action.host_assignment_id ?? null,
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
+        ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,

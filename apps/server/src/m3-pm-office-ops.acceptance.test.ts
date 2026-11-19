@@ -55,6 +55,7 @@ class PmRuntime implements Runtime {
   readonly bus = new EventEmitter();
   readonly launches: { assignment: Assignment; launch: RuntimeLaunch }[] = [];
   readonly bells: { id: AssignmentId; text: string }[] = [];
+  readonly working = new Set<AssignmentId>();
   readonly fail = new Set<AssignmentId>();
   /** Terminals whose process is gone: the dispatcher must open a new session. */
   readonly gone = new Set<AssignmentId>();
@@ -101,7 +102,7 @@ class PmRuntime implements Runtime {
       };
     return ok({
       process: "alive" as const,
-      agent: "idle" as const,
+      agent: this.working.has(id) ? ("working" as const) : ("idle" as const),
       observed_seq: 1,
     });
   }
@@ -707,6 +708,7 @@ test.each(["comment", "delivery", "pass", "reject", "execution failure"])(
 
 test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one delivery", async () => {
   const s = await routingSetup(false);
+  s.runtime.working.add(s.ops.id);
   await s.finish(s.coder);
   await s.provision(s.coder);
   await s.finish(s.coder);
@@ -730,6 +732,7 @@ test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one deli
     blocking: true,
     decider: "role:coder",
   });
+  s.runtime.working.delete(s.ops.id);
   await expect
     .poll(() =>
       notices(s, s.ops)
@@ -916,10 +919,16 @@ test("P11 §7.3: Agent execution failure escalates to Ops without interrupting O
 // P12 (fixed): --assignment on a standing PM also matches its logical recipient.
 test("P12 M3.5: inbox --assignment includes pending notifications for that standing PM", async () => {
   const s = await routingSetup(false);
+  // Keep the attention notice pending across dispatcher ticks while reading each inbox.
+  s.runtime.working.add(s.ops.id);
   await s.finish(s.coder);
   await s.routed();
-  const all = await s.cli("inbox");
-  expect(all).toContain("pending");
-  expect(await s.cli("inbox", "--assignment", s.office.id)).not.toBe(all);
-  expect(await s.cli("inbox", "--assignment", s.ops.id)).toBe(all);
+  const pendingAttention = /pending\s+seq=\d+ run_attention\b/u;
+  expect(await s.cli("inbox")).toMatch(pendingAttention);
+  expect(await s.cli("inbox", "--assignment", s.office.id)).not.toMatch(
+    pendingAttention,
+  );
+  expect(await s.cli("inbox", "--assignment", s.ops.id)).toMatch(
+    pendingAttention,
+  );
 });

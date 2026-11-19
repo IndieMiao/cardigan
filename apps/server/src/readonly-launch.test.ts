@@ -247,11 +247,16 @@ test.each([false, true])(
       },
       beforeWake: prepare,
     });
+    const status = vi.spyOn(runtime, "status").mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "working", observed_seq: 2 },
+    });
     await dispatcher.tick(f.project_id);
     expect(prepare).not.toHaveBeenCalled();
     expect(runtime.wake).not.toHaveBeenCalled();
     expect(git(path, "rev-parse", "HEAD")).toBe(sha);
     f.endRun(s.reviewer);
+    status.mockRestore();
     // S12: untracked test outputs are disposable; tracked edits still block.
     writeFileSync(join(path, "local-notes"), "cache");
     if (dirty) writeFileSync(join(path, "version"), "keep");

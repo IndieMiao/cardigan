@@ -305,6 +305,7 @@ test("C-220 busy host_ops keeps recovery work pending for the existing Run", asy
   const owner = pm("ops");
   f.session(owner, false);
   const run = f.session(hostOps, false);
+  f.working.add(f.refFor(hostOps).terminal_ref);
   f.skipEvents();
   f.advance(100);
   f.store.touchAssignmentActivity(f.project, hostOps.id, f.clock.now());

@@ -19,12 +19,13 @@ export function recoveryFixture(machine_id = "local") {
     target = f.create();
   f.session(target.assignment);
   const stopped = new Set<string>();
+  const working = new Set<string>();
   const runtime: Runtime = {
     status: vi.fn(async (ref) => ({
       ok: true,
       value: {
         process: stopped.has(ref.terminal_ref) ? "exited" : "alive",
-        agent: "idle",
+        agent: working.has(ref.terminal_ref) ? "working" : "idle",
         observed_seq: 1,
       },
     })),
@@ -135,6 +136,7 @@ export function recoveryFixture(machine_id = "local") {
   return {
     ...f,
     target,
+    working,
     runtime,
     options,
     skipEvents,

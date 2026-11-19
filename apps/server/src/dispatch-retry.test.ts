@@ -575,6 +575,7 @@ test("active PM Ops receives plain language escalation in its inbox", async () =
   f.store.uow.run((tx) =>
     tx.assignments.put(f.project, { ...ops, standing_mode: "ops" }),
   );
+  f.working.add(f.refFor(ops).terminal_ref);
   f.session(ops, false); // A busy Ops keeps the alert visible in its inbox.
   f.skipEvents();
   f.comment();
@@ -1011,6 +1012,7 @@ test.each([false, true])(
       f.store.uow.run((tx) =>
         tx.assignments.put(f.project, { ...ops, standing_mode: "ops" }),
       );
+      f.working.add(f.refFor(ops).terminal_ref);
       f.session(ops, false);
       f.skipEvents();
     }

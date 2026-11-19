@@ -21,6 +21,7 @@ import { cancelRunDispatch } from "./launch.js";
 // Q-88 explicitly selects 60 minutes despite observed legitimate silence of
 // 48 minutes. The 15-minute alert remains separate from this configurable deadline.
 export const DEFAULT_INACTIVE_CANCEL_AFTER_MS = 60 * 60_000;
+export const DEFAULT_INBOX_STALL_AFTER_MS = 120 * 60_000;
 export const INACTIVE_STOP_LEASE_MS = 60_000;
 const ended = (run: Run) =>
   ["completed", "failed", "cancelled"].includes(run.status);
@@ -149,6 +150,8 @@ export function claimInactiveRunStop(
       d.now,
       p.harness_activity,
     );
+    // Read-only diagnoses (open or reported) have zero stop grace. This checks
+    // execution/exit fences only; those must never expire on a timer.
     if (hostOpsPending(state.events, a.id)) return;
     if (run.dispatch_stop) return undefined;
     const old = run.inactivity_stop;

@@ -414,3 +414,31 @@ test("pi read failure is distinct from missing records and never exposes the err
   expect(sample?.activity).toBeUndefined();
   expect(JSON.stringify(sample)).not.toContain("SECRET-PI-READ");
 });
+
+test.each(["claude-code", "codex"] as const)(
+  "C-475: only the last attributable %s protocol turn end is idle evidence",
+  async (harness) => {
+    const path =
+      harness === "codex"
+        ? rollout()
+        : join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl");
+    const record = (end: boolean) =>
+      harness === "codex"
+        ? line({
+            type: "event_msg",
+            timestamp: now,
+            payload: { type: end ? "task_complete" : "task_started" },
+          })
+        : line({
+            type: "assistant",
+            sessionId: "session-1",
+            cwd,
+            timestamp: now,
+            message: { stop_reason: end ? "end_turn" : "tool_use" },
+          });
+    await write(path, harness === "codex" ? codex(record(true)) : record(true));
+    expect((await read(state(harness)))?.activity?.turn_ended).toBe(true);
+    await appendFile(path, record(false));
+    expect((await read(state(harness)))?.activity?.turn_ended).toBeUndefined();
+  },
+);
