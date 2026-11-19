@@ -508,3 +508,48 @@ test("after an interrupted press ends, blurring an edited minutes field saves it
   await f.release();
   await waitFor(() => expect(f.state()).toBe(120));
 });
+
+const nextTask = () =>
+  act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+test("a touch tap on the switch turns it off without writing the unsaved minutes", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "1" } });
+  // Chromium touch tap: pointer events, then later compat mouse events.
+  fireEvent.pointerDown(f.toggle, { pointerType: "touch" });
+  fireEvent.pointerUp(f.toggle, { pointerType: "touch" });
+  await nextTask();
+  fireEvent.mouseDown(f.toggle);
+  act(() => f.input.blur());
+  fireEvent.mouseUp(f.toggle);
+  fireEvent.click(f.toggle);
+  expect(f.writes).toEqual([null]);
+  await f.release();
+  await waitFor(() => expect(on(f.toggle)).toBe(false));
+  expect(f.state()).toBeNull();
+});
+
+test("an abandoned touch press is ended by the next tap elsewhere", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "120" } });
+  fireEvent.pointerDown(f.toggle, { pointerType: "touch" });
+  fireEvent.pointerUp(document.body, { pointerType: "touch" });
+  await nextTask();
+  fireEvent.pointerDown(document.body, { pointerType: "touch" });
+  act(() => f.input.blur());
+  expect(f.writes).toEqual([120]);
+  await f.release();
+});
+
+test("a queued off still reaches the original project after leaving the page", async () => {
+  const f = await heldTimeout();
+  enter(f.input, "1");
+  expect(f.writes).toEqual([1]);
+  fireEvent.click(f.toggle);
+  cleanup();
+  await f.release();
+  await waitFor(() => expect(f.writes).toEqual([1, null]));
+  await waitFor(() => expect(f.state()).toBeNull());
+});

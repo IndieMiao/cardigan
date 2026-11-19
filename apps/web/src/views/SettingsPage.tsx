@@ -389,25 +389,30 @@ function TimeoutMergeSetting({
   if (setting.value !== null && setting.value !== lastMinutes)
     setLastMinutes(setting.value);
   const minutes = useNumberDraft(lastMinutes, 1, 1440);
-  // A blur caused by pressing the switch leaves the decision to the switch.
-  // The press covers its own gesture (focus move and click) and ends right
-  // after any pointer release, so it never affects later edits.
+  // A blur caused by pressing the switch (mouse, pen or touch tap) leaves the
+  // decision to the switch. The press ends when the switch toggles, a new
+  // pointer press starts elsewhere, the gesture is cancelled, or the minutes
+  // field is focused or edited again, so it never affects later edits.
   const pressing = useRef(false);
   const skipBlur = useRef(false);
+  const switchRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    const release = () => {
-      window.setTimeout(() => {
+    const press = (event: PointerEvent) => {
+      if (!switchRef.current?.contains(event.target as Node))
         pressing.current = false;
-      });
     };
-    window.addEventListener("pointerup", release, true);
-    window.addEventListener("pointercancel", release, true);
+    const cancel = () => {
+      pressing.current = false;
+    };
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("pointercancel", cancel, true);
     return () => {
-      window.removeEventListener("pointerup", release, true);
-      window.removeEventListener("pointercancel", release, true);
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("pointercancel", cancel, true);
     };
   }, []);
   const toggle = (next: boolean) => {
+    pressing.current = false;
     if (!next) return setting.save(null);
     if (minutes.valid) return setting.save(Number(minutes.draft));
   };
@@ -428,6 +433,7 @@ function TimeoutMergeSetting({
           checked={enabled}
           aria-labelledby={`${id}-label`}
           aria-describedby={`${id}-help`}
+          ref={switchRef}
           aria-disabled={setting.busy}
           onPointerDown={() => {
             pressing.current = true;
@@ -445,7 +451,11 @@ function TimeoutMergeSetting({
           max="1440"
           value={minutes.draft}
           readOnly={setting.busy}
+          onFocus={() => {
+            pressing.current = false;
+          }}
           onChange={(e) => {
+            pressing.current = false;
             minutes.setDraft(e.target.value);
             setting.clear();
           }}
@@ -453,6 +463,7 @@ function TimeoutMergeSetting({
             skipBlur.current = pressing.current;
           }}
           onKeyDown={() => {
+            pressing.current = false;
             skipBlur.current = false;
           }}
           onCommit={() => {

@@ -82,9 +82,16 @@ export function useSettingWrite<T>({
     sending.current = true;
     inFlight.current = { value: next };
     let ok = false;
-    setBusy(true);
-    setError("");
-    setMessage("");
+    // State updates only while mounted; a queued write still runs after the
+    // view unmounts (navigation), bound to the project it was chosen for.
+    const live = (update: () => void) => {
+      if (mounted.current) update();
+    };
+    live(() => {
+      setBusy(true);
+      setError("");
+      setMessage("");
+    });
     const key =
       pending.current && same(pending.current.value, next)
         ? pending.current.key
@@ -92,24 +99,24 @@ export function useSettingWrite<T>({
     pending.current = { value: next, key };
     try {
       await write(next, key);
-      if (pending.current?.key === key) pending.current = undefined;
-      if (!mounted.current) return true;
       ok = true;
-      setValue(next);
-      setMessage(success(next));
-      saved();
+      if (pending.current?.key === key) pending.current = undefined;
+      live(() => {
+        setValue(next);
+        setMessage(success(next));
+        saved();
+      });
       return true;
     } catch (cause) {
-      if (mounted.current) setError(describeWriteError(cause));
+      live(() => setError(describeWriteError(cause)));
       return false;
     } finally {
       sending.current = false;
       inFlight.current = undefined;
-      if (mounted.current) setBusy(false);
+      live(() => setBusy(false));
       const later = queued.current;
       queued.current = undefined;
-      if (later && mounted.current && !(ok && same(later.value, next)))
-        void save(later.value);
+      if (later && !(ok && same(later.value, next))) void save(later.value);
     }
   };
   const clear = () => {
