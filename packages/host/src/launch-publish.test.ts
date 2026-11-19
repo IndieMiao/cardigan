@@ -18,12 +18,17 @@ import type {
   WorkerFileIdentity,
 } from "@cardigan/runtime-herdr";
 import { workerFileRequest, workerFiles } from "@cardigan/runtime-herdr";
-import { Store, writeRole } from "@cardigan/store";
+import { beginLaunchAttempt, Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
-import { launchRun, scrubRunCredentials } from "./launch.js";
+import { HostLaunchError } from "./errors.js";
+import {
+  launchRun,
+  RunPreflightDeferred,
+  scrubRunCredentials,
+} from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
 import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
 
 let store: Store,
@@ -277,13 +282,14 @@ function fixture(
       secrets: {},
     },
   };
-  const start = () =>
+  const start = (retry = false) =>
     launchRun(host, {
       project: "fixture",
       assignment_id: assignment.id,
       actor,
       run,
       reuse_session: true,
+      ...(retry ? { retry_target_preflight: true as const } : {}),
       worktree: {
         path: "/independent-worker/worktrees/fixture/A-1",
         base_sha: "a".repeat(40),
@@ -297,6 +303,35 @@ function fixture(
     latest: () => store.uow.read((tx) => tx.runs.get("fixture", run.id)),
   };
 }
+
+test.each(["clean", "unconfirmed", "auth"])(
+  "authenticated worker preflight only defers a fully withdrawn transient launch: %s",
+  async (mode) => {
+    const f = fixture();
+    if (mode === "unconfirmed") failAt = "clear_fail";
+    vi.mocked(checkWorkerMcp).mockRejectedValueOnce(
+      new WorkerMcpError(
+        mode === "auth" ? "mcp_auth_failed" : "mcp_gateway_error",
+      ),
+    );
+    await expect(f.start(true)).rejects.toBeInstanceOf(
+      mode === "clean" ? RunPreflightDeferred : HostLaunchError,
+    );
+    expect(order).not.toContain("provision");
+    expect(f.latest()).toMatchObject({
+      status: mode === "auth" ? "cancelled" : "queued",
+      launch_publication: {
+        phase: mode === "unconfirmed" ? "stopping" : "exited",
+      },
+    });
+    const tokens = store.uow.run((tx) =>
+      tx.tokensForAssignment("fixture", "A-1"),
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]?.revoked_at).not.toBeNull();
+    if (mode === "clean") expect((await f.start(true)).run.id).toBe(f.run.id);
+  },
+);
 
 test.each(["codex", "pi", "claude-code"] as const)(
   "%s material is generation-private and start follows durable dispatch",
@@ -406,6 +441,110 @@ test("failed remote MCP check revokes the new token before any material or proce
   ).toBe(true);
 });
 
+test.each(["provision", "replacement", "cleanup_unknown", "adapter_unknown"])(
+  "a system launch settles only the exact router refusal before adapter invocation: %s",
+  async (mode) => {
+    const f = fixture();
+    const previous: RuntimeRef = {
+      machine_id: "worker-a",
+      terminal_ref: "fixture-worker/old",
+      runtime_machine: "fixture-worker",
+      agent_name: "old",
+      target: execution.target,
+    };
+    if (mode === "replacement")
+      store.uow.run((tx) => {
+        const owner = tx.assignments.get("fixture", "A-1");
+        if (!owner) throw new Error("Missing owner");
+        tx.assignments.put("fixture", { ...owner, runtime_ref: previous });
+      });
+    store.uow.run(() =>
+      beginLaunchAttempt(store.database, {
+        id: "dispatch",
+        project_id: "fixture",
+        assignment_id: f.run.assignment_id,
+        run_id: f.run.id,
+        started_at: clock.now(),
+        lease_until: new Date(now + 60_000).toISOString(),
+      }),
+    );
+    const router: RuntimeTargets = Object.create(RuntimeTargets.prototype);
+    const probe = vi
+      .spyOn(router, "forLaunch")
+      .mockRejectedValue(new RuntimeTargetError("mcp_timeout"));
+    // This runtime wrapper already has a durable intent. Only an actual
+    // pre-adapter refusal from the router can retract it, never an error code.
+    const replace = vi.fn<Runtime["resume_or_replace"]>((ref, launch) =>
+      router.resume_or_replace(ref, launch),
+    );
+    if (mode === "adapter_unknown")
+      vi.mocked(runtime.provision).mockResolvedValueOnce({
+        ok: false,
+        error: {
+          code: "invalid_launch",
+          message: "Runtime target rejected: mcp_timeout",
+        },
+      });
+    else if (mode !== "replacement")
+      vi.mocked(runtime.provision).mockImplementationOnce((...args) =>
+        router.provision(...args),
+      );
+    if (mode === "cleanup_unknown") failAt = "clear_fail";
+    const host = {
+      ...f.host,
+      runtime: { ...runtime, resume_or_replace: replace },
+    };
+    const start = () =>
+      launchRun(host, {
+        project: "fixture",
+        assignment_id: f.run.assignment_id,
+        actor: { kind: "system", project_id: "fixture" },
+        run: f.run,
+        retry_target_preflight: true,
+        worktree: {
+          path: "/independent-worker/worktrees/fixture/A-1",
+          base_sha: "a".repeat(40),
+          branch: "agent/fixture",
+        },
+        ...(mode === "replacement"
+          ? { replacement: { previous, reason: "runtime_not_found" as const } }
+          : {}),
+      });
+    const clean = mode === "provision" || mode === "replacement";
+    await expect(start()).rejects.toBeInstanceOf(
+      clean ? RunPreflightDeferred : HostLaunchError,
+    );
+    expect(probe).toHaveBeenCalledTimes(mode === "adapter_unknown" ? 0 : 1);
+    expect(replace).toHaveBeenCalledTimes(mode === "replacement" ? 1 : 0);
+    expect(order).toContain("publish");
+    expect(order).not.toContain("commit");
+    expect(f.latest()).toMatchObject({
+      status: "queued",
+      launch_publication: {
+        phase: clean ? "exited" : "stopping",
+        provision_attempted: mode === "adapter_unknown",
+      },
+    });
+    expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(!clean);
+    const tokens = store.uow.run((tx) =>
+      tx.tokensForAssignment("fixture", "A-1"),
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]?.revoked_at).not.toBeNull();
+    if (mode === "adapter_unknown") {
+      now += 600_000;
+      await expect(recoverLaunchPublications(host, "fixture")).rejects.toThrow(
+        "exit_unconfirmed",
+      );
+      expect(order).toContain("locate");
+    } else expect(order).not.toContain("locate");
+    if (mode === "provision") {
+      expect((await start()).run.id).toBe(f.run.id);
+      expect(order.filter((op) => op === "commit")).toHaveLength(1);
+    }
+  },
+);
+
 test.each([
   "ready",
   "disabled",
@@ -413,6 +552,7 @@ test.each([
   "authentication",
   "revoked_after_auth",
   "revoked_after_provision",
+  "last_check_timeout",
 ] as const)(
   "the real target gate integrates remote launch and authenticated publication: %s",
   async (mode) => {
@@ -447,6 +587,17 @@ test.each([
       },
       workerMcpReachability: async () => {
         order.push("reachability");
+        if (
+          mode === "last_check_timeout" &&
+          order.includes("publish") &&
+          !order.includes("clear")
+        ) {
+          expect(f.latest()?.launch_publication).toMatchObject({
+            phase: "published",
+            provision_attempted: false,
+          });
+          throw new WorkerMcpError("mcp_timeout");
+        }
         if (mode === "reachability")
           throw new WorkerMcpError("mcp_unreachable");
       },
@@ -455,6 +606,10 @@ test.each([
         value: {
           ...runtime,
           provision: async (...args: Parameters<Runtime["provision"]>) => {
+            expect(f.latest()?.launch_publication).toMatchObject({
+              phase: "provisioning",
+              provision_attempted: true,
+            });
             const result = await runtime.provision(...args);
             if (mode === "revoked_after_provision") allowed = false;
             return result;
@@ -480,7 +635,18 @@ test.each([
         order.push("mcp");
         allowed = false;
       });
-    if (mode === "ready") {
+    if (mode === "last_check_timeout") {
+      await expect(f.start(true)).rejects.toBeInstanceOf(RunPreflightDeferred);
+      expect(f.latest()).toMatchObject({
+        status: "queued",
+        launch_publication: { phase: "exited", provision_attempted: false },
+      });
+      expect(order).not.toContain("provision");
+      expect(order).not.toContain("locate");
+      expect((await f.start(true)).run.id).toBe(f.run.id);
+      expect(order.filter((op) => op === "provision")).toHaveLength(1);
+      expect(order.filter((op) => op === "commit")).toHaveLength(1);
+    } else if (mode === "ready") {
       const launched = await f.start();
       expect(launched.runtime_ref).toMatchObject({
         machine_id: "worker-a",

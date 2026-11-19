@@ -166,6 +166,32 @@ test("producer placement orders by same-card producer worktree, free fraction, p
     work_items: [...busy.work_items, item],
   };
   expect(value(select(onCard)).data.machine_id).toBe(remote.id);
+  const full = value(
+    select({
+      ...onCard,
+      read_machine_placement: () =>
+        placement([
+          [
+            remote.id,
+            { ...healthy, limit: 1, occupied: 1, pending_assignments: 1 },
+          ],
+          ["local", healthy],
+        ]),
+    }),
+  );
+  expect(full.events.at(-1)?.payload).toMatchObject({
+    machine_id: "local",
+    candidates: [
+      { machine_id: "local" },
+      {
+        machine_id: remote.id,
+        affinity: true,
+        occupied: 1,
+        pending_assignments: 1,
+        remaining_ratio: 0,
+      },
+    ],
+  });
   expect(
     value(
       select({
@@ -483,7 +509,12 @@ test("repeated assignments stay fixed even after health changes; release cannot 
   ).toBe(false);
 });
 
-test.each(["missing_tags", "prefer_control", "specific_capability"])(
+test.each([
+  "missing_tags",
+  "prefer_control",
+  "full_control",
+  "specific_capability",
+])(
   "automatic verifiers use the shared selection and deferral policy: %s",
   (scenario) => {
     const s = state();
@@ -522,7 +553,10 @@ test.each(["missing_tags", "prefer_control", "specific_capability"])(
       ],
       read_machine_placement: () =>
         placement([
-          ["local", { ...healthy, occupied: 3 }],
+          [
+            "local",
+            { ...healthy, occupied: scenario === "full_control" ? 4 : 3 },
+          ],
           [remote.id, healthy],
         ]),
       deliveries: [delivery],

@@ -26,7 +26,10 @@ import { wallClock } from "./commands.js";
 import { type LaunchStep, messageOf } from "./errors.js";
 import { safeCheckDiagnostic } from "./merge-gate-log.js";
 import { deferTargetAttempt, refreshTargetWait } from "./run-target.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import {
+  type ProvisionTargetRefusal,
+  RuntimeTargets,
+} from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { redactSecrets } from "./wake-preparation.js";
 
@@ -298,9 +301,16 @@ export class LaunchPublication {
     this.update("started");
   }
   /** Revocation and durable reservation precede every worker call or terminal stop. */
-  async stop(wait = false, failureReason?: string): Promise<boolean> {
+  async stop(
+    wait = false,
+    failureReason?: string,
+    refusal?: ProvisionTargetRefusal,
+  ): Promise<boolean> {
     this.recoveryOperation = "revoke_identity";
     let current = this.update("stopping", {
+      // An opaque runtime may delegate to the checked router after its intent
+      // was journaled. Only its exact pre-adapter receipt can disprove that intent.
+      ...(refusal ? { provision_attempted: false } : {}),
       wait,
       ...(failureReason ? { failure_reason: failureReason } : {}),
     });

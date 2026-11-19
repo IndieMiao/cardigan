@@ -126,6 +126,7 @@ export {
   type PreparedWorktree,
   projectActor,
   RunCapacityDeferred,
+  RunPreflightDeferred,
   RunPreparationDeferred,
   scrubRunCredentials,
   sessionFingerprint,
