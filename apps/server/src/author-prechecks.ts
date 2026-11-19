@@ -372,6 +372,57 @@ export class AuthorPrechecks {
       }
     return { done: Promise.all(started).then(() => {}) };
   }
+  private recordMutexWait(
+    project: ProjectId,
+    check: Precheck,
+    blocker: string,
+  ): void {
+    this.options.store.uow.run((tx) => {
+      const events = tx.events.listAfter(project, check.card_id, 0);
+      if (
+        events.some(
+          (e) =>
+            e.type === "precheck_waiting" &&
+            e.actor.kind === "system" &&
+            (e.payload as { attempt_id?: string }).attempt_id ===
+              check.attempt_id &&
+            (e.payload as { blocking_attempt?: string }).blocking_attempt ===
+              blocker,
+        )
+      )
+        return;
+      const reason = `等待同卡 GitHub 检查 ${blocker} 释放占用`;
+      const seq = tx.ids.nextEventSequence(project, check.card_id),
+        at = this.options.clock.now();
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq,
+        card_id: check.card_id,
+        type: "precheck_waiting",
+        actor: { kind: "system", project_id: project },
+        payload: {
+          attempt_id: check.attempt_id,
+          blocking_attempt: blocker,
+          reason,
+        },
+        created_at: at,
+      });
+      const id = tx.ids.nextTimelineEntryId(project, check.card_id);
+      tx.timeline.put(project, {
+        id,
+        short_id: id,
+        card_id: check.card_id,
+        event_seq: seq,
+        type: "system",
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: at,
+        body: `作者预检查 ${check.attempt_id}：${reason}`,
+      });
+    });
+  }
   private async execute(projectId: ProjectId, original: Precheck) {
     let check = original,
       stage = "配置",
@@ -470,27 +521,30 @@ export class AuthorPrechecks {
       const distribute = this.options.git.distribute;
       const project = this.options.git.projectOf(projectId);
       if (!project) throw new Error("Missing project");
-      slot = await this.options.reserve(settings);
-      if (!slot || this.options.signal.aborted) return;
       const journal = new GithubDispatchJournal(this.options.store);
       if (target.type === "github") {
-        const unfinished = journal
-          .admitted()
-          .filter((i) => i.executor === target.name);
+        const admitted = journal.admitted();
+        const unfinished = admitted.filter((i) => i.executor === target.name);
+        const blocker = admitted.find(
+          (i) =>
+            i.project === projectId &&
+            i.card === check.card_id &&
+            i.attempt !== check.attempt_id,
+        );
+        if (blocker) {
+          this.recordMutexWait(projectId, check, blocker.attempt);
+          return;
+        }
         if (
-          unfinished.some(
-            (i) =>
-              i.project === projectId &&
-              i.card === check.card_id &&
-              i.attempt !== check.attempt_id,
-          ) ||
-          (!unfinished.some(
+          !unfinished.some(
             (i) => i.attempt === check.attempt_id && i.project === projectId,
           ) &&
-            unfinished.length >= target.maxConcurrent)
+          unfinished.length >= target.maxConcurrent
         )
           return;
       }
+      slot = await this.options.reserve(settings);
+      if (!slot || this.options.signal.aborted) return;
       // Admission and capacity are rechecked under the same SQLite write lock.
       release = acquireMergeCheckCapacity(
         this.options.store,

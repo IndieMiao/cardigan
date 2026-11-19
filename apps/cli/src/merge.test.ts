@@ -9,6 +9,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type {
   Actor,
   Assignment,
@@ -46,7 +47,7 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import { Store, writeRole } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -313,6 +314,7 @@ async function seatAwaitingMerge() {
   return {
     card,
     development,
+    completion,
     confirmation: state().decisions.at(-1) as Decision,
   };
 }
@@ -1211,4 +1213,296 @@ test("human can explicitly recheck a residual registration without reopening the
     ),
   ).not.toBe(0);
   expect(state().events).toHaveLength(before);
+});
+
+async function abandonedCliDispatch() {
+  const { card, completion } = await seatAwaitingMerge();
+  const {
+    GithubCheckExecutor,
+    GithubClient,
+    GithubDispatchJournal,
+    loadMergeGateConfig,
+    githubCheckRunName,
+  } = await import("@cardigan/host");
+  writeFileSync(join(dataDir, "ci.key"), "synthetic", { mode: 0o600 });
+  const cfg = {
+    executors: {
+      ci: {
+        type: "github",
+        repo: "fixture/project",
+        workflow: ".github/workflows/check.yml",
+        app_id: 1,
+        installation_id: 2,
+        private_key_file: "ci.key",
+        bot_login: "fixture[bot]",
+        max_concurrent: 1,
+      },
+    },
+    projects: {
+      [project]: { checks: [{ name: "test", run: "true" }], executor: "ci" },
+    },
+  };
+  writeFileSync(join(dataDir, "merge-gate.yaml"), JSON.stringify(cfg), {
+    mode: 0o600,
+  });
+  const config = (
+    await loadMergeGateConfig({ dataDir, env: io().env })
+  ).forExecutor?.("ci");
+  if (config?.type !== "github") throw new Error("Missing test executor");
+  const attempt = "old-cli-check",
+    tree = "b".repeat(40);
+  apply(
+    (s, a, p) =>
+      recordMergeCheck(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        {
+          card_id: card.id,
+          completion_id: completion.id,
+          attempt_id: attempt,
+          candidate_sha: SHA,
+          tree_sha: tree,
+          status: "queued",
+          executor: { name: "ci", type: "github" },
+        },
+        p,
+      ),
+    { kind: "system", project_id: project },
+  );
+  const journal = new GithubDispatchJournal(store);
+  const request = {
+    kind: "merge_check" as const,
+    project,
+    attempt,
+    sha: SHA,
+    tree,
+    checks: [{ name: "test", run: "true" }],
+  };
+  const executor = new GithubCheckExecutor({
+    config,
+    journal,
+    now: () => Date.parse("2020-01-01T00:00:00Z"),
+    context: () => ({
+      card: card.id,
+      delivery: completion.id,
+      baselineBranch: "main",
+    }),
+    client: {
+      token: async () => "fixture",
+      dispatch: async () => undefined,
+      runs: async () => [],
+      run: vi.fn(),
+    },
+    push: async () => ({ status: "pushed" }),
+    isBaselineAncestor: async () => true,
+    lifecycle: { cancel: vi.fn(), poll: vi.fn(), fetchFailureLog: vi.fn() },
+  });
+  await expect(executor.dispatch(request)).rejects.toMatchObject({
+    retryAt: expect.any(Number),
+  });
+  journal.reconcile([project], () => ({ status: "disabled" }));
+  const cli = () => cardigan("merge", "finish-undispatched", card.id, attempt);
+  const list = vi.spyOn(GithubClient.prototype, "runs");
+  return {
+    card,
+    cli,
+    journal,
+    list,
+    matchingRun: {
+      id: 123,
+      run_attempt: 1,
+      path: config.workflow,
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: SHA,
+      actor: { login: config.botLogin },
+      html_url: `https://github.com/${config.repo}/actions/runs/123`,
+      created_at: "2020-01-01T00:00:00Z",
+      display_title: githubCheckRunName({
+        sha: SHA,
+        tree,
+        attempt,
+        kind: "merge_check",
+        card: card.id,
+        delivery: completion.id,
+      }),
+    },
+  };
+}
+
+test.each(["dead_writer", "live_legacy"] as const)(
+  "finish-undispatched handles the POST writer without a background worker (%s)",
+  async (mode) => {
+    const { card, cli, journal, list } = await abandonedCliDispatch();
+    try {
+      const [current] = journal.admitted();
+      if (!current) throw new Error("Missing dispatch");
+      store.uow.run((tx) => {
+        const history = tx.events.listAfter(project, card.id, 0);
+        const publishing = history.find(
+          (e) =>
+            e.type === "github_check_dispatch" &&
+            e.payload.phase === "publishing",
+        );
+        const publisher = publishing?.payload.publisher as {
+          pid: number;
+          start: string;
+        };
+        expect(publisher.pid).toBe(process.pid);
+        const {
+          absenceNotBefore: _,
+          nextDiscoveryAt: _cadence,
+          ...rest
+        } = current;
+        tx.events.append(project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project, card.id),
+          card_id: card.id,
+          actor: { kind: "system", project_id: project },
+          type: "github_check_dispatch",
+          payload: JSON.parse(
+            JSON.stringify({
+              ...rest,
+              ...(mode === "dead_writer"
+                ? {
+                    postOwner: { ...publisher, start: `${publisher.start}0` },
+                  }
+                : {}),
+            }),
+          ),
+          created_at: NOW,
+        });
+      });
+      expect((await cli()).code).not.toBe(0);
+      expect(list).not.toHaveBeenCalled();
+      const [held] = journal.admitted();
+      if (!held) throw new Error("Missing held dispatch");
+      if (mode === "live_legacy") {
+        expect(held.absenceNotBefore).toBeUndefined();
+        expect(held.nextDiscoveryAt).toBeUndefined();
+        return;
+      }
+      expect(held.absenceNotBefore).toBeGreaterThan(Date.now());
+      expect(held.postOwner).toBeUndefined();
+      const grace = held.absenceNotBefore;
+      if (!grace) throw new Error("Missing visibility window");
+      const clock = vi.spyOn(Date, "now");
+      try {
+        clock.mockReturnValue(grace - 1);
+        expect((await cli()).code).not.toBe(0);
+        expect(list).not.toHaveBeenCalled();
+        clock.mockReturnValue(grace);
+        list.mockResolvedValueOnce([]);
+        expect((await cli()).code).toBe(0);
+        expect(list).toHaveBeenCalledOnce();
+        expect(journal.admitted()).toEqual([]);
+      } finally {
+        clock.mockRestore();
+      }
+    } finally {
+      list.mockRestore();
+    }
+  },
+);
+
+test.each(["absent", "match"] as const)(
+  "finish-undispatched verifies the original GitHub workflow online (%s)",
+  async (mode) => {
+    const { cli, journal, list, matchingRun } = await abandonedCliDispatch();
+    try {
+      list.mockRejectedValueOnce(new Error("partial listing"));
+      expect((await cli()).code).not.toBe(0);
+      expect(journal.admitted()).toHaveLength(1);
+      if (mode === "match") {
+        list.mockResolvedValueOnce([matchingRun]);
+        expect((await cli()).code).not.toBe(0);
+        expect(journal.admitted()).toHaveLength(1);
+        list.mockResolvedValue([]);
+        expect((await cli()).code).not.toBe(0);
+        expect(journal.admitted()).toMatchObject([{ observedRunIds: [123] }]);
+        return;
+      }
+      list.mockResolvedValueOnce([]);
+      expect(await cli()).toMatchObject({
+        code: 0,
+        out: expect.stringContaining("已核实未派发"),
+      });
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(journal.admitted()).toEqual([]);
+      expect(journal.all()[0]?.undispatched).toMatchObject({
+        source: "human",
+        listed: 0,
+      });
+    } finally {
+      list.mockRestore();
+    }
+  },
+);
+
+test("finish-undispatched rechecks online after another reader retired under a SQLite write lock", async () => {
+  const { cli, journal, list } = await abandonedCliDispatch();
+  try {
+    const [intent] = journal.admitted();
+    if (!intent) throw new Error("Missing dispatch");
+    const scan = journal.beginDiscovery(intent, Date.now(), 20_000);
+    list.mockResolvedValue([]);
+    expect((await cli()).code).not.toBe(0);
+    expect(list).not.toHaveBeenCalled();
+    const db = store.database.location();
+    if (!db) throw new Error("Missing fixture DB");
+    store.database.exec("PRAGMA busy_timeout=10");
+    const locker = new DatabaseSync(db);
+    try {
+      locker.exec("BEGIN IMMEDIATE");
+      expect(() => journal.endListing(scan, [])).toThrow();
+    } finally {
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+    expect(journal.admitted()).toHaveLength(1);
+    expect((await cli()).code).toBe(0);
+    expect(list).toHaveBeenCalledOnce();
+    expect(journal.admitted()).toEqual([]);
+  } finally {
+    list.mockRestore();
+  }
+});
+
+test("finish-undispatched preserves uncertainty when it is the first to recover an interrupted reader", async () => {
+  const { card, cli, journal, list } = await abandonedCliDispatch();
+  try {
+    const [intent] = journal.admitted();
+    if (!intent) throw new Error("Missing dispatch");
+    const scan = journal.beginDiscovery(intent, Date.now(), 20_000);
+    const owner = scan.scanOwner;
+    if (!owner) throw new Error("Missing scan owner");
+    // Durable state after a reader exits before any receipt; even a reused PID isn't that incarnation.
+    store.uow.run((tx) =>
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: project },
+        type: "github_check_dispatch",
+        payload: JSON.parse(
+          JSON.stringify({
+            ...scan,
+            scanOwner: { ...owner, start: `${owner.start}0` },
+          }),
+        ),
+        created_at: NOW,
+      }),
+    );
+    list.mockResolvedValue([]);
+    for (let i = 0; i < 2; i++) {
+      expect((await cli()).code).not.toBe(0);
+      expect(journal.admitted()).toMatchObject([
+        { attempt: intent.attempt, scanEvidenceLost: true },
+      ]);
+      expect(journal.admitted()[0]?.undispatched).toBeUndefined();
+    }
+    expect(list).not.toHaveBeenCalled();
+  } finally {
+    list.mockRestore();
+  }
 });
