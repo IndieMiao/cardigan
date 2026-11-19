@@ -10,7 +10,11 @@ import {
   type GithubJob,
   type GithubRun,
 } from "./github-client.js";
-import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
+import {
+  GITHUB_POLL_DEFAULTS,
+  GithubRateLimit,
+  GithubRetryLater,
+} from "./github-rate-limit.js";
 
 const start = Date.parse("2026-11-15T00:00:00Z");
 const identity = (id: number): GithubRun => ({
@@ -116,7 +120,10 @@ test("D4: ten runs share one conditional list per cycle; 304 does not fetch jobs
     etag: '"one"',
   });
   await f.poller.tick();
-  expect(f.client.pollRuns).toHaveBeenLastCalledWith('"one"');
+  expect(f.client.pollRuns).toHaveBeenLastCalledWith(
+    '"one"',
+    expect.any(AbortSignal),
+  );
   expect(f.client.jobs).not.toHaveBeenCalled();
   f.advance();
   f.complete();
@@ -251,7 +258,7 @@ test("D4: start timeout requests cancellation, retains reservation until the tru
     etag: "x",
   });
   await f.poller.tick();
-  expect(f.client.cancel).toHaveBeenCalledWith(1);
+  expect(f.client.cancel).toHaveBeenCalledWith(1, expect.any(AbortSignal));
   expect(f.finished).toHaveBeenCalledOnce();
 });
 test.each(["failure", "timed_out", "skipped"])(
@@ -312,7 +319,7 @@ test("D4: bound runs outside the newest list are still read by id after a 304", 
     etag: "x",
   });
   await f.poller.tick();
-  expect(f.client.run).toHaveBeenCalledWith(1);
+  expect(f.client.run).toHaveBeenCalledWith(1, expect.any(AbortSignal));
   f.advance();
   f.client.pollRuns.mockResolvedValueOnce({
     unchanged: true,
@@ -512,3 +519,276 @@ test.each(["test", "build", "Validate object inputs"])(
       );
   },
 );
+
+test("C-466: one stuck jobs response does not withhold a verified peer terminal", async () => {
+  const f = setup(2);
+  f.complete();
+  const held = Promise.withResolvers<void>();
+  f.client.jobs.mockImplementation(async (id) => {
+    if (id === 1) await held.promise;
+    return [job(id)];
+  });
+  const peer = f.poller.poll(external(2));
+  const cycle = f.poller.tick();
+  try {
+    await vi.waitFor(() => expect(f.finished).toHaveBeenCalledOnce());
+    expect((await peer).status).toBe("passed");
+  } finally {
+    held.resolve();
+    await cycle;
+  }
+});
+
+test("C-466: a completed run awaiting jobs cannot time out as queued on an overlapping tick", async () => {
+  const f = setup(1);
+  const jobs = Promise.withResolvers<GithubJob[]>();
+  const reading = Promise.withResolvers<void>();
+  f.client.jobs.mockImplementationOnce(() => {
+    reading.resolve();
+    return jobs.promise;
+  });
+  f.advance(GITHUB_POLL_DEFAULTS.queueWaitMs - 5000);
+  f.complete();
+  const result = f.poller.poll(external(1));
+  const first = f.poller.tick();
+  await reading.promise;
+  f.advance(5000);
+  const overlapping = f.poller.tick();
+  expect(f.finished).not.toHaveBeenCalled();
+  jobs.resolve([job(1)]);
+  await Promise.all([first, overlapping]);
+  expect((await result).status).toBe("passed");
+  expect(f.finished).toHaveBeenCalledOnce();
+  expect(f.client.cancel).not.toHaveBeenCalled();
+});
+
+test("C-466: a slow cancellation leaves later list cycles free to finish another run", async () => {
+  const f = setup(2);
+  const held = Promise.withResolvers<void>();
+  f.client.cancel.mockReturnValueOnce(held.promise);
+  const cancel = f.poller.cancel(external(1));
+  const first = f.poller.tick();
+  try {
+    await vi.waitFor(() => expect(f.client.pollRuns).toHaveBeenCalledOnce());
+    // Let the first (immediate queued) list finish, not the held cancel.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    f.advance();
+    f.client.pollRuns.mockResolvedValueOnce({
+      unchanged: false,
+      runs: [
+        identity(1),
+        { ...identity(2), status: "completed", conclusion: "success" },
+      ],
+      etag: "two",
+    });
+    const result = f.poller.poll(external(2));
+    const second = f.poller.tick();
+    await vi.waitFor(() => expect(f.finished).toHaveBeenCalledOnce());
+    expect((await result).status).toBe("passed");
+    expect(f.client.cancel).toHaveBeenCalledTimes(1);
+    held.resolve();
+    await second;
+  } finally {
+    held.resolve();
+    await Promise.all([first, cancel]);
+  }
+});
+
+test("C-466: a later list finishes a peer while terminal jobs are still in flight", async () => {
+  const f = setup(2);
+  const held = Promise.withResolvers<GithubJob[]>();
+  f.client.jobs.mockReturnValueOnce(held.promise);
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [
+      { ...identity(1), status: "completed", conclusion: "success" },
+      identity(2),
+    ],
+    etag: "first",
+  });
+  const first = f.poller.tick();
+  const peer = f.poller.poll(external(2));
+  try {
+    await vi.waitFor(() =>
+      expect(f.client.jobs).toHaveBeenCalledWith(1, expect.any(AbortSignal)),
+    );
+    f.advance();
+    f.complete();
+    const second = f.poller.tick();
+    await vi.waitFor(() => expect(f.finished).toHaveBeenCalledOnce());
+    expect((await peer).status).toBe("passed");
+    expect(f.client.jobs.mock.calls.map(([id]) => id)).toEqual([1, 2]);
+    held.resolve([job(1)]);
+    await second;
+  } finally {
+    held.resolve([job(1)]);
+    await first;
+  }
+});
+
+test("C-466: conflicting newer binding evidence fences a late successful jobs response", async () => {
+  const f = setup(1);
+  f.complete();
+  const held = Promise.withResolvers<GithubJob[]>();
+  f.client.jobs.mockReturnValueOnce(held.promise);
+  const result = f.poller.poll(external(1));
+  const first = f.poller.tick();
+  try {
+    await vi.waitFor(() =>
+      expect(f.client.jobs).toHaveBeenCalledWith(1, expect.any(AbortSignal)),
+    );
+    f.advance();
+    f.client.pollRuns.mockResolvedValueOnce({
+      unchanged: false,
+      runs: [{ ...identity(1), run_attempt: 2 }],
+      etag: "rerun",
+    });
+    await f.poller.tick();
+    expect((await result).status).toBe("executor_unreachable");
+  } finally {
+    held.resolve([job(1)]);
+    await first;
+  }
+  expect(f.finished).not.toHaveBeenCalled();
+});
+
+test("C-466: one deadline covers list and jobs; late successful jobs cannot finish the reservation", async () => {
+  const f = setup(1);
+  f.complete();
+  const list = Promise.withResolvers<void>();
+  const jobs = Promise.withResolvers<GithubJob[]>();
+  const original = f.client.pollRuns.getMockImplementation()!;
+  f.client.pollRuns.mockImplementationOnce(async () => {
+    await list.promise;
+    return original();
+  });
+  f.client.jobs.mockImplementationOnce(() => jobs.promise);
+  vi.useFakeTimers();
+  try {
+    let settled = false;
+    void f.poller.tick().then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(50_000);
+    list.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.client.jobs).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toBe(true);
+    jobs.resolve([job(1)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.finished).not.toHaveBeenCalled();
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    f.advance(60_000);
+    f.client.pollRuns.mockResolvedValueOnce({
+      unchanged: false,
+      etag: "new",
+      runs: [{ ...identity(1), status: "completed", conclusion: "cancelled" }],
+    });
+    const result = f.poller.poll(external(1));
+    await f.poller.tick();
+    expect(await result).toMatchObject({ status: "interrupted" });
+    expect(f.finished).toHaveBeenCalledOnce();
+  } finally {
+    list.resolve();
+    jobs.resolve([]);
+    vi.useRealTimers();
+  }
+});
+
+test("C-466: expired list cannot replace a newer ETag or start detail reads", async () => {
+  const f = setup(1);
+  const late =
+    Promise.withResolvers<Awaited<ReturnType<typeof f.client.pollRuns>>>();
+  f.client.pollRuns.mockImplementationOnce(() => late.promise);
+  vi.useFakeTimers();
+  try {
+    let settled = false;
+    void f.poller.tick().then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(true);
+    f.advance(60_000);
+    await f.poller.tick();
+    late.resolve({
+      unchanged: false,
+      etag: "stale",
+      runs: [{ ...identity(1), status: "completed", conclusion: "success" }],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    f.advance();
+    await f.poller.tick();
+    expect(f.client.pollRuns.mock.calls.at(-1)?.[0]).toBe('"one"');
+    expect(f.client.jobs).not.toHaveBeenCalled();
+    expect(f.finished).not.toHaveBeenCalled();
+  } finally {
+    late.resolve({ unchanged: false, etag: "late", runs: [] });
+    vi.useRealTimers();
+  }
+});
+
+test("C-466: an old jobs timeout cannot clear the ETag from an intervening list", async () => {
+  const f = setup(1);
+  const held = Promise.withResolvers<GithubJob[]>();
+  f.complete();
+  f.client.jobs.mockImplementationOnce(() => held.promise);
+  vi.useFakeTimers();
+  try {
+    const slow = f.poller.tick();
+    await vi.advanceTimersByTimeAsync(20_000);
+    f.advance();
+    f.client.pollRuns.mockResolvedValueOnce({
+      unchanged: false,
+      etag: "fresh",
+      runs: [{ ...identity(1), status: "completed", conclusion: "success" }],
+    });
+    await f.poller.tick();
+    await vi.advanceTimersByTimeAsync(40_000);
+    await slow;
+    f.advance(40_000);
+    await f.poller.tick();
+    expect(f.client.pollRuns.mock.calls.at(-1)?.[0]).toBe("fresh");
+  } finally {
+    held.resolve([]);
+    vi.useRealTimers();
+  }
+});
+
+test("V-2081: 304 for a list skipped during backoff cannot certify an older terminal run", async () => {
+  const f = setup(2);
+  const completed = {
+    ...identity(1),
+    status: "completed",
+    conclusion: "success",
+  };
+  const rerun = { ...identity(1), run_attempt: 2, status: "in_progress" };
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [completed, identity(2)],
+    etag: "a",
+  });
+  f.client.jobs.mockRejectedValueOnce(new GithubExecutorError("security"));
+  await f.poller.tick();
+  f.advance();
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [rerun, identity(2)],
+    etag: "b",
+  });
+  await f.poller.tick();
+  expect(f.finished).not.toHaveBeenCalled();
+  f.advance();
+  f.client.run.mockResolvedValueOnce(rerun);
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: true,
+    runs: [],
+    etag: "b",
+  });
+  await f.poller.tick();
+  expect(f.finished).not.toHaveBeenCalled();
+  expect(f.client.pollRuns.mock.calls.at(-1)?.[0]).toBe("b");
+  expect(f.client.run.mock.calls.map(([id]) => id)).toEqual([1]);
+  expect(f.client.jobs).toHaveBeenCalledOnce();
+  expect(f.client.cancel).not.toHaveBeenCalled();
+});

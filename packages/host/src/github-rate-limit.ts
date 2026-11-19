@@ -9,7 +9,10 @@ export const GITHUB_POLL_DEFAULTS = {
 
 export class GithubRetryLater extends Error {
   readonly category = "api" as const;
-  constructor(readonly retryAt: number) {
+  constructor(
+    readonly retryAt: number,
+    readonly scope: "provider" | "attempt" = "provider",
+  ) {
     super("Check executor unavailable: api");
   }
 }
@@ -79,4 +82,30 @@ export class GithubRateLimit {
     });
     throw new GithubRetryLater(retryAt);
   }
+}
+
+export interface MaintenanceRetry {
+  readonly failures: number;
+  readonly retryAt: number;
+  readonly reason:
+    | "identity_mismatch"
+    | "discovery_error"
+    | "discovery_expired";
+}
+
+/** Retry a read-only investigation, never a workflow dispatch. */
+export function nextMaintenanceRetry(
+  previous: MaintenanceRetry | undefined,
+  now: number,
+  interval: number,
+  reason: MaintenanceRetry["reason"],
+  notBefore = 0,
+): MaintenanceRetry {
+  const failures = Math.min((previous?.failures ?? 0) + 1, 16);
+  const cap = Math.max(interval, GITHUB_POLL_DEFAULTS.waitStartMs);
+  const delay =
+    reason === "discovery_expired"
+      ? cap
+      : Math.min(interval * 2 ** failures, cap);
+  return { failures, reason, retryAt: Math.max(notBefore, now + delay) };
 }
