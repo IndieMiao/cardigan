@@ -4,6 +4,7 @@ import type {
   Assignment,
   Card,
   MergeClassificationInput,
+  UiStateAndSave,
   WorkItem,
 } from "../entities.js";
 import type { Result } from "../errors.js";
@@ -23,6 +24,7 @@ import { parseCardPriority } from "../priority.js";
 import {
   builtinCardTemplatesForFlow,
   latestCardTemplate,
+  requiresUiStateAndSave,
 } from "../templates.js";
 import { transition } from "../transitions.js";
 import {
@@ -82,6 +84,7 @@ export type CreateCardParams = Pick<
       | "deadline"
       | "template"
       | "acceptance_criteria"
+      | "state_and_save"
     >
   > &
   CardDependencyInput & {
@@ -91,6 +94,45 @@ export type CreateCardParams = Pick<
     >;
     readonly priority?: number | string;
   };
+function stateAndSaveCriterion(
+  plan: UiStateAndSave | undefined,
+  required: boolean,
+): string | undefined {
+  if (!required && plan === undefined) return undefined;
+  ensure(
+    required,
+    "validation_failed",
+    "填写状态与保存请选择有设计总监验收的界面或设计模板",
+  );
+  if (plan === "无写入") return undefined;
+  ensure(
+    plan && typeof plan === "object" && !Array.isArray(plan),
+    "validation_failed",
+    "请填写状态与保存（state_and_save）：保存时机、离页行为、失败提示和读写一致性；纯展示填“无写入”",
+  );
+  const labels = {
+    save_timing: "保存时机",
+    leave_behavior: "离页行为",
+    failure_feedback: "失败提示",
+    consistency: "读写一致性",
+  } as const;
+  ensure(
+    Object.keys(plan).every((key) => Object.hasOwn(labels, key)),
+    "validation_failed",
+    "状态与保存只接受保存时机、离页行为、失败提示和读写一致性",
+  );
+  const fields = Object.entries(labels).map(([key, label]) => {
+    const value = plan[key as keyof typeof labels];
+    ensure(
+      typeof value === "string" && value.trim(),
+      "validation_failed",
+      `状态与保存：请填写${label}`,
+    );
+    return `${label}：${value}`;
+  });
+  return `设计验收须确认状态与保存：${fields.join("；")}`;
+}
+
 export function createCard(
   state: CommandState,
   actor: Actor,
@@ -174,7 +216,6 @@ export function createCard(
     );
     ensure(priority !== undefined, "validation_failed", "Invalid priority");
     for (const id of p.related_cards ?? []) d.card(id);
-    const id = d.ids.next(state.project_id, "card");
     const flow_version = projectFlowVersion(projectPreferences(state));
     ensure(
       validFlowVersion(flow_version),
@@ -182,11 +223,19 @@ export function createCard(
       "项目流程版本尚未开放",
     );
     validateTemplateFlow(template, flow_version);
+    const saveCriterion = stateAndSaveCriterion(
+      p.state_and_save,
+      requiresUiStateAndSave(template),
+    );
+    const id = d.ids.next(state.project_id, "card");
     let card: Card = {
       id,
       project_id: state.project_id,
       title: p.title,
       goal: p.goal,
+      ...(p.state_and_save === undefined
+        ? {}
+        : { state_and_save: p.state_and_save }),
       acceptance_criteria: [...acceptance],
       source: p.source,
       ...(p.repo === undefined ? {} : { repo: p.repo }),
@@ -227,7 +276,16 @@ export function createCard(
         role_id: w.role_id,
         required: w.required,
         depends_on: [],
-        completion_criteria: [...acceptance, ...(w.completion_criteria ?? [])],
+        completion_criteria: [
+          ...acceptance,
+          ...(w.completion_criteria ?? []),
+          ...(saveCriterion &&
+          (w.key === template.primary_work_item_key ||
+            (w.role_id === "design_director" &&
+              w.target_work_item_key === template.primary_work_item_key))
+            ? [saveCriterion]
+            : []),
+        ],
         template_key: w.key,
         ...(w.requirements === undefined &&
         p.work_item_requirements?.[w.key] === undefined

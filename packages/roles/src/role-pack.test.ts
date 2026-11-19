@@ -814,6 +814,20 @@ test("MC-2 frontend machine requirements are separate from permission capabiliti
   );
 });
 
+test("UI producers and design directors use the same state and save guideline", () => {
+  for (const role of ["frontend_engineer", "design_director"] as const) {
+    const rules = instructionsFor(role);
+    for (const phrase of [
+      "状态与保存",
+      "无写入",
+      "docs/design/ui-guidelines.md 的“设置类写入的默认做法”",
+      "设计总监",
+      "实现验收",
+    ])
+      expect(rules).toContain(phrase);
+  }
+});
+
 test("PM planning splits UI framework from complex writes without splitting ordinary UI", () => {
   const planning = corePromptFor("pm")
     .split("## 拆卡和派活")[1]

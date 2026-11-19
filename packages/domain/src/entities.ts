@@ -133,7 +133,18 @@ export interface CardHold {
   readonly set_at: Timestamp;
 }
 
+/** New UI cards explicitly distinguish display-only work from a write contract. */
+export type UiStateAndSave =
+  | "无写入"
+  | {
+      readonly save_timing: string;
+      readonly leave_behavior: string;
+      readonly failure_feedback: string;
+      readonly consistency: string;
+    };
+
 export interface Card {
+  readonly state_and_save?: UiStateAndSave;
   readonly merge_solo?: boolean;
   readonly id: CardId;
   readonly project_id: ProjectId;

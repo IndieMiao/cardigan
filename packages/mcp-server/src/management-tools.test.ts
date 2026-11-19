@@ -146,6 +146,56 @@ test("B3b create_card expands registered product with PM acceptance and pins its
   ).toBe(1);
 });
 
+test("create_card passes a design write contract from discovery through storage and review", async () => {
+  store.uow.run((tx) => {
+    for (const role_id of ["ui_ux_designer", "design_director"])
+      tx.roles.put(project, {
+        role_id,
+        role_version: 1,
+        allowed_tools: toolNames,
+        capabilities: [],
+      });
+  });
+  const { templates } = await ok<{
+    templates: { id: string; requires_state_and_save?: boolean }[];
+  }>(office, "list_templates", {});
+  expect(
+    templates.find((t) => t.id === "design")?.requires_state_and_save,
+  ).toBe(true);
+  const input = {
+    template_id: "design",
+    title: "Settings",
+    goal: "Design",
+    acceptance_criteria: ["Review the draft"],
+    source: { kind: "quote", text: "Settings" },
+  };
+  const missing = await raw(office, "create_card", input);
+  expect(missing.isError).toBe(true);
+  expect(JSON.stringify(missing.content)).toContain("状态与保存");
+  const plan = {
+    save_timing: "即时",
+    leave_behavior: "允许离开",
+    failure_feedback: "全站提示",
+    consistency: "按版本补读",
+  };
+  const created = await ok<Card>(office, "create_card", {
+    ...input,
+    state_and_save: plan,
+  });
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, created.id))?.state_and_save,
+  ).toEqual(plan);
+  const items = store.uow
+    .read((tx) => tx.work_items.list(project))
+    .filter((w) => w.card_id === created.id);
+  expect(items.find((w) => w.role_id === "design_director")).toMatchObject({
+    required: true,
+    completion_criteria: expect.arrayContaining([
+      expect.stringContaining("读写一致性：按版本补读"),
+    ]),
+  });
+});
+
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
   store.createProject({ id: project });
