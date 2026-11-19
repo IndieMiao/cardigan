@@ -1476,7 +1476,8 @@ function reportableHostAction(action: HumanAction) {
 function internalHostFollowup(action: HumanAction) {
   return (
     action.triage === "host" &&
-    action.host_operator !== "external" &&
+    action.host_operator === "host_ops" &&
+    action.host_diagnostic === true &&
     reportableHostAction(action)
   );
 }
@@ -1627,6 +1628,8 @@ export function triageHumanAction(
     todo?: string;
     /** C-212: with host only; absent means host_ops. */
     host_operator?: "external" | "host_ops";
+    /** Opt in to internal read-only diagnosis, not general host work. */
+    host_diagnostic?: true;
     host_assignment_id?: AssignmentId;
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
@@ -1671,6 +1674,15 @@ export function triageHumanAction(
       external || p.host_assignment_id === undefined,
       "validation_failed",
       "host_assignment_id 只能用于 host/external 交接",
+    );
+    ensure(
+      p.host_diagnostic === undefined ||
+        (p.host_diagnostic === true &&
+          p.disposition === "host" &&
+          !external &&
+          reportableHostAction(action)),
+      "validation_failed",
+      "只有非阻塞的内部卡片诊断可以由运维回填结项",
     );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
@@ -1829,17 +1841,19 @@ export function triageHumanAction(
     };
     const {
       host_operator: _operator,
+      host_diagnostic: _diagnostic,
       host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
       ...rest
     } = classified;
     let owner = p.host_assignment_id;
-    if (
-      p.disposition === "host" &&
-      !external &&
-      reportableHostAction(classified)
-    ) {
+    if (p.host_diagnostic) {
+      ensure(
+        reportableHostAction(classified),
+        "validation_failed",
+        "诊断不能阻塞工作或合并",
+      );
       owner = (internalHostOwner(d, "host_ops") ?? internalHostOwner(d, "pm"))
         ?.id;
       ensure(
@@ -1854,6 +1868,7 @@ export function triageHumanAction(
       ...(p.disposition === "host"
         ? {
             host_operator: p.host_operator ?? "host_ops",
+            ...(p.host_diagnostic ? { host_diagnostic: true as const } : {}),
             ...(owner ? { host_assignment_id: owner } : {}),
           }
         : {}),
@@ -1884,6 +1899,7 @@ export function triageHumanAction(
         previous_host_assignment_id: action.host_assignment_id ?? null,
         host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
+        ...(next.host_diagnostic ? { host_diagnostic: true } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,

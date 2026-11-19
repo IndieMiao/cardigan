@@ -1050,6 +1050,8 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /** Explicit internal read-only diagnostic; absent on ordinary host handoffs. */
+  readonly host_diagnostic?: true;
   /** Exact handoff owner (external Office, internal host ops, or fallback PM Ops). */
   readonly host_assignment_id?: AssignmentId;
   readonly cancellation?: {

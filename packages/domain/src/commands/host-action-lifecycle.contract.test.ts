@@ -376,7 +376,7 @@ test("internal non-blocking handoff binds a result author; only their explicit f
     triageHumanAction(
       s,
       human,
-      { ...params, host_operator: "host_ops" },
+      { ...params, host_operator: "host_ops", host_diagnostic: true },
       ports(),
     );
   const assigned = value(assign(state));
@@ -417,6 +417,32 @@ test("internal non-blocking handoff binds a result author; only their explicit f
   ]) {
     expect(
       report({ ...after, human_actions: [{ ...assigned.data, ...patch }] }).ok,
+    ).toBe(false);
+  }
+  // Rewriting a diagnosis as ordinary host work must revoke the result grant.
+  const ordinary = value(
+    triageHumanAction(
+      after,
+      human,
+      { ...params, host_operator: "host_ops" },
+      ports(),
+    ),
+  );
+  expect(ordinary.data.host_diagnostic).toBeUndefined();
+  expect(ordinary.data.host_assignment_id).toBeUndefined();
+  expect(report(apply(after, ordinary)).ok).toBe(false);
+  for (const overrides of [
+    { disposition: "human" as const },
+    { ...handoff }, // external operator
+    { blocks_merge: true, prerequisite: "credential" as const },
+  ]) {
+    expect(
+      triageHumanAction(
+        state,
+        human,
+        { ...params, ...overrides, host_diagnostic: true },
+        ports(),
+      ).ok,
     ).toBe(false);
   }
   const closed = apply(after, value(report(after)));

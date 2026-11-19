@@ -1357,7 +1357,9 @@ function notifyHumanAction(
       rule,
       action.host_operator === "external"
         ? `${action.id} 主机操作等外接操作员执行：${title}`
-        : `${action.id} 主机操作等 host_ops 执行：${title}`,
+        : action.host_diagnostic && action.host_assignment_id
+          ? `${action.id} 主机诊断等 ${action.host_assignment_id} 回填：${title}`
+          : `${action.id} 主机操作等 host_ops 执行：${title}`,
     );
     return;
   }

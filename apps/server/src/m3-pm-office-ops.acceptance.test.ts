@@ -55,6 +55,7 @@ class PmRuntime implements Runtime {
   readonly bus = new EventEmitter();
   readonly launches: { assignment: Assignment; launch: RuntimeLaunch }[] = [];
   readonly bells: { id: AssignmentId; text: string }[] = [];
+  readonly working = new Set<AssignmentId>();
   readonly fail = new Set<AssignmentId>();
   /** Terminals whose process is gone: the dispatcher must open a new session. */
   readonly gone = new Set<AssignmentId>();
@@ -101,7 +102,7 @@ class PmRuntime implements Runtime {
       };
     return ok({
       process: "alive" as const,
-      agent: "idle" as const,
+      agent: this.working.has(id) ? ("working" as const) : ("idle" as const),
       observed_seq: 1,
     });
   }
@@ -707,6 +708,7 @@ test.each(["comment", "delivery", "pass", "reject", "execution failure"])(
 
 test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one delivery", async () => {
   const s = await routingSetup(false);
+  s.runtime.working.add(s.ops.id);
   await s.finish(s.coder);
   await s.provision(s.coder);
   await s.finish(s.coder);
@@ -730,6 +732,7 @@ test("P06 §7.2/§6.7: Ops escalations wait while busy, then merge into one deli
     blocking: true,
     decider: "role:coder",
   });
+  s.runtime.working.delete(s.ops.id);
   await expect
     .poll(() =>
       notices(s, s.ops)

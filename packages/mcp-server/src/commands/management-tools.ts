@@ -123,7 +123,7 @@ const schemas = {
     host_result_for: id("human_action")
       .optional()
       .describe(
-        "Host Ops only: record the final result and complete this assigned non-blocking host action. Omit on progress comments.",
+        "Host Ops only: record the final result and complete this assigned internal host diagnostic. Omit on progress comments.",
       ),
     reply_to: entryId.optional(),
     refs: refs.optional(),
@@ -299,6 +299,12 @@ const schemas = {
       .optional()
       .describe(
         "Required with host/external: exact active external PM Office Assignment; rewriting explicitly transfers responsibility.",
+      ),
+    host_diagnostic: z
+      .literal(true)
+      .optional()
+      .describe(
+        "With internal host handoff only: this is a read-only diagnostic; bind a result author (host_ops or fallback PM Ops). Omit for ordinary host work.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])
