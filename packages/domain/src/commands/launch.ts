@@ -7,6 +7,7 @@ import {
 } from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
+import { HARNESSES, isHarness } from "../harness.js";
 import {
   automaticContextActionForRun,
   hostOpsPending,
@@ -209,13 +210,12 @@ export function launchSettings(
     ...(source.effort === undefined ? {} : { effort: source.effort }),
   };
 }
-const HARNESS_VALUES: readonly string[] = ["claude-code", "codex", "pi"];
 export function settingsValid(source: LaunchSettingsSource) {
   if (source.harness !== undefined)
     ensure(
-      HARNESS_VALUES.includes(source.harness),
+      isHarness(source.harness),
       "validation_failed",
-      "harness must be claude-code, codex or pi",
+      `harness must be ${HARNESSES.slice(0, -1).join(", ")} or ${HARNESSES.at(-1)}`,
     );
   if (source.effort !== undefined) text(source.effort, "effort");
 }

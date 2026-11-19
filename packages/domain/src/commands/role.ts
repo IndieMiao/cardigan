@@ -1,5 +1,6 @@
 import type { Actor, Event, ToolName } from "../entities.js";
 import type { Result } from "../errors.js";
+import { isHarness } from "../harness.js";
 import { HOST_OPS_FORBIDDEN_TOOLS } from "../host-ops.js";
 import type { ProjectId } from "../ids.js";
 import { validateWorkItemRequirements } from "../machine-requirements.js";
@@ -66,11 +67,7 @@ export function validateRole(role: RoleDefinition): Result<RoleDefinition> {
       "validation_failed",
       "角色类型不合法",
     );
-    ensure(
-      ["claude-code", "codex", "pi"].includes(role.harness),
-      "validation_failed",
-      "Harness 不合法",
-    );
+    ensure(isHarness(role.harness), "validation_failed", "Harness 不合法");
     text(role.launch_profile_ref, "launch_profile_ref");
     if (role.instructions !== undefined) {
       ensure(

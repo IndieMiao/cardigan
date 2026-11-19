@@ -1,5 +1,5 @@
 import {
-  HARNESS_BINARY,
+  getHarnessAdapter,
   type LaunchConfig,
   reportLaunchWarnings,
   resolveProfile,
@@ -94,14 +94,14 @@ async function checkProfile(
   }
 
   const credentialsReady = problems.length === 0;
-  const binary = HARNESS_BINARY[resolved.profile.harness];
+  const { binary, versionArgs } = getHarnessAdapter(resolved.profile.harness);
   const executable = await findExecutable(binary, io.env.PATH, io.platform);
   if (executable === undefined) {
     lines.push(`CLI：${binary}（PATH 里没有）`);
     problems.push(`没有安装 ${binary}`);
   } else {
     lines.push(`CLI：${executable}`);
-    const version = await probeVersion(executable, io);
+    const version = await probeVersion(executable, versionArgs, io);
     lines.push(`版本：${version ?? "（无法获取，可忽略）"}`);
   }
 
@@ -141,6 +141,7 @@ async function checkProfile(
 
 async function probeVersion(
   executable: string,
+  versionArgs: readonly string[],
   io: CliIo,
 ): Promise<string | undefined> {
   const env: Record<string, string> = {};
@@ -150,7 +151,7 @@ async function probeVersion(
     }
   }
   try {
-    const captured = await io.captureCommand(executable, ["--version"], {
+    const captured = await io.captureCommand(executable, versionArgs, {
       cwd: io.cwd,
       env,
       timeoutMs: 5000,

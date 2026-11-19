@@ -1,4 +1,21 @@
 export {
+  claudeContextWindow,
+  expandClaudeModel,
+  parseClaudeTranscript,
+} from "./adapters/claude-context.js";
+export { parseCodexContext } from "./adapters/codex-context.js";
+export {
+  type ActivityMetadata,
+  type ContextReadInput,
+  type ContextReading,
+  type ContextSample,
+  measured,
+  parseContextCache,
+  parseContextSample,
+} from "./adapters/context.js";
+export { getHarnessAdapter } from "./adapters/registry.js";
+export type { HarnessAdapter } from "./adapters/types.js";
+export {
   type AssignmentIdentity,
   type AssignmentMcpEndpoint,
   type AssignmentRoleInput,

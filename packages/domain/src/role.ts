@@ -5,6 +5,7 @@ import {
   type ToolName,
   toolNames,
 } from "./entities.js";
+import type { Harness } from "./harness.js";
 import { HOST_OPS_TOOLS } from "./host-ops.js";
 import type { ProjectId } from "./ids.js";
 
@@ -18,7 +19,7 @@ export interface Role extends Omit<RoleReference, "role_version"> {
   readonly kind: RoleKind | "work";
   readonly core_prompt: string;
   readonly instructions?: string;
-  readonly harness: "claude-code" | "codex" | "pi";
+  readonly harness: Harness;
   readonly launch_profile_ref: string;
   readonly abilities: readonly string[];
   readonly worktree: RoleWorktree;

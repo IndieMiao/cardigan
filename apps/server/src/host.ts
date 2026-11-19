@@ -127,8 +127,11 @@ export async function loadLaunchFiles(
 }
 
 /** Ask the harness binary for its version (local mode only); the Run records it. */
-async function cliVersion(binary: string): Promise<string> {
-  const { stdout } = await exec(binary, ["--version"], { timeout: 10_000 });
+async function cliVersion(
+  binary: string,
+  args: readonly string[],
+): Promise<string> {
+  const { stdout } = await exec(binary, args, { timeout: 10_000 });
   const line = stdout.trim().split("\n")[0]?.trim();
   if (!line) throw new Error(`${binary} --version printed nothing`);
   return line;

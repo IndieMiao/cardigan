@@ -140,8 +140,12 @@ function requireAssignment(
   }
 }
 
-async function cliVersion(io: CliIo, binary: string): Promise<string> {
-  const captured = await io.captureCommand(binary, ["--version"], {
+async function cliVersion(
+  io: CliIo,
+  binary: string,
+  args: readonly string[],
+): Promise<string> {
+  const captured = await io.captureCommand(binary, args, {
     cwd: io.cwd,
     env: Object.fromEntries(
       Object.entries(io.env).filter(
@@ -303,7 +307,7 @@ async function startUnlocked(
     {
       execution,
       captureAgent: options.runtime.captureAgent?.bind(options.runtime),
-      captureLocal: (binary) => cliVersion(io, binary),
+      captureLocal: (binary, args) => cliVersion(io, binary, args),
     },
     harnessBinary(profile.harness),
   ).catch((error: unknown) => {
