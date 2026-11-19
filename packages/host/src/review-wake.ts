@@ -2,6 +2,7 @@ import {
   type Assignment,
   type Clock,
   type CommandState,
+  type Delivery,
   type Run,
   repairWakeTarget,
   resumableReviewWithdrawal,
@@ -41,6 +42,12 @@ export function crossRepairSendBoundary(
   owner: Assignment,
   clock: Clock,
   requireReceipt = false,
+  authorized?: (
+    state: CommandState,
+    owner: Assignment,
+    run: Run,
+    target: Delivery,
+  ) => boolean | undefined,
 ): "send" | "deferred" | "withdrawn" {
   return store.uow.run((tx) => {
     const state = loadCommandState(tx, attempt.project_id);
@@ -64,6 +71,7 @@ export function crossRepairSendBoundary(
       }
       if (
         wakeIsCurrent(state, owner, run.id) &&
+        (!authorized || authorized(state, owner, run, target)) &&
         (!requireReceipt || resumableReviewWithdrawal(state, owner, run))
       )
         return bindReviewWake(store.database, attempt, binding, clock.now())

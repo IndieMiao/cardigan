@@ -11,7 +11,6 @@ import {
   dispatchRecoveryQueuedAt,
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
-  eventsOfType,
   hasRunTarget,
   hostOpsPending,
   type ProjectId,
@@ -52,6 +51,7 @@ import {
   recordNotification,
   type Store,
   type StoreTransactionContext,
+  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -60,34 +60,16 @@ import {
   type DeliveryStage,
   deliveryFailure,
   deliveryFailureLine,
+  dispatchAlert,
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
-
-function unconfirmedReviewSend(
-  state: CommandState,
-  run: Run,
-  attemptId: string,
-) {
-  if (run.kind !== "rework") return false;
-  const target = repairWakeTarget(state, run);
-  return (
-    !!target &&
-    state.decisions.some(
-      (q) => q.review_limit_group?.delivery_id === target.id,
-    ) &&
-    eventsOfType(state.events, "bell_delivery_attempt_failed").some((e) => {
-      const p = e.payload as Record<string, unknown> | null;
-      return (
-        e.actor.kind === "system" &&
-        p?.run_id === run.id &&
-        p.unconfirmed_attempt_id === attemptId
-      );
-    })
-  );
-}
+import {
+  legacyRepairAuthority,
+  legacyRepairWake,
+} from "./legacy-repair-wake.js";
 
 export interface DispatchRecoveryPolicy {
   timeoutMs: number;
@@ -511,7 +493,7 @@ export async function retryDispatchedRuns(
       const fromWithdrawal = resumableReviewWithdrawal(state, a, run);
       const withdrawn = !last && fromWithdrawal;
       const binding = last?.review_wake;
-      const target = binding && repairWakeTarget(state, run);
+      const target = repairWakeTarget(state, run);
       const sameTarget =
         !!binding &&
         target?.id === binding.delivery_id &&
@@ -525,22 +507,29 @@ export async function retryDispatchedRuns(
         state.decisions.some(
           (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
         );
-      const unconfirmed =
-        last?.outcome === "failed" &&
-        (binding
-          ? shared && !!binding.sending_at
-          : unconfirmedReviewSend(state, run, last.id));
+      const legacy =
+        !withdrawn && !disposition && target
+          ? legacyRepairWake(state, a, run, target, history)
+          : undefined;
+      const reconcile = legacy === "reconcile" ? target : undefined;
+      const unconfirmed = !!reconcile || (shared && !!binding?.sending_at);
       // A wait finishing is not a send. Only an actual boundary (or a legacy
       // result) starts the restored ack window. Clear failures still back off.
       const noSendYet =
         withdrawn ||
-        (shared && last?.outcome === "failed" && !binding.sending_at);
-      const ackSince = shared
-        ? (binding.sending_at ??
-          (last?.outcome === "sent" ? last.finished_at : undefined))
-        : fromWithdrawal
-          ? last?.finished_at
-          : undefined;
+        legacy === "unsent" ||
+        (!reconcile &&
+          shared &&
+          last?.outcome === "failed" &&
+          !binding.sending_at);
+      const ackSince = reconcile
+        ? last?.finished_at
+        : shared
+          ? (binding.sending_at ??
+            (last?.outcome === "sent" ? last.finished_at : undefined))
+          : fromWithdrawal
+            ? last?.finished_at
+            : undefined;
       const timedOut =
         started &&
         Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
@@ -550,14 +539,18 @@ export async function retryDispatchedRuns(
           !noSendYet &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-        failures >= policy.maxRetries + 1;
+        (!reconcile &&
+          !(shared && binding?.refused_at) &&
+          failures >= policy.maxRetries + 1);
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
         last.finished_at &&
         Date.parse(at) >=
           Date.parse(last.finished_at) +
-            policy.retryBaseMs * 2 ** Math.max(0, failures - 1);
+            policy.retryBaseMs *
+              2 **
+                (shared && binding?.refused_at ? 0 : Math.max(0, failures - 1));
       // C-120: an obsolete cross-card bell cannot be retried as an empty launch.
       // Timeout recovery safely stops its terminal, then cancels without requeueing.
       const unreadable = unreadableCommentTrigger(state, run);
@@ -567,6 +560,8 @@ export async function retryDispatchedRuns(
         a,
         failures,
         recover,
+        reconcile,
+        legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
           (withdrawn || (retry && !unconfirmed)) &&
@@ -580,6 +575,29 @@ export async function retryDispatchedRuns(
     const observed = inspect();
     if (!observed) continue;
     if (observed.recover) {
+      if (observed.reconcile) {
+        store.uow.run((tx) => {
+          const fresh = inspect(loadState(tx, project), tx);
+          if (!fresh?.recover || !fresh.reconcile) return;
+          const { state, run, a, reconcile: target, at } = fresh;
+          dispatchAlert(tx, store, state, at, {
+            assignment: a,
+            run_id: run.id,
+            card_id: state.work_items.find((w) => w.id === target.work_item_id)
+              ?.card_id,
+            type: "run_dispatch_stalled",
+            reason: "legacy_repair_ack_unknown",
+            audience: "ops",
+            notifyHostOps: true,
+            review: {
+              delivery_id: target.id,
+              target_sha: target.subject.value,
+              body: `旧版返工通知 ${run.id}（${target.id} / ${target.subject.value}）无法确认送达。请核对原会话与回执；未证实未发前不要补投。`,
+            },
+          });
+        });
+        continue;
+      }
       const used =
         dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
         recoveryChainUsed(observed.state, observed.run);
@@ -734,6 +752,7 @@ export async function retryDispatchedRuns(
                     job.a,
                     clock,
                     job.withdrawn,
+                    job.legacyRetry ? legacyRepairAuthority : undefined,
                   ) === "send"
                 );
               if (deferIfTargetWait(store, job.attempt, clock)) {
@@ -749,7 +768,7 @@ export async function retryDispatchedRuns(
         );
         if (result.ok && result.value.withdrawn) {
           store.uow.run(() =>
-            withdrawBellAttempt(store.database, project, job.attempt.id),
+            settleWakeWithdrawal(store.database, job.attempt, clock.now()),
           );
           continue;
         }

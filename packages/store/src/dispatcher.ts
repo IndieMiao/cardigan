@@ -13,6 +13,8 @@ export interface ReviewWakeBinding {
   readonly target_sha: string;
   /** Written before external IO. Absence on a tracked intent proves pre-send. */
   readonly sending_at?: string;
+  /** Final adapter guard positively refused this attempt after the caller allowed it. */
+  readonly refused_at?: string;
 }
 export interface BellAttempt {
   readonly review_wake?: ReviewWakeBinding;
@@ -172,6 +174,45 @@ export function confirmReviewNotSent(db: DatabaseSync, attempt: BellAttempt) {
       WHERE project_id=? AND id=? AND finished_at IS NULL AND review_wake IS NOT NULL`).run(
     attempt.project_id,
     attempt.id,
+  );
+}
+/** A final adapter refusal is stronger than the local permission to send.
+ * Keep the receipt on its exact claim. After lease expiry it can clarify that
+ * claim only while it is still the latest, unacknowledged, unfenced repair. */
+export function settleWakeWithdrawal(
+  db: DatabaseSync,
+  attempt: BellAttempt,
+  at: string,
+) {
+  requireTransaction(db);
+  if (!attempt.review_wake)
+    return withdrawBellAttempt(db, attempt.project_id, attempt.id);
+  timestamp(at);
+  return (
+    Number(
+      db
+        .prepare(`UPDATE bell_attempts SET outcome='failed', finished_at=?,
+    review_wake=json_set(json_remove(review_wake,'$.sending_at'),'$.refused_at',?)
+    WHERE project_id=? AND id=? AND assignment_id=? AND run_id=? AND started_at <= ?
+      AND json_extract(review_wake,'$.delivery_id')=? AND json_extract(review_wake,'$.target_sha')=?
+      AND (finished_at IS NULL OR (outcome='failed' AND json_extract(review_wake,'$.sending_at') IS NOT NULL))
+      AND NOT EXISTS (SELECT 1 FROM bell_attempts later WHERE later.project_id=bell_attempts.project_id
+        AND later.run_id=bell_attempts.run_id AND later.rowid > bell_attempts.rowid)
+      AND EXISTS (SELECT 1 FROM runs r WHERE r.project_id=bell_attempts.project_id AND r.id=bell_attempts.run_id
+        AND json_extract(r.doc,'$.status')='dispatched' AND json_extract(r.doc,'$.started_at') IS NULL
+        AND json_extract(r.doc,'$.dispatch_stop') IS NULL AND json_extract(r.doc,'$.inactivity_stop') IS NULL)`)
+        .run(
+          at,
+          at,
+          attempt.project_id,
+          attempt.id,
+          attempt.assignment_id,
+          attempt.run_id,
+          at,
+          attempt.review_wake.delivery_id,
+          attempt.review_wake.target_sha,
+        ).changes,
+    ) === 1
   );
 }
 /** A late completion cannot overwrite recovery's already-settled outcome. */

@@ -95,6 +95,7 @@ import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
+  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -1034,10 +1035,10 @@ export class Dispatcher {
         );
         if (result.ok && result.value.withdrawn) {
           this.options.store.uow.run(() =>
-            withdrawBellAttempt(
+            settleWakeWithdrawal(
               this.options.store.database,
-              project,
-              job.attempt.id,
+              job.attempt,
+              this.clock.now(),
             ),
           );
           return;

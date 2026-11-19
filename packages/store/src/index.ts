@@ -14,6 +14,7 @@ export {
   finishBellAttempt,
   listBellAttempts,
   type ReviewWakeBinding,
+  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "./dispatcher.js";
