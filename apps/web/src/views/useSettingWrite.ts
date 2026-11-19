@@ -66,6 +66,10 @@ export const SettingPlaceContext = createContext<SettingPlace | undefined>(
 interface SaveNotice {
   key: string;
   message: string;
+  /** The server's reason, shown on the row when a view takes the notice over. */
+  cause: string;
+  /** The value that was not saved; a read showing it retires the notice. */
+  value: unknown;
   project: string;
   panel: SettingPlace["panel"];
 }
@@ -162,15 +166,29 @@ export function useSettingWrite<T>({
   const sending = useRef(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
-  // The latest failure shown here, kept for a leave right after it.
-  const shown = useRef<{ text: string; at: number } | undefined>(undefined);
+  /**
+   * The latest failure on this row and whether the reader may have missed it:
+   * `seen` once shown in view, `reported` once in the shared notice.
+   */
+  const shown = useRef<
+    | {
+        text: string;
+        cause: string;
+        value: unknown;
+        at: number;
+        seen: boolean;
+        reported: boolean;
+      }
+    | undefined
+  >(undefined);
   const pending = useRef<{ value: T; key: string } | undefined>(undefined);
   const place = useContext(SettingPlaceContext);
   const visible = useFeedbackVisible();
   const key = `${place?.project ?? ""}:${name}`;
   // Completions reach whichever render is current.
-  const latest = useRef({ saved, success, failure, visible });
-  latest.current = { saved, success, failure, visible };
+  const latest = useRef({ saved, success, failure, visible, server });
+  latest.current = { saved, success, failure, visible, server };
+  const current = useSyncExternalStore(subscribe, () => notice);
   // A view replaced meanwhile (another project) ignores the response.
   const alive = useRef(true);
   const home = useRef("");
@@ -181,34 +199,57 @@ export function useSettingWrite<T>({
     return () => {
       alive.current = false;
       if (reveals.get(key) === place?.reveal) reveals.delete(key);
-      // A failure that answered as the reader was leaving (a link or Back
-      // changes the address a moment later) or behind another panel may not
-      // have been seen: report it once here too.
+      // A failure not yet reported that the reader may have missed: never
+      // in view, or shown just as they left (a link or Back changes the
+      // address a moment later). Report it once here.
       const last = shown.current;
       if (
         last &&
         place &&
-        (!latest.current.visible || Date.now() - last.at < UNSEEN_MS)
+        !last.reported &&
+        (!last.seen || Date.now() - last.at < UNSEEN_MS)
       )
         showNotice({
           key,
           message: last.text,
+          cause: last.cause,
+          value: last.value,
           project: place.project,
           panel: place.panel,
         });
     };
   }, [key, place]);
-  // In view again: the row shows the failure itself.
+  // In view: the row takes this setting's notice over and shows the failure
+  // itself, unless its read already shows the value that was not confirmed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: inView reads refs and the project in `key`.
   useEffect(() => {
-    if (visible) clearNotice(key);
-  }, [visible, key]);
+    if (!visible) return;
+    if (shown.current) shown.current.seen = true;
+    if (current?.key !== key || !inView()) return;
+    clearNotice(key);
+    if (confirmable && same(current.value, latest.current.server)) return;
+    setError(current.cause);
+    shown.current = {
+      text: current.message,
+      cause: current.cause,
+      value: current.value,
+      at: Date.now(),
+      seen: true,
+      reported: false,
+    };
+  }, [visible, key, current, confirmable]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new read is the trigger.
   useEffect(() => {
+    if (!confirmable) return;
     // A read showing the value confirms the write even if its response was lost.
-    if (confirmable && pending.current && same(pending.current.value, server)) {
+    if (pending.current && same(pending.current.value, server))
       pending.current = undefined;
+    // ...and retires its failure here and in the shared notice.
+    if (shown.current && same(shown.current.value, server)) {
+      shown.current = undefined;
       setError("");
     }
+    if (notice?.key === key && same(notice.value, server)) clearNotice(key);
   }, [source]);
   /** Still on this project's settings with the panel shown (URL already counts). */
   const inView = () => {
@@ -241,16 +282,27 @@ export function useSettingWrite<T>({
       setValue(next);
       setMessage(latest.current.success(next));
       latest.current.saved();
-    } catch (cause) {
+    } catch (thrown) {
       const text = `${latest.current.failure?.(next) ?? `未能保存“${name}”`}，请回到设置重试`;
+      const cause = describeWriteError(thrown);
+      const away = !inView();
       if (alive.current) {
-        setError(describeWriteError(cause));
-        shown.current = { text, at: Date.now() };
+        setError(cause);
+        shown.current = {
+          text,
+          cause,
+          value: next,
+          at: Date.now(),
+          seen: !away,
+          reported: away && !!place,
+        };
       }
-      if (!inView() && place)
+      if (away && place)
         showNotice({
           key,
           message: text,
+          cause,
+          value: next,
           project: place.project,
           panel: place.panel,
         });

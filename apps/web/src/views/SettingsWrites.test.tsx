@@ -8,9 +8,10 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import type { PreferencesView, SystemReminderPolicy } from "../api.js";
+import type { StreamCallbacks } from "../stream.js";
 import { fakeClient, project } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
@@ -1002,4 +1003,141 @@ test("a reminder threshold save that fails after leaving is reported once", asyn
   await waitFor(() =>
     expect(alerts()).toContain("未能保存“催办阈值”，请回到设置重试"),
   );
+});
+
+// C-455 review (V-2193): a returning view takes a detached failure over, and a
+// read confirming the value retires it everywhere.
+describe("save failure notice lifecycle", () => {
+  const settings = "#/p/p-1/settings?tab=authorization";
+  const alerts = () =>
+    screen
+      .queryAllByRole("alert")
+      .map((el) => el.textContent)
+      .join(" ");
+  const row = () => screen.findByRole("switch", { name: /^对外发布/ });
+  const tab = (s: string) =>
+    screen.getByRole("button", { name: s, exact: true });
+  async function leave() {
+    fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "设置", exact: true }),
+      ).toBeNull(),
+    );
+  }
+  function setup(applied = false) {
+    location.hash = settings;
+    const write = Promise.withResolvers<void>();
+    const read = Promise.withResolvers<void>();
+    let holdRead = false,
+      publish = true,
+      stream: StreamCallbacks | undefined;
+    const preferences = vi.fn(async () => {
+      if (holdRead) await read.promise;
+      return {
+        auto_merge_after_minutes: null,
+        merge_gate_enabled: true,
+        decision_delegation: { publish },
+      };
+    });
+    const setDelegation = vi.fn(
+      async (_project: string, _category: string, next: boolean) => {
+        if (applied) publish = next;
+        await write.promise;
+      },
+    );
+    render(
+      <App
+        client={fakeClient({
+          preferences,
+          setDelegation,
+          subscribe: (_, s) => {
+            stream = s;
+            s.status("live");
+            return () => {};
+          },
+        })}
+      />,
+    );
+    return {
+      read,
+      write,
+      hold: () => {
+        holdRead = true;
+        preferences.mockClear();
+      },
+      preferences,
+      setDelegation,
+      refresh: () =>
+        stream?.change({
+          type: "preferences_updated",
+          stream: "project",
+          seq: 1,
+        }),
+    };
+  }
+  const failed = "未能撤销“对外发布”授权";
+  for (const sameTurn of [true, false])
+    test(`quick return to authorization receives the detached failure (${sameTurn ? "read and failure together" : "control: read first"})`, async () => {
+      const f = setup();
+      fireEvent.click(await row());
+      expect(f.setDelegation).toHaveBeenCalledTimes(1);
+      await leave();
+      f.hold();
+      history.back();
+      await waitFor(() => expect(f.preferences).toHaveBeenCalled());
+      expect(location.hash).toBe(settings);
+      expect(screen.queryByRole("switch", { name: /^对外发布/ })).toBeNull();
+      if (!sameTurn) {
+        await act(async () => f.read.resolve());
+        await row();
+      }
+      await act(async () => {
+        f.write.reject(new Error("撤销未保存"));
+        f.read.resolve();
+      });
+      expect((await row()).getAttribute("aria-checked")).toBe("true");
+      expect(alerts()).toMatch(/未能撤销|撤销未保存/);
+    });
+
+  test("a read confirming revocation must not be followed by an old failure on Help", async () => {
+    const f = setup(true);
+    fireEvent.click(await row());
+    expect(f.setDelegation).toHaveBeenCalledTimes(1);
+    fireEvent.click(tab("偏好"));
+    await act(async () => f.write.reject(new TypeError("reply lost")));
+    expect(alerts()).toContain(failed);
+    fireEvent.click(tab("回到设置"));
+    await row();
+    act(() => f.refresh());
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("switch", { name: /^对外发布/ })
+          .getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    // A fresh server read confirms the requested value; the local error is gone.
+    await waitFor(() => expect(alerts().trim()).toBe(""));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 550));
+    });
+    fireEvent.click(tab("偏好"));
+    await leave();
+    expect(f.setDelegation).toHaveBeenCalledTimes(1);
+    expect(alerts()).not.toContain(failed);
+  });
+
+  test("a failure seen on the page is not reported again on a later leave", async () => {
+    const f = setup();
+    fireEvent.click(await row());
+    await act(async () => f.write.reject(new Error("撤销未保存")));
+    expect(alerts()).toContain("撤销未保存");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 550));
+    });
+    fireEvent.click(tab("偏好"));
+    await leave();
+    expect(alerts()).not.toContain(failed);
+  });
 });
