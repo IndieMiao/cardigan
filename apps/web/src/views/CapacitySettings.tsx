@@ -28,6 +28,8 @@ function AgentLimit({
   const name = `${machine.label} Agent 并发上限`;
   const setting = useSettingWrite({
     name,
+    // Labels may repeat; each machine's limit is its own setting.
+    id: `run-limit:${machine.machine_id}`,
     server: machine.limit,
     source,
     write: (limit, key) =>
@@ -66,15 +68,7 @@ function AgentLimit({
           draft.setDraft(event.target.value);
           setting.clear();
         }}
-        onCommit={() =>
-          // The shared capacity read is not ordered against writes: read the
-          // counts again once the new limit is acknowledged.
-          draft.commit(async (limit) => {
-            const ok = await setting.save(limit);
-            if (ok) saved();
-            return ok;
-          })
-        }
+        onCommit={() => draft.commit(setting.save)}
       />
       <RequestFeedback
         error={

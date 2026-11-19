@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeWriteError,
@@ -12,10 +12,7 @@ import {
 import { Drawer } from "../components/Drawer.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
-import {
-  CardDetailLayout,
-  cardDetailDrawerClassName,
-} from "../components/layout/CardDetailLayout.js";
+import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
 import {
   SettingsDialogActions,
@@ -29,6 +26,8 @@ import {
   SettingsTable,
   SettingsText,
   SettingsWarning,
+  settingsDrawerClassName,
+  useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
@@ -66,6 +65,13 @@ type View =
 function useRoleWrite() {
   const keys = useRef(new Map<string, string>());
   const sending = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const submit = useCallback(
@@ -83,13 +89,14 @@ function useRoleWrite() {
       try {
         const result = await action(key);
         keys.current.delete(id);
-        return result;
+        // A form that is gone (another project) must not act on its reply.
+        return alive.current ? result : undefined;
       } catch (cause) {
-        setError(describeWriteError(cause));
+        if (alive.current) setError(describeWriteError(cause));
         return undefined;
       } finally {
         sending.current = false;
-        setBusy(false);
+        if (alive.current) setBusy(false);
       }
     },
     [],
@@ -113,7 +120,9 @@ export function RolesSettings({
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
+  const remember = useDrawerReturnFocus(view !== undefined);
   const open = (next: View | undefined, note = "") => {
+    if (next) remember();
     setMessage(note);
     setView(next);
     if (next === undefined) list.reload();
@@ -146,33 +155,20 @@ export function RolesSettings({
         />
       )}
       {view?.kind === "new" && (
-        <Drawer
-          className={cardDetailDrawerClassName ?? ""}
-          open
-          onOpenChange={(next) => {
-            if (!next) open(undefined);
+        <NewRoleForm
+          client={client}
+          projectId={projectId}
+          list={list.data}
+          onCancel={() => open(undefined)}
+          onCreated={(role) => {
+            setCreatedRole(role.role_id);
+            list.reload();
+            open(
+              { kind: "detail", roleId: role.role_id },
+              `已创建角色 ${role.role_id} v${role.version}`,
+            );
           }}
-          title="新建角色"
-          description="新建角色"
-          initialFocus="close"
-        >
-          <CardDetailLayout className="card-page-drawer">
-            <NewRoleForm
-              client={client}
-              projectId={projectId}
-              list={list.data}
-              onCancel={() => open(undefined)}
-              onCreated={(role) => {
-                setCreatedRole(role.role_id);
-                list.reload();
-                open(
-                  { kind: "detail", roleId: role.role_id },
-                  `已创建角色 ${role.role_id} v${role.version}`,
-                );
-              }}
-            />
-          </CardDetailLayout>
-        </Drawer>
+        />
       )}
       {roleId && (
         <RoleDetail
@@ -298,183 +294,208 @@ function NewRoleForm({
     ...new Set(list?.roles.map((role) => role.launch_profile_ref) ?? []),
   ];
   return (
-    <form
-      aria-label="新建角色"
-      onSubmit={async (event) => {
-        event.preventDefault();
-        if (!ready) return;
-        const input = {
-          role_id: roleId,
-          ...(name.trim() ? { display_name: name.trim() } : {}),
-          source:
-            source === "default"
-              ? {
-                  kind: "default" as const,
-                  role_id: defaultRole,
-                  harness,
-                  launch_profile_ref: profile.trim(),
-                }
-              : {
-                  kind: "project" as const,
-                  ...(sourceProject === projectId
-                    ? {}
-                    : { project_id: sourceProject }),
-                  role_id: sourceRole,
-                  ...(sourceVersion ? { version: Number(sourceVersion) } : {}),
-                },
-        };
-        const role = await write.submit(input, (key) =>
-          client.copyRole(projectId, input, key),
-        );
-        if (role) onCreated(role);
+    <Drawer
+      className={settingsDrawerClassName}
+      open
+      onOpenChange={(next) => {
+        // Every way out (×, Escape, the overlay) waits for the submit.
+        if (!next && !write.busy) onCancel();
       }}
+      title="新建角色"
+      description="新建角色"
+      initialFocus="close"
     >
-      <SettingsDialogFields>
-        <fieldset>
-          <legend>复制来源</legend>
-          <ToggleGroup
-            type="multiple"
-            aria-label="复制来源"
-            value={[source]}
-            onValueChange={(next) => {
-              const value = next.at(-1);
-              if (value === "default" || value === "project") setSource(value);
-            }}
-          >
-            <ToggleGroupItem value="default">从默认角色包复制</ToggleGroupItem>
-            <ToggleGroupItem value="project">从现有角色复制</ToggleGroupItem>
-          </ToggleGroup>
-        </fieldset>
-        {source === "default" ? (
-          <>
-            <label>
-              默认角色
-              <SelectControl
-                value={defaultRole}
-                onValueChange={(e) => setDefaultRole(e)}
-              >
-                {(list?.default_roles ?? []).map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </SelectControl>
-            </label>
-            <label>
-              Harness
-              <SelectControl
-                value={harness}
-                onValueChange={(e) => setHarness(e)}
-              >
-                {(list?.harnesses ?? ["claude-code", "codex", "pi"]).map(
-                  (h) => (
-                    <option key={h} value={h}>
-                      {h}
-                    </option>
-                  ),
-                )}
-              </SelectControl>
-            </label>
-            <label>
-              启动配置
-              <Input
-                value={profile}
-                list="role-launch-profiles"
-                onChange={(e) => setProfile(e.target.value)}
-              />
-            </label>
-            <datalist id="role-launch-profiles">
-              {profiles.map((p) => (
-                <option key={p} value={p} />
-              ))}
-            </datalist>
-          </>
-        ) : (
-          <>
-            <label>
-              来源项目
-              <SelectControl
-                value={sourceProject}
-                onValueChange={(e) => {
-                  setSourceProject(e);
-                  setSourceRole("");
+      <CardDetailLayout className="card-page-drawer">
+        <form
+          aria-label="新建角色"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!ready) return;
+            const input = {
+              role_id: roleId,
+              ...(name.trim() ? { display_name: name.trim() } : {}),
+              source:
+                source === "default"
+                  ? {
+                      kind: "default" as const,
+                      role_id: defaultRole,
+                      harness,
+                      launch_profile_ref: profile.trim(),
+                    }
+                  : {
+                      kind: "project" as const,
+                      ...(sourceProject === projectId
+                        ? {}
+                        : { project_id: sourceProject }),
+                      role_id: sourceRole,
+                      ...(sourceVersion
+                        ? { version: Number(sourceVersion) }
+                        : {}),
+                    },
+            };
+            const role = await write.submit(input, (key) =>
+              client.copyRole(projectId, input, key),
+            );
+            if (role) onCreated(role);
+          }}
+        >
+          <SettingsDialogFields>
+            <fieldset>
+              <legend>复制来源</legend>
+              <ToggleGroup
+                type="multiple"
+                aria-label="复制来源"
+                value={[source]}
+                onValueChange={(next) => {
+                  const value = next.at(-1);
+                  if (value === "default" || value === "project")
+                    setSource(value);
                 }}
               >
-                {(projects.data ?? [{ id: projectId }]).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.id}
-                  </option>
-                ))}
-              </SelectControl>
-            </label>
+                <ToggleGroupItem value="default">
+                  从默认角色包复制
+                </ToggleGroupItem>
+                <ToggleGroupItem value="project">
+                  从现有角色复制
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </fieldset>
+            {source === "default" ? (
+              <>
+                <label>
+                  默认角色
+                  <SelectControl
+                    value={defaultRole}
+                    onValueChange={(e) => setDefaultRole(e)}
+                  >
+                    {(list?.default_roles ?? []).map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                  </SelectControl>
+                </label>
+                <label>
+                  Harness
+                  <SelectControl
+                    value={harness}
+                    onValueChange={(e) => setHarness(e)}
+                  >
+                    {(list?.harnesses ?? ["claude-code", "codex", "pi"]).map(
+                      (h) => (
+                        <option key={h} value={h}>
+                          {h}
+                        </option>
+                      ),
+                    )}
+                  </SelectControl>
+                </label>
+                <label>
+                  启动配置
+                  <Input
+                    value={profile}
+                    list="role-launch-profiles"
+                    onChange={(e) => setProfile(e.target.value)}
+                  />
+                </label>
+                <datalist id="role-launch-profiles">
+                  {profiles.map((p) => (
+                    <option key={p} value={p} />
+                  ))}
+                </datalist>
+              </>
+            ) : (
+              <>
+                <label>
+                  来源项目
+                  <SelectControl
+                    value={sourceProject}
+                    onValueChange={(e) => {
+                      setSourceProject(e);
+                      setSourceRole("");
+                    }}
+                  >
+                    {(projects.data ?? [{ id: projectId }]).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.id}
+                      </option>
+                    ))}
+                  </SelectControl>
+                </label>
+                <label>
+                  来源角色
+                  <SelectControl
+                    value={sourceRole}
+                    onValueChange={(e) => setSourceRole(e)}
+                  >
+                    <option value="">请选择</option>
+                    {(sourceRoles.data?.roles ?? []).map((role) => (
+                      <option key={role.role_id} value={role.role_id}>
+                        {role.display_name}（{role.role_id} v{role.version}）
+                      </option>
+                    ))}
+                  </SelectControl>
+                </label>
+                <RequestFeedback
+                  {...sourceRoles}
+                  retry={sourceRoles.reload}
+                  pendingMessage="正在加载来源角色…"
+                />
+                <label>
+                  来源版本（留空用最新版本）
+                  <Input
+                    inputMode="numeric"
+                    aria-invalid={!versionValid || undefined}
+                    value={sourceVersion}
+                    onChange={(e) => setSourceVersion(e.target.value)}
+                  />
+                </label>
+                <RequestFeedback
+                  error={!versionValid ? "版本号须为正整数。" : undefined}
+                />
+              </>
+            )}
             <label>
-              来源角色
-              <SelectControl
-                value={sourceRole}
-                onValueChange={(e) => setSourceRole(e)}
-              >
-                <option value="">请选择</option>
-                {(sourceRoles.data?.roles ?? []).map((role) => (
-                  <option key={role.role_id} value={role.role_id}>
-                    {role.display_name}（{role.role_id} v{role.version}）
-                  </option>
-                ))}
-              </SelectControl>
-            </label>
-            <RequestFeedback
-              {...sourceRoles}
-              retry={sourceRoles.reload}
-              pendingMessage="正在加载来源角色…"
-            />
-            <label>
-              来源版本（留空用最新版本）
+              新角色编号
               <Input
-                inputMode="numeric"
-                aria-invalid={!versionValid || undefined}
-                value={sourceVersion}
-                onChange={(e) => setSourceVersion(e.target.value)}
+                value={roleId}
+                aria-invalid={(roleId !== "" && !idValid) || undefined}
+                onChange={(e) => setRoleId(e.target.value)}
               />
             </label>
             <RequestFeedback
-              error={!versionValid ? "版本号须为正整数。" : undefined}
+              error={
+                roleId !== "" && !idValid
+                  ? "角色编号只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。"
+                  : undefined
+              }
             />
-          </>
-        )}
-        <label>
-          新角色编号
-          <Input
-            value={roleId}
-            aria-invalid={(roleId !== "" && !idValid) || undefined}
-            onChange={(e) => setRoleId(e.target.value)}
+            <label>
+              显示名（可选）
+              <Input value={name} onChange={(e) => setName(e.target.value)} />
+            </label>
+          </SettingsDialogFields>
+          <SettingsDialogActions>
+            <Button onClick={onCancel} disabled={write.busy}>
+              取消
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={write.busy || !ready}
+            >
+              创建角色
+            </Button>
+          </SettingsDialogActions>
+          <RequestFeedback
+            interactive
+            pending={write.busy}
+            pendingMessage="正在提交角色…"
+            error={write.error}
           />
-        </label>
-        <RequestFeedback
-          error={
-            roleId !== "" && !idValid
-              ? "角色编号只能用小写字母、数字、点、下划线和短横线，且以字母或数字开头。"
-              : undefined
-          }
-        />
-        <label>
-          显示名（可选）
-          <Input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-      </SettingsDialogFields>
-      <SettingsDialogActions>
-        <Button onClick={onCancel} disabled={write.busy}>
-          取消
-        </Button>
-        <Button type="submit" variant="primary" disabled={write.busy || !ready}>
-          创建角色
-        </Button>
-      </SettingsDialogActions>
-      <RequestFeedback
-        interactive
-        pending={write.busy}
-        pendingMessage="正在提交角色…"
-        error={write.error}
-      />
-    </form>
+        </form>
+      </CardDetailLayout>
+    </Drawer>
   );
 }
 
@@ -532,10 +553,11 @@ function RoleDetail({
   };
   return (
     <Drawer
-      className={cardDetailDrawerClassName ?? ""}
+      className={settingsDrawerClassName}
       open
       onOpenChange={(next) => {
-        if (!next) onClose();
+        // Closing waits for a save, status change or rollback in flight.
+        if (!next && !write.busy) onClose();
       }}
       title={data ? data.role.display_name : `角色 ${roleId}`}
       description={`角色 ${roleId} 详情`}

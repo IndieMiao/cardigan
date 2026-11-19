@@ -514,3 +514,53 @@ test("HTTP role client uses encoded role routes and the idempotency header", asy
   expect(new Headers(last?.headers).get("Idempotency-Key")).toBe("k5");
   expect(last?.body).toBe('{"version":2}');
 });
+
+test("a role being created keeps its drawer: close, Escape and the overlay wait for the reply", async () => {
+  const reply = Promise.withResolvers<RoleDefinitionView>();
+  const copyRole = vi.fn(() => reply.promise);
+  await openRoles(client({ copyRole }));
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  changeControl(within(form).getByLabelText("新角色编号"), {
+    target: { value: "tester-x" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
+  await waitFor(() => expect(copyRole).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.getByRole("form", { name: "新建角色" })).toBeTruthy();
+  expect(
+    (within(form).getByRole("button", { name: "取消" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  reply.resolve({ ...v1, role_id: "tester-x" });
+  expect(await screen.findByText("已创建角色 tester-x v1")).toBeTruthy();
+});
+
+test("a role status change in flight keeps the detail drawer open", async () => {
+  const reply = Promise.withResolvers<RoleDefinitionView>();
+  await openRoles(client({ setRoleActive: vi.fn(() => reply.promise) }));
+  fireEvent.click(await screen.findByRole("button", { name: "写手" }));
+  fireEvent.click(await screen.findByRole("button", { name: "停用" }));
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  reply.resolve({ ...v2, version: 3, status: "inactive" });
+  expect(await screen.findByText("角色已停用，不能再被新指派")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("closing a role drawer returns focus to the row that opened it", async () => {
+  await openRoles();
+  const row = await screen.findByRole("button", { name: "写手" });
+  row.focus();
+  fireEvent.click(row);
+  await screen.findByRole("dialog");
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "写手" }),
+    ),
+  );
+});

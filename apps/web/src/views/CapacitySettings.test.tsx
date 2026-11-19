@@ -212,3 +212,82 @@ test("an unchanged value writes nothing and a read-only session has no write con
   expect(screen.getByText("仅人类登录会话可修改并发上限。")).toBeTruthy();
   expect(setRunLimit).not.toHaveBeenCalled();
 });
+
+test("a limit already shown by a newer read is not reported as failed when only the reply is lost", async () => {
+  let current = capacity;
+  const write = Promise.withResolvers<void>();
+  const setRunLimit = vi.fn(() => write.promise);
+  const read = vi.fn(async () => current);
+  const client = fakeClient({ executionCapacity: read, setRunLimit });
+  const view = render(<Settings client={client} projectId="p" revision={0} />);
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: "Workstation Agent 并发上限",
+  });
+  fireEvent.change(input, { target: { value: "9" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledOnce();
+  // The server applied it; a live update reads 9 before the reply is lost.
+  current = { ...capacity, agents: [{ ...agent, limit: 9 }] };
+  view.rerender(<Settings client={client} projectId="p" revision={1} />);
+  await screen.findByText("全部 7 · 非常驻 5 / 上限 9 / 排队 2");
+  await act(async () => write.reject(new Error("reply lost")));
+  await waitFor(() => expect(input.readOnly).toBe(false));
+  expect(screen.queryByText(/未能保存/)).toBeNull();
+  expect(input.value).toBe("9");
+});
+
+test("a failed limit write reads the counts again before the field can be edited", async () => {
+  const setRunLimit = vi.fn().mockRejectedValue(new Error("offline"));
+  const read = vi.fn(async () => capacity);
+  render(
+    <Settings
+      client={fakeClient({ executionCapacity: read, setRunLimit })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton");
+  expect(read).toHaveBeenCalledTimes(1);
+  fireEvent.change(input, { target: { value: "8" } });
+  fireEvent.blur(input);
+  await screen.findByText(/未能保存“Workstation Agent 并发上限”/);
+  // The write may have taken effect: the shared read runs again.
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(input.readOnly).toBe(false));
+  expect(input.value).toBe("8");
+});
+
+test("machines sharing a label keep separate saves", async () => {
+  const write = Promise.withResolvers<void>();
+  const setRunLimit = vi.fn(() => write.promise);
+  render(
+    <Settings
+      client={fakeClient({
+        executionCapacity: async () => ({
+          ...capacity,
+          agents: [
+            { ...agent, machine_id: "a", label: "同名", limit: 6 },
+            { ...agent, machine_id: "b", label: "同名", limit: 9 },
+          ],
+        }),
+        setRunLimit,
+      })}
+      projectId="p"
+      revision={0}
+    />,
+  );
+  const [first, second] = await screen.findAllByRole<HTMLInputElement>(
+    "spinbutton",
+    { name: "同名 Agent 并发上限" },
+  );
+  if (!first || !second) throw new Error("two machines expected");
+  fireEvent.change(first, { target: { value: "9" } });
+  fireEvent.keyDown(first, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledWith("p", "a", 9, expect.any(String));
+  expect(first.readOnly).toBe(true);
+  expect(second.readOnly).toBe(false);
+  fireEvent.change(second, { target: { value: "3" } });
+  fireEvent.keyDown(second, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledWith("p", "b", 3, expect.any(String));
+  await act(async () => write.resolve());
+});

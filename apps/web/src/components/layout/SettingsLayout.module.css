@@ -292,6 +292,18 @@
     justify-content: flex-end;
     gap: var(--ui-space-2);
   }
+  /* Below the drawer header (padding, close button, gap) on every width. */
+  .drawer :global(.request-feedback-region),
+  :global(body):has(.drawer) > :global(.request-feedback-region) {
+    top: calc(var(--ui-space-6) + var(--ui-control) + var(--ui-space-4));
+    max-height: calc(
+      100vh -
+      var(--ui-space-6) -
+      var(--ui-control) -
+      var(--ui-space-4) -
+      var(--ui-space-4)
+    );
+  }
   /* Fitted to the settings column; the cards list keeps its own minimum. */
   .table {
     min-width: 0;

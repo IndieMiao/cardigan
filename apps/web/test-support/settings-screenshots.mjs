@@ -250,7 +250,40 @@ try {
                 h: Math.round(b.height * 10) / 10,
               };
             };
+            // Real hit testing (C-479 review): the centre of every header
+            // action and of the close button must reach that control, also
+            // while a feedback toast (e.g. connecting to live updates) shows.
+            const hits = [...d.querySelectorAll(".drawer-actions button")].map(
+              (button) => {
+                const b = button.getBoundingClientRect();
+                const top = document.elementFromPoint(
+                  b.left + b.width / 2,
+                  b.top + b.height / 2,
+                );
+                return {
+                  name:
+                    button.getAttribute("aria-label") ??
+                    button.textContent.trim(),
+                  hit: !!top && button.contains(top),
+                  topmost: top?.closest(".request-feedback")
+                    ? "request-feedback"
+                    : top?.tagName,
+                };
+              },
+            );
+            const toasts = [...document.querySelectorAll(".request-feedback")]
+              .filter((t) => t.textContent.trim())
+              .map((t) => {
+                const b = t.getBoundingClientRect();
+                return {
+                  text: t.textContent.trim(),
+                  y: Math.round(b.top),
+                  bottom: Math.round(b.bottom),
+                };
+              });
             return {
+              hits,
+              toasts,
               drawer: { x: r.left, y: r.top, w: r.width, h: r.height },
               drawerScrollWidth: d.scrollWidth,
               drawerClientWidth: d.clientWidth,
@@ -266,6 +299,11 @@ try {
             resolve(output, `${name}-${width}-${theme}.png`),
             Buffer.from(shot.data, "base64"),
           );
+          for (const hit of report.scenes[`${name}-${width}-${theme}`].hits)
+            assert(
+              hit.hit,
+              `${name}-${width}-${theme}: ${hit.name} is covered by ${hit.topmost}`,
+            );
           await run(() =>
             document.querySelector("[aria-label='关闭抽屉']")?.click(),
           );

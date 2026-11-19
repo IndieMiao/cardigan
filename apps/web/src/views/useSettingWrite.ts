@@ -14,6 +14,9 @@ import {
   useFeedbackVisible,
 } from "../components/RequestFeedback.js";
 import { parseRoute, routeHash } from "../route.js";
+import { readStart, settingsTick } from "../settings-clock.js";
+
+export { trackSettingsRead } from "../settings-clock.js";
 
 /** Success notices leave the shared feedback stack after a short while. */
 export function useNotice() {
@@ -41,32 +44,10 @@ const subscribe = (listener: () => void) => {
   return () => listeners.delete(listener);
 };
 
-/**
- * Ordering instead of server versions (C-455, Q-928): a logical clock stamps
- * when each settings read starts and when each write starts and ends. A read
- * that started before a setting's last write ended is old for that setting;
- * the view reads again. A failure is void when a read that started after the
- * write began already shows its value.
- */
-let clock = 0;
-const readStarts = new WeakMap<object, number>();
 /** Last write end per project and setting. */
 const writeEnds = new Map<string, number>();
 /** Newest read per project and setting: when it started and what it showed. */
 const confirmed = new Map<string, { at: number; value: unknown }>();
-/** Wraps a settings read so its start can be compared with writes. */
-export function trackSettingsRead<T extends object>(read: Promise<T>) {
-  const at = ++clock;
-  return read.then((data) => {
-    readStarts.set(data, at);
-    return data;
-  });
-}
-const readStart = (source: unknown) =>
-  typeof source === "object" && source !== null
-    ? readStarts.get(source)
-    : undefined;
-
 /**
  * Saves in flight per project and setting, shared by every view of it: a
  * page shown again while the first request runs cannot send a second one.
@@ -191,6 +172,7 @@ export function resetSettingWrites() {
  */
 export function useSettingWrite<T>({
   name,
+  id = name,
   failure,
   server,
   source,
@@ -201,6 +183,8 @@ export function useSettingWrite<T>({
 }: {
   /** The setting's name, for a failure reported away from it. */
   name: string;
+  /** Stable identity when the name is only a display label (defaults to it). */
+  id?: string;
   /** What did not happen, e.g. 未能撤销“对外发布”授权; defaults to 未能保存“name”. */
   failure?: (value: T) => string;
   server: T;
@@ -241,7 +225,7 @@ export function useSettingWrite<T>({
   const pending = useRef<{ value: T; key: string } | undefined>(undefined);
   const place = useContext(SettingPlaceContext);
   const visible = useFeedbackVisible();
-  const key = `${place?.project ?? ""}:${name}`;
+  const key = `${place?.project ?? ""}:${id}`;
   // Completions reach whichever render is current.
   const latest = useRef({
     saved,
@@ -347,7 +331,7 @@ export function useSettingWrite<T>({
   };
   const save = async (next: T): Promise<boolean> => {
     if (inflight.has(key) || latest.current.stale) return false;
-    const startedAt = ++clock;
+    const startedAt = settingsTick();
     beginSave(key);
     setError("");
     setMessage("");
@@ -405,7 +389,7 @@ export function useSettingWrite<T>({
           panel: place.panel,
         });
     } finally {
-      const end = ++clock;
+      const end = settingsTick();
       // Only an acknowledged write tells this view the value: after a failure
       // it may still have taken effect, so the view waits for the read again.
       if (ok && alive.current) setOwnEnd(end);

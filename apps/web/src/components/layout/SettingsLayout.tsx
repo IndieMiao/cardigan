@@ -1,9 +1,17 @@
 import { CircleHelp, TriangleAlert } from "lucide-react";
-import { type ComponentProps, type ReactNode, useId } from "react";
+import {
+  type ComponentProps,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+} from "react";
 import { cn } from "../../lib/utils.js";
 import { Tooltip } from "../Tooltip.js";
 import { IconButton } from "../ui/button.js";
 import { Input } from "../ui/input.js";
+import { cardDetailDrawerClassName } from "./CardDetailLayout.js";
 import { DataTableLayout } from "./DataTableLayout.js";
 import styles from "./SettingsLayout.module.css";
 
@@ -332,4 +340,47 @@ export function SettingsAvatar({
 /** Avatar and name on one line, wrapping the name when narrow. */
 export function SettingsIdentity({ children }: { children: ReactNode }) {
   return <span className={styles.identity}>{children}</span>;
+}
+
+/**
+ * Settings drawers use the card detail drawer frame. While one is open the
+ * request feedback stacks (the drawer's own and the page's) start below the
+ * drawer header, so a toast never covers its actions or the close button.
+ */
+export const settingsDrawerClassName = cn(
+  cardDetailDrawerClassName,
+  styles.drawer,
+);
+
+/**
+ * Drawers opened from a table row or a panel button are controlled (no Radix
+ * trigger): remember the opener when opening and give it focus back once the
+ * drawer is gone. An opener removed meanwhile (a renamed row) leaves focus to
+ * the browser. Call the returned function right before opening.
+ */
+export function useDrawerReturnFocus(open: boolean) {
+  const opener = useRef<HTMLElement | null>(null);
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    if (wasOpen.current && !open) {
+      const target = opener.current;
+      opener.current = null;
+      // After the dialog's own focus restoration, which runs on unmount.
+      window.setTimeout(() => {
+        const active = document.activeElement;
+        if (
+          target?.isConnected &&
+          (!active || active === document.body || !active.isConnected)
+        )
+          target.focus();
+      }, 0);
+    }
+    wasOpen.current = open;
+  }, [open]);
+  return useCallback(() => {
+    if (wasOpen.current) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body)
+      opener.current = active;
+  }, []);
 }

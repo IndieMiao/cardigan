@@ -9,7 +9,9 @@ import {
   useState,
 } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
+import { trackSettingsRead } from "../settings-clock.js";
 import { useResource } from "../useResource.js";
+
 import { Button } from "./ui/button.js";
 import * as Popover from "./ui/popover.js";
 
@@ -32,8 +34,9 @@ export function CapacityProvider({
   canEdit: boolean;
   children: ReactNode;
 }) {
+  // Ordered against the settings page's limit writes (instant save, C-479).
   const load = useCallback(
-    () => client.executionCapacity(projectId),
+    () => trackSettingsRead(client.executionCapacity(projectId)),
     [client, projectId],
   );
   const resource = useResource(load, revision);

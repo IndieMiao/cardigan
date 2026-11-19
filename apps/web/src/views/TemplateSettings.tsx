@@ -11,10 +11,7 @@ import {
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
-import {
-  CardDetailLayout,
-  cardDetailDrawerClassName,
-} from "../components/layout/CardDetailLayout.js";
+import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
 import {
   SettingsDialogActions,
@@ -25,6 +22,8 @@ import {
   SettingsSection,
   SettingsTable,
   SettingsText,
+  settingsDrawerClassName,
+  useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
@@ -119,7 +118,11 @@ export function TemplateSettings({
       setBusy(false);
     }
   };
+  const remember = useDrawerReturnFocus(
+    selected !== undefined || editing !== undefined,
+  );
   const close = () => {
+    // Every way out of a drawer waits for a template write in flight.
     if (busy) return;
     setSelected(undefined);
     setEditing(undefined);
@@ -138,6 +141,7 @@ export function TemplateSettings({
           variant="primary"
           disabled={busy}
           onClick={() => {
+            remember();
             setSelected(undefined);
             setEditing({ action: "add", template: empty });
             setError("");
@@ -183,6 +187,7 @@ export function TemplateSettings({
                     aria-haspopup="dialog"
                     disabled={busy}
                     onClick={() => {
+                      remember();
                       setSelected(t.id);
                       setEditing(undefined);
                       setError("");
@@ -221,7 +226,7 @@ export function TemplateSettings({
       )}
       {editing && (
         <Drawer
-          className={cardDetailDrawerClassName ?? ""}
+          className={settingsDrawerClassName}
           open
           onOpenChange={(next) => {
             if (!next) close();
@@ -323,7 +328,7 @@ function TemplatePanel({
   const template = data?.template;
   return (
     <Drawer
-      className={cardDetailDrawerClassName ?? ""}
+      className={settingsDrawerClassName}
       open
       onOpenChange={(next) => {
         if (!next) onClose();

@@ -267,3 +267,33 @@ test("HTTP employee creation uses owner cookies and an idempotency key with the 
     }),
   ]);
 });
+
+test("an employee being created keeps its drawer until the reply, and focus returns to the opener", async () => {
+  const reply = Promise.withResolvers<{
+    id: string;
+    name: string;
+    role_id: string;
+  }>();
+  await open({ createEmployee: vi.fn(() => reply.promise) });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.getByRole("form", { name: "新建员工" })).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "取消" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  reply.resolve({ id: "E-3", name: "孙悟空", role_id: "coder" });
+  expect(await screen.findByText("已创建员工 孙悟空（E-3）")).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "选用孙悟空" }),
+    ),
+  );
+});
