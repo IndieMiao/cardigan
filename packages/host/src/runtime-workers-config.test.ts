@@ -30,6 +30,7 @@ import {
 } from "../../domain/src/commands/test-fixtures.js";
 import { configureMachinePlacement } from "./machine-placement.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
+import { RuntimeTargets } from "./runtime-targets.js";
 import {
   loadRuntimeWorkers,
   parseRuntimeWorkers,
@@ -429,6 +430,7 @@ test("placement reads current project opt-in and unexpired observations in the c
   const write = (
     allow_remote_launch: boolean,
     platform: { os?: string; arch?: string } = {},
+    generation = "one",
   ) =>
     writeFileSync(
       join(root, "runtime-workers.yaml"),
@@ -437,7 +439,20 @@ test("placement reads current project opt-in and unexpired observations in the c
         machines: config.machines.map((m) => ({
           ...m,
           ...platform,
-          projects: m.projects.map((p) => ({ ...p, allow_remote_launch })),
+          projects: m.projects.map((p) => ({
+            ...p,
+            allow_remote_launch,
+            generation,
+            publication: {
+              header_max_bytes: 4096,
+              file_max_bytes: 2048,
+              batch_max_bytes: 8192,
+              timeout_ms: 2000,
+            },
+            python: "/usr/bin/python3",
+            git_helper: "/opt/worker/worker-git.py",
+            file_helper: "/opt/worker/worker-files.py",
+          })),
         })),
       }),
       { mode: 0o600 },
@@ -538,6 +553,73 @@ test("placement reads current project opt-in and unexpired observations in the c
     expect(select(["fixture-only"]).data).toMatchObject({
       machine_id: "worker-a",
     });
+    const setPolicy = (worktree: "none" | "write") =>
+      store.uow.run((tx) => {
+        tx.roles.put(project, { ...role("coder"), worktree });
+      });
+    setPolicy("write");
+    expect(select(["fixture-only"]).data).toMatchObject({ deferred: true });
+    const runtime = await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      env,
+    });
+    if (!runtime.ok) throw new Error("Invalid fixture runtime");
+    const proof = {
+      target_fingerprint: runtime.value.resolve(project, "worker-a").execution
+        .target?.fingerprint,
+      os: "darwin",
+      arch: "arm64",
+      evidence_ref: "fixture-acceptance",
+      verified_at: now,
+      expires_at: "2026-01-01T01:00:00.000Z",
+    };
+    const file = join(root, "worktree-preparation.yaml");
+    const attest = (key: string, patch: object = {}) =>
+      writeFileSync(
+        file,
+        JSON.stringify({
+          version: 1,
+          bindings: { [key]: { ...proof, ...patch } },
+        }),
+        { mode: 0o600 },
+      );
+    const key = `${project}/worker-a`;
+    for (const other of [`${project}/worker-b`, "other/worker-a"]) {
+      attest(other);
+      expect(read()?.worktree_preparation).toBe("missing");
+    }
+    attest(key);
+    expect(select(["fixture-only"]).data).toMatchObject({
+      machine_id: "worker-a",
+    });
+    expect(read(project, proof.expires_at)?.worktree_preparation).toBe(
+      "expired",
+    );
+    expect(
+      read(project, "2025-12-31T23:59:59.999Z")?.worktree_preparation,
+    ).toBe("invalid");
+    write(true, {}, "two");
+    expect(read()?.worktree_preparation).toBe("invalid");
+    write(true);
+    for (const patch of [
+      { os: "linux" },
+      { arch: "x64" },
+      { target_fingerprint: "wrong" },
+      { evidence_ref: " " },
+      { expires_at: "invalid" },
+      { verified_at: "2026-02-30" },
+      { enabled: false },
+    ]) {
+      attest(key, patch);
+      expect(read()?.worktree_preparation).toBe("invalid");
+    }
+    attest(key);
+    chmodSync(file, 0o644);
+    expect(select(["fixture-only"]).data).toMatchObject({ deferred: true });
+    rmSync(file);
+    expect(read()?.worktree_preparation).toBe("missing");
+    setPolicy("none");
     for (const platform of [{ os: "linux" }, { arch: "x64" }]) {
       write(true, platform);
       expect(read()).toMatchObject({

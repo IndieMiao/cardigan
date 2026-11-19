@@ -207,7 +207,9 @@ test.each(["write", "readonly", undefined] as const)(
         ...(worktree ? { worktree } : {}),
       })),
     };
-    const reason = `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree ?? "未声明"}）`;
+    const reason = worktree
+      ? `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree}）`
+      : "角色工作树策略未知，无法确定远程 Git 工作树准备要求";
     const params = { work_item_id: id("work_item", 1), role_id: "coder" };
     const e = value(assignOrDefer(s, human, params, ports()));
     expect(e.data).toMatchObject({ machine_id: "local" });
@@ -241,6 +243,63 @@ test.each(["write", "readonly", undefined] as const)(
     expect(value(select(s, { machine_id: remote.id })).data.machine_id).toBe(
       remote.id,
     );
+  },
+);
+
+test.each(["write", "readonly", undefined] as const)(
+  "a preparation attested for one worker only admits known worktree policy %s",
+  (worktree) => {
+    const base = preferRemote();
+    const ready: MachinePlacement = {
+      ...healthy,
+      worktree_preparation: "verified",
+    };
+    const target: CommandState = {
+      ...base,
+      roles: fixture().roles.map((r) => ({
+        ...r,
+        ...(worktree && { worktree }),
+      })),
+      machines: [machine(), remote, { ...remote, id: "worker-b" }],
+      read_machine_placement: () =>
+        new Map([
+          ["local", { ...healthy, occupied: 3 }],
+          [remote.id, ready],
+          ["worker-b", healthy],
+        ]),
+    };
+    const selected = value(select(target));
+    if (!worktree) {
+      expect(selected.data.machine_id).toBe("local");
+      expect(selected.events.at(-1)?.payload).toMatchObject({
+        excluded: [
+          {
+            machine_id: remote.id,
+            reasons: [expect.stringContaining("策略未知")],
+          },
+          {
+            machine_id: "worker-b",
+            reasons: [expect.stringContaining("策略未知")],
+          },
+        ],
+      });
+      return;
+    }
+    expect(selected.data.machine_id).toBe(remote.id);
+    expect(selected.events.at(-1)?.payload).toMatchObject({
+      excluded: [
+        {
+          machine_id: "worker-b",
+          reasons: [expect.stringContaining("尚未验证")],
+        },
+      ],
+    });
+    const bound = apply(target, selected);
+    const repeated = value(
+      select({ ...bound, read_machine_placement: () => new Map() }),
+    );
+    expect(repeated.data).toEqual(selected.data);
+    expect(repeated.events).toEqual([]);
   },
 );
 
@@ -343,6 +402,9 @@ test("selection records sorted scores and exclusions, never redeems an unverifie
 });
 
 test.each([
+  [{ worktree_preparation: "expired" }, "准备证据已过期"],
+  [{ worktree_preparation: "invalid" }, "准备证据无效"],
+  [{ limit: 0 }, "容量配置不可用"],
   [{ remote_binding: "disabled" }, "allow_remote_launch"],
   [{ remote_binding: "platform_mismatch" }, "OS 或架构与机器登记不一致"],
   [{ health: null }, "缺少健康快照"],
@@ -357,11 +419,18 @@ test.each([
 ] as const)(
   "implicit remote placement requires fresh trusted evidence (%j)",
   (patch, reason) => {
-    const s = {
-      ...state(),
+    const base = state();
+    const s: CommandState = {
+      ...base,
+      roles: base.roles.map((r) => ({ ...r, worktree: "write" })),
       machines: [remote],
       read_machine_placement: () =>
-        new Map([[remote.id, { ...healthy, ...patch }]]),
+        new Map([
+          [
+            remote.id,
+            { ...healthy, worktree_preparation: "verified", ...patch },
+          ],
+        ]),
     };
     expect(select(s)).toMatchObject({
       ok: false,
