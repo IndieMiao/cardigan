@@ -12,6 +12,7 @@ import { join, relative } from "node:path";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { afterEach, beforeAll, expect, test, vi } from "vitest";
+import { loadConfig, loadOptionalConfigSync } from "../../cli/src/config.js";
 import { resolveLaunchPaths } from "../../cli/src/paths.js";
 import { configDir, loadLaunchFiles } from "./host.js";
 
@@ -109,4 +110,40 @@ test("server load keeps legacy Codex config compatible and emits fixed advisorie
   );
   expect(warnings).toHaveLength(3);
   expect(warnings.join("\n")).not.toContain("synthetic-secret");
+});
+
+test("server and both CLI readers resolve the same YAML alias using only the host data cache", async () => {
+  const root = mkdtempSync(join(tmpdir(), "launch-models-"));
+  roots.push(root);
+  const dataDir = join(root, "data");
+  writeFileSync(
+    join(root, "launch.yaml"),
+    `providers:
+  fixture: {harness: pi}
+models:
+  current: {id: fixture-v1, provider: fixture}
+profiles:
+  employee: {harness: pi, model: current}
+`,
+  );
+  const fetch = vi.fn(async () =>
+    Response.json({
+      fixture: { models: { "fixture-v1": { limit: { context: 12000 } } } },
+    }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  try {
+    const server = await loadLaunchFiles(root, undefined, dataDir);
+    expect(server.config.profiles.employee?.model).toBe("fixture-v1");
+    const paths = resolveLaunchPaths({
+      CARDIGAN_CONFIG_DIR: root,
+      CARDIGAN_DATA_DIR: dataDir,
+    });
+    expect(await loadConfig(paths)).toEqual(server.config);
+    expect(loadOptionalConfigSync(paths)).toEqual(server.config);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(readdirSync(dataDir)).toEqual(["models-dev.json"]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

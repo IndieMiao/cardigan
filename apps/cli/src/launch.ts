@@ -5,7 +5,7 @@ import type { CliIo } from "./io.js";
 import { checkProfile } from "./launch-check.js";
 import { importSettings } from "./launch-import.js";
 import { runProfile } from "./launch-run.js";
-import { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
+import { cliLaunchPaths, type LaunchPaths } from "./paths.js";
 
 const LAUNCH_USAGE = [
   "用法：",
@@ -136,7 +136,7 @@ export async function runLaunchCommand(
   io: CliIo,
 ): Promise<number> {
   const parsed = parseLaunchArgs(args);
-  const paths = resolveLaunchPaths(io.env);
+  const paths = cliLaunchPaths(io);
 
   switch (parsed.kind) {
     case "help":

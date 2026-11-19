@@ -1,5 +1,6 @@
 /** Installed in the isolated PI_CODING_AGENT_DIR, never in the worktree. */
-export const piContextUsageExtension = `
+export function makePiContextUsageExtension(persistentHome?: string) {
+  return `
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,7 @@ export default function (pi) {
     let temporary;
     try {
       const session = ctx.sessionManager.getSessionId();
-      const root = process.env.PI_CODING_AGENT_DIR;
+      const root = ${persistentHome ? JSON.stringify(persistentHome) : "process.env.PI_CODING_AGENT_DIR"};
       if (!root || !/^[a-zA-Z0-9_-]+$/.test(session)) return;
       let usage;
       try { usage = ctx.getContextUsage(); } catch { /* Unknown usage. */ }
@@ -41,3 +42,4 @@ export default function (pi) {
   });
 }
 `;
+}

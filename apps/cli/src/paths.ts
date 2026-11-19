@@ -1,7 +1,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveDataDirectory } from "@cardigan/runtime-herdr";
+import type { CliIo } from "./io.js";
 
 export interface LaunchPaths {
+  readonly dataDir: string;
   /** Directory holding `launch.yaml` and `secrets.env`. */
   readonly configDir: string;
   readonly launchFile: string;
@@ -11,6 +14,8 @@ export interface LaunchPaths {
 }
 
 export interface PathEnv {
+  readonly CARDIGAN_DATA_DIR?: string | undefined;
+  readonly HOME?: string | undefined;
   readonly CARDIGAN_CONFIG_DIR?: string | undefined;
   readonly XDG_RUNTIME_DIR?: string | undefined;
 }
@@ -26,6 +31,7 @@ export interface PathEnv {
 export function resolveLaunchPaths(
   env: PathEnv,
   home: string = homedir(),
+  cwd: string = process.cwd(),
 ): LaunchPaths {
   const configDir =
     env.CARDIGAN_CONFIG_DIR !== undefined && env.CARDIGAN_CONFIG_DIR.length > 0
@@ -37,9 +43,19 @@ export function resolveLaunchPaths(
       : join(home, ".cache", "cardigan", "run");
 
   return {
+    dataDir: resolveDataDirectory({ ...env, HOME: env.HOME ?? home }, cwd),
     configDir,
     launchFile: join(configDir, "launch.yaml"),
     secretsFile: join(configDir, "secrets.env"),
     runtimeDir: runtimeRoot,
   };
+}
+
+/** Carry the invoking command's store location through to the catalog cache. */
+export function cliLaunchPaths(io: CliIo, override?: string): LaunchPaths {
+  const env = {
+    ...io.env,
+    CARDIGAN_DATA_DIR: override ?? io.env.CARDIGAN_DATA_DIR,
+  };
+  return resolveLaunchPaths(env, undefined, io.cwd);
 }

@@ -79,7 +79,7 @@ import {
 } from "./host.js";
 import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
-import { resolveLaunchPaths } from "./paths.js";
+import { cliLaunchPaths } from "./paths.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 import { launchExecution, terminalExecution } from "./runtime-check.js";
 
@@ -2125,7 +2125,7 @@ async function openPlacementStore(
   const limits = await loadRunCapacityConfig({ env: io.env });
   const store = openCardiganStore({ dataDir });
   configureMachinePlacement(store, dataDir, io.env, limits, () =>
-    loadOptionalConfigSync(resolveLaunchPaths(io.env)),
+    loadOptionalConfigSync(cliLaunchPaths(io, dataDir)),
   );
   return store;
 }

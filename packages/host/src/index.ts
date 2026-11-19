@@ -181,6 +181,10 @@ export {
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {
+  loadModelLaunchConfig,
+  parseCachedLaunchConfig,
+} from "./model-catalog.js";
+export {
   agentNameFor,
   projectSegment,
   projectShortCode,

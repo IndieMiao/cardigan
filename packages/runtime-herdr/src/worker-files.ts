@@ -72,7 +72,7 @@ type Operation = "publish" | "commit" | "clear" | "status" | "inspect";
 type WorkerExecution = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 const trailer = Buffer.from("\nCARDIGAN-PUBLISH-1\n");
 const allowedFile =
-  /^(?:core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex\/config\.toml|pi\/(?:mcp\.json|trust\.json|extensions\/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)$/u;
+  /^(?:core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex\/config\.toml|pi\/(?:models\.json|mcp\.json|trust\.json|extensions\/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)$/u;
 const rejected = (): never => {
   throw new Error("Worker publication rejected");
 };
