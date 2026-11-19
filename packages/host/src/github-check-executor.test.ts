@@ -1,6 +1,13 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { PushResult } from "@cardigan/git-transport";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -2357,3 +2364,142 @@ test("C-466: identity retry survives reopening SQLite; only the original verifie
   expect(client.cancel).not.toHaveBeenCalled();
   expect(client.dispatch).toHaveBeenCalledOnce();
 });
+
+test.each(["count_drift", "bad_link", "bad_sibling"] as const)(
+  "a rejected REST page keeps all exact candidates (%s)",
+  async (fault) => {
+    const f = setup();
+    await loseDispatch(f);
+    const intent = {
+      ...f.journal.unfinished()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    const other = Array.from({ length: 100 }, (_, i) => ({
+      ...trusted,
+      id: 1000 + i,
+      display_title: "other",
+    }));
+    const second = { ...trusted, id: 124 };
+    let time = now + 3_600_000;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ total_count: 103, workflow_runs: other }),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            total_count: fault === "count_drift" ? 102 : 103,
+            workflow_runs: [
+              trusted,
+              fault === "bad_sibling" ? null : other[0],
+              second,
+            ],
+          },
+          fault === "bad_link"
+            ? { headers: { link: '<https://invalid.example/>; rel="next"' } }
+            : {},
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ total_count: 0, workflow_runs: [] }),
+      );
+    const client = new GithubClient({
+      config,
+      dataDir: "/synthetic",
+      fetch,
+      now: () => time,
+    });
+    vi.spyOn(client, "token").mockResolvedValue(syntheticToken);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...f.options,
+        client,
+        now: () => time,
+      }).recoverAbandoned(f.request, intent);
+    await expect(recover()).rejects.toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    time += 60_000;
+    await expect(recover()).rejects.toBeDefined();
+    expect(f.journal.admitted()).toMatchObject([
+      { observedRunIds: [123, 124] },
+    ]);
+    expect(f.journal.admitted()[0]?.externalRun).toBeUndefined();
+  },
+);
+
+test.each([false, true])(
+  "a completed scan can be replayed after SQLite contention (saw matching runs: %s)",
+  async (sawMatch) => {
+    const dir = mkdtempSync(join(tmpdir(), "cg-scan-retire-"));
+    roots.push(dir);
+    const file = join(dir, "repo.db"),
+      f = setup(file);
+    await loseDispatch(f);
+    const intent = {
+      ...f.journal.unfinished()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    let time = now + 3_600_000;
+    const locker = new DatabaseSync(file);
+    f.store.database.exec("PRAGMA busy_timeout=10");
+    f.client.runs.mockImplementationOnce(async () => {
+      locker.exec("BEGIN IMMEDIATE");
+      if (sawMatch) return [trusted, { ...trusted, id: 124 }];
+      throw new GithubExecutorError("api");
+    });
+    try {
+      await expect(
+        new GithubCheckExecutor({
+          ...f.options,
+          now: () => time,
+        }).recoverAbandoned(f.request, intent),
+      ).rejects.toBeDefined();
+    } finally {
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+    expect(f.journal.admitted()).toHaveLength(1);
+    const id = f.journal.admitted()[0]?.scanOwner?.id;
+    expect(id).toBeDefined();
+    const receipt = join(dir, `.cardigan-scan-${id}.json`);
+    const original = readFileSync(receipt, "utf8");
+    closeFixtureStore(f.store);
+    const peer = setup(file, false);
+    peer.client.runs.mockResolvedValue([]);
+    time += 86_400_000;
+    if (sawMatch) {
+      // A visible scan ID or an edited receipt is not evidence that a reader returned no matches.
+      writeFileSync(
+        receipt,
+        JSON.stringify({ ...JSON.parse(original), ids: [] }),
+      );
+      await expect(
+        new GithubCheckExecutor({
+          ...peer.options,
+          now: () => time,
+        }).recoverAbandoned(peer.request, intent),
+      ).rejects.toBeDefined();
+      expect(peer.client.runs).not.toHaveBeenCalled();
+      expect(peer.journal.admitted()).toHaveLength(1);
+      writeFileSync(receipt, original);
+    }
+    const result = new GithubCheckExecutor({
+      ...peer.options,
+      now: () => time,
+    }).recoverAbandoned(peer.request, intent);
+    if (sawMatch) {
+      await expect(result).rejects.toBeDefined();
+      expect(peer.journal.admitted()).toMatchObject([
+        { observedRunIds: [123, 124] },
+      ]);
+    } else {
+      await expect(result).resolves.toBeUndefined();
+      expect(peer.journal.admitted()).toEqual([]);
+    }
+    expect(peer.client.runs).toHaveBeenCalledOnce();
+    expect(existsSync(receipt)).toBe(false);
+  },
+);

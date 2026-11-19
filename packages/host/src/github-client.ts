@@ -353,7 +353,7 @@ export class GithubClient {
     branch: string,
     since: string,
     signal?: AbortSignal,
-    onObserved?: (run: GithubRun) => void,
+    onObserved?: (page: readonly unknown[]) => void,
   ): Promise<readonly GithubRun[]> {
     try {
       return await githubDeadline(
@@ -373,7 +373,7 @@ export class GithubClient {
     branch: string,
     since: string,
     signal: AbortSignal,
-    onObserved?: (run: GithubRun) => void,
+    onObserved?: (page: readonly unknown[]) => void,
   ) {
     // GitHub's created filter has second precision. Fix the upper bound once;
     // subdivision must not extend the recovery interval while it is scanned.
@@ -419,6 +419,10 @@ export class GithubClient {
         );
         if (signal?.aborted)
           throw new GithubExecutorError("recovery_incomplete");
+        // A bad count, Link, sibling or time window invalidates this enumeration, not
+        // the fact that GitHub returned an identifiable candidate on this very page.
+        // These are only hints. The unchanged validation below gates every successful list.
+        if (Array.isArray(body.workflow_runs)) onObserved?.(body.workflow_runs);
         if (
           !Array.isArray(body.workflow_runs) ||
           !Number.isSafeInteger(body.total_count) ||
@@ -443,7 +447,6 @@ export class GithubClient {
             created >= (end + 1) * 1000
           )
             throw new GithubExecutorError("security");
-          onObserved?.(run);
           add(observed, run);
           add(windowRuns, run);
         }

@@ -19,6 +19,13 @@ import {
   GithubRetryLater,
   type MaintenanceRetry,
 } from "./github-rate-limit.js";
+import {
+  completedScan,
+  discardCompletedScan,
+  issueScanTicket,
+  recordCompletedScan,
+  type ScanTicket,
+} from "./github-scan-receipt.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
@@ -49,7 +56,7 @@ export interface GithubDispatchIntent {
   /** Exact title observations are not bindings. Two distinct IDs already prove ambiguity. */
   readonly observedRunIds?: readonly number[];
   /** Serialize list IO across the CLI and background, including scans outlasting cadence. */
-  readonly scanOwner?: ExecutionOwner;
+  readonly scanOwner?: ExecutionOwner & Partial<ScanTicket>;
   readonly undispatched?: {
     readonly reason: "complete_scan_no_match";
     readonly source: "automatic" | "human";
@@ -759,9 +766,10 @@ export class GithubDispatchJournal {
     fallbackWindowMs: number = GITHUB_POLL_DEFAULTS.waitStartMs,
   ): GithubDispatchIntent {
     const clock = typeof at === "number" ? () => at : at;
+    let replayed: string | undefined;
     const reservation = this.store.uow.run((tx) => {
       const now = clock();
-      const current = this.current(tx, intent.project, intent.card).find(
+      let current = this.current(tx, intent.project, intent.card).find(
         (i) => i.attempt === intent.attempt,
       );
       if (
@@ -787,11 +795,20 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       const retryAt = now + (interval ?? GITHUB_POLL_DEFAULTS.pollIntervalMs);
-      if (
-        current.scanOwner &&
-        executionOwner(current.scanOwner.pid)?.start === current.scanOwner.start
-      )
-        throw new GithubRetryLater(retryAt, "attempt");
+      if (current.scanOwner) {
+        const { id, verifier, pid, start } = current.scanOwner;
+        // Check liveness first: an exiting reader may publish its last hints just before exit.
+        const live = executionOwner(pid)?.start === start;
+        const ids =
+          id && verifier
+            ? completedScan(this.store, { id, verifier })
+            : undefined;
+        if (id && ids !== undefined) {
+          current = this.retiredScan(current, ids);
+          this.save(tx, current);
+          replayed = id;
+        } else if (live) throw new GithubRetryLater(retryAt, "attempt");
+      }
       const prepared = this.afterWriterExit(
         tx,
         current,
@@ -818,7 +835,9 @@ export class GithubDispatchJournal {
       const { scanOwner: _stale, ...ready } = prepared;
       const scanning = {
         ...ready,
-        ...(scanOwner ? { scanOwner } : {}),
+        ...(scanOwner
+          ? { scanOwner: { ...scanOwner, ...issueScanTicket() } }
+          : {}),
         ...(interval !== undefined &&
         (dispatchedRunId !== undefined || ready.absenceNotBefore !== undefined)
           ? { nextDiscoveryAt: retryAt }
@@ -828,12 +847,16 @@ export class GithubDispatchJournal {
       this.save(tx, scanning);
       return scanning;
     });
+    if (replayed) discardCompletedScan(this.store, replayed);
     if (!reservation) throw new GithubExecutorError("recovery_incomplete");
     return reservation;
   }
   /** Save positive evidence before detail IO, even if a later page fails. Never promote it to a response ID. */
-  observeMatch(intent: GithubDispatchIntent, id: number) {
-    if (!Number.isSafeInteger(id) || id < 1)
+  observeMatches(intent: GithubDispatchIntent, ids: readonly number[]) {
+    if (
+      ids.length > 2 ||
+      !ids.every((id) => Number.isSafeInteger(id) && id > 0)
+    )
       throw new GithubExecutorError("security");
     this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
@@ -847,8 +870,9 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("recovery_incomplete");
       const known = current.observedRunIds ?? [];
-      if (known.length < 2 && !known.includes(id))
-        this.save(tx, { ...current, observedRunIds: [...known, id] });
+      const observedRunIds = [...new Set([...known, ...ids])].slice(0, 2);
+      if (observedRunIds.length !== known.length)
+        this.save(tx, { ...current, observedRunIds });
     });
   }
   private ownsScan(current: GithubDispatchIntent, scan: GithubDispatchIntent) {
@@ -856,23 +880,45 @@ export class GithubDispatchJournal {
       !!scan.scanOwner &&
       scan.scanOwner.pid === process.pid &&
       current.scanOwner?.pid === scan.scanOwner.pid &&
+      !!scan.scanOwner.id &&
+      current.scanOwner.id === scan.scanOwner.id &&
       current.scanOwner.start === scan.scanOwner.start
     );
   }
-  endListing(intent: GithubDispatchIntent) {
-    this.store.uow.run((tx) => {
-      const current = this.current(tx, intent.project, intent.card).find(
-        (i) => i.attempt === intent.attempt,
-      );
-      if (
-        current &&
-        current.key === intent.key &&
-        this.ownsScan(current, intent)
-      ) {
-        const { scanOwner: _, ...released } = current;
-        this.save(tx, released);
-      }
-    });
+  private retiredScan(
+    current: GithubDispatchIntent,
+    ids: readonly number[],
+  ): GithubDispatchIntent {
+    const { scanOwner: _, ...released } = current;
+    const observedRunIds = [
+      ...new Set([...(released.observedRunIds ?? []), ...ids]),
+    ].slice(0, 2);
+    return {
+      ...released,
+      ...(observedRunIds.length ? { observedRunIds } : {}),
+    };
+  }
+  endListing(intent: GithubDispatchIntent, ids: readonly number[]) {
+    try {
+      this.store.uow.run((tx) => {
+        const current = this.current(tx, intent.project, intent.card).find(
+          (i) => i.attempt === intent.attempt,
+        );
+        if (
+          current &&
+          current.key === intent.key &&
+          this.ownsScan(current, intent)
+        ) {
+          this.save(tx, this.retiredScan(current, ids));
+        }
+      });
+    } catch (error) {
+      // The caller has stopped accepting results. Retain all hints, including a
+      // page whose initial observation write was blocked by the same DB lock.
+      if (intent.scanOwner?.id)
+        recordCompletedScan(this.store, intent.scanOwner.id, ids);
+      throw error;
+    }
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
   beginPublication(intent: GithubDispatchIntent): boolean {

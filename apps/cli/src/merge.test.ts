@@ -9,6 +9,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type {
   Actor,
   Assignment,
@@ -1437,3 +1438,32 @@ test.each(["absent", "match"] as const)(
     }
   },
 );
+
+test("finish-undispatched rechecks online after another reader retired under a SQLite write lock", async () => {
+  const { cli, journal, list } = await abandonedCliDispatch();
+  try {
+    const [intent] = journal.admitted();
+    if (!intent) throw new Error("Missing dispatch");
+    const scan = journal.beginDiscovery(intent, Date.now(), 20_000);
+    list.mockResolvedValue([]);
+    expect((await cli()).code).not.toBe(0);
+    expect(list).not.toHaveBeenCalled();
+    const db = store.database.location();
+    if (!db) throw new Error("Missing fixture DB");
+    store.database.exec("PRAGMA busy_timeout=10");
+    const locker = new DatabaseSync(db);
+    try {
+      locker.exec("BEGIN IMMEDIATE");
+      expect(() => journal.endListing(scan, [])).toThrow();
+    } finally {
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+    expect(journal.admitted()).toHaveLength(1);
+    expect((await cli()).code).toBe(0);
+    expect(list).toHaveBeenCalledOnce();
+    expect(journal.admitted()).toEqual([]);
+  } finally {
+    list.mockRestore();
+  }
+});

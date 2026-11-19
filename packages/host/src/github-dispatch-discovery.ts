@@ -191,6 +191,9 @@ export async function discoverUnboundGithub(o: {
     undefined,
     wait,
   );
+  const seen = new Set(intent.observedRunIds);
+  let finished = false;
+  let accepting = true;
   try {
     const scanStarted = clock();
     const deadline =
@@ -200,24 +203,32 @@ export async function discoverUnboundGithub(o: {
     if (finishAs === "human" && !eligible)
       throw new GithubExecutorError("recovery_incomplete");
     const title = githubCheckRunName(o.inputs);
-    const seen = new Set(intent.observedRunIds);
-    const observe = (run: GithubRun) => {
-      if (run.display_title === title && seen.size < 2 && !seen.has(run.id)) {
-        o.journal.observeMatch(intent, run.id);
-        seen.add(run.id);
+    const observe = (rows: readonly unknown[]) => {
+      const before = seen.size;
+      for (const row of rows) {
+        if (seen.size >= 2) break;
+        const run = row as Partial<GithubRun> | null;
+        if (
+          run?.display_title === title &&
+          typeof run.id === "number" &&
+          Number.isSafeInteger(run.id) &&
+          run.id > 0
+        )
+          seen.add(run.id);
       }
+      if (seen.size !== before) o.journal.observeMatches(intent, [...seen]);
     };
     // Bound the journal lease too: a transport ignoring cancellation must not hold
     // the next scan hostage or deliver late evidence into its reservation.
     const listed = await githubDeadline(
       (deadlineSignal) =>
-        o.client.runs(o.branch, intent.startedAt, deadlineSignal, (run) => {
-          if (!deadlineSignal.aborted) observe(run);
+        o.client.runs(o.branch, intent.startedAt, deadlineSignal, (page) => {
+          if (accepting && !deadlineSignal.aborted) observe(page);
         }),
       signal,
     );
     const matches = listed.filter((run) => run.display_title === title);
-    for (const run of matches) observe(run);
+    observe(matches);
     if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
     if (eligible && !matches.length) {
       if (!listed.every((run) => clearlyUnrelated(run, o.config.botLogin)))
@@ -229,6 +240,7 @@ export async function discoverUnboundGithub(o: {
         listed.length,
         finishAs,
       );
+      finished = true;
       return undefined;
     }
     return matches;
@@ -237,7 +249,8 @@ export async function discoverUnboundGithub(o: {
     if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
     throw error;
   } finally {
-    o.journal.endListing(intent);
+    accepting = false;
+    if (!finished) o.journal.endListing(intent, [...seen]);
   }
 }
 
