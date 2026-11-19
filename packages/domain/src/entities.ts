@@ -157,6 +157,7 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly related_cards: readonly CardId[];
+  readonly is_ui_framework?: boolean;
   readonly depends_on_cards?: readonly CardId[];
   readonly wait_for_dependencies?: boolean;
   readonly early_start?: {

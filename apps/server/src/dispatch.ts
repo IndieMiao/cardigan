@@ -159,6 +159,7 @@ export interface DispatcherOptions {
   readonly baselineForWait?: (
     project: ProjectId,
   ) => Promise<{ branch: string; sha: string } | undefined>;
+  readonly frameworkWaitReminderMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
@@ -566,7 +567,7 @@ export class Dispatcher {
         this.clock,
         this.loadState,
         waitBaseline,
-        this.options.baselineConflictMaxResumes,
+        this.options,
       ),
     );
     await yieldToLoop();

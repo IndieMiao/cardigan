@@ -2780,3 +2780,20 @@ test("MC-2 an author with advertised management tools still cannot edit machine 
   expect(rows()).toEqual(before);
   expect(work("coder").requirements).toBeUndefined();
 });
+
+test("PM can create and clear the explicit UI framework marker through MCP", async () => {
+  const framework = (await ok(office, "create_card", {
+    title: "Layout",
+    goal: "Layout",
+    source: { kind: "quote", text: "Layout" },
+    template: "general",
+    is_ui_framework: true,
+  })) as Card;
+  expect(framework.is_ui_framework).toBe(true);
+  expect(
+    await ok(office, "update_card", {
+      card_id: framework.id,
+      is_ui_framework: false,
+    }),
+  ).toMatchObject({ is_ui_framework: false });
+});
