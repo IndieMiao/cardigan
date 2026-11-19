@@ -665,6 +665,21 @@ test("placement reads current project opt-in and unexpired observations in the c
       occupied: 1,
       resources: new Map([["godot", { limit: 2, occupied: 1 }]]),
     });
+    // The same physical worker serves both projects. A queued owner is forecast once;
+    // moving into a real Run slot replaces (not adds to) that forecast.
+    store.uow.run((tx) => {
+      const item = tx.work_items.get(project, id("work_item", 1));
+      if (!item) throw new Error("Missing work item");
+      tx.work_items.put("other", { ...item, assignment_id: assignment().id });
+      tx.runs.put("other", { ...run(), status: "queued" });
+    });
+    expect(read()).toMatchObject({ occupied: 1, pending_assignments: 1 });
+    store.uow.run((tx) => tx.runs.put("other", run()));
+    expect(read()).toMatchObject({ occupied: 1, pending_assignments: 0 });
+    store.uow.run((tx) =>
+      tx.runs.put("other", { ...run(), status: "completed" }),
+    );
+    expect(read()).toMatchObject({ occupied: 0, pending_assignments: 0 });
     expect(read("other")).toMatchObject({
       remote_binding: "disabled",
       health: null,

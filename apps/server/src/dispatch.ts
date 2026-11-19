@@ -59,8 +59,10 @@ import {
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   type ReadResourceLimits,
+  RunPreflightDeferred,
   RunPreparationDeferred,
   RunTargetDeferred,
+  RuntimeTargetError,
   redactFailureLine,
   refreshTargetWait,
   runCapacitySnapshot,
@@ -86,6 +88,7 @@ import {
   getRoleVersion,
   moveNotification,
   PROJECT_EVENT_STREAM,
+  type ReadRepositories,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
@@ -776,6 +779,18 @@ export class Dispatcher {
       !hasRunTarget(a, state)
     )
       return;
+    if (a.snapshot_retry && a.snapshot_retry.ready_at > this.clock.now())
+      return;
+    const queued = this.queued(state, a);
+    // A previously enqueued Run already has its snapshot. Skip remote IO while
+    // it cannot compete; the authoritative check remains inside claim().
+    if (
+      queued?.queue_reason === "concurrency_limit" &&
+      !this.options.store.uow.read((tx) =>
+        this.availableResources(tx, state, a, queued),
+      )
+    )
+      return;
     let live = false;
     let doneObserved = false;
     let replacement: DispatchRunParams["replacement"];
@@ -815,7 +830,6 @@ export class Dispatcher {
         return;
       }
     }
-    const queued = this.queued(state, a);
     const prior = state.runs
       .filter(
         (r) =>
@@ -867,12 +881,35 @@ export class Dispatcher {
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
     } catch (error) {
+      if (this.closing) return;
+      const versionProbe =
+        error instanceof HostLaunchError && error.step === "cli version";
+      const cause = versionProbe ? error.cause : error;
+      // hc returned before executing --version. Do not retry general CLI or
+      // adapter errors, even if their diagnostic mentions a queue timeout.
+      const versionNotExecuted =
+        versionProbe &&
+        typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        cause.code === "runtime_queue_timeout";
+      if (
+        !this.reject(
+          project,
+          notes,
+          a,
+          "snapshot_unavailable",
+          queued?.id,
+          versionNotExecuted ||
+            (cause instanceof RuntimeTargetError && cause.transient),
+        )
+      )
+        return;
       this.options.onError?.(
         new Error(
           `bell delivery rejected: project=${project} asg=${a.id} reason=snapshot_unavailable message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
         ),
       );
-      this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
     if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
@@ -909,7 +946,13 @@ export class Dispatcher {
         "code" in error &&
         typeof error.code === "string"
       ) {
-        this.reject(project, notes, a, `dispatch_rejected:${error.code}`);
+        this.reject(
+          project,
+          notes,
+          a,
+          `dispatch_rejected:${error.code}`,
+          queued?.id,
+        );
         return;
       }
       throw error;
@@ -1028,6 +1071,12 @@ export class Dispatcher {
         reason = "startup_did_not_dispatch";
       }
     } catch (error) {
+      if (
+        !live &&
+        error instanceof RunPreflightDeferred &&
+        this.deferPreflight(job, queued?.queue_reason)
+      )
+        return;
       if (error instanceof RunPreparationDeferred) {
         const attempt = job.attempt;
         this.options.store.uow.run(() =>
@@ -1113,6 +1162,60 @@ export class Dispatcher {
         });
     });
   }
+  private availableResources(
+    tx: ReadRepositories,
+    state: CommandState,
+    a: Assignment,
+    run: Run,
+  ) {
+    const project = state.project_id;
+    const capacity = runCapacitySnapshot(
+      this.options.store,
+      tx,
+      this.options.resourceLimits,
+    );
+    const slots = capacity.resourcesForMachine(a.machine_id);
+    const keys = assignmentResourceKeys(tx, project, a);
+    const trigger = state.events.find((e) => e.id === run.trigger_event_id);
+    const order = {
+      ...dispatchTier(state, a, run, trigger),
+      priority: cardPriority(state, a),
+      ...cardDependencyDispatchOrder(state, a),
+      project_id: project,
+      assignment_id: a.id,
+      created_at: trigger?.created_at ?? a.created_at,
+      trigger_event_id: run.trigger_event_id,
+    };
+    const earlier = hasEarlierCapacityWait(
+      tx,
+      capacity.queue,
+      order,
+      a.machine_id,
+      slots,
+      this.clock.now(),
+      (p, owner) =>
+        hasRunTarget(owner, {
+          work_items: tx.work_items.list(p),
+          deliveries: tx.deliveries.list(p),
+        }),
+    );
+    if (
+      remainingResourceRatio(keys, slots) <= 0 ||
+      (!isRunCapacityExempt(a) && earlier) ||
+      !canDispatchRun(
+        effectiveRunLimit(
+          this.options.store,
+          a.machine_id,
+          this.options.runLimit,
+          this.options.runLimitMaximum,
+        ),
+        capacity.occupied.get(a.machine_id) ?? 0,
+        isRunCapacityExempt(a),
+      )
+    )
+      return undefined;
+    return keys;
+  }
   private claim(
     project: ProjectId,
     notes: readonly Notification[],
@@ -1126,7 +1229,13 @@ export class Dispatcher {
     return store.uow.run((tx) => {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
-      if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      if (
+        a?.status !== "active" ||
+        a.external ||
+        !sameRef(a, expected) ||
+        a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
+      )
+        return;
       if (
         continuing &&
         (a.session_ref !== expected.session_ref ||
@@ -1226,7 +1335,8 @@ export class Dispatcher {
       if (
         (!ready.length &&
           waiting?.queue_reason === undefined &&
-          !waiting?.dispatch_target_wait) ||
+          !waiting?.dispatch_target_wait &&
+          !waiting?.preparation_retry) ||
         (continuing && !ready.length) ||
         this.busy(state, a, continuing?.id)
       )
@@ -1289,51 +1399,8 @@ export class Dispatcher {
         return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
-        const capacity = runCapacitySnapshot(
-          store,
-          tx,
-          this.options.resourceLimits,
-        );
-        const slots = capacity.resourcesForMachine(a.machine_id);
-        const keys = assignmentResourceKeys(tx, project, a);
-        const trigger = state.events.find(
-          (e) => e.id === run?.trigger_event_id,
-        );
-        const order = {
-          ...dispatchTier(state, a, run, trigger),
-          priority: cardPriority(state, a),
-          ...cardDependencyDispatchOrder(state, a),
-          project_id: project,
-          assignment_id: a.id,
-          created_at: trigger?.created_at ?? a.created_at,
-          trigger_event_id: run.trigger_event_id,
-        };
-        const earlier = hasEarlierCapacityWait(
-          tx,
-          capacity.queue,
-          order,
-          a.machine_id,
-          slots,
-          (p, owner) =>
-            hasRunTarget(owner, {
-              work_items: tx.work_items.list(p),
-              deliveries: tx.deliveries.list(p),
-            }),
-        );
-        if (
-          remainingResourceRatio(keys, slots) <= 0 ||
-          (!isRunCapacityExempt(a) && earlier) ||
-          !canDispatchRun(
-            effectiveRunLimit(
-              store,
-              a.machine_id,
-              this.options.runLimit,
-              this.options.runLimitMaximum,
-            ),
-            capacity.occupied.get(a.machine_id) ?? 0,
-            isRunCapacityExempt(a),
-          )
-        ) {
+        const keys = this.availableResources(tx, state, a, run);
+        if (!keys) {
           if (run.queue_reason !== "concurrency_limit")
             tx.runs.put(project, { ...run, queue_reason: "concurrency_limit" });
           return;
@@ -1691,6 +1758,11 @@ export class Dispatcher {
               at,
             );
       if (!recorded) return;
+      const owner = tx.assignments.get(project, attempt.assignment_id);
+      if (owner?.snapshot_retry) {
+        const { snapshot_retry: _retry, ...cleared } = owner;
+        tx.assignments.put(project, cleared);
+      }
       let state = this.loadState(tx, project);
       // A queued Run has never crossed dispatch/sentinel. Fence it atomically
       // with lease recovery so a late provision cannot dispatch after its slot
@@ -1796,32 +1868,117 @@ export class Dispatcher {
       }
     });
   }
+  private schedulePreflightRetry(
+    tx: StoreTransactionContext,
+    project: ProjectId,
+    owner: Assignment,
+  ) {
+    const failures = (owner.snapshot_retry?.failures ?? 0) + 1;
+    if (failures > this.maxRetries) return false;
+    const ready_at = new Date(
+      Date.parse(this.clock.now()) +
+        this.deliveryRetryBaseMs * 2 ** (failures - 1),
+    ).toISOString();
+    tx.assignments.put(project, {
+      ...owner,
+      snapshot_retry: { failures, ready_at },
+    });
+    return true;
+  }
+  /** Only an explicitly proven pre-send failure may give back a launch reservation. */
+  private deferPreflight(job: Job, previous: Run["queue_reason"]) {
+    const { store } = this.options,
+      { project_id: project } = job.attempt;
+    return store.uow.run((tx) => {
+      const run = tx.runs.get(project, job.run.id),
+        owner = tx.assignments.get(project, job.assignment.id);
+      if (
+        run?.status !== "queued" ||
+        owner?.status !== "active" ||
+        owner.external ||
+        !sameRef(owner, job.assignment)
+      )
+        return false;
+      if (
+        !unfinishedBellAttempts(store.database, project, owner.id).some(
+          (a) => a.id === job.attempt.id,
+        )
+      )
+        return true;
+      if (!this.closing && !this.schedulePreflightRetry(tx, project, owner))
+        return false;
+      withdrawBellAttempt(store.database, project, job.attempt.id);
+      tx.runs.put(project, {
+        ...run,
+        queue_reason: previous ?? "runtime_unavailable",
+      });
+      return true;
+    });
+  }
   private reject(
     project: ProjectId,
     notes: readonly Notification[],
     a: Assignment,
     reason: string,
+    queuedId?: RunId,
+    transient = false,
   ) {
     const { store } = this.options;
-    store.uow.run((tx) => {
+    return store.uow.run((tx) => {
       const current = store.listNotifications({
         project_id: project,
         ids: notes.map((n) => n.id),
         status: "pending",
       });
-      const queued = tx.runs
-        .list(project)
-        .find(
-          (r) =>
-            r.assignment_id === a.id &&
-            r.status === "queued" &&
-            r.queue_reason !== undefined,
-        );
-      if (!current.length && !queued) return;
+      const queued = queuedId ? tx.runs.get(project, queuedId) : undefined;
+      if (
+        queuedId &&
+        (queued?.status !== "queued" || queued.assignment_id !== a.id)
+      )
+        return false;
+      if (!current.length && !queued) return false;
+      if (reason === "snapshot_unavailable") {
+        const owner = tx.assignments.get(project, a.id);
+        if (
+          owner?.status !== "active" ||
+          owner.external ||
+          !sameRef(owner, a) ||
+          owner.snapshot_retry?.ready_at !== a.snapshot_retry?.ready_at ||
+          unfinishedBellAttempts(store.database, project, a.id).length > 0
+        )
+          return false;
+        // Another transaction may have started a Run, paused the card or
+        // replaced the target while the failed probe was in flight.
+        const state = this.loadState(tx, project);
+        if (
+          this.queued(state, owner)?.id !== queuedId ||
+          this.busy(state, owner) ||
+          !assignmentDependenciesAllowStart(state, owner) ||
+          assignmentCardHeld(owner, state, queued?.trigger_event_id) ||
+          !hasRunTarget(owner, state)
+        )
+          return false;
+        if (transient && this.schedulePreflightRetry(tx, project, owner))
+          return false;
+        if (owner.snapshot_retry) {
+          const { snapshot_retry: _retry, ...cleared } = owner;
+          tx.assignments.put(project, cleared);
+        }
+      }
       if (queued) {
-        const cleared = { ...queued };
-        delete cleared.queue_reason;
-        tx.runs.put(project, cleared);
+        // Removing only queue_reason leaves target/preparation-only candidates runnable.
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            abortDispatch(
+              this.loadState(tx, project),
+              { kind: "system", project_id: project },
+              { run_id: queued.id, reason },
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
       }
       for (const n of current)
         moveNotification(store.database, {
@@ -1830,7 +1987,8 @@ export class Dispatcher {
           event: "deliver_failed",
           at: this.clock.now(),
         });
-      this.escalate(tx, project, current, a.id, reason);
+      this.escalate(tx, project, current, a.id, reason, undefined, queuedId);
+      return true;
     });
   }
   private escalate(
@@ -1840,11 +1998,14 @@ export class Dispatcher {
     assignment: Assignment["id"],
     reason: string,
     failure?: DeliveryFailure,
+    runId?: RunId,
   ) {
     const state = this.loadState(tx, project);
     const a = state.assignments.find((a) => a.id === assignment);
     if (!a) return;
-    const launch = state.runs.findLast((r) => r.assignment_id === a.id);
+    const launch = runId
+      ? state.runs.find((r) => r.id === runId && r.assignment_id === a.id)
+      : state.runs.findLast((r) => r.assignment_id === a.id);
     if (
       launch &&
       failAutomaticContextRun(
@@ -1866,7 +2027,7 @@ export class Dispatcher {
         notes[0]?.card_id ??
         state.work_items.find((w) => w.id === a.work_item_id)?.card_id,
       notification_ids: notes.map((n) => n.id),
-      run_id: notes[0]?.run_id,
+      run_id: runId ?? notes[0]?.run_id,
       ...(failure ? { error: failure } : {}),
     });
   }

@@ -13,6 +13,7 @@ const codes = [
   "mcp_timeout",
   "mcp_redirect",
   "mcp_protocol_error",
+  "mcp_gateway_error",
   "mcp_worker_failed",
 ] as const;
 type Code = (typeof codes)[number];
@@ -50,10 +51,17 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
 // Executed by the worker's isolated Python. URL/token go only through stdin.
 // initialize authenticates without acknowledging a Run or touching tool activity.
 const probe = `
-import json, socket, ssl, sys, urllib.error, urllib.request
+import http.client, json, socket, ssl, sys, urllib.error, urllib.request
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
+def read_reply(response):
+    raw = response.read(65537)
+    length = response.headers.get("Content-Length", "")
+    if length.isdecimal() and len(raw) < min(65537, int(length)):
+        raise http.client.IncompleteRead(raw)
+    return raw
+
 def check():
     try:
         data = json.load(sys.stdin)
@@ -69,7 +77,7 @@ def check():
         req = urllib.request.Request(data["url"], data=body, method="POST", headers=headers)
         with opener.open(req, timeout=data["timeoutMs"]/1000) as response:
             if not data["authenticate"]: return "mcp_protocol_error"
-            raw = response.read(65537)
+            raw = read_reply(response)
             if response.status != 200 or len(raw) > 65536:
                 return "mcp_protocol_error"
             reply = json.loads(raw)
@@ -80,17 +88,21 @@ def check():
                 return "mcp_protocol_error"
         return "ok"
     except urllib.error.HTTPError as error:
+        if 500 <= error.code < 600: return "mcp_gateway_error"
         if error.code == 401 and not data["authenticate"]:
             try:
-                raw = error.read(65537)
+                raw = read_reply(error)
                 if (len(raw) <= 65536 and error.headers.get("WWW-Authenticate") == "Bearer"
                     and json.loads(raw).get("error", {}).get("code") == "unauthorized"):
                     return "ok"
+            except http.client.HTTPException: return "mcp_gateway_error"
             except Exception: pass
             return "mcp_protocol_error"
         if error.code in (401, 403): return "mcp_auth_failed"
         if 300 <= error.code < 400: return "mcp_redirect"
         return "mcp_protocol_error"
+    except http.client.HTTPException:
+        return "mcp_gateway_error"
     except (ssl.SSLError, urllib.error.URLError, OSError) as error:
         reason = getattr(error, "reason", error)
         if isinstance(reason, ssl.SSLError): return "mcp_tls_failed"

@@ -90,7 +90,12 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import {
+  type ProvisionTargetRefusal,
+  provisionRefusalFor,
+  RuntimeTargetError,
+  RuntimeTargets,
+} from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
@@ -100,7 +105,11 @@ import {
   preparationExecutionExited,
   preparationUnavailable,
 } from "./wake-preparation.js";
-import { checkWorkerMcp, workerMcpConfig } from "./worker-mcp.js";
+import {
+  checkWorkerMcp,
+  WorkerMcpError,
+  workerMcpConfig,
+} from "./worker-mcp.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -159,6 +168,9 @@ export interface LaunchHost {
   readonly report?: ((message: string) => void) | undefined;
 }
 
+/** No delivery was possible and any issued credential has been revoked. */
+export class RunPreflightDeferred extends Error {}
+
 export interface LaunchRunInput {
   readonly project: ProjectId;
   readonly assignment_id: Assignment["id"];
@@ -175,6 +187,8 @@ export interface LaunchRunInput {
   readonly replacement?: DispatchRunParams["replacement"];
   /** Explicit assignment start can wake an existing idle business session. */
   readonly reuse_session?: boolean;
+  /** Dispatcher owns bounded retry of proven pre-delivery target failures. */
+  readonly retry_target_preflight?: true;
 }
 
 export interface LaunchedRun {
@@ -372,6 +386,7 @@ async function launchWithClaim(
               position,
               assignment.machine_id,
               slots,
+              clock.now(),
             ))))
     ) {
       return undefined;
@@ -482,8 +497,19 @@ async function launch(
     project,
     input.assignment_id,
   );
-  if (host.runtime instanceof RuntimeTargets)
-    execution = (await host.runtime.forLaunch(project, assignment)).execution;
+  if (host.runtime instanceof RuntimeTargets) {
+    try {
+      execution = (await host.runtime.forLaunch(project, assignment)).execution;
+    } catch (error) {
+      if (
+        input.retry_target_preflight &&
+        error instanceof RuntimeTargetError &&
+        error.transient
+      )
+        throw new RunPreflightDeferred(error.message, { cause: error });
+      throw error;
+    }
+  }
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );
@@ -742,6 +768,7 @@ async function launch(
   let ref: RuntimeRef | undefined;
   let publication: LaunchPublication | undefined;
   let launchToken: string | undefined;
+  let provisionRefusal: ProvisionTargetRefusal | undefined;
   try {
     if (remote && execution.mode === "agent-ssh") {
       publication = LaunchPublication.begin(
@@ -926,19 +953,41 @@ async function launch(
         ...(input.run.recovery_policy ? { generation: randomUUID() } : {}),
       },
     };
-    publication?.assertCurrent();
-    publication?.update("provisioning", { provision_attempted: true });
+    const runtime: Pick<RuntimeTargets, "provision" | "resume_or_replace"> =
+      host.runtime;
+    const enterAdapter = () => {
+      if (publication) requireTarget();
+      publication?.assertCurrent();
+      publication?.update("provisioning", { provision_attempted: true });
+    };
+    // The router has asynchronous target checks of its own. Journal at the
+    // actual adapter boundary; an opaque runtime must be fenced before entry.
+    const boundary: [] | [() => void] =
+      publication && host.runtime instanceof RuntimeTargets
+        ? [enterAdapter]
+        : [];
+    if (!boundary.length) enterAdapter();
     const provisioned =
       input.replacement && input.replacement.reason !== "launch_profile_changed"
-        ? await host.runtime.resume_or_replace(
+        ? await runtime.resume_or_replace(
             input.replacement.previous,
             launchDesc,
+            ...boundary,
           )
-        : await host.runtime.provision(assignment, role, machine, launchDesc);
-    if (!provisioned.ok)
+        : await runtime.provision(
+            assignment,
+            role,
+            machine,
+            launchDesc,
+            ...boundary,
+          );
+    if (!provisioned.ok) {
+      provisionRefusal = provisionRefusalFor(provisioned.error, launchDesc);
+      if (provisionRefusal) throw provisionRefusal;
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
       );
+    }
     ref = {
       ...provisioned.value,
       ...(publication
@@ -1034,16 +1083,24 @@ async function launch(
         host.launch.secrets,
         launchToken,
       );
+      const targetFailure =
+        step === "MCP preflight" && error instanceof WorkerMcpError
+          ? new RuntimeTargetError(error.code)
+          : provisionRefusal;
+      const retry = input.retry_target_preflight && targetFailure?.transient;
       let exited = false;
       try {
         exited = await publication.stop(
-          deferred,
-          deferred ? undefined : reason,
+          deferred || retry,
+          deferred || retry ? undefined : reason,
+          provisionRefusal,
         );
       } catch {
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
+      if (retry && exited)
+        throw new RunPreflightDeferred(targetFailure.reason, { cause: error });
       throw new HostLaunchError(
         step,
         `${reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`,

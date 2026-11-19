@@ -33,6 +33,7 @@ import {
   launchRun,
   mergeCheckCapacityAvailable,
   RunCapacityDeferred,
+  RuntimeTargetError,
   readRunQueue,
   runCapacitySnapshot,
   tryHostOpsLock,
@@ -136,6 +137,77 @@ const ownNotes = () =>
     project_id: f.project,
     assignment_id: target.assignment.id,
   });
+
+test.each(["recover", "exhaust", "permanent"])(
+  "snapshot preflight: %s",
+  async (outcome) => {
+    target = f.create();
+    comment();
+    const snapshot = vi.fn(options.snapshot);
+    snapshot.mockRejectedValueOnce(
+      new RuntimeTargetError(
+        outcome === "permanent" ? "remote_launch_disabled" : "mcp_timeout",
+      ),
+    );
+    if (outcome === "exhaust")
+      snapshot.mockRejectedValue(
+        new RuntimeTargetError("machine_check_runtime_timeout"),
+      );
+    const opts = {
+      ...options,
+      snapshot,
+      maxRetries: 2,
+      deliveryRetryBaseMs: 100,
+    };
+    const alerts = () =>
+      f.state().events.filter((e) => e.type === "bell_delivery_failed");
+    let dispatcher = new Dispatcher(opts);
+    await dispatcher.tick();
+    if (outcome !== "permanent") {
+      expect(alerts()).toHaveLength(0);
+      expect(ownNotes().map((n) => n.status)).toContain("pending");
+      expect(
+        f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+      ).toHaveLength(0);
+      // A new dispatcher still respects the stored deadline.
+      dispatcher = new Dispatcher(opts);
+      f.advance(99);
+      await dispatcher.tick();
+      expect(snapshot).toHaveBeenCalledTimes(1);
+      f.advance(1);
+      await dispatcher.tick();
+      if (outcome === "recover") {
+        expect(alerts()).toHaveLength(0);
+        expect(options.startRun).toHaveBeenCalledTimes(1);
+        expect(ownNotes().map((n) => n.status)).toContain("belled");
+        expect(
+          f.state().assignments.find((a) => a.id === target.assignment.id)
+            ?.snapshot_retry,
+        ).toBeUndefined();
+        return;
+      }
+      f.advance(199);
+      await dispatcher.tick();
+      expect(snapshot).toHaveBeenCalledTimes(2);
+      expect(alerts()).toHaveLength(0);
+      f.advance(1);
+      await dispatcher.tick();
+    }
+    f.advance(500);
+    await dispatcher.tick();
+    expect(snapshot).toHaveBeenCalledTimes(outcome === "permanent" ? 1 : 3);
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(alerts()).toMatchObject([
+      {
+        payload: {
+          assignment_id: target.assignment.id,
+          reason: "snapshot_unavailable",
+        },
+      },
+    ]);
+    expect(ownNotes().map((n) => n.status)).toContain("delivery_failed");
+  },
+);
 
 function saveLimit(limit: number) {
   f.store.uow.run((tx) => {
