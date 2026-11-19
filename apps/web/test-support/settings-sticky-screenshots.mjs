@@ -291,6 +291,114 @@ try {
     const last = end.items.at(-1);
     assert(last.visible && last.hit, `${key}: last nav item not reachable`);
   }
+  // Real input starting on the nav (review V-2223): a vertical wheel or touch
+  // swipe over a nav that does not need to scroll vertically must scroll the
+  // page; a horizontal swipe on the narrow nav still scrolls the nav itself.
+  await send("Emulation.setEmulatedMedia", {
+    features: [
+      { name: "prefers-color-scheme", value: "light" },
+      { name: "prefers-reduced-motion", value: "reduce" },
+    ],
+  });
+  const navState = () =>
+    run(() => {
+      const nav = document.querySelector("nav[aria-label='设置分栏']");
+      return {
+        scrollX: Math.round(scrollX),
+        scrollY: Math.round(scrollY),
+        navScrollLeft: Math.round(nav.scrollLeft),
+        navScrollTop: Math.round(nav.scrollTop),
+        navOverflowX: nav.scrollWidth > nav.clientWidth,
+      };
+    });
+  const resetScroll = async () => {
+    await run(() => {
+      window.scrollTo(0, 0);
+      const nav = document.querySelector("nav[aria-label='设置分栏']");
+      nav.scrollLeft = 0;
+      nav.scrollTop = 0;
+    });
+    await frames();
+  };
+  // A finger drag in small steps; touch emulation is on for these pages.
+  const swipe = async (x, y, xDistance, yDistance) => {
+    const point = (step) => [
+      {
+        x: x + (xDistance * step) / 10,
+        y: y + (yDistance * step) / 10,
+        id: 1,
+      },
+    ];
+    await send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: point(0),
+    });
+    for (let step = 1; step <= 10; step++) {
+      await delay(16);
+      await send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: point(step),
+      });
+    }
+    await send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await delay(300);
+    await frames();
+  };
+  for (const width of [1440, 390, 320]) {
+    const height = 760;
+    const key = `${width}x${height}`;
+    await viewport(width, height);
+    await send("Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 1,
+    });
+    await open(
+      "settings",
+      "#/p/p-1/settings",
+      "!!document.querySelector('[role=switch]')",
+      "light",
+    );
+    await resetScroll();
+    const first = (await measure()).items[0];
+    const x = Math.round(first.x + Math.min(first.w / 2, 30));
+    const y = Math.round(first.y + first.h / 2);
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x,
+      y,
+      deltaX: 0,
+      deltaY: 180,
+    });
+    await delay(200);
+    await frames();
+    const wheel = await navState();
+    await resetScroll();
+    await swipe(x, y, 0, -70);
+    const touch = await navState();
+    await resetScroll();
+    await swipe(x, y, -80, 0);
+    const sideways = await navState();
+    await send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    report.scenes[`nav-input-${key}`] = {
+      point: { x, y },
+      wheel,
+      touch,
+      sideways,
+    };
+    if (before) continue;
+    assert(wheel.scrollY > 0, `${key}: wheel over the nav does not scroll`);
+    assert(touch.scrollY > 0, `${key}: swipe over the nav does not scroll`);
+    if (width <= 760 && sideways.navOverflowX) {
+      assert(
+        sideways.navScrollLeft > 0,
+        `${key}: nav does not scroll sideways`,
+      );
+      assert.equal(sideways.scrollX, 0, `${key}: page scrolled sideways`);
+    }
+  }
   // Side-by-side: card page (left) and settings (right), same width/theme.
   await viewport(1440, 1000);
   for (const { key, width, height, cards, top } of cases) {

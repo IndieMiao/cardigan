@@ -32,8 +32,9 @@
     top: var(--settings-sticky-top);
     min-width: 0;
     max-height: calc(100dvh - var(--settings-sticky-top) - var(--ui-space-6));
+    /* No overscroll containment: a wheel or swipe that the nav does not
+       need still scrolls the page (review V-2223). */
     overflow-y: auto;
-    overscroll-behavior: contain;
   }
   /* Opaque scrolled contents keep subpixel text in the nav scroller. */
   .navList {

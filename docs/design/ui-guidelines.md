@@ -112,7 +112,7 @@
 |---|---|
 | 页面外框 | `SettingsLayout header={<PageTitle title="设置" />}`：沿用 `ui-workspace` 内边距，页标题与卡片页同位（1440 宽 x=244/y=24，390 宽 x=12/y=68）；导航顶边与卡片页工具栏同在 y=60 |
 | 二级导航 | `SettingsNavItem`：纯文字列表，宽 `--ui-settings-nav`（160px），项高 32px、14px/20px、常规字重，当前项 `aria-current="page"` 用 `--ui-selected` 底色；≤760px 变为顶部横向列表，超出时在导航内部横向滚动，页面不横向溢出 |
-| 固定标题与导航（C-480） | 宽屏（>760px）页面仍由整页滚动，但页标题行和二级导航用 `position: sticky` 固定：页头带（y=0～60，页面底色，覆盖工作区上内边距）贴住视口顶部，标题保持 y=24；导航贴在 y=60，滚动到底部时标题、每个导航项和当前项高亮都可见，面板内容从页头带下方滚过。导航最大高为视口减 60px 和下方 24px，超出时只在导航内部纵向滚动（`overscroll-behavior: contain`）。导航滚动内容带页面底色，静止时与改前逐像素一致。面板内元素获得焦点或 `scrollIntoView` 时留出 60px（`scroll-margin`），不被页头带遮住。≤760px 不固定：标题与顶部横向列表留在文档流里，不遮挡内容。由 `SettingsLayout` 统一提供，页面不另写；证据脚本 `apps/web/test-support/settings-sticky-screenshots.mjs` |
+| 固定标题与导航（C-480） | 宽屏（>760px）页面仍由整页滚动，但页标题行和二级导航用 `position: sticky` 固定：页头带（y=0～60，页面底色，覆盖工作区上内边距）贴住视口顶部，标题保持 y=24；导航贴在 y=60，滚动到底部时标题、每个导航项和当前项高亮都可见，面板内容从页头带下方滚过。导航最大高为视口减 60px 和下方 24px，超出时在导航内部纵向滚动；导航不设 `overscroll-behavior` 拦截，导航不需要滚动或已滚到头时，从导航上起手的滚轮和触滑照常滚动页面（宽窄屏都一样），窄屏导航仍可横滑。导航滚动内容带页面底色，静止时与改前逐像素一致。面板内元素获得焦点或 `scrollIntoView` 时留出 60px（`scroll-margin`），不被页头带遮住。≤760px 不固定：标题与顶部横向列表留在文档流里，不遮挡内容。由 `SettingsLayout` 统一提供，页面不另写；证据脚本 `apps/web/test-support/settings-sticky-screenshots.mjs` |
 | 内容宽度 | `SettingsPanel`：面板标题 16px/24px，标题行固定 28px；内容最大宽 `--ui-settings-width`（720px），分组间距 24px。所有元素不得超出这一列 |
 | 分组 | `SettingsGroup`：组标题 14px/20px、字重 600，下方可选一句话说明（13px/20px，弱化色）；行包在一个 1px 边框、6px 圆角的面板里，行间 1px 分隔线，不再在行内套框 |
 | 设置行 | `SettingsRow`：左侧名称（14px/20px）+ 一句简短描述（13px/20px），右侧控件右对齐；行内边距 12px 16px（≤760px 为 12px）。长说明放进名称旁的 `SettingsHelp` 悬停提示（28px 命中区，不撑高行），不写第二段 |
