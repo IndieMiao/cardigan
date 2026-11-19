@@ -74,6 +74,7 @@ export function deliveryAttemptFailed(
     run_id: RunId;
     reason: string;
     error: DeliveryFailure;
+    unconfirmed_attempt_id?: string;
     notification_ids: readonly string[];
     card_id?: CardId | undefined;
   },
@@ -91,6 +92,9 @@ export function deliveryAttemptFailed(
       run_id: input.run_id,
       reason: input.reason,
       error: { ...input.error },
+      ...(input.unconfirmed_attempt_id
+        ? { unconfirmed_attempt_id: input.unconfirmed_attempt_id }
+        : {}),
       notification_ids: [...input.notification_ids],
     },
   });

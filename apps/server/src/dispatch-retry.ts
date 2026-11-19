@@ -11,6 +11,7 @@ import {
   dispatchRecoveryQueuedAt,
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
+  eventsOfType,
   hasRunTarget,
   hostOpsPending,
   type ProjectId,
@@ -20,6 +21,8 @@ import {
   recoverDispatch,
   recoveryChainUsed,
   refreshRunTargetWait,
+  repairWakeTarget,
+  resumableReviewWithdrawal,
   retireObsoleteQueuedRun,
   retireRecoveryQueuedRun,
   reviewRunWakeDisposition,
@@ -30,7 +33,7 @@ import {
   withdrawDispatchStop,
 } from "@cardigan/domain";
 import {
-  deferTargetAttempt,
+  deferIfTargetWait,
   failAutomaticContextRun,
   refreshTargetWait,
   testReviewRunPrompt,
@@ -59,6 +62,29 @@ import {
 } from "./dispatch-alert.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
+
+function unconfirmedReviewSend(
+  state: CommandState,
+  run: Run,
+  attemptId: string,
+) {
+  if (run.kind !== "rework") return false;
+  const target = repairWakeTarget(state, run);
+  return (
+    !!target &&
+    state.decisions.some(
+      (q) => q.review_limit_group?.delivery_id === target.id,
+    ) &&
+    eventsOfType(state.events, "bell_delivery_attempt_failed").some((e) => {
+      const p = e.payload as Record<string, unknown> | null;
+      return (
+        e.actor.kind === "system" &&
+        p?.run_id === run.id &&
+        p.unconfirmed_attempt_id === attemptId
+      );
+    })
+  );
+}
 
 export interface DispatchRecoveryPolicy {
   timeoutMs: number;
@@ -477,12 +503,31 @@ export async function retryDispatchedRuns(
       const at = clock.now(),
         started =
           dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
+      // An unfinished claim excludes its peers; any settled attempt supersedes
+      // the withdrawal proof. Empty legacy history alone authorizes nothing.
+      const fromWithdrawal = resumableReviewWithdrawal(state, a, run);
+      const withdrawn = !last && fromWithdrawal;
+      const unconfirmed =
+        last?.outcome === "failed" &&
+        unconfirmedReviewSend(state, run, last.id);
+      const timedOut =
+        started &&
+        Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
+          policy.timeoutMs;
+      // Preparation before the first withdrawal may itself have lasted longer
+      // than the ack timeout. Give the restored send its own ack window.
+      const restoredAt =
+        timedOut && fromWithdrawal
+          ? (last?.finished_at ??
+            eventsOfType(state.events, "run_target_wait_finished").findLast(
+              (e) =>
+                (e.payload as { run_id?: unknown } | null)?.run_id === run.id,
+            )?.created_at)
+          : undefined;
       const recover =
-        (started &&
-          Date.parse(at) -
-            Date.parse(started) -
-            dispatchTargetWaitMs(run, at) >=
-            policy.timeoutMs) ||
+        (timedOut &&
+          (!restoredAt ||
+            Date.parse(at) - Date.parse(restoredAt) >= policy.timeoutMs)) ||
         failures >= policy.maxRetries + 1;
       const retry =
         run.status === "dispatched" &&
@@ -500,7 +545,11 @@ export async function retryDispatchedRuns(
         a,
         failures,
         recover,
-        retry: retry && !unreadable && !reviewRunWakeDisposition(state, a, run),
+        withdrawn,
+        retry:
+          (withdrawn || (retry && !unconfirmed)) &&
+          !unreadable &&
+          !reviewRunWakeDisposition(state, a, run),
         at,
         last,
       };
@@ -593,8 +642,11 @@ export async function retryDispatchedRuns(
     const currentWakeRun = () =>
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
+        const run = state.runs.find((r) => r.id === job.run.id);
         if (
+          !run ||
           !wakeIsCurrent(state, job.a, job.run.id) ||
+          (job.withdrawn && !resumableReviewWithdrawal(state, job.a, run)) ||
           !unfinishedBellAttempts(store.database, project).some(
             (attempt) => attempt.id === job.attempt.id,
           )
@@ -602,7 +654,7 @@ export async function retryDispatchedRuns(
           withdrawBellAttempt(store.database, project, job.attempt.id);
           return undefined;
         }
-        return state.runs.find((run) => run.id === job.run.id);
+        return run;
       });
     try {
       // C-68: beforeWake already retries lock/network failures for a few
@@ -611,8 +663,7 @@ export async function retryDispatchedRuns(
         project,
         assignment: job.a,
       });
-      if (refreshTargetWait(store, project, job.run.id, clock)) {
-        deferTargetAttempt(store, job.attempt, clock);
+      if (deferIfTargetWait(store, job.attempt, clock)) {
         continue;
       }
       // C-247: nothing was sent yet, so withdraw the retry and leave it to
@@ -646,8 +697,7 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
-              if (refreshTargetWait(store, project, job.run.id, clock)) {
-                deferTargetAttempt(store, job.attempt, clock);
+              if (deferIfTargetWait(store, job.attempt, clock)) {
                 return false;
               }
               return (
@@ -669,14 +719,12 @@ export async function retryDispatchedRuns(
         else ({ reason, failure } = wakeFailure(result.error));
       }
     } catch (error) {
-      if (stage === "before_wake" && !currentWakeRun()) continue;
       if (
         stage === "before_wake" &&
-        refreshTargetWait(store, project, job.run.id, clock)
-      ) {
-        deferTargetAttempt(store, job.attempt, clock);
+        deferIfTargetWait(store, job.attempt, clock)
+      )
         continue;
-      }
+      if (stage === "before_wake" && !currentWakeRun()) continue;
       // The reason stays a stable code; the cause is sanitized (C-68).
       ({ reason, failure } = deliveryFailure(stage, error));
     } finally {

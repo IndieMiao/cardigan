@@ -2,7 +2,10 @@ import { assignmentCardHeld } from "../card-hold.js";
 import type { Actor, Assignment, Run } from "../entities.js";
 import type { RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
-import { reviewRunWakeDisposition } from "../shared-review-wake.js";
+import {
+  repairWakeTarget,
+  reviewRunWakeDisposition,
+} from "../shared-review-wake.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 
 export function dispatchTargetWaitMs(run: Run, now: string): number {
@@ -44,13 +47,21 @@ export function refreshRunTargetWait(
         ? d.get("work_items", owner.work_item_id).card_id
         : undefined;
     const reason = runTargetWaitReason(state, owner, run);
-    if (p.withdrawn_attempt_id)
+    if (p.withdrawn_attempt_id) {
+      const target =
+        reason === "shared_review_paused"
+          ? repairWakeTarget(state, run)
+          : undefined;
       d.emit("run_dispatch_deferred", card, {
         run_id: run.id,
         assignment_id: owner.id,
         attempt_id: p.withdrawn_attempt_id,
         reason: reason ?? "review_target_unavailable",
+        ...(target
+          ? { delivery_id: target.id, target_sha: target.subject.value }
+          : {}),
       });
+    }
     if (
       !["queued", "dispatched"].includes(run.status) ||
       run.started_at ||

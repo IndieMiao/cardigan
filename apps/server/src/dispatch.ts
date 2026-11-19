@@ -42,6 +42,7 @@ import {
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
+  reviewRunWakeDisposition,
   runnableQueuedRun,
   runsOf,
   standingRunDormant,
@@ -50,7 +51,9 @@ import {
 } from "@cardigan/domain";
 import {
   assignmentResourceKeys,
+  deferIfTargetWait,
   deferTargetAttempt,
+  deferTargetInTransaction,
   effectiveRunLimit,
   failAutomaticContextRun,
   type HarnessActivityInspection,
@@ -63,7 +66,6 @@ import {
   RunTargetDeferred,
   RuntimeTargetError,
   redactFailureLine,
-  refreshTargetWait,
   runCapacitySnapshot,
   settleTestReviewLimits,
   testReviewRunPrompt,
@@ -984,9 +986,8 @@ export class Dispatcher {
             );
         if (
           !continuing &&
-          refreshTargetWait(this.options.store, project, job.run.id, this.clock)
+          deferIfTargetWait(this.options.store, job.attempt, this.clock)
         ) {
-          deferTargetAttempt(this.options.store, job.attempt, this.clock);
           return;
         }
         if (this.withdrawOnClose(job, queued?.queue_reason)) return;
@@ -1063,9 +1064,8 @@ export class Dispatcher {
         if (
           !sent &&
           actual?.status === "queued" &&
-          refreshTargetWait(this.options.store, project, job.run.id, this.clock)
+          deferIfTargetWait(this.options.store, job.attempt, this.clock)
         ) {
-          deferTargetAttempt(this.options.store, job.attempt, this.clock);
           return;
         }
         reason = "startup_did_not_dispatch";
@@ -1086,23 +1086,19 @@ export class Dispatcher {
       }
       // Only pre-delivery waits can withdraw an intent. A failed wake is still
       // ambiguous and must retain its attempt and normal retry semantics.
-      if (
-        stage !== "wake" &&
-        (error instanceof RunTargetDeferred ||
-          ((stage === "before_wake" ||
-            this.state(project).runs.find((r) => r.id === job.run.id)
-              ?.status === "queued") &&
-            (stage === "before_wake" || !(error instanceof HostLaunchError)) &&
-            refreshTargetWait(
-              this.options.store,
-              project,
-              job.run.id,
-              this.clock,
-            )))
-      ) {
+      if (stage !== "wake" && error instanceof RunTargetDeferred) {
         deferTargetAttempt(this.options.store, job.attempt, this.clock);
         return;
       }
+      if (
+        stage !== "wake" &&
+        (stage === "before_wake" ||
+          (this.state(project).runs.find((r) => r.id === job.run.id)?.status ===
+            "queued" &&
+            !(error instanceof HostLaunchError))) &&
+        deferIfTargetWait(this.options.store, job.attempt, this.clock)
+      )
+        return;
       if (live && stage !== "wake" && !this.activate(job)) return;
       ({ reason, failure } = deliveryFailure(stage, error));
     } finally {
@@ -1651,6 +1647,14 @@ export class Dispatcher {
       }
       const run = state.runs.find((r) => r.id === job.run.id);
       const owner = state.assignments.find((a) => a.id === job.assignment.id);
+      if (
+        owner &&
+        run &&
+        reviewRunWakeDisposition(state, owner, run) === "paused"
+      ) {
+        deferTargetInTransaction(store, tx, state, job.attempt, this.clock);
+        return false;
+      }
       // The producer was dispatched before asynchronous lock/preparation IO.
       // Recheck its authority immediately before sending: a human stop or a
       // replaced/finished session must not receive this stale bell.
@@ -1843,6 +1847,14 @@ export class Dispatcher {
         run?.status === "dispatched" ||
         run?.status === "running" ||
         (run !== undefined && dispatchRecoveryFailed(state, run));
+      // A lost acknowledgement (including a crashed sender) cannot certify a
+      // failed physical send. Keep attempt-specific evidence for shared review.
+      const unconfirmed =
+        !sent &&
+        run?.kind === "rework" &&
+        (reason === "interrupted_delivery" ||
+          (reason === "wake_failed" &&
+            failure?.category !== "runtime_queue_timeout"));
       if (failed && !recovering)
         this.escalate(
           tx,
@@ -1852,7 +1864,7 @@ export class Dispatcher {
           reason,
           failure,
         );
-      else if (failed && failure && run) {
+      else if (((failed && failure) || unconfirmed) && run) {
         // C-68: keep the real cause on the card without alerting anyone.
         const a = state.assignments.find((x) => x.id === attempt.assignment_id);
         if (a)
@@ -1860,7 +1872,11 @@ export class Dispatcher {
             assignment: a,
             run_id: run.id,
             reason,
-            error: failure,
+            error: failure ?? {
+              category: "interrupted_delivery",
+              message: "Delivery outcome unknown",
+            },
+            ...(unconfirmed ? { unconfirmed_attempt_id: attempt.id } : {}),
             notification_ids: attempt.notification_ids,
             card_id:
               notes[0]?.card_id ??

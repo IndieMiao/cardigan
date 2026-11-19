@@ -9,7 +9,7 @@ import {
   updateWorkItem,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import { listBellAttempts, Store } from "@cardigan/store";
+import { beginDispatchRetry, listBellAttempts, Store } from "@cardigan/store";
 import { expect, onTestFinished, test, vi } from "vitest";
 import {
   first,
@@ -240,5 +240,130 @@ test.each(["backoff", "preparation", "before_send", "superseded"] as const)(
       expect(sent).toBe(1);
     }
     expect(continued?.payload).not.toHaveProperty("rework_work_item_id");
+  },
+);
+
+// Re-create the dispatcher at resume; two independent loops contend for the
+// same durable attempt. Count the external write only behind the final guard.
+test.each([
+  "preparation",
+  "before_send",
+  "superseded",
+  "unknown",
+  "interrupted",
+] as const)(
+  "withdrawn first repair has one owner after restart: %s",
+  async (phase) => {
+    const f = await fixture();
+    let paused = false,
+      writes = 0;
+    const pauseOnce = () => {
+      if (!paused) {
+        paused = true;
+        f.pause();
+      }
+    };
+    const release = vi.fn();
+    const runtime: Runtime = {
+      status: async () => ({
+        ok: true,
+        value: { process: "alive", agent: "idle", observed_seq: 0 },
+      }),
+      wake: async (_ref, _bell, opts) => {
+        if (phase !== "preparation") pauseOnce();
+        if (opts?.before_send && !opts.before_send())
+          return { ok: true, value: { sent: false, withdrawn: true } };
+        writes++;
+        if (phase === "unknown")
+          return {
+            ok: false,
+            error: { code: "runtime_timeout", message: "Lost response" },
+          };
+        return { ok: true, value: { sent: true } };
+      },
+      release,
+      provision: vi.fn(),
+      interrupt: vi.fn(),
+      resume_or_replace: vi.fn(),
+      human_entry: vi.fn(),
+    };
+    const loop = () =>
+      new Dispatcher({
+        store: f.store,
+        clock: f.clock,
+        runtime,
+        startRun: vi.fn(),
+        snapshot: async () => ({ model: "fixture", agent_cli_version: "1" }),
+        beforeWake: async () => {
+          if (phase === "preparation" && !paused) {
+            f.advance(12 * 60_000);
+            pauseOnce();
+          }
+        },
+      });
+    await loop().tick();
+    const run = f
+      .read()
+      .runs.find((r) => r.assignment_id === f.owner && r.kind === "rework");
+    if (!run) throw Error("Missing withdrawn rework");
+    const outcomes = () =>
+      listBellAttempts(f.store.database, f.project, run.id).map(
+        (a) => a.outcome,
+      );
+    expect(writes).toBe(0);
+    expect(outcomes()).toEqual([]);
+    expect(
+      f
+        .read()
+        .events.filter((e) => e.type === "run_dispatch_deferred")
+        .map((e) => e.payload),
+    ).toContainEqual(
+      expect.objectContaining({
+        run_id: run.id,
+        reason: "shared_review_paused",
+        delivery_id: f.target.id,
+        target_sha: f.target.subject.value,
+      }),
+    );
+    f.advance(12 * 60_000);
+    await loop().tick();
+    if (phase === "superseded")
+      f.store.uow.run((tx) =>
+        tx.deliveries.put(f.project, { ...f.target, status: "superseded" }),
+      );
+    f.resume();
+    if (phase === "interrupted") {
+      // Simulate a previous process that committed its claim but did not
+      // persist the IO outcome. Neither its lease nor its expiry proves no IO.
+      f.store.uow.run(() =>
+        beginDispatchRetry(f.store.database, {
+          id: "lost-claim",
+          project_id: f.project,
+          assignment_id: f.owner,
+          run_id: run.id,
+          notification_ids: [],
+          started_at: f.clock.now(),
+          lease_until: new Date(Date.parse(f.clock.now()) + 1000).toISOString(),
+        }),
+      );
+      await loop().tick();
+      expect(outcomes()).toEqual([null]);
+      f.advance(1_001);
+      await loop().tick();
+      f.advance(30_001);
+      await loop().tick();
+      expect(writes).toBe(0);
+      expect(outcomes()).toEqual(["failed"]);
+      expect(release).not.toHaveBeenCalled();
+      return;
+    }
+    await Promise.all([loop().tick(), loop().tick()]);
+    f.advance(30_001);
+    await loop().tick();
+    expect(writes).toBe(phase === "superseded" ? 0 : 1);
+    expect(outcomes()).toEqual(
+      phase === "superseded" ? [] : phase === "unknown" ? ["failed"] : ["sent"],
+    );
+    expect(release).not.toHaveBeenCalled();
   },
 );

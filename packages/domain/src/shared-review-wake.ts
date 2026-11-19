@@ -8,7 +8,7 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
-import { eventsForDecision } from "./event-index.js";
+import { eventsForDecision, eventsOfType } from "./event-index.js";
 import { originalRunTrigger } from "./run-trigger.js";
 import { verificationTarget } from "./verification-activity.js";
 
@@ -128,7 +128,61 @@ export function reviewRunWakeDisposition(
   );
 }
 
-/** If the failed first send is still awaiting its retry/ack, that Run owns the
+/** Bind a host withdrawal to the immutable trigger, not just the current SHA. */
+export function repairWakeTarget(state: CommandState, run: Run) {
+  if (run.kind !== "rework" || run.status !== "dispatched" || run.started_at)
+    return;
+  const e = originalRunTrigger(state, run);
+  const p = e?.payload as Record<string, unknown> | null;
+  const id =
+    e?.type === "review_submitted"
+      ? p?.delivery_id
+      : e?.type === "decision_resolved" && p?.rework_work_item_id
+        ? state.decisions.find((q) => q.id === p.decision_id)
+            ?.review_limit_group?.delivery_id
+        : undefined;
+  return state.deliveries.find((d) => d.id === id);
+}
+
+/** Only a proven pre-send withdrawal can replace the missing first attempt.
+ * In-flight, sent or failed attempts take precedence in the dispatcher. */
+export function resumableReviewWithdrawal(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  const target = repairWakeTarget(state, run);
+  if (
+    !target ||
+    run.assignment_id !== owner.id ||
+    owner.scope !== "work_item" ||
+    target.work_item_id !== owner.work_item_id ||
+    !state.decisions.some(
+      (q) =>
+        q.review_limit_group?.delivery_id === target.id &&
+        q.status === "resolved" &&
+        q.resolution?.option === "raise_limit" &&
+        sharedReworkItem(state, q)?.id === target.work_item_id,
+    ) ||
+    reviewRunWakeDisposition(state, owner, run)
+  )
+    return false;
+  return eventsOfType(state.events, "run_dispatch_deferred").some((e) => {
+    const p = e.payload as Record<string, unknown> | null;
+    return (
+      e.actor.kind === "system" &&
+      e.actor.project_id === state.project_id &&
+      p?.reason === "shared_review_paused" &&
+      p.run_id === run.id &&
+      p.assignment_id === owner.id &&
+      typeof p.attempt_id === "string" &&
+      p.delivery_id === target.id &&
+      p.target_sha === target.subject.value
+    );
+  });
+}
+
+/** An unstarted dispatched repair owns its send, resume, retry or ack. Keep one
  * continuation. Do not also publish a second wake for the resolution. */
 export function dispatchedRepair(
   state: CommandState,

@@ -1,5 +1,12 @@
 import { expect, test } from "vitest";
-import { sharedMustFixes, submitReview, updateWorkItem } from "../index.js";
+import {
+  type Run,
+  refreshRunTargetWait,
+  resumableReviewWithdrawal,
+  sharedMustFixes,
+  submitReview,
+  updateWorkItem,
+} from "../index.js";
 import { parallelDelivery } from "./parallel-review/test-fixtures.js";
 import {
   first,
@@ -274,4 +281,74 @@ test("continuing after a new delivery resumes its reviewers, not the old repair"
     resume_work_items: [id("work_item", 2), id("work_item", 3)],
   });
   expect(event?.payload).not.toHaveProperty("rework_work_item_id");
+});
+
+test("invariant 11: only a host's exact withdrawn repair can resume on the same delivery and SHA", async () => {
+  const f = await fixture(1, [first], 2);
+  f.review(2, [first]);
+  const cause = f.state.events.findLast((e) => e.type === "review_submitted");
+  const producer = f.state.assignments.find(
+    (a) => a.id === id("assignment", 1),
+  );
+  if (!producer || !cause) throw Error("Missing repair");
+  const run: Run = {
+    id: id("run", 99),
+    assignment_id: producer.id,
+    kind: "rework",
+    status: "dispatched",
+    trigger_event_id: cause.id,
+    role_version: producer.role_version,
+    model: "fixture",
+    agent_cli_version: "1",
+    outcome: null,
+    summary: "",
+  };
+  f.review(3, [], f.refs());
+  expect(f.decide(3, "pause").ok).toBe(true);
+  const s = { ...f.state, runs: [...f.state.runs, run] };
+  const receipt = value(
+    refreshRunTargetWait(
+      s,
+      { kind: "system", project_id: s.project_id },
+      { run_id: run.id, withdrawn_attempt_id: "before-send" },
+      f.io,
+    ),
+  ).events.find((e) => e.type === "run_dispatch_deferred");
+  if (!receipt) throw Error("Missing withdrawal");
+  const expected = {
+    reason: "shared_review_paused",
+    attempt_id: "before-send",
+    delivery_id: f.target.id,
+    target_sha: f.target.subject.value,
+  };
+  expect(receipt.payload).toMatchObject(expected);
+  const canResume = (event = receipt) =>
+    resumableReviewWithdrawal(
+      { ...f.state, events: [...f.state.events, event] },
+      producer,
+      run,
+    );
+  expect(canResume()).toBe(false);
+  expect(f.decide(3, "raise_limit").ok).toBe(true);
+  expect(resumableReviewWithdrawal(f.state, producer, run)).toBe(false);
+  expect(canResume()).toBe(true);
+  for (const patch of [
+    { run_id: "other" },
+    { target_sha: "0".repeat(40) },
+    { delivery_id: "older" },
+    { reason: "other" },
+    { attempt_id: null },
+  ])
+    expect(
+      canResume({
+        ...receipt,
+        payload: {
+          ...expected,
+          run_id: run.id,
+          assignment_id: producer.id,
+          ...patch,
+        },
+      }),
+    ).toBe(false);
+  expect(canResume({ ...receipt, actor: actor() })).toBe(false);
 });

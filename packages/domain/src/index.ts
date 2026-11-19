@@ -239,6 +239,8 @@ export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
 export { sharedMustFixes } from "./shared-findings.js";
 export {
+  repairWakeTarget,
+  resumableReviewWithdrawal,
   reviewRunWakeDisposition,
   reviewWakeBlocked,
 } from "./shared-review-wake.js";

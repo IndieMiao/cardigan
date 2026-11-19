@@ -220,7 +220,9 @@ export {
 } from "./run-capacity-config.js";
 export { assignmentResourceKeys } from "./run-resources.js";
 export {
+  deferIfTargetWait,
   deferTargetAttempt,
+  deferTargetInTransaction,
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
