@@ -413,3 +413,22 @@ test("activity client encodes speaker, category, range and paging without mutati
   expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
   expect(init?.body).toBeUndefined();
 });
+
+test("the project activity row explains why a supervisor action was closed", async () => {
+  const reason = "没有监督器运行差异，无需升级";
+  const activity = async (): Promise<ActivityData> => ({
+    ...data,
+    events: [
+      {
+        ...event,
+        card_id: null,
+        card_title: null,
+        type: "human_action_cancelled",
+        actor: { kind: "system" },
+        payload: { source: "supervisor_rechecked", reason },
+      },
+    ],
+  });
+  render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
+  expect((await screen.findByText(reason)).closest("tr")?.hidden).toBe(false);
+});

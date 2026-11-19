@@ -5,6 +5,7 @@ import {
   hasPassedMergeCheck,
   mergeBatches,
   type ProjectId,
+  reconcileSupervisorNotice,
   recordDeployment,
   recordDeploymentStop,
   requestDeploymentAction,
@@ -340,6 +341,28 @@ export function writeDeploymentNotice(
           loadCommandState(tx, "cardigan"),
           { kind: "system", project_id: "cardigan" },
           { key, instructions },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    );
+  });
+}
+
+export function writeSupervisorComparison(
+  store: Store,
+  supervisor: string,
+  main: string,
+  affected: string[],
+) {
+  store.uow.run((tx) => {
+    persistEffect(
+      tx,
+      "cardigan",
+      unwrap(
+        reconcileSupervisorNotice(
+          loadCommandState(tx, "cardigan"),
+          { kind: "system", project_id: "cardigan" },
+          { supervisor, main, affected },
           { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
         ),
       ),

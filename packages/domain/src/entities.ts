@@ -1114,7 +1114,7 @@ export interface HumanAction {
     readonly reason: string;
     readonly by: Author;
     readonly at: Timestamp;
-    readonly source: "human" | "card_cancelled";
+    readonly source: "human" | "card_cancelled" | "supervisor_rechecked";
   };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;
