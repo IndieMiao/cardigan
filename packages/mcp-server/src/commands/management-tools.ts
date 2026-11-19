@@ -359,6 +359,20 @@ const schemas = {
     due: text.optional(),
   },
   create_card: {
+    state_and_save: z
+      .union([
+        z.literal("无写入"),
+        z.strictObject({
+          save_timing: text.describe("保存时机（即时或按组）"),
+          leave_behavior: text.describe("离页行为"),
+          failure_feedback: text.describe("失败提示"),
+          consistency: text.describe("读写一致性做法"),
+        }),
+      ])
+      .optional()
+      .describe(
+        "状态与保存：模板标有 requires_state_and_save 时必填；纯展示只填“无写入”",
+      ),
     work_item_requirements: z
       .record(text, requirements)
       .optional()
@@ -700,6 +714,7 @@ export function managementTools(clock?: Clock) {
                 "No default base branch; register the project baseline or provide base_branch explicitly",
               );
             const {
+              state_and_save,
               depends_on_cards,
               wait_for_dependencies,
               early_start,
@@ -721,6 +736,7 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
+                  ...(state_and_save === undefined ? {} : { state_and_save }),
                   ...(work_item_requirements === undefined
                     ? {}
                     : { work_item_requirements }),

@@ -256,6 +256,27 @@ export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   uiCardTemplate,
 ];
 
+/** Creation-time input for UI implementations and design-first templates (including copies).
+ * This is not a new workflow step or a change to a pinned template definition. */
+export function requiresUiStateAndSave(template: CardTemplate): boolean {
+  const key = template.primary_work_item_key;
+  return (
+    template.work_items.some(
+      (w) =>
+        w.key === key &&
+        w.kind === "produce" &&
+        (w.role_id === "frontend_engineer" || w.role_id === "ui_ux_designer"),
+    ) &&
+    template.work_items.some(
+      (w) =>
+        w.kind === "verify" &&
+        w.required &&
+        w.role_id === "design_director" &&
+        w.target_work_item_key === key,
+    )
+  );
+}
+
 /** Historical cards resolve v1; never silently use a newer definition. */
 export function cardTemplate(
   card: Pick<Card, "template" | "template_version">,

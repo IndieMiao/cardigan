@@ -222,7 +222,18 @@ async function registeredCard(
   state = apply(
     state,
     value(
-      createCard(state, human, { ...params, template_id: template.id }, io),
+      createCard(
+        state,
+        human,
+        {
+          ...params,
+          template_id: template.id,
+          ...(template.id === "ui"
+            ? { state_and_save: "无写入" as const }
+            : {}),
+        },
+        io,
+      ),
     ),
   );
   const card = state.cards[0];
@@ -590,6 +601,74 @@ test.each([1, 2, 3, 4, 5])(
     expect(state.card_templates).toEqual(builtinCardTemplates);
   },
 );
+
+test("UI creation requires an explicit state and save contract without adding a review", () => {
+  const state: CommandState = {
+    ...initial(),
+    project_preferences: [
+      {
+        id: initial().project_id,
+        flow_version: 5,
+        auto_merge_after_minutes: null,
+      },
+    ],
+  };
+  const input = { ...params, template: "ui" };
+  expect(
+    value(listTemplates(state, human)).data.templates.find(
+      (t) => t.id === "ui",
+    ),
+  ).toMatchObject({ requires_state_and_save: true });
+  expect(createCard(state, human, input, ports())).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("纯展示填“无写入”") },
+  });
+  const plan = {
+    save_timing: "按组保存",
+    leave_behavior: "允许离开",
+    failure_feedback: "全站提示一次",
+    consistency: "写后补读",
+  };
+  for (const [key, label] of [
+    ["save_timing", "保存时机"],
+    ["leave_behavior", "离页行为"],
+    ["failure_feedback", "失败提示"],
+    ["consistency", "读写一致性"],
+  ] as const) {
+    expect(
+      createCard(
+        state,
+        human,
+        { ...input, state_and_save: { ...plan, [key]: " \t" } },
+        ports(),
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: { message: `状态与保存：请填写${label}` },
+    });
+  }
+  const create = (state_and_save: typeof plan | "无写入") =>
+    value(createCard(state, human, { ...input, state_and_save }, ports()));
+  const write = create(plan);
+  expect(write.data.state_and_save).toEqual(plan);
+  const criteria = (e: typeof write) =>
+    e.changes
+      .filter((c) => c.collection === "work_items")
+      .map((c) => c.entity.completion_criteria);
+  const [producer, director, reviewer] = criteria(write);
+  for (const criterion of [producer?.at(-1), director?.at(-1)]) {
+    for (const value of Object.values(plan)) expect(criterion).toContain(value);
+  }
+  const display = create("无写入");
+  expect(display.data.state_and_save).toBe("无写入");
+  expect(criteria(display)).toEqual(
+    uiCardTemplate.work_items.map((w) => [
+      ...params.acceptance_criteria,
+      ...w.completion_criteria,
+    ]),
+  );
+  expect(reviewer).toEqual(criteria(display)[2]);
+});
 
 test("ui@1 binds both required reviews to the frontend delivery before system completion", async () => {
   const f = await registeredCard(uiCardTemplate);
