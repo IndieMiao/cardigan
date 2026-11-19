@@ -1,21 +1,28 @@
 import { createHash } from "node:crypto";
+import type { RuntimeTargetBinding } from "@cardigan/domain";
 import {
   type ExecutionConfig,
   registeredRuntimeOf,
 } from "@cardigan/runtime-herdr";
 
 /** The persisted runtime_ref identity; placement must compare against the same encoding. */
-export function runtimeTargetFingerprint(
-  project: string,
-  machine_id: string,
-  generation: string,
-  execution: ExecutionConfig,
-  session: string,
-): string {
-  return createHash("sha256")
+export function runtimeTargetBinding({
+  project_id,
+  machine_id,
+  generation,
+  execution,
+  session,
+}: {
+  project_id: string;
+  machine_id: string;
+  generation: string;
+  execution: ExecutionConfig;
+  session: string;
+}): RuntimeTargetBinding {
+  const fingerprint = createHash("sha256")
     .update(
       JSON.stringify([
-        project,
+        project_id,
         machine_id,
         generation,
         registeredRuntimeOf(execution, session),
@@ -40,4 +47,5 @@ export function runtimeTargetFingerprint(
       ]),
     )
     .digest("hex");
+  return { project_id, machine_id, session, generation, fingerprint };
 }

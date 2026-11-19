@@ -1,9 +1,12 @@
 import { dirname, join } from "node:path";
+import type { Machine } from "@cardigan/domain";
 import {
+  matchesWorkerPlatform,
   onboardWorker,
   parseWorkerOnboarding,
   readOnboardingYaml,
   refreshMachineObservations,
+  runtimeTargetBinding,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
@@ -113,6 +116,9 @@ export async function runWorkerCommand(
       (flags.host !== undefined && flags.host !== config.worker.execution.host)
     )
       throw new WorkerOnboardingError("worker_identity_conflict");
+    const matchesCheckedWorker = (registered: Machine) =>
+      registered.herdr_machine === machine &&
+      matchesWorkerPlatform(registered, config.worker);
     const registration = async (create: boolean) => {
       const store = openStore({ dataDir });
       let exists = false;
@@ -127,14 +133,7 @@ export async function runWorkerCommand(
               .map((m) => ({ project: p.id, machine: m })),
           ),
         );
-        if (
-          machines.some(
-            (m) =>
-              m.machine.os !== config.worker.os ||
-              m.machine.arch !== config.worker.arch ||
-              m.machine.herdr_machine !== machine,
-          )
-        )
+        if (machines.some((m) => !matchesCheckedWorker(m.machine)))
           return false;
         exists = machines.some((m) => m.project === project);
         label = machines[0]?.machine.label ?? machine;
@@ -182,19 +181,32 @@ export async function runWorkerCommand(
     });
     const store = openStore({ dataDir });
     try {
-      const registered = store.uow.read((tx) =>
-        tx.machines.get(project, machine),
-      );
-      if (registered) {
+      const checkedRegistration = () => {
+        const registered = store.uow.read((tx) =>
+          tx.machines.get(project, machine),
+        );
+        return registered && matchesCheckedWorker(registered)
+          ? registered
+          : undefined;
+      };
+      if (checkedRegistration()) {
+        const execution = {
+          ...config.worker.execution,
+          target: runtimeTargetBinding(config.worker),
+        };
         const observations = await refreshMachineObservations({
           store,
           project,
           machine,
           env: io.env,
-          target: () => ({
-            execution: config.worker.execution,
-            machine: registered,
-          }),
+          // The wizard probes its input configuration, not an arbitrary later registration.
+          // Resolve both sides of the observation fence against that same worker.
+          target: () => {
+            const registered = checkedRegistration();
+            if (!registered)
+              throw new WorkerOnboardingError("worker_identity_conflict");
+            return { execution, machine: registered };
+          },
           check: async () => ({
             blockers: passed ? [] : ["worker_check_failed"],
             launch_enabled: false,
@@ -202,6 +214,8 @@ export async function runWorkerCommand(
         });
         if (passed && !observations.health?.available)
           throw new WorkerOnboardingError("worker_capability_check_failed");
+      } else if (passed) {
+        throw new WorkerOnboardingError("worker_identity_conflict");
       }
     } finally {
       store.close();

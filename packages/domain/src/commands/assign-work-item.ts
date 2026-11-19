@@ -19,9 +19,13 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import {
+  continuesConfirmedTakeover,
+  releasedBeforeFirstLaunch,
+} from "./failed-placement.js";
 import { hostOpsExitConfirmation } from "./host-ops-actions.js";
-
 import { type MachineRequirements, selectMachine } from "./machines.js";
+import { canStartWork } from "./workflow.js";
 
 export interface AssignWorkItemParams extends MachineRequirements {
   work_item_id: WorkItemId;
@@ -55,14 +59,6 @@ export function assignWorkItem(
     "validation_failed",
     "Assignment role must match the work item",
   );
-  const role = d.state.roles
-    .filter(
-      (r) =>
-        r.role_id === p.role_id &&
-        (p.role_version === undefined || r.role_version === p.role_version),
-    )
-    .sort((a, b) => b.role_version - a.role_version)[0];
-  ensure(role, "not_found", "Role version was not found");
   const existing = d
     .list("assignments")
     .filter((a) => a.scope === "work_item" && a.work_item_id === item.id);
@@ -72,50 +68,87 @@ export function assignWorkItem(
     "已被替换的验证项不能再指派",
   );
   const previous = existing.find((a) => a.id === item.assignment_id);
-  const recovery =
-    previous?.status === "released"
+  const retry =
+    previous && releasedBeforeFirstLaunch(d, previous, item.card_id)
+      ? previous
+      : undefined;
+  const version = p.role_version ?? retry?.role_version;
+  const role = d.state.roles
+    .filter(
+      (r) =>
+        r.role_id === p.role_id &&
+        (version === undefined || r.role_version === version),
+    )
+    .sort((a, b) => b.role_version - a.role_version)[0];
+  ensure(role, "not_found", "Role version was not found");
+  const confirmedLoss = (a: Assignment | undefined) =>
+    a?.status === "released"
       ? remoteWorkerLosses(d.state.events).find(
           (loss) =>
-            loss.assignment_id === previous.id &&
+            loss.assignment_id === a.id &&
             loss.work_item_id === item.id &&
             remoteWorkerLossReleased(d.state.events, loss.action_id) &&
             hostOpsExitConfirmation(d.state, loss.action_id).status ===
               "confirmed",
         )
       : undefined;
-  if (recovery) {
+  const recovery = confirmedLoss(previous);
+  if (recovery || retry) {
     ensure(
       !existing.some((a) => hostOpsPending(d.state.events, a.id)),
       "illegal_transition",
       "Work item has a pending exit confirmation or host operation",
     );
     ensure(
-      !automaticTarget &&
-        (p.recovery_source === "main" || p.recovery_source === "backup"),
-      "validation_failed",
-      "PM must explicitly choose main or backup for recovery",
-    );
-    ensure(
-      p.machine_id !== undefined && p.machine_id !== previous?.machine_id,
-      "validation_failed",
-      "Recovery requires another explicit machine",
-    );
-    ensure(
-      p.recovery_source !== "backup" || recovery.backup,
-      "validation_failed",
-      "No successful backup is available",
-    );
-    ensure(
       existing.every((a) => a.status === "released"),
       "invariant_violation",
       "Work item still has an active Assignment",
     );
+    if (retry) {
+      ensure(
+        !automaticTarget &&
+          p.machine_id === undefined &&
+          p.recovery_source === undefined &&
+          p.role_id === retry.role_id &&
+          version === retry.role_version,
+        "validation_failed",
+        "首发失败恢复须保留原工作项和角色，不指定机器重新指派",
+      );
+      ensure(
+        canStartWork({ item, work_items: d.list("work_items") }) ||
+          // A confirmed takeover continues the same in-progress work; it cannot start it again.
+          (item.status === "in_progress" &&
+            !item.reported_blocker &&
+            continuesConfirmedTakeover(
+              d,
+              retry,
+              item.card_id,
+              existing,
+              (a) => !!confirmedLoss(a),
+            )),
+        "illegal_transition",
+        "工作项尚不可启动，不能重新选机",
+      );
+    } else if (recovery) {
+      ensure(
+        !automaticTarget &&
+          (p.recovery_source === "main" || p.recovery_source === "backup"),
+        "validation_failed",
+        "PM must explicitly choose main or backup for recovery",
+      );
+      ensure(
+        p.machine_id !== undefined && p.machine_id !== previous?.machine_id,
+        "validation_failed",
+        "Recovery requires another explicit machine",
+      );
+    }
   } else if (existing.length || item.assignment_id) {
     const current = previous;
     ensure(
       existing.every(
         (a) =>
           a.id === current?.id ||
+          releasedBeforeFirstLaunch(d, a, item.card_id) ||
           (a.status === "released" &&
             remoteWorkerLosses(d.state.events).some(
               (loss) =>
@@ -171,10 +204,23 @@ export function assignWorkItem(
     "validation_failed",
     "Recovery requires a released remote loss",
   );
+  // A pre-launch retry changes the machine, not an already confirmed recovery source.
+  const source = retry?.recovery?.source ?? p.recovery_source ?? "main";
+  const backup = retry ? retry.recovery?.backup : recovery?.backup;
+  ensure(
+    source !== "backup" || backup,
+    "validation_failed",
+    "No successful backup is available",
+  );
   const employee = selectEmployee(
     d,
     item,
-    p.employee_id ?? (recovery ? previous?.employee_id : undefined),
+    p.employee_id ?? (recovery || retry ? previous?.employee_id : undefined),
+  );
+  ensure(
+    !retry || retry.employee_id === employee?.id,
+    "validation_failed",
+    "首发失败恢复须保留原员工",
   );
   const selection =
     automaticTarget && employee
@@ -195,7 +241,11 @@ export function assignWorkItem(
     item,
     required,
     role.worktree,
-    p.machine_id,
+    {
+      failedMachine: retry?.machine_id,
+      explicit: p.machine_id,
+      profile: employee?.launch_profile_ref ?? role.launch_profile_ref,
+    },
   );
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
@@ -210,14 +260,12 @@ export function assignWorkItem(
     runtime_state: "not_provisioned" as const,
     machine_id,
     runtime_ref: null,
-    ...(recovery
+    ...(previous && (retry || recovery)
       ? {
           recovery: {
-            source: p.recovery_source as "main" | "backup",
-            previous_assignment_id: recovery.assignment_id,
-            ...(p.recovery_source === "backup"
-              ? { backup: recovery.backup }
-              : {}),
+            previous_assignment_id: previous.id,
+            source,
+            ...(source === "backup" && backup ? { backup } : {}),
           },
         }
       : {}),

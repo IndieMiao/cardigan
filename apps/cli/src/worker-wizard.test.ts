@@ -10,7 +10,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toolNames } from "@cardigan/domain";
-import { WORKER_PROBES } from "@cardigan/host";
+import {
+  type CapabilityProbe,
+  configureMachinePlacement,
+  loadRunCapacityConfig,
+  parseWorkerOnboarding,
+  WORKER_PROBES,
+} from "@cardigan/host";
 import { readMachineObservations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
@@ -19,6 +25,7 @@ import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { runWorkerCommand } from "./worker-wizard.js";
 
+const capabilityProbe = vi.hoisted(() => vi.fn<CapabilityProbe>());
 // Onboarding fixtures contain example SSH paths; never contact those endpoints.
 vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
@@ -29,7 +36,7 @@ vi.mock("@cardigan/host", async (importOriginal) => {
     ) =>
       host.refreshMachineObservations({
         ...options,
-        probe: async () => ({ ok: false, output: "" }),
+        probe: capabilityProbe,
       }),
   };
 });
@@ -38,6 +45,7 @@ let root: string, configRoot: string, io: CliIo, lines: string[];
 let file: string;
 const args = ["--project", "example", "--machine", "worker-a"];
 beforeEach(() => {
+  capabilityProbe.mockReset().mockResolvedValue({ ok: false, output: "" });
   root = mkdtempSync(join(tmpdir(), "worker-cli-"));
   configRoot = join(root, "config");
   mkdirSync(configRoot, { mode: 0o700 });
@@ -375,3 +383,92 @@ test("invalid config and host override fail closed without exposing content", as
   expect(probe).not.toHaveBeenCalled();
   expect(machines().some((m) => m.id === "worker-a")).toBe(false);
 });
+
+test.each(["wizard", "capability"] as const)(
+  "registry change during %s probes cannot certify a different platform",
+  async (phase) => {
+    await bootstrap();
+    const project = "example",
+      machine = "worker-a",
+      dataDir = join(root, "data");
+    const version = { ok: true, output: "codex-cli 1.2.3" };
+    capabilityProbe.mockImplementation(async (_e, _os, command) =>
+      command[0] === "codex" ? version : { ok: false, output: "" },
+    );
+    expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+      0,
+    );
+    const input = parse(readFileSync(file, "utf8"));
+    input.runtime.machines[0].projects[0].allow_remote_launch = true;
+    const enable = () =>
+      writeFileSync(
+        join(configRoot, "runtime-workers.yaml"),
+        stringify(parseWorkerOnboarding(input, dataDir).runtime),
+        { mode: 0o600 },
+      );
+    enable();
+    const store = Store.open({ dataDir });
+    try {
+      configureMachinePlacement(
+        store,
+        dataDir,
+        io.env,
+        await loadRunCapacityConfig({ env: io.env }),
+        () => undefined,
+      );
+      const placement = () =>
+        store.uow.run((tx) =>
+          tx
+            .read_machine_placement?.(project, new Date().toISOString())
+            .machines.get(machine),
+        );
+      expect(placement()).toMatchObject({
+        remote_binding: "allowed",
+        observation_target_matches: true,
+        capabilities: [{ key: "harness.codex", version: "1.2.3" }],
+      });
+      const changeRegistry = async () => {
+        expect(
+          await main(
+            [
+              "machine",
+              "update",
+              machine,
+              "--project",
+              project,
+              "--arch",
+              "arm64",
+            ],
+            io,
+          ),
+        ).toBe(0);
+      };
+      capabilityProbe
+        .mockClear()
+        .mockImplementation(async (_e, _os, command) => {
+          if (command[0] !== "codex") return { ok: false, output: "" };
+          if (phase === "capability") await changeRegistry();
+          return version; // Result from the x64 worker, even when the registry now says arm64.
+        });
+      await expect(
+        runWorkerCommand(["check", ...args], io, async (step) => {
+          if (phase === "wizard" && step === "mcp") await changeRegistry();
+          return true;
+        }),
+      ).rejects.toThrow(
+        phase === "wizard"
+          ? "worker_identity_conflict"
+          : "worker_capability_check_failed",
+      );
+      if (phase === "wizard") expect(capabilityProbe).not.toHaveBeenCalled();
+      input.runtime.machines[0].arch = "arm64";
+      enable();
+      expect(placement()).toMatchObject({
+        remote_binding: "allowed",
+        observation_target_matches: false,
+      });
+    } finally {
+      store.close();
+    }
+  },
+);

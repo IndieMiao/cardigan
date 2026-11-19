@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
@@ -19,6 +19,17 @@ import {
 } from "./machine-capability-probe.js";
 
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
+/** Capability evidence identifies the probed platform as well as the private runtime binding.
+ * Keep this separate from the persisted runtime_ref fingerprint used to address live terminals. */
+export function observationFingerprint(
+  binding: string | undefined,
+  platform: Pick<Machine, "os" | "arch">,
+) {
+  if (!binding) return undefined;
+  return createHash("sha256")
+    .update(JSON.stringify([binding, platform.os, platform.arch]))
+    .digest("hex");
+}
 interface ObservationTarget {
   readonly execution: ExecutionConfig;
   readonly machine: Machine;
@@ -55,6 +66,7 @@ export async function refreshMachineObservations(
     launch_enabled: false,
   };
   let capabilities: MachineCapability[] = [];
+  let targetFingerprint: string | undefined;
   try {
     const target = await options.target();
     const binding = JSON.stringify([
@@ -122,6 +134,11 @@ export async function refreshMachineObservations(
       ])
     )
       throw new Error("Machine target changed");
+    if (health.status === "passed")
+      targetFingerprint = observationFingerprint(
+        target.execution.target?.fingerprint,
+        target.machine,
+      );
   } catch {
     // Do not echo configuration, command output, SSH parameters, or exceptions.
     health = {
@@ -140,6 +157,7 @@ export async function refreshMachineObservations(
     observation,
     health,
     capabilities,
+    targetFingerprint,
   );
   return readMachineObservations(store, project, machine, now());
 }

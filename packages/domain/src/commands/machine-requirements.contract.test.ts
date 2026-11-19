@@ -19,6 +19,7 @@ import {
   fixture,
   human,
   id,
+  placement,
   ports,
   value,
 } from "./test-fixtures.js";
@@ -323,7 +324,7 @@ test("requirements filter new assignments but never move or mutate an existing a
   state = {
     ...state,
     read_machine_placement: () =>
-      new Map([
+      placement([
         [
           "local",
           {

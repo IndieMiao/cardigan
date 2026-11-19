@@ -299,6 +299,7 @@ async function assembleServer(
     config.dataDir,
     { ...runtimeEnv },
     runCapacity,
+    () => options.dispatcher?.upstream,
   );
   for (const message of [...mergeGate.errors, ...runCapacity.errors])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(

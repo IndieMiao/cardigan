@@ -22,6 +22,12 @@ function fresh(at: string, now: string): boolean {
   const age = Date.parse(now) - Date.parse(at);
   return age >= 0 && age <= MACHINE_OBSERVATION_TTL_MS;
 }
+function decodeHealth(doc: string) {
+  const { target_fingerprint, ...health } = JSON.parse(doc) as MachineHealth & {
+    target_fingerprint?: string;
+  };
+  return { fingerprint: target_fingerprint, health };
+}
 export function readMachineObservations(
   store: Store,
   project: string,
@@ -39,15 +45,15 @@ export function readMachineObservationsInTransaction(
   project: string,
   machine: string,
   now: string,
+  expectedFingerprint?: string,
 ) {
   const row = store.database
     .prepare(
       "SELECT observation_id, doc FROM machine_health WHERE project_id = ? AND machine_id = ?",
     )
     .get(project, machine);
-  const health = row
-    ? (JSON.parse(String(row.doc)) as MachineHealth)
-    : undefined;
+  const observed = row ? decodeHealth(String(row.doc)) : undefined;
+  const health = observed?.health;
   const capabilities = store.database
     .prepare(
       "SELECT key, version, verified_at, evidence_ref FROM machine_capabilities WHERE project_id = ? AND machine_id = ? ORDER BY key",
@@ -63,6 +69,12 @@ export function readMachineObservationsInTransaction(
       return { ...capability, available: fresh(capability.verified_at, now) };
     });
   return {
+    ...(expectedFingerprint
+      ? {
+          observation_target_matches:
+            expectedFingerprint === observed?.fingerprint,
+        }
+      : {}),
     capabilities,
     health: health
       ? {
@@ -120,14 +132,20 @@ export function completeMachineObservation(
   observation: string,
   health: MachineHealth,
   capabilities: readonly MachineCapability[],
+  targetFingerprint?: string,
 ): boolean {
   systemOnly(actor, project);
   return store.uow.run(() => {
     const updated = store.database
       .prepare(
-        "UPDATE machine_health SET doc = ? WHERE project_id = ? AND machine_id = ? AND observation_id = ?",
+        "UPDATE machine_health SET doc = ? WHERE project_id = ? AND machine_id = ? AND observation_id = ? AND json_extract(doc, '$.status') = 'checking'",
       )
-      .run(JSON.stringify(health), project, machine, observation);
+      .run(
+        JSON.stringify({ ...health, target_fingerprint: targetFingerprint }),
+        project,
+        machine,
+        observation,
+      );
     if (updated.changes !== 1) return false;
     const insert = store.database.prepare(
       "INSERT INTO machine_capabilities VALUES (?, ?, ?, ?, ?, ?)",

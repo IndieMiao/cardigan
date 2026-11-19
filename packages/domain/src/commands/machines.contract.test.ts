@@ -8,6 +8,7 @@ import {
   type Machine,
   type MachinePlacement,
   queueRun,
+  releaseAssignment,
   saveMachine,
 } from "../index.js";
 import {
@@ -19,7 +20,10 @@ import {
   id,
   machine,
   now,
+  placement,
   ports,
+  role,
+  run,
   subject,
   value,
 } from "./test-fixtures.js";
@@ -37,8 +41,12 @@ const remote: Machine = {
 };
 const healthy: MachinePlacement = {
   remote_binding: "allowed",
+  observation_target_matches: true,
   health: { status: "passed", available: true },
-  capabilities: [{ key: "godot", version: "4.10", available: true }],
+  capabilities: [
+    { key: "harness.codex", version: "1.2.3", available: true },
+    { key: "godot", version: "4.10", available: true },
+  ],
   limit: 4,
   occupied: 0,
 };
@@ -48,7 +56,7 @@ function state(): CommandState {
     ...s,
     roles: s.roles.map((r) => ({ ...r, worktree: "none" })),
     read_machine_placement: () =>
-      new Map([
+      placement([
         ["local", healthy],
         [remote.id, healthy],
       ]),
@@ -138,7 +146,7 @@ test("producer placement orders by same-card producer worktree, free fraction, p
   const busy = {
     ...tie,
     read_machine_placement: () =>
-      new Map([
+      placement([
         [remote.id, { ...healthy, limit: 8, occupied: 6 }],
         ["local", { ...healthy, limit: 2, occupied: 1 }],
       ]),
@@ -190,7 +198,7 @@ function preferRemote(): CommandState {
     ...state(),
     machines: [machine(), remote],
     read_machine_placement: () =>
-      new Map([
+      placement([
         ["local", { ...healthy, occupied: 3 }],
         [remote.id, healthy],
       ]),
@@ -262,7 +270,7 @@ test.each(["write", "readonly", undefined] as const)(
       })),
       machines: [machine(), remote, { ...remote, id: "worker-b" }],
       read_machine_placement: () =>
-        new Map([
+        placement([
           ["local", { ...healthy, occupied: 3 }],
           [remote.id, ready],
           ["worker-b", healthy],
@@ -296,7 +304,7 @@ test.each(["write", "readonly", undefined] as const)(
     });
     const bound = apply(target, selected);
     const repeated = value(
-      select({ ...bound, read_machine_placement: () => new Map() }),
+      select({ ...bound, read_machine_placement: () => placement() }),
     );
     expect(repeated.data).toEqual(selected.data);
     expect(repeated.events).toEqual([]);
@@ -340,7 +348,7 @@ test("selection records sorted scores and exclusions, never redeems an unverifie
       requirements: { capabilities: ["godot=4.10.0"] },
     })),
     read_machine_placement: () =>
-      new Map([
+      placement([
         [remote.id, healthy],
         ["local", { ...healthy, capabilities: [] }],
         [
@@ -377,7 +385,7 @@ test("selection records sorted scores and exclusions, never redeems an unverifie
   const tooOld = {
     ...multi,
     read_machine_placement: () =>
-      new Map([
+      placement([
         [
           remote.id,
           {
@@ -425,7 +433,7 @@ test.each([
       roles: base.roles.map((r) => ({ ...r, worktree: "write" })),
       machines: [remote],
       read_machine_placement: () =>
-        new Map([
+        placement([
           [
             remote.id,
             { ...healthy, worktree_preparation: "verified", ...patch },
@@ -513,7 +521,7 @@ test.each(["missing_tags", "prefer_control", "specific_capability"])(
         },
       ],
       read_machine_placement: () =>
-        new Map([
+        placement([
           ["local", { ...healthy, occupied: 3 }],
           [remote.id, healthy],
         ]),
@@ -563,7 +571,7 @@ test("an implicit interactive request hands an actionable gap to Ops once; expli
   const s = {
     ...state(),
     machines: [remote],
-    read_machine_placement: () => new Map(),
+    read_machine_placement: () => placement(),
   };
   const params = { work_item_id: id("work_item", 1), role_id: "coder" };
   const effect = value(assignOrDefer(s, human, params, ports()));
@@ -597,7 +605,7 @@ test("MC-4 ranks by the tightest required slot without moving an existing assign
     machines: [machine(), remote],
     roles: s.roles.map((r) => ({ ...r, required_capabilities: ["godot>=4"] })),
     read_machine_placement: () =>
-      new Map([
+      placement([
         [
           "local",
           {
@@ -631,7 +639,150 @@ test("MC-4 ranks by the tightest required slot without moving an existing assign
   });
   const bound = apply(multi, selected);
   expect(
-    value(select({ ...bound, read_machine_placement: () => new Map() })).data
+    value(select({ ...bound, read_machine_placement: () => placement() })).data
       .machine_id,
   ).toBe(remote.id);
+});
+
+test.each([
+  [undefined, [], "启动配置未知"],
+  ["claude-code", [], "harness.claude-code：未验证"],
+  [
+    "claude-code",
+    [{ available: false, version: "2.0" }],
+    "harness.claude-code：已过期",
+  ],
+  [
+    "claude-code",
+    [{ available: true, version: null }],
+    "harness.claude-code：缺少版本",
+  ],
+] as const)(
+  "remote launch requires fresh version evidence; local keeps registry rules (%s, %j)",
+  (harness, proof, reason) => {
+    const worker = {
+      ...healthy,
+      capabilities: [
+        ...healthy.capabilities,
+        ...proof.map((c) => ({ ...c, key: "harness.claude-code" })),
+      ],
+    };
+    const effect = value(
+      select({
+        ...preferRemote(),
+        read_machine_placement: () => ({
+          harness,
+          machines: new Map([[remote.id, worker]]),
+        }),
+      }),
+    );
+    expect(effect.data.machine_id).toBe("local");
+    expect(effect.events.at(-1)).toMatchObject({
+      type: "machine_selected",
+      payload: {
+        excluded: [
+          { machine_id: remote.id, reasons: [expect.stringContaining(reason)] },
+        ],
+      },
+    });
+  },
+);
+
+test("only a released pre-Run snapshot failure can reselect a different machine for the same item", () => {
+  const io = ports();
+  const base = preferRemote();
+  const ops = {
+    ...actor(4, "pm"),
+    allowed_tools: ["release_assignment", "assign"] as const,
+  };
+  const s: CommandState = {
+    ...base,
+    assignments: base.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: "ops" } : a,
+    ),
+    work_items: base.work_items.map((w) =>
+      w.kind === "produce" ? { ...w, status: "todo" } : w,
+    ),
+  };
+  const params = { role_id: "coder", work_item_id: id("work_item", 1) };
+  const first = value(assign(s, human, params, io));
+  expect(first.data.machine_id).toBe(remote.id);
+  const before = apply(s, first),
+    card = id("card", 1);
+  const failure = {
+    id: io.ids.nextEventId(),
+    seq: io.ids.nextEventSequence(s.project_id, card),
+    card_id: card,
+    created_at: now,
+    type: "bell_delivery_failed",
+    actor: { kind: "system" as const, project_id: s.project_id },
+    payload: { assignment_id: first.data.id, reason: "snapshot_unavailable" },
+  };
+  const failed = { ...before, events: [...before.events, failure] };
+  expect(value(assign(failed, human, params, io)).data.id).toBe(first.data.id);
+  const release = value(
+    releaseAssignment(failed, ops, { assignment_id: first.data.id }, io),
+  );
+  const released = apply(failed, release);
+  const reassign = (state: CommandState) => assign(state, ops, params, io);
+  for (const events of [
+    before.events,
+    [...before.events, ...release.events],
+    [...before.events, { ...failure, actor: human }, ...release.events],
+    [
+      ...released.events.filter((e) => e.id !== failure.id),
+      { ...failure, seq: 99 },
+    ],
+  ]) {
+    expect(reassign({ ...released, events }).ok).toBe(false);
+  }
+  expect(
+    reassign({
+      ...released,
+      runs: [{ ...run(), assignment_id: first.data.id, status: "completed" }],
+    }).ok,
+  ).toBe(false);
+  expect(
+    assign(released, human, { ...params, machine_id: "local" }, io).ok,
+  ).toBe(false);
+  expect(
+    value(assignOrDefer({ ...released, machines: [remote] }, human, params, io))
+      .token_requests,
+  ).toEqual([]);
+  const recovered = value(
+    reassign({
+      ...released,
+      roles: [...released.roles, { ...role("coder"), role_version: 2 }],
+    }),
+  );
+  expect(recovered.data).toMatchObject({
+    machine_id: "local",
+    work_item_id: params.work_item_id,
+    role_version: 1,
+    recovery: { previous_assignment_id: first.data.id, source: "main" },
+  });
+  expect(recovered.data.id).not.toBe(first.data.id);
+  expect(recovered.events.at(-1)).toMatchObject({
+    type: "machine_selected",
+    payload: {
+      excluded: [
+        {
+          machine_id: remote.id,
+          reasons: [expect.stringContaining("上次首发")],
+        },
+      ],
+    },
+  });
+  const next = apply(released, recovered);
+  expect(next.assignments.find((a) => a.id === first.data.id)).toMatchObject({
+    status: "released",
+    machine_id: remote.id,
+  });
+  expect(
+    next.work_items.find((w) => w.id === params.work_item_id)?.assignment_id,
+  ).toBe(recovered.data.id);
+  expect(
+    next.work_items.find((w) => w.kind === "verify")?.target_work_item_id,
+  ).toBe(params.work_item_id);
+  expect(value(reassign(next)).events).toEqual([]);
 });

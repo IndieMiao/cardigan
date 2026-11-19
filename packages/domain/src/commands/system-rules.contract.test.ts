@@ -24,6 +24,7 @@ import {
   human,
   id,
   now,
+  placement,
   ports,
   role,
   run,
@@ -880,13 +881,16 @@ test("C-300 ready assignment pins the unique tagged machine and audits it withou
   const s: CommandState = {
     ...initial,
     read_machine_placement: () =>
-      new Map([
+      placement([
         [
           "worker-a",
           {
             remote_binding: "allowed",
-            health: { status: "passed", available: true, launch_enabled: true },
-            capabilities: [],
+            observation_target_matches: true,
+            health: { status: "passed", available: true },
+            capabilities: [
+              { key: "harness.codex", version: "1.2.3", available: true },
+            ],
             limit: 4,
             occupied: 0,
           },

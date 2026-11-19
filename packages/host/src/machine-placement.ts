@@ -1,10 +1,13 @@
 import type { MachinePlacement } from "@cardigan/domain";
+import type { Harness, LaunchConfig } from "@cardigan/roles";
 import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { observationFingerprint } from "./machine-capabilities.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
   matchesWorkerPlatform,
@@ -19,11 +22,13 @@ export function configureMachinePlacement(
   dataDir: string,
   env: NodeJS.ProcessEnv,
   limits: RunCapacityConfiguration,
+  launchConfig: () => LaunchConfig | undefined,
 ) {
-  store.setMachinePlacementReader((tx, project, now) => {
+  store.setMachinePlacementReader((tx, project, now, profile) => {
     const machines = tx.machines.list(project);
     const allowed = new Map<string, RuntimeWorker>();
-    if (machines.some((m) => m.id !== "local")) {
+    const hasRemote = machines.some((m) => m.id !== "local");
+    if (hasRemote) {
       try {
         for (const worker of loadRuntimeWorkers(
           dataDir,
@@ -43,33 +48,55 @@ export function configureMachinePlacement(
       tx,
       limits.resourcesForMachine,
     );
-    return new Map(
-      machines.map((machine) => {
-        const { id } = machine;
-        const worker = allowed.get(id);
-        return [
-          id,
-          {
-            ...readMachineObservationsInTransaction(store, project, id, now),
-            ...(worker && id !== "local" && preparation
-              ? { worktree_preparation: preparation(worker) }
-              : {}),
-            remote_binding: !worker
-              ? "disabled"
-              : matchesWorkerPlatform(machine, worker)
-                ? "allowed"
-                : "platform_mismatch",
-            limit: effectiveRunLimit(
-              store,
-              id,
-              limits.forMachine,
-              limits.maxForMachine,
-            ),
-            occupied: occupied.get(id) ?? 0,
-            resources: resourcesForMachine(id),
-          } satisfies MachinePlacement,
-        ];
-      }),
-    );
+    let harness: Harness | undefined;
+    if (hasRemote && profile) {
+      try {
+        harness = launchConfig()?.profiles[profile]?.harness;
+      } catch {
+        // Invalid private launch configuration must not authorize remote placement.
+      }
+    }
+    return {
+      harness,
+      machines: new Map(
+        machines.map((machine) => {
+          const { id } = machine;
+          const worker = allowed.get(id);
+          return [
+            id,
+            {
+              ...readMachineObservationsInTransaction(
+                store,
+                project,
+                id,
+                now,
+                worker && id !== "local"
+                  ? observationFingerprint(
+                      runtimeTargetBinding(worker).fingerprint,
+                      machine,
+                    )
+                  : undefined,
+              ),
+              ...(worker && id !== "local" && preparation
+                ? { worktree_preparation: preparation(worker) }
+                : {}),
+              remote_binding: !worker
+                ? "disabled"
+                : matchesWorkerPlatform(machine, worker)
+                  ? "allowed"
+                  : "platform_mismatch",
+              limit: effectiveRunLimit(
+                store,
+                id,
+                limits.forMachine,
+                limits.maxForMachine,
+              ),
+              occupied: occupied.get(id) ?? 0,
+              resources: resourcesForMachine(id),
+            } satisfies MachinePlacement,
+          ];
+        }),
+      ),
+    };
   });
 }

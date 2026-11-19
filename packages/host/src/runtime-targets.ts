@@ -27,7 +27,7 @@ import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
-import { runtimeTargetFingerprint } from "./runtime-target-fingerprint.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
   matchesWorkerPlatform,
@@ -170,25 +170,18 @@ export class RuntimeTargets implements Runtime {
       this.options.env?.CARDIGAN_HC_SESSION ??
       "cardigan";
     const generation = worker?.generation ?? "legacy";
-    const fingerprint = runtimeTargetFingerprint(
-      project,
-      machine_id,
-      generation,
-      execution,
-      session,
-    );
     return {
       machine,
       session,
       execution: {
         ...execution,
-        target: {
+        target: runtimeTargetBinding({
           project_id: project,
           machine_id,
           session,
           generation,
-          fingerprint,
-        },
+          execution,
+        }),
       },
     };
   }

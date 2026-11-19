@@ -48,8 +48,13 @@ export function selectMachine(
   item: WorkItem,
   required: WorkItemRequirements,
   worktree: RoleWorktree | undefined,
-  explicit?: string,
+  options: {
+    explicit?: string | undefined;
+    profile?: string | undefined;
+    failedMachine?: string | undefined;
+  },
 ) {
+  const { explicit } = options;
   const machines = d
     .list("machines")
     .filter((m) => explicit === undefined || m.id === explicit)
@@ -79,7 +84,11 @@ export function selectMachine(
     );
     return { machine_id: explicit };
   }
-  const facts = d.state.read_machine_placement?.(d.state.project_id, d.now);
+  const facts = d.state.read_machine_placement?.(
+    d.state.project_id,
+    d.now,
+    options.profile,
+  );
   const constraints = (required.capabilities ?? []).map((raw) => ({
     raw,
     ...unwrap(parseCapabilityRequirement(raw)),
@@ -111,9 +120,28 @@ export function selectMachine(
     excluded = [];
   for (const machine of machines) {
     const machine_id = machine.id,
-      f = facts?.get(machine_id),
+      f = facts?.machines.get(machine_id),
       reasons = registryReasons(machine);
     if (machine_id !== "local") {
+      if (machine_id === options.failedMachine)
+        reasons.push("上次首发快照失败，恢复时需要另一台机器");
+      if (!facts?.harness) reasons.push("启动配置未知，无法确定所需启动器");
+      else {
+        const key = `harness.${facts.harness}`;
+        const cap = f?.capabilities.find((c) => c.key === key);
+        if (
+          cap &&
+          f?.remote_binding === "allowed" &&
+          !f.observation_target_matches
+        )
+          reasons.push(
+            `${key}：缺少与当前工作机绑定和平台匹配的检查，请重新检查`,
+          );
+        else if (!cap?.available || !cap.version)
+          reasons.push(
+            `${key}：${!cap ? "未验证" : !cap.available ? "已过期" : "缺少版本"}`,
+          );
+      }
       if (worktree === "write" || worktree === "readonly") {
         const proof = f?.worktree_preparation;
         if (proof !== "verified") {
