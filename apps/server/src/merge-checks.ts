@@ -40,6 +40,7 @@ import type {
   PreparedMerge,
 } from "@cardigan/git-service";
 import {
+  abandonedGithubRequest,
   acquireMergeCheckCapacity,
   type CandidateTestSnapshot,
   CHECKOUT_LIMITS,
@@ -73,6 +74,7 @@ import {
   mergeCheckCapacityAvailable,
   nextMaintenanceRetry,
   type ProjectMergeGate,
+  requestChecks,
   runCheckExecutor,
   type runInTemporaryCheckout,
   SshCheckExecutor,
@@ -109,41 +111,6 @@ import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
-function requestChecks(
-  settings: Settings,
-  scope?: MergeCheckView["scope"],
-  level: "card" | "batch" = "card",
-): CheckRequest["checks"] {
-  return settings.checks
-    .filter(
-      (step) =>
-        !settings.queue ||
-        (step.name === "e2e"
-          ? level === "batch"
-          : !step.tiers || step.tiers.includes(level)) ||
-        settings.executor?.type === "github",
-    )
-    .map((step) => ({
-      name: step.name,
-      run: step.run,
-      ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
-      ...(settings.queue && level === "card" && step.name === "e2e"
-        ? { skipReason: "card_tier" as const }
-        : {}),
-      ...(scope?.kind === "docs_only" &&
-      step.skipDocsOnly &&
-      !(settings.queue && level === "card" && step.name === "e2e")
-        ? { skipReason: "docs_only" as const }
-        : {}),
-      ...(step.scope === "affected"
-        ? {
-            affectedPaths:
-              scope?.kind === "affected" ? (scope.packages ?? []) : [],
-          }
-        : {}),
-    }));
-}
-
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
@@ -1248,22 +1215,15 @@ export class MergeChecks {
       return;
     const config = this.githubMaintenanceConfig(intent);
     const project = this.options.git.projectOf(intent.project as ProjectId);
-    const original = this.options.store.uow.read(
-      (tx) =>
-        journal.candidatePrecheck(tx, intent) ??
-        journal.candidateCheck(tx, intent),
+    const settings = this.options.configuration.forProject(intent.project);
+    const request = abandonedGithubRequest(
+      this.options.store,
+      journal,
+      intent,
+      settings,
     );
     const ancestor = this.options.git.isBaselineAncestor;
-    if (
-      !config ||
-      !project ||
-      !original?.candidate_sha ||
-      !original.tree_sha ||
-      !ancestor
-    )
-      return;
-    const author = "assignment_id" in original;
-    const settings = this.options.configuration.forProject(intent.project);
+    if (!config || !project || !request || !ancestor) return;
     const { client, poller } = this.githubProvider(config);
     const executor = new GithubCheckExecutor({
       config,
@@ -1273,7 +1233,7 @@ export class MergeChecks {
       now: () => Date.parse(this.options.clock.now()),
       context: () => ({
         card: intent.card,
-        delivery: author ? original.assignment_id : original.completion_id,
+        delivery: request.delivery,
         baselineBranch: project.base_branch,
       }),
       push: async () => {
@@ -1285,24 +1245,7 @@ export class MergeChecks {
     const work = executor
       .recoverAbandoned(
         {
-          kind: author ? "precheck" : "merge_check",
-          ...(!author &&
-          (original.level === "card" || original.level === "batch")
-            ? { mergeTier: original.level }
-            : {}),
-          project: intent.project,
-          attempt: intent.attempt,
-          env: settings.status === "enabled" ? settings.env : {},
-          sha: original.candidate_sha,
-          tree: original.tree_sha,
-          checks:
-            settings.status === "enabled"
-              ? requestChecks(
-                  settings,
-                  author ? undefined : original.scope,
-                  !author && original.level === "batch" ? "batch" : "card",
-                )
-              : [],
+          ...request.check,
           signal: this.abort.signal,
         },
         intent,

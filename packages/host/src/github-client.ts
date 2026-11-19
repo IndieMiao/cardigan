@@ -353,10 +353,11 @@ export class GithubClient {
     branch: string,
     since: string,
     signal?: AbortSignal,
+    onObserved?: (page: readonly unknown[]) => void,
   ): Promise<readonly GithubRun[]> {
     try {
       return await githubDeadline(
-        (deadline) => this.discover(branch, since, deadline),
+        (deadline) => this.discover(branch, since, deadline, onObserved),
         signal,
       );
     } catch (error) {
@@ -368,7 +369,12 @@ export class GithubClient {
       throw transportFailure("recovery_incomplete", error);
     }
   }
-  private async discover(branch: string, since: string, signal: AbortSignal) {
+  private async discover(
+    branch: string,
+    since: string,
+    signal: AbortSignal,
+    onObserved?: (page: readonly unknown[]) => void,
+  ) {
     // GitHub's created filter has second precision. Fix the upper bound once;
     // subdivision must not extend the recovery interval while it is scanned.
     const from = Math.floor(Date.parse(since) / 1000);
@@ -413,6 +419,10 @@ export class GithubClient {
         );
         if (signal?.aborted)
           throw new GithubExecutorError("recovery_incomplete");
+        // A bad count, Link, sibling or time window invalidates this enumeration, not
+        // the fact that GitHub returned an identifiable candidate on this very page.
+        // These are only hints. The unchanged validation below gates every successful list.
+        if (Array.isArray(body.workflow_runs)) onObserved?.(body.workflow_runs);
         if (
           !Array.isArray(body.workflow_runs) ||
           !Number.isSafeInteger(body.total_count) ||

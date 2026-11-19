@@ -1,6 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { PushResult } from "@cardigan/git-transport";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -15,12 +23,17 @@ import {
 import { GithubCheckPoller } from "./github-check-poller.js";
 import {
   GithubClient,
+  GithubExecutorError,
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
-import { GithubDispatchJournal } from "./github-dispatch-journal.js";
+import {
+  type GithubDispatchIntent,
+  GithubDispatchJournal,
+} from "./github-dispatch-journal.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import { executionOwner } from "./process-identity.js";
 
 const stores: Store[] = [],
   roots: string[] = [];
@@ -350,7 +363,8 @@ test("D3: a 204 response uses the exact name and time window, ambiguity fails cl
   expect(f.client.runs).toHaveBeenCalledWith(
     "main",
     trusted.created_at,
-    undefined,
+    expect.any(AbortSignal),
+    expect.any(Function),
   );
   const g = setup();
   g.client.dispatch.mockResolvedValue(undefined);
@@ -1543,6 +1557,7 @@ test.each([
     const result = executor.recoverAbandoned(f.request, intent);
     if (mode === "valid") {
       const handle = await result;
+      if (!handle) throw new Error("Missing recovered run");
       expect(f.lifecycle.cancel).toHaveBeenCalledWith(
         expect.objectContaining({ run_id: 123 }),
       );
@@ -1561,6 +1576,164 @@ test.each([
     await expect(
       new GithubCheckExecutor(f.options).dispatch(f.request),
     ).rejects.toMatchObject({ category: "security" });
+  },
+);
+
+test.each([
+  "absent",
+  "other_runs",
+  "malformed_actor",
+  "case_variant_bot",
+  "malformed_title",
+  "capacity_changed",
+  "workflow_changed",
+  "credentials_changed",
+  "before_deadline",
+  "active",
+  "known_id",
+  "default_title",
+  "incomplete",
+  "rate_limit",
+  "api_failure",
+  "aborted",
+  "concurrent_binding",
+  "concurrent_id",
+  "scan_began_too_early",
+] as const)(
+  "abandoned dispatch absence (%s) releases only after complete expired discovery",
+  async (mode) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-absent-dispatch-"));
+    roots.push(root);
+    const db = join(root, "state.db");
+    const f = setup(db);
+    await loseDispatch(f);
+    const previous = f.journal.unfinished()[0]!;
+    const intent = {
+      ...previous,
+      ...(mode === "active" ? {} : { abandoned: "superseded" as const }),
+      ...(mode === "known_id" ? { dispatchedRunId: 123 } : {}),
+    };
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(JSON.stringify(intent)),
+        created_at: trusted.created_at,
+      }),
+    );
+    let time =
+      now +
+      (["before_deadline", "scan_began_too_early"].includes(mode)
+        ? 20_000
+        : 3_600_000);
+    const abort = new AbortController();
+    f.client.runs.mockImplementation(async () => {
+      if (mode === "scan_began_too_early") time += 3_600_000;
+      if (mode === "concurrent_id")
+        f.journal.beginDiscovery(intent, time + 20_000, 20_000, 123);
+      if (mode === "incomplete")
+        throw new GithubExecutorError("recovery_incomplete");
+      if (mode === "rate_limit") throw new GithubRetryLater(time + 60_000);
+      if (mode === "api_failure") throw new GithubExecutorError("api");
+      if (mode === "aborted") abort.abort();
+      if (mode === "concurrent_binding")
+        f.journal.bind(intent, {
+          provider: "github",
+          run_id: trusted.id,
+          run_attempt: 1,
+          html_url: trusted.html_url,
+          workflow_sha: trusted.head_sha,
+        });
+      if (mode === "other_runs")
+        return Array.from({ length: 41 }, (_, n) => ({
+          ...trusted,
+          id: 200 + n,
+          display_title: githubCheckRunName({
+            ...inputs,
+            attempt: `other-${n}`,
+          }),
+        }));
+      if (mode === "malformed_actor")
+        return [{ ...unevaluated, actor: { login: 42 as unknown as string } }];
+      if (mode === "case_variant_bot")
+        return [
+          { ...unevaluated, actor: { login: config.botLogin.toUpperCase() } },
+        ];
+      if (mode === "malformed_title")
+        return [
+          {
+            ...unevaluated,
+            actor: { login: "other" },
+            display_title: null as unknown as string,
+          },
+        ];
+      return mode === "default_title" ? [unevaluated] : [];
+    });
+    f.client.run.mockRejectedValue(new GithubNotFoundError());
+    const executor = new GithubCheckExecutor({
+      ...f.options,
+      now: () => time,
+      config: {
+        ...config,
+        ...(mode === "capacity_changed" ? { maxConcurrent: 16 } : {}),
+        ...(mode === "workflow_changed"
+          ? { workflow: ".github/workflows/other.yml" }
+          : {}),
+        ...(mode === "credentials_changed" ? { installationId: 99 } : {}),
+      },
+    });
+    const request = { ...f.request, signal: abort.signal };
+    const recovery =
+      mode === "active"
+        ? executor.dispatch(request)
+        : executor.recoverAbandoned(request, intent);
+    const released = ["absent", "other_runs", "capacity_changed"].includes(
+      mode,
+    );
+    if (released) await expect(recovery).resolves.toBeUndefined();
+    else await expect(recovery).rejects.toBeDefined();
+    expect(f.journal.unfinished()).toHaveLength(released ? 0 : 1);
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    expect(f.lifecycle.cancel).not.toHaveBeenCalled();
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    if (released) {
+      const finished = f.journal.all()[0]!;
+      expect(finished.undispatched).toEqual({
+        reason: "complete_scan_no_match",
+        source: "automatic",
+        scanStartedAt: new Date(time).toISOString(),
+        listed: mode === "other_runs" ? 41 : 0,
+      });
+      closeFixtureStore(f.store);
+      const restored = setup(db, false);
+      expect(restored.journal.unfinished()).toEqual([]);
+      expect(restored.journal.admitted()).toEqual([]);
+      await expect(
+        new GithubCheckExecutor(restored.options).dispatch(restored.request),
+      ).rejects.toMatchObject({ category: "security" });
+      expect(restored.client.dispatch).not.toHaveBeenCalled();
+      // The abandoned attempt stays fenced, but the next same-card claim can use the only slot.
+      restored.journal.claim(
+        {
+          project: intent.project,
+          card: intent.card,
+          startedAt: intent.startedAt,
+          executor: config.name,
+          phase: "reserved",
+          attempt: "next",
+          key: "new",
+        },
+        1,
+      );
+      expect(restored.journal.admitted().map((i) => i.attempt)).toEqual([
+        "next",
+      ]);
+    }
   },
 );
 
@@ -1902,6 +2075,234 @@ test.each(["before_push", "after_push"])(
   },
 );
 
+test("a late POST response cannot race a negative abandoned scan or lose its returned run ID", async () => {
+  const f = setup(),
+    post = Promise.withResolvers<number>();
+  let time = now;
+  const options = { ...f.options, now: () => time };
+  f.client.dispatch.mockReturnValueOnce(post.promise);
+  const dispatch = new GithubCheckExecutor(options).dispatch(f.request);
+  await vi.waitFor(() => expect(f.client.dispatch).toHaveBeenCalledOnce());
+  const intent = {
+    ...f.journal.unfinished()[0]!,
+    abandoned: "attempt_finished" as const,
+  };
+  f.store.uow.run((tx) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(human.project_id, card.id),
+      card_id: card.id,
+      actor: { kind: "system", project_id: human.project_id },
+      type: "github_check_dispatch",
+      payload: JSON.parse(JSON.stringify(intent)),
+      created_at: trusted.created_at,
+    }),
+  );
+  time += 3_600_000;
+  f.client.runs.mockResolvedValue([]);
+  await expect(
+    new GithubCheckExecutor(options).recoverAbandoned(f.request, intent),
+  ).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.client.runs).not.toHaveBeenCalled();
+  expect(f.journal.admitted()).toHaveLength(1);
+  f.client.run.mockRejectedValueOnce(new GithubNotFoundError());
+  post.resolve(123);
+  await expect(dispatch).rejects.toBeDefined();
+  expect(f.journal.admitted()).toMatchObject([{ dispatchedRunId: 123 }]);
+});
+
+function appendDispatch(
+  f: ReturnType<typeof setup>,
+  intent: GithubDispatchIntent,
+) {
+  f.store.uow.run((tx) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(human.project_id, card.id),
+      card_id: card.id,
+      actor: { kind: "system", project_id: human.project_id },
+      type: "github_check_dispatch",
+      payload: JSON.parse(JSON.stringify(intent)),
+      created_at: intent.startedAt,
+    }),
+  );
+}
+
+test.each(["live", "dead", "missing"] as const)(
+  "legacy POST writer (%s): upgrade never races a late response",
+  async (writer) => {
+    const f = setup();
+    // Obtain the real digest, then reproduce the old writer's event stream in a clean store.
+    await loseDispatch(f);
+    const {
+      absenceNotBefore: _,
+      discoveryDeadlineAt: _deadline,
+      ...base
+    } = f.journal.all()[0]!;
+    const old = setup(),
+      owner = executionOwner(process.pid)!;
+    const dead = { ...owner, start: `${owner.start}0` };
+    appendDispatch(old, { ...base, phase: "reserved" });
+    // A failed earlier publication is not the writer which crossed the POST boundary.
+    appendDispatch(old, { ...base, phase: "publishing", publisher: dead });
+    appendDispatch(old, { ...base, phase: "reserved" });
+    appendDispatch(old, {
+      ...base,
+      phase: "publishing",
+      ...(writer === "missing"
+        ? {}
+        : { publisher: writer === "live" ? owner : dead }),
+    });
+    appendDispatch(old, base); // old beginDispatch removes publisher just BEFORE POST
+    const abandoned = { ...base, abandoned: "superseded" as const };
+    appendDispatch(old, abandoned);
+    let time = now + 3_600_000;
+    old.client.runs.mockResolvedValue([]);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...old.options,
+        now: () => time,
+      }).recoverAbandoned(old.request, abandoned);
+    await expect(recover()).rejects.toBeDefined();
+    expect(old.journal.admitted()).toHaveLength(1);
+    if (writer === "live") {
+      // Old beginDiscovery checks cadence BEFORE saving the dispatch response ID.
+      expect(old.journal.unfinished()[0]?.nextDiscoveryAt).toBeUndefined();
+      old.journal.beginDiscovery(abandoned, time, 20_000, 123);
+      expect(old.journal.admitted()[0]?.dispatchedRunId).toBe(123);
+    } else {
+      const grace = old.journal.admitted()[0]?.absenceNotBefore;
+      if (writer === "dead") expect(grace).toBe(time + 15 * 60_000);
+      else expect(grace).toBeUndefined();
+      time += 15 * 60_000;
+      if (writer === "dead") {
+        await expect(recover()).resolves.toBeUndefined();
+        expect(old.journal.admitted()).toEqual([]);
+      } else {
+        await expect(recover()).rejects.toBeDefined();
+        expect(old.journal.admitted()).toHaveLength(1);
+      }
+    }
+  },
+);
+
+test.each(["unique", "ambiguous", "different"] as const)(
+  "exact list evidence survives failed detail, restart and later empty list (%s)",
+  async (mode) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-observed-dispatch-"));
+    roots.push(root);
+    const db = join(root, "state.db"),
+      f = setup(db);
+    await loseDispatch(f);
+    const second = {
+      ...trusted,
+      id: 124,
+      html_url: trusted.html_url.replace("123", "124"),
+    };
+    f.client.runs.mockResolvedValue(
+      mode === "ambiguous" ? [trusted, second] : [trusted],
+    );
+    f.client.run.mockRejectedValue(new GithubNotFoundError());
+    await expect(f.executor.dispatch(f.request)).rejects.toBeDefined();
+    const abandoned = {
+      ...f.journal.admitted()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, abandoned);
+    closeFixtureStore(f.store);
+    const restored = setup(db, false);
+    let time = now + 3_600_000;
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...restored.options,
+        now: () => time,
+      }).recoverAbandoned(restored.request, abandoned);
+    restored.client.runs.mockResolvedValue([]);
+    await expect(recover()).rejects.toBeDefined();
+    expect(restored.journal.admitted()[0]?.dispatchedRunId).toBeUndefined();
+    const run = mode === "different" ? second : trusted;
+    restored.client.runs.mockResolvedValue([run]);
+    restored.client.run.mockResolvedValue(run);
+    time += 20_000;
+    if (mode === "unique") {
+      expect(await recover()).toBeDefined();
+      expect(restored.journal.admitted()[0]?.boundByDispatchId).toBeFalsy();
+    } else {
+      await expect(recover()).rejects.toBeDefined();
+      expect(restored.journal.admitted()[0]?.externalRun).toBeUndefined();
+    }
+  },
+);
+
+test("a second scanner cannot settle while a slower listing can still return a match", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const abandoned = {
+    ...f.journal.unfinished()[0]!,
+    abandoned: "superseded" as const,
+  };
+  appendDispatch(f, abandoned);
+  let time = now + 3_600_000;
+  const first = Promise.withResolvers<GithubRun[]>();
+  f.client.runs.mockReturnValueOnce(first.promise).mockResolvedValue([]);
+  f.client.run.mockRejectedValue(new GithubNotFoundError());
+  const recover = () =>
+    new GithubCheckExecutor({ ...f.options, now: () => time }).recoverAbandoned(
+      f.request,
+      abandoned,
+    );
+  const slow = recover();
+  await vi.waitFor(() => expect(f.client.runs).toHaveBeenCalledOnce());
+  time += 30_000;
+  await expect(recover()).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.client.runs).toHaveBeenCalledOnce();
+  first.resolve([trusted]);
+  await expect(slow).rejects.toBeDefined();
+  await expect(recover()).rejects.toBeDefined();
+  expect(f.journal.admitted()).toMatchObject([
+    { observedRunIds: [trusted.id] },
+  ]);
+});
+
+test("a match on an earlier REST page survives a failed later page", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const abandoned = {
+    ...f.journal.admitted()[0]!,
+    abandoned: "superseded" as const,
+  };
+  appendDispatch(f, abandoned);
+  let time = now + 3_600_000;
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json({ total_count: 2, workflow_runs: [trusted] }),
+    )
+    .mockResolvedValueOnce(new Response("", { status: 503 }))
+    .mockResolvedValueOnce(
+      Response.json({ total_count: 0, workflow_runs: [] }),
+    );
+  const client = new GithubClient({
+    config,
+    dataDir: "/synthetic",
+    fetch,
+    now: () => time,
+  });
+  vi.spyOn(client, "token").mockResolvedValue(syntheticToken);
+  const recover = () =>
+    new GithubCheckExecutor({
+      ...f.options,
+      client,
+      now: () => time,
+    }).recoverAbandoned(f.request, abandoned);
+  await expect(recover()).rejects.toBeDefined();
+  expect(f.journal.admitted()).toMatchObject([{ observedRunIds: [123] }]);
+  time += 20_000;
+  await expect(recover()).rejects.toBeDefined();
+  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(f.journal.admitted()).toHaveLength(1);
+});
+
 test("C-466: identity retry survives reopening SQLite; only the original verified terminal releases capacity", async () => {
   const root = mkdtempSync(join(tmpdir(), "cg-identity-retry-"));
   roots.push(root);
@@ -1964,3 +2365,229 @@ test("C-466: identity retry survives reopening SQLite; only the original verifie
   expect(client.cancel).not.toHaveBeenCalled();
   expect(client.dispatch).toHaveBeenCalledOnce();
 });
+
+test.each(["count_drift", "bad_link", "bad_sibling"] as const)(
+  "a rejected REST page keeps all exact candidates (%s)",
+  async (fault) => {
+    const f = setup();
+    await loseDispatch(f);
+    const intent = {
+      ...f.journal.unfinished()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    const other = Array.from({ length: 100 }, (_, i) => ({
+      ...trusted,
+      id: 1000 + i,
+      display_title: "other",
+    }));
+    const second = { ...trusted, id: 124 };
+    let time = now + 3_600_000;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ total_count: 103, workflow_runs: other }),
+      )
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            total_count: fault === "count_drift" ? 102 : 103,
+            workflow_runs: [
+              trusted,
+              fault === "bad_sibling" ? null : other[0],
+              second,
+            ],
+          },
+          fault === "bad_link"
+            ? { headers: { link: '<https://invalid.example/>; rel="next"' } }
+            : {},
+        ),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ total_count: 0, workflow_runs: [] }),
+      );
+    const client = new GithubClient({
+      config,
+      dataDir: "/synthetic",
+      fetch,
+      now: () => time,
+    });
+    vi.spyOn(client, "token").mockResolvedValue(syntheticToken);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...f.options,
+        client,
+        now: () => time,
+      }).recoverAbandoned(f.request, intent);
+    await expect(recover()).rejects.toBeDefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    time += 60_000;
+    await expect(recover()).rejects.toBeDefined();
+    expect(f.journal.admitted()).toMatchObject([
+      { observedRunIds: [123, 124] },
+    ]);
+    expect(f.journal.admitted()[0]?.externalRun).toBeUndefined();
+  },
+);
+
+test.each([false, true])(
+  "a completed scan can be replayed after SQLite contention (saw matching runs: %s)",
+  async (sawMatch) => {
+    const dir = mkdtempSync(join(tmpdir(), "cg-scan-retire-"));
+    roots.push(dir);
+    const file = join(dir, "repo.db"),
+      f = setup(file);
+    await loseDispatch(f);
+    const intent = {
+      ...f.journal.unfinished()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    let time = now + 3_600_000;
+    const locker = new DatabaseSync(file);
+    f.store.database.exec("PRAGMA busy_timeout=10");
+    f.client.runs.mockImplementationOnce(async () => {
+      locker.exec("BEGIN IMMEDIATE");
+      if (sawMatch) return [trusted, { ...trusted, id: 124 }];
+      throw new GithubExecutorError("api");
+    });
+    try {
+      await expect(
+        new GithubCheckExecutor({
+          ...f.options,
+          now: () => time,
+        }).recoverAbandoned(f.request, intent),
+      ).rejects.toBeDefined();
+    } finally {
+      locker.exec("ROLLBACK");
+      locker.close();
+    }
+    expect(f.journal.admitted()).toHaveLength(1);
+    const id = f.journal.admitted()[0]?.scanOwner?.id;
+    expect(id).toBeDefined();
+    const receipt = join(dir, `.cardigan-scan-${id}.json`);
+    const original = readFileSync(receipt, "utf8");
+    closeFixtureStore(f.store);
+    const peer = setup(file, false);
+    peer.client.runs.mockResolvedValue([]);
+    time += 86_400_000;
+    if (sawMatch) {
+      // A visible scan ID or an edited receipt is not evidence that a reader returned no matches.
+      writeFileSync(
+        receipt,
+        JSON.stringify({ ...JSON.parse(original), ids: [] }),
+      );
+      await expect(
+        new GithubCheckExecutor({
+          ...peer.options,
+          now: () => time,
+        }).recoverAbandoned(peer.request, intent),
+      ).rejects.toBeDefined();
+      expect(peer.client.runs).not.toHaveBeenCalled();
+      expect(peer.journal.admitted()).toHaveLength(1);
+      writeFileSync(receipt, original);
+    }
+    const result = new GithubCheckExecutor({
+      ...peer.options,
+      now: () => time,
+    }).recoverAbandoned(peer.request, intent);
+    if (sawMatch) {
+      await expect(result).rejects.toBeDefined();
+      expect(peer.journal.admitted()).toMatchObject([
+        { observedRunIds: [123, 124] },
+      ]);
+    } else {
+      await expect(result).resolves.toBeUndefined();
+      expect(peer.journal.admitted()).toEqual([]);
+    }
+    expect(peer.client.runs).toHaveBeenCalledOnce();
+    expect(existsSync(receipt)).toBe(false);
+  },
+);
+
+test.each([false, true])(
+  "a reader exit under contention never turns lost evidence into absence (wrote receipt: %s)",
+  async (retired) => {
+    const dir = mkdtempSync(join(tmpdir(), "cg-scan-interrupt-"));
+    roots.push(dir);
+    const file = join(dir, "repo.db"),
+      f = setup(file);
+    await loseDispatch(f);
+    const [original] = f.journal.unfinished();
+    if (!original) throw new Error("Missing dispatch");
+    const intent = {
+      ...original,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    closeFixtureStore(f.store);
+    let time = now + 3_600_000;
+    // Same DB lock, candidate and process exit in both cases. Only one reader
+    // reaches endListing's fallback before exiting; neither writes the observation to SQLite.
+    execFileSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `import assert from 'node:assert/strict';
+       import { DatabaseSync } from 'node:sqlite';
+       import { Store } from ${JSON.stringify(new URL("../../store/dist/index.js", import.meta.url).href)};
+       import { GithubDispatchJournal } from ${JSON.stringify(new URL("../dist/github-dispatch-journal.js", import.meta.url).href)};
+       const file = ${JSON.stringify(file)};
+       const store = Store.open({ dbPath: file });
+       const journal = new GithubDispatchJournal(store);
+       const scan = journal.beginDiscovery(journal.admitted()[0], ${time}, 20_000);
+       const locker = new DatabaseSync(file);
+       store.database.exec('PRAGMA busy_timeout=10');
+       locker.exec('BEGIN IMMEDIATE');
+       assert.throws(() => journal.observeMatches(scan, [123]), /locked/);
+       if (${retired}) assert.throws(() => journal.endListing(scan, [123]), /locked/);
+       process.exit(0);`,
+    ]);
+    let peer = setup(file, false);
+    const [left] = peer.journal.admitted();
+    expect(left?.observedRunIds).toBeUndefined();
+    expect(left?.scanOwner?.id).toBeDefined();
+    expect(
+      existsSync(join(dir, `.cardigan-scan-${left?.scanOwner?.id}.json`)),
+    ).toBe(retired);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...peer.options,
+        now: () => time,
+      }).recoverAbandoned(peer.request, intent);
+    for (let i = 0; i < 2; i++) {
+      time += 60_000;
+      peer.client.runs.mockResolvedValue([]);
+      await expect(recover()).rejects.toMatchObject({
+        category: "dispatch_unknown",
+      });
+      expect(peer.client.runs).toHaveBeenCalledOnce();
+      const [held] = peer.journal.admitted();
+      expect(held?.attempt).toBe(intent.attempt);
+      expect(held?.undispatched).toBeUndefined();
+      expect(held?.scanOwner).toBeUndefined();
+      expect(held?.scanEvidenceLost).toBe(retired ? undefined : true);
+      expect(held?.observedRunIds).toEqual(retired ? [123] : undefined);
+      closeFixtureStore(peer.store);
+      peer = setup(file, false);
+    }
+    // Online positive discovery still runs. A title alone cannot disambiguate
+    // potentially missing history; the original dispatch response ID can.
+    time += 60_000;
+    if (!retired) {
+      await expect(recover()).rejects.toMatchObject({
+        category: "recovery_incomplete",
+      });
+      expect(peer.client.run).toHaveBeenCalledWith(
+        123,
+        expect.any(AbortSignal),
+      );
+      expect(peer.journal.admitted()[0]?.externalRun).toBeUndefined();
+      time += 60_000;
+      peer.journal.beginDiscovery(intent, time, 20_000, trusted.id);
+      time += 60_000;
+    }
+    expect(await recover()).toBeDefined();
+    expect(peer.journal.admitted()[0]?.externalRun?.run_id).toBe(123);
+    expect(peer.client.dispatch).not.toHaveBeenCalled();
+  },
+);

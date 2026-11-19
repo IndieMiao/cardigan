@@ -5516,9 +5516,12 @@ test("C-466: late abandoned discovery cannot bind after the maintenance deadline
         String(error).includes("GitHub operation timed out"),
       ),
     ).toBe(true);
+    // The abandoned scan's IO lease must end at the deadline, even before its adapter returns.
+    expect(journal.unfinished()[0]?.scanOwner).toBeUndefined();
     held.resolve([h.remote()]);
     await vi.advanceTimersByTimeAsync(0);
     expect(journal.unfinished()).toHaveLength(1);
+    expect(journal.unfinished()[0]?.observedRunIds).toBeUndefined();
     expect(journal.unfinished()[0]?.externalRun).toBeUndefined();
     expect(h.client.cancel).not.toHaveBeenCalled();
     expect(h.client.dispatch).toHaveBeenCalledOnce();
@@ -5584,6 +5587,8 @@ test("C-466: expired abandoned discovery reports its deadline and persists its n
   const journal = new GithubDispatchJournal(h.f.store);
   const check = required(h.check());
   h.advance(15 * 60_000);
+  // A complete empty scan is now proof of absence; only an inconclusive scan backs off.
+  h.client.runs.mockRejectedValue(new Error("Incomplete listing"));
   const investigate = async () => {
     const gate = h.create();
     try {
@@ -5801,5 +5806,41 @@ test("V-2081: a provider Retry-After still blocks both slots until its deadline"
   } finally {
     second.stop();
     await second.idle();
+  }
+});
+
+test("expired abandoned GitHub dispatch is settled after a complete empty scan without repeated maintenance", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.advance(15 * 60_000);
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    await next.idle();
+    expect(journal.admitted()).toEqual([]);
+    expect(journal.all()).toMatchObject([
+      {
+        finished: true,
+        undispatched: { source: "automatic", reason: "complete_scan_no_match" },
+      },
+    ]);
+    const reads = h.client.runs.mock.calls.length;
+    h.advance();
+    await next.tick([h.f.project_id]);
+    await next.idle();
+    expect(h.client.runs).toHaveBeenCalledTimes(reads);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
   }
 });
