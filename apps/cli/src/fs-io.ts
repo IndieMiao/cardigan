@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { type BigIntStats, constants, statSync } from "node:fs";
 import {
   access,
   chmod,
@@ -25,6 +25,15 @@ export async function readTextIfExists(
   }
 }
 
+// Metadata only: bind a preflight to the opened inode (or its absence), not to secret bytes.
+function secretVersion(s: BigIntStats | undefined): string | undefined {
+  return s && `${s.dev}:${s.ino}:${s.mode}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+}
+
+export function currentSecretsVersion(path: string): string | undefined {
+  return secretVersion(statSync(path, { bigint: true, throwIfNoEntry: false }));
+}
+
 /**
  * Read `secrets.env`, refusing a file whose permission bits are not exactly
  * 0600. The refusal message contains the `chmod` command to run, never a value.
@@ -33,20 +42,28 @@ export async function readSecretsFile(
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string | undefined> {
+  return (await readSecretsSnapshot(path, platform)).text;
+}
+
+export async function readSecretsSnapshot(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<{ text: string | undefined; version: string | undefined }> {
   let file: Awaited<ReturnType<typeof open>>;
   try {
     file = await open(path, "r");
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
-      return undefined;
+      return { text: undefined, version: undefined };
     }
     throw error;
   }
 
   // Windows has no POSIX permission bits; there is nothing to check there.
   try {
+    const opened = await file.stat({ bigint: true });
     if (platform !== "win32") {
-      const mode = (await file.stat()).mode & 0o777;
+      const mode = Number(opened.mode & 0o777n);
       if (mode !== 0o600) {
         throw new CliError(`密钥文件权限不是 600：${path}`, EXIT.usage, [
           `当前权限是 ${mode.toString(8).padStart(4, "0")}`,
@@ -55,7 +72,10 @@ export async function readSecretsFile(
       }
     }
 
-    return await file.readFile("utf8");
+    return {
+      text: await file.readFile("utf8"),
+      version: secretVersion(opened),
+    };
   } finally {
     await file.close();
   }

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { lstat, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { loadModelLaunchConfig } from "@cardigan/host";
-import { validateLaunchSecrets } from "@cardigan/roles";
+import { parseSecretsText, validateLaunchSecrets } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { isMap, isScalar, parseDocument } from "yaml";
 import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
+import { currentSecretsVersion, readSecretsSnapshot } from "./fs-io.js";
 import { resolveGlobalActor } from "./host.js";
 import type { CliIo } from "./io.js";
 import {
@@ -62,7 +63,11 @@ export async function setModel(
     field.value = id;
     const candidate = doc.toString();
     const config = await loadModelLaunchConfig(doc.toJS(), paths.dataDir);
-    validateLaunchSecrets(config, await loadSecrets(paths, io));
+    const { text, version } = await readSecretsSnapshot(
+      paths.secretsFile,
+      io.platform,
+    );
+    validateLaunchSecrets(config, parseSecretsText(text ?? ""));
     try {
       await writeFile(temp, candidate, privateFile);
       publishModelFile(
@@ -72,6 +77,7 @@ export async function setModel(
         suffix,
         original,
         candidate,
+        () => currentSecretsVersion(paths.secretsFile) === version,
         `本机管理员已将模型 ${alias} 从 ${previous} 换为 ${id}。新 Run 使用新配置。`,
       );
     } finally {

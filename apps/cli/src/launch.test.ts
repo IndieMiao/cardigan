@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   writeFile,
@@ -15,6 +16,11 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CapturedOutput, CliIo, SpawnInheritOptions } from "./io.js";
+
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return { ...fs, writeFile: vi.fn(fs.writeFile) };
+});
 
 /**
  * Every test builds its own fake home: configuration, secrets, generated files
@@ -746,6 +752,74 @@ test("set-model preflights a private backup, atomically updates the alias and re
     vi.unstubAllGlobals();
   }
 });
+
+test.each(["replace", "chmod", "edit", "remove"] as const)(
+  "set-model refuses stale preflight after %s of secrets.env and permits a fresh retry",
+  async (change) => {
+    harness = await makeHarness({ launchYaml: aliasConfig });
+    const dir = join(harness.root, "config"),
+      path = join(dir, "launch.yaml"),
+      secrets = join(dir, "secrets.env");
+    const dataDir = join(harness.root, "data");
+    harness.io.env.CARDIGAN_DATA_DIR = dataDir;
+    const store = Store.open({ dataDir });
+    const fs =
+      await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({})),
+    );
+    try {
+      store.createProject({ id: "p" });
+      const switchModel = () =>
+        harness.run(["launch", "set-model", "current", "next"]);
+      const notices = () =>
+        store.uow.read((tx) =>
+          tx.events
+            .listAfter("p", undefined, 0)
+            .filter((e) => e.type === "launch_model_changed"),
+        );
+      vi.mocked(writeFile).mockImplementation(async (...args) => {
+        await fs.writeFile(...args);
+        if (!String(args[0]).endsWith(".tmp")) return;
+        if (change === "replace") {
+          await fs.writeFile(`${secrets}.new`, "OTHER=fixture", {
+            mode: 0o600,
+          });
+          await rename(`${secrets}.new`, secrets);
+        } else if (change === "chmod") await chmod(secrets, 0o644);
+        else if (change === "edit")
+          await fs.writeFile(secrets, "CX_API_KEY=rotated-fixture");
+        else await rm(secrets);
+      });
+      expect(await switchModel()).not.toBe(0);
+      expect(harness.err.join("\n")).toContain("重新预检");
+      expect(await readFile(path, "utf8")).toBe(aliasConfig);
+      expect(notices()).toEqual([]);
+      expect(
+        store.database.prepare("SELECT * FROM launch_model_intents").all(),
+      ).toEqual([]);
+      const files = await readdir(dir);
+      expect(files.filter((f) => f.endsWith(".tmp"))).toEqual([]);
+      const backups = files.filter((f) => f.endsWith(".bak"));
+      expect(backups).toHaveLength(1);
+      expect(await readFile(join(dir, backups.at(0) ?? ""), "utf8")).toBe(
+        aliasConfig,
+      );
+      vi.mocked(writeFile).mockReset();
+      await fs.writeFile(secrets, "CX_API_KEY=retry-fixture", { mode: 0o600 });
+      await chmod(secrets, 0o600);
+      expect(await switchModel()).toBe(0);
+      expect(notices()).toHaveLength(1);
+    } finally {
+      vi.mocked(writeFile).mockReset();
+      vi.unstubAllGlobals();
+      store.close();
+    }
+  },
+);
 
 test("a failed COMMIT after publication is repaired on same-model retry, exactly once", async () => {
   harness = await makeHarness({ launchYaml: aliasConfig });

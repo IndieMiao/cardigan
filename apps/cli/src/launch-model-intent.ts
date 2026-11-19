@@ -52,6 +52,7 @@ export function publishModelFile(
   operation: string,
   original: string,
   candidate: string,
+  secretsStillCurrent: () => boolean,
   notice: string,
 ) {
   // Commit a recoverable intent *before* replacing the file. A competing CLI
@@ -68,7 +69,7 @@ export function publishModelFile(
       )
       .run(path, operation, hash(original), hash(candidate), notice);
   });
-  store.uow.run((tx) => {
+  const installed = store.uow.run((tx) => {
     const owner = store.database
       .prepare("SELECT operation FROM launch_model_intents WHERE path=?")
       .get(path);
@@ -77,7 +78,19 @@ export function publishModelFile(
       readFileSync(path, "utf8") !== original
     )
       throw changed();
+    // Recheck the exact secret file validated by preflight immediately before rename.
+    // No file was installed on mismatch: retire our own intent without a success notice.
+    if (!secretsStillCurrent()) {
+      store.database
+        .prepare(
+          "DELETE FROM launch_model_intents WHERE path=? AND operation=?",
+        )
+        .run(path, operation);
+      return false;
+    }
     renameSync(temp, path);
     settle(store, tx, path, candidate);
+    return true;
   });
+  if (!installed) throw changed();
 }
