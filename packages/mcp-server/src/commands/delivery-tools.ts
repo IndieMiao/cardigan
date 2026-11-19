@@ -83,6 +83,13 @@ const reviewInput = z.object({
       proof: z.string().optional(),
     }),
   ),
+  rejection_category: z
+    .string()
+    .trim()
+    .min(1)
+    .max(48)
+    .optional()
+    .describe("驳回的主要原因类别，例如并发时序；重复问题沿用同一类别"),
   recheck_required: z.boolean().optional(),
   attachments,
   screenshot_check: z

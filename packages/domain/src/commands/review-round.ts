@@ -101,25 +101,22 @@ export function reviewRound(
 }
 
 /** A pass or conditional result ends a rejection streak; reuse spends no rounds. */
-export function consecutiveReviewRejects(d: CommandDraft, item: WorkItem) {
+export function rejectionStreak(d: CommandDraft, item: WorkItem) {
   const reviews = d
     .list("reviews")
     .filter((r) => r.work_item_id === item.id)
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
   const end = reviews.findIndex((r) => r.verdict !== "reject");
-  return (end === -1 ? reviews : reviews.slice(0, end)).length;
+  return end === -1 ? reviews : reviews.slice(0, end);
 }
 
 export function reviewRejectionsNeedAttention(d: CommandDraft, item: WorkItem) {
-  if (consecutiveReviewRejects(d, item) <= 3) return false;
-  const latest = d
-    .list("reviews")
-    .filter((r) => r.work_item_id === item.id)
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  const streak = rejectionStreak(d, item);
+  if (streak.length < 3) return false;
   return ![...d.state.events, ...d.events].some(
     (e) =>
       e.type === "review_limit_rejections_acknowledged" &&
-      (e.payload as Record<string, unknown>).review_id === latest?.id &&
+      (e.payload as Record<string, unknown>).review_id === streak[0]?.id &&
       (e.payload as Record<string, unknown>).work_item_id === item.id,
   );
 }

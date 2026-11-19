@@ -120,6 +120,16 @@ const schemas = {
     body: text,
     work_item_id: id("work_item").optional(),
     mentions: z.array(text).optional(),
+    review_plan: z
+      .object({
+        decision_id: id("decision"),
+        step: z.enum(["propose", "confirm"]),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "换做法：作者提交方案，指定审核员 reply_to 方案并确认方向，不等于审核通过",
+      ),
     host_result_for: id("human_action")
       .optional()
       .describe(
@@ -528,11 +538,18 @@ const schemas = {
     review_limit_decision: z
       .object({
         decision_id: id("decision"),
-        option: z.enum(["raise_limit", "pause", "escalate"]),
+        option: z.enum([
+          "raise_limit",
+          "pause",
+          "escalate",
+          "narrow_scope",
+          "change_approach",
+          "split_card",
+        ]),
         rationale: text,
       })
       .describe(
-        "PM Ops only: resolve a delegated review limit with a reason; raise_limit adds one round, pause keeps it blocked, escalate sends the same decision to the human.",
+        "PM Ops only: resolve a delegated review limit with a reason; choose a listed option, or escalate to the human. For narrow_scope specify the excluded scope; for split_card first create the follow-up with this decision as source.",
       )
       .optional(),
   },

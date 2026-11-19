@@ -88,6 +88,9 @@ const reworkOptionLabels: Record<string, string> = {
 const reviewOptionLabels: Record<string, string> = {
   pause: "暂停",
   raise_limit: "增加轮数",
+  change_approach: "换做法",
+  narrow_scope: "收窄范围",
+  split_card: "拆卡",
 };
 type Props = { client: CardiganClient; projectId: string; revision?: number };
 function useAction(done: () => void) {
@@ -286,10 +289,15 @@ function Decision({
     delegableCategories.includes(q.category);
   const grantCategory = canDelegate && delegateFuture;
   const paused = isPausedReview(q);
-  const selected = paused ? "raise_limit" : option;
   const options = paused
-    ? q.options.filter((o) => o.key === "raise_limit")
+    ? q.options.filter((o) => o.key !== "pause")
     : q.options;
+  const resumeOnly =
+    paused && options.length === 1 && options[0]?.key === "raise_limit";
+  const selected = resumeOnly ? "raise_limit" : option;
+  const scopeRequired =
+    q.trigger === "review_limit" &&
+    ["split_card", "narrow_scope"].includes(selected);
   const rowHead = {
     ids: (
       <>
@@ -389,7 +397,7 @@ function Decision({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (selected === "") return;
+          if (selected === "" || (scopeRequired && !quote.trim())) return;
           void action.run(
             [projectId, q.id, "resolve", selected, quote, grantCategory],
             (key) =>
@@ -478,8 +486,11 @@ function Decision({
           </p>
         )}
         <label>
-          补充说明（可选，会作为你的原话记录）
+          {scopeRequired
+            ? "本轮移出的范围（必填）"
+            : "补充说明（可选，会作为你的原话记录）"}
           <Textarea
+            required={scopeRequired}
             aria-label={`${q.id} 原话或补充说明`}
             value={quote}
             onChange={(e) => setQuote(e.target.value)}
@@ -488,10 +499,10 @@ function Decision({
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
             {q.grouped_decisions
-              ? paused
+              ? resumeOnly
                 ? `为 ${q.id} 增加一轮审核额度`
                 : `按所选回答 ${q.id}`
-              : paused
+              : resumeOnly
                 ? "增加一轮审核额度"
                 : "按所选拍板"}
           </button>

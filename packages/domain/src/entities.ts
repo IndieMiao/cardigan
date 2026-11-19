@@ -772,6 +772,7 @@ export interface ReviewIssue {
   readonly proof?: string;
 }
 export interface Review {
+  readonly rejection_category?: string;
   /** Historical quota fact, preserved even when a later lease expires. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: ReviewId;
@@ -887,6 +888,13 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** Control-plane binding for a consecutive-rejection decision (absent on legacy questions). */
+  readonly review_intervention?: {
+    readonly review_id: ReviewId;
+    readonly producer_id: WorkItemId;
+    readonly proposal?: TimelineEntryId;
+    readonly confirmation?: TimelineEntryId;
+  };
   /** System attribution: the sole personal-confirmation reason was this source. */
   readonly source_human_reason?: {
     readonly decision_id: DecisionId;

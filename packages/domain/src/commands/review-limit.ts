@@ -1,14 +1,14 @@
 import type { Decision, WorkItem } from "../entities.js";
-import type { CommandDraft } from "./core.js";
+import { type CommandDraft, ensure } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
-import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import {
-  consecutiveReviewRejects,
   currentReviewTarget,
+  rejectionStreak,
   reviewRejectionsNeedAttention,
 } from "./review-round.js";
+import { strategyOptions, summarizeRejection } from "./review-strategy.js";
 
 export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
   return d
@@ -28,23 +28,18 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
   const existing = pendingReviewLimit(d, item);
-  const prior = d
-    .list("reviews")
-    .filter((r) => r.work_item_id === item.id)
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  const streak = rejectionStreak(d, item);
+  const prior = streak[0];
+  ensure(prior, "invariant_violation", "缺少连续驳回依据");
+  const recent = streak.slice(0, 3).map(summarizeRejection);
+  const repeated = recent[0]?.key === recent[1]?.key;
   const conflictRepair = !!currentReviewTarget(d, item)
     ?.merge_conflict_event_id;
-  const mustFix =
-    prior?.issues.some((i) => i.must_fix && !i.pre_existing) ?? false;
+  const mustFix = prior.issues.some((i) => i.must_fix && !i.pre_existing);
   const recommended = conflictRepair || !mustFix ? "raise_limit" : "pause";
-  const verdict = prior
-    ? { pass: "通过", reject: "驳回", conditional: "有条件通过" }[prior.verdict]
-    : "尚无结论";
-  const reason = conflictRepair
-    ? "最近一次交付是合并冲突修复，建议增加一轮审核额度以继续确认修复结果"
-    : mustFix
-      ? "上一轮仍有必须修复的问题，建议暂停并先确认后续处理方向"
-      : "上一轮没有必须修复的问题，建议增加一轮审核额度以继续确认交付";
+  const reason = repeated
+    ? "最近两次同类，推荐换做法或收窄范围；能独立跟进的部分可拆卡。"
+    : "最近两次类别不同，请判断是继续还是暂停。";
   const id = existing?.id ?? d.ids.next(d.state.project_id, "decision");
   const decision: Decision =
     existing ??
@@ -56,8 +51,16 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       kind: "choose",
       category: "general",
       trigger: "review_limit",
-      question: `连续驳回 ${consecutiveReviewRejects(d, item)} 次，请 PM 排查：${item.id}`,
-      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${reason}。`,
+      question: `连续驳回 ${streak.length} 次，请 PM 排查：${item.id}`,
+      review_intervention: {
+        review_id: prior.id,
+        producer_id: d.get("deliveries", prior.delivery_id).work_item_id,
+      },
+      context: [
+        `最近三次驳回（从新到旧）：`,
+        ...recent.map((r) => `${r.id}【${r.category}】${r.summary}`),
+        reason,
+      ].join("\n"),
       options: [
         {
           key: "raise_limit",
@@ -69,9 +72,14 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
           description: "暂停：保持停止，不安排返工",
           impact: "保留当前阻塞，之后仍可选择增加审核轮数。",
         },
+        ...(repeated ? strategyOptions : []),
       ],
-      recommended,
-      plain_summary: { ...REVIEW_LIMIT_PLAIN_SUMMARY },
+      recommended: repeated ? "change_approach" : recommended,
+      plain_summary: {
+        changed: `同一项审核已连续被驳回 ${streak.length} 次`,
+        impact: reason,
+        risk: "在决定下一步之前，暂停返工。",
+      },
       affected_cards: [item.card_id],
       affected_work_items: [item.id],
       blocking: true,

@@ -512,7 +512,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 4 次驳回暂停并交 PM",
+    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回暂停并交 PM",
     "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
