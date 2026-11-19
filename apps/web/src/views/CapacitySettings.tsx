@@ -6,6 +6,7 @@ import {
   SettingsNumberField,
   SettingsPanel,
   SettingsRow,
+  SettingsValue,
 } from "../components/layout/SettingsLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
@@ -140,7 +141,7 @@ export function CapacitySettings({
                 label={machine.label}
                 description={`全部 ${machine.total_running} · 非常驻 ${machine.running} / 排队 ${machine.queued}`}
               >
-                上限 {machine.limit || "不可用"}
+                <SettingsValue>上限 {machine.limit || "不可用"}</SettingsValue>
               </SettingsRow>
             ),
           )}
@@ -160,7 +161,7 @@ export function CapacitySettings({
                 .join("；")}
               help="需要主机预置，找张良"
             >
-              上限 {machine.limit || "不可用"}
+              <SettingsValue>上限 {machine.limit || "不可用"}</SettingsValue>
             </SettingsRow>
           ))}
           {data.merge_config_invalid && (

@@ -188,6 +188,10 @@
     max-width: 100%;
     margin-inline-start: auto;
   }
+  .value {
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
   .number {
     display: inline-flex;
     align-items: center;
@@ -256,7 +260,7 @@
     margin-block-end: var(--ui-space-2);
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
-    font-weight: 600;
+    font-weight: 400;
   }
   /* A checkbox and its name share one line; a list of them wraps in columns. */
   .dialogFields label:has([role="checkbox"]) {

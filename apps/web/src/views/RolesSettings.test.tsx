@@ -564,3 +564,14 @@ test("closing a role drawer returns focus to the row that opened it", async () =
     ),
   );
 });
+
+test("closing the new-role drawer with Escape returns focus to 新建角色", async () => {
+  await openRoles();
+  const opener = await screen.findByRole("button", { name: "新建角色" });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});

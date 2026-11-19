@@ -297,3 +297,14 @@ test("an employee being created keeps its drawer until the reply, and focus retu
     ),
   );
 });
+
+test("closing the new-employee drawer with Escape returns focus to 新建员工", async () => {
+  await open();
+  const opener = screen.getByRole("button", { name: "新建员工" });
+  opener.focus();
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(opener));
+});

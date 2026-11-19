@@ -181,6 +181,11 @@ export function SettingsRow({
   );
 }
 
+/** A read-only value in a row's control column (13px/20px, like descriptions). */
+export function SettingsValue({ children }: { children: ReactNode }) {
+  return <span className={styles.value}>{children}</span>;
+}
+
 /**
  * Integer field with its unit; commits on blur or Enter (instant save).
  * An unsaved edit tints the border without taking space.

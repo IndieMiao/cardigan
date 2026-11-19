@@ -229,6 +229,9 @@ try {
                   b.getAttribute("aria-label") === text),
             );
             if (!target) throw new Error(`Missing trigger: ${text}`);
+            // Keyboard path: focus the opener, open it, later close with Escape.
+            window.__settingsOpener = target;
+            target.focus();
             target.click();
           }, trigger);
           await until(
@@ -304,10 +307,24 @@ try {
               hit.hit,
               `${name}-${width}-${theme}: ${hit.name} is covered by ${hit.topmost}`,
             );
-          await run(() =>
-            document.querySelector("[aria-label='关闭抽屉']")?.click(),
-          );
+          // A real Escape key press closes it; focus must return to the opener.
+          for (const type of ["keyDown", "keyUp"])
+            await send("Input.dispatchKeyEvent", {
+              type,
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            });
           await until("!document.querySelector('[role=dialog]')");
+          await delay(100);
+          const returned = await evaluate(
+            "document.activeElement === window.__settingsOpener",
+          );
+          report.scenes[`${name}-${width}-${theme}`].focusReturned = returned;
+          assert(
+            returned,
+            `${name}-${width}-${theme}: focus not returned to ${trigger}`,
+          );
         };
         // Mouse users see no focus ring on the panel focused after a nav
         // click; the scripted click has no pointer, so drop the focus.

@@ -417,3 +417,20 @@ test("manual validation retry immediately replaces the error with shared progres
   await act(async () => request.resolve({ valid: true, reason: null }));
   expect(screen.queryByText("正在校验…")).toBeNull();
 });
+
+test.each([
+  ["a template row", { name: "dev", exact: true }],
+  ["新建模板", { name: "新建模板" }],
+] as const)(
+  "closing a drawer opened from %s returns focus to it",
+  async (_label, query) => {
+    await open();
+    const opener = screen.getByRole("button", query);
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  },
+);
