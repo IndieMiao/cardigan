@@ -413,6 +413,9 @@ function TimeoutMergeSetting({
   }, []);
   const toggle = (next: boolean) => {
     pressing.current = false;
+    // The switch decides: turning off drops the unsaved minutes as a pending
+    // commit (they stay visible for a later activation); turning on writes them.
+    minutes.settle();
     if (!next) return setting.save(null);
     if (minutes.valid) return setting.save(Number(minutes.draft));
   };

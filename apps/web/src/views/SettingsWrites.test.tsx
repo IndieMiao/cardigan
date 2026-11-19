@@ -553,3 +553,41 @@ test("a queued off still reaches the original project after leaving the page", a
   await waitFor(() => expect(f.writes).toEqual([1, null]));
   await waitFor(() => expect(f.state()).toBeNull());
 });
+
+test("after turning off with an unsaved draft, tabbing through the minutes field cannot re-enable it", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "1" } });
+  fireEvent.pointerDown(f.toggle, { button: 0, pointerType: "mouse" });
+  act(() => f.toggle.focus());
+  fireEvent.pointerUp(f.toggle, { button: 0, pointerType: "mouse" });
+  fireEvent.click(f.toggle);
+  expect(f.writes).toEqual([null]);
+  act(() => f.input.focus());
+  act(() => f.input.blur());
+  await f.release();
+  await settle();
+  expect(f.writes).toEqual([null]);
+  expect(f.state()).toBeNull();
+  expect(on(f.toggle)).toBe(false);
+  // The draft stays visible and is what a later activation writes.
+  expect(f.input.value).toBe("1");
+  fireEvent.click(f.toggle);
+  await waitFor(() => expect(f.writes).toEqual([null, 1]));
+});
+
+test("a keyboard off with an unsaved draft also drops it as a pending commit", async () => {
+  const f = await heldTimeout();
+  act(() => f.input.focus());
+  fireEvent.change(f.input, { target: { value: "1" } });
+  // Keyboard path without pointer events: the blur commits the edit first.
+  act(() => f.toggle.focus());
+  fireEvent.click(f.toggle);
+  act(() => f.input.focus());
+  act(() => f.input.blur());
+  await f.release();
+  await waitFor(() => expect(f.writes).toEqual([1, null]));
+  await settle();
+  expect(f.writes).toEqual([1, null]);
+  expect(f.state()).toBeNull();
+});

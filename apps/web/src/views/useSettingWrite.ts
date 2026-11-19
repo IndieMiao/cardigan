@@ -151,6 +151,10 @@ export function useNumberDraft(confirmed: number, min: number, max: number) {
     },
     valid,
     dirty,
+    /** Another control decided (e.g. a switch): the edit is no longer pending. */
+    settle: () => {
+      edited.current = false;
+    },
     commit: async (save: (value: number) => Promise<boolean>) => {
       if (!edited.current || !valid || !dirty) return;
       edited.current = false;
