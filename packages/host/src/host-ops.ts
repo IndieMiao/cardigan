@@ -68,7 +68,7 @@ import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
 
 interface Options {
-  upstream?: LaunchConfig;
+  upstream?: LaunchConfig | undefined;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
   runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">>;
@@ -104,7 +104,9 @@ interface Options {
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
   private readonly clock: Clock;
-  private readonly upstream: UpstreamHealthMonitor | undefined;
+  private generation: LaunchConfig | undefined;
+  private monitor: UpstreamHealthMonitor | undefined;
+  private readonly retiring = new Set<Promise<void>>();
   private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
   private readonly sessionPolls = new Map<
     ProjectId,
@@ -125,19 +127,34 @@ export class HostOpsService {
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
-    this.upstream =
-      options.upstreamMonitor ??
-      (options.upstream
+  }
+  /** Each monitor (including its in-flight probes) belongs to one immutable launch generation. */
+  private get upstream(): UpstreamHealthMonitor | undefined {
+    if (this.options.upstreamMonitor) return this.options.upstreamMonitor;
+    const config = this.options.upstream;
+    if (!this.closing && this.generation !== config) {
+      if (this.monitor) {
+        const retiring = this.monitor
+          .close()
+          .finally(() => this.retiring.delete(retiring));
+        this.retiring.add(retiring);
+      }
+      this.generation = config;
+      this.monitor = config
         ? new UpstreamHealthMonitor(
-            options.upstream,
-            options.runtime,
+            config,
+            this.options.runtime,
             this.clock,
             undefined,
-            options.store,
+            this.options.store,
             () =>
-              options.onError?.(new Error("upstream probe publication failed")),
+              this.options.onError?.(
+                new Error("upstream probe publication failed"),
+              ),
           )
-        : undefined);
+        : undefined;
+    }
+    return this.monitor;
   }
   readonly tools: NonNullable<HostOpsToolOptions["hostOps"]> = {
     read: (context, project) => this.read(context, project),
@@ -549,6 +566,7 @@ export class HostOpsService {
     this.contextAbort.abort();
     await this.upstream?.close();
     await Promise.allSettled([
+      ...this.retiring,
       ...this.upstreamPolls.values(),
       ...this.sessionPolls.values(),
       ...this.actionWorkers.values(),

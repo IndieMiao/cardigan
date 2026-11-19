@@ -25,6 +25,7 @@ import {
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -59,7 +60,12 @@ beforeEach(() => {
     env: {
       CARDIGAN_RUNTIME_MODE: "local",
       CARDIGAN_DATA_DIR: dataDir,
-      CARDIGAN_CONFIG_DIR: join(dataDir, "config"),
+      CARDIGAN_CONFIG_DIR: roleConfig(
+        dataDir,
+        "codex-agent",
+        "codex-astra",
+        "claude-opus",
+      ),
     },
     cwd: dataDir,
     platform: "linux",

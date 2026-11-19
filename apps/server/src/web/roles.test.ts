@@ -71,6 +71,13 @@ test("V9b role routes list, show, version history and run every write as the log
     );
 
     // Copy from the default role pack and from an existing project role.
+    const unknown = await write("/coder/update", {
+      launch_profile_ref: "missing",
+    });
+    expect(unknown.status).toBe(400);
+    expect(JSON.stringify(unknown.json)).toContain(
+      "missing 不存在于 launch.yaml",
+    );
     const fromDefault = await write("/copy", {
       role_id: "designer-x",
       display_name: "设计师",

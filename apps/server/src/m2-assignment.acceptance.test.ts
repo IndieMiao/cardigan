@@ -336,6 +336,7 @@ setInterval(() => {}, 1000);
         `      CARDIGAN_MCP_URL: ${server.url}`,
         "      CARDIGAN_CARD_ID: C-1",
         "profiles:",
+        "  codex-agent: {harness: codex}",
         "  pi-agent:",
         "    harness: pi",
         "    provider: fake",

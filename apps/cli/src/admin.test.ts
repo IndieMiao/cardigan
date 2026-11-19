@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultMigrationsDir, listMigrations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -16,7 +17,10 @@ beforeEach(() => {
   out = [];
   err = [];
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(dataDir, "codex-agent", "test-agent"),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: dataDir,
     platform: "linux",
     stdout: (text) => out.push(text),

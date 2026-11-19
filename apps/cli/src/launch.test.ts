@@ -1,7 +1,9 @@
 import { EventEmitter } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -9,7 +11,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { Store } from "@cardigan/store";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CapturedOutput, CliIo, SpawnInheritOptions } from "./io.js";
 
@@ -637,3 +640,109 @@ async function exitedPid(): Promise<number> {
   await new Promise<void>((resolve) => child.once("exit", () => resolve()));
   return pid;
 }
+
+const aliasConfig = `providers:
+  relay: {base_url: https://relay.example.invalid/v1, api: openai-responses, secret_env: {TOKEN: CX_API_KEY}}
+models:
+  current: {id: original, provider: relay, context_window: 12000} # retain this note
+profiles:
+  first: {model: current, harness: codex}
+  second: {model: current, harness: codex}
+`;
+
+test("check all profiles offline; metadata, provider listing and billable requests are separate checks", async () => {
+  harness = await makeHarness({ launchYaml: aliasConfig });
+  await writeFile(join(harness.root, "bin", "codex"), "#!/bin/sh\n", {
+    mode: 0o755,
+  });
+  const network = vi.fn(async (url: string, init: RequestInit) => {
+    expect(init.redirect).toBe("error");
+    expect(new Headers(init.headers).get("authorization")).toBe(
+      `Bearer ${SECRET_VALUES.CX_API_KEY}`,
+    );
+    if (url.endsWith("/models"))
+      return Response.json({ data: [{ id: "original" }] });
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: "original",
+      max_output_tokens: 16,
+    });
+    return Response.json({ id: "response", output: [] });
+  });
+  vi.stubGlobal("fetch", network);
+  try {
+    expect(await harness.run(["launch", "check"])).toBe(0);
+    expect(harness.out.join("\n")).toContain("启动配置：second");
+    expect(await harness.run(["launch", "check", "--metadata"])).toBe(1);
+    expect(harness.err.join("\n")).toContain("max_output_tokens");
+    expect(network).not.toHaveBeenCalled();
+    expect(await harness.run(["launch", "check", "first", "--online"])).toBe(0);
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(await harness.run(["launch", "check", "first", "--smoke"])).toBe(0);
+    expect(network.mock.calls.map((c) => c[0])).toEqual(
+      ["models", "models", "responses"].map(
+        (route) => `https://relay.example.invalid/v1/${route}`,
+      ),
+    );
+    network.mockResolvedValueOnce(Response.json({ data: [] }));
+    expect(await harness.run(["launch", "check", "first", "--smoke"])).toBe(1);
+    expect(network).toHaveBeenCalledTimes(4);
+    expect([...harness.out, ...harness.err].join("\n")).not.toContain(
+      SECRET_VALUES.CX_API_KEY,
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("set-model preflights a private backup, atomically updates the alias and records a Needs You notice per project", async () => {
+  harness = await makeHarness({ launchYaml: aliasConfig });
+  const dir = join(harness.root, "config"),
+    path = join(dir, "launch.yaml"),
+    dataDir = join(harness.root, "data");
+  harness.io.env.CARDIGAN_DATA_DIR = dataDir;
+  const store = Store.open({ dataDir });
+  const network = vi.fn(async (_url: string) => Response.json({}));
+  vi.stubGlobal("fetch", network);
+  try {
+    store.createProject({ id: "p" });
+    store.createProject({ id: "q" });
+    const events = (project: string) =>
+      store.uow.read((tx) =>
+        tx.events
+          .listAfter(project, undefined, 0)
+          .filter((e) => e.type === "launch_model_changed"),
+      );
+    await chmod(join(dir, "secrets.env"), 0o644);
+    expect(
+      await harness.run(["launch", "set-model", "current", "next"]),
+    ).not.toBe(0);
+    expect(await readFile(path, "utf8")).toBe(aliasConfig);
+    expect(events("p")).toEqual([]);
+    await chmod(join(dir, "secrets.env"), 0o600);
+    expect(await harness.run(["launch", "set-model", "current", "next"])).toBe(
+      0,
+    );
+    const backups = (await readdir(dir)).filter((n) => n.endsWith(".bak"));
+    expect(backups).toHaveLength(2);
+    for (const n of backups) {
+      expect(await readFile(join(dir, n), "utf8")).toBe(aliasConfig);
+      expect((await stat(join(dir, n))).mode & 0o777).toBe(0o600);
+    }
+    expect(await readFile(path, "utf8")).toContain("# retain this note");
+    expect(await harness.run(["launch", "--list"])).toBe(0);
+    expect(harness.out.join("\n")).toContain("next");
+    for (const project of ["p", "q"]) {
+      expect(events(project)).toHaveLength(1);
+      expect(events(project)[0]?.payload).toMatchObject({
+        notice: expect.stringContaining("original 换为 next"),
+      });
+    }
+    expect(await harness.run(["launch", "reload"])).toBe(0);
+    expect(
+      network.mock.calls.every((c) => String(c[0]).includes("models.dev")),
+    ).toBe(true);
+  } finally {
+    store.close();
+    vi.unstubAllGlobals();
+  }
+});

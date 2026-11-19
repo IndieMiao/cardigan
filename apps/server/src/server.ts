@@ -351,9 +351,9 @@ async function assembleServer(
         store,
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
-        ...(options.dispatcher.upstream
-          ? { upstream: options.dispatcher.upstream }
-          : {}),
+        get upstream() {
+          return options.dispatcher?.upstream;
+        },
         contextUsage: {
           execution,
           cacheDir:
@@ -419,9 +419,9 @@ async function assembleServer(
       ? new DiagnosticsReader(
           {
             dbPath: databaseFile,
-            ...(hostOpsOptions.upstream
-              ? { upstream: hostOpsOptions.upstream }
-              : {}),
+            get upstream() {
+              return hostOpsOptions.upstream;
+            },
             ...(hostOpsOptions.contextUsage
               ? { contextUsage: hostOpsOptions.contextUsage }
               : {}),
@@ -571,6 +571,8 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          launchProfiles: () =>
+            Object.keys(options.dispatcher?.upstream?.profiles ?? {}),
           hcSession: session,
           ...(config.runtimeUnknownGraceMs === undefined
             ? {}

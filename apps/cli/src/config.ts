@@ -46,13 +46,14 @@ export function loadOptionalConfigSync(
 function decodeConfig(text: string, paths: LaunchPaths): unknown {
   let decoded: unknown;
   try {
-    decoded = parseYaml(text);
+    decoded = parseYaml(text, { prettyErrors: false });
   } catch (error) {
     throw new CliError(`${paths.launchFile} 不是合法的 YAML`, EXIT.usage, [
       error instanceof Error ? error.message : String(error),
     ]);
   }
-  return decoded ?? {};
+  if (decoded == null) throw new CliError("启动配置为空", EXIT.usage);
+  return decoded;
 }
 
 export async function loadSecrets(

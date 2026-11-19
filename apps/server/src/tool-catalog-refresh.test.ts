@@ -326,3 +326,34 @@ test("P2a-10 A: a fresh session records the catalog it will list", async () => {
   });
   expect(f.latest()).toMatchObject({ tool_catalog: "catalog-v3" });
 });
+
+test.each([true, false])(
+  "a changed recorded model rotates only on the next natural wake (employee %s)",
+  async (employee) => {
+    const f = fixture({ employee, recorded: "catalog-v2" });
+    const previous = f.latest();
+    if (!previous) throw new Error("Missing previous Run");
+    f.store.uow.run((tx) =>
+      tx.runs.put(f.project, {
+        ...previous,
+        launch_profile_ref: "profile",
+        model: "before",
+      }),
+    );
+    vi.mocked(f.dispatcher.snapshot).mockResolvedValue({
+      model: "after",
+      launch_profile_ref: "profile",
+      agent_cli_version: "fixture",
+    });
+    const dispatcher = new Dispatcher(f.dispatcher);
+    await dispatcher.tick();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    f.wake();
+    await dispatcher.tick();
+    expect(f.runtime.release).toHaveBeenCalledOnce();
+    expect(f.replaced()).toMatchObject([
+      { payload: { reason: "launch_profile_changed" } },
+    ]);
+    expect(f.latest()).toMatchObject({ model: "after" });
+  },
+);

@@ -23,6 +23,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const project_id = "p-attribution" as ProjectId;
@@ -43,7 +44,10 @@ async function cardigan(argv: readonly string[]): Promise<number> {
   output = [];
   errors = [];
   return main(argv, {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      CARDIGAN_CONFIG_DIR: join(dataDir, "config"),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: dataDir,
     platform: process.platform,
     stdout: (line) => output.push(line),
@@ -137,6 +141,7 @@ function connect(token: string): Promise<Client> {
 describe("an Assignment may only acknowledge its own Run", () => {
   beforeEach(async () => {
     dataDir = mkdtempSync(join(tmpdir(), "cardigan-attribution-"));
+    roleConfig(dataDir, "codex-agent");
     expect(await cardigan(["init"])).toBe(0);
     expect(await cardigan(["project", "create", project_id])).toBe(0);
     expect(

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { corePromptFor } from "@cardigan/roles";
 import { getRoleVersion, listRoleVersions, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { parseRoleFile } from "./role-file.js";
@@ -35,7 +36,19 @@ beforeEach(async () => {
   output = [];
   errors = [];
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(
+        root,
+        "codex-agent",
+        "codex-agent-2",
+        "changed",
+        "fixture",
+        "claude-agent",
+        "claude-opus",
+        "codex-astra",
+      ),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: root,
     platform: "linux",
     stdout: (line) => output.push(line),
@@ -536,4 +549,24 @@ test("MC-2 role YAML persists and shows required capabilities without replacing 
   }
   writeFileSync(roleFile, `${ROLE_YAML}\nrequired_capabilities: ['godot~4']\n`);
   expect(await run(["role", "update", "--file", roleFile])).not.toBe(0);
+});
+
+test("unknown file and default-pack profiles cannot create a role version", async () => {
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  writeFileSync(roleFile, ROLE_YAML.replace("codex-agent", "missing"));
+  expect(await run(["role", "update", "--file", roleFile])).toBe(2);
+  expect(errors.join("\n")).toContain("missing 不存在于 launch.yaml");
+  rmSync(join(root, "config", "launch.yaml"));
+  expect(
+    await run([
+      "role",
+      "copy",
+      "frontend_engineer",
+      "frontend",
+      "--from-default",
+    ]),
+  ).toBe(2);
+  expect(errors.join("\n")).toContain("claude-opus 不存在于 launch.yaml");
+  expect(await run(["role", "show", "coder", "--history"])).toBe(0);
+  expect(JSON.parse(printed())).toHaveLength(1);
 });

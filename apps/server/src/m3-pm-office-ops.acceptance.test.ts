@@ -1,3 +1,4 @@
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 /** M3.T2/M3.5: expectations from plan §3.4 and development plan §7.1–§7.3, §6.4.
  * Setup uses CLI pm create, createCard + assign commands, real MCP and Runtime ports.
  * No repository writes or implementation imports. Mutation evidence is in the PR.
@@ -155,7 +156,11 @@ async function pmFixture(automaticOps = false) {
   const io: CliIo = {
     ...createProcessIo(),
     cwd: root,
-    env: { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_PROJECT: project },
+    env: {
+      CARDIGAN_CONFIG_DIR: roleConfig(root, "fixture"),
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_PROJECT: project,
+    },
     stdout: (s) => {
       output += s;
     },

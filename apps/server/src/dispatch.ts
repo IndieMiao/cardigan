@@ -205,6 +205,7 @@ export interface DispatcherOptions {
     assignment: Assignment;
     run: Run;
     bell: string;
+    snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
   /** Prepare Git after claiming an idle Run; append current baseline to its prompt. */
@@ -857,7 +858,7 @@ export class Dispatcher {
         queued.recovery_policy.root_run_id !== queued.id
       ) {
         snapshot = queued;
-      } else if (a.employee_id) {
+      } else if (a.employee_id || (live && prior?.launch_profile_ref)) {
         snapshot = await this.options.snapshot(a, project);
         replaceProfile =
           live &&
@@ -1041,7 +1042,9 @@ export class Dispatcher {
             { force: true },
           );
           if (!released.ok)
-            throw new Error("Previous employee session could not be released");
+            throw new Error(
+              "Previous launch profile session could not be released",
+            );
         }
         await profileSpan("deliver.start_run", () =>
           this.options.startRun({
@@ -1049,6 +1052,7 @@ export class Dispatcher {
             assignment: job.assignment,
             run: job.run,
             bell: job.bell,
+            snapshot,
             ...(replacement ? { replacement } : {}),
           }),
         );

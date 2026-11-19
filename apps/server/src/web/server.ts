@@ -114,6 +114,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
   readonly runLimit?: (machine: string) => number;
@@ -176,6 +177,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
@@ -345,6 +347,7 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
+        launchProfiles: options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -560,6 +563,7 @@ async function serveProjectRoute(
         project_id,
         clock,
         dataDir: context.dataDir,
+        launchProfiles: context.launchProfiles,
         mergeGate: context.mergeGate?.forProject(project_id),
         runLimit: context.runLimit,
         runLimitMaximum: context.runLimitMaximum,

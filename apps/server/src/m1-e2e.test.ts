@@ -14,6 +14,7 @@ import { newUlid, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
@@ -76,7 +77,11 @@ let errors: string[];
 /** Run a CLI command as the human would, capturing what it prints. */
 async function host(argv: readonly string[]): Promise<string> {
   const code = await cli([...argv], {
-    env: { ...process.env, CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      ...process.env,
+      CARDIGAN_CONFIG_DIR: join(dataDir, "config"),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: dataDir,
     platform: process.platform,
     signals: { on: () => undefined, off: () => undefined },
@@ -184,6 +189,7 @@ function provisionRun(assignmentId: string): string {
 
 beforeEach(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-e2e-"));
+  roleConfig(dataDir, "codex-agent");
   output = [];
   errors = [];
   await host(["init"]);

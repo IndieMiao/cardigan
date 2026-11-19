@@ -3,9 +3,9 @@ import {
   access,
   chmod,
   mkdir,
+  open,
   readFile,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -33,9 +33,9 @@ export async function readSecretsFile(
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<string | undefined> {
-  let info: Awaited<ReturnType<typeof stat>>;
+  let file: Awaited<ReturnType<typeof open>>;
   try {
-    info = await stat(path);
+    file = await open(path, "r");
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       return undefined;
@@ -44,17 +44,21 @@ export async function readSecretsFile(
   }
 
   // Windows has no POSIX permission bits; there is nothing to check there.
-  if (platform !== "win32") {
-    const mode = info.mode & 0o777;
-    if (mode !== 0o600) {
-      throw new CliError(`密钥文件权限不是 600：${path}`, EXIT.usage, [
-        `当前权限是 ${mode.toString(8).padStart(4, "0")}`,
-        `修复：chmod 600 ${path}`,
-      ]);
+  try {
+    if (platform !== "win32") {
+      const mode = (await file.stat()).mode & 0o777;
+      if (mode !== 0o600) {
+        throw new CliError(`密钥文件权限不是 600：${path}`, EXIT.usage, [
+          `当前权限是 ${mode.toString(8).padStart(4, "0")}`,
+          `修复：chmod 600 ${path}`,
+        ]);
+      }
     }
-  }
 
-  return readFile(path, "utf8");
+    return await file.readFile("utf8");
+  } finally {
+    await file.close();
+  }
 }
 
 /** Write a file, creating parent directories, and force the given mode. */

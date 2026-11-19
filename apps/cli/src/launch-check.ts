@@ -1,17 +1,58 @@
-import { HARNESS_BINARY, resolveProfile } from "@cardigan/roles";
-import { loadConfig, loadSecrets } from "./config.js";
+import {
+  HARNESS_BINARY,
+  type LaunchConfig,
+  reportLaunchWarnings,
+  resolveProfile,
+} from "@cardigan/roles";
+import { loadOptionalConfigSync, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { findExecutable } from "./fs-io.js";
 import type { CliIo } from "./io.js";
+import { probeModel } from "./launch-online.js";
 import type { LaunchPaths } from "./paths.js";
 import { scanSettingsFiles } from "./runtime-files.js";
 
-export async function checkProfile(
+export interface CheckOptions {
+  readonly profile?: string;
+  readonly online: boolean;
+  readonly smoke: boolean;
+  readonly metadata: boolean;
+}
+export async function checkProfiles(
+  paths: LaunchPaths,
+  io: CliIo,
+  options: CheckOptions,
+) {
+  const config = loadOptionalConfigSync(paths);
+  if (!config)
+    throw new CliError(`找不到启动配置：${paths.launchFile}`, EXIT.usage);
+  reportLaunchWarnings(config, (message) => io.stderr(message));
+  let result: number = EXIT.ok;
+  for (const name of options.profile
+    ? [options.profile]
+    : Object.keys(config.profiles))
+    if ((await checkProfile(paths, io, name, config, options)) !== EXIT.ok)
+      result = EXIT.failure;
+  if (options.metadata) {
+    for (const [alias, model] of Object.entries(config.models ?? {})) {
+      const missing = (
+        ["context_window", "max_output_tokens", "reasoning_efforts"] as const
+      ).filter((key) => model[key] === undefined);
+      if (missing.length) {
+        io.stderr(`模型 ${alias} 缺少元数据：${missing.join("、")}`);
+        result = EXIT.failure;
+      }
+    }
+  }
+  return result;
+}
+async function checkProfile(
   paths: LaunchPaths,
   io: CliIo,
   profileName: string,
+  config: LaunchConfig,
+  options: CheckOptions,
 ): Promise<number> {
-  const config = await loadConfig(paths, (message) => io.stderr(message));
   const resolved = resolveProfile(config, profileName);
   const problems: string[] = [];
   const lines: string[] = [
@@ -42,7 +83,7 @@ export async function checkProfile(
   } else {
     lines.push("需要的密钥（secrets.env 的键 → 传给 CLI 的变量）：");
     for (const [envName, secretKey] of secretEntries) {
-      const present = (secrets[secretKey] ?? "").length > 0;
+      const present = Object.hasOwn(secrets, secretKey) && !!secrets[secretKey];
       lines.push(
         `  ${secretKey}${present ? "（已设置）" : "（缺失）"} → ${envName}`,
       );
@@ -52,6 +93,7 @@ export async function checkProfile(
     }
   }
 
+  const credentialsReady = problems.length === 0;
   const binary = HARNESS_BINARY[resolved.profile.harness];
   const executable = await findExecutable(binary, io.env.PATH, io.platform);
   if (executable === undefined) {
@@ -75,6 +117,20 @@ export async function checkProfile(
     lines.push(`  ${path}`);
   }
 
+  if (options.online && credentialsReady) {
+    try {
+      const error = await probeModel(
+        resolved,
+        secrets,
+        options.smoke,
+        config.launch_check,
+      );
+      if (error) problems.push(error);
+      else lines.push(options.smoke ? "模型已列出，冒烟成功" : "模型已列出");
+    } catch (error) {
+      problems.push(error instanceof Error ? error.message : "接入点检查失败");
+    }
+  }
   io.stdout(lines.join("\n"));
   if (problems.length > 0) {
     io.stderr(`检查未通过：${problems.join("；")}`);

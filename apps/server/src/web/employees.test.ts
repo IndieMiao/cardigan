@@ -437,3 +437,50 @@ test("session revocation while reading the body is checked before blob IO and wr
   expect(existsSync(join(h.dataDir, "avatars"))).toBe(false);
   expect(employees()).toEqual([]);
 });
+
+test("profile overrides are validated on owner creation and update, and may be cleared", async () => {
+  expect((await post({ ...input, launch_profile_ref: "missing" })).status).toBe(
+    400,
+  );
+  expect(employees()).toHaveLength(0);
+  expect((await post({ ...input, launch_profile_ref: "fixture" })).status).toBe(
+    200,
+  );
+  const update = (profile: string | null, session = cookie) =>
+    call(h.port, `${path}/E-1/update`, {
+      method: "POST",
+      cookie: session,
+      body: JSON.stringify({ launch_profile_ref: profile }),
+      headers: {
+        origin: `http://${h.hostHeader}`,
+        "content-type": "application/json",
+        "idempotency-key": `change-${++sequence}`,
+      },
+    });
+  expect((await update("missing")).status).toBe(400);
+  expect((await update(null, "")).status).not.toBe(200);
+  expect(employees()[0]?.launch_profile_ref).toBe("fixture");
+  expect((await update(null)).status).toBe(200);
+  expect(employees()[0]?.launch_profile_ref).toBeNull();
+});
+
+test("creation without an override rejects a role whose profile was removed", async () => {
+  h.store.uow.run((tx) =>
+    tx.roles.put(
+      "p-test",
+      roleDocument({
+        ...defaultRoleDefinition("coder", {
+          harness: "pi",
+          launch_profile_ref: "removed",
+        }),
+        version: 2,
+      }),
+    ),
+  );
+  const response = await post(input);
+  expect(response.status).toBe(400);
+  expect(response.json).toMatchObject({
+    error: { message: expect.stringContaining("removed") },
+  });
+  expect(employees()).toHaveLength(0);
+});
