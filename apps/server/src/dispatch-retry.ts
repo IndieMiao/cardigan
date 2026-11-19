@@ -479,12 +479,6 @@ export async function retryDispatchedRuns(
         return;
       const history = listBellAttempts(store.database, project, run.id);
       const last = history.at(-1);
-      const failures =
-        last?.outcome === "failed"
-          ? history.slice(
-              history.findLastIndex((t) => t.outcome === "sent") + 1,
-            ).length
-          : 0;
       const at = clock.now(),
         started =
           dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
@@ -507,6 +501,23 @@ export async function retryDispatchedRuns(
         state.decisions.some(
           (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
         );
+      // Keep every receipt for audit. A positive refusal for this shared target
+      // neither spends nor resets the ordinary failure budget since the last send.
+      let failures = 0;
+      for (let i = history.length - 1; i >= 0; i--) {
+        const attempt = history[i];
+        if (attempt?.outcome !== "failed") break;
+        const receipt = attempt.review_wake;
+        if (
+          shared &&
+          receipt?.refused_at &&
+          !receipt.sending_at &&
+          receipt.delivery_id === binding.delivery_id &&
+          receipt.target_sha === binding.target_sha
+        )
+          continue;
+        failures++;
+      }
       const legacy =
         !withdrawn && !disposition && target
           ? legacyRepairWake(state, a, run, target, history)
@@ -539,9 +550,7 @@ export async function retryDispatchedRuns(
           !noSendYet &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-        (!reconcile &&
-          !(shared && binding?.refused_at) &&
-          failures >= policy.maxRetries + 1);
+        (!unconfirmed && failures >= policy.maxRetries + 1);
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&

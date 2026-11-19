@@ -128,6 +128,7 @@ export async function sharedRepairStore() {
     store,
     project,
     clock,
+    dataDir: dir,
     target,
     read,
     owner,

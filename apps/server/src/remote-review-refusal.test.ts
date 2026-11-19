@@ -36,9 +36,13 @@ const machine = (id: string, alias = "local"): Machine => ({
   last_seen: "2026-01-01T00:00:00Z",
 });
 // The real agent-ssh adapter requires a Linux control plane. hc itself is a fixture.
-test.runIf(process.platform === "linux")(
-  "remote final refusal is not a lost acknowledgement",
-  async () => {
+test.runIf(process.platform === "linux").each([
+  { refusals: 1, preparationFailure: false },
+  { refusals: 0, preparationFailure: true },
+  { refusals: 4, preparationFailure: true },
+])(
+  "remote final guard: $refusals refusals, preparation failure=$preparationFailure",
+  async ({ refusals, preparationFailure }) => {
     const root = await mkdtemp(join(tmpdir(), "cg-remote-refusal-"));
     const store = Store.open({ dataDir: root });
     store.createProject({ id: "fixture" });
@@ -94,8 +98,8 @@ test.runIf(process.platform === "linux")(
     });
     const socketPath = join(root, "wake.sock");
     const env = { CARDIGAN_HC_CONCURRENCY: "1" };
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
+    let entered = Promise.withResolvers<void>();
+    let release = Promise.withResolvers<void>();
     let hold = false;
     let queued: Promise<void> | undefined;
     const client: HcClient = {
@@ -160,7 +164,8 @@ test.runIf(process.platform === "linux")(
     };
     // Use the production remote adapter and queue; only hc and clock are fixtures.
     const f = await sharedRepairStore();
-    let first = true;
+    let first = true,
+      failOnce = false;
     const replies: unknown[] = [];
     const runtime: Runtime = {
       status: async () => ({
@@ -173,7 +178,7 @@ test.runIf(process.platform === "linux")(
         return reply;
       },
       provision: vi.fn(),
-      release: vi.fn(),
+      release: vi.fn(async () => ({ ok: true as const, value: undefined })),
       interrupt: vi.fn(),
       human_entry: vi.fn(),
       resume_or_replace: vi.fn(),
@@ -186,6 +191,10 @@ test.runIf(process.platform === "linux")(
         startRun: vi.fn(),
         snapshot: async () => ({ model: "fixture", agent_cli_version: "1" }),
         beforeWake: async () => {
+          if (failOnce) {
+            failOnce = false;
+            throw Error("transient preparation failure");
+          }
           if (first) {
             first = false;
             f.pause();
@@ -198,43 +207,58 @@ test.runIf(process.platform === "linux")(
       .runs.find((r) => r.assignment_id === f.owner && r.kind === "rework");
     if (!run) throw Error("Missing repair Run");
     expect(f.resume()?.payload).toMatchObject({ rework_run_id: run.id });
-    const history = () =>
-      listBellAttempts(f.store.database, f.project, run.id).map((a) => ({
-        outcome: a.outcome,
-        crossed: !!a.review_wake?.sending_at,
-      }));
-    hold = true;
-    const sending = loop().tick();
-    try {
-      await entered.promise;
-      store.uow.run((tx) =>
-        tx.machines.put("fixture", {
-          ...machine("worker-a", "worker-a"),
-          status: "offline",
-        }),
-      );
-    } finally {
-      release.resolve();
-    }
-    await sending;
-    await queued;
     const count = () =>
       vi.mocked(client.exec).mock.calls.filter(([args]) => args[0] === "send")
         .length;
-    expect(count()).toBe(0);
-    expect(replies).toEqual([
-      { ok: true, value: { sent: false, withdrawn: true } },
-    ]);
-    const afterRefusal = history();
-    store.uow.run((tx) =>
-      tx.machines.put("fixture", machine("worker-a", "worker-a")),
-    );
+    for (let i = 0; i < refusals; ++i) {
+      entered = Promise.withResolvers<void>();
+      release = Promise.withResolvers<void>();
+      hold = true;
+      const sending = loop().tick();
+      try {
+        await entered.promise;
+        store.uow.run((tx) =>
+          tx.machines.put("fixture", {
+            ...machine("worker-a", "worker-a"),
+            status: "offline",
+          }),
+        );
+      } finally {
+        release.resolve();
+      }
+      await sending;
+      await queued;
+      expect(count()).toBe(0);
+      expect(replies.at(-1)).toEqual({
+        ok: true,
+        value: { sent: false, withdrawn: true },
+      });
+      store.uow.run((tx) =>
+        tx.machines.put("fixture", machine("worker-a", "worker-a")),
+      );
+      await loop().tick();
+      expect(count()).toBe(0);
+      f.advance(30_001);
+    }
+    const rows = () =>
+      listBellAttempts(f.store.database, f.project, run.id).map((a) =>
+        a.review_wake?.refused_at ? "refused" : a.outcome,
+      );
+    expect(rows()).toEqual(Array(refusals).fill("refused"));
+    if (preparationFailure) {
+      failOnce = true;
+      await loop().tick();
+      expect(rows()).toEqual([...Array(refusals).fill("refused"), "failed"]);
+      f.advance(30_001);
+    } else {
+      expect(
+        listBellAttempts(f.store.database, f.project, run.id)[0]?.review_wake
+          ?.sending_at,
+      ).toBeUndefined();
+    }
     await loop().tick();
     f.advance(60_001);
     await loop().tick();
-    f.advance(30_001);
-    await loop().tick();
-    expect(afterRefusal).toEqual([{ outcome: "failed", crossed: false }]);
     expect(count()).toBe(1);
     expect(runtime.release).not.toHaveBeenCalled();
   },
