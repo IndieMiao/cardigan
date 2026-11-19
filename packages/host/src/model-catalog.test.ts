@@ -172,11 +172,10 @@ test("partial metadata complements local fields and enforces known effort", asyn
 
 test("damaged fields recover only from the same row, preserving the good offline cache", async () => {
   const cache = join(dir, "models-dev.json");
-  const good = await loadModelLaunchConfig(config, dir, {
-    now,
-    fetch: async () => Response.json(fixture),
-  });
-  const saved = await readFile(cache, "utf8");
+  const changed = {
+    ...config,
+    models: { active: { ...config.models.active, id: "v2" } },
+  };
   for (const v1 of [
     { limit: { context: 0, output: 501 } },
     {
@@ -184,26 +183,38 @@ test("damaged fields recover only from the same row, preserving the good offline
       reasoning_options: [{ type: "effort", values: [] }],
     },
   ]) {
-    const result = await loadModelLaunchConfig(config, dir, {
+    await rm(cache, { force: true });
+    await loadModelLaunchConfig(config, dir, {
+      now,
+      fetch: async () => Response.json(fixture),
+    });
+    const result = await loadModelLaunchConfig(changed, dir, {
       now: stale,
       fetch: async () =>
         Response.json({
-          native: { models: { v1, v2: { limit: { context: 9000 } } } },
+          native: { models: { v1, v2: { limit: { context: 8192 } } } },
         }),
     });
-    expect(result.models?.active).toMatchObject({
+    expect(result.models?.active.context_window).toBe(8192);
+    expect(parseCachedLaunchConfig(changed, dir)).toEqual(result);
+    expect(JSON.parse(await readFile(cache, "utf8")).fetched_at).toBe(
+      now().toISOString(),
+    );
+    expect(parseCachedLaunchConfig(config, dir).models?.active).toMatchObject({
       context_window: 8000,
       max_output_tokens: 501,
     });
-    expect(await readFile(cache, "utf8")).toBe(saved);
-    expect(parseCachedLaunchConfig(config, dir)).toEqual(good);
+    if ("reasoning_options" in v1)
+      expect(
+        parseCachedLaunchConfig(config, dir).models?.active.reasoning_efforts,
+      ).toEqual(["low", "high"]);
+    const offline = vi.fn(async () => new Response(null, { status: 503 }));
     expect(
-      await loadModelLaunchConfig(config, dir, {
-        now: stale,
-        fetch: async () => new Response(null, { status: 503 }),
-      }),
-    ).toEqual(good);
+      await loadModelLaunchConfig(changed, dir, { now: stale, fetch: offline }),
+    ).toEqual(result);
+    expect(offline).toHaveBeenCalledOnce(); // recovered fields have not become fresh
   }
+  const saved = await readFile(cache, "utf8");
   // A healthy response without the model is not a transient damaged row.
   await expect(
     loadModelLaunchConfig(config, dir, {

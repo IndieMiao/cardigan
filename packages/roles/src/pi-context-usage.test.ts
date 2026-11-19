@@ -1,5 +1,4 @@
 import {
-  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -11,13 +10,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { expect, test, vi } from "vitest";
-import { piContextUsageExtension } from "./pi-context-usage.js";
+import { makePiContextUsageExtension } from "./pi-context-usage.js";
 
-test("installed extension atomically writes current usage at turn_end, including a fresh session; unknown usage and IO failures are harmless", async () => {
+test.each([false, true])(
+  "writes usage to the persistent home and tolerates IO failures (isolated registry: %s)",
+  checkUsage,
+);
+async function checkUsage(isolated: boolean) {
   const root = await mkdtemp(join(tmpdir(), "pi-context-"));
   try {
     const script = join(root, "extension.mjs");
-    await writeFile(script, piContextUsageExtension);
+    await writeFile(
+      script,
+      makePiContextUsageExtension(isolated ? root : undefined),
+    );
     const extension = (await import(pathToFileURL(script).href)).default;
     let callback: (_event: unknown, ctx: unknown) => Promise<void> =
       async () => {};
@@ -27,7 +33,10 @@ test("installed extension atomically writes current usage at turn_end, including
         callback = cb;
       },
     });
-    vi.stubEnv("PI_CODING_AGENT_DIR", root);
+    vi.stubEnv(
+      "PI_CODING_AGENT_DIR",
+      isolated ? join(root, "launch-R-1") : root,
+    );
     const ctx = (session = "session-1", tokens: number | null = 850) => ({
       cwd: "/fixture",
       model: { id: "fixture" },
@@ -97,13 +106,11 @@ test("installed extension atomically writes current usage at turn_end, including
       "pi-session-2.json",
       "pi-unknown.json",
     ]);
-    const broken = join(root, "broken");
-    await mkdir(broken);
-    await writeFile(join(broken, "context-usage"), "not a directory");
-    vi.stubEnv("PI_CODING_AGENT_DIR", broken);
+    await rm(join(root, "context-usage"), { recursive: true });
+    await writeFile(join(root, "context-usage"), "not a directory");
     await expect(callback({}, ctx())).resolves.toBeUndefined();
   } finally {
     vi.unstubAllEnvs();
     await rm(root, { recursive: true, force: true });
   }
-});
+}

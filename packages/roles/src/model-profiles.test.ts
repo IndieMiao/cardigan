@@ -321,3 +321,123 @@ test.each(["relay.v1", "openai", "ollama", "lmstudio", "amazon-bedrock"])(
     ).toEqual(["--profile", name]);
   },
 );
+
+const piInput = (profile = {}, metadata = {}) => ({
+  providers: { relay: { base_url: base, api: "openai-responses" } },
+  profiles: { p: { harness: "pi", model: "active", ...profile } },
+  models: {
+    active: {
+      id: "current-model",
+      provider: "relay",
+      context_window: 8192,
+      ...metadata,
+    },
+  },
+});
+
+test("inline Pi rejects competing route and thinking flags in profile and passthrough without changing native profiles", () => {
+  for (const arg of [
+    "--model",
+    "--model=old",
+    "--provider",
+    "--models",
+    "--thinking",
+    "--api-key",
+  ]) {
+    const args = [arg, "old"];
+    expect(() =>
+      parseLaunchConfig(piInput({ args, effort: "high" })),
+    ).toThrow();
+    expect(() =>
+      compileLaunch({
+        config: parseLaunchConfig(piInput()),
+        profile: "p",
+        runtimeDir: "/fixture",
+        secrets: {},
+        extraArgs: args,
+      }),
+    ).toThrow();
+    expect(
+      compile({ profiles: { p: { harness: "pi", args } } }, "p").args,
+    ).toEqual(args);
+  }
+  expect(() => compile(piInput({ args: ["--no-session"] }), "p")).not.toThrow();
+  expect(() => compile(piInput({ effort: "turbo" }), "p")).toThrow();
+  expect(() =>
+    compile(piInput({}, { reasoning_efforts: ["turbo"] }), "p"),
+  ).toThrow();
+});
+
+test.each([
+  [
+    "xhigh",
+    ["low", "high", "xhigh"],
+    { low: undefined, xhigh: "xhigh", max: null, medium: null },
+  ],
+  ["max", ["max"], { max: "max", xhigh: null, high: null }],
+  ["high", undefined, { xhigh: null, high: undefined }],
+] as const)(
+  "inline Pi represents the selected %s instead of relying on SDK clamping",
+  (effort, levels, expected) => {
+    const compiled = compile(
+      piInput({ effort }, { reasoning_efforts: levels }),
+      "p",
+    );
+    const model = JSON.parse(compiled.files[0]?.content ?? "null").providers
+      .relay.models[0];
+    expect(model.reasoning).toBe(true);
+    for (const [level, value] of Object.entries(expected))
+      expect(model.thinkingLevelMap[level]).toEqual(value);
+    expect(compiled.args.slice(-2)).toEqual(["--thinking", effort]);
+  },
+);
+
+test("successive local Assignment launches isolate inline registries from each other and the native Pi home", () => {
+  const launch = (id: string, config: unknown) =>
+    compileAssignmentLaunch({
+      assignment: { assignment_id: "A-1", run_id: id },
+      role: {
+        role_id: "coder",
+        harness: "pi",
+        launch_profile: "p",
+        worktree: "write",
+        allowed_tools: [],
+      },
+      launch: parseLaunchConfig(config),
+      mcp: { url: "https://fixture.invalid/mcp" },
+      run_dir: "/fixture/run",
+      work_dir: "/fixture/work",
+      work_dir_real: "/fixture/work",
+      first_prompt: "fixture",
+      secrets: {},
+    });
+  const runs = [
+    launch("R-1", piInput()),
+    launch("R-2", piInput()),
+    launch("R-3", {
+      profiles: {
+        p: { harness: "pi", model: "current-model", provider_flag: "relay" },
+      },
+    }),
+  ];
+  expect(new Set(runs.map((r) => r.env.PI_CODING_AGENT_DIR)).size).toBe(3);
+  for (const r of runs.slice(0, 2)) {
+    const dir = r.env.PI_CODING_AGENT_DIR;
+    for (const name of [
+      "models.json",
+      "mcp.json",
+      "trust.json",
+      "extensions/cardigan-context-usage.js",
+    ])
+      expect(r.files.some((f) => f.path === `${dir}/${name}`)).toBe(true);
+    expect(r.env.PI_CODING_AGENT_SESSION_DIR).toBe(
+      "/fixture/run/pi/sessions/--fixture-work--",
+    );
+  }
+  expect(runs[2]?.env.PI_CODING_AGENT_DIR).toBe("/fixture/run/pi");
+  expect(
+    runs
+      .flatMap((r) => r.files)
+      .some((f) => f.path === "/fixture/run/pi/models.json"),
+  ).toBe(false);
+});

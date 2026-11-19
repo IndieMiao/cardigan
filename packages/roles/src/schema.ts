@@ -2,6 +2,7 @@ import { z } from "zod";
 import { LaunchConfigError } from "./errors.js";
 import { HARNESSES } from "./harness.js";
 import { type CatalogEntry, modelMetadata } from "./model-catalog.js";
+import { piInlineArgsConflict, piThinkingLevels } from "./pi-model.js";
 
 const nameSchema = z
   .string()
@@ -391,6 +392,7 @@ function normalizeConfig(
       )
         details.push(`${at}.effort 不在模型支持的推理强度中`);
     }
+    const configuredArgs = profile.args ?? [];
     if (profile.harness === "codex") {
       const provider =
         profile.provider && Object.hasOwn(config.providers, profile.provider)
@@ -474,6 +476,18 @@ function normalizeConfig(
           provider.base_url_env === "PI_CODING_AGENT_DIR"
         )
           details.push(`${at}: Pi 内联端点需要模型并独占此启动的模型目录`);
+        if (piInlineArgsConflict(configuredArgs))
+          details.push(
+            `${at}.args: Pi 内联模式请用 model、provider_flag、effort 和接入点凭据选择线路，不可用参数覆盖`,
+          );
+        if (profile.effort && !piThinkingLevels.includes(profile.effort))
+          details.push(`${at}.effort: Pi 不能表达该推理强度`);
+        if (
+          model?.reasoning_efforts?.some(
+            (e) => e !== "none" && !piThinkingLevels.includes(e),
+          )
+        )
+          details.push(`${at}: Pi 不能表达模型声明的推理强度`);
         profile.provider_flag ??= profile.provider;
         if (model)
           profile.pi_model = {

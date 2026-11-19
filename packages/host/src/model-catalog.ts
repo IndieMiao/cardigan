@@ -46,15 +46,16 @@ function projectCache(
   json: unknown,
   now: Date,
   limit: number,
-  previous?: CatalogEntry[],
+  previous?: ReturnType<typeof readCache>,
 ) {
-  const prefix = `{"fetched_at":${JSON.stringify(now.toISOString())},"entries":[`;
+  const prefix = (at: Date) =>
+    `{"fetched_at":${JSON.stringify(at.toISOString())},"entries":[`;
   const rows: string[] = [];
   const entries: CatalogEntry[] = [];
-  let bytes = Buffer.byteLength(prefix) + 2;
+  let bytes = Buffer.byteLength(prefix(now)) + 2;
   if (bytes > limit) throw new Error("catalog cache too large");
   let recovered = false;
-  for (const row of catalogEntries(json, previous)) {
+  for (const row of catalogEntries(json, previous?.entries)) {
     const entry = row.entry;
     // Early cheap lower bound before escaping a potentially long repeated provider/ID.
     let lowerBound = bytes + entry.provider.length + entry.id.length;
@@ -70,7 +71,16 @@ function projectCache(
     entries.push(entry);
     recovered ||= row.recovered;
   }
-  return { entries, recovered, text: `${prefix}${rows.join(",")}]}` };
+  // One freshness clock for the whole snapshot: publish healthy siblings,
+  // but keep the older watermark while any field still relies on it.
+  const at =
+    recovered && previous
+      ? new Date(Math.min(now.getTime(), Date.parse(previous.fetched_at)))
+      : now;
+  const text = `${prefix(at)}${rows.join(",")}]}`;
+  if (Buffer.byteLength(text) > limit)
+    throw new Error("catalog cache too large");
+  return { entries, text };
 }
 
 /** Read-only CLI views never contact the network. Legacy configs do no catalog IO. */
@@ -128,7 +138,7 @@ export async function loadModelLaunchConfig(
       JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")),
       now,
       cache_max_bytes,
-      cache?.entries,
+      cache,
     );
   } catch {
     return parsed.resolve(cache?.entries);
@@ -136,7 +146,6 @@ export async function loadModelLaunchConfig(
 
   // A real removal or an unsupported effort is a configuration error, not a network failure.
   const resolved = parsed.resolve(projection.entries);
-  if (projection.recovered) return resolved; // do not advance the last good cache/date
   const tmp = join(dir, `.${CACHE}.${randomUUID()}`);
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });

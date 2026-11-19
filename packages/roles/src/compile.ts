@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { LaunchConfigError } from "./errors.js";
 import { HARNESS_BINARY, type Harness } from "./harness.js";
+import { piInlineArgsConflict, piThinkingConfig } from "./pi-model.js";
 import { type LaunchConfig, resolveProfile } from "./schema.js";
 
 /** A file Cardigan must create before starting the CLI, and remove afterwards. */
@@ -185,6 +186,11 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
       resolved.profile.provider_flag &&
       resolved.profile.model
     ) {
+      if (piInlineArgsConflict(extraArgs))
+        throw new LaunchConfigError(
+          "invalid_config",
+          "Pi 内联模式不能用额外参数覆盖模型、接入点或推理强度",
+        );
       const dir =
         input.piRegistryDir ??
         join(
@@ -204,11 +210,10 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
                 id: resolved.profile.model,
                 contextWindow: meta?.context_window,
                 maxTokens: meta?.max_output_tokens,
-                reasoning: meta?.reasoning_efforts
-                  ? meta.reasoning_efforts.some(
-                      (e) => e !== "off" && e !== "none",
-                    )
-                  : undefined,
+                ...piThinkingConfig(
+                  meta?.reasoning_efforts,
+                  resolved.profile.effort,
+                ),
               },
             ],
           },
