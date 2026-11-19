@@ -150,27 +150,30 @@ export function SystemRulesSettings({
           policy={policy.value}
           busy={policy.busy}
           error={policy.error}
-          clear={policy.clear}
+          message={policy.message}
           save={policy.save}
         />
-        <RequestFeedback interactive message={policy.message} />
       </SettingsRow>
     </SettingsGroup>
   );
 }
 
-/** The dialog stays open while saving, so a failure keeps its error and draft. */
+/**
+ * The dialog stays open while saving, so a failure keeps its error and draft.
+ * A failure stays visible (on the row while closed) until the next save, also
+ * when it happened while nobody was on the page.
+ */
 function ReminderPolicyDialog({
   policy,
   busy,
   error,
-  clear,
+  message,
   save,
 }: {
   policy: SystemReminderPolicy | null;
   busy: boolean;
   error: string;
-  clear: () => void;
+  message: string;
   save: (policy: SystemReminderPolicy | null) => Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
@@ -178,7 +181,6 @@ function ReminderPolicyDialog({
   const [repeat, setRepeat] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const reset = () => {
-    clear();
     setConfigure(!!policy);
     setRepeat(policy?.repeat === true);
     setValues(
@@ -188,104 +190,114 @@ function ReminderPolicyDialog({
     );
   };
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (busy) return;
-        if (next) reset();
-        setOpen(next);
-      }}
-    >
-      <DialogTrigger asChild>
-        <Button aria-label="编辑催办阈值">编辑</Button>
-      </DialogTrigger>
-      <DialogContent className={settingsDialogClassName}>
-        <DialogTitle>催办阈值</DialogTitle>
-        <DialogDescription>
-          没有完整配置就不催办；不重复时每个等待周期只提醒一次。
-        </DialogDescription>
-        <form
-          onSubmit={async (event) => {
-            event.preventDefault();
-            if (busy) return;
-            const next = configure
-              ? ({
-                  ...Object.fromEntries(
-                    fields.map(([key]) => [
-                      key,
-                      values[key]?.trim() ? Number(values[key]) : null,
-                    ]),
-                  ),
-                  repeat,
-                } as unknown as SystemReminderPolicy)
-              : null;
-            if (await save(next)) setOpen(false);
-          }}
-        >
-          <SettingsDialogFields>
-            <label>
-              设置催办阈值和允许范围
-              <Switch
-                checked={configure}
-                disabled={busy}
-                onCheckedChange={setConfigure}
-              />
-            </label>
-            {configure && (
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (busy) return;
+          if (next) reset();
+          setOpen(next);
+        }}
+      >
+        <DialogTrigger asChild>
+          <Button aria-label="编辑催办阈值">编辑</Button>
+        </DialogTrigger>
+        <DialogContent className={settingsDialogClassName}>
+          <DialogTitle>催办阈值</DialogTitle>
+          <DialogDescription>
+            没有完整配置就不催办；不重复时每个等待周期只提醒一次。
+          </DialogDescription>
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (busy) return;
+              const next = configure
+                ? ({
+                    ...Object.fromEntries(
+                      fields.map(([key]) => [
+                        key,
+                        values[key]?.trim() ? Number(values[key]) : null,
+                      ]),
+                    ),
+                    repeat,
+                  } as unknown as SystemReminderPolicy)
+                : null;
+              if (await save(next)) setOpen(false);
+            }}
+          >
+            <SettingsDialogFields>
               <label>
-                重复提醒
+                设置催办阈值和允许范围
                 <Switch
-                  checked={repeat}
+                  checked={configure}
                   disabled={busy}
-                  onCheckedChange={(next) => {
-                    setRepeat(next);
-                    if (!next)
-                      setValues((v) => ({ ...v, repeat_interval_minutes: "" }));
-                  }}
+                  onCheckedChange={setConfigure}
                 />
               </label>
-            )}
-            {configure &&
-              fields.map(([key, label]) => (
-                <label key={key}>
-                  {label}
-                  <Input
-                    type="number"
-                    step="1"
-                    value={values[key] ?? ""}
-                    placeholder="未设置"
-                    disabled={
-                      busy || (key === "repeat_interval_minutes" && !repeat)
-                    }
-                    onChange={(e) =>
-                      setValues((v) => ({ ...v, [key]: e.target.value }))
-                    }
+              {configure && (
+                <label>
+                  重复提醒
+                  <Switch
+                    checked={repeat}
+                    disabled={busy}
+                    onCheckedChange={(next) => {
+                      setRepeat(next);
+                      if (!next)
+                        setValues((v) => ({
+                          ...v,
+                          repeat_interval_minutes: "",
+                        }));
+                    }}
                   />
                 </label>
-              ))}
-          </SettingsDialogFields>
-          <SettingsDialogActions>
-            <Button
-              type="button"
-              aria-disabled={busy}
-              onClick={() => {
-                if (!busy) setOpen(false);
-              }}
-            >
-              取消
-            </Button>
-            <Button type="submit" variant="primary" aria-disabled={busy}>
-              保存催办阈值
-            </Button>
-          </SettingsDialogActions>
-          <RequestFeedback
-            interactive
-            pending={busy}
-            pendingMessage="正在保存催办阈值…"
-            error={error}
-          />
-        </form>
-      </DialogContent>
-    </Dialog>
+              )}
+              {configure &&
+                fields.map(([key, label]) => (
+                  <label key={key}>
+                    {label}
+                    <Input
+                      type="number"
+                      step="1"
+                      value={values[key] ?? ""}
+                      placeholder="未设置"
+                      disabled={
+                        busy || (key === "repeat_interval_minutes" && !repeat)
+                      }
+                      onChange={(e) =>
+                        setValues((v) => ({ ...v, [key]: e.target.value }))
+                      }
+                    />
+                  </label>
+                ))}
+            </SettingsDialogFields>
+            <SettingsDialogActions>
+              <Button
+                type="button"
+                aria-disabled={busy}
+                onClick={() => {
+                  if (!busy) setOpen(false);
+                }}
+              >
+                取消
+              </Button>
+              <Button type="submit" variant="primary" aria-disabled={busy}>
+                保存催办阈值
+              </Button>
+            </SettingsDialogActions>
+            <RequestFeedback
+              interactive
+              pending={busy}
+              pendingMessage="正在保存催办阈值…"
+              error={error}
+            />
+          </form>
+        </DialogContent>
+      </Dialog>
+      <RequestFeedback
+        interactive
+        error={open ? undefined : error}
+        message={message}
+      />
+    </>
   );
 }

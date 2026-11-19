@@ -34,6 +34,11 @@ interface Channel {
   /** Idempotency key of the newest write not yet confirmed. */
   pending: { value: unknown; key: string } | undefined;
   unseenError: string | undefined;
+  /**
+   * A write confirmed while no view listened. The next view may hold a read
+   * that started before it, so it shows this value and reads again.
+   */
+  unseenDone: { value: unknown } | undefined;
   listeners: Set<Listener>;
 }
 const channels = new Map<string, Channel>();
@@ -46,6 +51,7 @@ const channel = (id: string) => {
       queued: undefined,
       pending: undefined,
       unseenError: undefined,
+      unseenDone: undefined,
       listeners: new Set(),
     };
     channels.set(id, found);
@@ -72,6 +78,7 @@ async function run(c: Channel, next: unknown, write: Write<unknown>) {
     ok = true;
     if (c.pending?.key === key) c.pending = undefined;
     c.unseenError = undefined;
+    c.unseenDone = c.listeners.size ? undefined : { value: next };
     for (const l of c.listeners) l.done(next);
   } catch (cause) {
     const message = describeWriteError(cause);
@@ -161,6 +168,12 @@ export function useSettingWrite<T>({
       setError(c.unseenError);
       c.unseenError = undefined;
     }
+    const unseen = c.unseenDone;
+    if (unseen) {
+      c.unseenDone = undefined;
+      setValue(unseen.value as T);
+      latest.current.saved();
+    }
     return () => {
       c.listeners.delete(listener);
     };
@@ -199,6 +212,8 @@ export function useNumberDraft(confirmed: number, min: number, max: number) {
   const [draft, setDraft] = useState(String(confirmed));
   const [shown, setShown] = useState(confirmed);
   const edited = useRef(false);
+  // Bumped when another control decides, so an older commit stays settled.
+  const decided = useRef(0);
   if (shown !== confirmed) {
     setShown(confirmed);
     if (draft === String(shown)) setDraft(String(confirmed));
@@ -217,12 +232,16 @@ export function useNumberDraft(confirmed: number, min: number, max: number) {
     /** Another control decided (e.g. a switch): the edit is no longer pending. */
     settle: () => {
       edited.current = false;
+      decided.current++;
     },
     commit: async (save: (value: number) => Promise<boolean>) => {
       if (!edited.current || !valid || !dirty) return;
       edited.current = false;
-      // A failed or deferred write keeps the edit for the next blur or Enter.
-      if (!(await save(Number(draft)))) edited.current = true;
+      const at = decided.current;
+      // A failed or deferred write keeps the edit for the next blur or Enter,
+      // unless another control decided meanwhile (it cancelled the edit).
+      if (!(await save(Number(draft))) && decided.current === at)
+        edited.current = true;
     },
   };
 }

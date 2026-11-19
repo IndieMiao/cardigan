@@ -700,3 +700,112 @@ test("another project's settings do not share the queue", async () => {
   await waitFor(() => expect(writes).toEqual(["p-1:1", "p-2:10"]));
   await act(async () => first.resolve());
 });
+
+// C-455 review (V-2181): a decided switch, a confirmed write during the read
+// on return, and an off-page failure of the reminder threshold.
+const timeoutName = "超时自动合并";
+
+test("failed older minute write must not revive its edit after an explicit off", async () => {
+  let minutes: number | null = 10;
+  const writes: (number | null)[] = [];
+  const first = Promise.withResolvers<void>(),
+    off = Promise.withResolvers<void>();
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: minutes,
+      merge_gate_enabled: true,
+    }),
+    setPreferences: async (_p, v) => {
+      writes.push(v);
+      if (writes.length === 1) await first.promise;
+      if (v === null) await off.promise;
+      minutes = v;
+    },
+  });
+  render(<SettingsPage client={client} projectId="p-1" />);
+  const toggle = await screen.findByRole("switch", { name: timeoutName });
+  const input = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  act(() => input.focus());
+  fireEvent.change(input, { target: { value: "1" } });
+  act(() => toggle.focus()); // Tab: blur commits 1
+  fireEvent.click(toggle); // Space activates off while the 1 is in flight
+  expect(writes).toEqual([1]);
+  await act(async () => first.reject(new Error("first write rejected")));
+  expect(writes).toEqual([1, null]);
+  expect(input.readOnly).toBe(true);
+  act(() => input.focus());
+  act(() => input.blur()); // Tab through; no new edit
+  await act(async () => off.resolve());
+  expect({
+    writes,
+    minutes,
+    checked: toggle.getAttribute("aria-checked"),
+  }).toEqual({ writes: [1, null], minutes: null, checked: "false" });
+});
+
+test("a write confirmed during the first read on return must invalidate the pre-write snapshot", async () => {
+  let reads = 0,
+    minutes: number | null = null;
+  const read = Promise.withResolvers<void>(),
+    write = Promise.withResolvers<void>();
+  const client = fakeClient({
+    preferences: async () => {
+      const snapshot = {
+        auto_merge_after_minutes: minutes,
+        merge_gate_enabled: true,
+      };
+      if (++reads === 2) await read.promise;
+      return snapshot;
+    },
+    setPreferences: async (_p, v) => {
+      await write.promise;
+      minutes = v;
+    },
+  });
+  const page = () => <SettingsPage client={client} projectId="p-1" />;
+  const view = render(page());
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  view.unmount();
+  render(page());
+  expect(reads).toBe(2);
+  await act(async () => write.resolve());
+  expect(minutes).toBe(10);
+  await act(async () => read.resolve());
+  const toggle = await screen.findByRole("switch", { name: timeoutName });
+  expect({ minutes, checked: toggle.getAttribute("aria-checked") }).toEqual({
+    minutes: 10,
+    checked: "true",
+  });
+});
+
+test("a reminder threshold write rejected off-page remains visible on return", async () => {
+  const write = Promise.withResolvers<void>();
+  const setSystemRules = vi.fn(() => write.promise);
+  const client = fakeClient({ setSystemRules });
+  const page = () => <SettingsPage client={client} projectId="p-1" />;
+  const view = render(page());
+  fireEvent.click(await screen.findByRole("button", { name: "编辑催办阈值" }));
+  const dialog = await screen.findByRole("dialog", { name: "催办阈值" });
+  fireEvent.click(
+    within(dialog).getByRole("switch", { name: "设置催办阈值和允许范围" }),
+  );
+  fireEvent.change(within(dialog).getByLabelText("允许的最少分钟数"), {
+    target: { value: "7" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
+  expect(setSystemRules).toHaveBeenCalledTimes(1);
+  view.unmount();
+  await act(async () => write.reject(new Error("threshold write rejected")));
+  render(page());
+  const edit = await screen.findByRole("button", { name: "编辑催办阈值" });
+  const alerts = () =>
+    screen
+      .queryAllByRole("alert")
+      .map((e) => e.textContent)
+      .join(" ");
+  const onPage = alerts();
+  fireEvent.click(edit);
+  await screen.findByRole("dialog", { name: "催办阈值" });
+  expect(onPage).toContain("threshold write rejected");
+  expect(alerts()).toContain("threshold write rejected");
+});
