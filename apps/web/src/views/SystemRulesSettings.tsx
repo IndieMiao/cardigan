@@ -168,7 +168,9 @@ export function SystemRulesSettings({
 /**
  * The dialog stays open while saving, so a failure keeps its error and draft.
  * A failure stays visible until the next save: in the dialog while open, in
- * the shared feedback stack once closed.
+ * the shared feedback stack once closed. Saving replaces only the fields
+ * edited since the dialog opened; the rest come from the latest confirmed
+ * policy, so a newer value the draft did not show is not written back.
  */
 function ReminderPolicyDialog({
   policy,
@@ -190,7 +192,12 @@ function ReminderPolicyDialog({
   const [configure, setConfigure] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
+  /** Fields edited since the dialog opened; only these replace the saved policy's. */
+  const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
+  const touch = (...keys: string[]) =>
+    setTouched((old) => new Set([...old, ...keys]));
   const reset = () => {
+    setTouched(new Set());
     setConfigure(!!policy);
     setRepeat(policy?.repeat === true);
     setValues(
@@ -221,17 +228,28 @@ function ReminderPolicyDialog({
             onSubmit={async (event) => {
               event.preventDefault();
               if (busy) return;
-              const next = configure
-                ? ({
-                    ...Object.fromEntries(
-                      fields.map(([key]) => [
-                        key,
-                        values[key]?.trim() ? Number(values[key]) : null,
-                      ]),
-                    ),
-                    repeat,
-                  } as unknown as SystemReminderPolicy)
-                : null;
+              const draft = (key: string) =>
+                values[key]?.trim() ? Number(values[key]) : null;
+              // Untouched fields keep the latest confirmed policy, not the
+              // value shown when the dialog opened.
+              const next = !configure
+                ? null
+                : policy
+                  ? ({
+                      ...policy,
+                      ...Object.fromEntries(
+                        fields
+                          .filter(([key]) => touched.has(key))
+                          .map(([key]) => [key, draft(key)]),
+                      ),
+                      ...(touched.has("repeat") ? { repeat } : {}),
+                    } as SystemReminderPolicy)
+                  : ({
+                      ...Object.fromEntries(
+                        fields.map(([key]) => [key, draft(key)]),
+                      ),
+                      repeat,
+                    } as unknown as SystemReminderPolicy);
               if (await save(next)) setOpen(false);
             }}
           >
@@ -252,11 +270,14 @@ function ReminderPolicyDialog({
                     disabled={busy}
                     onCheckedChange={(next) => {
                       setRepeat(next);
-                      if (!next)
+                      touch("repeat");
+                      if (!next) {
+                        touch("repeat_interval_minutes");
                         setValues((v) => ({
                           ...v,
                           repeat_interval_minutes: "",
                         }));
+                      }
                     }}
                   />
                 </label>
@@ -273,9 +294,10 @@ function ReminderPolicyDialog({
                       disabled={
                         busy || (key === "repeat_interval_minutes" && !repeat)
                       }
-                      onChange={(e) =>
-                        setValues((v) => ({ ...v, [key]: e.target.value }))
-                      }
+                      onChange={(e) => {
+                        touch(key);
+                        setValues((v) => ({ ...v, [key]: e.target.value }));
+                      }}
                     />
                   </label>
                 ))}

@@ -14,6 +14,7 @@ import type { PreferencesView, SystemReminderPolicy } from "../api.js";
 import type { StreamCallbacks } from "../stream.js";
 import { fakeClient, project } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
 
 // C-455 review (V-2162): write ordering, idempotency keys and feedback.
@@ -1781,5 +1782,57 @@ describe("a known-old read cannot seed an edit", () => {
     ).not.toBe("true");
     fireEvent.click(screen.getByRole("switch", { name: "催办提醒" }));
     await waitFor(() => expect(sent).toEqual([true, false]));
+  });
+  test("saving the policy dialog replaces only edited fields; others keep the latest confirmed policy", async () => {
+    const policy = (max: number): SystemReminderPolicy => ({
+      min_minutes: 1,
+      max_minutes: max,
+      min_count: 1,
+      max_count: 4,
+      unassigned_ready_after_minutes: 15,
+      pre_merge_check_pending_after_minutes: 20,
+      repeat: false,
+      repeat_interval_minutes: null,
+      max_reminders: 1,
+    });
+    const sent: (SystemReminderPolicy | null | undefined)[] = [];
+    const client = fakeClient({
+      setSystemRules: async (_p, patch) => {
+        sent.push(patch.system_reminder_policy);
+      },
+    });
+    const view = (max: number) => {
+      const read = {
+        auto_merge_after_minutes: null,
+        merge_gate_enabled: true,
+        system_reminder_policy: policy(max),
+      };
+      return (
+        <SystemRulesSettings
+          initial={read}
+          source={read}
+          client={client}
+          projectId="p-1"
+          saved={() => {}}
+        />
+      );
+    };
+    const { rerender } = render(view(60));
+    fireEvent.click(screen.getByRole("button", { name: "编辑催办阈值" }));
+    const d = within(await screen.findByRole("dialog", { name: "催办阈值" }));
+    // A newer read arrives while the dialog shows the older value.
+    rerender(view(120));
+    expect(
+      (d.getByLabelText("允许的最多分钟数") as HTMLInputElement).value,
+    ).toBe("60");
+    fireEvent.change(d.getByLabelText(/就绪未指派：等待分钟数/), {
+      target: { value: "25" },
+    });
+    fireEvent.click(d.getByRole("button", { name: "保存催办阈值" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toEqual({
+      ...policy(120),
+      unassigned_ready_after_minutes: 25,
+    });
   });
 });
