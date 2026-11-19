@@ -360,10 +360,16 @@ export const settingsDrawerClassName = cn(
 /**
  * Drawers opened from a table row or a panel button are controlled (no Radix
  * trigger): remember the opener when opening and give it focus back once the
- * drawer is gone. An opener removed meanwhile (a renamed row) leaves focus to
- * the browser. Call the returned function right before opening.
+ * drawer is gone. An opener removed meanwhile (a person now taken) gives way
+ * to `fallback`. Call the returned function right before opening.
  */
-export function useDrawerReturnFocus(open: boolean) {
+export function useDrawerReturnFocus(
+  open: boolean,
+  /** Where focus goes when the opener is gone (e.g. a row that changed). */
+  fallback?: () => HTMLElement | null | undefined,
+) {
+  const fallbackRef = useRef(fallback);
+  fallbackRef.current = fallback;
   const opener = useRef<HTMLElement | null>(null);
   const wasOpen = useRef(open);
   useEffect(() => {
@@ -373,11 +379,9 @@ export function useDrawerReturnFocus(open: boolean) {
       // After the dialog's own focus restoration, which runs on unmount.
       window.setTimeout(() => {
         const active = document.activeElement;
-        if (
-          target?.isConnected &&
-          (!active || active === document.body || !active.isConnected)
-        )
-          target.focus();
+        if (active && active !== document.body && active.isConnected) return;
+        if (target?.isConnected) target.focus();
+        else fallbackRef.current?.()?.focus();
       }, 0);
     }
     wasOpen.current = open;

@@ -571,7 +571,11 @@ function RoleDetail({
             <Button disabled={write.busy} onClick={() => void toggleActive()}>
               {data.role.status === "active" ? "停用" : "启用"}
             </Button>
-            <Button variant="primary" onClick={() => onEdit(true)}>
+            <Button
+              variant="primary"
+              disabled={write.busy}
+              onClick={() => onEdit(true)}
+            >
               编辑
             </Button>
           </>

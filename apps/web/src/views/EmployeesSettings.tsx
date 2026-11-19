@@ -66,8 +66,10 @@ export function EmployeesSettings({
   );
   const [version, setVersion] = useState(0);
   const visible = options.data?.library.filter((item) => matches(item, search));
+  const newEmployee = useRef<HTMLButtonElement>(null);
   const remember = useDrawerReturnFocus(
     form !== undefined && options.data !== undefined,
+    () => newEmployee.current,
   );
   const start = (person: string) => {
     remember();
@@ -91,6 +93,7 @@ export function EmployeesSettings({
             onChange={(event) => setSearch(event.target.value)}
           />
           <Button
+            ref={newEmployee}
             variant="primary"
             disabled={!options.data}
             onClick={() => start("")}

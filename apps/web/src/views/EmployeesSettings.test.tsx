@@ -308,3 +308,41 @@ test("closing the new-employee drawer with Escape returns focus to 新建员工"
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await waitFor(() => expect(document.activeElement).toBe(opener));
 });
+
+test("after creating from 选用 the person is taken: focus falls back to 新建员工", async () => {
+  const employeeOptions = vi
+    .fn()
+    .mockResolvedValueOnce(options)
+    .mockResolvedValue({
+      ...options,
+      library: options.library.map((item) =>
+        item.id === "sun-wukong"
+          ? {
+              ...item,
+              occupied_by: { id: "E-3", name: "悟空", status: "active" },
+            }
+          : item,
+      ),
+    });
+  await open({
+    employeeOptions,
+    createEmployee: vi
+      .fn()
+      .mockResolvedValue({ id: "E-3", name: "悟空", role_id: "coder" }),
+  });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  await screen.findByText("已创建员工 悟空（E-3）");
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "选用孙悟空" })).toBeNull(),
+  );
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "新建员工" }),
+    ),
+  );
+});

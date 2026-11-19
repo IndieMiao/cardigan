@@ -544,6 +544,11 @@ test("a role status change in flight keeps the detail drawer open", async () => 
   fireEvent.click(await screen.findByRole("button", { name: "停用" }));
   fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
   expect(screen.getByRole("dialog")).toBeTruthy();
+  // No edit draft can start that the status change would then discard.
+  expect(
+    (screen.getByRole("button", { name: "编辑" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
   reply.resolve({ ...v2, version: 3, status: "inactive" });
   expect(await screen.findByText("角色已停用，不能再被新指派")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
