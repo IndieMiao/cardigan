@@ -17,7 +17,8 @@ import styles from "./SettingsLayout.module.css";
 
 /**
  * Settings shell inside the shared workspace (same padding as the cards page):
- * page header, a text navigation list and the selected panel.
+ * page header, a text navigation list and the selected panel. On wide screens
+ * the header and the navigation stay in view while the panel scrolls.
  */
 export function SettingsLayout({
   header,
@@ -30,10 +31,10 @@ export function SettingsLayout({
 }) {
   return (
     <div className={cn("ui-workspace", styles.workspace)}>
-      {header}
+      <div className={styles.header}>{header}</div>
       <div className={styles.layout}>
         <nav aria-label="设置分栏" className={styles.nav}>
-          {nav}
+          <div className={styles.navList}>{nav}</div>
         </nav>
         <div className={styles.main}>{children}</div>
       </div>
