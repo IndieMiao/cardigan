@@ -347,20 +347,25 @@ test("real loop: a leftover Run the monitor already marked unknown is still reco
   monitor.reconcile();
   await vi.waitFor(() => expect(runOf(original.id)?.status).toBe("unknown"));
   const controller = new AbortController();
+  const d = dispatcher();
   const loop = startDispatchLoop({
-    dispatcher: dispatcher(),
+    dispatcher: {
+      tick: async () => {
+        await d.tick();
+        // Recovery is recorded before the replacement is launched. Stop only
+        // after the whole first tick, never between those two phases.
+        controller.abort();
+      },
+      close: () => d.close(),
+    },
     monitor,
     signal: controller.signal,
     onError: (error) => {
       throw error;
     },
   });
-  try {
-    await vi.waitFor(() => expect(count("run_dispatch_recovered")).toBe(1));
-  } finally {
-    controller.abort();
-    await loop.stop();
-  }
+  await loop.done;
+  expect(count("run_dispatch_recovered")).toBe(1);
   expect(runOf(original.id)).toMatchObject({ status: "cancelled" });
   expect(runOf(original.id)?.dispatch_stop).toBeUndefined();
   expect(f.runtime.release).not.toHaveBeenCalled();
