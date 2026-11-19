@@ -1,10 +1,30 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   type LaunchConfig,
   requiredSecretKeys,
   resolveProfile,
 } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
+
+/** Unused databases (including exportable synthetic fixtures) need no private key. */
+function comparisonKey(store: Store) {
+  const select = store.database.prepare(
+    "SELECT key FROM launch_comparison_key WHERE singleton=1",
+  );
+  let row = select.get();
+  if (!row) {
+    // Two host processes can start together. Keep the first committed key and read the winner.
+    store.database
+      .prepare(
+        "INSERT INTO launch_comparison_key(singleton,key) VALUES (1,?) ON CONFLICT(singleton) DO NOTHING",
+      )
+      .run(randomBytes(32));
+    row = select.get();
+  }
+  if (!(row?.key instanceof Uint8Array) || row.key.length !== 32)
+    throw new Error("启动配置指纹不可用");
+  return row.key;
+}
 
 /** Stable across server restarts and mapping reordering. Ignore unrelated profiles/secrets. */
 export function launchFingerprint(
@@ -13,10 +33,6 @@ export function launchFingerprint(
   ref: string,
   browserCapable = false,
 ) {
-  const row = store.database
-    .prepare("SELECT key FROM launch_comparison_key WHERE singleton=1")
-    .get();
-  if (!(row?.key instanceof Uint8Array)) throw new Error("启动配置指纹不可用");
   const resolved = resolveProfile(launch.config, ref);
   const secrets = Object.fromEntries(
     requiredSecretKeys(launch.config, ref).map((key) => [
@@ -45,5 +61,7 @@ export function launchFingerprint(
         )
       : value,
   );
-  return createHmac("sha256", row.key).update(canonical).digest("hex");
+  return createHmac("sha256", comparisonKey(store))
+    .update(canonical)
+    .digest("hex");
 }

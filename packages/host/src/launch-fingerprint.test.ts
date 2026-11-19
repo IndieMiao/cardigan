@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
@@ -46,5 +49,44 @@ test("same profile and model: only effective settings and referenced credentials
     ).not.toBe(original);
   } finally {
     store.close();
+  }
+});
+
+test("unused databases contain no comparison key; used databases keep their own key across reopen", () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-fingerprint-"));
+  const config = parseLaunchConfig({
+    profiles: { p: { harness: "codex", model: "m" } },
+  });
+  const fingerprint = (store: Store) =>
+    launchFingerprint(store, { config, secrets: {} }, "p");
+  const count = (store: Store) =>
+    store.database
+      .prepare("SELECT COUNT(*) AS n FROM launch_comparison_key")
+      .get()?.n;
+  try {
+    const dbPath = join(root, "first.db");
+    const first = Store.open({ dbPath });
+    let original: string;
+    try {
+      expect(count(first)).toBe(0);
+      original = fingerprint(first);
+      expect(count(first)).toBe(1);
+    } finally {
+      first.close();
+    }
+    const reopened = Store.open({ dbPath });
+    try {
+      expect(fingerprint(reopened)).toBe(original);
+    } finally {
+      reopened.close();
+    }
+    const other = Store.open({ dbPath: join(root, "second.db") });
+    try {
+      expect(fingerprint(other)).not.toBe(original);
+    } finally {
+      other.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
