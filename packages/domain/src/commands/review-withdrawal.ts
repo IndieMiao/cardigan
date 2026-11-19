@@ -1,4 +1,4 @@
-import { isReviewStale } from "../derived.js";
+import { isReviewStale, reviewPassed } from "../derived.js";
 import type { Actor, Review } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
 import { mergeBatches } from "../merge-batch.js";
@@ -68,7 +68,7 @@ export function withdrawReview(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     ensure(
       delivery &&
-        review.verdict === "pass" &&
+        reviewPassed(review) &&
         !isReviewStale(review, delivery) &&
         !d.list("deliveries").some((v) => v.supersedes === delivery.id),
       "stale_target",

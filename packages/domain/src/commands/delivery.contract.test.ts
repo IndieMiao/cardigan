@@ -161,6 +161,7 @@ test("invariants 8, 14: a reject requests rework; a new delivery supersedes old 
           {
             severity: "critical",
             description: "Bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -219,6 +220,7 @@ test("invariants 11, 14: stale SHA, foreign verifier and client verdict cannot b
       {
         severity: "major" as const,
         description: "Bug",
+        impact: "functional" as const,
         must_fix: true,
         pre_existing: false,
       },
@@ -414,6 +416,7 @@ test("invariant 13: incomplete conditions need explicit known gaps and follow-up
           {
             severity: "major",
             description: "Not ready",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -441,6 +444,7 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
       {
         severity: "major",
         description: "Bug",
+        impact: "functional" as const,
         must_fix: true,
         pre_existing: false,
       },
@@ -487,6 +491,7 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
           {
             severity: "minor",
             description: "New issue",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -547,6 +552,7 @@ test.each(["reject", "conditional", "pass"] as const)(
                   {
                     severity: "major",
                     description: "Bug",
+                    impact: "functional" as const,
                     must_fix: true,
                     pre_existing: false,
                   },
@@ -617,6 +623,7 @@ test.each(["pending", "conditional", "rejected"] as const)(
                       {
                         severity: "major",
                         description: "Not ready",
+                        impact: "functional" as const,
                         must_fix: true,
                         pre_existing: false,
                       },

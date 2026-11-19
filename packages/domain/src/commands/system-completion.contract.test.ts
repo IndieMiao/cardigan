@@ -211,6 +211,7 @@ test("B3a: a real passing review retains pre-existing issues without blocking ag
   const issues: ReviewIssue[] = [
     {
       severity: "major",
+      impact: "functional" as const,
       must_fix: true,
       pre_existing: true,
       description: "Existing unrelated issue",
@@ -344,6 +345,7 @@ test.each([
                         issues: [
                           {
                             severity: "minor" as const,
+                            impact: "functional" as const,
                             must_fix: true,
                             pre_existing: false,
                             description: "fix",
@@ -679,6 +681,7 @@ test("B3a: a rejected completion is not automatically resubmitted", async () => 
           issues: [
             {
               severity: "major",
+              impact: "functional" as const,
               must_fix: true,
               pre_existing: false,
               description: "Need evidence",

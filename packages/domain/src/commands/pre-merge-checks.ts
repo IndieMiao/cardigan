@@ -1,3 +1,4 @@
+import { reviewPassed } from "../derived.js";
 import type {
   Card,
   Delivery,
@@ -181,7 +182,11 @@ export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
   return writePreMergeCheck(d, d.card(item.card_id), {
     label: INDEPENDENT_REVIEW_CHECK_LABEL,
     status:
-      review.verdict === "pass" && !review.issues.some((i) => i.must_fix)
+      reviewPassed(review) &&
+      !review.issues.some(
+        (i) =>
+          i.must_fix && !(review.followup_card_id && i.impact === "ux_only"),
+      )
         ? "passed"
         : "failed",
     note: review.test_review

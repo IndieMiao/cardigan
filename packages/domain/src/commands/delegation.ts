@@ -3,7 +3,7 @@ import {
   categoryAuthorization,
   categoryDelegated,
 } from "../decision-authorization.js";
-import { deriveReviewMatrix } from "../derived.js";
+import { deriveReviewMatrix, reviewPassed } from "../derived.js";
 import type {
   Card,
   Decision,
@@ -188,7 +188,7 @@ export function riskTagAutoMergeAllowed(
   // and a passed work item alone cannot grant merge authority.
   const matrix = deriveReviewMatrix(current, verifiers, state.reviews);
   return current.every((v) =>
-    matrix.some((r) => r.delivery_id === v.id && r.verdict === "pass"),
+    matrix.some((r) => r.delivery_id === v.id && reviewPassed(r)),
   );
 }
 function projectPreference(d: CommandDraft) {

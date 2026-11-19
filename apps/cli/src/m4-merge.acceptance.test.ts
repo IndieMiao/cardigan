@@ -823,6 +823,7 @@ test("§12.5 a known-gap work item is left out of the merge plan", async () => {
             {
               severity: "major",
               description: "not acceptable yet",
+              impact: "functional" as const,
               must_fix: true,
               pre_existing: false,
             },

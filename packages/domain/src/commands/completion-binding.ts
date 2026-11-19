@@ -1,4 +1,8 @@
-import { deriveReviewMatrix } from "../derived.js";
+import {
+  deriveReviewMatrix,
+  reviewPassed,
+  unresolvedMustFix,
+} from "../derived.js";
 import type { Card, Delivery } from "../entities.js";
 import { highRiskProducts } from "../high-risk.js";
 import { hasProbeEvidence } from "../probes.js";
@@ -74,7 +78,7 @@ export function completionSources(d: CommandDraft, card: Card) {
     const w = d.work(row.work_item_id);
     if (!w.required || w.replaced_by_work_item_id) return [];
     ensure(
-      w.status === "passed" && row.verdict === "pass" && row.review_id,
+      w.status === "passed" && reviewPassed(row) && row.review_id,
       "invariant_violation",
       `必需验证项 ${w.id} 尚未对当前交付通过`,
     );
@@ -82,7 +86,7 @@ export function completionSources(d: CommandDraft, card: Card) {
     ensure(
       !review.blocking &&
         !review.recheck_required &&
-        !review.issues.some((i) => i.must_fix && !i.pre_existing),
+        !unresolvedMustFix(review),
       "invariant_violation",
       `审核 ${review.id} 仍有必改问题`,
     );
