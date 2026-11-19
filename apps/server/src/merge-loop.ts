@@ -22,6 +22,7 @@ import {
   systemConfirmMerge,
 } from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
+import { withMergeTransferBudget } from "@cardigan/git-transport";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
@@ -30,7 +31,8 @@ import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
-import { withPublication } from "./publication-lock.js";
+import { DEFAULT_MERGE_WATCHDOG_MS, watchMergePass } from "./merge-watchdog.js";
+import { tryPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -84,6 +86,8 @@ export interface MergeLoopOptions {
  * per project runs at a time; a `stale` result retries on the next tick.
  */
 export class MergeExecutor {
+  private readonly direct = new Map<ProjectId, Promise<void>>();
+  private stopped = false;
   private serial: Promise<void> = Promise.resolve();
   private confirmationErrors = 0;
   get confirmationErrorCount(): number {
@@ -109,6 +113,7 @@ export class MergeExecutor {
       : undefined;
   }
   stop(): void {
+    this.stopped = true;
     this.checks?.stop();
   }
 
@@ -124,20 +129,28 @@ export class MergeExecutor {
    * so the next pass can publish already-checked cards without waiting (C-113).
    */
   schedule(project_id?: ProjectId): Promise<{ readonly done: Promise<void> }> {
-    const next = this.serial.then(async () => {
-      const projects = project_id
-        ? [project_id]
-        : this.options.store.listProjects().map((project) => project.id);
-      for (const id of projects) {
-        this.confirmDue(id);
-        if (!this.checks?.configured(id)) await this.project(id);
-      }
-      return (
-        (await this.checks?.schedule(projects)) ?? {
-          done: Promise.resolve(),
+    const next = withMergeTransferBudget(() =>
+      this.serial.then(async () => {
+        const projects = project_id
+          ? [project_id]
+          : this.options.store.listProjects().map((project) => project.id);
+        const direct: Promise<void>[] = [];
+        for (const id of projects) {
+          if (this.stopped) break;
+          this.confirmDue(id);
+          let pass = this.direct.get(id);
+          if (!pass && !this.checks?.configured(id)) {
+            pass = this.project(id)
+              .catch((error: unknown) => this.options.onError?.(error))
+              .finally(() => this.direct.delete(id));
+            this.direct.set(id, pass);
+          }
+          if (pass) direct.push(pass);
         }
-      );
-    });
+        const gates = await this.checks?.schedule(projects);
+        return { done: Promise.all([...direct, gates?.done]).then(() => {}) };
+      }),
+    );
     this.serial = next.then(
       () => {},
       () => {},
@@ -145,8 +158,9 @@ export class MergeExecutor {
     return next;
   }
   /** Resolves when no background check round is in flight. */
-  idle(): Promise<void> {
-    return this.checks?.idle() ?? Promise.resolve();
+  async idle(): Promise<void> {
+    await this.serial;
+    await Promise.all([...this.direct.values(), this.checks?.idle()]);
   }
 
   private get clock(): Clock {
@@ -318,8 +332,10 @@ export class MergeExecutor {
       if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
         return false;
       await this.options.git.sync(project);
-      return await withPublication(project_id, async () => {
+      const merged = await tryPublication(project_id, async () => {
         if (
+          this.stopped ||
+          this.checks?.configured(project_id) ||
           new CheckHandoffs(this.options.store, "").blockedProject(project_id)
         )
           return false;
@@ -345,6 +361,8 @@ export class MergeExecutor {
                 plan,
                 clock: this.clock,
                 stopped: () =>
+                  this.stopped ||
+                  this.checks?.configured(project_id) === true ||
                   new CheckHandoffs(this.options.store, "").blockedProject(
                     project_id,
                   ),
@@ -385,6 +403,7 @@ export class MergeExecutor {
           });
         return true;
       });
+      return merged ?? false; // Busy project writer: re-plan on the next pass.
     } catch (error) {
       this.recordFailure(
         project_id,
@@ -427,6 +446,7 @@ export class MergeExecutor {
       ),
     );
     for (;;) {
+      if (this.stopped || this.checks?.configured(project_id)) return;
       const state = this.state(project_id),
         card = state.cards
           .filter(
@@ -454,6 +474,7 @@ export interface MergeLoop {
 }
 export function startMergeLoop(
   options: MergeLoopOptions & {
+    readonly watchdogMs?: number;
     readonly intervalMs?: number;
     readonly clock?: Clock;
     readonly onError?: (error: unknown) => void;
@@ -467,7 +488,17 @@ export function startMergeLoop(
   const loop = startTimerLoop({
     name: "merge",
     tick: async () => {
-      await executor.schedule();
+      const disarm = watchMergePass(
+        options.store,
+        options.clock ?? systemClock,
+        options.watchdogMs ?? DEFAULT_MERGE_WATCHDOG_MS,
+        options.onError ?? (() => {}),
+      );
+      try {
+        await executor.schedule();
+      } finally {
+        disarm();
+      }
     },
     intervalMs: options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),

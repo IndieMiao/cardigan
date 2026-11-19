@@ -8,6 +8,7 @@ import {
   GithubExecutorError,
   type GithubRun,
 } from "./github-client.js";
+import { githubDeadline } from "./github-deadline.js";
 import type {
   ExternalGithubRun,
   GithubDispatchIntent,
@@ -206,11 +207,14 @@ export async function discoverUnboundGithub(o: {
         seen.add(run.id);
       }
     };
-    const listed = await o.client.runs(
-      o.branch,
-      intent.startedAt,
+    // Bound the journal lease too: a transport ignoring cancellation must not hold
+    // the next scan hostage or deliver late evidence into its reservation.
+    const listed = await githubDeadline(
+      (deadlineSignal) =>
+        o.client.runs(o.branch, intent.startedAt, deadlineSignal, (run) => {
+          if (!deadlineSignal.aborted) observe(run);
+        }),
       signal,
-      observe,
     );
     const matches = listed.filter((run) => run.display_title === title);
     for (const run of matches) observe(run);
@@ -228,6 +232,10 @@ export async function discoverUnboundGithub(o: {
       return undefined;
     }
     return matches;
+  } catch (error) {
+    // Never surface a caller-provided abort reason as an adapter diagnostic.
+    if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
+    throw error;
   } finally {
     o.journal.endListing(intent);
   }

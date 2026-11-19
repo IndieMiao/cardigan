@@ -33,6 +33,7 @@ import {
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
+  SshCheckExecutor,
   type sweepCheckoutOrphans,
   verifiedCheckoutContext,
 } from "@cardigan/host";
@@ -58,7 +59,7 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
-import { withPublication } from "./publication-lock.js";
+import { MergeLockBusy, withPublication } from "./publication-lock.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
@@ -535,6 +536,62 @@ test.each(["queued", "running"] as const)(
     ).toBe(true);
   },
 );
+
+test("C-466: an SSH distribution lock timeout keeps the original attempt queued for retry", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const serial = c.gate as unknown as {
+    serial(project: string, work: () => Promise<void>): Promise<void>;
+  };
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const dispatch = SshCheckExecutor.prototype.dispatch;
+  const spy = vi
+    .spyOn(SshCheckExecutor.prototype, "dispatch")
+    .mockImplementationOnce(function (this: SshCheckExecutor, request) {
+      void serial.serial(f.project_id, () => held.promise);
+      const waiting = dispatch.call(this, request);
+      entered.resolve();
+      return waiting;
+    });
+  vi.useFakeTimers();
+  const round = c.gate.tick([f.project_id]);
+  try {
+    await entered.promise;
+    const attempt = required(check()).attempt_id;
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.lockWaitMs + 1);
+    held.resolve();
+    await round;
+    expect(check()).toMatchObject({ status: "queued", attempt_id: attempt });
+    expect(capacity(f).checks).toEqual({});
+    expect(c.errors).toHaveBeenCalledWith(expect.any(MergeLockBusy));
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.publish).not.toHaveBeenCalled();
+    expect(
+      f
+        .state()
+        .events.some((e) =>
+          [
+            "merge_failed",
+            "merge_check_started",
+            "merge_check_finished",
+            "merge_executor_unreachable",
+          ].includes(e.type),
+        ),
+    ).toBe(false);
+    await c.gate.tick([f.project_id]);
+    expect(check()).toMatchObject({ status: "passed", attempt_id: attempt });
+    expect(c.git.distribute).toHaveBeenCalledOnce();
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.git.publish).toHaveBeenCalledOnce();
+  } finally {
+    held.resolve();
+    await round;
+    spy.mockRestore();
+    vi.useRealTimers();
+  }
+});
 
 test("a distribution failure is recorded without pretending any check ran or retrying automatically", async () => {
   const { f, check } = await fixture("auto");
@@ -3244,7 +3301,7 @@ test.each([
     await round.done;
     if (mode === "invalidated" || mode === "switched") {
       const { GithubDispatchJournal } = await import("@cardigan/host");
-      expect(client.cancel).toHaveBeenCalledWith(123);
+      expect(client.cancel).toHaveBeenCalledWith(123, expect.any(AbortSignal));
       expect(new GithubDispatchJournal(f.store).unfinished()).toEqual([]);
       expect(check()?.status).not.toBe("passed");
       expect(c.git.publish).not.toHaveBeenCalled();
@@ -3601,6 +3658,9 @@ test.each([
           { attempt, phase: "dispatching" },
         ]);
         const sent = fetcher.mock.calls.length;
+        time += 20_000;
+        await restarted.tick([f.project_id]);
+        expect(fetcher.mock.calls.length).toBe(sent);
         time += 20_000;
         await restarted.tick([f.project_id]);
         expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
@@ -4835,7 +4895,12 @@ test("C-316: GitHub fills two same-project slots, retains independent bindings a
     expect(h.client.dispatch).toHaveBeenCalledTimes(2);
     h.finish(0);
     await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(3));
+    // A pass no longer waits for a previous REST list to settle. Drive the
+    // next maintenance tick as production does before checking new capacity.
+    await vi.waitFor(async () => {
+      await gate.schedule([h.f.project_id]);
+      expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    });
     await h.running(2);
     expect(h.check(1).status).toBe("running");
     expect(h.counts()).toMatchObject({ running: 2, queued: 0 });
@@ -4876,6 +4941,7 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
     await gate.schedule([h.f.project_id]);
     expect(h.client.cancel).toHaveBeenCalledWith(
       required(first.external_run).run_id,
+      expect.any(AbortSignal),
     );
     expect(
       h.client.cancel.mock.calls.every(
@@ -4885,8 +4951,13 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
     expect(h.counts()?.running).toBe(2);
     expect(h.check(1)).toEqual(second);
     h.finish(0, "cancelled");
-    await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.counts()?.running).toBe(1));
+    // A scheduled pass can join the preceding list. Drive normal host ticks
+    // until the next list sees the new terminal; never complete on a cancel ACK.
+    await vi.waitFor(async () => {
+      h.advance(5000);
+      await gate.schedule([h.f.project_id]);
+      expect(h.counts()?.running).toBe(1);
+    });
     h.finish(1);
     await gate.schedule([h.f.project_id]);
     await gate.idle();
@@ -5000,8 +5071,15 @@ test.each([false, true])(
   },
 );
 
-test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
-  const h = await parallelGithub();
+async function queueGithubMerge(h: Awaited<ReturnType<typeof parallelGithub>>) {
+  const other = m4Scenario(h.f);
+  await acceptThroughMergeGate(h.f, other, "a".repeat(40));
+  return other.card.id;
+}
+
+async function queueGithubAuthor(
+  h: Awaited<ReturnType<typeof parallelGithub>>,
+) {
   const author = m4Scenario(h.f);
   h.f.store.uow.run((tx) => {
     tx.cards.put(h.f.project_id, { ...author.card, flow_version: 3 });
@@ -5034,6 +5112,12 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
       base_sha: "a".repeat(40),
     }),
   });
+  return author.card.id;
+}
+
+test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
+  const h = await parallelGithub();
+  await queueGithubAuthor(h);
   const gate = h.create();
   try {
     await h.startPair(gate);
@@ -5285,7 +5369,7 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   h.advance();
   await restarted.schedule([h.f.project_id]);
   await restarted.idle();
-  await restarted.schedule([h.f.project_id]);
+  await (await restarted.schedule([h.f.project_id])).done;
   expect(h.c.errors).not.toHaveBeenCalled();
   expect(h.client.dispatch).toHaveBeenCalledTimes(4);
   expect(publish).toHaveBeenCalledTimes(1);
@@ -5294,6 +5378,435 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   ).toHaveLength(3);
   restarted.stop();
   await restarted.idle();
+});
+
+test.each(["merge_check", "precheck"])(
+  "C-466: a stuck workflow list does not block %s admission on another card of the same project",
+  async (kind) => {
+    const h = await parallelGithub(1);
+    const gate = h.create();
+    const stuck =
+      Promise.withResolvers<Awaited<ReturnType<typeof h.client.pollRuns>>>();
+    try {
+      await gate.schedule([h.f.project_id]);
+      await h.running(0);
+      h.advance();
+      h.client.pollRuns.mockImplementationOnce(() => stuck.promise);
+      const otherCard =
+        kind === "precheck"
+          ? await queueGithubAuthor(h)
+          : await queueGithubMerge(h);
+      const pass = gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => {
+        expect(h.client.pollRuns).toHaveBeenCalled();
+        expect(
+          h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+        ).toContain(otherCard);
+      });
+      await pass;
+      expect(h.check(0).status).toBe("running");
+      expect(h.git.publish).not.toHaveBeenCalled();
+    } finally {
+      stuck.resolve({ unchanged: false, runs: [], etag: "x" });
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["merge_check", "precheck"])(
+  "C-466: an occupied publication lock does not block another card's %s on the same project",
+  async (kind) => {
+    const h = await parallelGithub(1);
+    const gate = h.create();
+    const held = Promise.withResolvers<void>();
+    let lock: Promise<void> | undefined;
+    try {
+      await gate.schedule([h.f.project_id]);
+      await h.running(0);
+      h.finish(0);
+      await gate.schedule([h.f.project_id]);
+      await gate.idle();
+      expect(h.check(0).status).toBe("passed");
+      h.f.decide(required(mergeConfirmation(h.f, h.scenario.card.id)), "merge");
+      lock = withPublication(h.f.project_id, () => held.promise);
+      const otherCard =
+        kind === "precheck"
+          ? await queueGithubAuthor(h)
+          : await queueGithubMerge(h);
+      const pass = gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(
+          h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+        ).toContain(otherCard),
+      );
+      await pass;
+      expect(h.git.publish).not.toHaveBeenCalled();
+      held.resolve();
+      await lock;
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.git.publish).toHaveBeenCalledOnce());
+      expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    } finally {
+      held.resolve();
+      await lock;
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-466: abandoned discovery reports the redacted cause and exact reservation", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  const old = required(h.check());
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.client.runs.mockRejectedValue(
+    new Error(
+      "discovery connection reset: synthetic-private-value ghs_synthetic",
+    ),
+  );
+  h.advance();
+  const gate = h.create();
+  try {
+    await gate.tick([h.f.project_id]);
+    const message = h.c.errors.mock.calls
+      .map(([error]) => String(error))
+      .find((line) => line.includes("旧 GitHub 派发身份尚未确认"));
+    expect(message).toContain(
+      `project=${h.f.project_id} card=${h.scenario.card.id} attempt=${old.attempt_id}`,
+    );
+    expect(message).toContain("discovery connection reset");
+    expect(message).not.toMatch(/synthetic-private-value|ghs_synthetic/);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: late abandoned discovery cannot bind after the maintenance deadline", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.advance();
+  const held = Promise.withResolvers<ReturnType<typeof h.remote>[]>();
+  h.client.runs.mockImplementationOnce(() => held.promise as Promise<never[]>);
+  const gate = h.create();
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  vi.useFakeTimers();
+  try {
+    const round = gate.tick([h.f.project_id]);
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.remoteCommandMs);
+    await round;
+    expect(
+      h.c.errors.mock.calls.some(([error]) =>
+        String(error).includes("GitHub operation timed out"),
+      ),
+    ).toBe(true);
+    // The abandoned scan's IO lease must end at the deadline, even before its adapter returns.
+    expect(journal.unfinished()[0]?.scanOwner).toBeUndefined();
+    held.resolve([h.remote()]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(journal.unfinished()).toHaveLength(1);
+    expect(journal.unfinished()[0]?.observedRunIds).toBeUndefined();
+    expect(journal.unfinished()[0]?.externalRun).toBeUndefined();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    held.resolve([]);
+    gate.stop();
+    await gate.idle();
+    vi.useRealTimers();
+  }
+});
+
+test("C-466: a stuck Git sync does not block a second project's merge check", async () => {
+  const slow = await fixture("auto", { project_id: "slow-git" });
+  const fast = await fixture("auto", {
+    project_id: "fast-check",
+    dataDir: slow.f.dataDir,
+  });
+  const c = controller(slow.f);
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const gate = new MergeChecks({
+    ...c.options,
+    git: {
+      ...c.git,
+      sync: async (project) => {
+        if (project.project_id === slow.f.project_id) {
+          entered.resolve();
+          await held.promise;
+          throw new Error("Git fetch timed out");
+        }
+        return "up_to_date";
+      },
+    },
+  });
+  try {
+    void gate.schedule([slow.f.project_id]);
+    await entered.promise;
+    void gate.schedule([fast.f.project_id]);
+    await vi.waitFor(() => expect(fast.check()?.status).toBe("passed"));
+    expect(slow.check()?.status).not.toBe("passed");
+    expect(
+      c.git.publish.mock.calls.some(
+        ([p]) => p.project_id === slow.f.project_id,
+      ),
+    ).toBe(false);
+  } finally {
+    held.resolve();
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: expired abandoned discovery reports its deadline and persists its next investigation across restart", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const check = required(h.check());
+  h.advance(15 * 60_000);
+  // A complete empty scan is now proof of absence; only an inconclusive scan backs off.
+  h.client.runs.mockRejectedValue(new Error("Incomplete listing"));
+  const investigate = async () => {
+    const gate = h.create();
+    try {
+      await gate.tick([h.f.project_id]);
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  };
+  await investigate();
+  const retryAt = h.now() + 15 * 60_000;
+  expect(journal.admitted()).toMatchObject([
+    {
+      attempt: check.attempt_id,
+      maintenanceRetry: { reason: "discovery_expired", retryAt, failures: 1 },
+    },
+  ]);
+  expect(h.c.errors.mock.calls.map(([e]) => String(e))).toContainEqual(
+    expect.stringContaining(
+      `attempt=${check.attempt_id} 发现期限已过，无法确认 retryAt=${new Date(retryAt).toISOString()}`,
+    ),
+  );
+  const reads = h.client.runs.mock.calls.length;
+  h.advance(15 * 60_000 - 1);
+  await investigate();
+  expect(h.client.runs).toHaveBeenCalledTimes(reads);
+  h.advance(1);
+  await investigate();
+  expect(h.client.runs).toHaveBeenCalledTimes(reads + 1);
+  expect(journal.admitted()).toMatchObject([
+    {
+      attempt: check.attempt_id,
+      maintenanceRetry: { reason: "discovery_expired", failures: 2 },
+    },
+  ]);
+  expect(h.client.dispatch).toHaveBeenCalledOnce();
+  expect(h.client.cancel).not.toHaveBeenCalled();
+});
+
+test("C-466: author admission proceeds while same-project ready publication is waiting for Git sync", async () => {
+  const h = await parallelGithub(1);
+  const gate = h.create();
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await h.running(0);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.check(0).status).toBe("passed");
+    h.f.decide(required(mergeConfirmation(h.f, h.scenario.card.id)), "merge");
+    h.git.sync.mockImplementationOnce(async () => {
+      entered.resolve();
+      await held.promise;
+      return "up_to_date";
+    });
+    const author = await queueGithubAuthor(h);
+    void gate.schedule([h.f.project_id]);
+    await entered.promise;
+    await vi.waitFor(() =>
+      expect(h.client.dispatch.mock.calls.map(([, i]) => i.card)).toContain(
+        author,
+      ),
+    );
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    held.resolve();
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: a slow ungated repository does not hold the scheduler; enabling its gate during sync prevents unchecked publication", async () => {
+  const slow = await fixture("auto", { project_id: "slow-direct" });
+  const fast = await fixture("auto", {
+    project_id: "fast-gated",
+    dataDir: slow.f.dataDir,
+  });
+  const c = controller(slow.f);
+  const entered = Promise.withResolvers<void>(),
+    held = Promise.withResolvers<void>();
+  let gated = false;
+  const config = {
+    ...c.options.configuration,
+    forProject: (id: string): ProjectMergeGate =>
+      id === slow.f.project_id && !gated
+        ? { status: "disabled" }
+        : c.options.configuration.forProject(),
+  };
+  const git = {
+    ...c.git,
+    sync: async (project: CentralProject) => {
+      if (project.project_id === slow.f.project_id) {
+        entered.resolve();
+        await held.promise;
+      }
+      return "up_to_date" as const;
+    },
+  };
+  const executor = new MergeExecutor({
+    store: c.options.store,
+    git,
+    clock: c.options.clock,
+    onError: c.errors,
+    gate: { configuration: config, execution: c.options.execution, run: c.run },
+  });
+  try {
+    void executor.schedule();
+    await entered.promise;
+    await vi.waitFor(() => expect(fast.check()?.status).toBe("passed"));
+    gated = true;
+    held.resolve();
+    await executor.idle();
+    expect(
+      c.git.publish.mock.calls.some(
+        ([p]) => p.project_id === slow.f.project_id,
+      ),
+    ).toBe(false);
+    expect(c.git.merge).not.toHaveBeenCalled();
+  } finally {
+    held.resolve();
+    executor.stop();
+    await executor.idle();
+  }
+});
+
+test("V-2081: restarting a quarantined attempt leaves the other GitHub slot usable", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  try {
+    await first.schedule([h.f.project_id]);
+    await h.running(0);
+  } finally {
+    first.stop();
+    await first.idle();
+  }
+  const { GithubDispatchJournal, GithubCheckPoller } = await import(
+    "@cardigan/host"
+  );
+  const journal = new GithubDispatchJournal(h.f.store);
+  const intent = required(journal.unfinished()[0]);
+  const original = required(intent.externalRun);
+  const observer = new GithubCheckPoller({ client: h.client, now: h.now });
+  const check = h.check(0);
+  observer.register(
+    original,
+    {
+      project: intent.project,
+      kind: "merge_check",
+      sha: required(check.candidate_sha),
+      tree: required(check.tree_sha),
+      checks: [],
+    },
+    required(intent.identity),
+    () => journal.finish(intent),
+    intent.boundByDispatchId === true,
+    journal.retryBinding(intent),
+  );
+  h.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [{ ...h.remote(), id: original.run_id, run_attempt: 2 }],
+    etag: "different-attempt",
+  });
+  await observer.tick();
+  const retry = { reason: "identity_mismatch", retryAt: h.now() + 40_000 };
+  expect(journal.admitted()[0]?.maintenanceRetry).toMatchObject(retry);
+  const second = h.create();
+  try {
+    await second.tick([h.f.project_id]);
+    const peer = await queueGithubMerge(h);
+    await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(
+        h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+      ).toEqual([intent.card, peer]),
+    );
+    expect(
+      journal.admitted().find((i) => i.attempt === intent.attempt),
+    ).toMatchObject({ externalRun: original, maintenanceRetry: retry });
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    second.stop();
+    await second.idle();
+  }
+});
+
+test("V-2081: a provider Retry-After still blocks both slots until its deadline", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  try {
+    await first.schedule([h.f.project_id]);
+    await h.running(0);
+  } finally {
+    first.stop();
+    await first.idle();
+  }
+  const { GithubRateLimit } = await import("@cardigan/host");
+  const rate = new GithubRateLimit(undefined, h.now);
+  h.client.run.mockImplementationOnce(async () => rate.backoff("60"));
+  const second = h.create();
+  try {
+    await second.tick([h.f.project_id]);
+    const peer = await queueGithubMerge(h);
+    h.advance(59_999);
+    await second.tick([h.f.project_id]);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    h.advance(1);
+    await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(
+        h.client.dispatch.mock.calls.map(([, input]) => input.card),
+      ).toEqual([h.scenario.card.id, peer]),
+    );
+  } finally {
+    second.stop();
+    await second.idle();
+  }
 });
 
 test("expired abandoned GitHub dispatch is settled after a complete empty scan without repeated maintenance", async () => {

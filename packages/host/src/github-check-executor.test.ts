@@ -108,7 +108,7 @@ test("C-404: queue timeout and rejected cancellation retain the journal until co
     status: "timed_out",
     reason: "GitHub 长时间未启动 · 已等 1 分钟",
   });
-  expect(client.cancel).toHaveBeenCalledWith(123);
+  expect(client.cancel).toHaveBeenCalledWith(123, expect.any(AbortSignal));
   expect(f.journal.unfinished()).toHaveLength(1);
   await expect(
     executor.dispatch({ ...f.request, attempt: "attempt-2" }),
@@ -355,7 +355,7 @@ test("D3: a 204 response uses the exact name and time window, ambiguity fails cl
   expect(f.client.runs).toHaveBeenCalledWith(
     "main",
     trusted.created_at,
-    undefined,
+    expect.any(AbortSignal),
     expect.any(Function),
   );
   const g = setup();
@@ -750,6 +750,14 @@ test.each(["ambiguous", "dense"] as const)(
         category: mode === "dense" ? "recovery_incomplete" : "security",
       });
       api.advance(20_000);
+      if (mode === "ambiguous") {
+        const requests = api.visited.length;
+        await expect(executor.dispatch(f.request)).rejects.toBeInstanceOf(
+          GithubRetryLater,
+        );
+        expect(api.visited).toHaveLength(requests);
+        api.advance(20_000);
+      }
     }
     expect(f.onExternalRun).not.toHaveBeenCalled();
     expect(f.request.onReady).not.toHaveBeenCalled();
@@ -1780,6 +1788,7 @@ test.each(["Cardigan check", "unresolved title"])(
       expect.anything(),
       expect.any(Function),
       true,
+      expect.objectContaining({ save: expect.any(Function) }),
     );
     expect(f.client.runs).not.toHaveBeenCalled();
     expect(f.client.dispatch).toHaveBeenCalledOnce();
@@ -2284,4 +2293,67 @@ test("a match on an earlier REST page survives a failed later page", async () =>
   await expect(recover()).rejects.toBeDefined();
   expect(fetch).toHaveBeenCalledTimes(3);
   expect(f.journal.admitted()).toHaveLength(1);
+});
+
+test("C-466: identity retry survives reopening SQLite; only the original verified terminal releases capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-identity-retry-"));
+  roots.push(root);
+  const db = join(root, "state.db");
+  const f = setup(db);
+  let time = now;
+  let remote: GithubRun = { ...trusted, status: "in_progress" };
+  const client = {
+    ...f.client,
+    run: vi.fn(async () => remote),
+    pollRuns: vi.fn(async () => ({ unchanged: false, runs: [remote] })),
+    cancel: vi.fn(async () => {}),
+    jobs: vi.fn(async () => []),
+    jobLog: vi.fn(async () => ""),
+  };
+  const lifecycle = new GithubCheckPoller({ client, now: () => time });
+  await new GithubCheckExecutor({ ...f.options, client, lifecycle }).dispatch(
+    f.request,
+  );
+  remote = { ...remote, run_attempt: 2 };
+  await lifecycle.tick();
+  const external = f.journal.unfinished()[0]!.externalRun!;
+  await lifecycle.cancel(external);
+  expect(f.journal.admitted()[0]?.maintenanceRetry).toEqual({
+    failures: 1,
+    reason: "identity_mismatch",
+    retryAt: now + 40_000,
+  });
+  expect(client.cancel).not.toHaveBeenCalled();
+  closeFixtureStore(f.store);
+  const g = setup(db, false);
+  const restarted = new GithubCheckPoller({ client, now: () => time });
+  const restore = new GithubCheckExecutor({
+    ...g.options,
+    client,
+    lifecycle: restarted,
+    now: () => time,
+  });
+  await expect(restore.dispatch(g.request)).rejects.toMatchObject({
+    retryAt: now + 40_000,
+  });
+  expect(client.run).toHaveBeenCalledOnce();
+  time += 40_000;
+  await expect(restore.dispatch(g.request)).rejects.toMatchObject({
+    category: "security",
+  });
+  expect(g.journal.admitted()[0]?.maintenanceRetry).toEqual({
+    failures: 2,
+    reason: "identity_mismatch",
+    retryAt: time + 80_000,
+  });
+  time += 80_000;
+  remote = { ...trusted, status: "completed", conclusion: "cancelled" };
+  const handle = await restore.dispatch(g.request);
+  const result = restore.poll(handle);
+  await restarted.tick();
+  // A terminal cancelled run needs no job evidence and no provider cancellation.
+  expect(await result).toMatchObject({ status: "interrupted" });
+  expect(g.journal.admitted()).toHaveLength(0);
+  expect(client.cancel).not.toHaveBeenCalled();
+  expect(client.dispatch).toHaveBeenCalledOnce();
 });
