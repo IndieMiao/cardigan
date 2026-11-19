@@ -304,7 +304,7 @@ const schemas = {
       .literal(true)
       .optional()
       .describe(
-        "With internal host handoff only: this is a read-only diagnostic; bind a result author (host_ops or fallback PM Ops). Omit for ordinary host work.",
+        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). PM Ops may only set this on its own untriaged inbox items, not on existing handoffs. Omit for ordinary host work.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])

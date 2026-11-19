@@ -1684,6 +1684,15 @@ export function triageHumanAction(
       "validation_failed",
       "只有非阻塞的内部卡片诊断可以由运维回填结项",
     );
+    // A diagnostic handoff grants result authority. PM can delegate its own
+    // inbox, not reclaim work already handed to a human or host operator.
+    ensure(
+      !p.host_diagnostic ||
+        actor.kind === "human" ||
+        action.triage === "pm_ops",
+      "unauthorized",
+      "只有人才能把已经交接的待办或旧待办改为主机诊断",
+    );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
       externalHostOwner(d, p.host_assignment_id);

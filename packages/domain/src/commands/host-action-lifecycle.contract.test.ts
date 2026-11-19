@@ -351,7 +351,7 @@ test("card cancellation and compensation preserve history, do not resume work, a
   expect(refreshCancelledHumanActions(legacy, owner, ports()).ok).toBe(false);
 });
 
-test("internal non-blocking handoff binds a result author; only their explicit final report closes it", () => {
+function diagnosticOwners() {
   const base = setup();
   const pm = {
     ...required(base.assignments.find((a) => a.scope === "standing")),
@@ -372,6 +372,53 @@ test("internal non-blocking handoff binds a result author; only their explicit f
     assignments: [...base.assignments.slice(0, 3), pm, internal],
   };
   const { host_assignment_id: _office, ...params } = handoff;
+  return { state, pm, host, base, params };
+}
+
+test.each(["human", "host", undefined, "pm_ops"] as const)(
+  "only a human can grant diagnostic authority outside the PM inbox (prior triage: %s)",
+  (triage) => {
+    const { state, pm, host, params } = diagnosticOwners();
+    const {
+      triage: _oldTriage,
+      host_operator: _operator,
+      host_assignment_id: _owner,
+      ...original
+    } = required(state.human_actions[0]);
+    const action = { ...original, ...(triage ? { triage } : {}) };
+    for (const hasHost of [true, false]) {
+      const snapshot = {
+        ...state,
+        human_actions: [action],
+        assignments: state.assignments.filter(
+          (a) => hasHost || a.id !== host.id,
+        ),
+      };
+      const diagnose = (who: Actor) =>
+        triageHumanAction(
+          snapshot,
+          who,
+          { ...params, host_operator: "host_ops", host_diagnostic: true },
+          ports(),
+        );
+      const authorized = {
+        host_diagnostic: true,
+        host_assignment_id: hasHost ? host.id : pm.id,
+      };
+      if (triage === "pm_ops")
+        expect(value(diagnose(owner)).data).toMatchObject(authorized);
+      else
+        expect(diagnose(owner)).toMatchObject({
+          ok: false,
+          error: { code: "unauthorized" },
+        });
+      expect(value(diagnose(human)).data).toMatchObject(authorized);
+    }
+  },
+);
+
+test("internal non-blocking handoff binds a result author; only their explicit final report closes it", () => {
+  const { state, pm, host, base, params } = diagnosticOwners();
   const assign = (s: CommandState) =>
     triageHumanAction(
       s,
