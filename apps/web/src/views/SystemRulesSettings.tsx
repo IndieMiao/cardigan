@@ -1,10 +1,8 @@
-import { useEffect, useId, useRef, useState } from "react";
-import {
-  type CardiganClient,
-  describeWriteError,
-  type PreferencesView,
-  type SystemReminderPolicy,
-  type SystemRulesPreferences,
+import { useId, useState } from "react";
+import type {
+  CardiganClient,
+  PreferencesView,
+  SystemReminderPolicy,
 } from "../api.js";
 import {
   SettingsDialogActions,
@@ -17,13 +15,14 @@ import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogTitle,
+  DialogTrigger,
 } from "../components/ui/dialog.js";
 import { Input } from "../components/ui/input.js";
 import { Switch } from "../components/ui/switch.js";
+import { useSettingWrite } from "./useSettingWrite.js";
 
 const fields = [
   ["min_minutes", "允许的最少分钟数"],
@@ -39,63 +38,58 @@ const fields = [
   ["max_reminders", "每个等待周期最多提醒次数"],
 ] as const;
 
-/** Auto-assign and reminders save instantly; the reminder policy saves as one dialog. */
+interface Props {
+  initial: PreferencesView;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+  source: PreferencesView | undefined;
+}
+
+/**
+ * Auto-assign and reminders save instantly; the reminder policy saves as one
+ * dialog. Each write sends only its own field, so it cannot undo another.
+ */
 export function SystemRulesSettings({
   initial,
   client,
   projectId,
   saved,
-}: {
-  initial: PreferencesView;
-  client: CardiganClient;
-  projectId: string;
-  saved: () => void;
-}) {
+  source,
+}: Props) {
   const id = useId();
-  const current: Required<SystemRulesPreferences> = {
-    system_auto_assign_verifiers: initial.system_auto_assign_verifiers === true,
-    system_reminders: initial.system_reminders === true,
-    system_reminder_policy: initial.system_reminder_policy ?? null,
-  };
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  // Dialog saves report inside the modal; Radix hides the page from assistive tech.
-  const [origin, setOrigin] = useState<"row" | "dialog">("row");
-  const sending = useRef(false);
-  useEffect(() => {
-    if (!message) return;
-    const timer = window.setTimeout(() => setMessage(""), 4000);
-    return () => window.clearTimeout(timer);
-  }, [message]);
-  const write = async (
-    patch: Partial<SystemRulesPreferences>,
-    from: "row" | "dialog" = "row",
-  ) => {
-    if (sending.current) return false;
-    sending.current = true;
-    setOrigin(from);
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      await client.setSystemRules(
-        projectId,
-        { ...current, ...patch },
-        crypto.randomUUID(),
-      );
-      setMessage("系统规则已保存");
-      saved();
-      return true;
-    } catch (cause) {
-      setError(describeWriteError(cause));
-      return false;
-    } finally {
-      sending.current = false;
-      setBusy(false);
-    }
-  };
-  const policy = current.system_reminder_policy;
+  const rule = <T,>(
+    server: T,
+    field: "system_auto_assign_verifiers" | "system_reminders",
+    success: (value: T) => string,
+  ) => ({
+    server,
+    source,
+    write: (value: T, key: string) =>
+      client.setSystemRules(projectId, { [field]: value }, key),
+    saved,
+    success,
+  });
+  const assign = useSettingWrite(
+    rule(
+      initial.system_auto_assign_verifiers === true,
+      "system_auto_assign_verifiers",
+      (next) => (next ? "已开启自动指派验证项" : "已关闭自动指派验证项"),
+    ),
+  );
+  const remind = useSettingWrite(
+    rule(initial.system_reminders === true, "system_reminders", (next) =>
+      next ? "已开启催办提醒" : "已关闭催办提醒",
+    ),
+  );
+  const policy = useSettingWrite<SystemReminderPolicy | null>({
+    server: initial.system_reminder_policy ?? null,
+    source,
+    write: (value, key) =>
+      client.setSystemRules(projectId, { system_reminder_policy: value }, key),
+    saved,
+    success: () => "催办阈值已保存",
+  });
   return (
     <SettingsGroup title="自动指派与催办">
       <SettingsRow
@@ -105,13 +99,18 @@ export function SystemRulesSettings({
         descriptionId={`${id}-assign-help`}
       >
         <Switch
-          checked={current.system_auto_assign_verifiers}
-          aria-disabled={busy}
+          checked={assign.value}
+          aria-disabled={assign.busy}
           aria-labelledby={`${id}-assign`}
           aria-describedby={`${id}-assign-help`}
-          onCheckedChange={(next) =>
-            write({ system_auto_assign_verifiers: next })
-          }
+          onCheckedChange={assign.save}
+        />
+        <RequestFeedback
+          interactive
+          pending={assign.busy}
+          pendingMessage="正在保存…"
+          error={assign.error}
+          message={assign.message}
         />
       </SettingsRow>
       <SettingsRow
@@ -121,50 +120,55 @@ export function SystemRulesSettings({
         descriptionId={`${id}-remind-help`}
       >
         <Switch
-          checked={current.system_reminders}
-          aria-disabled={busy}
+          checked={remind.value}
+          aria-disabled={remind.busy}
           aria-labelledby={`${id}-remind`}
           aria-describedby={`${id}-remind-help`}
-          onCheckedChange={(next) => write({ system_reminders: next })}
+          onCheckedChange={remind.save}
+        />
+        <RequestFeedback
+          interactive
+          pending={remind.busy}
+          pendingMessage="正在保存…"
+          error={remind.error}
+          message={remind.message}
         />
       </SettingsRow>
       <SettingsRow
         label="催办阈值"
         description={
-          policy
-            ? policy.repeat
+          policy.value
+            ? policy.value.repeat
               ? "已设置，重复提醒"
               : "已设置，每个等待周期提醒一次"
             : "未设置"
         }
       >
         <ReminderPolicyDialog
-          policy={policy}
-          busy={busy}
-          error={origin === "dialog" ? error : ""}
-          save={(next) => write({ system_reminder_policy: next }, "dialog")}
+          policy={policy.value}
+          busy={policy.busy}
+          error={policy.error}
+          clear={policy.clear}
+          save={policy.save}
         />
+        <RequestFeedback interactive message={policy.message} />
       </SettingsRow>
-      <RequestFeedback
-        interactive
-        pending={busy && origin === "row"}
-        pendingMessage="正在保存…"
-        error={origin === "row" ? error : ""}
-        message={message}
-      />
     </SettingsGroup>
   );
 }
 
+/** The dialog stays open while saving, so a failure keeps its error and draft. */
 function ReminderPolicyDialog({
   policy,
   busy,
   error,
+  clear,
   save,
 }: {
   policy: SystemReminderPolicy | null;
   busy: boolean;
   error: string;
+  clear: () => void;
   save: (policy: SystemReminderPolicy | null) => Promise<boolean>;
 }) {
   const [open, setOpen] = useState(false);
@@ -172,6 +176,7 @@ function ReminderPolicyDialog({
   const [repeat, setRepeat] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const reset = () => {
+    clear();
     setConfigure(!!policy);
     setRepeat(policy?.repeat === true);
     setValues(
@@ -184,19 +189,14 @@ function ReminderPolicyDialog({
     <Dialog
       open={open}
       onOpenChange={(next) => {
+        if (busy) return;
         if (next) reset();
         setOpen(next);
       }}
     >
-      <Button
-        aria-label="编辑催办阈值"
-        onClick={() => {
-          reset();
-          setOpen(true);
-        }}
-      >
-        编辑
-      </Button>
+      <DialogTrigger asChild>
+        <Button aria-label="编辑催办阈值">编辑</Button>
+      </DialogTrigger>
       <DialogContent className={settingsDialogClassName}>
         <DialogTitle>催办阈值</DialogTitle>
         <DialogDescription>
@@ -262,10 +262,16 @@ function ReminderPolicyDialog({
               ))}
           </SettingsDialogFields>
           <SettingsDialogActions>
-            <DialogClose asChild>
-              <Button>取消</Button>
-            </DialogClose>
-            <Button type="submit" variant="primary" disabled={busy}>
+            <Button
+              type="button"
+              aria-disabled={busy}
+              onClick={() => {
+                if (!busy) setOpen(false);
+              }}
+            >
+              取消
+            </Button>
+            <Button type="submit" variant="primary" aria-disabled={busy}>
               保存催办阈值
             </Button>
           </SettingsDialogActions>

@@ -1,9 +1,5 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import {
-  type CardiganClient,
-  describeWriteError,
-  type PreferencesView,
-} from "../api.js";
+import { useCallback, useEffect, useId, useState } from "react";
+import type { CardiganClient, PreferencesView } from "../api.js";
 import { PageTitle, StatusTag } from "../components/Foundation.js";
 import {
   SettingsGroup,
@@ -28,6 +24,7 @@ import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
+import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -69,7 +66,7 @@ export function SettingsPage({
   const data = resource.data;
   // The review round ceiling comes only from the server (domain, Q-420).
   const roundsCeiling = data?.review_max_rounds_ceiling;
-  const common = { client, projectId, saved: resource.reload };
+  const common = { client, projectId, saved: resource.reload, source: data };
   return (
     <SettingsLayout
       header={<PageTitle title="设置" />}
@@ -180,15 +177,6 @@ export function SettingsPage({
             />
           )}
           {data && (
-            <SettingsGroup title="协作">
-              <CrossCardReadSetting
-                key={`cross-card-read:${projectId}`}
-                enabled={data.cross_card_read !== false}
-                {...common}
-              />
-            </SettingsGroup>
-          )}
-          {data && (
             <SettingsGroup title="合并确认">
               {(["stall", "snooze", "snooze-max"] as const).map((kind) => (
                 <MergeMinutesSetting
@@ -227,8 +215,13 @@ export function SettingsPage({
             <SettingsGroup
               title="需谨慎"
               tone="caution"
-              description="只有你能修改；会让系统在无人确认时合并代码。"
+              description="只有你能修改；跨卡只读会扩大卡片读取范围，自动合并会让系统在无人确认时合并代码。"
             >
+              <CrossCardReadSetting
+                key={`cross-card-read:${projectId}`}
+                enabled={data.cross_card_read !== false}
+                {...common}
+              />
               <AutoMergeSetting
                 key={`auto-merge:${projectId}`}
                 enabled={
@@ -247,7 +240,8 @@ export function SettingsPage({
               />
               <TimeoutMergeSetting
                 key={`timeout:${projectId}`}
-                initial={data}
+                minutes={data.auto_merge_after_minutes}
+                gate={data.merge_gate_enabled}
                 {...common}
               />
             </SettingsGroup>
@@ -331,134 +325,75 @@ interface SettingProps {
   client: CardiganClient;
   projectId: string;
   saved: () => void;
+  /** The preferences read that produced this setting's props. */
+  source: PreferencesView | undefined;
 }
 
-/** Success notices leave the shared feedback stack after a short while. */
-function useNotice() {
-  const [message, setMessage] = useState("");
-  useEffect(() => {
-    if (!message) return;
-    const timer = window.setTimeout(() => setMessage(""), 4000);
-    return () => window.clearTimeout(timer);
-  }, [message]);
-  return [message, setMessage] as const;
-}
-
-/**
- * Integer setting saved on blur or Enter. Drafts follow fresh server values
- * unless they hold an unsaved edit; a retry of the same value reuses its key.
- */
+/** Integer setting saved on blur or Enter. */
 function useNumberSetting({
   initial,
   min,
   max,
   write,
   saved,
+  source,
 }: {
   initial: number;
   min: number;
   max: number;
   write: (value: number, key: string) => Promise<void>;
   saved: () => void;
+  source: unknown;
 }) {
-  const [draft, setDraft] = useState(String(initial));
-  const [base, setBase] = useState(initial);
-  const [committed, setCommitted] = useState<string>();
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [message, setMessage] = useNotice();
-  const sending = useRef(false),
-    keys = useRef(new Map<string, string>());
-  if (base !== initial) {
-    setBase(initial);
-    if (draft === String(base) || draft === committed)
-      setDraft(String(initial));
-    setCommitted(undefined);
-  }
-  const valid =
-    /^\d+$/.test(draft) && Number(draft) >= min && Number(draft) <= max;
-  const dirty = draft !== String(initial) && draft !== committed;
-  const commit = async () => {
-    if (sending.current || !valid || !dirty) return;
-    sending.current = true;
-    const value = draft;
-    setBusy(true);
-    setError("");
-    setMessage("");
-    const key = keys.current.get(value) ?? crypto.randomUUID();
-    keys.current.set(value, key);
-    try {
-      await write(Number(value), key);
-      keys.current.delete(value);
-      setCommitted(value);
-      setMessage("偏好已保存");
-      saved();
-    } catch (cause) {
-      setError(describeWriteError(cause));
-    } finally {
-      sending.current = false;
-      setBusy(false);
-    }
-  };
+  const setting = useSettingWrite({
+    server: initial,
+    source,
+    write,
+    saved,
+    success: () => "偏好已保存",
+  });
+  const draft = useNumberDraft(setting.value, min, max);
   return {
-    draft,
+    ...setting,
+    ...draft,
     setDraft: (value: string) => {
-      setDraft(value);
-      setMessage("");
-      setError("");
+      draft.setDraft(value);
+      setting.clear();
     },
-    valid,
-    busy,
-    error,
-    message,
-    commit,
-    dirty,
+    commit: async () => {
+      if (draft.valid && draft.dirty) await setting.save(Number(draft.draft));
+    },
   };
 }
 
+/** Enabling writes the chosen minutes in the same request (C-455 review). */
 function TimeoutMergeSetting({
-  initial,
+  minutes: serverMinutes,
+  gate,
   client,
   projectId,
   saved,
-}: SettingProps & { initial: PreferencesView }) {
+  source,
+}: SettingProps & {
+  minutes: number | null | undefined;
+  gate: boolean | undefined;
+}) {
   const id = useId();
-  const enabled = initial.auto_merge_after_minutes !== null;
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [message, setMessage] = useNotice();
-  const sending = useRef(false),
-    keys = useRef(new Map<string, string>());
-  const write = async (value: number | null) => {
-    const input = JSON.stringify(value);
-    const key = keys.current.get(input) ?? crypto.randomUUID();
-    keys.current.set(input, key);
-    await client.setPreferences(projectId, value, key);
-    keys.current.delete(input);
-  };
-  const minutes = useNumberSetting({
-    initial: initial.auto_merge_after_minutes ?? 10,
-    min: 1,
-    max: 1440,
-    write: (value) => write(value),
+  const setting = useSettingWrite<number | null>({
+    server: serverMinutes ?? null,
+    source,
+    write: (value, key) => client.setPreferences(projectId, value, key),
     saved,
+    success: (value) => (value === null ? "已关闭超时自动合并" : "偏好已保存"),
   });
-  const toggle = async (next: boolean) => {
-    if (sending.current || minutes.busy || (next && !minutes.valid)) return;
-    sending.current = true;
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      await write(next ? Number(minutes.draft) : null);
-      setMessage("偏好已保存");
-      saved();
-    } catch (cause) {
-      setError(describeWriteError(cause));
-    } finally {
-      sending.current = false;
-      setBusy(false);
-    }
+  const enabled = setting.value !== null;
+  const [lastMinutes, setLastMinutes] = useState(setting.value ?? 10);
+  if (setting.value !== null && setting.value !== lastMinutes)
+    setLastMinutes(setting.value);
+  const minutes = useNumberDraft(lastMinutes, 1, 1440);
+  const toggle = (next: boolean) => {
+    if (!next) return setting.save(null);
+    if (minutes.valid) return setting.save(Number(minutes.draft));
   };
   return (
     <>
@@ -468,7 +403,7 @@ function TimeoutMergeSetting({
         description="合并确认无人处理且没有其他阻塞时，按等待时间自动代批。"
         descriptionId={`${id}-help`}
         warning={
-          initial.merge_gate_enabled
+          gate
             ? undefined
             : "没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码"
         }
@@ -477,7 +412,7 @@ function TimeoutMergeSetting({
           checked={enabled}
           aria-labelledby={`${id}-label`}
           aria-describedby={`${id}-help`}
-          aria-disabled={busy}
+          aria-disabled={setting.busy}
           onCheckedChange={toggle}
         />
       </SettingsRow>
@@ -486,29 +421,30 @@ function TimeoutMergeSetting({
           id={`${id}-minutes`}
           unit="分钟"
           dirty={enabled && minutes.dirty}
-          invalid={enabled && !minutes.valid}
+          invalid={!minutes.valid}
           min="1"
           max="1440"
           value={minutes.draft}
-          disabled={!enabled || busy}
-          readOnly={minutes.busy}
-          onChange={(e) => minutes.setDraft(e.target.value)}
-          onCommit={minutes.commit}
+          readOnly={setting.busy}
+          onChange={(e) => {
+            minutes.setDraft(e.target.value);
+            setting.clear();
+          }}
+          onCommit={() => {
+            if (enabled && minutes.valid && minutes.dirty)
+              setting.save(Number(minutes.draft));
+          }}
         />
       </SettingsRow>
       <RequestFeedback
-        error={
-          enabled && !minutes.valid
-            ? "请输入 1 到 1440 的整数分钟。"
-            : undefined
-        }
+        error={minutes.valid ? undefined : "请输入 1 到 1440 的整数分钟。"}
       />
       <RequestFeedback
         interactive
-        pending={busy || minutes.busy}
+        pending={setting.busy}
         pendingMessage="保存中…"
-        error={error || minutes.error}
-        message={message || minutes.message}
+        error={setting.error}
+        message={setting.message}
       />
     </>
   );
@@ -522,6 +458,7 @@ function ReviewRoundsSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & {
   kind: "review" | "independent";
   initial: number;
@@ -537,6 +474,7 @@ function ReviewRoundsSetting({
     write: (value, key) =>
       client.setReviewMaxRounds(projectId, kind, value, key),
     saved,
+    source,
   });
   return (
     <SettingsRow
@@ -585,6 +523,7 @@ function MergeMinutesSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & {
   kind: "stall" | "snooze" | "snooze-max";
   initial: number;
@@ -610,6 +549,7 @@ function MergeMinutesSetting({
           ? client.setMergeConfirmSnoozeDefault(projectId, value, key)
           : client.setMergeConfirmStallAfter(projectId, value, key),
     saved,
+    source,
   });
   return (
     <SettingsRow
@@ -664,12 +604,16 @@ function PmMergeSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const sending = useRef(false),
-    key = useRef<string | undefined>(undefined);
+  const setting = useSettingWrite({
+    server: enabled,
+    source,
+    write: (next, key) => client.setPmMergeConfirmation(projectId, next, key),
+    saved,
+    success: (next) => (next ? "已开启 PM 代确认" : "已关闭 PM 代确认"),
+  });
   return (
     <SettingsRow
       label="合并由 PM 代确认"
@@ -680,40 +624,25 @@ function PmMergeSetting({
       status={
         <span id={`${id}-status`}>
           <StatusTag
-            status={enabled ? "active" : "waiting_decision"}
-            label={enabled ? "由 PM 代确认" : "PM 代确认已关闭"}
+            status={setting.value ? "active" : "waiting_decision"}
+            label={setting.value ? "由 PM 代确认" : "PM 代确认已关闭"}
           />
         </span>
       }
     >
       <Switch
-        checked={enabled}
-        disabled={busy}
+        checked={setting.value}
+        aria-disabled={setting.busy}
         aria-labelledby={`${id}-label ${id}-status`}
         aria-describedby={`${id}-help`}
-        onCheckedChange={async (next) => {
-          if (sending.current) return;
-          sending.current = true;
-          setBusy(true);
-          setError("");
-          key.current ??= crypto.randomUUID();
-          try {
-            await client.setPmMergeConfirmation(projectId, next, key.current);
-            key.current = undefined;
-            saved();
-          } catch (cause) {
-            setError(describeWriteError(cause));
-          } finally {
-            sending.current = false;
-            setBusy(false);
-          }
-        }}
+        onCheckedChange={setting.save}
       />
       <RequestFeedback
         interactive
-        pending={busy}
+        pending={setting.busy}
         pendingMessage="保存合并授权中…"
-        error={error}
+        error={setting.error}
+        message={setting.message}
       />
     </SettingsRow>
   );
@@ -726,12 +655,17 @@ function DelegationSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & { category: string; label: string; enabled: boolean }) {
   const id = useId();
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const sending = useRef(false),
-    key = useRef<string | undefined>(undefined);
+  const setting = useSettingWrite({
+    server: enabled,
+    source,
+    write: (next, key) => client.setDelegation(projectId, category, next, key),
+    saved,
+    success: (next) =>
+      next ? `${label}：已授权 PM 代拍` : `${label}：已改为由人拍板`,
+  });
   return (
     <SettingsRow
       label={label}
@@ -739,110 +673,27 @@ function DelegationSetting({
       status={
         <span id={`${id}-status`}>
           <StatusTag
-            status={enabled ? "active" : "waiting_decision"}
-            label={enabled ? "由 PM 代拍" : "由人拍板"}
+            status={setting.value ? "active" : "waiting_decision"}
+            label={setting.value ? "由 PM 代拍" : "由人拍板"}
           />
         </span>
       }
     >
       <Switch
-        checked={enabled}
-        disabled={busy}
+        checked={setting.value}
+        aria-disabled={setting.busy}
         aria-labelledby={`${id}-label ${id}-status`}
-        onCheckedChange={async (next) => {
-          if (sending.current) return;
-          sending.current = true;
-          setBusy(true);
-          setError("");
-          key.current ??= crypto.randomUUID();
-          try {
-            await client.setDelegation(projectId, category, next, key.current);
-            key.current = undefined;
-            saved();
-          } catch (cause) {
-            setError(describeWriteError(cause));
-          } finally {
-            sending.current = false;
-            setBusy(false);
-          }
-        }}
+        onCheckedChange={setting.save}
       />
       <RequestFeedback
         interactive
-        pending={busy}
+        pending={setting.busy}
         pendingMessage="保存授权中…"
-        error={error}
+        error={setting.error}
+        message={setting.message}
       />
     </SettingsRow>
   );
-}
-
-/** Boolean preference that waits for the server and never replays a stale key. */
-function useConfirmedSwitch({
-  enabled,
-  confirmed,
-  write,
-  saved,
-  success,
-}: {
-  enabled: boolean;
-  confirmed: boolean;
-  write: (next: boolean, key: string) => Promise<void>;
-  saved: () => void;
-  success: (next: boolean) => string;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useNotice();
-  const sending = useRef(false);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  const pending = useRef<{ value: boolean; key: string } | undefined>(
-    undefined,
-  );
-  useEffect(() => {
-    // A refreshed server value confirms the operation even if its response was lost.
-    if (confirmed && pending.current?.value === enabled) {
-      pending.current = undefined;
-      setError("");
-    }
-  }, [enabled, confirmed]);
-  const save = async (next: boolean) => {
-    if (sending.current) return;
-    sending.current = true;
-    setBusy(true);
-    setError("");
-    setMessage("");
-    // Reuse only the outstanding operation; a later switch gets a new key.
-    const key =
-      pending.current?.value === next
-        ? pending.current.key
-        : crypto.randomUUID();
-    pending.current = { value: next, key };
-    try {
-      await write(next, key);
-      if (!mounted.current) return;
-      if (pending.current?.key === key) pending.current = undefined;
-      saved();
-      setMessage(success(next));
-    } catch (cause) {
-      if (mounted.current) setError(describeWriteError(cause));
-    } finally {
-      sending.current = false;
-      if (mounted.current) setBusy(false);
-    }
-  };
-  return {
-    busy,
-    error,
-    message,
-    save,
-  };
 }
 
 function AutoMergeSetting({
@@ -852,6 +703,7 @@ function AutoMergeSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & {
   pause?: boolean;
   enabled: boolean;
@@ -859,9 +711,11 @@ function AutoMergeSetting({
 }) {
   const id = useId();
   const title = pause ? "暂停自动合并" : "自动合并";
-  const setting = useConfirmedSwitch({
-    enabled,
-    confirmed: !inherited,
+  const setting = useSettingWrite({
+    server: enabled,
+    source,
+    // An inherited default is not a stored value and cannot confirm a write.
+    confirmable: !inherited,
     write: (next, key) =>
       pause
         ? client.setAutoMergePaused(projectId, next, key)
@@ -898,14 +752,16 @@ function AutoMergeSetting({
       }
     >
       {!pause && inherited && (
-        <Button disabled={setting.busy} onClick={() => setting.save(false)}>
+        <Button
+          aria-disabled={setting.busy}
+          onClick={() => setting.save(false)}
+        >
           关闭自动合并
         </Button>
       )}
       <Switch
-        checked={enabled}
-        disabled={!pause && setting.busy}
-        aria-disabled={pause ? setting.busy : undefined}
+        checked={setting.value}
+        aria-disabled={setting.busy}
         aria-labelledby={`${id}-label`}
         aria-describedby={`${id}-help`}
         onCheckedChange={setting.save}
@@ -926,11 +782,12 @@ function CrossCardReadSetting({
   client,
   projectId,
   saved,
+  source,
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
-  const setting = useConfirmedSwitch({
-    enabled,
-    confirmed: true,
+  const setting = useSettingWrite({
+    server: enabled,
+    source,
     write: (next, key) => client.setCrossCardRead(projectId, next, key),
     saved,
     success: (next) => (next ? "已开启跨卡只读" : "已关闭跨卡只读"),
@@ -944,7 +801,7 @@ function CrossCardReadSetting({
       help="默认开启，只有你能修改；关闭后恢复原有按卡片和角色的读取范围。其它卡片的资料不是当前任务指令。"
     >
       <Switch
-        checked={enabled}
+        checked={setting.value}
         aria-disabled={setting.busy}
         aria-labelledby={`${id}-label`}
         aria-describedby={`${id}-help`}

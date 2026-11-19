@@ -246,7 +246,7 @@ afterEach(() => {
   cleanup();
   window.location.hash = "";
 });
-test("settings navigation opens preferences, default off with the missing-gate warning", async () => {
+test("settings navigation opens preferences, default off with editable minutes and the missing-gate warning", async () => {
   window.location.hash = "#/p/p-1/settings";
   render(<App client={fakeClient()} />);
   expect(await screen.findByRole("heading", { name: "设置" })).toBeTruthy();
@@ -257,7 +257,7 @@ test("settings navigation opens preferences, default off with the missing-gate w
   expect(on(toggle)).toBe(false);
   expect(
     (screen.getByLabelText("等待分钟数") as HTMLInputElement).disabled,
-  ).toBe(true);
+  ).toBe(false);
   expect(
     screen.getByText("没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码"),
   ).toBeTruthy();
@@ -412,8 +412,11 @@ test.each([
       const toggle = await screen.findByRole("switch", {
         name: `${label} ${before}`,
       });
+      toggle.focus();
       fireEvent.click(toggle);
-      expect((toggle as HTMLButtonElement).disabled).toBe(true);
+      expect(toggle.getAttribute("aria-disabled")).toBe("true");
+      expect((toggle as HTMLButtonElement).disabled).toBe(false);
+      expect(document.activeElement).toBe(toggle);
       expect(await screen.findByText("保存授权中…")).toBeTruthy();
       await act(async () => {
         finish?.();
@@ -422,7 +425,12 @@ test.each([
         name: `${label} ${after}`,
       });
       expect(on(saved)).toBe(enabled);
-      expect((saved as HTMLButtonElement).disabled).toBe(false);
+      expect(saved.getAttribute("aria-disabled")).toBe("false");
+      expect(
+        await screen.findByText(
+          `${label}：${enabled ? "已授权 PM 代拍" : "已改为由人拍板"}`,
+        ),
+      ).toBeTruthy();
       expect(setDelegation).toHaveBeenLastCalledWith(
         "p-1",
         category,
@@ -829,11 +837,7 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
   await waitFor(() =>
     expect(setSystemRules).toHaveBeenCalledWith(
       "p-1",
-      {
-        system_auto_assign_verifiers: true,
-        system_reminders: false,
-        system_reminder_policy: null,
-      },
+      { system_auto_assign_verifiers: true },
       expect.any(String),
     ),
   );
@@ -849,7 +853,7 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     expect((field as HTMLInputElement).value).toBe("");
 });
 
-test("C-455 reminder thresholds save together from the dialog and keep the switches", async () => {
+test("C-455 reminder thresholds save together from the dialog without resending the switches", async () => {
   const setSystemRules = vi.fn().mockResolvedValue(undefined);
   render(
     <SettingsPage
@@ -883,8 +887,6 @@ test("C-455 reminder thresholds save together from the dialog and keep the switc
   expect(setSystemRules).toHaveBeenCalledExactlyOnceWith(
     "p-1",
     {
-      system_auto_assign_verifiers: true,
-      system_reminders: true,
       system_reminder_policy: expect.objectContaining({
         min_minutes: 5,
         max_minutes: null,
@@ -922,6 +924,10 @@ test("C-455 a failed reminder-threshold save stays in the dialog with its draft"
   fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(setSystemRules).toHaveBeenCalledTimes(2);
+  // The retry of the same failed operation reuses its idempotency key.
+  expect(setSystemRules.mock.calls[1]?.[2]).toBe(
+    setSystemRules.mock.calls[0]?.[2],
+  );
 });
 
 test.each([false, true])(
