@@ -146,31 +146,138 @@ const currentHash = (): string =>
 const isUnparseable = (hash: string): boolean =>
   hash.length > 0 && hash !== "#" && parseRoute(hash) === undefined;
 
-let hold: { home: string } | undefined;
-let resume: { hash: string; go: () => void } | undefined;
 /**
- * Keeps the reader on the current page until unfinished work there ends
- * (C-455: a setting that is still saving). Leaving is remembered and carried
- * out by `release(true)`; `release(false)` stays, e.g. to show a failure.
+ * Navigation hold (C-455): while a page finishes work (a setting that is still
+ * saving) the reader stays on it. The latest attempt to leave is remembered
+ * and carried out by `release(true)`; `release(false)` drops it and stays.
+ *
+ * - Hash links are intercepted on click, so the decision is made when the
+ *   reader clicks, whatever the work does before `hashchange` runs.
+ * - `navigate()` and work deferred with `deferWhileHeld` are remembered.
+ * - Back/forward cannot be cancelled: the step is undone by traversing back
+ *   to the held entry (marked in `history.state`), so no history entry is
+ *   rewritten, and redone the same way after success.
  */
+const HOLD_MARK = "cardiganHold";
+type Restore = {
+  /** fwd: assume Back and step forward; back2/back1: it was Forward. */
+  phase: "fwd" | "back2" | "back1";
+  timer?: ReturnType<typeof setTimeout>;
+};
+let hold:
+  | {
+      home: string;
+      mark: string;
+      leave?: (() => void) | undefined;
+      restoring?: Restore | undefined;
+      /** Set when released during a restore; applied once it ends. */
+      released?: boolean | undefined;
+    }
+  | undefined;
+
+const atHome = () =>
+  hold !== undefined &&
+  (history.state as Record<string, unknown> | null)?.[HOLD_MARK] === hold.mark;
+
+function finish(proceed: boolean) {
+  const leave = hold?.leave;
+  hold = undefined;
+  if (proceed) leave?.();
+}
+
+function step(phase: Restore["phase"], delta: number) {
+  if (!hold) return;
+  const restoring: Restore = { phase };
+  hold.restoring = restoring;
+  // A step past either end of history fires no event.
+  restoring.timer = setTimeout(() => {
+    if (hold?.restoring !== restoring) return;
+    if (phase === "fwd") step("back1", -1);
+    else giveUp();
+  }, 150);
+  history.go(delta);
+}
+
+/** More than one step away: put the held page back in place, drop leaving. */
+function giveUp() {
+  if (!hold) return;
+  hold.restoring = undefined;
+  hold.leave = undefined;
+  window.location.replace(hold.home);
+  history.replaceState({ [HOLD_MARK]: hold.mark }, "");
+  if (hold.released !== undefined) finish(false);
+}
+
+function onHashChange() {
+  if (!hold) return;
+  const restoring = hold.restoring;
+  if (restoring) clearTimeout(restoring.timer);
+  if (atHome()) {
+    if (!restoring) return;
+    hold.restoring = undefined;
+    // Back was undone by one step forward; Forward by one step back.
+    const redo = restoring.phase === "fwd" ? -1 : 1;
+    hold.leave = () => history.go(redo);
+    if (hold.released !== undefined) finish(hold.released);
+    return;
+  }
+  if (!restoring) step("fwd", 1);
+  else if (restoring.phase === "fwd") step("back2", -2);
+  else giveUp();
+}
+
+function onClick(event: MouseEvent) {
+  if (!hold || event.defaultPrevented || event.button !== 0) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const link = (event.target as Element | null)?.closest?.("a[href]");
+  if (!(link instanceof HTMLAnchorElement)) return;
+  if (link.target && link.target !== "_self") return;
+  const href = link.getAttribute("href") ?? "";
+  if (!href.startsWith("#") || href === hold.home) return;
+  event.preventDefault();
+  hold.leave = () => {
+    window.location.hash = href;
+  };
+}
+
+if (typeof window !== "undefined") {
+  // Registered before any route listener, so a held step never renders.
+  window.addEventListener("hashchange", onHashChange);
+  document.addEventListener("click", onClick, true);
+}
+
 export function holdNavigation(): (proceed: boolean) => void {
-  const mine = { home: currentHash() };
+  const mark = `${Date.now()}-${Math.random()}`;
+  history.replaceState(
+    { ...((history.state as object | null) ?? {}), [HOLD_MARK]: mark },
+    "",
+  );
+  const mine = { home: currentHash(), mark };
   hold = mine;
   return (proceed) => {
     if (hold !== mine) return;
-    hold = undefined;
-    const next = resume;
-    resume = undefined;
-    if (proceed) next?.go();
+    if (hold.restoring) hold.released = proceed;
+    else finish(proceed);
   };
 }
-/** False while held: the target is remembered and the page stays. */
-function mayLeave(hash: string, go: () => void): boolean {
-  if (!hold || hash === hold.home) return true;
-  if (resume?.hash !== hash) resume = { hash, go };
-  if (currentHash() !== hold.home) window.location.replace(hold.home);
+
+/** Test isolation only: drop any hold without leaving. */
+export function resetNavigationHold() {
+  if (hold?.restoring) clearTimeout(hold.restoring.timer);
+  hold = undefined;
+}
+
+/**
+ * Runs `go` now when nothing holds the page; otherwise remembers it as the
+ * latest way to leave and returns false.
+ */
+export function deferWhileHeld(go: () => void): boolean {
+  if (!hold) return true;
+  hold.leave = go;
   return false;
 }
+
+const held = (hash: string) => hold !== undefined && hash !== hold.home;
 
 /**
  * The route plus an invalid-hash flag.
@@ -199,12 +306,7 @@ export function useRoute(): [
   useEffect(() => {
     const sync = (): void => {
       const hash = currentHash();
-      if (
-        !mayLeave(hash, () => {
-          window.location.hash = hash;
-        })
-      )
-        return;
+      if (held(hash)) return;
       const next = parseRoute(hash);
       if (next !== undefined) {
         setRoute(next);
@@ -228,7 +330,7 @@ export function useRoute(): [
     options?: NavigateOptions,
   ) {
     const hash = routeHash(next);
-    if (!mayLeave(hash, () => go(next, options))) return;
+    if (held(hash) && !deferWhileHeld(() => go(next, options))) return;
     if (window.location.hash !== hash) {
       if (options?.replace) window.location.replace(hash);
       else window.location.hash = hash;

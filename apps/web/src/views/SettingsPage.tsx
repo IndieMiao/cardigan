@@ -17,7 +17,7 @@ import { Button } from "../components/ui/button.js";
 import { Switch } from "../components/ui/switch.js";
 import { categoryLabels, defaultDelegation } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
-import { useRouteFilters } from "../route.js";
+import { deferWhileHeld, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
@@ -67,6 +67,11 @@ export function SettingsPage({
   // The review round ceiling comes only from the server (domain, Q-420).
   const roundsCeiling = data?.review_max_rounds_ceiling;
   const common = { client, projectId, saved: resource.reload, source: data };
+  // Another panel waits for a save in progress, like leaving the page does,
+  // so its result shows in the panel that made it.
+  const show = (go: () => void) => {
+    if (deferWhileHeld(go)) go();
+  };
   return (
     <SettingsLayout
       header={<PageTitle title="设置" />}
@@ -74,45 +79,49 @@ export function SettingsPage({
         <>
           <SettingsNavItem
             current={tab === "preferences"}
-            onClick={() => setTab("preferences")}
+            onClick={() => show(() => setTab("preferences"))}
           >
             偏好
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "capacity"}
-            onClick={() => setTab("capacity")}
+            onClick={() => show(() => setTab("capacity"))}
           >
             并发与容量
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "authorization"}
-            onClick={() => setTab("authorization")}
+            onClick={() => show(() => setTab("authorization"))}
           >
             授权
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "roles"}
-            onClick={() => {
-              setTab("roles");
-              requestAnimationFrame(() =>
-                document.getElementById("roles")?.focus(),
-              );
-            }}
+            onClick={() =>
+              show(() => {
+                setTab("roles");
+                requestAnimationFrame(() =>
+                  document.getElementById("roles")?.focus(),
+                );
+              })
+            }
           >
             角色
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "templates"}
-            onClick={() => setTab("templates")}
+            onClick={() => show(() => setTab("templates"))}
           >
             卡片模板
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "employees"}
-            onClick={() => {
-              setEmployeeRole("");
-              setTab("employees");
-            }}
+            onClick={() =>
+              show(() => {
+                setEmployeeRole("");
+                setTab("employees");
+              })
+            }
           >
             {employeeCopy.tab}
           </SettingsNavItem>

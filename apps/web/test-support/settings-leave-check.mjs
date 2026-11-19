@@ -46,27 +46,24 @@ try {
   };
   const state = () =>
     evaluate(
-      `JSON.stringify({ hash: location.hash, settings: !!document.querySelector('[data-settings-content]'), alerts: [...document.querySelectorAll('[role=alert]')].map(a => a.textContent).join('|') })`,
+      `JSON.stringify({ hash: location.hash, panel: document.querySelector('[data-settings-content]:not([hidden]) h2')?.textContent ?? null, alerts: [...document.querySelectorAll('[role=alert]')].filter((a) => a.offsetParent).map((a) => a.textContent).join('|') })`,
     );
   const base = server.resolvedUrls.local[0];
-  for (const [minutes, how] of [
-    [1439, "link"],
-    [1438, "back"],
-    [1439, "back"],
-  ]) {
-    const label = `${minutes === 1439 ? "slow success" : "slow failure"} via ${how}`;
-    console.error("start", label);
-    const nav = send("Page.navigate", { url: "about:blank" });
+  const unload = () =>
+    evaluate(
+      "(() => { const e = new Event('beforeunload', { cancelable: true }); dispatchEvent(e); return e.defaultPrevented; })()",
+    );
+  const log = async (label) => {
+    out.push(`${label}: ${await state()} unloadBlocked=${await unload()}`);
+  };
+  // History cards → help → settings; then save slowly and try to leave.
+  const scene = async (minutes, label, leave, after) => {
+    await send("Page.navigate", { url: "about:blank" });
     await delay(1500);
-    try {
-      await send("Page.handleJavaScriptDialog", { accept: true });
-      console.error("a dialog was open before leaving");
-    } catch (e) {
-      console.error("no dialog:", String(e).slice(0, 80));
-    }
-    await nav;
     await send("Page.navigate", { url: `${base}__settings#/p/p-1/cards` });
-    await until("!!document.querySelector('main, #root > *')");
+    await until("!!document.querySelector('#root > *')");
+    await evaluate("location.hash = '#/p/p-1/help'");
+    await delay(200);
     await evaluate("location.hash = '#/p/p-1/settings'");
     await until("!!document.querySelector('[role=switch]')");
     await evaluate(`(() => {
@@ -76,23 +73,39 @@ try {
       [...document.querySelectorAll('[role=switch]')].find(s => document.getElementById(s.getAttribute('aria-labelledby'))?.textContent === '超时自动合并').click();
     })()`);
     await delay(100);
-    if (how === "link")
-      await evaluate(
-        `[...document.querySelectorAll('a')].find(a => a.textContent.trim() === '帮助').click()`,
-      );
-    else await evaluate("history.back()");
+    await evaluate(leave);
     await delay(500);
-    out.push(
-      `${label} t+0.6s: ${await state()} unloadBlocked=${await evaluate("(() => { const e = new Event('beforeunload', { cancelable: true }); dispatchEvent(e); return e.defaultPrevented; })()")}`,
-    );
-    console.error(out.at(-1));
+    await log(`${label} t+0.6s`);
     await delay(1800);
-    out.push(
-      `${label} t+2.4s: ${await state()} unloadBlocked=${await evaluate("(() => { const e = new Event('beforeunload', { cancelable: true }); dispatchEvent(e); return e.defaultPrevented; })()")}`,
-    );
-    console.error(out.at(-1));
-    console.error("done", label);
-  }
+    await log(`${label} t+2.4s`);
+    for (const [name, step] of after) {
+      await evaluate(step);
+      await delay(400);
+      await log(`${label} then ${name}`);
+    }
+  };
+  const link = (text) =>
+    `[...document.querySelectorAll('a')].find(a => a.textContent.trim() === '${text}').click()`;
+  const tab = (text) =>
+    `[...document.querySelectorAll("nav[aria-label='设置分栏'] button")].find(b => b.textContent.trim() === '${text}').click()`;
+  await scene(1439, "slow success, link 帮助", link("帮助"), [
+    ["Back", "history.back()"],
+  ]);
+  await scene(1438, "slow failure, link 帮助", link("帮助"), []);
+  await scene(1438, "slow failure, Back", "history.back()", [
+    ["Back", "history.back()"],
+  ]);
+  await scene(1439, "slow success, Back", "history.back()", [
+    ["Back", "history.back()"],
+    ["Forward", "history.forward()"],
+    ["Forward", "history.forward()"],
+  ]);
+  await scene(
+    1438,
+    "slow failure, tab 授权 then link 帮助",
+    `${tab("授权")}; ${link("帮助")}`,
+    [],
+  );
 } finally {
   await browser?.close();
   await server.close();

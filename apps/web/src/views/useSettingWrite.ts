@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { describeWriteError } from "../api.js";
-import { holdNavigation } from "../route.js";
+import { holdNavigation, resetNavigationHold } from "../route.js";
 
 /** Success notices leave the shared feedback stack after a short while. */
 export function useNotice() {
@@ -40,8 +40,8 @@ function beginSave() {
 export function resetSettingWrites() {
   saving = 0;
   window.removeEventListener("beforeunload", warn);
-  release?.(false);
   release = undefined;
+  resetNavigationHold();
 }
 function endSave(ok: boolean) {
   if (!ok) failed = true;

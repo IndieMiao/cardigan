@@ -640,6 +640,9 @@ test("another project's settings do not share the queue", async () => {
 // again edits what its own read returned.
 const timeoutName = "超时自动合并";
 const hashSettled = () => act(() => new Promise((r) => setTimeout(r, 0)));
+/** Long enough for a held step to be undone (see route.ts holdNavigation). */
+const restored = () => act(() => new Promise((r) => setTimeout(r, 400)));
+const helpLink = () => screen.getByRole("link", { name: "帮助", exact: true });
 
 function heldApp() {
   const write = Promise.withResolvers<void>();
@@ -656,8 +659,7 @@ test("leaving the page while a setting saves waits for it, then leaves", async (
   const unload = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(unload);
   expect(unload.defaultPrevented).toBe(true);
-  window.location.hash = "#/p/p-1/help";
-  await hashSettled();
+  fireEvent.click(helpLink());
   await hashSettled();
   expect(window.location.hash).toBe("#/p/p-1/settings");
   expect(screen.getByRole("heading", { name: "设置" })).toBeTruthy();
@@ -674,8 +676,7 @@ test("leaving the page while a setting saves waits for it, then leaves", async (
 test("a save that fails while leaving keeps the reader on the page with its error", async () => {
   const f = heldApp();
   fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
-  window.location.hash = "#/p/p-1/help";
-  await hashSettled();
+  fireEvent.click(helpLink());
   await act(async () => f.write.reject(new Error("测试：超时合并未保存")));
   await hashSettled();
   expect(window.location.hash).toBe("#/p/p-1/settings");
@@ -683,15 +684,28 @@ test("a save that fails while leaving keeps the reader on the page with its erro
     "测试：超时合并未保存",
   );
   // Leaving again after the failure is not held.
-  window.location.hash = "#/p/p-1/help";
+  fireEvent.click(helpLink());
   await waitFor(() =>
     expect(screen.queryByRole("heading", { name: "设置" })).toBeNull(),
   );
 });
 
-test("a reminder threshold save that fails while leaving stays visible in place", async () => {
+test("another settings panel waits for a save, then opens", async () => {
+  const f = heldApp();
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  expect(screen.getByRole("switch", { name: timeoutName })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "授权" })).toBeNull();
+  await act(async () => f.write.resolve());
+  await waitFor(() =>
+    expect(screen.getByRole("heading", { name: "授权" })).toBeTruthy(),
+  );
+});
+
+test("a reminder threshold save that fails during Back stays in place, history intact", async () => {
   const write = Promise.withResolvers<void>();
-  window.location.hash = "#/p/p-1/settings";
+  history.replaceState(null, "", "#/p/p-1/cards");
+  history.pushState(null, "", "#/p/p-1/settings");
   render(
     <App client={fakeClient({ setSystemRules: vi.fn(() => write.promise) })} />,
   );
@@ -706,8 +720,9 @@ test("a reminder threshold save that fails while leaving stays visible in place"
     target: { value: "7" },
   });
   fireEvent.click(dialog.getByRole("button", { name: "保存催办阈值" }));
-  window.location.hash = "#/p/p-1/help";
-  await hashSettled();
+  history.back();
+  await restored();
+  expect(window.location.hash).toBe("#/p/p-1/settings");
   await act(async () => write.reject(new Error("threshold write rejected")));
   await hashSettled();
   expect(window.location.hash).toBe("#/p/p-1/settings");
@@ -719,12 +734,13 @@ test("a reminder threshold save that fails while leaving stays visible in place"
   expect(screen.getByRole("alert").textContent).toContain(
     "threshold write rejected",
   );
+  history.back();
+  await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/cards"));
 });
 
-test("another project chosen while saving is held too, then opens with its own values", async () => {
+test("another project entered while saving is held too, then opens", async () => {
   const write = Promise.withResolvers<void>();
   const setPreferences = vi.fn(() => write.promise);
-  const f = { write, setPreferences };
   window.location.hash = "#/p/p-1/settings";
   render(
     <App
@@ -738,12 +754,13 @@ test("another project chosen while saving is held too, then opens with its own v
     />,
   );
   fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  // A typed or scripted URL change: a new entry, undone by stepping back.
   window.location.hash = "#/p/p-2/settings";
-  await hashSettled();
+  await restored();
   expect(window.location.hash).toBe("#/p/p-1/settings");
-  await act(async () => f.write.resolve());
+  await act(async () => write.resolve());
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-2/settings"));
-  expect(f.setPreferences.mock.calls.map((c) => c[0])).toEqual(["p-1"]);
+  expect(setPreferences.mock.calls.map((c) => c[0])).toEqual(["p-1"]);
 });
 
 // V-2186 (attachment-6495): a read after another window turned it off is what
@@ -865,3 +882,121 @@ for (const background of [false, true])
       storedWait: policy.unassigned_ready_after_minutes,
     }).toEqual({ shown: 120, storedMax: 120, storedWait: 25 });
   });
+
+// C-455 review (V-2187): Back/Forward keep their history, a click is decided
+// when made, and a held panel switch keeps the failure visible.
+const settings = "#/p/p-1/settings",
+  help = "#/p/p-1/help",
+  cards = "#/p/p-1/cards";
+const drain = () =>
+  act(async () => {
+    await new Promise((r) => setTimeout(r, 40));
+  });
+async function startHeld() {
+  history.replaceState(null, "", cards);
+  history.pushState(null, "", help);
+  history.pushState(null, "", settings);
+  const write = Promise.withResolvers<void>(),
+    setPreferences = vi.fn(() => write.promise);
+  render(<App client={fakeClient({ setPreferences })} />);
+  fireEvent.click(await screen.findByRole("switch", { name: "超时自动合并" }));
+  expect(setPreferences).toHaveBeenCalledTimes(1);
+  return write;
+}
+
+test("a rejected save holding Back does not erase the page the user tried to go back to", async () => {
+  const write = await startHeld();
+  history.back();
+  await drain();
+  expect(location.hash).toBe(settings);
+  await act(async () => write.reject(new Error("设置未保存")));
+  await drain();
+  expect(screen.getByRole("alert").textContent).toContain("设置未保存");
+  history.back();
+  await drain();
+  expect(location.hash).toBe(help); // the page immediately before settings
+});
+
+test("a successful save resumes Back as a traversal, preserving the previous and forward destinations", async () => {
+  const write = await startHeld();
+  history.back();
+  await drain();
+  expect(location.hash).toBe(settings);
+  await act(async () => write.resolve());
+  await drain();
+  expect(location.hash).toBe(help);
+  history.back();
+  await drain();
+  expect(location.hash).toBe(cards);
+  history.forward();
+  await drain();
+  expect(location.hash).toBe(help);
+  history.forward();
+  await drain();
+  expect(location.hash).toBe(settings);
+});
+
+test("a failed write cancels a requested hash navigation even if it settles before hashchange", async () => {
+  const write = await startHeld();
+  // Click the real sidebar anchor while the write is pending; settle it before the hashchange handler.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+    write.reject(new Error("超时合并未保存"));
+  });
+  await drain();
+  expect({
+    route: location.hash,
+    visibleError: !!screen
+      .queryByRole("alert")
+      ?.textContent?.includes("超时合并未保存"),
+  }).toEqual({ route: settings, visibleError: true });
+});
+
+test("when leaving is cancelled, the write error is visible even if another settings tab was selected", async () => {
+  const write = await startHeld();
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+  await drain();
+  await act(async () => write.reject(new Error("超时合并未保存")));
+  await drain();
+  expect(location.hash).toBe(settings);
+  expect(
+    screen
+      .queryAllByRole("alert")
+      .map((x) => x.textContent)
+      .join(" "),
+  ).toContain("超时合并未保存");
+});
+
+test("control: a held link whose hashchange is already handled stays and reports failure", async () => {
+  const write = await startHeld();
+  fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+  await drain();
+  await act(async () => write.reject(new Error("超时合并未保存")));
+  await drain();
+  expect(location.hash).toBe(settings);
+  expect(screen.getByRole("alert").textContent).toContain("超时合并未保存");
+});
+
+test("Forward while saving is undone and redone as a traversal too", async () => {
+  history.replaceState(null, "", cards);
+  history.pushState(null, "", settings);
+  history.pushState(null, "", help);
+  history.pushState(null, "", "#/p/p-1/needs-you");
+  history.go(-2);
+  await waitFor(() => expect(location.hash).toBe(settings));
+  const write = Promise.withResolvers<void>();
+  render(
+    <App client={fakeClient({ setPreferences: vi.fn(() => write.promise) })} />,
+  );
+  fireEvent.click(await screen.findByRole("switch", { name: timeoutName }));
+  history.forward();
+  await restored();
+  expect(location.hash).toBe(settings);
+  await act(async () => write.resolve());
+  await waitFor(() => expect(location.hash).toBe(help));
+  history.forward();
+  await waitFor(() => expect(location.hash).toBe("#/p/p-1/needs-you"));
+  history.go(-2);
+  await waitFor(() => expect(location.hash).toBe(settings));
+});
