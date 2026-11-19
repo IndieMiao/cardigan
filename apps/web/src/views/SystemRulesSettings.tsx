@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type {
   CardiganClient,
   PreferencesView,
@@ -168,9 +168,10 @@ export function SystemRulesSettings({
 /**
  * The dialog stays open while saving, so a failure keeps its error and draft.
  * A failure stays visible until the next save: in the dialog while open, in
- * the shared feedback stack once closed. Saving replaces only the fields
- * edited since the dialog opened; the rest come from the latest confirmed
- * policy, so a newer value the draft did not show is not written back.
+ * the shared feedback stack once closed. The draft always starts from the
+ * latest confirmed policy: the dialog cannot open while the read shown is
+ * known to be old, and a newer read arriving while it is open replaces the
+ * draft, so an older snapshot is never written back.
  */
 function ReminderPolicyDialog({
   policy,
@@ -192,12 +193,24 @@ function ReminderPolicyDialog({
   const [configure, setConfigure] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
-  /** Fields edited since the dialog opened; only these replace the saved policy's. */
-  const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
-  const touch = (...keys: string[]) =>
-    setTouched((old) => new Set([...old, ...keys]));
+  /** The policy the draft was taken from. */
+  const [from, setFrom] = useState(policy);
+  const [updated, setUpdated] = useState("");
+  const build = (): SystemReminderPolicy | null =>
+    configure
+      ? ({
+          ...Object.fromEntries(
+            fields.map(([key]) => [
+              key,
+              values[key]?.trim() ? Number(values[key]) : null,
+            ]),
+          ),
+          repeat,
+        } as unknown as SystemReminderPolicy)
+      : null;
   const reset = () => {
-    setTouched(new Set());
+    setFrom(policy);
+    setUpdated("");
     setConfigure(!!policy);
     setRepeat(policy?.repeat === true);
     setValues(
@@ -206,18 +219,31 @@ function ReminderPolicyDialog({
       ),
     );
   };
+  // A newer read while open replaces the draft; it says so unless the draft
+  // already matched (e.g. a save whose reply was lost took effect).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new confirmed policy is the trigger.
+  useEffect(() => {
+    if (!open || saving || JSON.stringify(policy) === JSON.stringify(from))
+      return;
+    const changed = JSON.stringify(build()) !== JSON.stringify(policy);
+    reset();
+    if (changed) setUpdated("催办阈值已更新为最新值");
+  }, [policy, open, saving]);
   return (
     <>
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (busy) return;
+          // Opening needs the latest value; closing only waits for a save.
+          if (next ? busy : saving) return;
           if (next) reset();
           setOpen(next);
         }}
       >
         <DialogTrigger asChild>
-          <Button aria-label="编辑催办阈值">编辑</Button>
+          <Button aria-label="编辑催办阈值" aria-disabled={busy}>
+            编辑
+          </Button>
         </DialogTrigger>
         <DialogContent className={settingsDialogClassName}>
           <DialogTitle>催办阈值</DialogTitle>
@@ -228,29 +254,8 @@ function ReminderPolicyDialog({
             onSubmit={async (event) => {
               event.preventDefault();
               if (busy) return;
-              const draft = (key: string) =>
-                values[key]?.trim() ? Number(values[key]) : null;
-              // Untouched fields keep the latest confirmed policy, not the
-              // value shown when the dialog opened.
-              const next = !configure
-                ? null
-                : policy
-                  ? ({
-                      ...policy,
-                      ...Object.fromEntries(
-                        fields
-                          .filter(([key]) => touched.has(key))
-                          .map(([key]) => [key, draft(key)]),
-                      ),
-                      ...(touched.has("repeat") ? { repeat } : {}),
-                    } as SystemReminderPolicy)
-                  : ({
-                      ...Object.fromEntries(
-                        fields.map(([key]) => [key, draft(key)]),
-                      ),
-                      repeat,
-                    } as unknown as SystemReminderPolicy);
-              if (await save(next)) setOpen(false);
+              setUpdated("");
+              if (await save(build())) setOpen(false);
             }}
           >
             <SettingsDialogFields>
@@ -270,14 +275,11 @@ function ReminderPolicyDialog({
                     disabled={busy}
                     onCheckedChange={(next) => {
                       setRepeat(next);
-                      touch("repeat");
-                      if (!next) {
-                        touch("repeat_interval_minutes");
+                      if (!next)
                         setValues((v) => ({
                           ...v,
                           repeat_interval_minutes: "",
                         }));
-                      }
                     }}
                   />
                 </label>
@@ -294,10 +296,9 @@ function ReminderPolicyDialog({
                       disabled={
                         busy || (key === "repeat_interval_minutes" && !repeat)
                       }
-                      onChange={(e) => {
-                        touch(key);
-                        setValues((v) => ({ ...v, [key]: e.target.value }));
-                      }}
+                      onChange={(e) =>
+                        setValues((v) => ({ ...v, [key]: e.target.value }))
+                      }
                     />
                   </label>
                 ))}
@@ -305,9 +306,9 @@ function ReminderPolicyDialog({
             <SettingsDialogActions>
               <Button
                 type="button"
-                aria-disabled={busy}
+                aria-disabled={saving}
                 onClick={() => {
-                  if (!busy) setOpen(false);
+                  if (!saving) setOpen(false);
                 }}
               >
                 取消
@@ -321,6 +322,7 @@ function ReminderPolicyDialog({
               pending={saving}
               pendingMessage="正在保存催办阈值…"
               error={error}
+              message={updated}
             />
           </form>
         </DialogContent>

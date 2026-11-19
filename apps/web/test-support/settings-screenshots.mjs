@@ -271,6 +271,70 @@ try {
           resolve(output, `dialog-${width}-${theme}.png`),
           Buffer.from(dialog.data, "base64"),
         );
+        // C-455 (Q-932): a newer read while the threshold dialog is open
+        // replaces its draft and says so. The policy changes elsewhere; saving
+        // another setting behind the dialog reads the preferences again.
+        const reminders = `[...document.querySelectorAll("[role=switch]")].find((s) => document.getElementById(s.getAttribute("aria-labelledby"))?.textContent === "催办提醒").click()`;
+        await run(() =>
+          window.settingsFixtureUpdate({
+            system_reminder_policy: {
+              min_minutes: 5,
+              max_minutes: 240,
+              min_count: 1,
+              max_count: 4,
+              unassigned_ready_after_minutes: 30,
+              pre_merge_check_pending_after_minutes: 20,
+              repeat: false,
+              repeat_interval_minutes: null,
+              max_reminders: 1,
+            },
+          }),
+        );
+        await evaluate(reminders);
+        await until(
+          "[...document.querySelectorAll('[role=status]')].some((a) => a.textContent.includes('催办阈值已更新为最新值'))",
+        );
+        await settle();
+        const updated = await send("Page.captureScreenshot", {
+          format: "png",
+        });
+        report.scenes[`policy-updated-${width}-${theme}`] = await run(() => {
+          const notice = [...document.querySelectorAll("[role=status]")].find(
+            (a) => a.textContent.includes("催办阈值已更新为最新值"),
+          );
+          const r = notice.getBoundingClientRect();
+          return {
+            notice: { x: r.left, y: r.top, w: r.width, h: r.height },
+            draftMaxMinutes: [
+              ...document.querySelectorAll("[role=dialog] label"),
+            ]
+              .find((l) => l.textContent.startsWith("允许的最多分钟数"))
+              ?.querySelector("input")?.value,
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        await writeFile(
+          resolve(output, `policy-updated-${width}-${theme}.png`),
+          Buffer.from(updated.data, "base64"),
+        );
+        // Back to the earlier state: no policy, reminders off, configuring.
+        await run(() =>
+          window.settingsFixtureUpdate({ system_reminder_policy: null }),
+        );
+        await evaluate(reminders);
+        await until(
+          "document.querySelector('[role=dialog] [role=switch]')?.getAttribute('aria-checked') === 'false'",
+        );
+        await run(() =>
+          document
+            .querySelector("[role=dialog] [role=switch]")
+            .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+        );
+        await until("!!document.querySelector('[role=dialog] input')");
+        // Let the reminder switch notices expire so later scenes match.
+        await until(
+          "![...document.querySelectorAll('[role=status]')].some((a) => a.textContent.includes('催办提醒'))",
+        );
         // A failed threshold save stays in the feedback stack once closed.
         await run(() => {
           const input = [...document.querySelectorAll("[role=dialog] label")]

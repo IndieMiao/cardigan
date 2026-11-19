@@ -1783,10 +1783,156 @@ describe("a known-old read cannot seed an edit", () => {
     fireEvent.click(screen.getByRole("switch", { name: "催办提醒" }));
     await waitFor(() => expect(sent).toEqual([true, false]));
   });
-  test("saving the policy dialog replaces only edited fields; others keep the latest confirmed policy", async () => {
-    const policy = (max: number): SystemReminderPolicy => ({
+  for (const cleared of [false, true])
+    test(`a newer read while the policy dialog is open replaces its draft (${cleared ? "cleared" : "changed"})`, async () => {
+      const policy = (max: number): SystemReminderPolicy => ({
+        min_minutes: 1,
+        max_minutes: max,
+        min_count: 1,
+        max_count: 4,
+        unassigned_ready_after_minutes: 15,
+        pre_merge_check_pending_after_minutes: 20,
+        repeat: false,
+        repeat_interval_minutes: null,
+        max_reminders: 1,
+      });
+      const sent: (SystemReminderPolicy | null | undefined)[] = [];
+      const client = fakeClient({
+        setSystemRules: async (_p, patch) => {
+          sent.push(patch.system_reminder_policy);
+        },
+      });
+      const view = (value: SystemReminderPolicy | null) => {
+        const read = {
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          system_reminder_policy: value,
+        };
+        return (
+          <SystemRulesSettings
+            initial={read}
+            source={read}
+            client={client}
+            projectId="p-1"
+            saved={() => {}}
+          />
+        );
+      };
+      const { rerender } = render(view(policy(60)));
+      fireEvent.click(screen.getByRole("button", { name: "编辑催办阈值" }));
+      const d = within(await screen.findByRole("dialog", { name: "催办阈值" }));
+      fireEvent.change(d.getByLabelText("允许的最多分钟数"), {
+        target: { value: "90" },
+      });
+      // A newer read arrives while the dialog shows the older value.
+      rerender(view(cleared ? null : policy(120)));
+      await waitFor(() =>
+        expect(screen.getByText("催办阈值已更新为最新值")).toBeTruthy(),
+      );
+      const configure = d.getByRole("switch", {
+        name: "设置催办阈值和允许范围",
+      });
+      if (cleared) {
+        expect(configure.getAttribute("aria-checked")).toBe("false");
+        expect(d.queryByLabelText("允许的最多分钟数")).toBeNull();
+      } else {
+        expect(
+          (d.getByLabelText("允许的最多分钟数") as HTMLInputElement).value,
+        ).toBe("120");
+        fireEvent.change(d.getByLabelText(/就绪未指派：等待分钟数/), {
+          target: { value: "25" },
+        });
+      }
+      fireEvent.click(d.getByRole("button", { name: "保存催办阈值" }));
+      await waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toEqual(
+        cleared ? null : { ...policy(120), unassigned_ready_after_minutes: 25 },
+      );
+    });
+  // V-2203 (attachment-6592). Same tab, project, writer and API. The server's write succeeded but its reply
+  // was lost. The follow-up read delivers the stored null BEFORE the second save.
+  for (const [early, changeWait] of [
+    [false, false],
+    [true, false],
+    [true, true],
+  ])
+    test(`unmodified configuration switch must not reinstate a confirmed removed policy (open early=${early}, edit wait=${changeWait})`, async () => {
+      let stored: SystemReminderPolicy | null = {
+        min_minutes: 1,
+        max_minutes: 60,
+        min_count: 1,
+        max_count: 4,
+        unassigned_ready_after_minutes: 15,
+        pre_merge_check_pending_after_minutes: 20,
+        repeat: false,
+        repeat_interval_minutes: null,
+        max_reminders: 1,
+      };
+      const read = Promise.withResolvers<void>();
+      let readBack = false;
+      const writes: (SystemReminderPolicy | null)[] = [];
+      const client = fakeClient({
+        preferences: async () => {
+          const value = stored;
+          if (writes.length === 1) {
+            readBack = true;
+            await read.promise;
+          }
+          return {
+            merge_gate_enabled: true,
+            auto_merge_after_minutes: null,
+            system_reminder_policy: value,
+          };
+        },
+        setSystemRules: async (_p, patch) => {
+          stored = patch.system_reminder_policy ?? null;
+          writes.push(stored);
+          if (writes.length === 1) throw new Error("reply lost");
+        },
+      });
+      history.replaceState(null, "", "#/p/p-1/settings");
+      render(<SettingsPage projectId="p-1" client={client} />);
+      const entry = () => screen.findByRole("button", { name: "编辑催办阈值" });
+      const dialog = () =>
+        within(screen.getByRole("dialog", { name: "催办阈值" }));
+      const save = () =>
+        fireEvent.click(dialog().getByRole("button", { name: "保存催办阈值" }));
+      const policyRow = (await entry()).closest("[data-settings-row]");
+      if (!policyRow) throw new Error("expected the policy row");
+      const policyStatus = () => policyRow.querySelector("p")?.textContent;
+      expect(policyStatus()).toBe("已设置，每个等待周期提醒一次");
+      fireEvent.click(await entry());
+      fireEvent.click(
+        dialog().getByRole("switch", { name: "设置催办阈值和允许范围" }),
+      );
+      save();
+      await waitFor(() => expect(readBack).toBe(true));
+      expect(writes).toEqual([null]);
+      // Dismiss failed edit and return to Preferences from Authorization; not a retry.
+      fireEvent.click(dialog().getByRole("button", { name: "取消" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "授权", exact: true }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "偏好", exact: true }),
+      );
+      if (early) fireEvent.click(await entry());
+      await act(async () => read.resolve());
+      // Even behind a modal, the read has reached the page (not a version race).
+      await waitFor(() => expect(policyStatus()).toBe("未设置"));
+      if (!screen.queryByRole("dialog")) fireEvent.click(await entry());
+      const wait = dialog().queryByLabelText(/就绪未指派：等待分钟数/);
+      if (changeWait && wait)
+        fireEvent.change(wait, { target: { value: "25" } });
+      // No second edit ever touches '设置催办阈值和允许范围'. A fresh dialog is off.
+      save();
+      await act(async () => {});
+      expect(stored).toBeNull();
+    });
+  test("after a save whose reply was lost, the open dialog cannot save again until the read again arrives", async () => {
+    let stored: SystemReminderPolicy | null = {
       min_minutes: 1,
-      max_minutes: max,
+      max_minutes: 60,
       min_count: 1,
       max_count: 4,
       unassigned_ready_after_minutes: 15,
@@ -1794,45 +1940,53 @@ describe("a known-old read cannot seed an edit", () => {
       repeat: false,
       repeat_interval_minutes: null,
       max_reminders: 1,
-    });
-    const sent: (SystemReminderPolicy | null | undefined)[] = [];
+    };
+    const read = Promise.withResolvers<void>();
+    let readBack = false;
+    const writes: (SystemReminderPolicy | null)[] = [];
     const client = fakeClient({
+      preferences: async () => {
+        const value = stored;
+        if (writes.length === 1) {
+          readBack = true;
+          await read.promise;
+        }
+        return {
+          merge_gate_enabled: true,
+          auto_merge_after_minutes: null,
+          system_reminder_policy: value,
+        };
+      },
       setSystemRules: async (_p, patch) => {
-        sent.push(patch.system_reminder_policy);
+        stored = patch.system_reminder_policy ?? null;
+        writes.push(stored);
+        if (writes.length === 1) throw new Error("reply lost");
       },
     });
-    const view = (max: number) => {
-      const read = {
-        auto_merge_after_minutes: null,
-        merge_gate_enabled: true,
-        system_reminder_policy: policy(max),
-      };
-      return (
-        <SystemRulesSettings
-          initial={read}
-          source={read}
-          client={client}
-          projectId="p-1"
-          saved={() => {}}
-        />
-      );
-    };
-    const { rerender } = render(view(60));
-    fireEvent.click(screen.getByRole("button", { name: "编辑催办阈值" }));
-    const d = within(await screen.findByRole("dialog", { name: "催办阈值" }));
-    // A newer read arrives while the dialog shows the older value.
-    rerender(view(120));
+    render(<SettingsPage projectId="p-1" client={client} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑催办阈值" }),
+    );
+    const d = within(screen.getByRole("dialog", { name: "催办阈值" }));
+    fireEvent.change(d.getByLabelText("允许的最多分钟数"), {
+      target: { value: "120" },
+    });
+    const save = d.getByRole("button", { name: "保存催办阈值" });
+    fireEvent.click(save);
+    await waitFor(() => expect(readBack).toBe(true));
+    // The write took effect; until the read says so, the draft cannot be sent.
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(save);
+    await act(async () => {});
+    expect(writes.map((w) => w?.max_minutes)).toEqual([120]);
+    await act(async () => read.resolve());
+    await waitFor(() =>
+      expect(save.getAttribute("aria-disabled")).toBe("false"),
+    );
+    // The read confirms the value: the failure is retired, the draft kept.
+    expect(screen.queryByText(/未能保存“催办阈值”/)).toBeNull();
     expect(
       (d.getByLabelText("允许的最多分钟数") as HTMLInputElement).value,
-    ).toBe("60");
-    fireEvent.change(d.getByLabelText(/就绪未指派：等待分钟数/), {
-      target: { value: "25" },
-    });
-    fireEvent.click(d.getByRole("button", { name: "保存催办阈值" }));
-    await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toEqual({
-      ...policy(120),
-      unassigned_ready_after_minutes: 25,
-    });
+    ).toBe("120");
   });
 });

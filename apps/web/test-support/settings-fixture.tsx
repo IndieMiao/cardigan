@@ -29,6 +29,8 @@ let preferences: PreferencesView = {
 const update = (patch: Partial<PreferencesView>) => {
   preferences = { ...preferences, ...patch };
 };
+// Evidence scene: a change made elsewhere, seen by the next read.
+Object.assign(window, { settingsFixtureUpdate: update });
 const client = fakeClient({
   preferences: async () => preferences,
   setPreferences: async (_p, minutes) => {

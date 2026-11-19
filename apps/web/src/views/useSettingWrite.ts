@@ -214,7 +214,7 @@ export function useSettingWrite<T>({
 }) {
   const [value, setValue] = useState(server);
   const [read, setRead] = useState(source);
-  /** When this view's own write of the setting ended: it knows `value` since then. */
+  /** When this view's own acknowledged write ended: it knows `value` since then. */
   const [ownEnd, setOwnEnd] = useState<number | undefined>(undefined);
   if (read !== source) {
     setRead(source);
@@ -406,7 +406,9 @@ export function useSettingWrite<T>({
         });
     } finally {
       const end = ++clock;
-      if (alive.current) setOwnEnd(end);
+      // Only an acknowledged write tells this view the value: after a failure
+      // it may still have taken effect, so the view waits for the read again.
+      if (ok && alive.current) setOwnEnd(end);
       endSave(key, end);
     }
     return ok;
