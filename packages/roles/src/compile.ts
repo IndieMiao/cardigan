@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { LaunchConfigError } from "./errors.js";
 import { HARNESS_BINARY, type Harness } from "./harness.js";
+import { piInlineArgsConflict, piThinkingConfig } from "./pi-model.js";
 import { type LaunchConfig, resolveProfile } from "./schema.js";
 
 /** A file Cardigan must create before starting the CLI, and remove afterwards. */
@@ -37,6 +38,8 @@ export interface CompileLaunchInput {
    * compiled output (e.g. a dry run).
    */
   readonly instanceId?: string;
+  /** Assignment publication stages this registry under run_dir/pi. */
+  readonly piRegistryDir?: string;
   /** Arguments after `--`, passed through to the harness CLI. */
   readonly extraArgs?: readonly string[];
 }
@@ -137,9 +140,11 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
     // Codex keeps its own config; Cardigan only composes arguments:
     // `--profile`, `-c key=value` overrides, `-m`, then extra arguments.
     const args: string[] = [];
-    if (resolved.provider !== undefined) {
-      args.push("--profile", resolved.provider.name);
-    }
+    const provider = resolved.provider;
+    const external = provider?.definition.base_url
+      ? provider.definition.codex?.profile
+      : provider?.name;
+    if (external) args.push("--profile", external);
     if (resolved.profile.model !== undefined) {
       args.push("-m", resolved.profile.model);
     }
@@ -174,13 +179,60 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
       env.PI_CODING_AGENT_DIR = resolved.profile.agent_dir;
     }
 
+    const files: CompiledFile[] = [];
+    const route = resolved.provider?.definition;
+    if (
+      route?.base_url &&
+      resolved.profile.provider_flag &&
+      resolved.profile.model
+    ) {
+      if (piInlineArgsConflict(extraArgs))
+        throw new LaunchConfigError(
+          "invalid_config",
+          "Pi 内联模式不能用额外参数覆盖模型、接入点或推理强度",
+        );
+      const dir =
+        input.piRegistryDir ??
+        join(
+          input.runtimeDir,
+          `cardigan-${input.instanceId ?? "static"}.${resolved.name}.pi`,
+        );
+      const key = route.pi?.env_key ?? Object.keys(route.secret_env)[0];
+      const meta = resolved.profile.pi_model;
+      const registry = {
+        providers: {
+          [resolved.profile.provider_flag]: {
+            baseUrl: route.base_url,
+            api: route.api,
+            apiKey: key ? `$${key}` : "cardigan-no-auth",
+            models: [
+              {
+                id: resolved.profile.model,
+                contextWindow: meta?.context_window,
+                maxTokens: meta?.max_output_tokens,
+                ...piThinkingConfig(
+                  meta?.reasoning_efforts,
+                  resolved.profile.effort,
+                ),
+              },
+            ],
+          },
+        },
+      };
+      files.push({
+        path: join(dir, "models.json"),
+        content: `${JSON.stringify(registry)}\n`,
+        mode: 0o600,
+      });
+      env.PI_CODING_AGENT_DIR = dir;
+    }
     return {
       harness: "pi",
       profile: resolved.name,
       command: HARNESS_BINARY.pi,
       args,
       env,
-      files: [],
+      files,
       secretEnvKeys: Object.keys(secretEnv),
     };
   }

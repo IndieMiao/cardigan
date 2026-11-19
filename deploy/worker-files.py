@@ -20,7 +20,7 @@ native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 TRAILER = b'\nCARDIGAN-PUBLISH-1\n'
-FILES = re.compile(r'(core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
+FILES = re.compile(r'(core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
 
 
 def require(ok):
@@ -414,7 +414,7 @@ def run_worker(namespace, header, policy):
                 else:
                     source = child(generation, name)
                     try:
-                        for filename in (['config.toml'] if harness == 'codex' else ['mcp.json', 'trust.json']):
+                        for filename in (['config.toml'] if harness == 'codex' else ['mcp.json', 'trust.json', 'models.json']):
                             if exists(source, filename):
                                 write_file(home, filename, read_file(source, filename, policy['file_max_bytes']))
                         if harness == 'pi':

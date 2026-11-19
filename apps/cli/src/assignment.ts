@@ -69,7 +69,7 @@ import {
   systemClock,
 } from "./host.js";
 import type { CliIo, SpawnedChild } from "./io.js";
-import { resolveLaunchPaths } from "./paths.js";
+import { cliLaunchPaths } from "./paths.js";
 import { launchExecution, terminalExecution } from "./runtime-check.js";
 import { forwardSignals } from "./signals.js";
 
@@ -402,7 +402,7 @@ async function startUnlocked(
         launch: options.launch,
         mcpUrl: options.mcpUrl,
         dataDir: options.dataDir,
-        configDir: resolveLaunchPaths(io.env).configDir,
+        configDir: cliLaunchPaths(io).configDir,
         execution,
         report: (message) => io.stderr(message),
       },
@@ -1048,8 +1048,8 @@ export async function startAssignmentCommand(
 ): Promise<number> {
   const { store, io, project_id, assignment_id, runtime } = options;
   rejectExternalTerminalAction(store, project_id, assignment_id);
-  const paths = resolveLaunchPaths(io.env);
-  const dataDir = resolveDataDir(io, options.dataDir);
+  const paths = cliLaunchPaths(io, options.dataDir);
+  const dataDir = paths.dataDir;
   const execution =
     runtime instanceof RuntimeTargets
       ? (

@@ -13,6 +13,7 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
+  loadModelLaunchConfig,
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
@@ -24,7 +25,6 @@ import {
 } from "@cardigan/host";
 import {
   type LaunchConfig,
-  parseLaunchConfig,
   parseSecretsText,
   profileLaunchSettings,
   reportLaunchWarnings,
@@ -33,6 +33,7 @@ import {
 import {
   type ExecutionConfig,
   type HcClient,
+  resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, type Store } from "@cardigan/store";
@@ -82,6 +83,7 @@ export const configDir = (env: HostEnv): string =>
 export async function loadLaunchFiles(
   dir: string,
   report: (message: string) => void = console.warn,
+  dataDir = resolveDataDirectory(),
 ): Promise<{
   config: LaunchConfig;
   secrets: Readonly<Record<string, string>>;
@@ -96,7 +98,7 @@ export async function loadLaunchFiles(
       `找不到启动配置：${launchFile}（先运行 cardigan launch import-claude-settings 或手写）`,
     );
   }
-  const config = parseLaunchConfig(parseYaml(text) ?? {});
+  const config = await loadModelLaunchConfig(parseYaml(text) ?? {}, dataDir);
   reportLaunchWarnings(config, report);
   let secrets: Readonly<Record<string, string>> = {};
   try {
@@ -167,7 +169,11 @@ export async function createHostWiring(options: {
       `运行时不可用：${created.error.code} ${created.error.message}`,
     );
   const runtime = created.value;
-  const launch = await loadLaunchFiles(configDir(env));
+  const launch = await loadLaunchFiles(
+    configDir(env),
+    undefined,
+    options.dataDir,
+  );
   const mcpUrl = hostMcpUrl(options.url, env);
   const versions = new Map<string, string>();
 

@@ -981,9 +981,17 @@ test.each([
     };
     const config = parseLaunchConfig({
       ...launchConfig,
+      providers: { ...launchConfig.providers, gateway: { harness: "codex" } },
+      models: {
+        active: {
+          id: "employee-model",
+          provider: "gateway",
+          context_window: 8000,
+        },
+      },
       profiles: {
         ...launchConfig.profiles,
-        "employee-codex": { harness: "codex", model: "employee-model" },
+        "employee-codex": { harness: "codex", model: "active" },
       },
     });
     const start = () =>

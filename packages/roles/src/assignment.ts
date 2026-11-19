@@ -10,7 +10,7 @@ import {
   compileLaunch,
 } from "./compile.js";
 import type { Harness } from "./harness.js";
-import { piContextUsageExtension } from "./pi-context-usage.js";
+import { makePiContextUsageExtension } from "./pi-context-usage.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
   BrowserLaunchDefinition,
@@ -229,6 +229,16 @@ export function compileAssignmentLaunch(
     secrets: input.secrets,
     runtimeDir: input.run_dir,
     instanceId: "assignment",
+    // Remote publication already creates an exclusive home per generation.
+    // A local run_dir is reused across runs: never put a generated model
+    // registry in the native Pi home (which can hold user-maintained config).
+    piRegistryDir: input.worker_launch
+      ? join(input.run_dir, "pi")
+      : join(
+          input.run_dir,
+          "pi",
+          `launch-${encodeURIComponent(input.assignment.run_id)}`,
+        ),
   });
 
   if (
@@ -366,12 +376,31 @@ export function compileAssignmentLaunch(
       harnessEnv.CODEX_HOME = join(sessionDir, "codex");
       break;
 
-    case "pi":
+    case "pi": {
+      const nativeHome = join(sessionDir, "pi");
+      const localInlineHome =
+        !input.worker_launch && base.files.length > 0
+          ? base.env.PI_CODING_AGENT_DIR
+          : undefined;
+      const materialDir = localInlineHome ?? join(input.run_dir, "pi");
+      if (
+        localInlineHome &&
+        base.env.PI_CODING_AGENT_SESSION_DIR === undefined
+      ) {
+        // Pi's default transcript location, independent of the disposable registry.
+        const cwd = input.work_dir_real ?? input.work_dir;
+        const key = `--${cwd.replace(/^[/\\]/u, "").replace(/[/\\:]/gu, "-")}--`;
+        harnessEnv.PI_CODING_AGENT_SESSION_DIR = join(
+          nativeHome,
+          "sessions",
+          key,
+        );
+      }
       // Keep mcp.json in the isolated PI_CODING_AGENT_DIR: putting it under
       // the worktree's .pi/ triggers project trust prompts that block unattended
       // terminals. Pi takes the prompt as a path (verified in 0.4 §3).
       harnessFiles.push({
-        path: join(input.run_dir, "pi", "mcp.json"),
+        path: join(materialDir, "mcp.json"),
         content: `${JSON.stringify(
           {
             mcpServers: {
@@ -399,13 +428,10 @@ export function compileAssignmentLaunch(
         mode: 0o600,
       });
       harnessFiles.push({
-        path: join(
-          input.run_dir,
-          "pi",
-          "extensions",
-          "cardigan-context-usage.js",
+        path: join(materialDir, "extensions", "cardigan-context-usage.js"),
+        content: makePiContextUsageExtension(
+          localInlineHome ? nativeHome : undefined,
         ),
-        content: piContextUsageExtension,
         mode: 0o600,
       });
       // C-211: pre-trust exactly the folder pi starts in, the worktree the
@@ -424,13 +450,14 @@ export function compileAssignmentLaunch(
         resolve(input.work_dir) !== resolve(input.run_dir)
       )
         harnessFiles.push({
-          path: join(input.run_dir, "pi", "trust.json"),
+          path: join(materialDir, "trust.json"),
           content: `${JSON.stringify({ [input.work_dir_real]: true }, null, 2)}\n`,
           mode: 0o600,
         });
-      harnessEnv.PI_CODING_AGENT_DIR = join(sessionDir, "pi");
+      harnessEnv.PI_CODING_AGENT_DIR = localInlineHome ?? nativeHome;
       harnessArgs.push("--append-system-prompt", coreFile);
       break;
+    }
   }
 
   // Claude's --allowedTools is variadic. Terminate options so it cannot consume
