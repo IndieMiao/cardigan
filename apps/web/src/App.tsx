@@ -40,6 +40,7 @@ import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { CardListPage } from "./views/CardListPage.js";
 import { LoginPage } from "./views/LoginPage.js";
+import { SettingsSaveNotice } from "./views/useSettingWrite.js";
 
 /**
  * Application shell (M5 plan §4 M5.3).
@@ -276,6 +277,7 @@ function Workbench({
         pending={loggingOut}
         pendingMessage="登出中…"
       />
+      <SettingsSaveNotice />
     </>
   );
   const navProps = {

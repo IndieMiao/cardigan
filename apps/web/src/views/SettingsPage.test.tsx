@@ -720,7 +720,7 @@ test.each([
   ["授权", "setDelegation", "流程 由 PM 代拍"],
   ["授权", "setPmMergeConfirmation", "合并由 PM 代确认 由 PM 代确认"],
 ] as const)(
-  "%s keeps its panel while %s saves, shows a late error there and hides it outside its tab",
+  "%s hides pending and late %s errors outside its tab without losing the form",
   async (tab, method, control) => {
     const request = Promise.withResolvers<void>();
     const save = vi.fn(() => request.promise);
@@ -746,16 +746,11 @@ test.each([
     else fireEvent.click(screen.getByRole("switch", { name: control }));
     expect(save).toHaveBeenCalledOnce();
     expect(screen.getByText(/保存.*中…/)).toBeTruthy();
-    // Another panel waits for the save (C-455): the failure shows where it was made.
     fireEvent.click(
       screen.getByRole("button", { name: "卡片模板", exact: true }),
     );
-    expect(screen.getByText(/保存.*中…/)).toBeTruthy();
+    expect(screen.queryByText(/保存.*中…/)).toBeNull();
     await act(async () => request.reject(new Error("设置保存失败")));
-    expect(screen.getByRole("alert").textContent).toContain("设置保存失败");
-    fireEvent.click(
-      screen.getByRole("button", { name: "卡片模板", exact: true }),
-    );
     expect(screen.queryByRole("alert")).toBeNull();
     expect(
       document.querySelector(".request-feedback-region")?.textContent,

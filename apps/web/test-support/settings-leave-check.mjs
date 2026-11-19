@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { chromium } from "./chromium.mjs";
 
-// C-455 evidence: leaving settings while a save is in flight (real Chromium,
+// C-455 evidence (C-455#326): leaving settings while a save is in flight (real Chromium,
 // settings fixture only; 1439 saves slowly, 1438 fails slowly).
 // Usage: node test-support/settings-leave-check.mjs
 const root = fileURLToPath(new URL("../", import.meta.url));

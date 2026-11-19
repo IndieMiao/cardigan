@@ -22,7 +22,7 @@ import {
 } from "../components/ui/dialog.js";
 import { Input } from "../components/ui/input.js";
 import { Switch } from "../components/ui/switch.js";
-import { useSettingWrite } from "./useSettingWrite.js";
+import { toggleFailure, useSettingWrite } from "./useSettingWrite.js";
 
 const fields = [
   ["min_minutes", "允许的最少分钟数"],
@@ -58,31 +58,39 @@ export function SystemRulesSettings({
   source,
 }: Props) {
   const id = useId();
-  const rule = <T,>(
-    server: T,
+  const rule = (
+    name: string,
+    server: boolean,
     field: "system_auto_assign_verifiers" | "system_reminders",
-    success: (value: T) => string,
+    success: (value: boolean) => string,
   ) => ({
+    name,
+    failure: toggleFailure(name),
     server,
     source,
-    write: (value: T, key: string) =>
+    write: (value: boolean, key: string) =>
       client.setSystemRules(projectId, { [field]: value }, key),
     saved,
     success,
   });
   const assign = useSettingWrite(
     rule(
+      "自动指派验证项",
       initial.system_auto_assign_verifiers === true,
       "system_auto_assign_verifiers",
       (next) => (next ? "已开启自动指派验证项" : "已关闭自动指派验证项"),
     ),
   );
   const remind = useSettingWrite(
-    rule(initial.system_reminders === true, "system_reminders", (next) =>
-      next ? "已开启催办提醒" : "已关闭催办提醒",
+    rule(
+      "催办提醒",
+      initial.system_reminders === true,
+      "system_reminders",
+      (next) => (next ? "已开启催办提醒" : "已关闭催办提醒"),
     ),
   );
   const policy = useSettingWrite<SystemReminderPolicy | null>({
+    name: "催办阈值",
     server: initial.system_reminder_policy ?? null,
     source,
     write: (value, key) =>

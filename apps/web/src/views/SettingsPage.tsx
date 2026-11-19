@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { CardiganClient, PreferencesView } from "../api.js";
 import { PageTitle, StatusTag } from "../components/Foundation.js";
 import {
@@ -17,14 +24,19 @@ import { Button } from "../components/ui/button.js";
 import { Switch } from "../components/ui/switch.js";
 import { categoryLabels, defaultDelegation } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
-import { deferWhileHeld, useRouteFilters } from "../route.js";
+import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
-import { useNumberDraft, useSettingWrite } from "./useSettingWrite.js";
+import {
+  SettingPlaceContext,
+  toggleFailure,
+  useNumberDraft,
+  useSettingWrite,
+} from "./useSettingWrite.js";
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -67,11 +79,23 @@ export function SettingsPage({
   // The review round ceiling comes only from the server (domain, Q-420).
   const roundsCeiling = data?.review_max_rounds_ceiling;
   const common = { client, projectId, saved: resource.reload, source: data };
-  // Another panel waits for a save in progress, like leaving the page does,
-  // so its result shows in the panel that made it.
-  const show = (go: () => void) => {
-    if (deferWhileHeld(go)) go();
-  };
+  // Where each panel's settings live, so a failure seen elsewhere can lead back.
+  const preferencesPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "preferences" as const,
+      reveal: () => setTab("preferences"),
+    }),
+    [projectId],
+  );
+  const authorizationPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "authorization" as const,
+      reveal: () => setTab("authorization"),
+    }),
+    [projectId],
+  );
   return (
     <SettingsLayout
       header={<PageTitle title="设置" />}
@@ -79,49 +103,45 @@ export function SettingsPage({
         <>
           <SettingsNavItem
             current={tab === "preferences"}
-            onClick={() => show(() => setTab("preferences"))}
+            onClick={() => setTab("preferences")}
           >
             偏好
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "capacity"}
-            onClick={() => show(() => setTab("capacity"))}
+            onClick={() => setTab("capacity")}
           >
             并发与容量
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "authorization"}
-            onClick={() => show(() => setTab("authorization"))}
+            onClick={() => setTab("authorization")}
           >
             授权
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "roles"}
-            onClick={() =>
-              show(() => {
-                setTab("roles");
-                requestAnimationFrame(() =>
-                  document.getElementById("roles")?.focus(),
-                );
-              })
-            }
+            onClick={() => {
+              setTab("roles");
+              requestAnimationFrame(() =>
+                document.getElementById("roles")?.focus(),
+              );
+            }}
           >
             角色
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "templates"}
-            onClick={() => show(() => setTab("templates"))}
+            onClick={() => setTab("templates")}
           >
             卡片模板
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "employees"}
-            onClick={() =>
-              show(() => {
-                setEmployeeRole("");
-                setTab("employees");
-              })
-            }
+            onClick={() => {
+              setEmployeeRole("");
+              setTab("employees");
+            }}
           >
             {employeeCopy.tab}
           </SettingsNavItem>
@@ -171,119 +191,148 @@ export function SettingsPage({
         />
       )}
       <RequestFeedbackScope hidden={tab !== "preferences"}>
-        <SettingsPanel
-          hidden={tab !== "preferences"}
-          id="preferences"
-          tabIndex={-1}
-          title="偏好"
-          titleId="preferences-title"
-        >
-          {data && (
-            <SystemRulesSettings
-              key={`system-rules:${projectId}`}
-              initial={data}
-              {...common}
-            />
-          )}
-          {data && (
-            <SettingsGroup title="合并确认">
-              {(["stall", "snooze", "snooze-max"] as const).map((kind) => (
-                <MergeMinutesSetting
-                  key={`${kind}:${projectId}`}
-                  kind={kind}
-                  initial={
-                    kind === "stall"
-                      ? (data.merge_confirm_stall_after_minutes ?? 60)
-                      : kind === "snooze"
-                        ? (data.merge_confirm_snooze_default_minutes ?? 240)
-                        : (data.merge_confirm_snooze_max_minutes ?? 4320)
-                  }
+        <SettingPlaceContext.Provider value={preferencesPlace}>
+          <SettingsPanel
+            hidden={tab !== "preferences"}
+            id="preferences"
+            tabIndex={-1}
+            title="偏好"
+            titleId="preferences-title"
+          >
+            {data && (
+              <SystemRulesSettings
+                key={`system-rules:${projectId}`}
+                initial={data}
+                {...common}
+              />
+            )}
+            {data && (
+              <SettingsGroup title="合并确认">
+                {(["stall", "snooze", "snooze-max"] as const).map((kind) => (
+                  <MergeMinutesSetting
+                    key={`${kind}:${projectId}`}
+                    kind={kind}
+                    initial={
+                      kind === "stall"
+                        ? (data.merge_confirm_stall_after_minutes ?? 60)
+                        : kind === "snooze"
+                          ? (data.merge_confirm_snooze_default_minutes ?? 240)
+                          : (data.merge_confirm_snooze_max_minutes ?? 4320)
+                    }
+                    {...common}
+                  />
+                ))}
+              </SettingsGroup>
+            )}
+            {roundsCeiling !== undefined && (
+              <SettingsGroup title="审核轮数">
+                {(["review", "independent"] as const).map((kind) => (
+                  <ReviewRoundsSetting
+                    kind={kind}
+                    key={`${kind}-rounds:${projectId}`}
+                    initial={
+                      kind === "review"
+                        ? (data?.review_max_rounds ?? 5)
+                        : (data?.independent_review_max_rounds ?? 3)
+                    }
+                    ceiling={roundsCeiling}
+                    {...common}
+                  />
+                ))}
+              </SettingsGroup>
+            )}
+            {data && (
+              <SettingsGroup
+                title="需谨慎"
+                tone="caution"
+                description="只有你能修改；跨卡只读会扩大卡片读取范围，自动合并会让系统在无人确认时合并代码。"
+              >
+                <CrossCardReadSetting
+                  key={`cross-card-read:${projectId}`}
+                  enabled={data.cross_card_read !== false}
                   {...common}
                 />
-              ))}
-            </SettingsGroup>
-          )}
-          {roundsCeiling !== undefined && (
-            <SettingsGroup title="审核轮数">
-              {(["review", "independent"] as const).map((kind) => (
-                <ReviewRoundsSetting
-                  kind={kind}
-                  key={`${kind}-rounds:${projectId}`}
-                  initial={
-                    kind === "review"
-                      ? (data?.review_max_rounds ?? 5)
-                      : (data?.independent_review_max_rounds ?? 3)
+                <AutoMergeSetting
+                  key={`auto-merge:${projectId}`}
+                  enabled={
+                    data.auto_merge === "on" ||
+                    (data.auto_merge === undefined &&
+                      (data.flow_version ?? 1) >= 4)
                   }
-                  ceiling={roundsCeiling}
+                  inherited={data.auto_merge === undefined}
                   {...common}
                 />
-              ))}
-            </SettingsGroup>
-          )}
-          {data && (
-            <SettingsGroup
-              title="需谨慎"
-              tone="caution"
-              description="只有你能修改；跨卡只读会扩大卡片读取范围，自动合并会让系统在无人确认时合并代码。"
-            >
-              <CrossCardReadSetting
-                key={`cross-card-read:${projectId}`}
-                enabled={data.cross_card_read !== false}
-                {...common}
-              />
-              <AutoMergeSetting
-                key={`auto-merge:${projectId}`}
-                enabled={
-                  data.auto_merge === "on" ||
-                  (data.auto_merge === undefined &&
-                    (data.flow_version ?? 1) >= 4)
-                }
-                inherited={data.auto_merge === undefined}
-                {...common}
-              />
-              <AutoMergeSetting
-                pause
-                key={`auto-pause:${projectId}`}
-                enabled={data.auto_merge_paused === true}
-                {...common}
-              />
-              <TimeoutMergeSetting
-                key={`timeout:${projectId}`}
-                minutes={data.auto_merge_after_minutes}
-                gate={data.merge_gate_enabled}
-                {...common}
-              />
-            </SettingsGroup>
-          )}
-        </SettingsPanel>
+                <AutoMergeSetting
+                  pause
+                  key={`auto-pause:${projectId}`}
+                  enabled={data.auto_merge_paused === true}
+                  {...common}
+                />
+                <TimeoutMergeSetting
+                  key={`timeout:${projectId}`}
+                  minutes={data.auto_merge_after_minutes}
+                  gate={data.merge_gate_enabled}
+                  {...common}
+                />
+              </SettingsGroup>
+            )}
+          </SettingsPanel>
+        </SettingPlaceContext.Provider>
       </RequestFeedbackScope>
       <RequestFeedbackScope hidden={tab !== "authorization"}>
-        <SettingsPanel
-          hidden={tab !== "authorization"}
-          id="authorization"
-          tabIndex={-1}
-          title="授权"
-          titleId="authorization-title"
-          help={
-            <>
-              PM 代拍时必须写明理由并保留授权依据；没有活跃 PM Ops
-              时交给你，代拍和代确认的合并都会在 Needs You 的知会区同步给你。
-              Flow Lite 已停用“人已拍板的改动由 PM 核对后确认合并”、
-              “已拍角色正文由 PM 代确认”和“独立复核加轮授权”旧开关，
-              原先保存的值不再控制新流程；审核用尽自动加轮，连续第 4 次驳回交
-              PM。收回默认交人事项的授权，请关闭相应类别开关；
-              停止系统自动合并，请在偏好中关闭“自动合并”或开启“暂停自动合并”。
-            </>
-          }
-        >
-          {data && (
-            <SettingsGroup
-              title="常驻授权"
-              description="这些类别默认由 PM 代拍；授权不增加执行能力。"
-            >
-              {Object.keys(categoryLabels)
-                .filter((category) => defaultDelegation[category])
-                .map((category) => (
+        <SettingPlaceContext.Provider value={authorizationPlace}>
+          <SettingsPanel
+            hidden={tab !== "authorization"}
+            id="authorization"
+            tabIndex={-1}
+            title="授权"
+            titleId="authorization-title"
+            help={
+              <>
+                PM 代拍时必须写明理由并保留授权依据；没有活跃 PM Ops
+                时交给你，代拍和代确认的合并都会在 Needs You 的知会区同步给你。
+                Flow Lite 已停用“人已拍板的改动由 PM 核对后确认合并”、
+                “已拍角色正文由 PM 代确认”和“独立复核加轮授权”旧开关，
+                原先保存的值不再控制新流程；审核用尽自动加轮，连续第 4 次驳回交
+                PM。收回默认交人事项的授权，请关闭相应类别开关；
+                停止系统自动合并，请在偏好中关闭“自动合并”或开启“暂停自动合并”。
+              </>
+            }
+          >
+            {data && (
+              <SettingsGroup
+                title="常驻授权"
+                description="这些类别默认由 PM 代拍；授权不增加执行能力。"
+              >
+                {Object.keys(categoryLabels)
+                  .filter((category) => defaultDelegation[category])
+                  .map((category) => (
+                    <DelegationSetting
+                      key={`${category}:${projectId}`}
+                      category={category}
+                      label={categoryLabel(category)}
+                      enabled={
+                        data.decision_delegation?.[category] ??
+                        defaultDelegation[category] ??
+                        false
+                      }
+                      {...common}
+                    />
+                  ))}
+              </SettingsGroup>
+            )}
+            {data && (
+              <SettingsGroup
+                title="需谨慎"
+                tone="caution"
+                description="默认交你处理，只有你能逐类开启；授权覆盖 PM 拍板与合并确认。"
+              >
+                <PmMergeSetting
+                  key={`pm-merge:${projectId}`}
+                  enabled={data.pm_merge_confirmation !== false}
+                  {...common}
+                />
+                {humanCategories.map((category) => (
                   <DelegationSetting
                     key={`${category}:${projectId}`}
                     category={category}
@@ -296,35 +345,10 @@ export function SettingsPage({
                     {...common}
                   />
                 ))}
-            </SettingsGroup>
-          )}
-          {data && (
-            <SettingsGroup
-              title="需谨慎"
-              tone="caution"
-              description="默认交你处理，只有你能逐类开启；授权覆盖 PM 拍板与合并确认。"
-            >
-              <PmMergeSetting
-                key={`pm-merge:${projectId}`}
-                enabled={data.pm_merge_confirmation !== false}
-                {...common}
-              />
-              {humanCategories.map((category) => (
-                <DelegationSetting
-                  key={`${category}:${projectId}`}
-                  category={category}
-                  label={categoryLabel(category)}
-                  enabled={
-                    data.decision_delegation?.[category] ??
-                    defaultDelegation[category] ??
-                    false
-                  }
-                  {...common}
-                />
-              ))}
-            </SettingsGroup>
-          )}
-        </SettingsPanel>
+              </SettingsGroup>
+            )}
+          </SettingsPanel>
+        </SettingPlaceContext.Provider>
       </RequestFeedbackScope>
     </SettingsLayout>
   );
@@ -340,6 +364,7 @@ interface SettingProps {
 
 /** Integer setting saved on blur or Enter. */
 function useNumberSetting({
+  name,
   initial,
   min,
   max,
@@ -347,6 +372,7 @@ function useNumberSetting({
   saved,
   source,
 }: {
+  name: string;
   initial: number;
   min: number;
   max: number;
@@ -355,6 +381,7 @@ function useNumberSetting({
   source: unknown;
 }) {
   const setting = useSettingWrite({
+    name,
     server: initial,
     source,
     write,
@@ -387,6 +414,9 @@ function TimeoutMergeSetting({
 }) {
   const id = useId();
   const setting = useSettingWrite<number | null>({
+    name: "超时自动合并",
+    failure: (value) =>
+      value === null ? "未能关闭“超时自动合并”" : "未能保存“超时自动合并”",
     server: serverMinutes ?? null,
     source,
     write: (value, key) => client.setPreferences(projectId, value, key),
@@ -521,6 +551,7 @@ function ReviewRoundsSetting({
   const independent = kind === "independent";
   const label = independent ? "独立复核轮数上限" : "普通审核轮数上限";
   const setting = useNumberSetting({
+    name: label,
     initial,
     min: 1,
     max: ceiling,
@@ -592,6 +623,7 @@ function MergeMinutesSetting({
   const min = snoozeMax ? 60 : 1;
   const max = snoozeMax ? 10080 : 1440;
   const setting = useNumberSetting({
+    name: label,
     initial,
     min,
     max,
@@ -661,6 +693,8 @@ function PmMergeSetting({
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
+    name: "合并由 PM 代确认",
+    failure: toggleFailure("合并由 PM 代确认"),
     server: enabled,
     source,
     write: (next, key) => client.setPmMergeConfirmation(projectId, next, key),
@@ -712,6 +746,9 @@ function DelegationSetting({
 }: SettingProps & { category: string; label: string; enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
+    name: label,
+    failure: (next) =>
+      next ? `未能开启“${label}”授权` : `未能撤销“${label}”授权`,
     server: enabled,
     source,
     write: (next, key) => client.setDelegation(projectId, category, next, key),
@@ -765,6 +802,8 @@ function AutoMergeSetting({
   const id = useId();
   const title = pause ? "暂停自动合并" : "自动合并";
   const setting = useSettingWrite({
+    name: title,
+    failure: toggleFailure(title),
     server: enabled,
     source,
     // An inherited default is not a stored value and cannot confirm a write.
@@ -839,6 +878,8 @@ function CrossCardReadSetting({
 }: SettingProps & { enabled: boolean }) {
   const id = useId();
   const setting = useSettingWrite({
+    name: "跨卡只读",
+    failure: toggleFailure("跨卡只读"),
     server: enabled,
     source,
     write: (next, key) => client.setCrossCardRead(projectId, next, key),

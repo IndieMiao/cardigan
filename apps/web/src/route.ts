@@ -147,190 +147,6 @@ const isUnparseable = (hash: string): boolean =>
   hash.length > 0 && hash !== "#" && parseRoute(hash) === undefined;
 
 /**
- * Navigation hold (C-455): while a page finishes work (a setting that is still
- * saving) the reader stays on it. The latest attempt to leave is remembered
- * and carried out by `release(true)`; `release(false)` drops it and stays.
- *
- * - Hash links are intercepted on click, so the decision is made when the
- *   reader clicks, whatever the work does before `hashchange` runs.
- * - `navigate()` and work deferred with `deferWhileHeld` are remembered.
- * - Back/forward cannot be cancelled: the step is undone by traversing back
- *   to the held entry (marked in `history.state`), so no history entry is
- *   rewritten, and redone the same way after success.
- */
-const HOLD_MARK = "cardiganHold";
-/** Position of each entry this app created, so a jump's size is known. */
-const ENTRY = "cardiganEntry";
-type State = Record<string, unknown> | null;
-const stamp = (key: string, value: unknown) =>
-  history.replaceState(
-    { ...((history.state as State) ?? {}), [key]: value },
-    "",
-  );
-const entryOf = (state: unknown) => {
-  const at = (state as State)?.[ENTRY];
-  return typeof at === "number" ? at : undefined;
-};
-let entry = 0;
-
-type Restore = {
-  /** Offset from the entry the reader went to; the held entry is found at `pos`. */
-  pos: number;
-  order: number[];
-  /** Offsets known to lie past either end of history. */
-  up: number;
-  down: number;
-  target?: number | undefined;
-  timer?: ReturnType<typeof setTimeout> | undefined;
-  redo: { delta: number };
-};
-let hold:
-  | {
-      home: string;
-      mark: string;
-      entry: number;
-      leave?: (() => void) | undefined;
-      restoring?: Restore | undefined;
-      /** Set when released during a restore; applied once it ends. */
-      released?: boolean | undefined;
-    }
-  | undefined;
-
-const atHome = () =>
-  hold !== undefined && (history.state as State)?.[HOLD_MARK] === hold.mark;
-
-function finish(proceed: boolean) {
-  const leave = hold?.leave;
-  hold = undefined;
-  if (proceed) leave?.();
-}
-
-/** Steps to the next candidate offset until the held entry is reached. */
-function seek() {
-  const restoring = hold?.restoring;
-  if (!restoring) return;
-  const next = restoring.order.find(
-    (t) => t !== restoring.pos && t <= restoring.up && t >= restoring.down,
-  );
-  restoring.order = restoring.order.filter((t) => t !== next);
-  if (next === undefined) return lost();
-  restoring.target = next;
-  // A step past either end of history fires no event.
-  restoring.timer = setTimeout(() => {
-    if (hold?.restoring !== restoring) return;
-    if (next > restoring.pos) restoring.up = next - 1;
-    else restoring.down = next + 1;
-    seek();
-  }, 150);
-  history.go(next - restoring.pos);
-}
-
-/**
- * The held entry is no longer in this tab's history (not expected in use):
- * stay on the page without touching history and drop the way out.
- */
-function lost() {
-  if (!hold) return;
-  hold.restoring = undefined;
-  hold.leave = undefined;
-  if (hold.released !== undefined) finish(false);
-}
-
-function onHashChange() {
-  const known = entryOf(history.state);
-  if (!hold) {
-    // A new entry has no position yet: it follows the one it was pushed from.
-    if (known === undefined) {
-      entry += 1;
-      stamp(ENTRY, entry);
-    } else entry = known;
-    return;
-  }
-  const restoring = hold.restoring;
-  if (restoring) {
-    clearTimeout(restoring.timer);
-    if (restoring.target !== undefined) restoring.pos = restoring.target;
-  }
-  if (atHome()) {
-    if (!restoring) return;
-    hold.restoring = undefined;
-    // From the held entry, the reader's choice lies the opposite way.
-    restoring.redo.delta = -restoring.pos;
-    if (hold.released !== undefined) finish(hold.released);
-    return;
-  }
-  if (restoring) return seek();
-  // The reader went back or forward while held: return, then redo the same
-  // step once saved. Recorded now, so a later choice replaces it.
-  const redo = { delta: 0 };
-  hold.leave = () => {
-    if (redo.delta) history.go(redo.delta);
-  };
-  const exact = known === undefined ? undefined : hold.entry - known;
-  const order: number[] = exact === undefined ? [] : [exact];
-  for (let n = 1; n <= 100; n += 1) order.push(n, -n);
-  hold.restoring = { pos: 0, order, up: Infinity, down: -Infinity, redo };
-  seek();
-}
-
-function onClick(event: MouseEvent) {
-  if (!hold || event.defaultPrevented || event.button !== 0) return;
-  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-  const link = (event.target as Element | null)?.closest?.("a[href]");
-  if (!(link instanceof HTMLAnchorElement)) return;
-  if (link.target && link.target !== "_self") return;
-  const href = link.getAttribute("href") ?? "";
-  if (!href.startsWith("#") || href === hold.home) return;
-  event.preventDefault();
-  hold.leave = () => {
-    window.location.hash = href;
-  };
-}
-
-if (
-  typeof window !== "undefined" &&
-  typeof history !== "undefined" &&
-  typeof document !== "undefined"
-) {
-  const known = entryOf(history.state);
-  if (known === undefined) stamp(ENTRY, entry);
-  else entry = known;
-  // Registered before any route listener, so a held step never renders.
-  window.addEventListener("hashchange", onHashChange);
-  document.addEventListener("click", onClick, true);
-}
-
-export function holdNavigation(): (proceed: boolean) => void {
-  const mark = `${Date.now()}-${Math.random()}`;
-  stamp(HOLD_MARK, mark);
-  const mine = { home: currentHash(), mark, entry };
-  hold = mine;
-  return (proceed) => {
-    if (hold !== mine) return;
-    if (hold.restoring) hold.released = proceed;
-    else finish(proceed);
-  };
-}
-
-/** Test isolation only: drop any hold without leaving. */
-export function resetNavigationHold() {
-  if (hold?.restoring) clearTimeout(hold.restoring.timer);
-  hold = undefined;
-}
-
-/**
- * Runs `go` now when nothing holds the page; otherwise remembers it as the
- * latest way to leave and returns false.
- */
-export function deferWhileHeld(go: () => void): boolean {
-  if (!hold) return true;
-  hold.leave = go;
-  return false;
-}
-
-const held = (hash: string) => hold !== undefined && hash !== hold.home;
-
-/**
  * The route plus an invalid-hash flag.
  *
  * An unparseable hash must not silently send the reader to another project:
@@ -357,7 +173,6 @@ export function useRoute(): [
   useEffect(() => {
     const sync = (): void => {
       const hash = currentHash();
-      if (held(hash)) return;
       const next = parseRoute(hash);
       if (next !== undefined) {
         setRoute(next);
@@ -376,18 +191,11 @@ export function useRoute(): [
     return () => window.removeEventListener("hashchange", sync);
   }, []);
 
-  const navigate = useCallback(function go(
-    next: Route,
-    options?: NavigateOptions,
-  ) {
+  const navigate = useCallback((next: Route, options?: NavigateOptions) => {
     const hash = routeHash(next);
-    if (held(hash) && !deferWhileHeld(() => go(next, options))) return;
     if (window.location.hash !== hash) {
-      if (options?.replace) {
-        window.location.replace(hash);
-        // A replaced entry keeps its position.
-        stamp(ENTRY, entry);
-      } else window.location.hash = hash;
+      if (options?.replace) window.location.replace(hash);
+      else window.location.hash = hash;
     }
     setRoute(next);
     setInvalidHash(undefined);

@@ -319,6 +319,60 @@ try {
           resolve(output, `policy-error-${width}-${theme}.png`),
           Buffer.from(failed.data, "base64"),
         );
+        // C-455#326: leave while a save is in flight (1438 fails slowly in
+        // the fixture); the failure is reported once on the next page.
+        await run(() => {
+          window.scrollTo(0, 0);
+          const input = document.querySelector("input[id$='-minutes']");
+          Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "value",
+          ).set.call(input, "1438");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          [...document.querySelectorAll("[role=switch]")]
+            .find(
+              (s) =>
+                document.getElementById(s.getAttribute("aria-labelledby"))
+                  ?.textContent === "超时自动合并",
+            )
+            .click();
+        });
+        await delay(100);
+        await run(() => {
+          window.location.hash = "#/p/p-1/help";
+        });
+        await until(
+          "[...document.querySelectorAll('[role=alert]')].some((a) => a.textContent.includes('超时自动合并”，请回到设置重试'))",
+        );
+        await settle();
+        const left = await send("Page.captureScreenshot", { format: "png" });
+        report.scenes[`leave-notice-${width}-${theme}`] = await run(() => {
+          const alert = [...document.querySelectorAll("[role=alert]")].find(
+            (a) => a.textContent.includes("超时自动合并”，请回到设置重试"),
+          );
+          const r = alert.getBoundingClientRect();
+          const s = getComputedStyle(alert);
+          return {
+            text: alert.textContent,
+            stack: [...document.querySelectorAll("[role=alert]")].map(
+              (a) => a.textContent,
+            ),
+            alert: {
+              x: r.left,
+              y: r.top,
+              w: r.width,
+              h: r.height,
+              fontSize: s.fontSize,
+              lineHeight: s.lineHeight,
+            },
+            hash: location.hash,
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        await writeFile(
+          resolve(output, `leave-notice-${width}-${theme}.png`),
+          Buffer.from(left.data, "base64"),
+        );
       }
     }
   await writeFile(
