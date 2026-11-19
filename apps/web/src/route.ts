@@ -159,15 +159,36 @@ const isUnparseable = (hash: string): boolean =>
  *   rewritten, and redone the same way after success.
  */
 const HOLD_MARK = "cardiganHold";
+/** Position of each entry this app created, so a jump's size is known. */
+const ENTRY = "cardiganEntry";
+type State = Record<string, unknown> | null;
+const stamp = (key: string, value: unknown) =>
+  history.replaceState(
+    { ...((history.state as State) ?? {}), [key]: value },
+    "",
+  );
+const entryOf = (state: unknown) => {
+  const at = (state as State)?.[ENTRY];
+  return typeof at === "number" ? at : undefined;
+};
+let entry = 0;
+
 type Restore = {
-  /** fwd: assume Back and step forward; back2/back1: it was Forward. */
-  phase: "fwd" | "back2" | "back1";
-  timer?: ReturnType<typeof setTimeout>;
+  /** Offset from the entry the reader went to; the held entry is found at `pos`. */
+  pos: number;
+  order: number[];
+  /** Offsets known to lie past either end of history. */
+  up: number;
+  down: number;
+  target?: number | undefined;
+  timer?: ReturnType<typeof setTimeout> | undefined;
+  redo: { delta: number };
 };
 let hold:
   | {
       home: string;
       mark: string;
+      entry: number;
       leave?: (() => void) | undefined;
       restoring?: Restore | undefined;
       /** Set when released during a restore; applied once it ends. */
@@ -176,8 +197,7 @@ let hold:
   | undefined;
 
 const atHome = () =>
-  hold !== undefined &&
-  (history.state as Record<string, unknown> | null)?.[HOLD_MARK] === hold.mark;
+  hold !== undefined && (history.state as State)?.[HOLD_MARK] === hold.mark;
 
 function finish(proceed: boolean) {
   const leave = hold?.leave;
@@ -185,45 +205,72 @@ function finish(proceed: boolean) {
   if (proceed) leave?.();
 }
 
-function step(phase: Restore["phase"], delta: number) {
-  if (!hold) return;
-  const restoring: Restore = { phase };
-  hold.restoring = restoring;
+/** Steps to the next candidate offset until the held entry is reached. */
+function seek() {
+  const restoring = hold?.restoring;
+  if (!restoring) return;
+  const next = restoring.order.find(
+    (t) => t !== restoring.pos && t <= restoring.up && t >= restoring.down,
+  );
+  restoring.order = restoring.order.filter((t) => t !== next);
+  if (next === undefined) return lost();
+  restoring.target = next;
   // A step past either end of history fires no event.
   restoring.timer = setTimeout(() => {
     if (hold?.restoring !== restoring) return;
-    if (phase === "fwd") step("back1", -1);
-    else giveUp();
+    if (next > restoring.pos) restoring.up = next - 1;
+    else restoring.down = next + 1;
+    seek();
   }, 150);
-  history.go(delta);
+  history.go(next - restoring.pos);
 }
 
-/** More than one step away: put the held page back in place, drop leaving. */
-function giveUp() {
+/**
+ * The held entry is no longer in this tab's history (not expected in use):
+ * stay on the page without touching history and drop the way out.
+ */
+function lost() {
   if (!hold) return;
   hold.restoring = undefined;
   hold.leave = undefined;
-  window.location.replace(hold.home);
-  history.replaceState({ [HOLD_MARK]: hold.mark }, "");
   if (hold.released !== undefined) finish(false);
 }
 
 function onHashChange() {
-  if (!hold) return;
+  const known = entryOf(history.state);
+  if (!hold) {
+    // A new entry has no position yet: it follows the one it was pushed from.
+    if (known === undefined) {
+      entry += 1;
+      stamp(ENTRY, entry);
+    } else entry = known;
+    return;
+  }
   const restoring = hold.restoring;
-  if (restoring) clearTimeout(restoring.timer);
+  if (restoring) {
+    clearTimeout(restoring.timer);
+    if (restoring.target !== undefined) restoring.pos = restoring.target;
+  }
   if (atHome()) {
     if (!restoring) return;
     hold.restoring = undefined;
-    // Back was undone by one step forward; Forward by one step back.
-    const redo = restoring.phase === "fwd" ? -1 : 1;
-    hold.leave = () => history.go(redo);
+    // From the held entry, the reader's choice lies the opposite way.
+    restoring.redo.delta = -restoring.pos;
     if (hold.released !== undefined) finish(hold.released);
     return;
   }
-  if (!restoring) step("fwd", 1);
-  else if (restoring.phase === "fwd") step("back2", -2);
-  else giveUp();
+  if (restoring) return seek();
+  // The reader went back or forward while held: return, then redo the same
+  // step once saved. Recorded now, so a later choice replaces it.
+  const redo = { delta: 0 };
+  hold.leave = () => {
+    if (redo.delta) history.go(redo.delta);
+  };
+  const exact = known === undefined ? undefined : hold.entry - known;
+  const order: number[] = exact === undefined ? [] : [exact];
+  for (let n = 1; n <= 100; n += 1) order.push(n, -n);
+  hold.restoring = { pos: 0, order, up: Infinity, down: -Infinity, redo };
+  seek();
 }
 
 function onClick(event: MouseEvent) {
@@ -240,7 +287,14 @@ function onClick(event: MouseEvent) {
   };
 }
 
-if (typeof window !== "undefined") {
+if (
+  typeof window !== "undefined" &&
+  typeof history !== "undefined" &&
+  typeof document !== "undefined"
+) {
+  const known = entryOf(history.state);
+  if (known === undefined) stamp(ENTRY, entry);
+  else entry = known;
   // Registered before any route listener, so a held step never renders.
   window.addEventListener("hashchange", onHashChange);
   document.addEventListener("click", onClick, true);
@@ -248,11 +302,8 @@ if (typeof window !== "undefined") {
 
 export function holdNavigation(): (proceed: boolean) => void {
   const mark = `${Date.now()}-${Math.random()}`;
-  history.replaceState(
-    { ...((history.state as object | null) ?? {}), [HOLD_MARK]: mark },
-    "",
-  );
-  const mine = { home: currentHash(), mark };
+  stamp(HOLD_MARK, mark);
+  const mine = { home: currentHash(), mark, entry };
   hold = mine;
   return (proceed) => {
     if (hold !== mine) return;
@@ -332,8 +383,11 @@ export function useRoute(): [
     const hash = routeHash(next);
     if (held(hash) && !deferWhileHeld(() => go(next, options))) return;
     if (window.location.hash !== hash) {
-      if (options?.replace) window.location.replace(hash);
-      else window.location.hash = hash;
+      if (options?.replace) {
+        window.location.replace(hash);
+        // A replaced entry keeps its position.
+        stamp(ENTRY, entry);
+      } else window.location.hash = hash;
     }
     setRoute(next);
     setInvalidHash(undefined);

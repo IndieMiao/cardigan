@@ -24,10 +24,12 @@ vi.stubGlobal(
     disconnect() {}
   },
 );
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   resetSettingWrites();
   window.location.hash = "";
+  // Let queued hashchange events and traversals end before the next test.
+  await new Promise((r) => setTimeout(r, 50));
 });
 
 const on = (control: HTMLElement) =>
@@ -999,4 +1001,107 @@ test("Forward while saving is undone and redone as a traversal too", async () =>
   await waitFor(() => expect(location.hash).toBe("#/p/p-1/needs-you"));
   history.go(-2);
   await waitFor(() => expect(location.hash).toBe(settings));
+});
+
+// C-455 review (V-2190): a jump of several entries is found without rewriting
+// history, and a later choice made during the return wins.
+const h = (name: string) => `#/p/p-1/${name}`;
+const tick = (ms = 40) =>
+  act(async () => {
+    await new Promise((r) => setTimeout(r, ms));
+  });
+const nextHash = () =>
+  new Promise<void>((r) =>
+    window.addEventListener("hashchange", () => r(), { once: true }),
+  );
+function seed([first, ...rest]: string[]) {
+  history.replaceState(null, "", h(first ?? "cards"));
+  for (const page of rest) history.pushState(null, "", h(page));
+}
+async function beginHeld() {
+  const write = Promise.withResolvers<void>();
+  const setPreferences = vi.fn(() => write.promise);
+  render(<App client={fakeClient({ setPreferences })} />);
+  fireEvent.click(await screen.findByRole("switch", { name: "超时自动合并" }));
+  expect(setPreferences).toHaveBeenCalledOnce();
+  return write;
+}
+for (const ok of [true, false])
+  test(`a two-entry Back doesn't drop the destination or replace the history when save ${ok ? "succeeds" : "fails"}`, async () => {
+    seed(["cards", "help", "needs-you", "settings"]);
+    const write = await beginHeld();
+    history.go(-2);
+    await tick(450);
+    await act(async () => {
+      if (ok) write.resolve();
+      else write.reject(new Error("设置未保存"));
+    });
+    await tick();
+    const after = location.hash; // on success: help; on failure: settings, with intact history
+    const alerts = screen
+      .queryAllByRole("alert")
+      .map((x) => x.textContent)
+      .join(" ");
+    history.back();
+    await tick();
+    expect({
+      after,
+      subsequentBack: location.hash,
+      visibleFailure: alerts.includes("设置未保存"),
+    }).toEqual({
+      after: h(ok ? "help" : "settings"),
+      subsequentBack: h(ok ? "cards" : "needs-you"),
+      visibleFailure: !ok,
+    });
+  });
+for (const laterPanel of [false, true])
+  test(`one-step Forward at the end of history respects the latest intent (${laterPanel ? "later panel click" : "control"})`, async () => {
+    seed(["cards", "settings", "help"]);
+    let changed = nextHash();
+    history.back();
+    await changed;
+    expect(location.hash).toBe(h("settings"));
+    const write = await beginHeld();
+    const panel = screen.getByRole("button", { name: "授权", exact: true });
+    changed = nextHash();
+    history.forward();
+    await act(async () => {
+      await changed;
+    });
+    // One forward, then another genuine UI choice during the pending save.
+    if (laterPanel) fireEvent.click(panel);
+    await tick(310);
+    await act(async () => write.resolve());
+    await tick();
+    expect({
+      after: location.hash,
+      authorization: !!screen.queryByRole("heading", {
+        name: "授权",
+        exact: true,
+      }),
+    }).toEqual({
+      after: h(laterPanel ? "settings" : "help"),
+      authorization: laterPanel,
+    });
+  });
+
+test("entries the app created are returned to in one exact step", async () => {
+  for (const page of ["cards", "help", "needs-you", "settings"]) {
+    const changed = nextHash();
+    window.location.hash = h(page);
+    await changed;
+  }
+  const write = await beginHeld();
+  const visited: string[] = [];
+  const log = () => visited.push(location.hash);
+  window.addEventListener("hashchange", log);
+  try {
+    history.go(-2);
+    await tick(300);
+    expect(visited).toEqual([h("help"), h("settings")]);
+    await act(async () => write.resolve());
+    await waitFor(() => expect(location.hash).toBe(h("help")));
+  } finally {
+    window.removeEventListener("hashchange", log);
+  }
 });

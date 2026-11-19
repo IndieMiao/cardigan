@@ -57,14 +57,27 @@ try {
     out.push(`${label}: ${await state()} unloadBlocked=${await unload()}`);
   };
   // History cards → help → settings; then save slowly and try to leave.
-  const scene = async (minutes, label, leave, after) => {
+  // History cards → help (→ more) → settings, created by the app; optionally
+  // step back first so a later entry lies ahead.
+  const scene = async (
+    minutes,
+    label,
+    leave,
+    after,
+    { pages = ["help"], ahead = [] } = {},
+  ) => {
     await send("Page.navigate", { url: "about:blank" });
     await delay(1500);
     await send("Page.navigate", { url: `${base}__settings#/p/p-1/cards` });
     await until("!!document.querySelector('#root > *')");
-    await evaluate("location.hash = '#/p/p-1/help'");
-    await delay(200);
-    await evaluate("location.hash = '#/p/p-1/settings'");
+    for (const page of [...pages, "settings", ...ahead]) {
+      await evaluate(`location.hash = '#/p/p-1/${page}'`);
+      await delay(200);
+    }
+    if (ahead.length) {
+      await evaluate(`history.go(-${ahead.length})`);
+      await delay(300);
+    }
     await until("!!document.querySelector('[role=switch]')");
     await evaluate(`(() => {
       const input = document.querySelector("input[id$='-minutes']");
@@ -100,6 +113,28 @@ try {
     ["Forward", "history.forward()"],
     ["Forward", "history.forward()"],
   ]);
+  const two = { pages: ["help", "needs-you"] };
+  await scene(
+    1439,
+    "slow success, Back 2 steps to 帮助",
+    "history.go(-2)",
+    [["Back", "history.back()"]],
+    two,
+  );
+  await scene(
+    1438,
+    "slow failure, Back 2 steps to 帮助",
+    "history.go(-2)",
+    [["Back", "history.back()"]],
+    two,
+  );
+  await scene(
+    1439,
+    "slow success, Forward then tab 授权",
+    `history.forward(); setTimeout(() => ${tab("授权")}, 50)`,
+    [],
+    { pages: [], ahead: ["help"] },
+  );
   await scene(
     1438,
     "slow failure, tab 授权 then link 帮助",
