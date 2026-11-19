@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { LaunchConfigError } from "./errors.js";
 import { HARNESSES } from "./harness.js";
+import { type CatalogEntry, modelMetadata } from "./model-catalog.js";
 
 const nameSchema = z
   .string()
@@ -41,8 +42,28 @@ const probeOrigin = z.string().refine((value) => {
  * and references to credentials. Credentials are only ever referenced by name:
  * `secret_env` maps an environment variable to a key in `secrets.env`.
  */
+const endpoint = z.url({ protocol: /^https?$/ }).refine((value) => {
+  const url = URL.parse(value);
+  return (
+    url !== null && !url.username && !url.password && !url.search && !url.hash
+  );
+}, "base_url must not contain credentials, query or fragment");
 const providerSchema = z.strictObject({
-  harness: harnessSchema,
+  harness: harnessSchema.optional(),
+  api: z
+    .enum(["openai-responses", "anthropic-messages", "openai-completions"])
+    .optional(),
+  base_url: endpoint.optional(),
+  /** Pi models.json can read its endpoint from this variable. */
+  base_url_env: envVarSchema.optional(),
+  codex: z
+    .strictObject({
+      name: z.string().min(1).optional(),
+      profile: nameSchema.optional(),
+      env_key: envVarSchema.optional(),
+      requires_openai_auth: z.boolean().optional(),
+    })
+    .optional(),
   env: z.record(envVarSchema, z.string()).default({}),
   secret_env: z.record(envVarSchema, z.string().min(1)).default({}),
   upstream: z
@@ -58,6 +79,10 @@ const profileSchema = z.strictObject({
   harness: harnessSchema,
   provider: nameSchema.optional(),
   model: z.string().min(1).optional(),
+  effort: z
+    .string()
+    .regex(/^[a-zA-Z0-9_-]+$/)
+    .optional(),
   /** Pi only: value for `--provider`. */
   provider_flag: z.string().min(1).optional(),
   /** Claude Code only: value for `--permission-mode`. */
@@ -96,6 +121,24 @@ const browserSchema = z.strictObject({
 
 const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
+  model_catalog: z
+    .strictObject({
+      max_age_ms: positiveMillis.optional(),
+      max_bytes: z.number().int().positive().optional(),
+      timeout_ms: positiveMillis.optional(),
+    })
+    .optional(),
+  models: z
+    .record(
+      nameSchema,
+      z.strictObject({
+        id: z.string().min(1),
+        provider: nameSchema,
+        catalog_provider: nameSchema.optional(),
+        ...modelMetadata.shape,
+      }),
+    )
+    .optional(),
   profiles: z.record(nameSchema, profileSchema).default({}),
   browser: browserSchema.optional(),
   /** Freshness of read-only interaction features; not a line-failure threshold. */
@@ -151,7 +194,15 @@ function formatIssues(error: z.ZodError): string[] {
  * subset of the optional fields, and a field aimed at the wrong harness is an
  * error rather than a silent no-op.
  */
-export function parseLaunchConfig(value: unknown): LaunchConfig {
+export function parseLaunchConfig(
+  value: unknown,
+  catalog: readonly CatalogEntry[] = [],
+): LaunchConfig {
+  return prepareLaunchConfig(value).resolve(catalog);
+}
+
+/** Validate local syntax before doing any catalog IO. Each resolution uses a fresh copy. */
+export function prepareLaunchConfig(value: unknown) {
   const parsed = launchConfigSchema.safeParse(value);
   if (!parsed.success) {
     throw new LaunchConfigError(
@@ -161,8 +212,95 @@ export function parseLaunchConfig(value: unknown): LaunchConfig {
     );
   }
 
+  const raw = parsed.data;
+  return {
+    catalogPolicy: Object.keys(raw.models ?? {}).length
+      ? (raw.model_catalog ?? {})
+      : undefined,
+    resolve: (catalog: readonly CatalogEntry[] = []) =>
+      normalizeConfig(structuredClone(raw), catalog),
+  };
+}
+
+function inlineCodexProvider(
+  name: string | undefined,
+  provider: ProviderDefinition | undefined,
+) {
+  const config: NonNullable<LaunchProfileDefinition["config"]> = {};
+  if (name && provider?.base_url) {
+    // A dot belongs to the provider name, not to another nested TOML key.
+    const key = `model_providers.${name.includes(".") ? JSON.stringify(name) : name}`;
+    config.model_provider = name;
+    config[`${key}.name`] = provider.codex?.name ?? name;
+    config[`${key}.base_url`] = provider.base_url;
+    config[`${key}.wire_api`] = "responses";
+    const secretNames = Object.keys(provider.secret_env);
+    const envKey =
+      provider.codex?.env_key ??
+      (!provider.codex?.requires_openai_auth && secretNames.length === 1
+        ? secretNames[0]
+        : undefined);
+    if (envKey) config[`${key}.env_key`] = envKey;
+    if (provider.codex?.requires_openai_auth !== undefined)
+      config[`${key}.requires_openai_auth`] =
+        provider.codex.requires_openai_auth;
+  }
+  return config;
+}
+
+function endpointEnvKey(
+  harness: LaunchProfileDefinition["harness"],
+  provider: ProviderDefinition,
+) {
+  if (harness === "claude-code") return "ANTHROPIC_BASE_URL";
+  return harness === "pi" ? provider.base_url_env : undefined;
+}
+
+function validateRoute(
+  at: string,
+  harness: LaunchProfileDefinition["harness"],
+  provider: ProviderDefinition,
+  details: string[],
+) {
+  if (
+    provider.api &&
+    ((harness === "codex" && provider.api !== "openai-responses") ||
+      (harness === "claude-code" && provider.api !== "anthropic-messages"))
+  )
+    details.push(`${at}.api 与 harness.${harness} 不兼容`);
+  if (!provider.base_url || harness === "codex") return;
+  const key = endpointEnvKey(harness, provider);
+  if (!key) details.push(`${at}: pi 的 base_url 需要指定 base_url_env`);
+  else if (
+    key in provider.secret_env ||
+    (key in provider.env && provider.env[key] !== provider.base_url)
+  )
+    details.push(`${at}: base_url 与 ${key} 的定义冲突`);
+}
+
+function normalizeConfig(
+  config: LaunchConfig,
+  catalog: readonly CatalogEntry[],
+): LaunchConfig {
   const details: string[] = [];
-  for (const [name, provider] of Object.entries(parsed.data.providers)) {
+  for (const [name, provider] of Object.entries(config.providers)) {
+    const at = `providers.${name}`;
+    if (!provider.harness && !provider.api)
+      details.push(`${at}: 接入点需要 harness，跨 harness 共用时需要 api`);
+    if (provider.harness)
+      validateRoute(at, provider.harness, provider, details);
+    if (
+      provider.codex &&
+      ((provider.harness && provider.harness !== "codex") ||
+        !provider.base_url ||
+        (provider.api && provider.api !== "openai-responses"))
+    )
+      details.push(`${at}.codex 需要 codex 接入点和 base_url`);
+    if (
+      provider.base_url_env &&
+      ((provider.harness && provider.harness !== "pi") || !provider.base_url)
+    )
+      details.push(`${at}.base_url_env 只用于 pi 的 base_url`);
     for (const envName of Object.keys(provider.secret_env)) {
       if (envName in provider.env) {
         details.push(
@@ -172,8 +310,66 @@ export function parseLaunchConfig(value: unknown): LaunchConfig {
     }
   }
 
-  for (const [name, profile] of Object.entries(parsed.data.profiles)) {
+  const models = config.models ?? {};
+  for (const [alias, model] of Object.entries(models)) {
+    if (!Object.hasOwn(config.providers, model.provider))
+      details.push(`models.${alias}: 引用了不存在的接入点 ${model.provider}`);
+    const upstream = catalog.find(
+      (entry) =>
+        entry.provider === (model.catalog_provider ?? model.provider) &&
+        entry.id === model.id,
+    );
+    model.context_window ??= upstream?.context_window;
+    model.max_output_tokens ??= upstream?.max_output_tokens;
+    model.reasoning_efforts ??= upstream?.reasoning_efforts;
+    if (!model.context_window)
+      details.push(
+        `models.${alias}.context_window: 目录中没有此模型的上下文窗口，请显式填写`,
+      );
+  }
+
+  // Normalize once so direct profile readers (Run snapshot, diagnostics, upstream grouping)
+  // see the same effective values as the compiler. Never mutate the decoded YAML.
+  for (const [name, profile] of Object.entries(config.profiles)) {
     const at = `profiles.${name}`;
+    const alias = profile.model;
+    const model =
+      alias && Object.hasOwn(models, alias) ? models[alias] : undefined;
+    if (model) {
+      if (profile.provider && profile.provider !== model.provider)
+        details.push(`${at}.provider 与模型接入点不一致`);
+      profile.model = model.id;
+      profile.provider = model.provider;
+      if (profile.harness === "pi") profile.provider_flag ??= model.provider;
+      if (
+        profile.effort &&
+        model.reasoning_efforts &&
+        !model.reasoning_efforts.includes(profile.effort)
+      )
+        details.push(`${at}.effort 不在模型支持的推理强度中`);
+    }
+    if (profile.harness === "codex") {
+      const provider =
+        profile.provider && Object.hasOwn(config.providers, profile.provider)
+          ? config.providers[profile.provider]
+          : undefined;
+      if (provider?.base_url || model || profile.effort) {
+        profile.config = {
+          ...inlineCodexProvider(profile.provider, provider),
+          ...(profile.effort ? { model_reasoning_effort: profile.effort } : {}),
+          ...(model?.context_window
+            ? { model_context_window: model.context_window }
+            : {}),
+          ...profile.config,
+        };
+      }
+    } else if (profile.effort) {
+      profile.args = [
+        profile.harness === "pi" ? "--thinking" : "--effort",
+        profile.effort,
+        ...(profile.args ?? []),
+      ];
+    }
     if (profile.harness !== "pi") {
       if (profile.provider_flag !== undefined) {
         details.push(`${at}: provider_flag 只用于 pi`);
@@ -198,9 +394,13 @@ export function parseLaunchConfig(value: unknown): LaunchConfig {
       details.push(`${at}: config 只用于 codex`);
     }
     if (profile.provider !== undefined) {
-      const provider = parsed.data.providers[profile.provider];
+      const provider = Object.hasOwn(config.providers, profile.provider)
+        ? config.providers[profile.provider]
+        : undefined;
       if (provider === undefined) {
         details.push(`${at}: 引用了不存在的接入点 ${profile.provider}`);
+      } else if (!provider.harness) {
+        validateRoute(at, profile.harness, provider, details);
       } else if (provider.harness !== profile.harness) {
         details.push(
           `${at}: harness 是 ${profile.harness}，但接入点 ${profile.provider} 是 ${provider.harness}`,
@@ -217,7 +417,7 @@ export function parseLaunchConfig(value: unknown): LaunchConfig {
     );
   }
 
-  return parsed.data;
+  return config;
 }
 
 /** Look up a profile and its provider, with errors that name what is missing. */
@@ -225,7 +425,9 @@ export function resolveProfile(
   config: LaunchConfig,
   profileName: string,
 ): ResolvedProfile {
-  const profile = config.profiles[profileName];
+  const profile = Object.hasOwn(config.profiles, profileName)
+    ? config.profiles[profileName]
+    : undefined;
   if (profile === undefined) {
     throw new LaunchConfigError(
       "unknown_profile",
@@ -244,10 +446,18 @@ export function resolveProfile(
       Object.keys(config.providers),
     );
   }
+  const key = endpointEnvKey(profile.harness, definition);
+  const route =
+    key && definition.base_url
+      ? {
+          ...definition,
+          env: { ...definition.env, [key]: definition.base_url },
+        }
+      : definition;
   return {
     name: profileName,
     profile,
-    provider: { name: profile.provider, definition },
+    provider: { name: profile.provider, definition: route },
   };
 }
 

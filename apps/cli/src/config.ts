@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
+import { loadModelLaunchConfig, parseCachedLaunchConfig } from "@cardigan/host";
 import {
   type LaunchConfig,
-  parseLaunchConfig,
   parseSecretsText,
   reportLaunchWarnings,
 } from "@cardigan/roles";
@@ -21,7 +21,10 @@ export async function loadConfig(
       "可以手写 providers/profiles，或用 cardigan launch import-claude-settings 生成",
     ]);
   }
-  const config = decodeConfig(text, paths);
+  const config = await loadModelLaunchConfig(
+    decodeConfig(text, paths),
+    paths.dataDir,
+  );
   if (report) reportLaunchWarnings(config, report);
   return config;
 }
@@ -37,10 +40,10 @@ export function loadOptionalConfigSync(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  return decodeConfig(text, paths);
+  return parseCachedLaunchConfig(decodeConfig(text, paths), paths.dataDir);
 }
 
-function decodeConfig(text: string, paths: LaunchPaths): LaunchConfig {
+function decodeConfig(text: string, paths: LaunchPaths): unknown {
   let decoded: unknown;
   try {
     decoded = parseYaml(text);
@@ -49,7 +52,7 @@ function decodeConfig(text: string, paths: LaunchPaths): LaunchConfig {
       error instanceof Error ? error.message : String(error),
     ]);
   }
-  return parseLaunchConfig(decoded ?? {});
+  return decoded ?? {};
 }
 
 export async function loadSecrets(

@@ -17,7 +17,7 @@ import { loadConfig } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveGlobalActor, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
-import { resolveLaunchPaths } from "./paths.js";
+import { cliLaunchPaths } from "./paths.js";
 
 const USAGE = [
   "用法：cardigan employee <命令>（全局员工，无需选择项目）",
@@ -128,7 +128,7 @@ export async function runEmployeeCommand(
       ? undefined
       : Object.keys(
           (
-            await loadConfig(resolveLaunchPaths(io.env), (message) =>
+            await loadConfig(cliLaunchPaths(io, flags["data-dir"]), (message) =>
               io.stderr(message),
             )
           ).profiles,

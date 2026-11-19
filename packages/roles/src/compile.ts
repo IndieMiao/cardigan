@@ -137,9 +137,11 @@ export function compileLaunch(input: CompileLaunchInput): CompiledLaunch {
     // Codex keeps its own config; Cardigan only composes arguments:
     // `--profile`, `-c key=value` overrides, `-m`, then extra arguments.
     const args: string[] = [];
-    if (resolved.provider !== undefined) {
-      args.push("--profile", resolved.provider.name);
-    }
+    const provider = resolved.provider;
+    const external = provider?.definition.base_url
+      ? provider.definition.codex?.profile
+      : provider?.name;
+    if (external) args.push("--profile", external);
     if (resolved.profile.model !== undefined) {
       args.push("-m", resolved.profile.model);
     }

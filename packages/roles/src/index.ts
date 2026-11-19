@@ -44,6 +44,11 @@ export {
   launchWarnings,
   reportLaunchWarnings,
 } from "./launch-diagnostics.js";
+export {
+  type CatalogEntry,
+  catalogCache,
+  catalogEntries,
+} from "./model-catalog.js";
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
@@ -89,6 +94,7 @@ export {
   type ProviderDefinition,
   parseLaunchConfig,
   parseSecretsText,
+  prepareLaunchConfig,
   type ResolvedProfile,
   requiredSecretKeys,
   resolveProfile,

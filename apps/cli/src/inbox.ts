@@ -12,7 +12,7 @@ import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { announceDataDir, resolveActor, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
-import { resolveLaunchPaths } from "./paths.js";
+import { cliLaunchPaths } from "./paths.js";
 
 /**
  * M3.5 read-only views until M5 builds the pages.
@@ -166,7 +166,7 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
   try {
     const project_id = resolveProject(store, io, flags.project);
     const now = new Date().toISOString();
-    const paths = resolveLaunchPaths(io.env);
+    const paths = cliLaunchPaths(io, flags["data-dir"]);
     const config = loadOptionalConfigSync(paths);
     const warnings = config ? launchWarnings(config) : [];
     const {
