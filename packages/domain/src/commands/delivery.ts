@@ -1,4 +1,9 @@
-import { deriveCardStatus, deriveReview, isReviewStale } from "../derived.js";
+import {
+  deriveCardStatus,
+  deriveReview,
+  isReviewStale,
+  reviewPassed,
+} from "../derived.js";
 import type {
   Actor,
   Assignment,
@@ -8,6 +13,7 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
+import { REVIEW_IMPACTS } from "../entities.js";
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
@@ -854,6 +860,7 @@ export type SubmitReviewParams = Pick<
       | "recheck_required"
       | "screenshot_check"
       | "rejection_category"
+      | "followup_card_id"
     >
   >;
 export function submitReview(
@@ -963,6 +970,37 @@ export function submitReview(
       "Review issues must describe severity and must_fix",
     );
     ensure(
+      p.issues.every((i) =>
+        i.impact === undefined
+          ? !i.must_fix
+          : REVIEW_IMPACTS.includes(i.impact),
+      ),
+      "validation_failed",
+      "Every must-fix issue requires a valid impact",
+    );
+    const calculated = deriveReview(
+      p.issues,
+      p.recheck_required ?? false,
+      p.followup_card_id,
+    );
+    if (p.followup_card_id !== undefined) {
+      ensure(
+        calculated.verdict === "conditional" &&
+          !p.recheck_required &&
+          !!p.followup_card_id,
+        "validation_failed",
+        "Only UX-only must-fix issues can be deferred to a follow-up card",
+      );
+      const followup = d.get("cards", p.followup_card_id);
+      ensure(
+        followup.id !== card.id &&
+          followup.project_id === card.project_id &&
+          !["done", "cancelled"].includes(followup.status),
+        "validation_failed",
+        "Follow-up must be a different open card in the same project",
+      );
+    }
+    ensure(
       p.screenshot_check === undefined ||
         p.screenshot_check === "passed" ||
         p.screenshot_check === "failed",
@@ -1031,7 +1069,6 @@ export function submitReview(
       "illegal_transition",
       "Verification is not running or its round limit was reached",
     );
-    const calculated = deriveReview(p.issues, p.recheck_required ?? false);
     if (p.rejection_category !== undefined)
       ensure(
         calculated.verdict === "reject" &&
@@ -1042,6 +1079,7 @@ export function submitReview(
         "validation_failed",
         "驳回类别须为 1 至 48 字的单行文字，仅用于驳回",
       );
+
     const reuseContext = deliveryTree(target)
       ? reviewReuseContext(d, target, item, d.assignment.id)
       : undefined;
@@ -1056,6 +1094,7 @@ export function submitReview(
       ...(p.rejection_category
         ? { rejection_category: p.rejection_category.trim() }
         : {}),
+      ...(p.followup_card_id ? { followup_card_id: p.followup_card_id } : {}),
       recheck_required: p.recheck_required ?? false,
       ...(testReview ? { test_review: testReview } : {}),
       attachments: [...(p.attachments ?? [])],
@@ -1072,22 +1111,22 @@ export function submitReview(
         : { screenshot_check: p.screenshot_check }),
     };
     d.put("reviews", value);
-    if (value.verdict !== "conditional")
+    if (reviewPassed(value) || value.blocking)
       item = d.move(
         item,
-        value.verdict === "pass" ? "review_passed" : "review_rejected",
+        reviewPassed(value) ? "review_passed" : "review_rejected",
       );
     d.put("work_items", item);
     const required = target.requested_verifiers.filter(
       (id) => d.work(id).required,
     );
-    const allPassed = required.every(
-      (id) =>
+    const allPassed = required.every((id) =>
+      reviewPassed(
         d
           .list("reviews")
           .filter((r) => r.work_item_id === id && !isReviewStale(r, target))
-          .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0]
-          ?.verdict === "pass",
+          .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0],
+      ),
     );
     if (!parallelLate && (value.blocking || allPassed)) {
       d.put("deliveries", {
@@ -1141,9 +1180,12 @@ export function submitReview(
         delivery_id: target.id,
         verdict: value.verdict,
         recheck_required: value.recheck_required,
+        ...(value.followup_card_id
+          ? { followup_card_id: value.followup_card_id }
+          : {}),
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
-          (value.blocking || value.verdict === "conditional") &&
+          (value.blocking || value.recheck_required) &&
           (!limitReached || flowRaised === true),
         ...(flowLimit && !flowRaised ? { review_limit_wait: true } : {}),
         ...(parallelLate ? { parallel_late: true } : {}),

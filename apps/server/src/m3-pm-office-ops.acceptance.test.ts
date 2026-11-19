@@ -692,6 +692,7 @@ test.each(["comment", "delivery", "pass", "reject", "execution failure"])(
               ? [
                   {
                     severity: "major",
+                    impact: "functional" as const,
                     must_fix: true,
                     pre_existing: false,
                     description: "Needs correction",

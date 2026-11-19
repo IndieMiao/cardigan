@@ -129,6 +129,7 @@ test.each(["reviewer", "independent_reviewer"])(
             issues: [
               {
                 severity: "critical",
+                impact: "functional" as const,
                 must_fix: true,
                 pre_existing: false,
                 description: "Defect",
@@ -217,6 +218,7 @@ test("third reject lists the verifier's three causes and recommends an alternati
     ["写入顺序错误", "并发时序"],
   ])
     expect(q.context).toContain(`【${category}】${reason}`);
+  expect(q.context).toContain("影响程度：功能错误");
   expect(q.recommended).toBe("change_approach");
   expect(q.options.map((o) => o.key)).toEqual([
     "raise_limit",

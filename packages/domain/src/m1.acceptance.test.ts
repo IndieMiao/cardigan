@@ -431,6 +431,7 @@ function review(
     issues?: readonly {
       readonly severity: "critical" | "major" | "minor";
       readonly description: string;
+      readonly impact?: import("./entities.js").ReviewImpact;
       readonly must_fix: boolean;
       readonly pre_existing: boolean;
       readonly proof?: string;
@@ -923,6 +924,7 @@ describe("inventory of §4.5 invariants", () => {
           {
             severity: "major",
             description: "fictional bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -1151,6 +1153,7 @@ describe("inventory of §4.5 invariants", () => {
           {
             severity: "major",
             description: "fictional bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -1321,6 +1324,7 @@ describe("end to end: a dev card from creation to merge readiness", () => {
           {
             severity: "major",
             description: "fictional bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -1700,6 +1704,7 @@ describe("review round limit", () => {
     const rejecting = {
       severity: "major" as const,
       description: "fictional bug",
+      impact: "functional" as const,
       must_fix: true,
       pre_existing: false,
     };
@@ -2122,6 +2127,7 @@ describe("review outcomes the plan distinguishes", () => {
     const rejecting = {
       severity: "major" as const,
       description: "fictional bug",
+      impact: "functional" as const,
       must_fix: true,
       pre_existing: false,
     };

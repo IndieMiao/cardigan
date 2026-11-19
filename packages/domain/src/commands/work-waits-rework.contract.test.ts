@@ -164,6 +164,7 @@ async function deliveredThenReworked() {
           {
             severity: "major",
             description: "Fix required",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },

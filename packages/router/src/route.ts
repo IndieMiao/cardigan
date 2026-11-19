@@ -30,6 +30,7 @@ import {
   pmMergeCheckDelegationAllowed,
   precheckConflictHandling,
   requesterNotificationRecipient,
+  reviewPassed,
   verificationTarget,
 } from "@cardigan/domain";
 import {
@@ -1839,7 +1840,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       const review = input.snapshot.reviews
         .filter((r) => r.work_item_id === item.id && !isReviewStale(r, target))
         .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-      if (review?.verdict === "pass" || target.status === "accepted") break;
+      if (reviewPassed(review) || target.status === "accepted") break;
       const reviewed = review !== undefined;
       noteAssignment(
         input,

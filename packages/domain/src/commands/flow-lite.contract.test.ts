@@ -345,6 +345,7 @@ test("B2: optional pending review does not add a gate, while any outstanding mus
           {
             severity: "major" as const,
             description: "Outstanding defect",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },

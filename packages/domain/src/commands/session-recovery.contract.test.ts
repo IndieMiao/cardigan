@@ -136,6 +136,7 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
         {
           severity: "major",
           description: "Defect",
+          impact: "functional" as const,
           must_fix: true,
           pre_existing: false,
         },
@@ -166,6 +167,7 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
             {
               severity: "major",
               description: "Defect",
+              impact: "functional" as const,
               must_fix: true,
               pre_existing: false,
             },

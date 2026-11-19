@@ -36,6 +36,27 @@ test.each([
   "designer",
   "tester",
   "pm",
+] as const)(
+  "%s explains the mandatory impact and when a follow-up is allowed",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const field of [
+      "data_or_permission",
+      "functional",
+      "ux_only",
+      "followup_card_id",
+    ])
+      expect(body).toContain(field);
+  },
+);
+
+test.each([
+  "reviewer",
+  "independent_reviewer",
+  "design_director",
+  "designer",
+  "tester",
+  "pm",
 ] as const)("C-413: %s permits proven major follow-up findings", (role) => {
   const body = instructionsFor(role);
   for (const phrase of [
@@ -812,4 +833,18 @@ test("MC-2 frontend machine requirements are separate from permission capabiliti
   expect(defaultRoleDefinition("coder", launch).required_capabilities).toEqual(
     [],
   );
+});
+
+test("UI producers and design directors use the same state and save guideline", () => {
+  for (const role of ["frontend_engineer", "design_director"] as const) {
+    const rules = instructionsFor(role);
+    for (const phrase of [
+      "状态与保存",
+      "无写入",
+      "docs/design/ui-guidelines.md 的“设置类写入的默认做法”",
+      "设计总监",
+      "实现验收",
+    ])
+      expect(rules).toContain(phrase);
+  }
 });

@@ -1,5 +1,6 @@
 // biome-ignore-all lint/suspicious/noArrayIndexKey: delivery and review arrays are immutable record snapshots with no item IDs.
 
+import { reviewImpactLabel } from "@cardigan/domain";
 import type { ReactNode } from "react";
 import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
@@ -129,6 +130,17 @@ export function TimelineContent({
           {review.issues?.length
             ? `报告 ${review.issues.length} 个问题。`
             : "未报告问题。"}
+          {review.followup_card_id && (
+            <IdTag
+              id={review.followup_card_id}
+              label="后续卡"
+              href={routeHash({
+                kind: "card",
+                projectId,
+                cardId: review.followup_card_id,
+              })}
+            />
+          )}
           {review.recheck_required && "需要复审。"}
           {delivery?.status === "superseded" && <span>旧版本结论，已失效</span>}
         </p>
@@ -168,6 +180,7 @@ export function TimelineContent({
                   >
                 )[issue.severity] ?? "问题"}
                 ，{issue.must_fix ? "必须修复" : "建议"}
+                {issue.impact && `，${reviewImpactLabel[issue.impact]}`}
                 {issue.pre_existing ? "，既有问题" : ""}
               </p>
               <Markdown body={issue.description} />

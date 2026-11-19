@@ -8,6 +8,7 @@ import {
   prepareCheck,
   prepareDelivery,
   prepareRecheck,
+  REVIEW_IMPACTS,
   requestCheck,
   requestDeliveryRework,
   requestRecheck,
@@ -79,6 +80,10 @@ const reviewInput = z.object({
       severity: z.enum(["critical", "major", "minor"]),
       description: z.string().min(1),
       must_fix: z.boolean(),
+      impact: z
+        .enum(REVIEW_IMPACTS)
+        .optional()
+        .describe("Required for every must_fix issue"),
       pre_existing: z.boolean(),
       proof: z.string().optional(),
     }),
@@ -91,6 +96,11 @@ const reviewInput = z.object({
     .optional()
     .describe("驳回的主要原因类别，例如并发时序；重复问题沿用同一类别"),
   recheck_required: z.boolean().optional(),
+  followup_card_id: id("card")
+    .optional()
+    .describe(
+      "Accept with conditions: defer exclusively UX-only must-fix issues to this open card",
+    ),
   attachments,
   screenshot_check: z
     .enum(["passed", "failed"])

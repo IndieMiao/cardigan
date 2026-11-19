@@ -6,6 +6,7 @@ import {
   autoMergeSchedule,
   type CardId,
   type CommandState,
+  createCard,
   type Decision,
   type DecisionCategory,
   expireMergeSnoozes,
@@ -28,6 +29,7 @@ import {
   setCardSensitive,
   setProjectPreferences,
   standingTools,
+  submitReview,
   type WorkItem,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
@@ -246,6 +248,55 @@ test("PM Ops can choose merge only after the gate passed, with a notice", async 
     },
   });
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test("deferred UX repairs satisfy the current review but never replace the merge check", async () => {
+  const { f, check, confirmation, pmResolve } = setup();
+  const followup = f.commit(
+    createCard(
+      f.state,
+      human,
+      {
+        repo: "fixture",
+        base_branch: "main",
+        title: "Repair UX",
+        goal: "Remove duplicate feedback",
+        acceptance_criteria: ["Show one hint"],
+        source: { kind: "quote", text: "Review finding" },
+      },
+      f.io,
+    ),
+  );
+  const v = await f.deliver();
+  f.start(f.reviewer);
+  const review = f.commit(
+    submitReview(
+      f.state,
+      f.actor(f.reviewer),
+      {
+        delivery_id: v.id,
+        target_sha: v.subject.value,
+        kind: "code",
+        issues: [
+          {
+            severity: "minor",
+            description: "Duplicate hint",
+            must_fix: true,
+            pre_existing: false,
+            impact: "ux_only",
+          },
+        ],
+        followup_card_id: followup.id,
+      },
+      f.io,
+    ),
+  );
+  expect(review.verdict).toBe("conditional");
+  f.review(await f.deliver("card_completion", v.subject.value));
+  expect(pmResolve("merge", { notice: "合并" }).ok).toBe(false);
+  check("passed");
+  expect(pmMergeBlockers(f.state, confirmation())).toEqual([]);
+  expect(pmResolve("merge", { notice: "体验问题已开后续卡" }).ok).toBe(true);
 });
 
 test("failed or missing verification and open must_fix block a PM merge", async () => {

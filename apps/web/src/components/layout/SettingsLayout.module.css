@@ -1,7 +1,24 @@
 @layer legacy, theme, base, components, utilities;
 @layer components {
   .workspace {
+    /* C-480: the sticky header band covers the workspace padding above the
+       title, so the title and the nav top match the cards page (y=24/y=60). */
+    --settings-sticky-top: calc(
+      var(--ui-space-6) +
+      var(--ui-control) +
+      var(--ui-space-2)
+    );
     min-width: 0;
+  }
+  .header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: grid;
+    min-width: 0;
+    margin-block-start: calc(-1 * var(--ui-space-6));
+    padding-block-start: var(--ui-space-6);
+    background: var(--bg);
   }
   .layout {
     display: grid;
@@ -11,10 +28,21 @@
     min-width: 0;
   }
   .nav {
+    position: sticky;
+    top: var(--settings-sticky-top);
+    min-width: 0;
+    max-height: calc(100dvh - var(--settings-sticky-top) - var(--ui-space-6));
+    /* No overscroll containment: a wheel or swipe that the nav does not
+       need still scrolls the page (review V-2223). */
+    overflow-y: auto;
+  }
+  /* Opaque scrolled contents keep subpixel text in the nav scroller. */
+  .navList {
     display: flex;
     flex-direction: column;
     gap: var(--ui-space-1);
     min-width: 0;
+    background: var(--bg);
   }
   .navItem {
     display: flex;
@@ -49,6 +77,10 @@
   }
   .main {
     min-width: 0;
+  }
+  /* Focus and scrollIntoView keep the target below the sticky header band. */
+  .main * {
+    scroll-margin-block-start: var(--settings-sticky-top);
   }
   .panel {
     display: grid;
@@ -399,15 +431,31 @@
     min-width: 0;
   }
   @media (max-width: 760px) {
+    /* Narrow screens keep the top list in the page flow; nothing sticks. */
+    .header {
+      position: static;
+      margin-block-start: 0;
+      padding-block-start: 0;
+      background: none;
+    }
+    .main * {
+      scroll-margin-block-start: 0;
+    }
     .layout {
       grid-template-columns: minmax(0, 1fr);
       gap: var(--ui-space-4);
     }
     .nav {
-      flex-direction: row;
+      position: static;
+      max-height: none;
       overflow-x: auto;
       border-bottom: var(--ui-stroke) solid var(--border);
       padding-bottom: var(--ui-space-2);
+    }
+    .navList {
+      flex-direction: row;
+      width: max-content;
+      min-width: 100%;
     }
     .navItem {
       flex: none;

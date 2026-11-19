@@ -1,5 +1,9 @@
 import { unmetCardDependencies } from "../card-dependencies.js";
-import { deriveReviewMatrix } from "../derived.js";
+import {
+  deriveReviewMatrix,
+  reviewPassed,
+  unresolvedMustFix,
+} from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
@@ -104,7 +108,7 @@ export function humanMergeBlockers(
         (r) =>
           r.work_item_id === w.id &&
           r.delivery_id === target.id &&
-          r.verdict === "pass",
+          reviewPassed(r),
       )
     )
       blockers.push(`${w.title}（${w.id}）：未通过当前交付审核`);
@@ -142,7 +146,7 @@ export function humanMergeBlockers(
   }
   for (const v of [...current, completion])
     for (const r of latestReviews(state, v).values())
-      if (r.issues.some((i) => i.must_fix && !i.pre_existing))
+      if (unresolvedMustFix(r))
         blockers.push(`审核 ${r.id}：有未处理的必须修复项`);
   for (const decision of mergeBlockingDecisions(
     state,

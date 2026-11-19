@@ -133,7 +133,18 @@ export interface CardHold {
   readonly set_at: Timestamp;
 }
 
+/** New UI cards explicitly distinguish display-only work from a write contract. */
+export type UiStateAndSave =
+  | "无写入"
+  | {
+      readonly save_timing: string;
+      readonly leave_behavior: string;
+      readonly failure_feedback: string;
+      readonly consistency: string;
+    };
+
 export interface Card {
+  readonly state_and_save?: UiStateAndSave;
   readonly merge_solo?: boolean;
   readonly id: CardId;
   readonly project_id: ProjectId;
@@ -310,6 +321,7 @@ export interface CardView extends Card {
       readonly delivery_id: DeliveryId;
     };
     readonly verdict: ReviewVerdict | null;
+    readonly followup_card_id?: CardId;
   }[];
   readonly why: string;
 }
@@ -717,6 +729,7 @@ export interface Delivery {
       readonly target_sha: string;
       readonly kind: Review["kind"];
       readonly issues: Review["issues"];
+      readonly followup_card_id?: CardId;
       readonly attachments: Review["attachments"];
       readonly acceptance_evidence: readonly {
         readonly timeline_entry_id: string;
@@ -764,7 +777,20 @@ export interface Delivery {
   readonly reused_reviews?: readonly ReviewId[];
   readonly status: DeliveryStatus;
 }
+export const REVIEW_IMPACTS = [
+  "data_or_permission",
+  "functional",
+  "ux_only",
+] as const;
+export type ReviewImpact = (typeof REVIEW_IMPACTS)[number];
+export const reviewImpactLabel: Readonly<Record<ReviewImpact, string>> = {
+  data_or_permission: "数据或权限错误",
+  functional: "功能错误",
+  ux_only: "仅提示或体验",
+};
 export interface ReviewIssue {
+  /** Required for newly submitted must-fix issues; absent on legacy records. */
+  readonly impact?: ReviewImpact;
   readonly severity: "critical" | "major" | "minor";
   readonly description: string;
   readonly must_fix: boolean;
@@ -785,6 +811,7 @@ export interface Review {
   readonly verdict: ReviewVerdict;
   readonly blocking: boolean;
   readonly recheck_required: boolean;
+  readonly followup_card_id?: CardId;
   readonly withdrawn?: { readonly at: string; readonly rationale: string };
   /** Captured by submitReview; legacy records without proof cannot be reused. */
   readonly reuse_basis?: {

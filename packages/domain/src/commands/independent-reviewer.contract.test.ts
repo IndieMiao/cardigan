@@ -285,6 +285,7 @@ test.each(
                       severity: "critical",
                       description: "Permission check bypass",
                       proof: "Unauthorized requests reach the write path",
+                      impact: "functional" as const,
                       must_fix: true,
                       pre_existing: false,
                     },
@@ -307,13 +308,21 @@ test.each(
         verdict === "pass"
           ? "passed"
           : verdict === "reject"
-            ? "failed"
+            ? "waiting_decision"
             : "in_progress",
-      max_review_rounds: verdict === "reject" ? LIMIT + 1 : LIMIT,
+      max_review_rounds: LIMIT,
     });
-    expect(f.state.decisions).toEqual([]);
+    if (verdict === "reject") {
+      expect(f.state.decisions).toMatchObject([
+        {
+          trigger: "review_limit",
+          status: "open",
+          affected_work_items: [item.id],
+        },
+      ]);
+    } else expect(f.state.decisions).toEqual([]);
     expect(
       f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
-    ).toHaveLength(verdict === "reject" ? 1 : 0);
+    ).toHaveLength(0);
   },
 );

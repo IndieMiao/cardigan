@@ -42,6 +42,7 @@ import {
   builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
+  requiresUiStateAndSave,
 } from "../templates.js";
 import {
   type CommandDraft,
@@ -304,6 +305,9 @@ function templateSummary(template: CardTemplate) {
     description: template.description,
     builtin: template.builtin,
     requires_repo: template.requires_repo,
+    ...(requiresUiStateAndSave(template)
+      ? { requires_state_and_save: true }
+      : {}),
     merge: template.merge,
     primary_work_item_key: template.primary_work_item_key,
     work_items: template.work_items.map((item) => ({
@@ -523,6 +527,9 @@ function mergeConfirmation(
         role_id: item?.role_id ?? null,
         kind: review.kind,
         verdict: review.verdict,
+        ...(review.followup_card_id
+          ? { followup_card_id: review.followup_card_id }
+          : {}),
         target_sha: review.target_sha,
         issues: review.issues,
       };

@@ -652,6 +652,7 @@ async function reviewLimit() {
           {
             severity: "major",
             description: "必须修复",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },

@@ -46,6 +46,7 @@ const office = actor(4, "pm");
 const issue = {
   severity: "major" as const,
   description: "Bug",
+  impact: "functional" as const,
   must_fix: true,
   pre_existing: false,
 };

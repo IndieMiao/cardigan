@@ -57,6 +57,7 @@ test("an incremental rejection can report a new weakened assertion and does not 
       {
         description: "Assertion removed",
         severity: "major",
+        impact: "functional" as const,
         must_fix: true,
         pre_existing: false,
       },

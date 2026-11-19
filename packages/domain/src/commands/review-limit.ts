@@ -1,4 +1,8 @@
-import type { Decision, WorkItem } from "../entities.js";
+import {
+  type Decision,
+  reviewImpactLabel,
+  type WorkItem,
+} from "../entities.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
@@ -36,6 +40,18 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
   const conflictRepair = !!currentReviewTarget(d, item)
     ?.merge_conflict_event_id;
   const mustFix = prior.issues.some((i) => i.must_fix && !i.pre_existing);
+  const impacts = [
+    ...new Set(
+      prior.issues.flatMap((i) =>
+        i.must_fix && !i.pre_existing && i.impact
+          ? [reviewImpactLabel[i.impact]]
+          : [],
+      ),
+    ),
+  ];
+  const impactSummary = impacts.length
+    ? `影响程度：${impacts.join("、")}。`
+    : "";
   const recommended = conflictRepair || !mustFix ? "raise_limit" : "pause";
   const reason = repeated
     ? "最近两次同类，推荐换做法或收窄范围；能独立跟进的部分可拆卡。"
@@ -59,6 +75,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       context: [
         `最近三次驳回（从新到旧）：`,
         ...recent.map((r) => `${r.id}【${r.category}】${r.summary}`),
+        ...(impactSummary ? [impactSummary] : []),
         reason,
       ].join("\n"),
       options: [
