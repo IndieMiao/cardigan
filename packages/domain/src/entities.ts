@@ -1050,7 +1050,7 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
-  /** Exact external Office identity; legacy actions remain human-only. */
+  /** Exact handoff owner (external Office, internal host ops, or fallback PM Ops). */
   readonly host_assignment_id?: AssignmentId;
   readonly cancellation?: {
     readonly reason: string;

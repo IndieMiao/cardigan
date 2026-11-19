@@ -5,6 +5,7 @@ import {
   completeHumanAction,
   listNeedsYou,
   notices,
+  postComment,
   refreshCancelledHumanActions,
   requestHumanAction,
   standingTools,
@@ -20,6 +21,7 @@ import {
   id,
   now,
   ports,
+  role,
   value,
 } from "./test-fixtures.js";
 
@@ -347,4 +349,101 @@ test("card cancellation and compensation preserve history, do not resume work, a
     ).events,
   ).toEqual([]);
   expect(refreshCancelledHumanActions(legacy, owner, ports()).ok).toBe(false);
+});
+
+test("internal non-blocking handoff binds a result author; only their explicit final report closes it", () => {
+  const base = setup();
+  const pm = {
+    ...required(base.assignments.find((a) => a.scope === "standing")),
+    scope: "standing" as const,
+    standing_mode: "ops" as const,
+    external: false,
+  };
+  const host = {
+    ...pm,
+    id: id("assignment", 5),
+    role_id: "host_ops",
+    standing_mode: undefined,
+  };
+  const { standing_mode: _mode, ...internal } = host;
+  const state = {
+    ...base,
+    roles: [...base.roles, role("host_ops")],
+    assignments: [...base.assignments.slice(0, 3), pm, internal],
+  };
+  const { host_assignment_id: _office, ...params } = handoff;
+  const assign = (s: CommandState) =>
+    triageHumanAction(
+      s,
+      human,
+      { ...params, host_operator: "host_ops" },
+      ports(),
+    );
+  const assigned = value(assign(state));
+  expect(assigned.data.host_assignment_id).toBe(host.id);
+  const after = apply(state, assigned);
+  const result = {
+    card_id: id("card", 1),
+    body: "H-1: checked the session",
+    host_result_for: target,
+  };
+  const report = (s: CommandState, a = actor(5, "host_ops")) =>
+    postComment(s, a, result, ports());
+  expect(
+    value(
+      postComment(
+        after,
+        actor(5, "host_ops"),
+        { card_id: result.card_id, body: result.body },
+        ports(),
+      ),
+    ).changes.some((c) => c.collection === "human_actions"),
+  ).toBe(false);
+  expect(report(after, actor()).ok).toBe(false);
+  expect(report(after, owner).ok).toBe(false);
+  expect(
+    postComment(
+      after,
+      actor(5, "host_ops"),
+      { ...result, card_id: id("card", 2) },
+      ports(),
+    ).ok,
+  ).toBe(false);
+  for (const patch of [
+    { blocks_merge: true },
+    { requested_by: "system" as const },
+    { host_operator: "external" as const },
+    { ready_when: { kind: "manual" as const } },
+  ]) {
+    expect(
+      report({ ...after, human_actions: [{ ...assigned.data, ...patch }] }).ok,
+    ).toBe(false);
+  }
+  const closed = apply(after, value(report(after)));
+  expect(closed.human_actions[0]).toMatchObject({
+    status: "done",
+    result: { text: result.body },
+  });
+  expect(report(closed).ok).toBe(false);
+  const fallback = {
+    ...state,
+    assignments: state.assignments.filter((a) => a.id !== host.id),
+  };
+  const assignedPm = value(assign(fallback));
+  expect(assignedPm.data.host_assignment_id).toBe(pm.id);
+  expect(
+    value(
+      triageHumanAction(
+        apply(fallback, assignedPm),
+        owner,
+        {
+          human_action_id: target,
+          disposition: "done",
+          rationale: "Result verified",
+        },
+        ports(),
+      ),
+    ).data.status,
+  ).toBe("done");
+  expect(assign(base).ok).toBe(false);
 });

@@ -154,6 +154,20 @@ test("Q-88 loads a configurable cancellation grace once, defaulting to 60 minute
   ).toBe(60 * 60_000);
 });
 
+test("C-475: inbox escalation has a separate read-on-start threshold", async () => {
+  expect((await loadRunCapacityConfig({ configDir })).inboxStallAfterMs).toBe(
+    120 * 60_000,
+  );
+  await write("machines: {}\ninbox_stall_after_minutes: 30\n");
+  expect(await loadRunCapacityConfig({ configDir })).toMatchObject({
+    errors: [],
+    inboxStallAfterMs: 30 * 60_000,
+    inactiveCancelAfterMs: 60 * 60_000,
+  });
+  await write("machines: {}\ninbox_stall_after_minutes: -1\n");
+  expect((await loadRunCapacityConfig({ configDir })).errors).toHaveLength(1);
+});
+
 test.each(["0", "-1", "1.5", "'30'", "null", "35792"])(
   "invalid inactivity grace %s disables destructive recovery",
   async (value) => {

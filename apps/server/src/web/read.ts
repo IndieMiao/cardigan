@@ -2004,6 +2004,7 @@ export const EVENT_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "run_started",
     "run_finished",
     "run_dispatch_aborted",
+    "run_inbox_stalled",
     "run_inactive",
     "run_inactivity_stop_requested",
     "run_inactivity_stop_started",

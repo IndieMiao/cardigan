@@ -13,6 +13,8 @@ export interface HarnessActivity
     "assignment_id" | "runtime_key" | "session_id" | "updated_at" | "source"
   > {
   readonly run_id: RunId;
+  /** Latest protocol record explicitly ended a turn (not a tool call or an error). */
+  readonly turn_ended?: true;
   readonly stale_after_ms: number;
   /** Last normal Claude record in the same bounded transcript read, before an error. */
   readonly last_progress_at?: string;

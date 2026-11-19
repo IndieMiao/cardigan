@@ -6,6 +6,7 @@ export interface ActivityMetadata {
   session_id: string;
   cwd: string;
   updated_at: string;
+  turn_ended?: true;
   error?: HarnessActivity["error"];
 }
 const object = (v: unknown): Record<string, unknown> | undefined =>
@@ -45,6 +46,7 @@ export function parseActivityMetadata(
     session_id: v.session_id,
     cwd: v.cwd,
     updated_at: v.updated_at,
+    ...(v.turn_ended === true && !v.error ? { turn_ended: true as const } : {}),
     ...(v.error ? { error: v.error as HarnessActivity["error"] } : {}),
   };
 }
@@ -87,7 +89,10 @@ export function parseCodexActivity(
     if (
       !(
         event?.type === "response_item" ||
-        (event?.type === "event_msg" && payload?.type === "token_count") ||
+        (event?.type === "event_msg" &&
+          ["token_count", "task_complete", "task_started"].includes(
+            String(payload?.type),
+          )) ||
         error
       )
     )
@@ -96,6 +101,9 @@ export function parseCodexActivity(
       session_id: meta?.id,
       cwd: meta?.cwd,
       updated_at: event?.timestamp,
+      ...(event?.type === "event_msg" && payload?.type === "task_complete"
+        ? { turn_ended: true }
+        : {}),
       ...(error ? { error: codexError(payload?.codex_error_info) } : {}),
     });
     // Regressing clocks/late older records do not become new activity.

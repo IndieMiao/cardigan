@@ -120,6 +120,11 @@ const schemas = {
     body: text,
     work_item_id: id("work_item").optional(),
     mentions: z.array(text).optional(),
+    host_result_for: id("human_action")
+      .optional()
+      .describe(
+        "Host Ops only: record the final result and complete this assigned non-blocking host action. Omit on progress comments.",
+      ),
     reply_to: entryId.optional(),
     refs: refs.optional(),
     supersedes: entryId.optional(),

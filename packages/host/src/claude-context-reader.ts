@@ -100,7 +100,7 @@ async function read() {
         const error = status === 429 ? 'rate_limit' :
           Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
         activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
-          updated_at: timestamp, ...(apiError ? { error } : {}) };
+          updated_at: timestamp, ...(event.type === 'assistant' && object(event.message)?.stop_reason === 'end_turn' && !apiError ? { turn_ended: true } : {}), ...(apiError ? { error } : {}) };
         if (!apiError) progress = activity;
         else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
       }

@@ -521,6 +521,9 @@ export async function readSessionContexts(
             matchesCwd(progress.cwd)
               ? { last_progress_at: progress.updated_at }
               : {}),
+            ...(activityMetadata.turn_ended
+              ? { turn_ended: true as const }
+              : {}),
             stale_after_ms: staleMs,
             source: `${harness}:session_metadata`,
             ...(activityMetadata.error

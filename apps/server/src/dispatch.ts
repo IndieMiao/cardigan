@@ -15,6 +15,7 @@ import {
   abortDispatch,
   assignmentCardHeld,
   assignmentDependenciesAllowStart,
+  associatedHarnessActivity,
   canDispatchRun,
   cardDependencyDispatchOrder,
   compareDispatchOrder,
@@ -31,6 +32,7 @@ import {
   hostOpsPending,
   isRunCapacityExempt,
   isStandingPm,
+  lastRunActivity,
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
@@ -84,6 +86,7 @@ import {
   beginLaunchAttempt,
   finishBellAttempt,
   getRoleVersion,
+  listBellAttempts,
   moveNotification,
   type Store,
   type StoreTransactionContext,
@@ -177,6 +180,7 @@ export interface DispatcherOptions {
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
+  readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
   readonly snapshot: (
@@ -722,7 +726,7 @@ export class Dispatcher {
     // A standing owner can leave held work queued while servicing another card.
     return runnableQueuedRun(a, state);
   }
-  private busy(state: CommandState, a: Assignment) {
+  private busy(state: CommandState, a: Assignment, continuing?: RunId) {
     if (a.role_upgrade || a.idle_retirement?.phase === "stopping") return true;
     if (hostOpsPending(state.events, a.id)) return true;
     // C-211: a stopped Assignment waits for the human's start; its bells stay
@@ -736,7 +740,10 @@ export class Dispatcher {
         r.inactivity_stop ||
         (r.launch_publication &&
           !["started", "exited"].includes(r.launch_publication.phase)) ||
-        (unfinishedRun(r) && r.id !== queued?.id && !standingRunDormant(a, r)),
+        (unfinishedRun(r) &&
+          r.id !== continuing &&
+          r.id !== queued?.id &&
+          !standingRunDormant(a, r)),
     );
   }
   private async deliver(
@@ -752,22 +759,48 @@ export class Dispatcher {
       this.reject(project, notes, a, "assignment_released");
       return;
     }
+    // A finished harness turn is not a finished business Run. Only new inbox
+    // work can continue it; never turn queued-only work into a second launch.
+    const running =
+      notes.length && a.runtime_ref
+        ? runsOf(state.runs, a.id).find((r) => r.status === "running")
+        : undefined;
+    const continuing =
+      running && notes.every((n) => !n.run_id || n.run_id === running.id)
+        ? running
+        : undefined;
     if (
       a.external ||
       a.status !== "active" ||
-      this.busy(state, a) ||
+      this.busy(state, a, continuing?.id) ||
       !assignmentDependenciesAllowStart(state, a) ||
       assignmentCardHeld(a, state) ||
       !hasRunTarget(a, state)
     )
       return;
     let live = false;
+    let transcriptEnd: string | undefined;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
+      if (continuing) {
+        if (!observed?.ok || observed.value.process !== "alive") return;
+        if (!["idle", "done"].includes(observed.value.agent)) {
+          // Claude/Codex may not publish OSC status. Require positive end-of-turn
+          // evidence from the exact Run/session, not mere silence or process life.
+          if (observed.value.agent !== "unknown") return;
+          const cached = this.options.harnessActivity?.(project, a.id);
+          if (
+            !cached?.turn_ended ||
+            !this.turnEndCurrent(state, a, continuing, cached)
+          )
+            return;
+          transcriptEnd = cached.updated_at;
+        }
+      }
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -813,7 +846,8 @@ export class Dispatcher {
       prior?.tool_catalog !== undefined &&
       prior.tool_catalog !== catalog;
     try {
-      if (
+      if (continuing) snapshot = continuing;
+      else if (
         queued?.recovery_policy &&
         queued.recovery_policy.root_run_id !== queued.id
       ) {
@@ -850,7 +884,7 @@ export class Dispatcher {
       this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
-    if (replaceCatalog && !replaceProfile && a.runtime_ref) {
+    if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
       // Same replacement path as a lost runtime: resume_or_replace force-
       // releases the live terminal and starts a fresh CLI session, so the new
       // session lists the current tools.
@@ -864,7 +898,15 @@ export class Dispatcher {
     let job: Job | undefined;
     try {
       job = profileSpanSync("deliver.claim", () =>
-        this.claim(project, notes, a, snapshot, live, sessionCatalog),
+        this.claim(
+          project,
+          notes,
+          a,
+          snapshot,
+          live,
+          sessionCatalog,
+          continuing,
+        ),
       );
     } catch (error) {
       if (a.role_id === "independent_reviewer")
@@ -898,13 +940,36 @@ export class Dispatcher {
         );
         if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
-        const baseline = await profileSpan("deliver.before_wake", async () =>
-          this.options.beforeWake?.({
-            project,
-            assignment: job.assignment,
-          }),
-        );
+        if (transcriptEnd && continuing) {
+          // Bypass the patrol cache under the launch lock; later input, tools,
+          // read failures and an intervening send all invalidate the old end.
+          const fresh = (
+            await this.options.inspectHarnessActivity?.(project, a.id)
+          )?.get(a.id);
+          if (
+            !fresh ||
+            !["fresh", "stale"].includes(fresh.status) ||
+            fresh.activity?.updated_at !== transcriptEnd ||
+            !this.turnEndCurrent(
+              this.state(project),
+              a,
+              continuing,
+              fresh.activity,
+              job.attempt.id,
+            )
+          )
+            throw new RunPreparationDeferred();
+        }
+        const baseline = continuing
+          ? undefined
+          : await profileSpan("deliver.before_wake", async () =>
+              this.options.beforeWake?.({
+                project,
+                assignment: job.assignment,
+              }),
+            );
         if (
+          !continuing &&
           refreshTargetWait(this.options.store, project, job.run.id, this.clock)
         ) {
           deferTargetAttempt(this.options.store, job.attempt, this.clock);
@@ -930,6 +995,7 @@ export class Dispatcher {
             runtimeRef,
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
+              ...(continuing && !transcriptEnd ? { if_idle: true } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
                 this.activate(job) &&
@@ -1032,6 +1098,35 @@ export class Dispatcher {
       );
     this.settle(job.attempt, sent, reason, job.bell, failure);
   }
+  private turnEndCurrent(
+    state: CommandState,
+    a: Assignment,
+    run: Run,
+    sample: HarnessActivity,
+    attemptId?: string,
+  ) {
+    const current = state.assignments.find((row) => row.id === a.id);
+    if (
+      !current ||
+      !sample.turn_ended ||
+      sample.source !== `${run.harness}:session_metadata` ||
+      sample.error ||
+      sample.run_id !== run.id ||
+      !associatedHarnessActivity(state, current, this.clock.now(), sample) ||
+      Date.parse(sample.updated_at) < lastRunActivity(run, current)
+    )
+      return false;
+    return !listBellAttempts(
+      this.options.store.database,
+      state.project_id,
+      run.id,
+    ).some(
+      (old) =>
+        old.id !== attemptId &&
+        Date.parse(old.finished_at ?? old.started_at) >=
+          Date.parse(sample.updated_at),
+    );
+  }
   private catalog(a: Assignment, project: ProjectId): string | undefined {
     try {
       return this.options.toolCatalog?.(a, project);
@@ -1079,12 +1174,23 @@ export class Dispatcher {
     snapshot: LaunchSnapshot,
     live: boolean,
     catalog: string | undefined,
+    continuing?: Run,
   ): Job | undefined {
     const { store } = this.options;
     return store.uow.run((tx) => {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      if (
+        continuing &&
+        (a.session_ref !== expected.session_ref ||
+          a.last_mcp_activity_at !== expected.last_mcp_activity_at ||
+          !wakeIsCurrent(state, expected, continuing.id) ||
+          !state.runs.some(
+            (r) => r.id === continuing.id && r.status === "running",
+          ))
+      )
+        return;
       if (
         !assignmentDependenciesAllowStart(state, a) ||
         assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
@@ -1175,7 +1281,8 @@ export class Dispatcher {
         (!ready.length &&
           waiting?.queue_reason === undefined &&
           !waiting?.dispatch_target_wait) ||
-        this.busy(state, a)
+        (continuing && !ready.length) ||
+        this.busy(state, a, continuing?.id)
       )
         return;
       if (
@@ -1189,6 +1296,7 @@ export class Dispatcher {
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
       if (!cause && !waiting) return;
       let run =
+        continuing ??
         this.queued(state, a) ??
         state.runs.find(
           (r) =>
@@ -1538,10 +1646,7 @@ export class Dispatcher {
         !run ||
         !owner ||
         !wakeIsCurrent(state, job.assignment, job.run.id) ||
-        // Existing completed Runs can still own an unread-notification retry.
-        // Only a completion that happened during this preparation is stale.
-        (!["queued", "dispatched"].includes(run.status) &&
-          !(run.status === "completed" && job.run.status === "completed"))
+        !this.wakeStatusCurrent(state, job, owner, run)
       ) {
         withdrawBellAttempt(store.database, project, job.attempt.id);
         return false;
@@ -1581,6 +1686,41 @@ export class Dispatcher {
         );
       return true;
     });
+  }
+  private wakeStatusCurrent(
+    state: CommandState,
+    job: Job,
+    owner: Assignment,
+    run: Run,
+  ) {
+    if (job.run.status !== "running")
+      return (
+        ["queued", "dispatched"].includes(run.status) ||
+        (run.status === "completed" && job.run.status === "completed")
+      );
+    if (
+      this.closing ||
+      run.status !== "running" ||
+      run.heartbeat_at !== job.run.heartbeat_at ||
+      owner.last_mcp_activity_at !== job.assignment.last_mcp_activity_at ||
+      this.busy(state, owner, run.id) ||
+      !assignmentDependenciesAllowStart(state, owner) ||
+      assignmentCardHeld(owner, state, run.trigger_event_id)
+    )
+      return false;
+    const notes = this.options.store.listNotifications({
+      project_id: state.project_id,
+      ids: job.attempt.notification_ids,
+    });
+    return (
+      notes.length === job.attempt.notification_ids.length &&
+      notes.every(
+        (n) =>
+          n.status === "pending" &&
+          !covered(n, state, owner.id) &&
+          !state.cards.some((c) => c.id === n.card_id && !!c.hold),
+      )
+    );
   }
   private settle(
     attempt: BellAttempt,
@@ -1625,6 +1765,7 @@ export class Dispatcher {
         );
         state = this.loadState(tx, project);
       }
+      const run = state.runs.find((r) => r.id === attempt.run_id);
       const notes = store.listNotifications({
         project_id: project,
         ids: attempt.notification_ids,
@@ -1643,7 +1784,7 @@ export class Dispatcher {
             run_id: attempt.run_id,
             attempts: n.attempts + 1,
             ...(bell ? { bell } : {}),
-            ...(sent && n.card_id
+            ...((sent || run?.status === "running") && n.card_id
               ? {
                   next_attempt_at: new Date(
                     Date.parse(at) + this.retryDelay(n.attempts + 1),
@@ -1666,7 +1807,6 @@ export class Dispatcher {
         )
       )
         return;
-      const run = state.runs.find((r) => r.id === attempt.run_id);
       // C-56: a dispatched Run is retried with backoff and recovered by
       // dispatch-retry; only escalate failures nobody else will handle.
       const recovering =
@@ -1841,7 +1981,7 @@ export class Dispatcher {
       step("belled", () => {
         for (const n of store.listNotifications({
           project_id: project,
-          status: "belled",
+          statuses: ["belled", "delivery_failed"],
         })) {
           if (!n.card_id || !n.next_attempt_at || n.next_attempt_at > at)
             continue;
@@ -1851,7 +1991,11 @@ export class Dispatcher {
             a?.status !== "active" ||
             a.external ||
             !hasRunTarget(a, state) ||
-            runsOf(state.runs, a.id).some(unfinishedRun) ||
+            (n.status === "delivery_failed"
+              ? !runsOf(state.runs, a.id).some(
+                  (r) => r.id === n.run_id && r.status === "running",
+                )
+              : runsOf(state.runs, a.id).some(unfinishedRun)) ||
             attempts.some(
               (t) =>
                 t.assignment_id === a.id || t.notification_ids.includes(n.id),

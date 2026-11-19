@@ -206,18 +206,193 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
     ownNotes().every((n) => n.status === "belled" && n.attempts === 1),
   ).toBe(true);
 });
-test("§3.1 an unfinished business Run holds notifications even if Runtime reports idle", async () => {
-  f.session(target.assignment, false);
+test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
+  "C-475: inbox delivery to a %s harness without finish_run",
+  async (agent) => {
+    const run = f.session(target.assignment, false);
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent, observed_seq: 1 },
+    });
+    const beforeWake = vi.fn(async () => undefined);
+    for (let i = 0; i < 2; i++)
+      await new Dispatcher({ ...options, beforeWake }).tick();
+    if (["idle", "done"].includes(agent)) {
+      expect(runtime.wake).toHaveBeenCalledOnce();
+      expect(vi.mocked(runtime.wake).mock.calls[0]).toMatchObject([
+        expect.anything(),
+        expect.stringContaining(`run=${run.id}`),
+        { if_idle: true },
+      ]);
+      expect(ownNotes()[0]).toMatchObject({
+        status: "belled",
+        run_id: run.id,
+        attempts: 1,
+      });
+    } else {
+      expect(runtime.wake).not.toHaveBeenCalled();
+      expect(ownNotes()[0]?.status).toBe("pending");
+    }
+    expect(beforeWake).not.toHaveBeenCalled(); // Never sync a live worktree to deliver a notification.
+    expect(options.startRun).not.toHaveBeenCalled();
+    expect(f.state().runs).toHaveLength(2);
+    expect(f.state().runs.at(-1)).toMatchObject({
+      id: run.id,
+      status: "running",
+    });
+  },
+);
+
+test.each(["same", "resumed", "unassociated", "read_failed"] as const)(
+  "C-475: Claude without OSC needs a rechecked end of this turn (%s)",
+  async (mode) => {
+    const run = f.session(target.assignment, false);
+    f.store.uow.run((tx) => {
+      const current = tx.runs.get(f.project, run.id);
+      if (!current) throw new Error("missing fixture run");
+      tx.runs.put(f.project, { ...current, harness: "claude-code" });
+    });
+    f.advance(3_000);
+    const sample = {
+      run_id: run.id,
+      assignment_id: target.assignment.id,
+      runtime_key: JSON.stringify(f.refFor(target.assignment)),
+      session_id: "fixture-session",
+      source: "claude-code:session_metadata",
+      updated_at: f.clock.now(),
+      stale_after_ms: 60_000,
+      turn_ended: true as const,
+    };
+    const { turn_ended: _ended, ...active } = sample;
+    const inspected =
+      mode === "same"
+        ? sample
+        : mode === "unassociated"
+          ? { ...sample, runtime_key: "another" }
+          : active;
+    const read = vi.fn(
+      async () =>
+        new Map([
+          [
+            target.assignment.id,
+            {
+              status:
+                mode === "read_failed"
+                  ? ("read_failed" as const)
+                  : ("fresh" as const),
+              activity: inspected,
+            },
+          ],
+        ]),
+    );
+    const opts = {
+      ...options,
+      harnessActivity: () => sample,
+      inspectHarnessActivity: read,
+    };
+    comment();
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "unknown", observed_seq: 1 },
+    });
+    await new Dispatcher(opts).tick();
+    expect(read).toHaveBeenCalledWith(f.project, target.assignment.id);
+    expect(runtime.wake).toHaveBeenCalledTimes(mode === "same" ? 1 : 0);
+    expect(ownNotes()[0]?.status).toBe(mode === "same" ? "belled" : "pending");
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+    if (mode === "same") {
+      comment("second pending event");
+      await new Dispatcher(opts).tick();
+      expect(runtime.wake).toHaveBeenCalledTimes(1); // A sent bell consumes the observed turn end, also across restart.
+    }
+  },
+);
+
+test("C-475: an ambiguous busy wake stays bound to the running Run and retries with backoff", async () => {
+  const run = f.session(target.assignment, false);
   comment();
   vi.mocked(runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "idle", observed_seq: 1 },
   });
+  vi.mocked(runtime.wake).mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_conflict", message: "busy" },
+  });
+  const opts = { ...options, retryBaseMs: 100 };
+  await new Dispatcher(opts).tick();
+  expect(ownNotes()[0]).toMatchObject({
+    run_id: run.id,
+    status: "delivery_failed",
+    attempts: 1,
+  });
+  await new Dispatcher(opts).tick();
+  expect(runtime.wake).toHaveBeenCalledOnce();
+  f.advance(101);
+  await new Dispatcher(opts).tick();
+  expect(ownNotes()[0]).toMatchObject({
+    run_id: run.id,
+    status: "belled",
+    attempts: 2,
+  });
+});
+
+test("C-475: withdraw if the running turn finishes while the wake is queued", async () => {
+  const run = f.session(target.assignment, false);
+  comment();
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 1 },
+  });
+  vi.mocked(runtime.wake).mockImplementation(async (_ref, _bell, guard) => {
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: run.id, outcome: "completed", summary: "done" },
+          p,
+        ),
+      f.actorFor(target.assignment),
+    );
+    expect(guard?.before_send?.()).toBe(false);
+    return { ok: true, value: { sent: false, withdrawn: true } };
+  });
   await new Dispatcher(options).tick();
-  expect(runtime.status).not.toHaveBeenCalled();
-  expect(runtime.wake).not.toHaveBeenCalled();
-  expect(ownNotes()[0]?.status).toBe("pending");
-  expect(f.state().runs).toHaveLength(2);
+  expect(ownNotes()[0]).toMatchObject({ status: "pending", attempts: 0 });
+  expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+});
+
+test("C-475: stalled pending inbox alerts PM Ops at two hours even without cancellation or harness evidence", async () => {
+  const run = f.session(target.assignment, false);
+  const opts = { ...options, inactiveCancelAfterMs: null };
+  const alerts = () =>
+    f.state().events.filter((e) => e.type === "run_inbox_stalled");
+  f.advance(2 * 60 * 60_000 - 1);
+  await new Dispatcher(opts).tick();
+  expect(alerts()).toEqual([]);
+  comment();
+  await new Dispatcher(opts).tick();
+  expect(alerts()).toEqual([]);
+  f.advance(1);
+  await new Dispatcher(opts).tick();
+  expect(alerts()).toHaveLength(1);
+  expect(alerts()[0]).toMatchObject({
+    card_id: target.card.id,
+    payload: {
+      assignment_id: target.assignment.id,
+      run_id: run.id,
+      notification_ids: [ownNotes().find((n) => n.status === "pending")?.id],
+    },
+  });
+  expect(
+    f.store
+      .listNotifications({ project_id: f.project })
+      .filter((n) => n.event_id === alerts()[0]?.id),
+  ).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+  await new Dispatcher(opts).tick();
+  expect(alerts()).toHaveLength(1);
 });
 test.each(
   (["decision_resumed", "rework", "fix"] as const).flatMap((kind) =>

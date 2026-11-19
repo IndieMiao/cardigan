@@ -591,3 +591,33 @@ test("fresh harness evidence prevents a claim and withdraws a pending stop; inva
     claim({ ...sample, session_id: "old-session" })?.inactivity_stop,
   ).toBeDefined();
 });
+
+test.each(["open", "done"] as const)(
+  "C-475: a %s read-only host diagnosis adds zero inactivity grace",
+  (status) => {
+    const t = inactiveFixture();
+    const id = f.io.ids.next(f.state.project_id, "human_action");
+    const card = f.state.cards[0];
+    if (!card) throw new Error("Missing card");
+    f.state = {
+      ...f.state,
+      human_actions: [
+        {
+          id,
+          key: id,
+          card_id: card.id,
+          requested_by: "human",
+          instructions: "Inspect the session",
+          why_human: "Read diagnostics",
+          expected_return: "Report",
+          blocked_work_items: [],
+          status,
+          triage: "host",
+          host_operator: "host_ops",
+        },
+      ],
+    };
+    t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+    expect(t.claim()?.inactivity_stop).toBeDefined();
+  },
+);

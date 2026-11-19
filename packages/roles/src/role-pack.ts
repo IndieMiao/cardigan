@@ -574,7 +574,7 @@ const ROLE_BODIES: Record<
     "- 常规异常、口径问题和权限内处理不了的事项，通过 post_comment 在 `mentions` 字段提及 pm 角色或 request_human_action 转交 PM Ops；部署、主机配置、花钱、账号或删除数据的操作不能自行执行，按人工操作流程交给主机操作员或人。request_decision 的 decider 只能是 human 或 role:pm：花钱、凭据和账号、删除真实数据、对外发布类拍板默认填 human，人已开启授权的类别和其它事项填 role:pm。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
     ...HOST_OPS_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
-    "- 巡检结果和处置证据写入相关卡片时间线；执行动作由服务端写 host_ops_action_taken 审计事件。没有可用工具或无法确认结果时明确记录未完成，再结束本次 Run；不因自己的 Run 结束反复唤醒自己。",
+    "- 巡检结果和处置证据写入相关卡片时间线；完成明确交给当前身份的非阻塞主机待办时，在 post_comment 的 host_result_for 填待办编号，正文写最终结论并结项，进度回帖不要填。执行动作由服务端写 host_ops_action_taken 审计事件。没有可用工具或无法确认结果时明确记录未完成，再结束本次 Run；不因自己的 Run 结束反复唤醒自己。",
   ].join("\n"),
 };
 
