@@ -4,6 +4,7 @@ import {
   parseWorkerOnboarding,
   readOnboardingYaml,
   refreshMachineObservations,
+  runtimeTargetBinding,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
@@ -192,7 +193,10 @@ export async function runWorkerCommand(
           machine,
           env: io.env,
           target: () => ({
-            execution: config.worker.execution,
+            execution: {
+              ...config.worker.execution,
+              target: runtimeTargetBinding(config.worker),
+            },
             machine: registered,
           }),
           check: async () => ({

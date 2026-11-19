@@ -6,6 +6,7 @@ import {
   MACHINE_OBSERVATION_TTL_MS,
   type MachineHealth,
   readMachineObservations,
+  readMachineObservationsInTransaction,
 } from "./machine-capabilities.js";
 import { withTempStore } from "./test-support.js";
 
@@ -133,6 +134,41 @@ test("late probes cannot overwrite newer results", () =>
     expect(
       readMachineObservations(store, "a", "local", now).capabilities,
     ).toEqual([]);
+  }));
+
+test("a completed observation cannot be rebound or expose its private fingerprint", () =>
+  withTempStore((store) => {
+    store.createProject({ id: "a" });
+    beginMachineObservation(store, actor, "a", "local", "probe", now);
+    const finish = (fingerprint: string) =>
+      completeMachineObservation(
+        store,
+        actor,
+        "a",
+        "local",
+        "probe",
+        health,
+        capabilities,
+        fingerprint,
+      );
+    expect(finish("original-target")).toBe(true);
+    expect(finish("replacement-target")).toBe(false);
+    const matches = (fingerprint: string) =>
+      store.uow.read(
+        () =>
+          readMachineObservationsInTransaction(
+            store,
+            "a",
+            "local",
+            now,
+            fingerprint,
+          ).observation_target_matches,
+      );
+    expect(matches("original-target")).toBe(true);
+    expect(matches("replacement-target")).toBe(false);
+    const view = readMachineObservations(store, "a", "local", now);
+    expect(view).not.toHaveProperty("observation_target_matches");
+    expect(view.health).not.toHaveProperty("target_fingerprint");
   }));
 
 test("only the matching system actor can write, even if an Assignment has every tool", () =>

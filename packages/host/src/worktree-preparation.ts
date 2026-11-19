@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import type { WorktreePreparation } from "@cardigan/domain";
-import { runtimeTargetFingerprint } from "./runtime-target-fingerprint.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   type RuntimeWorker,
   runtimeWorkersPath,
@@ -42,7 +42,7 @@ export function readWorktreePreparation(
   const bindings = input.bindings;
   const at = instant(now);
   return (worker) => {
-    const { project_id, machine_id, generation, execution, session } = worker;
+    const { project_id, machine_id, execution } = worker;
     const key = `${project_id}/${machine_id}`;
     if (!Object.hasOwn(bindings, key)) return "missing";
     const proof = bindings[key];
@@ -66,14 +66,7 @@ export function readWorktreePreparation(
       !execution.gitHelper ||
       !execution.fileHelper ||
       !execution.publication ||
-      proof.target_fingerprint !==
-        runtimeTargetFingerprint(
-          project_id,
-          machine_id,
-          generation,
-          execution,
-          session,
-        )
+      proof.target_fingerprint !== runtimeTargetBinding(worker).fingerprint
     )
       return "invalid";
     const from = instant(proof.verified_at),

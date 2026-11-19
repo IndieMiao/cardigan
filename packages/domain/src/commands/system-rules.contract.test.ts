@@ -886,6 +886,7 @@ test("C-300 ready assignment pins the unique tagged machine and audits it withou
           "worker-a",
           {
             remote_binding: "allowed",
+            observation_target_matches: true,
             health: { status: "passed", available: true },
             capabilities: [
               { key: "harness.codex", version: "1.2.3", available: true },

@@ -129,7 +129,13 @@ export function selectMachine(
       else {
         const key = `harness.${facts.harness}`;
         const cap = f?.capabilities.find((c) => c.key === key);
-        if (!cap?.available || !cap.version)
+        if (
+          cap &&
+          f?.remote_binding === "allowed" &&
+          !f.observation_target_matches
+        )
+          reasons.push(`${key}：缺少与当前工作机绑定匹配的检查，请重新检查`);
+        else if (!cap?.available || !cap.version)
           reasons.push(
             `${key}：${!cap ? "未验证" : !cap.available ? "已过期" : "缺少版本"}`,
           );

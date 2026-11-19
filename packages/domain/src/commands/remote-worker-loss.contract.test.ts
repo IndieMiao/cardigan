@@ -632,3 +632,63 @@ test.each(["main", "backup"] as const)(
     expect(retry.token_requests).toEqual([]);
   },
 );
+
+test("a pre-launch failure after confirmed backup takeover retains the chosen commit on the next machine", () => {
+  const f = setup();
+  f.confirm();
+  const released = f.release();
+  const work_item_id = id("work_item", 1),
+    card_id = id("card", 1);
+  const s = {
+    ...released,
+    machines: [...(released.machines ?? []), { ...machine(), id: "worker-b" }],
+    work_items: released.work_items.map((w) =>
+      w.id === work_item_id && w.kind === "produce"
+        ? { ...w, status: "changes_requested" as const }
+        : w,
+    ),
+  };
+  const params = { work_item_id, role_id: "coder" };
+  const takeover = value(
+    assign(
+      s,
+      human,
+      { ...params, machine_id: "worker-b", recovery_source: "backup" },
+      f.io,
+    ),
+  );
+  const assigned = apply(s, takeover);
+  const failure = {
+    type: "bell_delivery_failed",
+    id: f.io.ids.nextEventId(),
+    created_at: now,
+    card_id,
+    seq: f.io.ids.nextEventSequence(s.project_id, card_id),
+    actor: system,
+    payload: {
+      assignment_id: takeover.data.id,
+      reason: "snapshot_unavailable",
+    },
+  };
+  const failed = { ...assigned, events: [...assigned.events, failure] };
+  const ready = apply(
+    failed,
+    value(
+      releaseAssignment(
+        failed,
+        human,
+        { assignment_id: takeover.data.id },
+        f.io,
+      ),
+    ),
+  );
+  const retry = value(assign(ready, human, params, f.io));
+  expect(retry.data).toMatchObject({
+    machine_id: "local",
+    recovery: {
+      previous_assignment_id: takeover.data.id,
+      source: "backup",
+      backup,
+    },
+  });
+});

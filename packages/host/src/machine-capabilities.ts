@@ -55,6 +55,7 @@ export async function refreshMachineObservations(
     launch_enabled: false,
   };
   let capabilities: MachineCapability[] = [];
+  let targetFingerprint: string | undefined;
   try {
     const target = await options.target();
     const binding = JSON.stringify([
@@ -122,6 +123,8 @@ export async function refreshMachineObservations(
       ])
     )
       throw new Error("Machine target changed");
+    if (health.status === "passed")
+      targetFingerprint = target.execution.target?.fingerprint;
   } catch {
     // Do not echo configuration, command output, SSH parameters, or exceptions.
     health = {
@@ -140,6 +143,7 @@ export async function refreshMachineObservations(
     observation,
     health,
     capabilities,
+    targetFingerprint,
   );
   return readMachineObservations(store, project, machine, now());
 }

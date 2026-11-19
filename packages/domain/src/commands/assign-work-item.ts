@@ -127,11 +127,6 @@ export function assignWorkItem(
         "validation_failed",
         "Recovery requires another explicit machine",
       );
-      ensure(
-        p.recovery_source !== "backup" || recovery.backup,
-        "validation_failed",
-        "No successful backup is available",
-      );
     }
   } else if (existing.length || item.assignment_id) {
     const current = previous;
@@ -195,6 +190,14 @@ export function assignWorkItem(
     "validation_failed",
     "Recovery requires a released remote loss",
   );
+  // A pre-launch retry changes the machine, not an already confirmed recovery source.
+  const source = retry?.recovery?.source ?? p.recovery_source ?? "main";
+  const backup = retry ? retry.recovery?.backup : recovery?.backup;
+  ensure(
+    source !== "backup" || backup,
+    "validation_failed",
+    "No successful backup is available",
+  );
   const employee = selectEmployee(
     d,
     item,
@@ -247,10 +250,8 @@ export function assignWorkItem(
       ? {
           recovery: {
             previous_assignment_id: previous.id,
-            source: p.recovery_source ?? "main",
-            ...(p.recovery_source === "backup" && recovery?.backup
-              ? { backup: recovery.backup }
-              : {}),
+            source,
+            ...(source === "backup" && backup ? { backup } : {}),
           },
         }
       : {}),

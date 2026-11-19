@@ -41,6 +41,7 @@ const remote: Machine = {
 };
 const healthy: MachinePlacement = {
   remote_binding: "allowed",
+  observation_target_matches: true,
   health: { status: "passed", available: true },
   capabilities: [
     { key: "harness.codex", version: "1.2.3", available: true },

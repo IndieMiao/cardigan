@@ -6,6 +6,7 @@ import {
 } from "@cardigan/store";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
+import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
   matchesWorkerPlatform,
@@ -63,7 +64,15 @@ export function configureMachinePlacement(
           return [
             id,
             {
-              ...readMachineObservationsInTransaction(store, project, id, now),
+              ...readMachineObservationsInTransaction(
+                store,
+                project,
+                id,
+                now,
+                worker && id !== "local"
+                  ? runtimeTargetBinding(worker).fingerprint
+                  : undefined,
+              ),
               ...(worker && id !== "local" && preparation
                 ? { worktree_preparation: preparation(worker) }
                 : {}),

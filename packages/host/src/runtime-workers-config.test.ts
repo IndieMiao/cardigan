@@ -29,6 +29,8 @@ import {
   run,
   value,
 } from "../../domain/src/commands/test-fixtures.js";
+import { refreshMachineObservations } from "./machine-capabilities.js";
+import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
 import { configureMachinePlacement } from "./machine-placement.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import { RuntimeTargets } from "./runtime-targets.js";
@@ -432,6 +434,7 @@ test("placement reads current project opt-in and unexpired observations in the c
     allow_remote_launch: boolean,
     platform: { os?: string; arch?: string } = {},
     generation = "one",
+    user = "project_a",
   ) =>
     writeFileSync(
       join(root, "runtime-workers.yaml"),
@@ -444,6 +447,7 @@ test("placement reads current project opt-in and unexpired observations in the c
             ...p,
             allow_remote_launch,
             generation,
+            user,
             publication: {
               header_max_bytes: 4096,
               file_max_bytes: 2048,
@@ -574,6 +578,32 @@ test("placement reads current project opt-in and unexpired observations in the c
           ),
         ),
       );
+    // Legacy observations have no binding, even if the TTL and version are valid.
+    expect(select(["fixture-only"]).data).toMatchObject({
+      deferred: true,
+      reason: expect.stringContaining("绑定"),
+    });
+    const runtime = await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      env,
+    });
+    if (!runtime.ok) throw new Error("Invalid fixture runtime");
+    const refresh = () =>
+      refreshMachineObservations({
+        store,
+        project,
+        machine: "worker-a",
+        now: () => now,
+        target: () => runtime.value.resolve(project, "worker-a"),
+        check: async () => ({ blockers: [], launch_enabled: true }),
+        catalog: () =>
+          BUILTIN_MACHINE_CAPABILITIES.filter((c) =>
+            ["harness.codex", "godot"].includes(c.key),
+          ),
+        probe: async () => ({ ok: true, output: "4.10" }),
+      });
+    await refresh();
     expect(select(["fixture-only"]).data).toMatchObject({
       machine_id: "worker-a",
     });
@@ -614,6 +644,31 @@ test("placement reads current project opt-in and unexpired observations in the c
     expect(select(["fixture-only"]).data).toMatchObject({
       machine_id: "worker-a",
     });
+    // Same project, machine ID and platform: account and generation each invalidate launch proof.
+    for (const [generation, user] of [
+      ["one", "project_b"],
+      ["two", "project_b"],
+    ] as const) {
+      write(true, {}, generation, user);
+      expect(select([]).events.at(-1)).toMatchObject({
+        type: "machine_selected",
+        payload: {
+          machine_id: "local",
+          excluded: [
+            {
+              machine_id: "worker-a",
+              reasons: [expect.stringContaining("绑定")],
+            },
+          ],
+        },
+      });
+      await refresh();
+      expect(select(["fixture-only"]).data).toMatchObject({
+        machine_id: "worker-a",
+      });
+    }
+    write(true);
+    await refresh();
     const setPolicy = (worktree: "none" | "write") =>
       store.uow.run((tx) => {
         tx.roles.put(project, {
@@ -624,12 +679,6 @@ test("placement reads current project opt-in and unexpired observations in the c
       });
     setPolicy("write");
     expect(select(["fixture-only"]).data).toMatchObject({ deferred: true });
-    const runtime = await RuntimeTargets.create({
-      execution: { mode: "local", dataDir: root },
-      store,
-      env,
-    });
-    if (!runtime.ok) throw new Error("Invalid fixture runtime");
     const proof = {
       target_fingerprint: runtime.value.resolve(project, "worker-a").execution
         .target?.fingerprint,
