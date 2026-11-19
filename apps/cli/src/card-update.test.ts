@@ -687,3 +687,29 @@ test("C-370 CLI creates, replaces and clears dependencies with explicit waiting 
     snapshot().cards.find((c) => c.id === "C-2")?.early_start,
   ).toBeUndefined();
 });
+
+test("CLI preserves explicit framework classification on create and update", async () => {
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "general",
+      "--title",
+      "Layout",
+      "--goal",
+      "Frame",
+      "--is-ui-framework",
+      "on",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards.find((c) => c.id === "C-2")?.is_ui_framework).toBe(
+    true,
+  );
+  expect(await run(["card", "update", "C-2", "--is-ui-framework", "off"])).toBe(
+    0,
+  );
+  expect(snapshot().cards.find((c) => c.id === "C-2")?.is_ui_framework).toBe(
+    false,
+  );
+});

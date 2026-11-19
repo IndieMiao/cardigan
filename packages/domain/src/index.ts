@@ -48,6 +48,7 @@ export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
 export * from "./commands/flow.js";
+export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";

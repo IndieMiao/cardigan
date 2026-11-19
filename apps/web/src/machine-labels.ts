@@ -101,6 +101,7 @@ export function candidateReasons(c: MachineSelectionCandidate): string[] {
     ...(c.limit !== null && c.occupied !== null
       ? [`${slot ? "机器" : ""}占用 ${c.occupied}/${c.limit}`]
       : []),
+    ...(c.pending_assignments ? [`其中待启动 ${c.pending_assignments}`] : []),
   ];
   return [
     ...(c.control_host ? ["验证项优先控制主机"] : []),

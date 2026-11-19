@@ -690,6 +690,9 @@ export function machineSelection(
             control_host: c.control_host === true,
             limit: typeof c.limit === "number" ? c.limit : null,
             occupied: typeof c.occupied === "number" ? c.occupied : null,
+            ...(typeof c.pending_assignments === "number"
+              ? { pending_assignments: c.pending_assignments }
+              : {}),
             remaining_ratio:
               typeof c.remaining_ratio === "number" ? c.remaining_ratio : null,
             preference_rank:

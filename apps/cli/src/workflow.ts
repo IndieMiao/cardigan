@@ -92,7 +92,7 @@ const USAGE = [
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
-  "    create/update 支持 --depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
+  "    create/update 支持 --is-ui-framework on|off、--depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan card flow-upgrade <C-n…> --to <N> [--project <p>]  仅人可用，后续流程未开放前仅可选版本 1",
@@ -444,6 +444,7 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
     "priority",
     "status",
     "risk-tags",
+    "is-ui-framework",
     "depends-on-cards",
     "wait-for-dependencies",
     "early-start",
@@ -579,6 +580,7 @@ function cardDependencyFlags(
   flags: Args["flags"],
 ): Pick<
   Parameters<typeof updateCard>[2],
+  | "is_ui_framework"
   | "depends_on_cards"
   | "wait_for_dependencies"
   | "early_start"
@@ -609,6 +611,9 @@ function cardDependencyFlags(
             return parsed.value.id;
           });
   return {
+    ...(flags["is-ui-framework"] === undefined
+      ? {}
+      : { is_ui_framework: toggle("is-ui-framework") }),
     ...(ids === undefined ? {} : { depends_on_cards: ids }),
     ...(flags["wait-for-dependencies"] === undefined
       ? {}

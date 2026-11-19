@@ -33,6 +33,7 @@ let status: number,
   trusted: boolean,
   stall: boolean;
 const credential = "synthetic-preflight-token";
+let truncated = false;
 const validReply = {
   jsonrpc: "2.0",
   id: 1,
@@ -107,6 +108,7 @@ beforeAll(async () => {
       }
       if (stall) return;
       res.writeHead(status, {
+        ...(truncated ? { "Content-Length": 256, Connection: "close" } : {}),
         "Content-Type": "application/json",
         Location: "http://127.0.0.1/never-follow",
         ...(challenge ? { "WWW-Authenticate": challenge } : {}),
@@ -128,6 +130,7 @@ beforeEach(() => {
   requests = 0;
   trusted = true;
   stall = false;
+  truncated = false;
   proxyTarget = undefined;
   observedHost = undefined;
   authorization = `Bearer ${credential}`;
@@ -271,7 +274,7 @@ test("worker authenticates over verified TLS without a business tool call", asyn
   );
   expect(requests).toBe(1);
 });
-test.each([401, 403, 301, 302, 307, 308, 404, 500])(
+test.each([401, 403, 301, 302, 307, 308, 404, 500, 502, 503])(
   "HTTP %s refuses startup without following redirects",
   async (code) => {
     status = code;
@@ -280,11 +283,20 @@ test.each([401, 403, 301, 302, 307, 308, 404, 500])(
         ? "mcp_auth_failed"
         : code < 400
           ? "mcp_redirect"
-          : "mcp_protocol_error",
+          : code >= 500
+            ? "mcp_gateway_error"
+            : "mcp_protocol_error",
     );
     expect(requests).toBe(1);
   },
 );
+test("incomplete gateway response is distinct from a complete invalid MCP reply", async () => {
+  truncated = true;
+  body = "{";
+  await expect(checkWorkerMcp(execution(), credential)).rejects.toThrow(
+    /^mcp_gateway_error$/,
+  );
+});
 test.each([
   "not-json",
   "x".repeat(65537),

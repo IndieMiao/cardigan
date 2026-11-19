@@ -6,6 +6,7 @@ import {
   type Run,
   type Runtime,
 } from "@cardigan/domain";
+import { RuntimeTargetError } from "@cardigan/host";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -132,6 +133,44 @@ function fixture(options: { employee?: boolean; recorded?: string } = {}) {
     latest: () => f.state().runs.at(-1),
   };
 }
+
+test("a protocol error during follow-up preflight backs off and wakes the same queued Run", async () => {
+  const f = fixture({ employee: true, recorded: "catalog-v2" });
+  let limit = 0;
+  const dispatcher = new Dispatcher({
+    ...f.dispatcher,
+    runLimit: () => limit,
+    deliveryRetryBaseMs: 100,
+  });
+  f.wake();
+  await dispatcher.tick();
+  const queued = f.latest();
+  expect(queued).toMatchObject({
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  limit = 1;
+  const snapshot = vi.mocked(f.dispatcher.snapshot);
+  snapshot
+    .mockClear()
+    .mockRejectedValueOnce(new RuntimeTargetError("mcp_protocol_error"));
+  await dispatcher.tick();
+  f.advance(99);
+  await dispatcher.tick();
+  expect(snapshot).toHaveBeenCalledOnce();
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.latest()).toEqual(queued);
+  expect(
+    f.state().events.filter((e) => e.type === "bell_delivery_failed"),
+  ).toHaveLength(0);
+
+  f.advance(1);
+  await dispatcher.tick();
+  expect(snapshot).toHaveBeenCalledTimes(2);
+  expect(f.latest()).toMatchObject({ id: queued?.id, status: "dispatched" });
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.dispatcher.startRun).not.toHaveBeenCalled();
+});
 
 test("P2a-10 A: an unchanged tool catalog reuses the live session without replacement", async () => {
   const f = fixture({ recorded: "catalog-v2" });

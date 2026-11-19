@@ -88,6 +88,11 @@ export function selectMachine(
     d.state.project_id,
     d.now,
     options.profile,
+    {
+      assignments: d.list("assignments"),
+      work_items: d.list("work_items"),
+      runs: d.list("runs"),
+    },
   );
   const constraints = (required.capabilities ?? []).map((raw) => ({
     raw,
@@ -196,6 +201,9 @@ export function selectMachine(
       control_host: preferLocal && machine_id === "local",
       limit: f?.limit ?? null,
       occupied: f?.occupied ?? null,
+      ...(f?.pending_assignments
+        ? { pending_assignments: f.pending_assignments }
+        : {}),
       remaining_ratio: f
         ? Math.min(
             (f.limit - f.occupied) / f.limit,
@@ -209,6 +217,8 @@ export function selectMachine(
   // Registry order breaks exact ties, independent of insertion order or host locale.
   candidates.sort(
     (a, b) =>
+      Number((b.remaining_ratio ?? 0) > 0) -
+        Number((a.remaining_ratio ?? 0) > 0) ||
       Number(b.control_host) - Number(a.control_host) ||
       Number(b.affinity) - Number(a.affinity) ||
       (b.remaining_ratio ?? 0) - (a.remaining_ratio ?? 0) ||
@@ -227,6 +237,7 @@ export function selectMachine(
       candidates,
       excluded,
       selection_order: [
+        "has_capacity",
         "control_host",
         "affinity",
         "remaining_ratio",

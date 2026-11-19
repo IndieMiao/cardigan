@@ -70,6 +70,7 @@ export async function startQueuedRun(
     run: input.run,
     actor: hostActor(input.project),
     first_prompt: input.bell,
+    retry_target_preflight: true,
     ...(input.replacement ? { replacement: input.replacement } : {}),
   });
 }

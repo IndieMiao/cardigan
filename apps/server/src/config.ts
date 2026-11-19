@@ -1,5 +1,6 @@
 import {
   DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
+  DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
   DEFAULT_MERGE_BLOCKED_REMINDER_MS,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
@@ -39,6 +40,7 @@ export interface ServerConfig {
   /** M4.4 phase loops; every value has a default and is overridable. */
   readonly mergeWatchdogMs?: number;
   readonly mergeIntervalMs?: number;
+  readonly frameworkWaitReminderMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
@@ -86,6 +88,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_WEB_PUBLIC_ORIGINS?: string | undefined;
   readonly CARDIGAN_MERGE_WATCHDOG_MS?: string | undefined;
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_MERGE_BLOCKED_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
@@ -227,6 +230,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     ),
     ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
     runtimeUnknownGraceMs,
+    ...(nonEmpty(env.CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS) === undefined
+      ? {}
+      : {
+          frameworkWaitReminderMs: interval(
+            env.CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS,
+            "CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS",
+            DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
+          ),
+        }),
     ...(nonEmpty(env.CARDIGAN_MERGE_BLOCKED_REMINDER_MS) === undefined
       ? {}
       : {

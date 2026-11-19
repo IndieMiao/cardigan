@@ -1099,11 +1099,26 @@ test.each([
   },
 );
 
+test("a timeout waiting for a machine-check command slot is a transient launch refusal", async () => {
+  vi.spyOn(router, "check").mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_queue_timeout", message: "queue deadline" },
+  });
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toMatchObject({
+    reason: "machine_check_runtime_queue_timeout",
+    transient: true,
+  });
+  expect(factory).not.toHaveBeenCalled();
+});
+
 test.each([
   "mcp_tls_failed",
   "mcp_unreachable",
   "mcp_timeout",
   "mcp_protocol_error",
+  "mcp_gateway_error",
 ] as const)("a live %s blocks launch with its reason code", async (code) => {
   mcpReachability.mockRejectedValue(new WorkerMcpError(code));
   expect(value(await router.check("fixture", "worker-a"))).toEqual({
