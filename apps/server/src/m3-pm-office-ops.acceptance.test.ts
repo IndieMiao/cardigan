@@ -919,10 +919,16 @@ test("P11 §7.3: Agent execution failure escalates to Ops without interrupting O
 // P12 (fixed): --assignment on a standing PM also matches its logical recipient.
 test("P12 M3.5: inbox --assignment includes pending notifications for that standing PM", async () => {
   const s = await routingSetup(false);
+  // Keep the attention notice pending across dispatcher ticks while reading each inbox.
+  s.runtime.working.add(s.ops.id);
   await s.finish(s.coder);
   await s.routed();
-  const all = await s.cli("inbox");
-  expect(all).toContain("pending");
-  expect(await s.cli("inbox", "--assignment", s.office.id)).not.toBe(all);
-  expect(await s.cli("inbox", "--assignment", s.ops.id)).toBe(all);
+  const pendingAttention = /pending\s+seq=\d+ run_attention\b/u;
+  expect(await s.cli("inbox")).toMatch(pendingAttention);
+  expect(await s.cli("inbox", "--assignment", s.office.id)).not.toMatch(
+    pendingAttention,
+  );
+  expect(await s.cli("inbox", "--assignment", s.ops.id)).toMatch(
+    pendingAttention,
+  );
 });
