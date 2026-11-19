@@ -75,6 +75,7 @@ export class RuntimeTargetError extends Error {
   get transient(): boolean {
     return [
       "mcp_timeout",
+      "mcp_protocol_error",
       "mcp_unreachable",
       "worker_unreachable",
       "machine_check_runtime_timeout",
