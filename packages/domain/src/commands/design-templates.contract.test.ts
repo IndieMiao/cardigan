@@ -84,8 +84,20 @@ const params = {
   acceptance_criteria: ["Every state is drawn"],
   source: { kind: "quote" as const, text: "Design the settings page" },
 };
+const designParams = {
+  ...params,
+  template_id: "design",
+  state_and_save: "无写入",
+} as const;
 const workItems = (s: CommandState, template_id: string) =>
-  value(createCard(s, human, { ...params, template_id }, ports()))
+  value(
+    createCard(
+      s,
+      human,
+      { ...(template_id === "design" ? designParams : params), template_id },
+      ports(),
+    ),
+  )
     .changes.filter((c) => c.collection === "work_items")
     .map((c) => c.entity);
 
@@ -131,9 +143,7 @@ describe("design template (p2v-12 §2.4)", () => {
 
   test("creates a card wired to the design roles without a repository", () => {
     const s = state();
-    const created = value(
-      createCard(s, human, { ...params, template_id: "design" }, ports()),
-    );
+    const created = value(createCard(s, human, designParams, ports()));
     expect(created.data).toMatchObject({
       template: "design",
       template_version: 1,
@@ -161,7 +171,7 @@ describe("design template (p2v-12 §2.4)", () => {
       createCard(
         state(),
         human,
-        { ...params, template_id: "design", acceptance_criteria: [] },
+        { ...designParams, acceptance_criteria: [] },
         ports(),
       ).ok,
     ).toBe(false);
@@ -175,12 +185,7 @@ describe("design template (p2v-12 §2.4)", () => {
       r.role_id === wrong.role_id ? wrong : r,
     );
     expect(
-      createCard(
-        state(roles),
-        human,
-        { ...params, template_id: "design" },
-        ports(),
-      ),
+      createCard(state(roles), human, designParams, ports()),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
   });
 
@@ -190,7 +195,7 @@ describe("design template (p2v-12 §2.4)", () => {
         createCard(
           state(designRoles.filter((r) => r.role_id !== missing)),
           human,
-          { ...params, template_id: "design" },
+          designParams,
           ports(),
         ).ok,
       ).toBe(false);
@@ -214,9 +219,7 @@ describe("design template flow (p2v-12 §2.4)", () => {
   const start = (withOps = false) => {
     const p = ports();
     const base = state(designRoles, [], withOps);
-    const created = value(
-      createCard(base, human, { ...params, template_id: "design" }, p),
-    );
+    const created = value(createCard(base, human, designParams, p));
     let s = apply(base, created);
     const items = s.work_items.filter((w) => w.card_id === created.data.id);
     const production = items.find((w) => w.kind === "produce") as WorkItem;

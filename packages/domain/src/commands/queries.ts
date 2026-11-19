@@ -42,6 +42,7 @@ import {
   builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
+  requiresUiStateAndSave,
 } from "../templates.js";
 import {
   type CommandDraft,
@@ -304,6 +305,9 @@ function templateSummary(template: CardTemplate) {
     description: template.description,
     builtin: template.builtin,
     requires_repo: template.requires_repo,
+    ...(requiresUiStateAndSave(template)
+      ? { requires_state_and_save: true }
+      : {}),
     merge: template.merge,
     primary_work_item_key: template.primary_work_item_key,
     work_items: template.work_items.map((item) => ({

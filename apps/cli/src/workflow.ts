@@ -7,6 +7,7 @@ import type {
   MergeClassificationInput,
   ProjectId,
   RiskTag,
+  UiStateAndSave,
   WorkItemId,
 } from "@cardigan/domain";
 import {
@@ -88,6 +89,7 @@ const USAGE = [
   "  cardigan work-item update <W-n> --requirements <JSON> | work-item show <W-n>",
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
+  "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    create/update 支持 --depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
@@ -771,6 +773,17 @@ async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
           actor,
           {
             ...cardDependencyFlags(parsed.flags),
+            ...(parsed.flags["state-and-save"] === undefined
+              ? {}
+              : {
+                  state_and_save:
+                    parsed.flags["state-and-save"] === "无写入"
+                      ? "无写入"
+                      : (jsonFlag(
+                          parsed.flags,
+                          "state-and-save",
+                        ) as UiStateAndSave),
+                }),
             ...(parsed.flags["work-item-requirements"] === undefined
               ? {}
               : {
