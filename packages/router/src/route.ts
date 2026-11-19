@@ -778,6 +778,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
   // Persisted at review submission: replay may see a newer delivery already.
   // Keep the original target in the notice and use the normal busy/queued Run
   // coalescing, without treating a second parallel finding as another failure.
+  if (payload.review_limit_wait === true) return;
   if (payload.parallel_late === true) {
     const delivery = input.snapshot.deliveries.find(
       (candidate) => candidate.id === delivery_id,
@@ -825,7 +826,6 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
-  if (payload.review_limit_wait === true) return;
   if (verdict === "conditional") {
     // The final non-pass round is handled by the blocking review-limit Decision.
     if (payload.rework_allowed === false) return;

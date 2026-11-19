@@ -14,7 +14,7 @@ export function independentReviewLimitItem(
   q: Pick<Decision, "trigger"> &
     Partial<Pick<Decision, "affected_work_items" | "review_limit_group">>,
 ) {
-  const ids = q.review_limit_group?.candidate_items ?? q.affected_work_items;
+  const ids = q.affected_work_items;
   return q.trigger === "review_limit" &&
     (q.review_limit_group || ids?.length === 1)
     ? d

@@ -1,10 +1,14 @@
-import { submitReview } from "@cardigan/domain";
+import { dispatchRunKind, queueRun, submitReview } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   parallelBug,
   parallelDelivery,
   rejectedParallel,
 } from "../../domain/src/commands/parallel-review/test-fixtures.js";
+import {
+  first as sharedBug,
+  sharedReviewFixture,
+} from "../../domain/src/commands/shared-review/test-fixtures.js";
 import {
   actor,
   apply,
@@ -193,5 +197,52 @@ test.each(
         (n) => n.rule === "7.2/delivery rejected twice",
       ),
     ).toHaveLength(0);
+  },
+);
+
+test.each([2, 3])(
+  "a late rejection after %i prior rounds respects the pause without routing or dispatching rework",
+  async (rounds) => {
+    const f = await sharedReviewFixture(3, [sharedBug], rounds);
+    f.review(2, [sharedBug]);
+    expect(f.decide(2, "pause").ok).toBe(true);
+    f.review(3, [], f.refs());
+    const event = f.state.events.findLast((e) => e.type === "review_submitted");
+    const producer = f.state.assignments.find(
+      (a) => a.id === id("assignment", 1),
+    );
+    if (!event || !producer) throw Error("Missing late review or producer");
+    expect(event.payload).toMatchObject({
+      parallel_late: true,
+      review_limit_wait: true,
+      rework_allowed: false,
+    });
+    const idle = {
+      ...f.state,
+      runs: f.state.runs.filter((r) => r.assignment_id !== producer.id),
+    };
+    expect(routeEvent({ event, snapshot: idle }).notifications).toEqual([]);
+    const kind = dispatchRunKind(event, producer, true);
+    expect(kind).toBe("rework");
+    expect(
+      queueRun(
+        idle,
+        { kind: "system", project_id: idle.project_id },
+        {
+          assignment_id: producer.id,
+          kind,
+          trigger_event_id: event.id,
+          model: "fixture",
+          agent_cli_version: "1",
+        },
+        f.io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("暂停返工"),
+      },
+    });
   },
 );

@@ -14,6 +14,7 @@ import {
   deriveCardFields,
   deriveCardStatus,
   deriveReviewMatrix,
+  flowAtLeast,
   latestMergeCheck,
   mergeBatchReadScope,
   mergeClassificationView,
@@ -335,7 +336,9 @@ export const getCardTool = defineTool({
         subject: delivery.subject,
         role_rule_inventory: roleRuleInventory(delivery) ?? null,
       })),
-      shared_must_fixes: sharedMustFixes(reviews),
+      shared_must_fixes: flowAtLeast(card, 5)
+        ? sharedMustFixes(reviews, deliveries, work_items)
+        : [],
       reviews: reviews.map((review) => ({
         ...review,
         ...runAuthorView(authors, review.run_id),

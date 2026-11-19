@@ -6,6 +6,7 @@ import {
   standingRunDormant,
 } from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import { eventById } from "../event-index.js";
 import {
   automaticContextActionForRun,
   hostOpsPending,
@@ -283,6 +284,20 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "illegal_transition",
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
+  // An already emitted notification can survive a restart or upgrade. Never
+  // turn a review that explicitly stopped rework into a new producer Run.
+  if (p.kind === "rework" && p.trigger_event_id) {
+    const trigger = eventById(state.events, p.trigger_event_id);
+    ensure(
+      !(
+        trigger?.type === "review_submitted" &&
+        (trigger.payload as { review_limit_wait?: boolean } | null)
+          ?.review_limit_wait === true
+      ),
+      "illegal_transition",
+      "审核已暂停返工，请等待决定",
+    );
+  }
   if (p.reuse_queued) {
     const queued = runnableQueuedRun(assignment, {
       ...d.state,

@@ -10,7 +10,7 @@ import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
-import { queueResumedRun, resumeWork } from "./resumption.js";
+import { resumeWork } from "./resumption.js";
 import { raiseVerifierLimit } from "./review-limit-resolution.js";
 import {
   consecutiveReviewRejects,
@@ -145,15 +145,16 @@ export function requestReviewLimit(
     .filter(
       (r) => r.assignment_id === item.assignment_id && r.status === "running",
     );
-  for (const run of runs)
-    endRun(d, run, "blocked", decision.question, {
-      reason: "review_limit",
-      decision_id: id,
-    });
+  if (decision.status !== "resolved")
+    for (const run of runs)
+      endRun(d, run, "blocked", decision.question, {
+        reason: "review_limit",
+        decision_id: id,
+      });
   if (sibling && review) {
     const affected = [...sibling.affected_work_items, item.id];
     d.put("decisions", { ...sibling, affected_work_items: affected });
-    const joined = d.emit(
+    d.emit(
       "review_limit_group_joined",
       item.card_id,
       {
@@ -177,8 +178,8 @@ export function requestReviewLimit(
         sibling.resolution,
         sibling.resolution.resolved_by,
       );
-      const waiting = d.work(item.id);
-      if (resumeWork(d, waiting)) queueResumedRun(d, waiting, joined);
+      // This Run just submitted its verdict; the next delivery wakes the lane.
+      resumeWork(d, d.work(item.id));
       return true;
     }
   }

@@ -801,7 +801,10 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
   ]);
   const args = {
     ...review,
-    issue_refs: fixes.map((i) => i.finding_id),
+    issue_refs: fixes.map((i) => ({
+      finding_id: i.finding_id,
+      proof: "Independent observation",
+    })),
     idempotency_key: "parallel-late",
   };
   const results = await Promise.all([
@@ -812,7 +815,9 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
   expect(results[0]?.structuredContent).toEqual(results[1]?.structuredContent);
   expect(results[0]?.structuredContent).toMatchObject({
     verdict: "reject",
-    issues: [{ finding_id: fixes[0]?.finding_id }],
+    issues: [
+      { finding_id: fixes[0]?.finding_id, proof: "Independent observation" },
+    ],
   });
   expect(
     (await call(reviewer, "get_card", { card_id })).structuredContent

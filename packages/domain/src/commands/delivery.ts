@@ -855,7 +855,12 @@ export function systemCompletionSubmission(
 export type SubmitReviewParams = Pick<
   Review,
   "delivery_id" | "target_sha" | "kind" | "issues"
-> & { readonly issue_refs?: readonly string[] } & Partial<
+> & {
+  readonly issue_refs?: readonly (
+    | string
+    | { readonly finding_id: string; readonly proof: string }
+  )[];
+} & Partial<
     Pick<
       Review,
       | "attachments"
@@ -983,32 +988,30 @@ export function submitReview(
       flowAtLeast(card, 5) &&
       sharedReviewers(target, d.list("work_items")).includes(item.id);
     const existing = shared
-      ? sharedMustFixes(
-          d
-            .list("reviews")
-            .filter(
-              (r) =>
-                r.delivery_id === target.id && r.target_sha === p.target_sha,
-            ),
-        )
+      ? sharedMustFixes(d.list("reviews"), [target], d.list("work_items"))
       : [];
     const refs = p.issue_refs ?? [];
     ensure(
-      Array.isArray(refs) && new Set(refs).size === refs.length,
+      Array.isArray(refs),
       "validation_failed",
-      "Issue references must be unique",
+      "Expected an array of issue references",
     );
+    const seenRefs = new Set<string>();
     const issues = [
       ...p.issues,
       ...refs.map((ref) => {
-        const source = existing.find((i) => i.finding_id === ref);
+        const findingId = typeof ref === "string" ? ref : ref?.finding_id;
+        const source = existing.find((i) => i.finding_id === findingId);
         ensure(
-          source,
+          source && !seenRefs.has(source.finding_id),
           "validation_failed",
-          "Unknown must-fix reference on this delivery and SHA",
+          "Duplicate or unknown must-fix reference on this delivery and SHA",
         );
+        seenRefs.add(source.finding_id);
         const { delivery_id: _delivery, target_sha: _sha, ...issue } = source;
-        return issue;
+        if (typeof ref === "string") return issue;
+        text(ref.proof, "proof");
+        return { ...issue, proof: ref.proof };
       }),
     ];
     const calculated = deriveReview(
@@ -1196,6 +1199,19 @@ export function submitReview(
     const flowRaised = flowLimit
       ? requestReviewLimit(d, d.work(item.id), value)
       : false;
+    // A late lane can be below its own limit while the delivery is already
+    // waiting on its peer's decision. Keep its verdict, not a new rework wake.
+    const reviewLimitWait =
+      (flowLimit && !flowRaised) ||
+      (parallelLate &&
+        d
+          .list("decisions")
+          .some(
+            (q) =>
+              q.review_limit_group?.delivery_id === target.id &&
+              q.blocking &&
+              ["open", "provisional", "snoozed"].includes(q.status),
+          ));
     d.emit(
       "review_submitted",
       card.id,
@@ -1209,9 +1225,8 @@ export function submitReview(
           : {}),
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
-          (value.blocking || value.recheck_required) &&
-          (!limitReached || flowRaised === true),
-        ...(flowLimit && !flowRaised ? { review_limit_wait: true } : {}),
+          (value.blocking || value.recheck_required) && !reviewLimitWait,
+        ...(reviewLimitWait ? { review_limit_wait: true } : {}),
         ...(parallelLate ? { parallel_late: true } : {}),
       },
       {

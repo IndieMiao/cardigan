@@ -208,16 +208,23 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     )
   )
     return false;
+  // Authorize the scope of a shared decision before either lane can consume it.
+  // Its resolution and notice, on the other hand, describe only the actual participants.
+  if (q.trigger === "review_limit" && q.review_limit_group)
+    return (
+      !!q.card_id &&
+      !q.human_required_reason &&
+      !["done", "cancelled"].includes(d.get("cards", q.card_id).status) &&
+      categoryDelegated(
+        projectPreference(d),
+        [...d.state.events, ...d.events],
+        "general",
+      )
+    );
   const independent = independentReviewLimitItem(d, q);
   if (independent)
     return (
       !q.human_required_reason &&
-      (!q.review_limit_group ||
-        categoryDelegated(
-          projectPreference(d),
-          [...d.state.events, ...d.events],
-          "general",
-        )) &&
       !["done", "cancelled"].includes(
         d.get("cards", independent.card_id).status,
       )

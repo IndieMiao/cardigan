@@ -2,6 +2,7 @@ import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { transition } from "../transitions.js";
+import { verificationTarget } from "../verification-activity.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
 import {
   delegationAllowed,
@@ -62,9 +63,9 @@ export function resolveReviewLimit(
     d.put("decisions", {
       ...q,
       decider: "human",
-      ...(independent
+      ...(independent || q.review_limit_group
         ? {
-            human_required_reason: `独立复核加轮已由项目经理升级给人：${p.rationale}`,
+            human_required_reason: `${independent ? "独立复核" : "审核"}加轮已由项目经理升级给人：${p.rationale}`,
           }
         : {}),
       context: `${q.context}\n\n项目经理升级给你：${p.rationale}`,
@@ -89,11 +90,11 @@ export function resolveReviewLimit(
     );
     return item;
   }
-  const target = q.review_limit_group
-    ? d.get("deliveries", q.review_limit_group.delivery_id)
-    : independent
-      ? currentReviewTarget(d, independent)
-      : undefined;
+  const target = !independent
+    ? undefined
+    : q.review_limit_group
+      ? d.get("deliveries", q.review_limit_group.delivery_id)
+      : currentReviewTarget(d, independent);
   recordDecisionResolution(d, q, {
     option: p.option,
     rationale: p.rationale,
@@ -224,7 +225,15 @@ export function recordDecisionResolution(
       ? q.affected_work_items[0]
       : undefined;
   for (const card of cards.length ? cards : [undefined]) {
-    const unblocked = resumed.filter((w) => w.card_id === card);
+    const unblocked = resumed.filter(
+      (w) =>
+        w.card_id === card &&
+        (!q.review_limit_group ||
+          verificationTarget(w, {
+            deliveries: d.list("deliveries"),
+            reviews: d.list("reviews"),
+          })),
+    );
     const event = d.emit(
       result.status === "provisional"
         ? "decision_provisionally_resolved"

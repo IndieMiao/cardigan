@@ -1,126 +1,12 @@
 import { expect, test } from "vitest";
+import { submitReview } from "../index.js";
+import { parallelDelivery } from "./parallel-review/test-fixtures.js";
 import {
-  type CommandState,
-  type ReviewIssue,
-  sharedMustFixes,
-  submitReview,
-  updateWorkItem,
-} from "../index.js";
-import {
-  parallelBug,
-  parallelDelivery,
-  parallelState,
-} from "./parallel-review/test-fixtures.js";
-import { actor, apply, id, ports, role, value } from "./test-fixtures.js";
-
-const first = parallelBug;
-const second = {
-  ...first,
-  description: "A second missing check",
-  proof: "Reproduced with another fixture",
-};
-async function fixture(prior = 3) {
-  const base = parallelState();
-  const io = ports();
-  let state: CommandState = {
-    ...base,
-    roles: [...base.roles, role("independent_reviewer")],
-    assignments: base.assignments.map((a) =>
-      a.scope === "standing"
-        ? { ...a, standing_mode: "ops" }
-        : a.id === id("assignment", 3)
-          ? { ...a, role_id: "independent_reviewer" }
-          : a,
-    ),
-    work_items: base.work_items.map((w) =>
-      w.kind === "verify"
-        ? {
-            ...w,
-            max_review_rounds: 4,
-            role_id:
-              w.id === id("work_item", 3) ? "independent_reviewer" : "reviewer",
-          }
-        : w,
-    ),
-  };
-  const delivery = await parallelDelivery(state, io);
-  const target = delivery.data;
-  state = apply(state, delivery);
-  state = {
-    ...state,
-    reviews: [2, 3].flatMap((n) =>
-      Array.from({ length: prior }, (_, k) => ({
-        id: id("review", n * 10 + k),
-        work_item_id: id("work_item", n),
-        delivery_id: id("delivery", k + 1),
-        target_sha: "b".repeat(40),
-        run_id: id("run", n * 10 + k),
-        kind: "code" as const,
-        issues: [first, second],
-        verdict: "reject" as const,
-        blocking: true,
-        recheck_required: false,
-        attachments: [],
-      })),
-    ),
-  };
-  const who = (n: number) =>
-    actor(n, n === 2 ? "reviewer" : "independent_reviewer");
-  const submit = (
-    n: number,
-    issues: ReviewIssue[],
-    refs: string[] = [],
-    snapshot = state,
-    sha = target.subject.value,
-  ) =>
-    submitReview(
-      snapshot,
-      who(n),
-      {
-        delivery_id: target.id,
-        target_sha: sha,
-        kind: "code",
-        issues,
-        issue_refs: refs,
-      },
-      io,
-    );
-  function review(n: number, issues: ReviewIssue[], refs: string[] = []) {
-    const result = value(submit(n, issues, refs));
-    state = apply(state, result);
-    return result.data;
-  }
-  function decide(n: number, option: "raise_limit" | "pause" | "escalate") {
-    const q = state.decisions[0];
-    if (!q) throw Error("Missing decision");
-    const result = updateWorkItem(
-      state,
-      actor(4, "pm"),
-      {
-        work_item_id: id("work_item", n),
-        review_limit_decision: {
-          decision_id: q.id,
-          option,
-          rationale: "已核对本次交付",
-        },
-      },
-      io,
-    );
-    if (result.ok) state = apply(state, result.value);
-    return result;
-  }
-  return {
-    submit,
-    review,
-    decide,
-    target,
-    io,
-    get state() {
-      return state;
-    },
-    refs: () => sharedMustFixes(state.reviews).map((i) => i.finding_id),
-  };
-}
+  first,
+  sharedReviewFixture as fixture,
+  second,
+} from "./shared-review/test-fixtures.js";
+import { actor, apply, id } from "./test-fixtures.js";
 
 test.each([2, 3])(
   "either lane can publish first (%i); matching sets join one pause, then one raise",
@@ -194,6 +80,10 @@ test("a resolved raise covers a later exact match, but does not grant a round be
       .find((r) => r.id === id("run", 2))
       ?.review_limit_changes?.at(-1)?.actor,
   ).toEqual(f.state.decisions[0]?.resolution?.resolved_by);
+  expect(f.state.runs.filter((r) => r.kind === "decision_resumed")).toEqual([]);
+  expect(f.state.runs.find((r) => r.id === id("run", 2))?.status).toBe(
+    "running",
+  );
   expect(f.submit(2, [], f.refs()).ok).toBe(false);
   expect(
     f.state.events.filter((e) => e.type === "decision_resolved"),
@@ -274,4 +164,49 @@ test("references neither supply a verdict nor bypass author, delivery, SHA or ne
   expect(f.review(3, []).verdict).toBe("pass");
   expect(f.state.deliveries[0]?.status).toBe("rejected");
   expect(f.state.decisions).toHaveLength(0);
+});
+
+test("an ordinary raise records only the lane that actually rejected", async () => {
+  const f = await fixture();
+  f.review(3, []);
+  f.review(2, [first]);
+  expect(f.decide(2, "raise_limit").ok).toBe(true);
+  const q = f.state.decisions[0];
+  expect(q?.affected_work_items).toEqual([id("work_item", 2)]);
+  expect(q?.resolution?.notice).toBeUndefined();
+  expect(q?.resolution?.review_limit_target).toBeUndefined();
+  expect(q?.resolution?.proxy_authority).toMatch(
+    /decision-delegation|decision_delegation/,
+  );
+  expect(q?.delegation_authority).toBe(q?.resolution?.proxy_authority);
+  expect(
+    f.state.work_items.find((w) => w.id === id("work_item", 3)),
+  ).toMatchObject({ status: "passed", max_review_rounds: 4 });
+});
+
+test("a late reviewer can substantiate a new-to-them finding without changing its identity or its author's evidence", async () => {
+  const f = await fixture(3, [second]);
+  const original = f.review(2, [first]);
+  const [ref] = f.refs();
+  if (!ref) throw Error("Missing shared issue");
+  expect(f.submit(3, [], [ref])).toMatchObject({
+    ok: false,
+    error: {
+      code: "validation_failed",
+      message: expect.stringContaining("with proof"),
+    },
+  });
+  expect(f.submit(3, [], [{ finding_id: ref, proof: "   " }]).ok).toBe(false);
+  const local = {
+    finding_id: ref,
+    proof: "Observed incorrect result for fixture X",
+  };
+  expect(f.submit(3, [], [local, ref]).ok).toBe(false);
+  const late = f.review(3, [], [local]);
+  expect(late.issues).toEqual([{ ...first, ...local }]);
+  expect(original.issues[0]?.proof).toBeUndefined();
+  expect(f.refs()).toEqual([ref]);
+  expect(f.state.decisions).toMatchObject([
+    { affected_work_items: [original.work_item_id, late.work_item_id] },
+  ]);
 });
