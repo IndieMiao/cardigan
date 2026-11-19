@@ -33,7 +33,12 @@ const client = fakeClient({
   preferences: async () => preferences,
   setPreferences: async (_p, minutes) =>
     update({ auto_merge_after_minutes: minutes }),
-  setSystemRules: async (_p, input) => update(input),
+  setSystemRules: async (_p, input) => {
+    // Evidence scene: a threshold of 999 minutes is a synthetic failed write.
+    if (input.system_reminder_policy?.min_minutes === 999)
+      throw new Error("合成失败：催办阈值未保存");
+    update(input);
+  },
   setCrossCardRead: async (_p, value) => update({ cross_card_read: value }),
   setAutoMerge: async (_p, value) =>
     update({ auto_merge: value ? "on" : "off" }),

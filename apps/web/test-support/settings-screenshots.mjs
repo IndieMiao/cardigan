@@ -271,6 +271,54 @@ try {
           resolve(output, `dialog-${width}-${theme}.png`),
           Buffer.from(dialog.data, "base64"),
         );
+        // A failed threshold save stays in the feedback stack once closed.
+        await run(() => {
+          const input = [...document.querySelectorAll("[role=dialog] label")]
+            .find((l) => l.textContent.startsWith("允许的最少分钟数"))
+            .querySelector("input");
+          Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "value",
+          ).set.call(input, "999");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.form.requestSubmit();
+        });
+        await until("!!document.querySelector('[role=dialog] [role=alert]')");
+        await run(() =>
+          [...document.querySelectorAll("[role=dialog] button")]
+            .find((b) => b.textContent === "取消")
+            .click(),
+        );
+        await until("!document.querySelector('[role=dialog]')");
+        await run(() =>
+          document
+            .querySelector("button[aria-label='编辑催办阈值']")
+            .scrollIntoView({ block: "center" }),
+        );
+        await delay(100);
+        const failed = await send("Page.captureScreenshot", { format: "png" });
+        report.scenes[`policy-error-${width}-${theme}`] = await run(() => {
+          const alert = [...document.querySelectorAll("[role=alert]")].find(
+            (a) => a.textContent.includes("合成失败"),
+          );
+          const r = alert?.getBoundingClientRect();
+          const s = alert && getComputedStyle(alert);
+          return {
+            alert: r && {
+              x: r.left,
+              y: r.top,
+              w: r.width,
+              h: r.height,
+              fontSize: s.fontSize,
+              lineHeight: s.lineHeight,
+            },
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        await writeFile(
+          resolve(output, `policy-error-${width}-${theme}.png`),
+          Buffer.from(failed.data, "base64"),
+        );
       }
     }
   await writeFile(
