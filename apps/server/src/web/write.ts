@@ -1198,8 +1198,12 @@ export async function serveWrite(
           ["request_changes", "hold"].includes(p.option) &&
           s.decisions.find((q) => q.id === decision_id)?.trigger ===
             "merge_confirmation";
+        const scopeRequired =
+          ["narrow_scope", "split_card"].includes(p.option) &&
+          s.decisions.find((q) => q.id === decision_id)?.trigger ===
+            "review_limit";
         const raw_quote =
-          p.option === "hold" && returning
+          (p.option === "hold" && returning) || scopeRequired
             ? p.raw_quote?.trim() || p.rationale?.trim() || ""
             : p.raw_quote?.trim() || returning
               ? (p.raw_quote ?? "")

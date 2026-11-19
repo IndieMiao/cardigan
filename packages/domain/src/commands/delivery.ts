@@ -60,6 +60,7 @@ import {
   conflictRepairEvent,
   reviewRejectionsNeedAttention,
 } from "./review-round.js";
+import { checkReviewPlanGate } from "./review-strategy.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 import {
@@ -91,6 +92,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   const system = d.actor.kind === "system" && d.tool === "system_complete_card";
   const item = system ? d.work(p.work_item_id) : d.ownWork(p.work_item_id);
   checkEmployeeSeparation(d, item, d.assignment?.employee_id);
+  checkReviewPlanGate(d, item);
   ensure(
     item.kind === "produce",
     "unauthorized",
@@ -857,6 +859,7 @@ export type SubmitReviewParams = Pick<
       | "attachments"
       | "recheck_required"
       | "screenshot_check"
+      | "rejection_category"
       | "followup_card_id"
     >
   >;
@@ -892,6 +895,7 @@ export function submitReview(
       "A verification assignment is required",
     );
     let item = d.ownWork(d.assignment.work_item_id);
+    checkReviewPlanGate(d, producer, item.id);
     checkEmployeeSeparation(d, item, d.assignment.employee_id, target);
     ensure(
       item.kind === "verify" &&
@@ -1065,6 +1069,16 @@ export function submitReview(
       "illegal_transition",
       "Verification is not running or its round limit was reached",
     );
+    if (p.rejection_category !== undefined)
+      ensure(
+        calculated.verdict === "reject" &&
+          typeof p.rejection_category === "string" &&
+          p.rejection_category.trim().length > 0 &&
+          p.rejection_category.trim().length <= 48 &&
+          !/[\r\n]/u.test(p.rejection_category),
+        "validation_failed",
+        "驳回类别须为 1 至 48 字的单行文字，仅用于驳回",
+      );
 
     const reuseContext = deliveryTree(target)
       ? reviewReuseContext(d, target, item, d.assignment.id)
@@ -1077,6 +1091,9 @@ export function submitReview(
       run_id: run.id,
       kind: p.kind,
       ...calculated,
+      ...(p.rejection_category
+        ? { rejection_category: p.rejection_category.trim() }
+        : {}),
       ...(p.followup_card_id ? { followup_card_id: p.followup_card_id } : {}),
       recheck_required: p.recheck_required ?? false,
       ...(testReview ? { test_review: testReview } : {}),

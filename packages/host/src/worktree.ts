@@ -1,6 +1,7 @@
 import type {
   Assignment,
   Card,
+  DecisionId,
   ProjectId,
   Role,
   Runtime,
@@ -20,7 +21,7 @@ import {
   executionPaths,
   type HerdrRuntime,
 } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import type { ReadRepositories, Store } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
 import { launchEntities } from "./commands.js";
 import { withPreparationQueue } from "./preparation-queue.js";
@@ -30,6 +31,7 @@ import { WorkerGitTransport } from "./worker-git.js";
 /** The host-owned placement passed to launch and persisted by dispatchRun. */
 export interface PreparedWorktree {
   readonly path: string;
+  readonly review_plan?: DecisionId;
   readonly branch?: string | undefined;
   readonly base_sha: string;
   readonly baseline?: { readonly ref: string; readonly sha: string };
@@ -47,6 +49,9 @@ export function worktreeBaselinePrompt(
     baseline
       ? `当前基线 ${baseline.ref}：${baseline.sha}（已由主机同步）。`
       : undefined,
+    worktree?.review_plan
+      ? `本次只确认 ${worktree.review_plan} 的方案方向。只读检出是项目基线，不是待审交付；请在卡上回复方案。`
+      : undefined,
     build === undefined
       ? undefined
       : `可写构建目录：${build.path}（交付 ${build.sha} 的全新独立检出，可安装依赖、构建和跑测试；只读 worktree 保持不动。本次 Run 结束后主机会删除它，里面的改动不会保留，也不会被拉取、交付或合并）。`,
@@ -62,6 +67,7 @@ export interface WorktreeRequest {
   readonly card?: Card | undefined;
   readonly work_item?: WorkItem | undefined;
   readonly target_sha?: string;
+  readonly review_plan?: DecisionId;
 }
 export type WorktreeProvider = (
   request: WorktreeRequest,
@@ -74,10 +80,18 @@ export function reviewTargetSha(
   project: ProjectId,
   item?: WorkItem,
 ): string {
+  return store.uow.read((tx) => currentDeliverySha(tx, project, item));
+}
+
+function currentDeliverySha(
+  tx: ReadRepositories,
+  project: ProjectId,
+  item?: WorkItem,
+): string {
   if (item?.kind !== "verify")
     throw new Error("Readonly Assignment requires a verification work item");
-  const delivery = store.uow
-    .read((tx) => tx.deliveries.list(project))
+  const delivery = tx.deliveries
+    .list(project)
     .filter(
       (d) =>
         d.status !== "superseded" &&
@@ -93,6 +107,36 @@ export function reviewTargetSha(
       `No current Git delivery for readonly work item ${item.id}`,
     );
   return delivery.subject.value;
+}
+
+/** A plan is a discussion target, never a substitute SHA for a formal review. */
+export function readonlyWorktreeTarget(
+  store: Store,
+  project: ProjectId,
+  assignment: Assignment,
+): { work_item: WorkItem } & (
+  | { target_sha: string }
+  | { review_plan: DecisionId }
+) {
+  if (assignment.scope !== "work_item")
+    throw new Error("Readonly Assignment requires its verification work item");
+  return store.uow.read((tx) => {
+    const current = tx.work_items.get(project, assignment.work_item_id);
+    if (
+      current?.kind !== "verify" ||
+      current.assignment_id !== assignment.id ||
+      current.status === "cancelled"
+    )
+      throw new Error(
+        `Readonly Assignment no longer owns an active work item ${assignment.work_item_id}`,
+      );
+    return current.review_plan_target
+      ? { work_item: current, review_plan: current.review_plan_target }
+      : {
+          work_item: current,
+          target_sha: currentDeliverySha(tx, project, current),
+        };
+  });
 }
 
 /** Shared by the CLI start and server start/wake paths; all Agent Git stays on its entry. */
@@ -199,6 +243,7 @@ export function worktreeProvider(
           role: request.role,
           ...(request.card ? { card: request.card } : {}),
           ...(request.work_item ? { work_item: request.work_item } : {}),
+          ...(request.review_plan ? { review_plan: request.review_plan } : {}),
           ...(request.target_sha ? { target_sha: request.target_sha } : {}),
         });
         if (!placed) return undefined;
@@ -220,6 +265,7 @@ export function worktreeProvider(
         return {
           path: placed.worktree_path,
           base_sha: placed.base_sha,
+          ...(request.review_plan ? { review_plan: request.review_plan } : {}),
           ...(placed.baseline ? { baseline: placed.baseline } : {}),
           ...(placed.branch ? { branch: placed.branch } : {}),
           ...(build ? { build } : {}),
@@ -262,10 +308,9 @@ export async function prepareRoleWorktree(
     project_id: project,
     source_repo: source,
     ...entities,
-    work_item: entities.workItem,
     ...(entities.role.worktree === "readonly"
-      ? { target_sha: reviewTargetSha(host.store, project, entities.workItem) }
-      : {}),
+      ? readonlyWorktreeTarget(host.store, project, entities.assignment)
+      : { work_item: entities.workItem }),
   });
 }
 

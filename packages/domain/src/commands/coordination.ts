@@ -71,7 +71,15 @@ import {
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
-import { resolveReviewLimit } from "./review-limit-resolution.js";
+import {
+  isReviewLimitOption,
+  resolveReviewLimit,
+} from "./review-limit-resolution.js";
+import {
+  checkPlanSupersession,
+  type ReviewPlanComment,
+  recordReviewPlan,
+} from "./review-strategy.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { suggestSourceMergeUnrelated } from "./source-merge.js";
 import {
@@ -161,6 +169,7 @@ export function postComment(
   actor: Actor,
   p: Pick<TimelineEntry, "card_id" | "body"> & {
     host_result_for?: HumanActionId;
+    review_plan?: ReviewPlanComment;
   } & Partial<
       Pick<
         TimelineEntry,
@@ -188,12 +197,14 @@ export function postComment(
         "validation_failed",
         "Reply/supersession must stay on this card",
       );
-      if (id === p.supersedes)
+      if (id === p.supersedes) {
         ensure(
           entry.author === d.author,
           "unauthorized",
           "Only the same author can supersede a comment",
         );
+        checkPlanSupersession(d, entry, p.review_plan);
+      }
     }
     const refs = [
       ...new Map(
@@ -225,6 +236,8 @@ export function postComment(
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       },
     );
+    if (p.review_plan && d.timeline[0])
+      recordReviewPlan(d, d.timeline[0], p.review_plan);
     if (p.host_result_for) {
       const action = d.get("human_actions", p.host_result_for);
       ensure(
@@ -1310,7 +1323,7 @@ export function resolveDelegatedDecision(
     }
     if (q.trigger === "review_limit") {
       ensure(
-        p.option === "raise_limit" || p.option === "pause",
+        isReviewLimitOption(p.option),
         "validation_failed",
         "Unknown review limit option",
       );

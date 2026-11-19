@@ -24,7 +24,11 @@ export function canStartWork(input: {
   readonly work_items: readonly WorkItem[];
 }): boolean {
   const { item } = input;
-  if (item.kind === "verify") return item.status === "ready";
+  if (item.kind === "verify")
+    return (
+      item.status === "ready" ||
+      (item.status === "todo" && !!item.review_plan_target)
+    );
   if (item.status === "ready" || item.status === "changes_requested")
     return true;
   if (item.status !== "todo") return false;
