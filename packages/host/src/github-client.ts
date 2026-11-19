@@ -284,6 +284,7 @@ export class GithubClient {
     branch: string,
     since: string,
     signal?: AbortSignal,
+    onObserved?: (run: GithubRun) => void,
   ): Promise<readonly GithubRun[]> {
     // GitHub's created filter has second precision. Fix the upper bound once;
     // subdivision must not extend the recovery interval while it is scanned.
@@ -353,6 +354,7 @@ export class GithubClient {
             created >= (end + 1) * 1000
           )
             throw new GithubExecutorError("security");
+          onObserved?.(run);
           add(observed, run);
           add(windowRuns, run);
         }

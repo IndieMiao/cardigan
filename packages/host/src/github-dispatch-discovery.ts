@@ -149,6 +149,22 @@ export function abandonedGithubRequest(
   };
 }
 
+/** REST responses are untyped. An invalid actor or title cannot exclude a dispatch. */
+function clearlyUnrelated(run: GithubRun, botLogin: string): boolean {
+  const login = run.actor?.login,
+    title = run.display_title;
+  if (typeof login !== "string" || typeof title !== "string" || !title.trim())
+    return false;
+  if (login.toLowerCase() !== botLogin.toLowerCase())
+    return (
+      login.replace(/\[bot\]$/u, "").length <= 39 &&
+      /^[A-Za-z\d]+(?:-[A-Za-z\d]+)*(?:\[bot\])?$/u.test(login)
+    );
+  // A valid but different Cardigan title excludes our run; a default/unevaluated title does not.
+  return /^cardigan\/[\w-]+\/[\w-]+\/[\w-]+\/(precheck|merge_check)\/[a-f0-9]{40}\/[a-f0-9]{40}$/u.test(
+    title,
+  );
+}
 /** A normal return from runs() means the fixed time window was exhaustively enumerated. */
 export async function discoverUnboundGithub(o: {
   client: Pick<GithubClient, "runs">;
@@ -158,48 +174,63 @@ export async function discoverUnboundGithub(o: {
   inputs: Readonly<Record<string, string>>;
   branch: string;
   config: GithubMergeGateExecutor;
-  scanStarted: number;
+  clock: () => number;
   signal?: AbortSignal | undefined;
   finishAs?: "automatic" | "human" | undefined;
 }): Promise<readonly GithubRun[] | undefined> {
-  const { intent, scanStarted, signal, finishAs } = o;
-  if (o.key !== intent.key) throw new GithubExecutorError("security");
-  const deadline =
-    intent.discoveryDeadlineAt ??
-    Date.parse(intent.startedAt) +
-      (o.config.waitStartMs ?? GITHUB_POLL_DEFAULTS.waitStartMs);
-  const eligible =
-    finishAs && canFinishUndispatched(intent, scanStarted, deadline);
-  if (finishAs === "human" && !eligible)
-    throw new GithubExecutorError("recovery_incomplete");
-  const listed = await o.client.runs(o.branch, intent.startedAt, signal);
-  if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
-  const matches = listed.filter(
-    (run) => run.display_title === githubCheckRunName(o.inputs),
+  const { clock, signal, finishAs } = o;
+  if (o.key !== o.intent.key) throw new GithubExecutorError("security");
+  const wait = o.config.waitStartMs ?? GITHUB_POLL_DEFAULTS.waitStartMs;
+  const intent = o.journal.beginDiscovery(
+    o.intent,
+    clock,
+    finishAs === "human"
+      ? undefined
+      : (o.config.pollIntervalMs ?? GITHUB_POLL_DEFAULTS.pollIntervalMs),
+    undefined,
+    wait,
   );
-  if (eligible && !matches.length) {
-    // A missing/unevaluated title from our bot could still be this dispatch.
-    if (
-      listed.some(
-        (run) =>
-          !run.actor?.login ||
-          (run.actor.login === o.config.botLogin &&
-            !/^cardigan\/[\w-]+\/[\w-]+\/[\w-]+\/(precheck|merge_check)\/[a-f0-9]{40}\/[a-f0-9]{40}$/u.test(
-              run.display_title,
-            )),
-      )
-    )
+  try {
+    const scanStarted = clock();
+    const deadline =
+      intent.discoveryDeadlineAt ?? Date.parse(intent.startedAt) + wait;
+    const eligible =
+      finishAs && canFinishUndispatched(intent, scanStarted, deadline);
+    if (finishAs === "human" && !eligible)
       throw new GithubExecutorError("recovery_incomplete");
-    o.journal.finishUndispatched(
-      intent,
-      scanStarted,
-      deadline,
-      listed.length,
-      finishAs,
+    const title = githubCheckRunName(o.inputs);
+    const seen = new Set(intent.observedRunIds);
+    const observe = (run: GithubRun) => {
+      if (run.display_title === title && seen.size < 2 && !seen.has(run.id)) {
+        o.journal.observeMatch(intent, run.id);
+        seen.add(run.id);
+      }
+    };
+    const listed = await o.client.runs(
+      o.branch,
+      intent.startedAt,
+      signal,
+      observe,
     );
-    return undefined;
+    const matches = listed.filter((run) => run.display_title === title);
+    for (const run of matches) observe(run);
+    if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
+    if (eligible && !matches.length) {
+      if (!listed.every((run) => clearlyUnrelated(run, o.config.botLogin)))
+        throw new GithubExecutorError("recovery_incomplete");
+      o.journal.finishUndispatched(
+        intent,
+        scanStarted,
+        deadline,
+        listed.length,
+        finishAs,
+      );
+      return undefined;
+    }
+    return matches;
+  } finally {
+    o.journal.endListing(intent);
   }
-  return matches;
 }
 
 /** Offline assertions/flags cannot authorize settlement. The CLI uses the same online proof as maintenance. */
@@ -233,7 +264,7 @@ export async function verifyUndispatched(
     ...identity,
     branch,
     config,
-    scanStarted: Date.now(),
+    clock: Date.now,
     finishAs: "human",
   });
   if (matches) throw new GithubExecutorError("recovery_incomplete");

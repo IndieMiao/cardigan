@@ -1214,7 +1214,7 @@ test("human can explicitly recheck a residual registration without reopening the
   expect(state().events).toHaveLength(before);
 });
 
-test("finish-undispatched verifies the original GitHub workflow online; errors and matches never release the slot", async () => {
+async function abandonedCliDispatch() {
   const { card, completion } = await seatAwaitingMerge();
   const {
     GithubCheckExecutor,
@@ -1302,45 +1302,138 @@ test("finish-undispatched verifies the original GitHub workflow online; errors a
   journal.reconcile([project], () => ({ status: "disabled" }));
   const cli = () => cardigan("merge", "finish-undispatched", card.id, attempt);
   const list = vi.spyOn(GithubClient.prototype, "runs");
-  try {
-    list.mockRejectedValueOnce(new Error("partial listing"));
-    expect((await cli()).code).not.toBe(0);
-    expect(journal.admitted()).toHaveLength(1);
-    list.mockResolvedValueOnce([
-      {
-        id: 123,
-        run_attempt: 1,
-        path: config.workflow,
-        event: "workflow_dispatch",
-        head_branch: "main",
-        head_sha: SHA,
-        actor: { login: config.botLogin },
-        html_url: `https://github.com/${config.repo}/actions/runs/123`,
-        created_at: "2020-01-01T00:00:00Z",
-        display_title: githubCheckRunName({
-          sha: SHA,
-          tree,
-          attempt,
-          kind: "merge_check",
-          card: card.id,
-          delivery: completion.id,
-        }),
-      },
-    ]);
-    expect((await cli()).code).not.toBe(0);
-    expect(journal.admitted()).toHaveLength(1);
-    list.mockResolvedValueOnce([]);
-    expect(await cli()).toMatchObject({
-      code: 0,
-      out: expect.stringContaining("已核实未派发"),
-    });
-    expect(list).toHaveBeenCalledTimes(3);
-    expect(journal.admitted()).toEqual([]);
-    expect(journal.all()[0]?.undispatched).toMatchObject({
-      source: "human",
-      listed: 0,
-    });
-  } finally {
-    list.mockRestore();
-  }
-});
+  return {
+    card,
+    cli,
+    journal,
+    list,
+    matchingRun: {
+      id: 123,
+      run_attempt: 1,
+      path: config.workflow,
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: SHA,
+      actor: { login: config.botLogin },
+      html_url: `https://github.com/${config.repo}/actions/runs/123`,
+      created_at: "2020-01-01T00:00:00Z",
+      display_title: githubCheckRunName({
+        sha: SHA,
+        tree,
+        attempt,
+        kind: "merge_check",
+        card: card.id,
+        delivery: completion.id,
+      }),
+    },
+  };
+}
+
+test.each(["dead_writer", "live_legacy"] as const)(
+  "finish-undispatched handles the POST writer without a background worker (%s)",
+  async (mode) => {
+    const { card, cli, journal, list } = await abandonedCliDispatch();
+    try {
+      const [current] = journal.admitted();
+      if (!current) throw new Error("Missing dispatch");
+      store.uow.run((tx) => {
+        const history = tx.events.listAfter(project, card.id, 0);
+        const publishing = history.find(
+          (e) =>
+            e.type === "github_check_dispatch" &&
+            e.payload.phase === "publishing",
+        );
+        const publisher = publishing?.payload.publisher as {
+          pid: number;
+          start: string;
+        };
+        expect(publisher.pid).toBe(process.pid);
+        const {
+          absenceNotBefore: _,
+          nextDiscoveryAt: _cadence,
+          ...rest
+        } = current;
+        tx.events.append(project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project, card.id),
+          card_id: card.id,
+          actor: { kind: "system", project_id: project },
+          type: "github_check_dispatch",
+          payload: JSON.parse(
+            JSON.stringify({
+              ...rest,
+              ...(mode === "dead_writer"
+                ? {
+                    postOwner: { ...publisher, start: `${publisher.start}0` },
+                  }
+                : {}),
+            }),
+          ),
+          created_at: NOW,
+        });
+      });
+      expect((await cli()).code).not.toBe(0);
+      expect(list).not.toHaveBeenCalled();
+      const [held] = journal.admitted();
+      if (!held) throw new Error("Missing held dispatch");
+      if (mode === "live_legacy") {
+        expect(held.absenceNotBefore).toBeUndefined();
+        expect(held.nextDiscoveryAt).toBeUndefined();
+        return;
+      }
+      expect(held.absenceNotBefore).toBeGreaterThan(Date.now());
+      expect(held.postOwner).toBeUndefined();
+      const grace = held.absenceNotBefore;
+      if (!grace) throw new Error("Missing visibility window");
+      const clock = vi.spyOn(Date, "now");
+      try {
+        clock.mockReturnValue(grace - 1);
+        expect((await cli()).code).not.toBe(0);
+        expect(list).not.toHaveBeenCalled();
+        clock.mockReturnValue(grace);
+        list.mockResolvedValueOnce([]);
+        expect((await cli()).code).toBe(0);
+        expect(list).toHaveBeenCalledOnce();
+        expect(journal.admitted()).toEqual([]);
+      } finally {
+        clock.mockRestore();
+      }
+    } finally {
+      list.mockRestore();
+    }
+  },
+);
+
+test.each(["absent", "match"] as const)(
+  "finish-undispatched verifies the original GitHub workflow online (%s)",
+  async (mode) => {
+    const { cli, journal, list, matchingRun } = await abandonedCliDispatch();
+    try {
+      list.mockRejectedValueOnce(new Error("partial listing"));
+      expect((await cli()).code).not.toBe(0);
+      expect(journal.admitted()).toHaveLength(1);
+      if (mode === "match") {
+        list.mockResolvedValueOnce([matchingRun]);
+        expect((await cli()).code).not.toBe(0);
+        expect(journal.admitted()).toHaveLength(1);
+        list.mockResolvedValue([]);
+        expect((await cli()).code).not.toBe(0);
+        expect(journal.admitted()).toMatchObject([{ observedRunIds: [123] }]);
+        return;
+      }
+      list.mockResolvedValueOnce([]);
+      expect(await cli()).toMatchObject({
+        code: 0,
+        out: expect.stringContaining("已核实未派发"),
+      });
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(journal.admitted()).toEqual([]);
+      expect(journal.all()[0]?.undispatched).toMatchObject({
+        source: "human",
+        listed: 0,
+      });
+    } finally {
+      list.mockRestore();
+    }
+  },
+);

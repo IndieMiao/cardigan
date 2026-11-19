@@ -19,9 +19,13 @@ import {
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
-import { GithubDispatchJournal } from "./github-dispatch-journal.js";
+import {
+  type GithubDispatchIntent,
+  GithubDispatchJournal,
+} from "./github-dispatch-journal.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import { executionOwner } from "./process-identity.js";
 
 const stores: Store[] = [],
   roots: string[] = [];
@@ -352,6 +356,7 @@ test("D3: a 204 response uses the exact name and time window, ambiguity fails cl
     "main",
     trusted.created_at,
     undefined,
+    expect.any(Function),
   );
   const g = setup();
   g.client.dispatch.mockResolvedValue(undefined);
@@ -1560,7 +1565,10 @@ test.each([
 
 test.each([
   "absent",
-  "legacy",
+  "other_runs",
+  "malformed_actor",
+  "case_variant_bot",
+  "malformed_title",
   "capacity_changed",
   "workflow_changed",
   "credentials_changed",
@@ -1584,13 +1592,8 @@ test.each([
     const f = setup(db);
     await loseDispatch(f);
     const previous = f.journal.unfinished()[0]!;
-    const {
-      discoveryDeadlineAt: _deadline,
-      absenceNotBefore: _visibility,
-      ...legacy
-    } = previous;
     const intent = {
-      ...(mode === "legacy" ? legacy : previous),
+      ...previous,
       ...(mode === "active" ? {} : { abandoned: "superseded" as const }),
       ...(mode === "known_id" ? { dispatchedRunId: 123 } : {}),
     };
@@ -1628,6 +1631,29 @@ test.each([
           html_url: trusted.html_url,
           workflow_sha: trusted.head_sha,
         });
+      if (mode === "other_runs")
+        return Array.from({ length: 41 }, (_, n) => ({
+          ...trusted,
+          id: 200 + n,
+          display_title: githubCheckRunName({
+            ...inputs,
+            attempt: `other-${n}`,
+          }),
+        }));
+      if (mode === "malformed_actor")
+        return [{ ...unevaluated, actor: { login: 42 as unknown as string } }];
+      if (mode === "case_variant_bot")
+        return [
+          { ...unevaluated, actor: { login: config.botLogin.toUpperCase() } },
+        ];
+      if (mode === "malformed_title")
+        return [
+          {
+            ...unevaluated,
+            actor: { login: "other" },
+            display_title: null as unknown as string,
+          },
+        ];
       return mode === "default_title" ? [unevaluated] : [];
     });
     f.client.run.mockRejectedValue(new GithubNotFoundError());
@@ -1648,7 +1674,9 @@ test.each([
       mode === "active"
         ? executor.dispatch(request)
         : executor.recoverAbandoned(request, intent);
-    const released = ["absent", "legacy", "capacity_changed"].includes(mode);
+    const released = ["absent", "other_runs", "capacity_changed"].includes(
+      mode,
+    );
     if (released) await expect(recovery).resolves.toBeUndefined();
     else await expect(recovery).rejects.toBeDefined();
     expect(f.journal.unfinished()).toHaveLength(released ? 0 : 1);
@@ -1663,7 +1691,7 @@ test.each([
         reason: "complete_scan_no_match",
         source: "automatic",
         scanStartedAt: new Date(time).toISOString(),
-        listed: 0,
+        listed: mode === "other_runs" ? 41 : 0,
       });
       closeFixtureStore(f.store);
       const restored = setup(db, false);
@@ -2064,4 +2092,196 @@ test("a late POST response cannot race a negative abandoned scan or lose its ret
   post.resolve(123);
   await expect(dispatch).rejects.toBeDefined();
   expect(f.journal.admitted()).toMatchObject([{ dispatchedRunId: 123 }]);
+});
+
+function appendDispatch(
+  f: ReturnType<typeof setup>,
+  intent: GithubDispatchIntent,
+) {
+  f.store.uow.run((tx) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(human.project_id, card.id),
+      card_id: card.id,
+      actor: { kind: "system", project_id: human.project_id },
+      type: "github_check_dispatch",
+      payload: JSON.parse(JSON.stringify(intent)),
+      created_at: intent.startedAt,
+    }),
+  );
+}
+
+test.each(["live", "dead", "missing"] as const)(
+  "legacy POST writer (%s): upgrade never races a late response",
+  async (writer) => {
+    const f = setup();
+    // Obtain the real digest, then reproduce the old writer's event stream in a clean store.
+    await loseDispatch(f);
+    const {
+      absenceNotBefore: _,
+      discoveryDeadlineAt: _deadline,
+      ...base
+    } = f.journal.all()[0]!;
+    const old = setup(),
+      owner = executionOwner(process.pid)!;
+    const dead = { ...owner, start: `${owner.start}0` };
+    appendDispatch(old, { ...base, phase: "reserved" });
+    // A failed earlier publication is not the writer which crossed the POST boundary.
+    appendDispatch(old, { ...base, phase: "publishing", publisher: dead });
+    appendDispatch(old, { ...base, phase: "reserved" });
+    appendDispatch(old, {
+      ...base,
+      phase: "publishing",
+      ...(writer === "missing"
+        ? {}
+        : { publisher: writer === "live" ? owner : dead }),
+    });
+    appendDispatch(old, base); // old beginDispatch removes publisher just BEFORE POST
+    const abandoned = { ...base, abandoned: "superseded" as const };
+    appendDispatch(old, abandoned);
+    let time = now + 3_600_000;
+    old.client.runs.mockResolvedValue([]);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...old.options,
+        now: () => time,
+      }).recoverAbandoned(old.request, abandoned);
+    await expect(recover()).rejects.toBeDefined();
+    expect(old.journal.admitted()).toHaveLength(1);
+    if (writer === "live") {
+      // Old beginDiscovery checks cadence BEFORE saving the dispatch response ID.
+      expect(old.journal.unfinished()[0]?.nextDiscoveryAt).toBeUndefined();
+      old.journal.beginDiscovery(abandoned, time, 20_000, 123);
+      expect(old.journal.admitted()[0]?.dispatchedRunId).toBe(123);
+    } else {
+      const grace = old.journal.admitted()[0]?.absenceNotBefore;
+      if (writer === "dead") expect(grace).toBe(time + 15 * 60_000);
+      else expect(grace).toBeUndefined();
+      time += 15 * 60_000;
+      if (writer === "dead") {
+        await expect(recover()).resolves.toBeUndefined();
+        expect(old.journal.admitted()).toEqual([]);
+      } else {
+        await expect(recover()).rejects.toBeDefined();
+        expect(old.journal.admitted()).toHaveLength(1);
+      }
+    }
+  },
+);
+
+test.each(["unique", "ambiguous", "different"] as const)(
+  "exact list evidence survives failed detail, restart and later empty list (%s)",
+  async (mode) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-observed-dispatch-"));
+    roots.push(root);
+    const db = join(root, "state.db"),
+      f = setup(db);
+    await loseDispatch(f);
+    const second = {
+      ...trusted,
+      id: 124,
+      html_url: trusted.html_url.replace("123", "124"),
+    };
+    f.client.runs.mockResolvedValue(
+      mode === "ambiguous" ? [trusted, second] : [trusted],
+    );
+    f.client.run.mockRejectedValue(new GithubNotFoundError());
+    await expect(f.executor.dispatch(f.request)).rejects.toBeDefined();
+    const abandoned = {
+      ...f.journal.admitted()[0]!,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, abandoned);
+    closeFixtureStore(f.store);
+    const restored = setup(db, false);
+    let time = now + 3_600_000;
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...restored.options,
+        now: () => time,
+      }).recoverAbandoned(restored.request, abandoned);
+    restored.client.runs.mockResolvedValue([]);
+    await expect(recover()).rejects.toBeDefined();
+    expect(restored.journal.admitted()[0]?.dispatchedRunId).toBeUndefined();
+    const run = mode === "different" ? second : trusted;
+    restored.client.runs.mockResolvedValue([run]);
+    restored.client.run.mockResolvedValue(run);
+    time += 20_000;
+    if (mode === "unique") {
+      expect(await recover()).toBeDefined();
+      expect(restored.journal.admitted()[0]?.boundByDispatchId).toBeFalsy();
+    } else {
+      await expect(recover()).rejects.toBeDefined();
+      expect(restored.journal.admitted()[0]?.externalRun).toBeUndefined();
+    }
+  },
+);
+
+test("a second scanner cannot settle while a slower listing can still return a match", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const abandoned = {
+    ...f.journal.unfinished()[0]!,
+    abandoned: "superseded" as const,
+  };
+  appendDispatch(f, abandoned);
+  let time = now + 3_600_000;
+  const first = Promise.withResolvers<GithubRun[]>();
+  f.client.runs.mockReturnValueOnce(first.promise).mockResolvedValue([]);
+  f.client.run.mockRejectedValue(new GithubNotFoundError());
+  const recover = () =>
+    new GithubCheckExecutor({ ...f.options, now: () => time }).recoverAbandoned(
+      f.request,
+      abandoned,
+    );
+  const slow = recover();
+  await vi.waitFor(() => expect(f.client.runs).toHaveBeenCalledOnce());
+  time += 30_000;
+  await expect(recover()).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.client.runs).toHaveBeenCalledOnce();
+  first.resolve([trusted]);
+  await expect(slow).rejects.toBeDefined();
+  await expect(recover()).rejects.toBeDefined();
+  expect(f.journal.admitted()).toMatchObject([
+    { observedRunIds: [trusted.id] },
+  ]);
+});
+
+test("a match on an earlier REST page survives a failed later page", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const abandoned = {
+    ...f.journal.admitted()[0]!,
+    abandoned: "superseded" as const,
+  };
+  appendDispatch(f, abandoned);
+  let time = now + 3_600_000;
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(
+      Response.json({ total_count: 2, workflow_runs: [trusted] }),
+    )
+    .mockResolvedValueOnce(new Response("", { status: 503 }))
+    .mockResolvedValueOnce(
+      Response.json({ total_count: 0, workflow_runs: [] }),
+    );
+  const client = new GithubClient({
+    config,
+    dataDir: "/synthetic",
+    fetch,
+    now: () => time,
+  });
+  vi.spyOn(client, "token").mockResolvedValue(syntheticToken);
+  const recover = () =>
+    new GithubCheckExecutor({
+      ...f.options,
+      client,
+      now: () => time,
+    }).recoverAbandoned(f.request, abandoned);
+  await expect(recover()).rejects.toBeDefined();
+  expect(f.journal.admitted()).toMatchObject([{ observedRunIds: [123] }]);
+  time += 20_000;
+  await expect(recover()).rejects.toBeDefined();
+  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(f.journal.admitted()).toHaveLength(1);
 });

@@ -247,12 +247,6 @@ export class GithubCheckExecutor implements CheckExecutor {
         const interval =
           this.options.config.pollIntervalMs ??
           GITHUB_POLL_DEFAULTS.pollIntervalMs;
-        const scanning = this.options.journal.beginDiscovery(
-          intent,
-          now,
-          interval,
-          runId,
-        );
         const deferDiscovery = (): never => {
           if (
             !request.signal?.aborted &&
@@ -269,6 +263,7 @@ export class GithubCheckExecutor implements CheckExecutor {
           throw new GithubExecutorError("dispatch_unknown");
         };
         if (runId !== undefined) {
+          this.options.journal.beginDiscovery(intent, now, interval, runId);
           try {
             run = await this.options.client.run(runId);
           } catch (error) {
@@ -282,12 +277,12 @@ export class GithubCheckExecutor implements CheckExecutor {
           const matches = await discoverUnboundGithub({
             client: this.options.client,
             journal: this.options.journal,
-            intent: scanning,
+            intent,
             key,
             inputs,
             branch: context.baselineBranch,
             config: this.options.config,
-            scanStarted: now,
+            clock: this.options.now ?? Date.now,
             signal: request.signal,
             finishAs: abandoned ? "automatic" : undefined,
           });

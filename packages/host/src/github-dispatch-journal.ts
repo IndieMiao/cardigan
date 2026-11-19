@@ -14,7 +14,7 @@ import type {
 } from "@cardigan/store";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
-import { GithubRetryLater } from "./github-rate-limit.js";
+import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
@@ -35,7 +35,12 @@ export interface GithubDispatchIntent {
   readonly publisher?: ExecutionOwner;
   /** Only the dispatching process can still send or receive this POST. */
   readonly postOwner?: ExecutionOwner;
+  /** Proof the POST writer settled or exited, plus a full visibility window. */
   readonly absenceNotBefore?: number;
+  /** Exact title observations are not bindings. Two distinct IDs already prove ambiguity. */
+  readonly observedRunIds?: readonly number[];
+  /** Serialize list IO across the CLI and background, including scans outlasting cadence. */
+  readonly scanOwner?: ExecutionOwner;
   readonly undispatched?: {
     readonly reason: "complete_scan_no_match";
     readonly source: "automatic" | "human";
@@ -67,13 +72,19 @@ export interface GithubDispatchIntent {
 function absenceDeadline(
   intent: GithubDispatchIntent,
   settledAt: number,
+  fallbackWindowMs?: number,
 ): number {
-  // Only new records have postOwner; they always persist the original deadline.
-  if (intent.discoveryDeadlineAt === undefined)
+  const duration =
+    intent.discoveryDeadlineAt === undefined
+      ? fallbackWindowMs
+      : intent.discoveryDeadlineAt - Date.parse(intent.startedAt);
+  if (
+    duration === undefined ||
+    !Number.isSafeInteger(duration) ||
+    duration <= 0
+  )
     throw new GithubExecutorError("recovery_incomplete");
-  return (
-    settledAt + (intent.discoveryDeadlineAt - Date.parse(intent.startedAt))
-  );
+  return settledAt + duration;
 }
 /** A negative listing is meaningful only after the original writer and its discovery window. */
 export function canFinishUndispatched(
@@ -92,11 +103,13 @@ export function canFinishUndispatched(
     intent.dispatchedRunId === undefined &&
     Number.isFinite(deadline) &&
     deadline > Date.parse(intent.startedAt) &&
+    intent.absenceNotBefore !== undefined &&
     at >=
       Math.max(
         intent.discoveryDeadlineAt ?? deadline,
-        intent.absenceNotBefore ?? 0,
+        intent.absenceNotBefore,
       ) &&
+    !intent.observedRunIds?.length &&
     !intent.postOwner
   );
 }
@@ -631,26 +644,100 @@ export class GithubDispatchJournal {
       return current;
     });
   }
-  /** Persist the existing maintenance cadence across controllers and restarts. */
+  /** Old writers dropped publisher just before POST. Only the immediate publishing →
+   * dispatching transition of this incarnation identifies who could still return an ID. */
+  private legacyPostOwner(
+    tx: StoreTransactionContext,
+    intent: GithubDispatchIntent,
+  ) {
+    let previous: GithubDispatchIntent | undefined;
+    for (const event of tx.events.listAfter(
+      intent.project as ProjectId,
+      this.probeCard ?? (intent.card as CardId),
+      0,
+    )) {
+      if (
+        event.type !==
+          (this.probeCard
+            ? "github_probe_dispatch"
+            : "github_check_dispatch") ||
+        event.actor.kind !== "system"
+      )
+        continue;
+      const entry = event.payload as unknown as GithubDispatchIntent;
+      if (entry.attempt !== intent.attempt) continue;
+      if (
+        entry.key !== intent.key ||
+        entry.startedAt !== intent.startedAt ||
+        entry.project !== intent.project ||
+        entry.card !== intent.card
+      ) {
+        previous = undefined;
+        continue;
+      }
+      if (entry.phase === "dispatching")
+        return previous?.phase === "publishing"
+          ? previous.publisher
+          : undefined;
+      previous = entry;
+    }
+  }
+  /** No proof of settlement is not proof of absence. Older records may have no
+   * writer history at all: allow a positive lookup, never a negative settlement. */
+  private afterWriterExit(
+    tx: StoreTransactionContext,
+    current: GithubDispatchIntent,
+    id: number | undefined,
+    clock: () => number,
+    retryAt: number,
+    fallbackWindowMs: number,
+  ): GithubDispatchIntent {
+    if (
+      !current.postOwner &&
+      (id !== undefined || current.absenceNotBefore !== undefined)
+    )
+      return current;
+    const owner = current.postOwner ?? this.legacyPostOwner(tx, current);
+    if (!owner) return current;
+    if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}:\d+$/u.test(owner.start))
+      throw new GithubExecutorError("recovery_incomplete");
+    // Old writers check cadence BEFORE saving their response ID. Do not change it while one can still return.
+    if (executionOwner(owner.pid)?.start === owner.start)
+      throw new GithubRetryLater(retryAt);
+    const { postOwner: _dead, ...settled } = current;
+    return {
+      ...settled,
+      absenceNotBefore: absenceDeadline(current, clock(), fallbackWindowMs),
+    };
+  }
+  /** Reserve list IO and settle dead POST writers before either automatic or human discovery.
+   * An omitted interval is an explicit human scan: no polling cadence is consumed. */
   beginDiscovery(
     intent: GithubDispatchIntent,
-    now: number,
-    interval: number,
+    at: number | (() => number),
+    interval: number | undefined,
     dispatchedRunId?: number,
+    fallbackWindowMs: number = GITHUB_POLL_DEFAULTS.waitStartMs,
   ): GithubDispatchIntent {
-    return this.store.uow.run((tx) => {
+    const clock = typeof at === "number" ? () => at : at;
+    const reservation = this.store.uow.run((tx) => {
+      const now = clock();
       const current = this.current(tx, intent.project, intent.card).find(
-        (value) => value.attempt === intent.attempt,
+        (i) => i.attempt === intent.attempt,
       );
       if (
         !current ||
         current.key !== intent.key ||
+        current.startedAt !== intent.startedAt ||
         current.phase !== "dispatching" ||
         current.finished ||
-        current.deleting
+        current.deleting ||
+        current.externalRun ||
+        current.identity
       )
         throw new GithubExecutorError("security");
       if (
+        interval !== undefined &&
         current.nextDiscoveryAt !== undefined &&
         now < current.nextDiscoveryAt
       )
@@ -660,21 +747,92 @@ export class GithubDispatchJournal {
         current.dispatchedRunId !== dispatchedRunId
       )
         throw new GithubExecutorError("security");
-      const { postOwner, ...settled } = current;
-      if (postOwner && executionOwner(postOwner.pid)?.start === postOwner.start)
-        throw new GithubRetryLater(now + interval);
-      // A crashed POST could have reached GitHub just before exit. Give it the
-      // full original visibility window from the first observation of death.
+      const retryAt = now + (interval ?? GITHUB_POLL_DEFAULTS.pollIntervalMs);
+      if (
+        current.scanOwner &&
+        executionOwner(current.scanOwner.pid)?.start === current.scanOwner.start
+      )
+        throw new GithubRetryLater(retryAt);
+      const prepared = this.afterWriterExit(
+        tx,
+        current,
+        dispatchedRunId,
+        clock,
+        retryAt,
+        fallbackWindowMs,
+      );
+      const deadline =
+        current.discoveryDeadlineAt ??
+        Date.parse(current.startedAt) + fallbackWindowMs;
+      // Return normally: first observation of death must commit even when human verification is too early.
+      if (
+        interval === undefined &&
+        !canFinishUndispatched(prepared, now, deadline)
+      ) {
+        if (prepared !== current) this.save(tx, prepared);
+        return undefined;
+      }
+      const scanOwner =
+        dispatchedRunId === undefined ? executionOwner(process.pid) : undefined;
+      if (dispatchedRunId === undefined && !scanOwner)
+        throw new GithubExecutorError("recovery_incomplete");
+      const { scanOwner: _stale, ...ready } = prepared;
       const scanning = {
-        ...settled,
-        ...(postOwner
-          ? { absenceNotBefore: absenceDeadline(current, now) }
+        ...ready,
+        ...(scanOwner ? { scanOwner } : {}),
+        ...(interval !== undefined &&
+        (dispatchedRunId !== undefined || ready.absenceNotBefore !== undefined)
+          ? { nextDiscoveryAt: retryAt }
           : {}),
-        nextDiscoveryAt: now + interval,
         ...(dispatchedRunId !== undefined ? { dispatchedRunId } : {}),
       };
       this.save(tx, scanning);
       return scanning;
+    });
+    if (!reservation) throw new GithubExecutorError("recovery_incomplete");
+    return reservation;
+  }
+  /** Save positive evidence before detail IO, even if a later page fails. Never promote it to a response ID. */
+  observeMatch(intent: GithubDispatchIntent, id: number) {
+    if (!Number.isSafeInteger(id) || id < 1)
+      throw new GithubExecutorError("security");
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (i) => i.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        current.finished ||
+        !this.ownsScan(current, intent)
+      )
+        throw new GithubExecutorError("recovery_incomplete");
+      const known = current.observedRunIds ?? [];
+      if (known.length < 2 && !known.includes(id))
+        this.save(tx, { ...current, observedRunIds: [...known, id] });
+    });
+  }
+  private ownsScan(current: GithubDispatchIntent, scan: GithubDispatchIntent) {
+    return (
+      !!scan.scanOwner &&
+      scan.scanOwner.pid === process.pid &&
+      current.scanOwner?.pid === scan.scanOwner.pid &&
+      current.scanOwner.start === scan.scanOwner.start
+    );
+  }
+  endListing(intent: GithubDispatchIntent) {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (i) => i.attempt === intent.attempt,
+      );
+      if (
+        current &&
+        current.key === intent.key &&
+        this.ownsScan(current, intent)
+      ) {
+        const { scanOwner: _, ...released } = current;
+        this.save(tx, released);
+      }
     });
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
@@ -800,6 +958,7 @@ export class GithubDispatchJournal {
         this.probeCard ||
         !current ||
         current.key !== intent.key ||
+        !this.ownsScan(current, intent) ||
         !canFinishUndispatched(current, scanStarted, deadline) ||
         current.startedAt !== intent.startedAt ||
         current.discoveryDeadlineAt !== intent.discoveryDeadlineAt ||
@@ -807,8 +966,9 @@ export class GithubDispatchJournal {
         current.absenceNotBefore !== intent.absenceNotBefore
       )
         throw new GithubExecutorError("recovery_incomplete");
+      const { scanOwner: _scanner, ...done } = current;
       this.save(tx, {
-        ...current,
+        ...done,
         finished: true,
         abandonmentReason:
           "Complete discovery after deadline found no matching run; reservation released",
@@ -836,6 +996,8 @@ export class GithubDispatchJournal {
         current.deleting ||
         (current.finished && !current.externalRun) ||
         current.key !== intent.key ||
+        current.scanOwner ||
+        current.observedRunIds?.some((id) => id !== externalRun.run_id) ||
         (boundByDispatchId && current.dispatchedRunId !== externalRun.run_id) ||
         (current.externalRun &&
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))
