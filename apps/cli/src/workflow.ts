@@ -58,6 +58,7 @@ import {
   updateMachineDescription,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
+import { loadOptionalConfigSync } from "./config.js";
 import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { runFlowUpgrade } from "./flow-version.js";
@@ -77,6 +78,7 @@ import {
 } from "./host.js";
 import { rotateHostOps } from "./host-ops-rotate.js";
 import type { CliIo } from "./io.js";
+import { resolveLaunchPaths } from "./paths.js";
 import { printRotation, rotateStandingPmInStore } from "./pm-rotate.js";
 import { launchExecution, terminalExecution } from "./runtime-check.js";
 
@@ -2104,7 +2106,9 @@ async function openPlacementStore(
   const dataDir = announceDataDir(io, optional(flags, "data-dir"));
   const limits = await loadRunCapacityConfig({ env: io.env });
   const store = openCardiganStore({ dataDir });
-  configureMachinePlacement(store, dataDir, io.env, limits);
+  configureMachinePlacement(store, dataDir, io.env, limits, () =>
+    loadOptionalConfigSync(resolveLaunchPaths(io.env)),
+  );
   return store;
 }
 function openStoreFrom(io: CliIo, flags: Args["flags"]): Store {

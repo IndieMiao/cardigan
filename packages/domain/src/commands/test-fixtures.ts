@@ -15,6 +15,7 @@ import {
   formatTimelineEntryId,
   parseEventId,
 } from "../ids.js";
+import type { MachinePlacement } from "../machine-placement.js";
 import type { CommandEffect, CommandPorts, CommandState } from "./core.js";
 
 export function value<T>(result: Result<T>): T {
@@ -36,6 +37,9 @@ export const machine = (): Machine => ({
   status: "online",
   last_seen: now,
 });
+export const placement = (
+  entries: readonly (readonly [string, MachinePlacement])[] = [],
+) => ({ harness: "codex" as const, machines: new Map(entries) });
 export const subject = { kind: "git_head" as const, value: "a".repeat(40) };
 export const human: Actor = { kind: "human", project_id: "fixture-project" };
 export const role = (role_id: string): RoleReference => ({

@@ -19,7 +19,8 @@ cardigan machine show <机器> --project <项目>
 后台和 CLI 重叠检查时只有最新发起的一轮可以写回，检查中的旧能力立即失效。
 
 内置能力有 Blender、Godot、NVIDIA/Apple GPU、Android SDK/模拟器、Xcode、
-iOS 模拟器、Docker、Node、Python 和 Chromium。工具须在 worker 配置的 PATH 中；
+iOS 模拟器、Docker、Node、Python、Chromium 和三种启动器：`harness.codex`（`codex`）、
+`harness.claude-code`（`claude`）、`harness.pi`（`pi`）。工具须在 worker 配置的 PATH 中；
 Chromium 也支持常见 Chrome 与 Playwright 缓存位置。GPU/Xcode/iOS 按适用系统检查。
 Docker 检查服务端可达；版本只保存数字版本段，原始横幅、账号信息和检查输出不落库。
 
@@ -44,5 +45,11 @@ capabilities:
 传统 local 模式使用实际运行账号。只保留 PATH、账号 HOME 与固定语言环境，不传递主机 Token。
 需要登录的 CLI 由人先在对应 worker 账号完成配置，检查不会创建凭据。
 
-本阶段不改变选机、工作项需求、并发上限或界面。总体方案见
+## 自动选机和首发失败恢复
+
+未指定机器时，远程候选必须具备员工实际启动配置所需的启动器；员工未覆盖配置时取该角色固定版本的启动配置。机器缺少版本证据、证据过期或启动配置未知时，查看 `machine_selected` 的排除原因；所有候选都不可用时，查看交给 PM 的缺项说明。本机不要求额外的启动器证据，但仍须满足角色和工作项已有的能力要求。前端工程师和设计总监的默认角色包都要求 `browser.chromium`。
+
+若旧指派已经误派，先核实同卡的系统 `bell_delivery_failed` 原因是 `snapshot_unavailable`，且从未创建 Run、终端或工作区。PM Ops 可调用 `release_assignment` 释放该指派，再对**原工作项**调用 `assign`，保留原角色，不传 `machine_id` 或 `recovery_source`。系统避开上次失败的机器重新选机；没有候选时先补足能力证据，再重试。新身份继续原工作项，验证目标不变。已经运行过或发生失联的指派不能用这个方式换机。
+
+总体方案见
 [机器能力标签与自动选机方案](plans/machine-capabilities.md)。

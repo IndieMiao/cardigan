@@ -45,4 +45,8 @@ export interface MachinePlacement {
 export type ReadMachinePlacement = (
   project: string,
   now: string,
-) => ReadonlyMap<string, MachinePlacement>;
+  launchProfile?: string,
+) => {
+  readonly harness: import("./role.js").Role["harness"] | undefined;
+  readonly machines: ReadonlyMap<string, MachinePlacement>;
+};

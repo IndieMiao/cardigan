@@ -90,6 +90,7 @@ export const toolNames = [
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
 export interface RoleReference {
+  readonly launch_profile_ref?: string;
   /** Legacy references may not declare a worktree policy. */
   readonly worktree?: RoleWorktree;
   readonly required_capabilities?: readonly string[];
@@ -443,7 +444,7 @@ export interface RuntimeRef {
   readonly branch?: string;
 }
 interface AssignmentFields {
-  /** Human-confirmed remote loss; source selected explicitly by PM during assign. */
+  /** Confirmed remote loss (PM chooses source) or released first-launch failure (no workspace, use main). */
   readonly recovery?: {
     readonly previous_assignment_id: AssignmentId;
     readonly source: "main" | "backup";

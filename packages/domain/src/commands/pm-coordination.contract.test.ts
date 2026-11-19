@@ -28,6 +28,7 @@ import {
   id,
   machine,
   now,
+  placement,
   ports,
   run,
   value,
@@ -341,7 +342,7 @@ test("automatic first producer skips the idle remote worker for worktree roles a
   const available: MachinePlacement = {
     remote_binding: "allowed",
     health: { status: "passed", available: true },
-    capabilities: [],
+    capabilities: [{ key: "harness.codex", version: "1.2.3", available: true }],
     occupied: 0,
     limit: 4,
   };
@@ -356,7 +357,7 @@ test("automatic first producer skips the idle remote worker for worktree roles a
     roles: base.roles.map((r) => ({ ...r, worktree: "write" })),
     machines: [remote, machine()],
     read_machine_placement: () =>
-      new Map([
+      placement([
         [remote.id, available],
         ["local", { ...available, occupied: 3 }],
       ]),
@@ -377,7 +378,7 @@ test("automatic first producer skips the idle remote worker for worktree roles a
   const verified = auto({
     ...state,
     read_machine_placement: () =>
-      new Map([
+      placement([
         [remote.id, { ...available, worktree_preparation: "verified" }],
         ["local", { ...available, occupied: 3 }],
       ]),

@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import { HARNESS_BINARY, HARNESSES } from "@cardigan/roles";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import { readOnboardingYaml } from "./worker-onboarding-config.js";
 
@@ -30,6 +31,9 @@ function tool(
   };
 }
 export const BUILTIN_MACHINE_CAPABILITIES: readonly CapabilityDefinition[] = [
+  ...HARNESSES.map((harness) =>
+    tool(`harness.${harness}`, [HARNESS_BINARY[harness], "--version"]),
+  ),
   tool("blender", ["blender", "--version"]),
   tool("godot", ["godot", "--version"]),
   tool(

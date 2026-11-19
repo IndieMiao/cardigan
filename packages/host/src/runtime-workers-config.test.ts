@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assignOrDefer } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
+import { parseLaunchConfig } from "@cardigan/roles";
 import {
   beginMachineObservation,
   completeMachineObservation,
@@ -479,7 +480,11 @@ test("placement reads current project opt-in and unexpired observations in the c
           tags: ["fixture-only"],
         });
       tx.cards.put(project, { ...card(), project_id: project });
-      tx.roles.put(project, { ...role("coder"), worktree: "none" });
+      tx.roles.put(project, {
+        ...role("coder"),
+        launch_profile_ref: "role-profile",
+        worktree: "none",
+      });
       tx.work_items.put(project, {
         id: id("work_item", 1),
         card_id: card().id,
@@ -505,6 +510,12 @@ test("placement reads current project opt-in and unexpired observations in the c
       { status: "passed", checked_at: now, blockers: [], launch_enabled: true },
       [
         {
+          key: "harness.codex",
+          version: "1.2.3",
+          verified_at: now,
+          evidence_ref: "fixture",
+        },
+        {
           key: "godot",
           version: "4.10",
           verified_at: now,
@@ -517,10 +528,20 @@ test("placement reads current project opt-in and unexpired observations in the c
       root,
       env,
       await loadRunCapacityConfig({ env }),
+      () =>
+        parseLaunchConfig({
+          providers: {},
+          profiles: {
+            "role-profile": { harness: "codex" },
+            personal: { harness: "claude-code" },
+          },
+        }),
     );
     const read = (p = project, t = now) =>
       store.uow.run((tx) =>
-        loadCommandState(tx, p).read_machine_placement?.(p, t).get("worker-a"),
+        loadCommandState(tx, p)
+          .read_machine_placement?.(p, t)
+          .machines.get("worker-a"),
       );
     expect(read()).toMatchObject({
       remote_binding: "allowed",
@@ -528,7 +549,10 @@ test("placement reads current project opt-in and unexpired observations in the c
       occupied: 1,
       resources: new Map([["godot", { limit: 2, occupied: 1 }]]),
       health: { available: true },
-      capabilities: [{ key: "godot", available: true }],
+      capabilities: [
+        { key: "godot", available: true },
+        { key: "harness.codex", available: true },
+      ],
     });
     expect(read("other")).toMatchObject({
       remote_binding: "disabled",
@@ -553,9 +577,50 @@ test("placement reads current project opt-in and unexpired observations in the c
     expect(select(["fixture-only"]).data).toMatchObject({
       machine_id: "worker-a",
     });
+    // Exercise the actual transaction reader and employee-over-role profile precedence.
+    const employee = {
+      id: id("employee", 1),
+      name: "Worker",
+      title: "Coder",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      status: "active" as const,
+      created_at: now,
+      updated_at: now,
+    };
+    store.uow.run((tx) =>
+      tx.employees.put({ ...employee, launch_profile_ref: "personal" }),
+    );
+    expect(select([]).events.at(-1)).toMatchObject({
+      type: "machine_selected",
+      payload: {
+        machine_id: "local",
+        excluded: [
+          { machine_id: "worker-a", reasons: ["harness.claude-code：未验证"] },
+        ],
+      },
+    });
+    store.uow.run((tx) =>
+      tx.employees.put({ ...employee, launch_profile_ref: "unknown" }),
+    );
+    expect(select(["fixture-only"]).data).toMatchObject({
+      deferred: true,
+      reason: expect.stringContaining("启动配置未知"),
+    });
+    store.uow.run((tx) =>
+      tx.employees.put({ ...employee, launch_profile_ref: null }),
+    );
+    expect(select(["fixture-only"]).data).toMatchObject({
+      machine_id: "worker-a",
+    });
     const setPolicy = (worktree: "none" | "write") =>
       store.uow.run((tx) => {
-        tx.roles.put(project, { ...role("coder"), worktree });
+        tx.roles.put(project, {
+          ...role("coder"),
+          launch_profile_ref: "role-profile",
+          worktree,
+        });
       });
     setPolicy("write");
     expect(select(["fixture-only"]).data).toMatchObject({ deferred: true });
@@ -666,7 +731,10 @@ test("placement reads current project opt-in and unexpired observations in the c
       ),
     ).toMatchObject({
       health: { available: false },
-      capabilities: [{ available: false }],
+      capabilities: [
+        { key: "godot", available: false },
+        { key: "harness.codex", available: false },
+      ],
     });
   } finally {
     store.close();

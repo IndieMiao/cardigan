@@ -29,6 +29,7 @@ export function roleReference(role: Role): RoleReference {
   return {
     role_id: role.role_id,
     role_version: role.version,
+    launch_profile_ref: role.launch_profile_ref,
     worktree: role.worktree,
     allowed_tools: role.allowed_tools,
     capabilities: role.capabilities,

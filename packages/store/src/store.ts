@@ -236,8 +236,7 @@ export interface StoreObserver {
 
 type PlacementReader = (
   tx: ReadRepositories,
-  project: ProjectId,
-  now: string,
+  ...args: Parameters<ReadMachinePlacement>
 ) => ReturnType<ReadMachinePlacement>;
 
 export class Store {
@@ -478,10 +477,10 @@ export class Store {
       const tx: StoreTransactionContext = {
         ...(reader
           ? {
-              read_machine_placement: (project, now) => {
+              read_machine_placement: (...args) => {
                 if (!active)
                   throw new Error("Machine placement transaction has ended");
-                return reader(tx, project, now);
+                return reader(tx, ...args);
               },
             }
           : {}),

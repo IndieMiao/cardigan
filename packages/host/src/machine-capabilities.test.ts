@@ -39,6 +39,9 @@ afterEach(() => {
 
 test("catalog includes OS-specific probes and normalizes versions without retaining banners", () => {
   expect(BUILTIN_MACHINE_CAPABILITIES.map((c) => c.key)).toEqual([
+    "harness.claude-code",
+    "harness.codex",
+    "harness.pi",
     "blender",
     "godot",
     "gpu.nvidia",
@@ -158,6 +161,25 @@ test.each(["linux", "darwin"])(
       };
       const first = await refreshMachineObservations(options);
       expect(first.health?.available).toBe(true);
+      for (const [harness, binary] of [
+        ["claude-code", "claude"],
+        ["codex", "codex"],
+        ["pi", "pi"],
+      ]) {
+        expect(probe).toHaveBeenCalledWith(
+          execution,
+          os,
+          [binary, "--version"],
+          undefined,
+        );
+        expect(first.capabilities).toContainEqual(
+          expect.objectContaining({
+            key: `harness.${harness}`,
+            version: "4.7.1",
+            available: true,
+          }),
+        );
+      }
       expect(
         first.capabilities.find((c) => c.key === "lark-cli")?.version,
       ).toBe("4.7.1");
