@@ -374,6 +374,15 @@ test("automatic first producer skips the idle remote worker for worktree roles a
       ],
     },
   });
+  const verified = auto({
+    ...state,
+    read_machine_placement: () =>
+      new Map([
+        [remote.id, { ...available, worktree_preparation: "verified" }],
+        ["local", { ...available, occupied: 3 }],
+      ]),
+  });
+  expect(verified.data?.machine_id).toBe(remote.id);
   const gap = auto({
     ...state,
     work_items: state.work_items.map((w) => ({

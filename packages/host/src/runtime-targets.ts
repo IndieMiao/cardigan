@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { arch, platform } from "node:os";
 import type {
   Assignment,
@@ -20,7 +19,6 @@ import {
   type RegisteredRuntime,
   type RuntimeEvent,
   readRegisteredRuntime,
-  registeredRuntimeOf,
   runtimeDifferences,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
@@ -29,6 +27,7 @@ import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
+import { runtimeTargetFingerprint } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
   matchesWorkerPlatform,
@@ -171,34 +170,13 @@ export class RuntimeTargets implements Runtime {
       this.options.env?.CARDIGAN_HC_SESSION ??
       "cardigan";
     const generation = worker?.generation ?? "legacy";
-    const fingerprint = createHash("sha256")
-      .update(
-        JSON.stringify([
-          project,
-          machine_id,
-          generation,
-          registeredRuntimeOf(execution, session),
-          execution.dataDir,
-          execution.mode === "agent-ssh" ? execution.path : null,
-          ...(execution.mode === "agent-ssh" && execution.macosCore
-            ? [{ macosCore: execution.macosCore }]
-            : []),
-          ...(execution.mode === "agent-ssh" && execution.mcp
-            ? [{ mcp: execution.mcp }]
-            : []),
-          ...(execution.mode === "agent-ssh" &&
-          (execution.publication || execution.fileHelper || execution.gitHelper)
-            ? [
-                {
-                  publication: execution.publication,
-                  fileHelper: execution.fileHelper,
-                  gitHelper: execution.gitHelper,
-                },
-              ]
-            : []),
-        ]),
-      )
-      .digest("hex");
+    const fingerprint = runtimeTargetFingerprint(
+      project,
+      machine_id,
+      generation,
+      execution,
+      session,
+    );
     return {
       machine,
       session,
