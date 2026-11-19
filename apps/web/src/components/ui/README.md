@@ -21,4 +21,6 @@ Tailwind 扫描所有 views/components/App。页面组合布局组件；页面�
 
 编号统一消费IdBadge（IdTag/帮助图例复用，Markdown编号使用相同data-ui及类型类）；浅底、类型色文字，全部交互状态无下划线及hover边框。所有语义颜色只在theme定义，强调和成功用中性灰，不保留绿色/青绿类型色。Button的avatar尺寸用于圆形溢出计数，继承头像尺寸token，不改变常规控件28px合同。布局CSS module若使用cascade layer，须先声明完整layer顺序，避免动态导入顺序反转legacy与components。
 
+设置页用 `layout/SettingsLayout`（导航、面板、分组、设置行、数值框、悬停说明）组合，布尔设置用 `Switch`，多字段设置用 `DialogContent`；保存方式和危险区规则见 `docs/design/ui-guidelines.md` 的“设置页模式”。
+
 工具栏日期筛选用 `FilterDate`（`layout/FilterDateLayout` 提供控件框）；非卡片数据表用 `DataTableLayout stacked` 获得窄屏纵向记录，短值列用 `DataTableCell nowrap`。不要在页面为这两种场景另写 CSS。

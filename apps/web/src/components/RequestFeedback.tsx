@@ -27,6 +27,9 @@ export function RequestFeedbackScope({
   );
 }
 
+/** False inside a retained panel that is currently hidden. */
+export const useFeedbackVisible = () => useContext(FeedbackVisible);
+
 /** Share a stack, inside the active dialog when applicable (Radix hides its siblings). */
 function useFeedbackRegion() {
   const anchor = useRef<HTMLSpanElement>(null);

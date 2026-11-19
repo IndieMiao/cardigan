@@ -175,7 +175,7 @@ const cases: Case[] = [
     name: "preferences",
     method: "preferences",
     component: (p) => <SettingsPage {...p} />,
-    target: "#preferences form",
+    target: "#preferences [data-settings-group]",
   },
   {
     name: "authorization",
@@ -358,25 +358,35 @@ test("a real SSE invalidation in Workbench refreshes Needs You silently without 
 test("saving preferences reports progress, failure and success without moving the form", async () => {
   let request = Promise.withResolvers<void>();
   const save = vi.fn().mockImplementation(() => request.promise);
-  const client = fakeClient({ setPreferences: save });
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: 30,
+      merge_gate_enabled: true,
+    }),
+    setPreferences: save,
+  });
   const view = render(<SettingsPage client={client} projectId="p-1" />);
   await act(async () => {});
   const before = flowLayout(view.container);
-  const form = view.container.querySelector("form");
+  const group = view.container.querySelector("[data-settings-group]");
   const stable = () => {
-    expect(view.container.querySelector("form")).toBe(form);
+    expect(view.container.querySelector("[data-settings-group]")).toBe(group);
     expect(flowLayout(view.container)).toEqual(before);
   };
-  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  const minutes = screen.getByLabelText("等待分钟数");
+  fireEvent.change(minutes, { target: { value: "45" } });
+  stable();
+  fireEvent.keyDown(minutes, { key: "Enter" });
   expect(screen.getByText("保存中…")).toBeTruthy();
   stable();
   await act(async () => request.reject(new Error("保存失败")));
   expect(screen.getByRole("alert").textContent).toContain("保存失败");
   stable();
   request = Promise.withResolvers<void>();
-  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  fireEvent.keyDown(minutes, { key: "Enter" });
   expect(screen.getByText("保存中…")).toBeTruthy();
   await act(async () => request.resolve());
   expect(screen.getByText("偏好已保存")).toBeTruthy();
+  expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
   stable();
 });

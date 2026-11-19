@@ -37,14 +37,17 @@
     --ui-stroke: 1px;
     --ui-focus-width: 1px;
     --ui-check: 16px;
-    --ui-switch: 28px;
-    --ui-switch-thumb: 12px;
+    --ui-switch: 32px;
+    --ui-switch-height: 18px;
+    --ui-switch-thumb: 14px;
     --ui-menu-min: 128px;
     --ui-menu-max: 320px;
     --ui-dialog-width: 560px;
     --ui-sheet-width: 960px;
     --ui-detail-drawer-width: 760px;
     --ui-content-width: 1088px;
+    --ui-settings-nav: 160px;
+    --ui-settings-width: 720px;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
     --ui-avatar-size: 32px;
@@ -530,29 +533,31 @@
   }
   .ui-switch {
     display: inline-flex;
+    flex: none;
     align-items: center;
-    width: var(--ui-control-regular);
-    height: var(--ui-control);
+    width: var(--ui-switch);
+    height: var(--ui-switch-height);
     min-height: 0;
-    padding: var(--ui-stroke);
-    border: var(--ui-stroke) solid var(--control-border);
-    border-radius: var(--ui-radius);
-    background: var(--surface-muted);
+    padding: 0 var(--ui-stroke);
+    border: var(--ui-stroke) solid transparent;
+    border-radius: var(--ui-pill-radius);
+    background: var(--ui-border-hover);
+    cursor: pointer;
   }
   .ui-switch-thumb {
+    display: block;
     width: var(--ui-switch-thumb);
     height: var(--ui-switch-thumb);
-    background: var(--text-muted);
-    border-radius: var(--ui-radius);
+    background: var(--surface);
+    border-radius: var(--ui-pill-radius);
   }
   .ui-switch[data-state="checked"] {
-    background: var(--ui-selected);
+    background: var(--text);
   }
   .ui-switch[data-state="checked"] .ui-switch-thumb {
     transform: translateX(
       calc(var(--ui-switch) - var(--ui-switch-thumb) - 4 * var(--ui-stroke))
     );
-    background: var(--ui-selected-text);
   }
   .ui-tooltip {
     z-index: 220;
@@ -583,6 +588,8 @@
     left: 50%;
     transform: translate(-50%, -50%);
     width: min(var(--ui-dialog-width), calc(100vw - var(--ui-space-6)));
+    max-height: calc(100dvh - var(--ui-space-6));
+    overflow-y: auto;
     padding: var(--ui-panel-padding);
   }
   .ui-sheet {

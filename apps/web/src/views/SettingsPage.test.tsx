@@ -6,23 +6,45 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import { HttpCardiganClient } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { resetSettingWrites } from "./useSettingWrite.js";
+
+// Radix tooltips and form-bound switches measure with ResizeObserver.
+vi.stubGlobal(
+  "ResizeObserver",
+  class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+);
+
+const on = (control: HTMLElement) =>
+  control.getAttribute("aria-checked") === "true";
+/** Long explanations live in the row's help tooltip (keyboard focus opens it). */
+async function help(name: string) {
+  fireEvent.focus(screen.getByRole("button", { name: `${name}说明` }));
+  return (await screen.findAllByText(/./, { selector: "[role=tooltip]" }))
+    .map((node) => node.textContent)
+    .join("");
+}
 
 test("the independent review link opens authorization directly", async () => {
   window.location.hash = "#/p/p-1/settings?tab=authorization";
   render(<App client={fakeClient()} />);
   expect(
-    await screen.findByRole("checkbox", { name: /合并由 PM 代确认/ }),
+    await screen.findByRole("switch", { name: /合并由 PM 代确认/ }),
   ).toBeTruthy();
   expect(
     screen.getByRole("button", { name: "授权" }).getAttribute("aria-current"),
   ).toBe("page");
-  expect(screen.getByText(/原先保存的值不再控制新流程/)).toBeTruthy();
+  expect(await help("授权")).toMatch(/原先保存的值不再控制新流程/);
 });
 
 test.each([
@@ -48,11 +70,11 @@ test.each([
         })}
       />,
     );
-    const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+    const toggle = await screen.findByRole("switch", { name: "自动合并" });
     fireEvent.click(toggle);
     expect((await screen.findByRole("alert")).textContent).toContain(message);
-    expect((toggle as HTMLInputElement).checked).toBe(false);
-    expect((toggle as HTMLInputElement).disabled).toBe(false);
+    expect(on(toggle)).toBe(false);
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
   },
 );
 
@@ -79,11 +101,14 @@ test.each(
         })}
       />,
     );
-    const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
-    expect((toggle as HTMLInputElement).checked).toBe(
+    const toggle = await screen.findByRole("switch", { name: "自动合并" });
+    expect(on(toggle)).toBe(
       value === "on" || (value === undefined && flow_version >= 4),
     );
-    expect(toggle.closest("label")?.textContent).toContain(
+    const status =
+      document.getElementById(toggle.getAttribute("aria-describedby") ?? "")
+        ?.textContent ?? "";
+    expect(status).toContain(
       value === undefined
         ? flow_version >= 4
           ? "未设置，按流程级别由系统合并"
@@ -92,11 +117,10 @@ test.each(
           ? "已开启"
           : "已关闭",
     );
-    if (value === undefined)
-      expect(toggle.closest("label")?.textContent).not.toContain("已关闭");
-    expect(
-      screen.getByText(/未设置时，第 4 级及以上的卡按流程级别由系统合并/),
-    ).toBeTruthy();
+    if (value === undefined) expect(status).not.toContain("已关闭");
+    expect(await help("自动合并")).toMatch(
+      /未设置时，第 4 级及以上的卡按流程级别由系统合并/,
+    );
   },
 );
 
@@ -126,10 +150,9 @@ test.each([1, 4, 5])(
     fireEvent.click(
       await screen.findByRole("button", { name: "关闭自动合并", exact: true }),
     );
-    const toggle = await screen.findByRole("checkbox", {
-      name: "自动合并已关闭",
-    });
-    expect((toggle as HTMLInputElement).checked).toBe(false);
+    await screen.findByText("已关闭");
+    const toggle = screen.getByRole("switch", { name: "自动合并" });
+    expect(on(toggle)).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
       body: JSON.stringify({ auto_merge: "off" }),
@@ -140,7 +163,7 @@ test.each([1, 4, 5])(
   },
 );
 
-test("the inherited flow-four checkbox writes off when unchecked", async () => {
+test("the inherited flow-four switch writes off when turned off", async () => {
   let value: "off" | undefined;
   const save = vi.fn(async () => {
     value = "off";
@@ -159,10 +182,10 @@ test("the inherited flow-four checkbox writes off when unchecked", async () => {
       })}
     />,
   );
-  const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
-  expect((toggle as HTMLInputElement).checked).toBe(true);
+  const toggle = await screen.findByRole("switch", { name: "自动合并" });
+  expect(on(toggle)).toBe(true);
   fireEvent.click(toggle);
-  await screen.findByRole("checkbox", { name: "自动合并已关闭" });
+  await screen.findByText("已关闭");
   expect(save).toHaveBeenCalledExactlyOnceWith(
     "p-1",
     false,
@@ -187,16 +210,16 @@ test("auto-merge retries the same operation, reloads saved values and uses a fre
     setAutoMerge: save,
   });
   render(<SettingsPage projectId="p-1" client={client} />);
-  const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+  const toggle = await screen.findByRole("switch", { name: "自动合并" });
   fireEvent.click(toggle);
   await screen.findByRole("alert");
-  expect((toggle as HTMLInputElement).checked).toBe(false);
+  expect(on(toggle)).toBe(false);
   fireEvent.click(toggle);
-  await waitFor(() => expect((toggle as HTMLInputElement).checked).toBe(true));
+  await waitFor(() => expect(on(toggle)).toBe(true));
   expect(save.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", true]);
   expect(save.mock.calls[1]?.[2]).toBe(save.mock.calls[0]?.[2]);
   fireEvent.click(toggle);
-  await waitFor(() => expect((toggle as HTMLInputElement).checked).toBe(false));
+  await waitFor(() => expect(on(toggle)).toBe(false));
   expect(save.mock.calls[2]?.slice(0, 2)).toEqual(["p-1", false]);
   expect(save.mock.calls[2]?.[2]).not.toBe(save.mock.calls[1]?.[2]);
 });
@@ -222,62 +245,78 @@ test.each([true, false])(
 
 afterEach(() => {
   cleanup();
+  resetSettingWrites();
   window.location.hash = "";
 });
-test("settings navigation opens preferences, default off with the missing-gate warning", async () => {
+test("settings navigation opens preferences, default off with editable minutes and the missing-gate warning", async () => {
   window.location.hash = "#/p/p-1/settings";
   render(<App client={fakeClient()} />);
   expect(await screen.findByRole("heading", { name: "设置" })).toBeTruthy();
   expect(
     screen.getByRole("link", { name: "设置" }).getAttribute("aria-current"),
   ).toBe("page");
-  const toggle = await screen.findByRole("checkbox", { name: "超时自动合并" });
-  expect((toggle as HTMLInputElement).checked).toBe(false);
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  expect(on(toggle)).toBe(false);
   expect(
     (screen.getByLabelText("等待分钟数") as HTMLInputElement).disabled,
-  ).toBe(true);
+  ).toBe(false);
   expect(
     screen.getByText("没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码"),
   ).toBeTruthy();
 });
 
-test("enable, validate, retry with the same idempotency key, then disable", async () => {
+test("timeout merge saves instantly, validates, retries with the same idempotency key, then disables", async () => {
+  let minutes: number | null = null;
   const setPreferences = vi
     .fn()
     .mockRejectedValueOnce(new TypeError("offline"))
-    .mockResolvedValue(undefined);
+    .mockImplementation(async (_project, value) => {
+      minutes = value;
+    });
   render(
-    <SettingsPage projectId="p-1" client={fakeClient({ setPreferences })} />,
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: minutes,
+          merge_gate_enabled: false,
+        }),
+        setPreferences,
+      })}
+    />,
   );
-  fireEvent.click(
-    await screen.findByRole("checkbox", { name: "超时自动合并" }),
-  );
-  const minutes = screen.getByLabelText("等待分钟数");
-  fireEvent.change(minutes, { target: { value: "1.5" } });
-  expect(
-    (screen.getByRole("button", { name: "保存偏好" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
-  fireEvent.change(minutes, { target: { value: "20" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  const toggle = await screen.findByRole("switch", { name: "超时自动合并" });
+  fireEvent.click(toggle);
   await screen.findByRole("alert");
-  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
-  await waitFor(() => expect(setPreferences).toHaveBeenCalledTimes(2));
-  expect(setPreferences.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", 20]);
+  expect(on(toggle)).toBe(false);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(on(toggle)).toBe(true));
+  expect(setPreferences.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", 10]);
   expect(setPreferences.mock.calls[1]?.[2]).toBe(
     setPreferences.mock.calls[0]?.[2],
   );
-  await waitFor(() =>
-    expect(
-      (screen.getByRole("button", { name: "保存偏好" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false),
-  );
-  fireEvent.click(screen.getByRole("checkbox", { name: "超时自动合并" }));
-  fireEvent.click(screen.getByRole("button", { name: "保存偏好" }));
+  const input = screen.getByLabelText("等待分钟数") as HTMLInputElement;
+  expect(input.disabled).toBe(false);
+  fireEvent.change(input, { target: { value: "1.5" } });
+  expect(input.getAttribute("aria-invalid")).toBe("true");
+  expect(screen.getByRole("alert").textContent).toContain("请输入 1 到 1440");
+  fireEvent.blur(input);
+  expect(setPreferences).toHaveBeenCalledTimes(2);
+  fireEvent.change(input, { target: { value: "20" } });
+  expect(input.getAttribute("aria-invalid")).toBeNull();
+  expect(input.closest("[data-dirty]")).toBeTruthy();
+  fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() => expect(setPreferences).toHaveBeenCalledTimes(3));
-  expect(setPreferences.mock.calls[2]?.slice(0, 2)).toEqual(["p-1", null]);
-  expect(setPreferences.mock.calls[2]?.[2]).not.toBe(
+  expect(setPreferences.mock.calls[2]?.slice(0, 2)).toEqual(["p-1", 20]);
+  await waitFor(() => expect(input.closest("[data-dirty]")).toBeNull());
+  expect(screen.getByText("偏好已保存")).toBeTruthy();
+  expect(input.value).toBe("20");
+  fireEvent.blur(input);
+  expect(setPreferences).toHaveBeenCalledTimes(3);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(on(toggle)).toBe(false));
+  expect(setPreferences.mock.calls[3]?.slice(0, 2)).toEqual(["p-1", null]);
+  expect(setPreferences.mock.calls[3]?.[2]).not.toBe(
     setPreferences.mock.calls[0]?.[2],
   );
 });
@@ -294,13 +333,9 @@ test("existing setting loads and a configured gate hides the warning", async () 
       })}
     />,
   );
-  expect(
-    (
-      (await screen.findByRole("checkbox", {
-        name: "超时自动合并",
-      })) as HTMLInputElement
-    ).checked,
-  ).toBe(true);
+  expect(on(await screen.findByRole("switch", { name: "超时自动合并" }))).toBe(
+    true,
+  );
   expect((screen.getByLabelText("等待分钟数") as HTMLInputElement).value).toBe(
     "30",
   );
@@ -376,20 +411,28 @@ test.each([
       ["由人拍板", "由 PM 代拍", true],
       ["由 PM 代拍", "由人拍板", false],
     ] as const) {
-      const toggle = await screen.findByRole("checkbox", {
-        name: `${label}：${before}`,
+      const toggle = await screen.findByRole("switch", {
+        name: `${label} ${before}`,
       });
+      toggle.focus();
       fireEvent.click(toggle);
-      expect((toggle as HTMLInputElement).disabled).toBe(true);
+      expect(toggle.getAttribute("aria-disabled")).toBe("true");
+      expect((toggle as HTMLButtonElement).disabled).toBe(false);
+      expect(document.activeElement).toBe(toggle);
       expect(await screen.findByText("保存授权中…")).toBeTruthy();
       await act(async () => {
         finish?.();
       });
-      const saved = await screen.findByRole("checkbox", {
-        name: `${label}：${after}`,
+      const saved = await screen.findByRole("switch", {
+        name: `${label} ${after}`,
       });
-      expect((saved as HTMLInputElement).checked).toBe(enabled);
-      expect((saved as HTMLInputElement).disabled).toBe(false);
+      expect(on(saved)).toBe(enabled);
+      expect(saved.getAttribute("aria-disabled")).toBe("false");
+      expect(
+        await screen.findByText(
+          `${label}：${enabled ? "已授权 PM 代拍" : "已改为由人拍板"}`,
+        ),
+      ).toBeTruthy();
       expect(setDelegation).toHaveBeenLastCalledWith(
         "p-1",
         category,
@@ -409,12 +452,14 @@ test("authorization exposes defaults, retries safely, and allows human authoriza
     <SettingsPage projectId="p-1" client={fakeClient({ setDelegation })} />,
   );
   fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
-  const process = await screen.findByRole("checkbox", {
-    name: "流程：由 PM 代拍",
+  const process = await screen.findByRole("switch", {
+    name: "流程 由 PM 代拍",
   });
-  expect((process as HTMLInputElement).checked).toBe(true);
+  expect(on(process)).toBe(true);
   expect(
-    process.closest("label")?.querySelector("svg.status-shape-success"),
+    process
+      .closest("[data-settings-row]")
+      ?.querySelector("svg.status-shape-success"),
   ).toBeTruthy();
   expect(
     screen
@@ -422,11 +467,7 @@ test("authorization exposes defaults, retries safely, and allows human authoriza
       ?.querySelector("svg.status-shape-review"),
   ).toBeTruthy();
   expect(
-    (
-      screen.getByRole("checkbox", {
-        name: "需求范围变化：由 PM 代拍",
-      }) as HTMLInputElement
-    ).checked,
+    on(screen.getByRole("switch", { name: "需求范围变化 由 PM 代拍" })),
   ).toBe(true);
   for (const category of [
     "花钱",
@@ -436,20 +477,24 @@ test("authorization exposes defaults, retries safely, and allows human authoriza
     "对外发布",
     "人标记的敏感卡",
   ]) {
-    const toggle = screen.getByRole("checkbox", {
-      name: `${category}：由人拍板`,
-    }) as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
+    const toggle = screen.getByRole("switch", {
+      name: `${category} 由人拍板`,
+    }) as HTMLButtonElement;
+    expect(on(toggle)).toBe(false);
     expect(toggle.disabled).toBe(false);
+    // C-455: default-human categories sit in the caution group.
+    expect(
+      toggle.closest("[data-settings-group]")?.getAttribute("data-tone"),
+    ).toBe("caution");
   }
   for (const category of ["权限"]) {
-    const toggle = screen.getByRole("checkbox", {
-      name: `${category}：由 PM 代拍`,
+    const toggle = screen.getByRole("switch", {
+      name: `${category} 由 PM 代拍`,
     });
-    expect((toggle as HTMLInputElement).disabled).toBe(false);
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
     expect(
       toggle
-        .closest("label")
+        .closest("[data-settings-row]")
         ?.querySelector("svg.status-shape-success")
         ?.getAttribute("aria-hidden"),
     ).toBe("true");
@@ -481,16 +526,14 @@ test("preferences, authorization, roles and templates coexist as separate settin
     exact: true,
   });
   expect(preferences.getAttribute("aria-current")).toBe("page");
-  await screen.findByRole("checkbox", { name: "超时自动合并" });
+  await screen.findByRole("switch", { name: "超时自动合并" });
   fireEvent.click(authorization);
   expect(authorization.getAttribute("aria-current")).toBe("page");
   expect(
     screen.getByRole("heading", { name: "授权", exact: true }),
   ).toBeTruthy();
-  expect(screen.queryByRole("checkbox", { name: "超时自动合并" })).toBeNull();
-  expect(
-    screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
-  ).toBeTruthy();
+  expect(screen.queryByRole("switch", { name: "超时自动合并" })).toBeNull();
+  expect(screen.getByRole("switch", { name: "流程 由 PM 代拍" })).toBeTruthy();
   fireEvent.click(roles);
   await screen.findByText("本项目还没有登记角色。");
   expect(roles.getAttribute("aria-current")).toBe("page");
@@ -510,15 +553,13 @@ test("preferences, authorization, roles and templates coexist as separate settin
   ).toBeNull();
   fireEvent.click(preferences);
   expect(preferences.getAttribute("aria-current")).toBe("page");
-  expect(screen.getByRole("checkbox", { name: "超时自动合并" })).toBeTruthy();
+  expect(screen.getByRole("switch", { name: "超时自动合并" })).toBeTruthy();
   expect(screen.queryByRole("table", { name: "项目卡片模板" })).toBeNull();
   fireEvent.click(roles);
   await screen.findByText("本项目还没有登记角色。");
-  expect(screen.queryByRole("checkbox", { name: "超时自动合并" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: "超时自动合并" })).toBeNull();
   fireEvent.click(authorization);
-  expect(
-    screen.getByRole("checkbox", { name: "流程：由 PM 代拍" }),
-  ).toBeTruthy();
+  expect(screen.getByRole("switch", { name: "流程 由 PM 代拍" })).toBeTruthy();
 });
 
 test("PM merge confirmation defaults on and can be turned off", async () => {
@@ -530,10 +571,10 @@ test("PM merge confirmation defaults on and can be turned off", async () => {
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
-  const toggle = (await screen.findByRole("checkbox", {
-    name: "合并由 PM 代确认：由 PM 代确认",
-  })) as HTMLInputElement;
-  expect(toggle.checked).toBe(true);
+  const toggle = await screen.findByRole("switch", {
+    name: "合并由 PM 代确认 由 PM 代确认",
+  });
+  expect(on(toggle)).toBe(true);
   fireEvent.click(toggle);
   await waitFor(() => expect(setPmMergeConfirmation).toHaveBeenCalledTimes(1));
   expect(setPmMergeConfirmation.mock.calls[0]?.slice(0, 2)).toEqual([
@@ -554,18 +595,15 @@ test("PM merge confirmation stall alert shows the default 60 minutes and saves a
     "PM 合并确认停留告警（分钟）",
   )) as HTMLInputElement;
   expect(input.value).toBe("60");
-  expect(
-    screen.getByText(
-      /PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops/,
-    ),
-  ).toBeTruthy();
+  expect(await help("PM 合并确认停留告警")).toMatch(
+    /PM 持有的合并确认在合并检查出结论后，超过这么久还没处理，就提醒 PM Ops/,
+  );
   fireEvent.change(input, { target: { value: "0" } });
-  expect(
-    (screen.getByRole("button", { name: "保存停留告警" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+  expect(input.getAttribute("aria-invalid")).toBe("true");
+  fireEvent.blur(input);
+  expect(setMergeConfirmStallAfter).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "90" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存停留告警" }));
+  fireEvent.blur(input);
   await waitFor(() =>
     expect(setMergeConfirmStallAfter).toHaveBeenCalledTimes(1),
   );
@@ -599,20 +637,20 @@ test("review round limits show the defaults 5 and 3 and save new values", async 
   expect(
     screen.getAllByText(/只影响之后新建的审核项/).length,
   ).toBeGreaterThanOrEqual(2);
-  const save = (name: string) =>
-    screen.getByRole("button", { name }) as HTMLButtonElement;
   for (const bad of ["0", "21", "1.5"]) {
     fireEvent.change(independent, { target: { value: bad } });
-    expect(save("保存独立复核轮数").disabled).toBe(true);
+    expect(independent.getAttribute("aria-invalid")).toBe("true");
     expect(screen.getByText("请输入 1 到 20 的整数轮数。")).toBeTruthy();
+    fireEvent.keyDown(independent, { key: "Enter" });
   }
+  expect(setReviewMaxRounds).not.toHaveBeenCalled();
   for (const ok of ["11", "20"]) {
     fireEvent.change(independent, { target: { value: ok } });
-    expect(save("保存独立复核轮数").disabled).toBe(false);
+    expect(independent.getAttribute("aria-invalid")).toBeNull();
     expect(screen.queryByText("请输入 1 到 20 的整数轮数。")).toBeNull();
   }
   fireEvent.change(independent, { target: { value: "4" } });
-  fireEvent.click(save("保存独立复核轮数"));
+  fireEvent.keyDown(independent, { key: "Enter" });
   await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(1));
   expect(setReviewMaxRounds.mock.calls[0]?.slice(0, 3)).toEqual([
     "p-1",
@@ -620,7 +658,7 @@ test("review round limits show the defaults 5 and 3 and save new values", async 
     4,
   ]);
   fireEvent.change(review, { target: { value: "7" } });
-  fireEvent.click(save("保存审核轮数"));
+  fireEvent.blur(review);
   await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(2));
   expect(setReviewMaxRounds.mock.calls[1]?.slice(0, 3)).toEqual([
     "p-1",
@@ -641,15 +679,24 @@ test("review round limits stay hidden when the server omits the ceiling", async 
       })}
     />,
   );
-  await screen.findByRole("checkbox", { name: "超时自动合并" });
+  await screen.findByRole("switch", { name: "超时自动合并" });
   expect(screen.queryByLabelText("普通审核轮数上限（轮）")).toBeNull();
   expect(screen.queryByLabelText("独立复核轮数上限（轮）")).toBeNull();
 });
 
 test("hidden preferences suppress validation feedback and retain the draft when returning", async () => {
-  render(<SettingsPage client={fakeClient()} projectId="p-1" />);
-  const enabled = await screen.findByRole("checkbox", { name: "超时自动合并" });
-  fireEvent.click(enabled);
+  render(
+    <SettingsPage
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: 30,
+          merge_gate_enabled: false,
+        }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const enabled = await screen.findByRole("switch", { name: "超时自动合并" });
   const minutes = screen.getByLabelText("等待分钟数") as HTMLInputElement;
   fireEvent.change(minutes, { target: { value: "0" } });
   expect(screen.getByRole("alert").textContent).toContain("请输入 1 到 1440");
@@ -663,34 +710,40 @@ test("hidden preferences suppress validation feedback and retain the draft when 
     fireEvent.click(screen.getByRole("button", { name: "偏好", exact: true }));
     expect(screen.getByLabelText("等待分钟数")).toBe(minutes);
     expect(minutes.value).toBe("0");
-    expect((enabled as HTMLInputElement).checked).toBe(true);
+    expect(on(enabled)).toBe(true);
     expect(screen.getByRole("alert").textContent).toContain("请输入 1 到 1440");
   }
 });
 
 test.each([
-  ["偏好", "setPreferences", "保存偏好"],
-  ["授权", "setDelegation", "流程：由 PM 代拍"],
-  ["授权", "setPmMergeConfirmation", "合并由 PM 代确认：由 PM 代确认"],
+  ["偏好", "setPreferences", "等待分钟数"],
+  ["授权", "setDelegation", "流程 由 PM 代拍"],
+  ["授权", "setPmMergeConfirmation", "合并由 PM 代确认 由 PM 代确认"],
 ] as const)(
   "%s hides pending and late %s errors outside its tab without losing the form",
   async (tab, method, control) => {
     const request = Promise.withResolvers<void>();
     const save = vi.fn(() => request.promise);
     render(
-      <SettingsPage client={fakeClient({ [method]: save })} projectId="p-1" />,
+      <SettingsPage
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: 30,
+            merge_gate_enabled: false,
+          }),
+          [method]: save,
+        })}
+        projectId="p-1"
+      />,
     );
     const minutes = (await screen.findByLabelText(
       "等待分钟数",
     )) as HTMLInputElement;
-    fireEvent.click(screen.getByRole("checkbox", { name: "超时自动合并" }));
     fireEvent.change(minutes, { target: { value: "23" } });
     fireEvent.click(screen.getByRole("button", { name: tab, exact: true }));
-    fireEvent.click(
-      screen.getByRole(method === "setPreferences" ? "button" : "checkbox", {
-        name: control,
-      }),
-    );
+    if (method === "setPreferences")
+      fireEvent.keyDown(screen.getByLabelText(control), { key: "Enter" });
+    else fireEvent.click(screen.getByRole("switch", { name: control }));
     expect(save).toHaveBeenCalledOnce();
     expect(screen.getByText(/保存.*中…/)).toBeTruthy();
     fireEvent.click(
@@ -729,16 +782,13 @@ test("PM merge confirmation snooze duration shows the default 240 minutes and sa
     "合并确认默认暂缓时长（分钟）",
   )) as HTMLInputElement;
   expect(input.value).toBe("240");
-  expect(
-    screen.getByText(/PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长/),
-  ).toBeTruthy();
+  expect(await help("合并确认默认暂缓时长")).toMatch(
+    /PM 或人暂缓一条合并确认时，没有填到期时间就用这个时长/,
+  );
   fireEvent.change(input, { target: { value: "0" } });
-  expect(
-    (screen.getByRole("button", { name: "保存暂缓时长" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+  expect(input.getAttribute("aria-invalid")).toBe("true");
   fireEvent.change(input, { target: { value: "90" } });
-  fireEvent.click(screen.getByRole("button", { name: "保存暂缓时长" }));
+  fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() =>
     expect(setMergeConfirmSnoozeDefault).toHaveBeenCalledTimes(1),
   );
@@ -760,17 +810,17 @@ test("C-193: snooze cap shows 72 hours, validates bounds and saves the setting",
     "合并确认最长暂缓时长（分钟）",
   )) as HTMLInputElement;
   expect(input.value).toBe("4320");
-  const button = screen.getByRole("button", {
-    name: "保存暂缓上限",
-  }) as HTMLButtonElement;
+  expect(screen.getByText(/默认 72 小时/)).toBeTruthy();
   for (const value of ["59", "10081", "60.5"]) {
     fireEvent.change(input, { target: { value } });
-    expect(button.disabled).toBe(true);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.blur(input);
   }
+  expect(save).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "60" } });
-  expect(button.disabled).toBe(false);
+  expect(input.getAttribute("aria-invalid")).toBeNull();
   fireEvent.change(input, { target: { value: "10080" } });
-  fireEvent.click(button);
+  fireEvent.blur(input);
   await waitFor(() =>
     expect(save).toHaveBeenCalledWith("p-1", 10080, expect.any(String)),
   );
@@ -781,32 +831,105 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
   render(
     <SettingsPage projectId="p-1" client={fakeClient({ setSystemRules })} />,
   );
-  const assign = await screen.findByRole("checkbox", {
-    name: "自动指派验证项（含完成验收）",
-  });
-  const remind = screen.getByRole("checkbox", { name: "启用催办提醒" });
-  expect((assign as HTMLInputElement).checked).toBe(false);
-  expect((remind as HTMLInputElement).checked).toBe(false);
+  const assign = await screen.findByRole("switch", { name: "自动指派验证项" });
+  const remind = screen.getByRole("switch", { name: "催办提醒" });
+  expect(on(assign)).toBe(false);
+  expect(on(remind)).toBe(false);
   fireEvent.click(assign);
-  fireEvent.click(screen.getByRole("button", { name: "保存自动指派与催办" }));
   await waitFor(() =>
     expect(setSystemRules).toHaveBeenCalledWith(
       "p-1",
-      {
-        system_auto_assign_verifiers: true,
-        system_reminders: false,
-        system_reminder_policy: null,
-      },
+      { system_auto_assign_verifiers: true },
       expect.any(String),
     ),
   );
+  expect(screen.getByText("未设置")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "编辑催办阈值" }));
+  const dialog = await screen.findByRole("dialog", { name: "催办阈值" });
   fireEvent.click(
-    screen.getByRole("checkbox", { name: "设置催办阈值和允许范围" }),
+    within(dialog).getByRole("switch", { name: "设置催办阈值和允许范围" }),
   );
-  for (const field of screen
-    .getAllByRole("spinbutton")
-    .filter((node) => node.closest("fieldset")))
+  const fields = within(dialog).getAllByRole("spinbutton");
+  expect(fields).toHaveLength(8);
+  for (const field of fields)
     expect((field as HTMLInputElement).value).toBe("");
+});
+
+test("C-455 reminder thresholds save together from the dialog without resending the switches", async () => {
+  const setSystemRules = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          system_auto_assign_verifiers: true,
+          system_reminders: true,
+        }),
+        setSystemRules,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "编辑催办阈值" }));
+  const dialog = await screen.findByRole("dialog", { name: "催办阈值" });
+  fireEvent.click(
+    within(dialog).getByRole("switch", { name: "设置催办阈值和允许范围" }),
+  );
+  fireEvent.click(within(dialog).getByRole("switch", { name: "重复提醒" }));
+  fireEvent.change(within(dialog).getByLabelText("允许的最少分钟数"), {
+    target: { value: "5" },
+  });
+  fireEvent.change(within(dialog).getByLabelText(/重复提醒间隔/), {
+    target: { value: "30" },
+  });
+  expect(setSystemRules).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(setSystemRules).toHaveBeenCalledExactlyOnceWith(
+    "p-1",
+    {
+      system_reminder_policy: expect.objectContaining({
+        min_minutes: 5,
+        max_minutes: null,
+        repeat_interval_minutes: 30,
+        repeat: true,
+      }),
+    },
+    expect.any(String),
+  );
+});
+
+test("C-455 a failed reminder-threshold save stays in the dialog with its draft", async () => {
+  const setSystemRules = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("阈值保存失败"))
+    .mockResolvedValue(undefined);
+  render(
+    <SettingsPage projectId="p-1" client={fakeClient({ setSystemRules })} />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "编辑催办阈值" }));
+  const dialog = await screen.findByRole("dialog", { name: "催办阈值" });
+  fireEvent.click(
+    within(dialog).getByRole("switch", { name: "设置催办阈值和允许范围" }),
+  );
+  const field = within(dialog).getByLabelText(
+    "允许的最少分钟数",
+  ) as HTMLInputElement;
+  fireEvent.change(field, { target: { value: "7" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
+  expect((await within(dialog).findByRole("alert")).textContent).toContain(
+    "阈值保存失败",
+  );
+  expect(screen.getByRole("dialog")).toBe(dialog);
+  expect(field.value).toBe("7");
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存催办阈值" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(setSystemRules).toHaveBeenCalledTimes(2);
+  // The retry of the same failed operation reuses its idempotency key.
+  expect(setSystemRules.mock.calls[1]?.[2]).toBe(
+    setSystemRules.mock.calls[0]?.[2],
+  );
 });
 
 test.each([false, true])(
@@ -835,20 +958,27 @@ test.each([false, true])(
       />,
     );
     fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-    expect(await screen.findByText(/原先保存的值不再控制新流程/)).toBeTruthy();
+    await screen.findByRole("switch", { name: /合并由 PM 代确认/ });
+    const text = await help("授权");
+    expect(text).toMatch(/原先保存的值不再控制新流程/);
     for (const name of [
       /已拍角色正文由 PM 代确认/,
       /人已拍板的改动由 PM 核对后确认合并/,
       /允许后台代批独立复核加一轮/,
-    ])
+    ]) {
       expect(screen.queryByRole("checkbox", { name })).toBeNull();
-    expect(screen.getByText(/收回默认交人事项的授权/)).toBeTruthy();
+      expect(screen.queryByRole("switch", { name })).toBeNull();
+    }
+    expect(text).toMatch(/收回默认交人事项的授权/);
     expect(screen.queryByText(/关闭后这类合并全部由你确认/)).toBeNull();
     expect(
-      screen
-        .getByRole("checkbox", { name: /合并由 PM 代确认/ })
-        .closest("label")?.textContent,
-    ).toContain("PM 代确认已关闭");
+      screen.getByRole("switch", { name: /合并由 PM 代确认/ }).textContent,
+    ).toBe("");
+    expect(
+      screen.getByRole("switch", {
+        name: "合并由 PM 代确认 PM 代确认已关闭",
+      }),
+    ).toBeTruthy();
     expect(saveRole).not.toHaveBeenCalled();
     expect(saveHuman).not.toHaveBeenCalled();
     expect(saveRounds).not.toHaveBeenCalled();
@@ -889,21 +1019,21 @@ test("A3b pause switch waits for server confirmation, preserves state on denial 
     },
   });
   render(<SettingsPage projectId="p-1" client={client} />);
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /暂停自动合并/,
-  })) as HTMLInputElement;
-  expect(checkbox.checked).toBe(false);
+  const checkbox = await screen.findByRole("switch", {
+    name: "暂停自动合并",
+  });
+  expect(on(checkbox)).toBe(false);
   fireEvent.click(checkbox);
   await screen.findByRole("alert");
-  expect(checkbox.checked).toBe(false);
+  expect(on(checkbox)).toBe(false);
   const key = toggle.mock.calls[0]?.[2];
   fireEvent.click(checkbox);
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(toggle.mock.calls[1]).toEqual(["p-1", true, key]);
   fireEvent.click(checkbox);
-  await waitFor(() => expect(checkbox.checked).toBe(false));
+  await waitFor(() => expect(on(checkbox)).toBe(false));
   expect(toggle.mock.calls[2]?.[1]).toBe(false);
-  expect(screen.getByText(/默认不暂停，只有你能修改/)).toBeTruthy();
+  expect(await help("暂停自动合并")).toMatch(/默认不暂停，只有你能修改/);
 });
 
 test("A3b HTTP client writes only the pause preference", async () => {
@@ -939,20 +1069,22 @@ test("A3b committed response loss, refresh and reverse switches never replay an 
     },
   });
   const view = render(<SettingsPage projectId="p-1" client={client} />);
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /暂停自动合并/,
-  })) as HTMLInputElement;
+  const checkbox = await screen.findByRole("switch", {
+    name: "暂停自动合并",
+  });
   fireEvent.click(checkbox);
-  await screen.findByRole("alert");
+  // The write committed; the read after it (C-455, Q-928) shows that, so the
+  // lost response is not reported as a failure.
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(paused).toBe(true);
-  expect(checkbox.checked).toBe(false);
+  expect(screen.queryByRole("alert")).toBeNull();
   view.rerender(<SettingsPage projectId="p-1" client={client} revision={1} />);
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   fireEvent.click(checkbox);
-  await waitFor(() => expect(checkbox.checked).toBe(false));
+  await waitFor(() => expect(on(checkbox)).toBe(false));
   fireEvent.click(checkbox);
   await waitFor(() => expect(calls).toHaveLength(3));
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(paused).toBe(true);
   expect(calls.map((c) => c.replay)).toEqual([false, false, false]);
   expect(new Set(calls.map((c) => c.key)).size).toBe(3);
@@ -977,19 +1109,19 @@ test("A3b observing a committed operation retires its key even if another sessio
     },
   });
   const view = render(<SettingsPage projectId="p-1" client={client} />);
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /暂停自动合并/,
-  })) as HTMLInputElement;
+  const checkbox = await screen.findByRole("switch", {
+    name: "暂停自动合并",
+  });
   fireEvent.click(checkbox);
   await screen.findByRole("alert");
   view.rerender(<SettingsPage projectId="p-1" client={client} revision={1} />);
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   paused = false;
   view.rerender(<SettingsPage projectId="p-1" client={client} revision={2} />);
-  await waitFor(() => expect(checkbox.checked).toBe(false));
+  await waitFor(() => expect(on(checkbox)).toBe(false));
   fireEvent.click(checkbox);
   await waitFor(() => expect(keys).toHaveLength(2));
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(paused).toBe(true);
   expect(keys[1]).not.toBe(keys[0]);
 });
@@ -1012,21 +1144,24 @@ test("cross-card read switch waits for server confirmation, preserves state on d
     },
   });
   render(<SettingsPage projectId="p-1" client={client} />);
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /跨卡只读/,
-  })) as HTMLInputElement;
-  expect(checkbox.checked).toBe(true);
+  const checkbox = await screen.findByRole("switch", {
+    name: "跨卡只读",
+  });
+  expect(on(checkbox)).toBe(true);
   fireEvent.click(checkbox);
   await screen.findByRole("alert");
-  expect(checkbox.checked).toBe(true);
+  expect(on(checkbox)).toBe(true);
   const key = toggle.mock.calls[0]?.[2];
   fireEvent.click(checkbox);
-  await waitFor(() => expect(checkbox.checked).toBe(false));
+  await waitFor(() => expect(on(checkbox)).toBe(false));
   expect(toggle.mock.calls[1]).toEqual(["p-1", false, key]);
   fireEvent.click(checkbox);
-  await waitFor(() => expect(checkbox.checked).toBe(true));
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(toggle.mock.calls[2]?.[1]).toBe(true);
-  expect(screen.getByText(/默认开启，所有角色可读取/)).toBeTruthy();
+  expect(
+    screen.getByText(/所有角色可读取本项目其它非敏感卡片作参考/),
+  ).toBeTruthy();
+  expect(await help("跨卡只读")).toMatch(/默认开启，只有你能修改/);
 });
 
 test("cross-card HTTP client writes only the pause preference", async () => {
@@ -1040,13 +1175,13 @@ test("cross-card HTTP client writes only the pause preference", async () => {
 
 const focusSettings = [
   {
-    name: /跨卡只读/,
+    name: "跨卡只读",
     method: "setCrossCardRead",
     preference: "cross_card_read",
     initial: true,
   },
   {
-    name: /暂停自动合并/,
+    name: "暂停自动合并",
     method: "setAutoMergePaused",
     preference: "auto_merge_paused",
     initial: false,
@@ -1075,7 +1210,7 @@ test.each(focusSettings)(
       [method]: save,
     });
     render(<SettingsPage client={client} projectId="p-1" />);
-    const checkbox = await screen.findByRole<HTMLInputElement>("checkbox", {
+    const checkbox = await screen.findByRole<HTMLButtonElement>("switch", {
       name,
     });
     checkbox.focus();
@@ -1086,24 +1221,24 @@ test.each(focusSettings)(
     fireEvent.click(checkbox);
     fireEvent.click(checkbox);
     expect(save).toHaveBeenCalledTimes(1);
-    expect(checkbox.checked).toBe(initial);
+    expect(on(checkbox)).toBe(initial);
     await act(async () => requests[0]?.reject(new Error("Save denied")));
     await screen.findByRole("alert");
     expect(document.activeElement).toBe(checkbox);
     expect(checkbox.getAttribute("aria-disabled")).toBe("false");
-    expect(checkbox.checked).toBe(initial);
+    expect(on(checkbox)).toBe(initial);
     fireEvent.click(checkbox);
     expect(save).toHaveBeenCalledTimes(2);
     expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
     await act(async () => requests[1]?.resolve());
-    await waitFor(() => expect(checkbox.checked).toBe(!initial));
+    await waitFor(() => expect(on(checkbox)).toBe(!initial));
     expect(document.activeElement).toBe(checkbox);
     expect(checkbox.getAttribute("aria-disabled")).toBe("false");
     fireEvent.click(checkbox);
     const other = screen.getByRole("button", { name: "并发与容量" });
     other.focus();
     await act(async () => requests[2]?.resolve());
-    await waitFor(() => expect(checkbox.checked).toBe(initial));
+    await waitFor(() => expect(on(checkbox)).toBe(initial));
     expect(document.activeElement).toBe(other);
   },
 );
@@ -1124,15 +1259,15 @@ test.each(focusSettings)(
     });
     const client = fakeClient({ preferences, [method]: save });
     const view = render(<SettingsPage client={client} projectId="p-1" />);
-    fireEvent.click(await screen.findByRole("checkbox", { name }));
+    fireEvent.click(await screen.findByRole("switch", { name }));
     view.rerender(<SettingsPage client={client} projectId="p-2" />);
-    const checkbox = await screen.findByRole<HTMLInputElement>("checkbox", {
+    const checkbox = await screen.findByRole<HTMLButtonElement>("switch", {
       name,
     });
     checkbox.focus();
     await act(async () => requests[0]?.resolve());
     expect(document.activeElement).toBe(checkbox);
-    expect(checkbox.checked).toBe(initial);
+    expect(on(checkbox)).toBe(initial);
     expect(preferences.mock.calls).toEqual([["p-1"], ["p-2"]]);
     fireEvent.click(checkbox);
     view.unmount();
