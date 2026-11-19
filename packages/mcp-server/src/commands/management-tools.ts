@@ -297,7 +297,9 @@ const schemas = {
       .describe(
         "release: show an action already triaged human/host whose ready_when is not met yet (PM manual release); only rationale is needed.",
       ),
-    rationale: text,
+    rationale: text.describe(
+      "For host → done, cite the executor’s same-card result comment (C-n#N) linked to the action.",
+    ),
     title: text.max(80).optional(),
     todo: text
       .max(80)
@@ -314,7 +316,7 @@ const schemas = {
       .literal(true)
       .optional()
       .describe(
-        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). PM Ops may only set this on its own untriaged inbox items, not on existing handoffs. Omit for ordinary host work.",
+        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). May reassign eligible legacy or deferred actions. Omit for ordinary host work.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])
@@ -350,6 +352,12 @@ const schemas = {
     batch: text.optional(),
   },
   request_human_action: {
+    category: z
+      .enum(decisionCategories)
+      .optional()
+      .describe(
+        "标记待办本身涉及的事项；花钱、凭据和账号、删除数据、对外发布只能由人结项。",
+      ),
     ready_when: readyWhen(true),
     card_id: id("card"),
     instructions: text,

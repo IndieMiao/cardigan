@@ -1,7 +1,12 @@
 import type { Actor, Event, HumanAction } from "../entities.js";
-import type { AssignmentId, CardId, RunId } from "../ids.js";
+import { eventsOfType } from "../event-index.js";
+import type { AssignmentId, CardId, HumanActionId, RunId } from "../ids.js";
 import type { CommandPorts, CommandState } from "./core.js";
 import { command, ensure } from "./core.js";
+import {
+  completeActionDraft,
+  humanOnlyAction,
+} from "./human-action-completion.js";
 
 export type DeploymentControl =
   | {
@@ -244,5 +249,52 @@ export function requestDeploymentAction(
       blocked_work_items: [],
     });
     return action;
+  });
+}
+
+/** Old installations already recorded the role and action in a system request key. */
+export function pendingRoleConflictActions(state: CommandState) {
+  const open = new Map(
+    state.human_actions
+      .filter(
+        (a) => a.status === "open" && !a.card_id && a.requested_by === "system",
+      )
+      .map((a) => [a.id, a]),
+  );
+  if (!open.size) return [];
+  return eventsOfType(state.events, "host_deployment_action_requested").flatMap(
+    (e) => {
+      if (
+        e.actor.kind !== "system" ||
+        e.actor.project_id !== state.project_id ||
+        e.card_id
+      )
+        return [];
+      const p = e.payload as { key?: string; human_action_id?: HumanActionId };
+      const role =
+        /^deployment-role-manual:([^:]+):[1-9]\d*:[a-f0-9]{64}$/u.exec(
+          p.key ?? "",
+        )?.[1];
+      const action = p.human_action_id && open.get(p.human_action_id);
+      return role && action ? [{ role, action }] : [];
+    },
+  );
+}
+
+/** The host compares the installed role policies inside this same write transaction. */
+export function resolveMatchedRoleActions(
+  state: CommandState,
+  actor: Actor,
+  matched: ReadonlySet<string>,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    for (const { role, action } of pendingRoleConflictActions(state)) {
+      if (matched.has(role) && !humanOnlyAction(d, action))
+        completeActionDraft(d, {
+          human_action_id: action.id,
+          text: `角色 ${role} 当前规则已与默认包一致，升级冲突已解除。`,
+        });
+    }
   });
 }

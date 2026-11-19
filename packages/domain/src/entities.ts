@@ -1094,6 +1094,7 @@ export interface HumanAction {
   readonly key: HumanActionId;
   readonly card_id?: CardId;
   readonly requested_by: Author;
+  readonly category?: DecisionCategory;
   readonly instructions: string;
   readonly why_human: string;
   readonly expected_return: string;

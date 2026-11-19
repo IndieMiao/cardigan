@@ -9,7 +9,9 @@ import { contextUsageThresholds } from "../preferences.js";
 import { recordContextUsageNotices } from "./context-usage.js";
 import type { CommandState } from "./core.js";
 import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
+import { notices as needsNotices } from "./notices.js";
 import { projectPreferences, setProjectPreferences } from "./preferences.js";
+import { listNeedsYouCounts } from "./queries.js";
 import {
   actor,
   apply,
@@ -246,6 +248,63 @@ test("external Office gets handoff inbox and one manual clear request without a 
   expect(next.events.some((e) => e.type === "host_ops_action_taken")).toBe(
     false,
   );
+  const at = "2026-01-01T00:00:02.000Z";
+  const poll = (state: CommandState, observation: ContextObservation) =>
+    value(
+      recordContextUsageNotices(state, system, observation, 60_000, {
+        ...ports(),
+        clock: { now: () => at },
+      }),
+    );
+  const low = {
+    ...u,
+    context_tokens: 84_000,
+    used_percentage: 84,
+    updated_at: at,
+  };
+  const open = next.human_actions.at(-1);
+  if (!open) throw new Error("Expected context action");
+  for (const sample of [
+    u,
+    { ...u, updated_at: at },
+    { ...low, updated_at: now },
+    { ...low, runtime_key: "obsolete" },
+    { ...low, session_id: "unbound" },
+  ])
+    expect(poll(next, sample).changes).toHaveLength(0);
+  for (const sample of [
+    low,
+    { ...u, updated_at: at, session_id: "replacement" },
+  ]) {
+    const current = {
+      ...next,
+      assignments: next.assignments.map((a) =>
+        a.id === external.id ? { ...a, session_ref: sample.session_id } : a,
+      ),
+    };
+    const recovery = poll(current, sample);
+    const recovered = apply(current, recovery);
+    const action = recovered.human_actions.find((a) => a.id === open.id);
+    expect(action).toMatchObject({
+      status: "done",
+      result: { text: expect.stringContaining(sample.session_id) },
+    });
+    const count = (s: CommandState) =>
+      value(listNeedsYouCounts(s, human)).data.tabs.actions.count;
+    expect(count(recovered)).toBe(count(next) - 1);
+    expect(needsNotices(recovered)).toContainEqual(
+      expect.objectContaining({
+        kind: "human_action",
+        resolved_by: "system",
+        body: action?.result?.text,
+      }),
+    );
+    expect(
+      poll(recovered, sample).events.filter(
+        (e) => e.type === "human_action_completed",
+      ),
+    ).toHaveLength(0);
+  }
 });
 
 test("context restart binds current session, rechecks preferences, clears resume ID, and deduplicates beyond idempotency keys", () => {

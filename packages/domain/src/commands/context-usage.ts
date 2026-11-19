@@ -7,7 +7,12 @@ import {
   contextUsageLevel,
 } from "../context-usage.js";
 import type { Actor } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
+import {
+  completeActionDraft,
+  humanOnlyAction,
+} from "./human-action-completion.js";
 import { projectPreferences } from "./preferences.js";
 
 /** Host patrol records each threshold once and returns durable inbox work. */
@@ -27,13 +32,50 @@ export function recordContextUsageNotices(
         item.status === "active",
     );
     if (
-      !ops ||
       !contextObservationCurrent(a, usage, state.events) ||
       !contextUsageFresh(usage, d.now, staleAfterMs)
     )
       return [];
     const level = contextUsageLevel(usage, projectPreferences(state));
-    if (!level) return [];
+    if (a.external) {
+      for (const e of eventsOfType(state.events, "human_action_requested")) {
+        if (
+          e.actor.kind !== "system" ||
+          e.actor.project_id !== state.project_id ||
+          e.card_id
+        )
+          continue;
+        const request = e.payload as {
+          assignment_id?: string;
+          context_session_id?: string;
+          human_action_id?: string;
+        };
+        if (
+          request.assignment_id !== a.id ||
+          !request.context_session_id ||
+          !request.human_action_id ||
+          !(Date.parse(usage.updated_at) > Date.parse(e.created_at))
+        )
+          continue;
+        const replaced = request.context_session_id !== usage.session_id;
+        if (!replaced && level === "restart") continue;
+        const action = d.get("human_actions", request.human_action_id);
+        if (
+          action.status !== "open" ||
+          action.card_id ||
+          action.requested_by !== "system" ||
+          humanOnlyAction(d, action)
+        )
+          continue;
+        completeActionDraft(d, {
+          human_action_id: action.id,
+          text: replaced
+            ? `${a.id} 的外接会话已由 ${request.context_session_id} 更换为 ${usage.session_id}，原巡检待办已解除。`
+            : `${a.id} 的外接会话 ${usage.session_id} 已用 ${usage.used_percentage}%，已低于清理阈值。`,
+        });
+      }
+    }
+    if (!ops || !level) return [];
     const employee = state.employees?.find((e) => e.id === a.employee_id);
     const card =
       a.scope === "work_item"

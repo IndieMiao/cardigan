@@ -7,6 +7,7 @@ import {
   notices,
   postComment,
   refreshCancelledHumanActions,
+  requestDecision,
   requestHumanAction,
   standingTools,
   triageHumanAction,
@@ -376,7 +377,7 @@ function diagnosticOwners() {
 }
 
 test.each(["human", "host", undefined, "pm_ops"] as const)(
-  "only a human can grant diagnostic authority outside the PM inbox (prior triage: %s)",
+  "PM can assign a diagnosis from its inbox or a legacy host handoff (prior triage: %s)",
   (triage) => {
     const { state, pm, host, params } = diagnosticOwners();
     const {
@@ -405,7 +406,7 @@ test.each(["human", "host", undefined, "pm_ops"] as const)(
         host_diagnostic: true,
         host_assignment_id: hasHost ? host.id : pm.id,
       };
-      if (triage === "pm_ops")
+      if (triage === "pm_ops" || triage === "host")
         expect(value(diagnose(owner)).data).toMatchObject(authorized);
       else
         expect(diagnose(owner)).toMatchObject({
@@ -419,12 +420,13 @@ test.each(["human", "host", undefined, "pm_ops"] as const)(
 
 test("internal non-blocking handoff binds a result author; only their explicit final report closes it", () => {
   const { state, pm, host, base, params } = diagnosticOwners();
+  const io = ports();
   const assign = (s: CommandState) =>
     triageHumanAction(
       s,
       human,
       { ...params, host_operator: "host_ops", host_diagnostic: true },
-      ports(),
+      io,
     );
   const assigned = value(assign(state));
   expect(assigned.data.host_assignment_id).toBe(host.id);
@@ -504,19 +506,252 @@ test("internal non-blocking handoff binds a result author; only their explicit f
   };
   const assignedPm = value(assign(fallback));
   expect(assignedPm.data.host_assignment_id).toBe(pm.id);
+  const fallbackState = apply(fallback, assignedPm);
+  const evidence = value(
+    postComment(
+      fallbackState,
+      owner,
+      { card_id: result.card_id, body: result.body },
+      io,
+    ),
+  );
   expect(
     value(
       triageHumanAction(
-        apply(fallback, assignedPm),
+        apply(fallbackState, evidence),
         owner,
         {
           human_action_id: target,
           disposition: "done",
-          rationale: "Result verified",
+          rationale: `Result verified: ${evidence.data?.id}`,
         },
         ports(),
       ),
     ).data.status,
   ).toBe("done");
   expect(assign(base).ok).toBe(false);
+});
+
+test.each([false, true])(
+  "PM verifies the actual operator's result on a legacy host handoff, deferred=%s",
+  (deferred) => {
+    const { state, host } = diagnosticOwners();
+    const { host_assignment_id: _owner, ...original } = required(
+      state.human_actions[0],
+    );
+    const legacy: CommandState = {
+      ...state,
+      cards: state.cards.map((c) => ({ ...c, status: "done" })),
+      human_actions: [
+        {
+          ...original,
+          host_operator: "host_ops",
+          ...(deferred ? { ready_when: { kind: "manual" } } : {}),
+        },
+      ],
+    };
+    const evidence = value(
+      postComment(
+        legacy,
+        actor(5, "host_ops"),
+        { card_id: id("card", 1), body: `${target}: verified host state` },
+        ports(),
+      ),
+    );
+    const entry = required(evidence.data);
+    const cited = apply(legacy, evidence);
+    const reason = `Verified: ${entry.id}`;
+    const completePm = (s: CommandState, rationale = reason) =>
+      triageHumanAction(
+        s,
+        owner,
+        { human_action_id: target, disposition: "done", rationale },
+        ports(),
+      );
+    expect(completePm(cited, "No reference").ok).toBe(false);
+    expect(completePm(cited, "C-1#999").ok).toBe(false);
+    for (const patch of [
+      { refs: [] },
+      { card_id: id("card", 2) },
+      { type: "system" as const },
+      { retracted: true },
+      { author: `assignment:${id("assignment", 1)}` as const },
+    ])
+      expect(
+        completePm({ ...cited, timeline: [{ ...entry, ...patch }] }).ok,
+      ).toBe(false);
+    for (const patch of [
+      { blocks_merge: true },
+      { blocked_work_items: [id("work_item", 1)] },
+      { prerequisite: "credential" as const },
+      { prerequisite: "external_account" as const },
+      ...(
+        [
+          "spending",
+          "credential",
+          "account",
+          "data_deletion",
+          "publish",
+        ] as const
+      ).map((category) => ({ category })),
+    ]) {
+      expect(
+        completePm({
+          ...cited,
+          human_actions: [{ ...required(legacy.human_actions[0]), ...patch }],
+        }).ok,
+      ).toBe(false);
+    }
+    expect(
+      completePm({
+        ...cited,
+        cards: cited.cards.map((c) => ({ ...c, sensitive: true })),
+      }).ok,
+    ).toBe(false);
+    const needs = (s: CommandState) => value(listNeedsYou(s, human)).data;
+    expect([
+      ...needs(cited).later,
+      ...needs(cited).human_actions,
+    ]).toContainEqual(expect.objectContaining({ id: target }));
+    const completed = apply(cited, value(completePm(cited)));
+    expect(completed.human_actions[0]?.result?.text).toBe(reason);
+    expect([
+      ...needs(completed).later,
+      ...needs(completed).human_actions,
+    ]).not.toContainEqual(expect.objectContaining({ id: target }));
+    expect(notices(completed)).toContainEqual(
+      expect.objectContaining({
+        body: reason,
+        kind: "human_action",
+        resolved_by: "assignment:A-4",
+      }),
+    );
+    expect(completePm(completed).ok).toBe(false);
+    // Reassign instead of closing, preserving deferral and the merged card.
+    const external: Assignment = {
+      ...host,
+      id: id("assignment", 6),
+      role_id: "pm",
+      scope: "standing",
+      external: true,
+      standing_mode: "office",
+    };
+    const transferable = {
+      ...cited,
+      assignments: [...cited.assignments, external],
+    };
+    const transfer = value(
+      triageHumanAction(
+        transferable,
+        owner,
+        { ...handoff, host_assignment_id: external.id },
+        ports(),
+      ),
+    );
+    expect(transfer.data).toMatchObject({
+      status: "open",
+      host_assignment_id: external.id,
+    });
+    expect(transfer.data.ready_when).toEqual(
+      legacy.human_actions[0]?.ready_when,
+    );
+    expect(complete(apply(transferable, transfer), actor(6, "pm")).ok).toBe(
+      true,
+    );
+  },
+);
+
+test("protected actions cannot be closed directly by their external owner or stripped of a prerequisite by PM", () => {
+  const s = setup();
+  for (const patch of [
+    { category: "publish" as const },
+    { blocks_merge: true, prerequisite: "credential" as const },
+  ]) {
+    const held = {
+      ...s,
+      human_actions: [{ ...required(s.human_actions[0]), ...patch }],
+    };
+    expect(complete(held).ok).toBe(false);
+    expect(complete(held, human).ok).toBe(true);
+  }
+  const { state, params } = diagnosticOwners();
+  expect(
+    triageHumanAction(
+      {
+        ...state,
+        human_actions: [
+          {
+            ...required(s.human_actions[0]),
+            prerequisite: "credential",
+            blocks_merge: true,
+          },
+        ],
+      },
+      owner,
+      { ...params, host_operator: "host_ops", blocks_merge: false },
+      ports(),
+    ).ok,
+  ).toBe(false);
+});
+
+test("a standalone action's declared category survives handoff; a legacy action inherits card risk", () => {
+  const s = setup();
+  const io = ports();
+  const h = required(s.human_actions[0]);
+  const request = value(
+    requestHumanAction(
+      s,
+      owner,
+      {
+        card_id: id("card", 1),
+        instructions: h.instructions,
+        why_human: h.why_human,
+        expected_return: h.expected_return,
+        blocked_work_items: [],
+        category: "data_deletion",
+      },
+      io,
+    ),
+  );
+  const assigned = value(
+    triageHumanAction(
+      apply(s, request),
+      human,
+      { ...handoff, human_action_id: request.data.id },
+      io,
+    ),
+  );
+  expect(assigned.data.category).toBe("data_deletion");
+  expect(
+    completeHumanAction(
+      apply(apply(s, request), assigned),
+      owner,
+      { human_action_id: request.data.id, text: "Done" },
+      io,
+    ).ok,
+  ).toBe(false);
+  const risk = value(
+    requestDecision(
+      s,
+      human,
+      {
+        card_id: id("card", 1),
+        category: "publish",
+        kind: "choose",
+        decider: "human",
+        question: "Publish?",
+        context: "Public release",
+        options: [
+          { key: "approve", description: "Approve", impact: "Visible" },
+        ],
+        recommended: "approve",
+        affected_cards: [],
+        affected_work_items: [],
+        blocking: false,
+        plain_summary: { changed: "发布", impact: "公开", risk: "对外发布" },
+      },
+      io,
+    ),
+  );
+  expect(complete(apply(s, risk)).ok).toBe(false);
 });

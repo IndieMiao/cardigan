@@ -3,8 +3,10 @@ import {
   type CommandState,
   eventsOfType,
   type ProjectId,
+  pendingRoleConflictActions,
   type RoleDefinition,
   requestDeploymentAction,
+  resolveMatchedRoleActions,
   roleUpgradeDiff,
   rotatePmAfterDeployment,
   rotateStandingAfterDeployment,
@@ -302,6 +304,20 @@ export function rotateIdleDeployedRoles(
     const actor = { kind: "system" as const, project_id: project };
     const clock = { now: () => new Date().toISOString() };
     const ports = { ids: tx.ids, clock };
+    if (pendingRoleConflictActions(state).length) {
+      const matched = new Set(
+        [...idleRolePolicies(tx, project)]
+          .filter(
+            ([, p]) => p.role.status !== "inactive" && p.matches && p.published,
+          )
+          .map(([id]) => id),
+      );
+      const effect = unwrap(
+        resolveMatchedRoleActions(state, actor, matched, ports),
+      );
+      persistEffect(tx, project, effect);
+      if (effect.changes.length) state = loadState(tx, project);
+    }
     for (const previous of state.assignments) {
       if (
         previous.scope !== "standing" ||

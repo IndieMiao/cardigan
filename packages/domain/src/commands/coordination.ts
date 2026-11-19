@@ -110,6 +110,11 @@ import {
   unwrap,
 } from "./core.js";
 import { endRun } from "./end-run.js";
+import {
+  completeActionDraft,
+  hasHostResult,
+  humanOnlyAction,
+} from "./human-action-completion.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
 import {
@@ -1385,6 +1390,7 @@ export function requestHumanAction(
   > & {
     card_id: CardId;
     due?: string;
+    category?: HumanAction["category"];
     blocks_merge?: boolean;
     prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
@@ -1418,6 +1424,11 @@ export function requestHumanAction(
       "validation_failed",
       "只有凭据或外部账号前置操作可以阻塞合并",
     );
+    ensure(
+      p.category === undefined || decisionCategories.includes(p.category),
+      "validation_failed",
+      "Unknown human action category",
+    );
     const blocks = p.blocks_merge === true && !!p.prerequisite;
     const triage = hasActivePmOps(d, "triage_human_action")
       ? "pm_ops"
@@ -1446,6 +1457,7 @@ export function requestHumanAction(
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
       why_human: p.why_human,
       expected_return: p.expected_return,
@@ -1467,6 +1479,7 @@ export function requestHumanAction(
       {
         human_action_id: id,
         blocked_work_items: action.blocked_work_items,
+        ...(action.category ? { category: action.category } : {}),
         ...(action.blocks_merge
           ? { blocks_merge: true, prerequisite: action.prerequisite }
           : {}),
@@ -1560,7 +1573,8 @@ export function completeHumanAction(
           actor.kind === "assignment" &&
             action.triage === "host" &&
             action.host_operator === "external" &&
-            action.host_assignment_id === actor.assignment_id,
+            action.host_assignment_id === actor.assignment_id &&
+            action.requested_by !== "system",
           "unauthorized",
           "只能完成明确指派给当前身份的外接主机待办",
         );
@@ -1569,65 +1583,6 @@ export function completeHumanAction(
       return completeActionDraft(d, p);
     },
   );
-}
-/** Internal: shared by human-only commands that also complete a Needs You item. */
-export function completeActionDraft(
-  d: CommandDraft,
-  p: {
-    human_action_id: HumanActionId;
-    text: string;
-    attachments?: readonly string[];
-  },
-) {
-  const action = d.get("human_actions", p.human_action_id);
-  ensure(
-    !remoteExitAction(d.state, action.id) || d.actor.kind === "human",
-    "unauthorized",
-    "Only the human can confirm a remote worker exited",
-  );
-  text(p.text, "result");
-  if (action.card_id)
-    ensure(
-      d.card(action.card_id).status !== "cancelled" ||
-        remoteExitAction(d.state, action.id),
-      "illegal_transition",
-      "已取消卡片的待办不能完成",
-    );
-  for (const id of p.attachments ?? [])
-    ensure(
-      d.get("attachments", id).card_id === action.card_id,
-      "validation_failed",
-      "Attachment belongs to another card",
-    );
-  const result: HumanAction = {
-    ...action,
-    status: unwrap(transition("human_action", action.status, "complete")),
-    result: { text: p.text, attachments: p.attachments ?? [], at: d.now },
-  };
-  d.put("human_actions", result);
-  const resumed: WorkItem[] = [];
-  for (const id of action.blocked_work_items) {
-    const item = d.work(id);
-    if (["done", "cancelled"].includes(d.card(item.card_id).status)) continue;
-    if (resumeWork(d, item)) resumed.push(item);
-  }
-  const event = d.emit(
-    "human_action_completed",
-    action.card_id,
-    {
-      human_action_id: action.id,
-      ...(d.tool === "complete_host_action" && d.assignment
-        ? {
-            completed_by_host_assignment_id: d.assignment.id,
-            result: p.text,
-          }
-        : {}),
-      resume_work_items: resumed.map((item) => item.id),
-    },
-    { type: "human_action", body: p.text, human_action_id: action.id },
-  );
-  for (const item of resumed) queueResumedRun(d, item, event);
-  return result;
 }
 export function triageHumanAction(
   state: CommandState,
@@ -1659,7 +1614,7 @@ export function triageHumanAction(
 ) {
   return command(state, actor, "triage_human_action", ports, (d) => {
     ensure(
-      isPmOps(d) || actor.kind === "human",
+      (isPmOps(d) && isRoleActive(state.roles, "pm")) || actor.kind === "human",
       "forbidden_tool",
       "Only the human or PM Ops can triage human actions",
     );
@@ -1697,14 +1652,25 @@ export function triageHumanAction(
       "validation_failed",
       "只有非阻塞的内部卡片诊断可以由运维回填结项",
     );
-    // A diagnostic handoff grants result authority. PM can delegate its own
-    // inbox, not reclaim work already handed to a human or host operator.
     ensure(
       !p.host_diagnostic ||
         actor.kind === "human" ||
+        action.triage === "host" ||
         action.triage === "pm_ops",
       "unauthorized",
-      "只有人才能把已经交接的待办或旧待办改为主机诊断",
+      "未交给主机或后台项目经理的待办不能直接授权诊断结项",
+    );
+    ensure(
+      !p.host_diagnostic || !humanOnlyAction(d, action),
+      "unauthorized",
+      "交人事项不能标记为可回填诊断",
+    );
+    ensure(
+      actor.kind === "human" ||
+        !action.prerequisite ||
+        p.blocks_merge !== false,
+      "unauthorized",
+      "只有人能移除凭据或账号前置分类",
     );
     if (external) {
       text(p.host_assignment_id, "host_assignment_id");
@@ -1739,13 +1705,12 @@ export function triageHumanAction(
     if (p.disposition === "done") {
       ensure(
         action.triage === "pm_ops" ||
-          (isPmOps(d) &&
-            isRoleActive(state.roles, "pm") &&
-            internalHostFollowup(action) &&
-            action.host_assignment_id === d.assignment?.id &&
-            needsYouItemReady(readinessOf(d), action)),
+          (action.triage === "host" &&
+            reportableHostAction(action) &&
+            isPmOps(d) &&
+            hasHostResult(d, action, p.rationale)),
         "unauthorized",
-        "An action already handed to the human cannot be completed by PM",
+        "主机待办结项须引用同卡执行者关联本待办的回帖（C-n#N）",
       );
       return completeActionDraft(d, {
         human_action_id: action.id,

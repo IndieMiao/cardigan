@@ -89,9 +89,8 @@ export function notices(state: CommandState): readonly Notice[] {
     (e) =>
       ["card_hold_set", "card_hold_released"].includes(e.type) ||
       (e.type === "human_action_completed" &&
-        e.actor.kind === "assignment" &&
-        field(e, "completed_by_host_assignment_id") ===
-          e.actor.assignment_id) ||
+        e.actor.kind !== "human" &&
+        !!field(e, "result")) ||
       e.type === "ext_message_failed" ||
       systemNoticeEvents.has(e.type) ||
       ((e.type === "decision_resolved" ||
@@ -108,15 +107,18 @@ export function notices(state: CommandState): readonly Notice[] {
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const e of chronological) {
-    if (e.type === "human_action_completed" && e.actor.kind === "assignment") {
+    if (e.type === "human_action_completed" && e.actor.kind !== "human") {
       out.push({
         id: e.id,
         kind: "human_action",
         card_id: e.card_id ?? null,
         decision_id: null,
-        question: `${field(e, "human_action_id")} 外接维护者已完成`,
+        question: `${field(e, "human_action_id")} ${e.actor.kind === "system" ? "系统已核销" : "后台已完成"}`,
         option: "已完成",
-        resolved_by: `assignment:${e.actor.assignment_id}`,
+        resolved_by:
+          e.actor.kind === "assignment"
+            ? `assignment:${e.actor.assignment_id}`
+            : "system",
         body: field(e, "result") ?? "",
         proxy_authority: null,
         at: e.created_at,
