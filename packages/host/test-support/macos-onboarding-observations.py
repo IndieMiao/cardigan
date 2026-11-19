@@ -44,6 +44,10 @@ if c['step'] in ('account', 'directories', 'helpers'):
         subprocess.run = run
     else:
         native['acl_safe'] = lambda fd: not attributes(fd)
+        def physical_pwd(argv, *, cwd, **kwargs):
+            assert argv == ['/bin/pwd', '-P']
+            return types.SimpleNamespace(stdout=os.fsencode(str(cwd).removeprefix('/System/Volumes/Data')) + b'\n')
+        subprocess.run = physical_pwd
     os.listxattr = forbidden
 elif c['step'] == 'tools':
     actual_open = builtins.open

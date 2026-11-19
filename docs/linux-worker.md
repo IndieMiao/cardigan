@@ -176,6 +176,11 @@ for name in ('hc', 'herdr-core'):
         os.fchown(out.fileno(), 0, 2201)
         os.fchmod(out.fileno(), 0o750)
 PY
+```
+
+安装文件和 Git helper：
+
+```sh
 sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-files.py /srv/cardigan-workers/example/libexec/worker-files.py
 sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /srv/cardigan-workers/example/libexec/worker-git.py
 ```
@@ -183,6 +188,41 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /s
 基础 `worker-primitives.py` 由安装器安装。向导核验三个 helper 与控制主机发行文件的摘要、属主和权限，因此两边版本要一致。模型 CLI 和模型账号登录使用既有启动配置与凭据流程；它们不由接入向导复制，`worker check` 也不表示模型登录已经完成。
 
 `file_helper`、`git_helper` 与固定的 `<工作根>/libexec/worker-primitives.py` 必须是三个不同路径；复用路径会在读取配置时拒绝，不能用同一个 helper 代替其它协议。
+
+### 升级已接入 worker 的 helper
+
+暂停向这台 worker 派发新 Run，在执行视图确认没有仍在运行的 Run。在 worker 上，由管理员将与控制主机同版本的可信发行包解包到仅 root 可写的 `/opt/cardigan` 下，再去掉 `deploy` 目录及其文件的组和其他用户写权限：`git archive` 打包的文件和目录通常为 0664/0775，不符合安装器要求。不要对项目工作根执行此命令。
+
+```sh
+sudo chmod -R go-w /opt/cardigan/deploy
+```
+
+如果新版 `worker-primitives.py` 的内容有变化，安装器的 `layout()` 会拒绝覆盖旧文件，报 `worker_preflight_failed`。先把已安装的旧文件移到 `/root` 下的独立备份目录；内容相同时跳过这一步：
+
+```sh
+backup=$(sudo mktemp -d /root/cardigan-helper.XXXXXXXX) &&
+  sudo mv /srv/cardigan-workers/example/libexec/worker-primitives.py "$backup/" &&
+  printf '旧 helper 备份在 %s\n' "$backup"
+```
+
+用原安装配置先检查，通过后再安装基础 helper：
+
+```sh
+sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --check &&
+  sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --apply
+```
+
+若安装器只打印 `worker_preflight_failed`，可在 worker 上直接运行同一 Linux 检查入口，查看异常栈定位失败的检查；此命令不执行安装：
+
+```sh
+sudo python3 -I -c 'import runpy, sys; p="/opt/cardigan/deploy/install-macos-worker.py"; sys.argv=[p,"--config","/etc/cardigan/worker.json","--check"]; runpy.run_path(p)["main"]("Linux")'
+```
+
+`--apply` 成功后，执行上方两条 `sudo install` 命令更新 `worker-files.py` 和 `worker-git.py`。最后在**控制主机**重新检查，确认检查通过（其中 `helpers` 为 `passed`）后再恢复派发；失败时保留备份，先排查再重试。
+
+```sh
+cardigan worker check --project example --machine worker-a
+```
 
 ## 4. worker：资源与 MCP
 
