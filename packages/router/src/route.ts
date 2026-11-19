@@ -1520,6 +1520,25 @@ export function escalation(
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
   switch (input.event.type) {
+    case "framework_dependency_linked":
+    case "framework_dependency_overdue": {
+      if (
+        input.event.type === "framework_dependency_overdue" &&
+        input.event.actor.kind !== "system"
+      )
+        break;
+      const message = payloadString(input.event.payload, "notice");
+      if (message)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "dependency",
+          "6.4/card dependencies",
+          message,
+        );
+      break;
+    }
     case "card_dependencies_attention":
     case "card_dependencies_released":
     case "card_dependencies_ready": {

@@ -45,6 +45,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { recordFrameworkLinks } from "./framework-dependencies.js";
 import { cancelCardHumanActions } from "./human-action-lifecycle.js";
 import { bindRequiredVerifier } from "./late-verifier.js";
 import { syncRiskTagMerge } from "./merge.js";
@@ -267,6 +268,9 @@ export function createCard(
         card_id: id,
         template: template.id,
         template_version: template.version,
+        ...(p.is_ui_framework !== undefined
+          ? { is_ui_framework: p.is_ui_framework }
+          : {}),
         ...(card.depends_on_cards
           ? { depends_on_cards: card.depends_on_cards }
           : {}),
@@ -279,6 +283,7 @@ export function createCard(
       },
       { type: "system", body: dependencyChangeNotice(card, p) },
     );
+    recordFrameworkLinks(d, card);
     return card;
   });
 }
@@ -329,6 +334,7 @@ export function updateCard(
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
           p.status === undefined &&
+          p.is_ui_framework === undefined &&
           p.depends_on_cards === undefined &&
           p.wait_for_dependencies === undefined &&
           p.early_start === undefined &&
@@ -446,6 +452,9 @@ export function updateCard(
       {
         card_id: card.id,
         status,
+        ...(p.is_ui_framework !== undefined
+          ? { is_ui_framework: p.is_ui_framework }
+          : {}),
         ...(p.depends_on_cards !== undefined
           ? {
               previous_depends_on_cards: card.depends_on_cards ?? [],
@@ -479,6 +488,7 @@ export function updateCard(
       },
       { type: "status_change", body: dependencyChangeNotice(result, p) },
     );
+    recordFrameworkLinks(d, result, card);
     invalidateReviewReuse(d);
     if (p.risk_tags !== undefined || p.high_risk !== undefined)
       syncRiskTagMerge(d, d.card(card.id));

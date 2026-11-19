@@ -631,6 +631,9 @@ async function assembleServer(
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
         mergeWatchdogMs =
           options.dispatcher.mergeWatchdogMs ?? config.mergeWatchdogMs,
+        frameworkWaitReminderMs =
+          options.dispatcher.frameworkWaitReminderMs ??
+          config.frameworkWaitReminderMs,
         mergeBlockedReminderMs =
           options.dispatcher.mergeBlockedReminderMs ??
           config.mergeBlockedReminderMs,
@@ -738,6 +741,9 @@ async function assembleServer(
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
         ...(mergeWatchdogMs === undefined ? {} : { mergeWatchdogMs }),
+        ...(frameworkWaitReminderMs === undefined
+          ? {}
+          : { frameworkWaitReminderMs }),
         ...(mergeBlockedReminderMs === undefined
           ? {}
           : { mergeBlockedReminderMs }),

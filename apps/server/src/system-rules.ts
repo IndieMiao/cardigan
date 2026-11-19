@@ -36,14 +36,25 @@ export function runSystemRules(
   clock: Clock,
   loadState: StateLoader = loadCommandState,
   baseline?: { branch: string; sha: string },
-  conflictMaxResumes?: number,
+  {
+    baselineConflictMaxResumes: conflictMaxResumes,
+    frameworkWaitReminderMs,
+  }: {
+    baselineConflictMaxResumes?: number;
+    frameworkWaitReminderMs?: number;
+  } = {},
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
     const ports = { clock, ids: tx.ids };
     let state = loadState(tx, project);
-    const dependencies = refreshCardDependencies(state, actor, ports);
+    const dependencies = refreshCardDependencies(
+      state,
+      actor,
+      ports,
+      frameworkWaitReminderMs,
+    );
     if (!dependencies.ok) throw new Error(dependencies.error.message);
     persistEffect(tx, project, dependencies.value);
     if (dependencies.value.changes.length || dependencies.value.events.length)

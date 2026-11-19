@@ -216,3 +216,66 @@ test.each(["full", "summary"])(
     }
   },
 );
+
+test("linked and overdue framework reminders each reach PM Ops once; normal completion ends the wait", () => {
+  const { f, predecessor } = setup();
+  try {
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: predecessor.id, is_ui_framework: true }, p),
+    );
+    const sweep = () =>
+      runSystemRules(f.store, f.id, f.clock, undefined, undefined, {
+        frameworkWaitReminderMs: 1000,
+      });
+    f.advance(1000);
+    sweep();
+    expect(
+      f.state().events.some((e) => e.type === "framework_dependency_overdue"),
+    ).toBe(false);
+    f.advance(1);
+    sweep();
+    sweep();
+    routeProjectEvents(f.store, f.id, { clock: f.clock });
+    routeProjectEvents(f.store, f.id, { clock: f.clock });
+    for (const type of [
+      "framework_dependency_linked",
+      "framework_dependency_overdue",
+    ]) {
+      const events = f.state().events.filter((e) => e.type === type);
+      expect(events).toHaveLength(1);
+      const notes = f.store
+        .listNotifications({ project_id: f.id })
+        .filter((n) => n.event_id === events[0]?.id);
+      expect(notes).toMatchObject([
+        { recipient: { kind: "pm_ops" }, card_id: f.card.id },
+      ]);
+      const entry = f
+        .state()
+        .timeline.find(
+          (t) => t.card_id === f.card.id && t.event_seq === notes[0]?.seq,
+        );
+      expect(entry?.body).toContain(predecessor.id);
+      expect(entry?.body).toContain(f.card.id);
+    }
+    // A new wait which completes before its deadline must not generate another reminder.
+    for (const flag of [false, true])
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: predecessor.id, is_ui_framework: flag }, p),
+      );
+    f.apply((s, a, p) =>
+      markCardDone(
+        s,
+        a,
+        { card_id: predecessor.id, result: "Merged layout" },
+        p,
+      ),
+    );
+    f.advance(1001);
+    sweep();
+    expect(
+      f.state().events.filter((e) => e.type === "framework_dependency_overdue"),
+    ).toHaveLength(1);
+  } finally {
+    f.close();
+  }
+});
