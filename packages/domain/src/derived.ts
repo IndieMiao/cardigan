@@ -9,9 +9,38 @@ import type {
 } from "./entities.js";
 import type { ApprovalStatus, CardStatus } from "./states.js";
 
+/** A legacy conditional asking for a recheck is NOT a completed verification. */
+export function reviewPassed(
+  review:
+    | {
+        readonly verdict: Review["verdict"] | null;
+        readonly followup_card_id?: Review["followup_card_id"];
+      }
+    | undefined,
+): boolean {
+  return (
+    review?.verdict === "pass" ||
+    (review?.verdict === "conditional" && !!review.followup_card_id)
+  );
+}
+
+export function unresolvedMustFix(review: Review): boolean {
+  return review.issues.some(
+    (i) =>
+      i.must_fix &&
+      !i.pre_existing &&
+      !(
+        review.verdict === "conditional" &&
+        review.followup_card_id &&
+        i.impact === "ux_only"
+      ),
+  );
+}
+
 export function deriveReview(
   issues: readonly ReviewIssue[],
   recheck_required = false,
+  followup_card_id?: Review["followup_card_id"],
 ): Pick<Review, "issues" | "verdict" | "blocking"> {
   const normalized = issues.map(
     (issue): ReviewIssue =>
@@ -19,12 +48,21 @@ export function deriveReview(
         ? { ...issue, severity: "major" }
         : { ...issue },
   );
-  const blocking = normalized.some(
-    (issue) => issue.must_fix && !issue.pre_existing,
-  );
+  const deferred =
+    !!followup_card_id &&
+    !recheck_required &&
+    normalized.some((i) => i.must_fix && !i.pre_existing) &&
+    normalized.every((i) => !i.must_fix || i.impact === "ux_only");
+  const blocking =
+    !deferred &&
+    normalized.some((issue) => issue.must_fix && !issue.pre_existing);
   return {
     issues: normalized,
-    verdict: blocking ? "reject" : recheck_required ? "conditional" : "pass",
+    verdict: blocking
+      ? "reject"
+      : deferred || recheck_required
+        ? "conditional"
+        : "pass",
     blocking,
   };
 }
@@ -92,6 +130,7 @@ type MatrixReview = Pick<
   | "work_item_id"
   | "target_sha"
   | "verdict"
+  | "followup_card_id"
   | "withdrawn"
   | "reuse_basis"
   | "reuse_invalidated_at"
@@ -142,6 +181,9 @@ export function deriveReviewMatrix(
           work_item_id: item.id,
           target_sha: delivery.subject.value,
           verdict: latest?.verdict ?? null,
+          ...(latest?.followup_card_id
+            ? { followup_card_id: latest.followup_card_id }
+            : {}),
           ...(latest ? { review_id: latest.id } : {}),
           ...(latest && latest.delivery_id !== delivery.id
             ? {

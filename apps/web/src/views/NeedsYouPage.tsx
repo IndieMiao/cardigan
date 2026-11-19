@@ -1,3 +1,4 @@
+import { reviewImpactLabel } from "@cardigan/domain";
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -615,6 +616,9 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
         <EmployeeIdentity {...review} showTitle={false} />
         <IdTag id={review.work_item_id} label={label} />
         <StatusTag status={review.verdict} />
+        {review.followup_card_id && (
+          <IdTag id={review.followup_card_id} label="后续卡" />
+        )}
       </IdentityRow>
       {review.issues.length > 0 && (
         <details className="needs-review-issues">
@@ -624,6 +628,7 @@ function ReviewLine({ review }: { readonly review: MergeConfirmationReview }) {
               <li key={`${review.id}-${issue.severity}-${issue.description}`}>
                 <strong>
                   {issue.must_fix ? "必须修" : "非阻塞"} · {issue.severity}
+                  {issue.impact && ` · ${reviewImpactLabel[issue.impact]}`}
                 </strong>
                 <span>{issue.description}</span>
               </li>
@@ -864,10 +869,19 @@ export function MergeConfirmation({
       {!confirmed && <PreMergeChecks checks={preChecks} />}
       {merge?.reviews.flatMap((review) =>
         review.issues
-          .filter((issue) => issue.must_fix)
+          .filter(
+            (issue) =>
+              issue.must_fix &&
+              !(
+                review.verdict === "conditional" &&
+                review.followup_card_id &&
+                issue.impact === "ux_only"
+              ),
+          )
           .map((issue) => (
             <p className="error" key={`${review.id}/${issue.description}`}>
               必须修复：{issue.description}
+              {issue.impact && ` · ${reviewImpactLabel[issue.impact]}`}
             </p>
           )),
       )}

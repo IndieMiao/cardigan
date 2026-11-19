@@ -320,6 +320,7 @@ async function reviewWork(card, runId, verdict) {
           {
             severity: "major",
             description: "真机上起飞有空白帧",
+            impact: "functional",
             must_fix: true,
             pre_existing: false,
           },

@@ -1,4 +1,8 @@
-import type { Decision, WorkItem } from "../entities.js";
+import {
+  type Decision,
+  reviewImpactLabel,
+  type WorkItem,
+} from "../entities.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
@@ -36,6 +40,18 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
     ?.merge_conflict_event_id;
   const mustFix =
     prior?.issues.some((i) => i.must_fix && !i.pre_existing) ?? false;
+  const impacts = [
+    ...new Set(
+      prior?.issues.flatMap((i) =>
+        i.must_fix && !i.pre_existing && i.impact
+          ? [reviewImpactLabel[i.impact]]
+          : [],
+      ),
+    ),
+  ];
+  const impactSummary = impacts.length
+    ? `影响程度：${impacts.join("、")}。`
+    : "";
   const recommended = conflictRepair || !mustFix ? "raise_limit" : "pause";
   const verdict = prior
     ? { pass: "通过", reject: "驳回", conditional: "有条件通过" }[prior.verdict]
@@ -57,7 +73,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       category: "general",
       trigger: "review_limit",
       question: `连续驳回 ${consecutiveReviewRejects(d, item)} 次，请 PM 排查：${item.id}`,
-      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${reason}。`,
+      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${impactSummary}${reason}。`,
       options: [
         {
           key: "raise_limit",

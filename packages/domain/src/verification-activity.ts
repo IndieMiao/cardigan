@@ -43,7 +43,7 @@ export function verificationTarget(
   // Conditional reviews keep the same submitted version open for another Run.
   return latest?.status === "submitted" &&
     latest.requested_verifiers.includes(item.id) &&
-    (!review || review.verdict === "conditional")
+    (!review || (review.verdict === "conditional" && !review.followup_card_id))
     ? latest
     : undefined;
 }

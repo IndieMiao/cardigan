@@ -253,7 +253,7 @@ async function workOn(prompt) {
           delivery_id: delivery.id,
           target_sha: delivery.subject.value,
           kind: "code",
-          issues: [{ severity: "major", description: "please rework", must_fix: true, pre_existing: false }],
+          issues: [{ severity: "major", description: "please rework", impact: "functional", must_fix: true, pre_existing: false }],
         });
         log("review " + JSON.stringify(review).slice(0, 200));
         writeFileSync(marker("reviewed"), "1");

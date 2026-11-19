@@ -301,6 +301,7 @@ export function m3Fixture(
                   {
                     severity: "major",
                     description: "Incorrect output",
+                    impact: "functional" as const,
                     must_fix: true,
                     pre_existing: false,
                   },

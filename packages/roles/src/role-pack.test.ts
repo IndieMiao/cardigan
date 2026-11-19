@@ -36,6 +36,27 @@ test.each([
   "designer",
   "tester",
   "pm",
+] as const)(
+  "%s explains the mandatory impact and when a follow-up is allowed",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const field of [
+      "data_or_permission",
+      "functional",
+      "ux_only",
+      "followup_card_id",
+    ])
+      expect(body).toContain(field);
+  },
+);
+
+test.each([
+  "reviewer",
+  "independent_reviewer",
+  "design_director",
+  "designer",
+  "tester",
+  "pm",
 ] as const)("C-413: %s permits proven major follow-up findings", (role) => {
   const body = instructionsFor(role);
   for (const phrase of [

@@ -617,6 +617,7 @@ test("B3a: the scan aggregates a real pass with pre-existing issues and an undel
           issues: [
             {
               severity: "major",
+              impact: "functional" as const,
               must_fix: true,
               pre_existing: true,
               description: "Existing unrelated issue",

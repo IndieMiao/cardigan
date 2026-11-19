@@ -1,4 +1,4 @@
-import type { CardHold, DispatchOrder } from "@cardigan/domain";
+import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
@@ -390,7 +390,9 @@ export interface ReviewView extends AuthorView {
   readonly verdict: string;
   readonly blocking: boolean;
   readonly target_sha?: string;
+  readonly followup_card_id?: string;
   readonly issues?: readonly {
+    impact?: ReviewImpact;
     severity: string;
     description: string;
     must_fix: boolean;
@@ -704,7 +706,9 @@ export interface MergeConfirmationReview extends AuthorView {
   readonly kind: string;
   readonly verdict: string;
   readonly target_sha: string;
+  readonly followup_card_id?: string;
   readonly issues: readonly {
+    readonly impact?: ReviewImpact;
     readonly severity: string;
     readonly description: string;
     readonly must_fix: boolean;

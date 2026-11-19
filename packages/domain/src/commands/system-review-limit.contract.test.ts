@@ -55,6 +55,7 @@ async function fixture() {
     {
       severity: "major",
       description: "Earlier defect",
+      impact: "functional",
       must_fix: true,
       pre_existing: false,
     },

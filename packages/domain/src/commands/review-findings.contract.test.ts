@@ -12,6 +12,7 @@ import { human } from "./test-fixtures.js";
 const original: ReviewIssue = {
   severity: "major",
   description: "The original validation bug",
+  impact: "functional" as const,
   must_fix: true,
   pre_existing: false,
 };

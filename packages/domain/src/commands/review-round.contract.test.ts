@@ -13,6 +13,7 @@ const bug: ReviewIssue = {
   severity: "critical",
   description: "Conflict resolution loses a required check",
   proof: "The merged function no longer checks the input",
+  impact: "functional" as const,
   must_fix: true,
   pre_existing: false,
 };

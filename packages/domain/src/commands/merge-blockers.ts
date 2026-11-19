@@ -1,6 +1,6 @@
 import { autoRiskPaths } from "../auto-risk.js";
 import { unmetCardDependencies } from "../card-dependencies.js";
-import { isReviewStale } from "../derived.js";
+import { isReviewStale, reviewPassed, unresolvedMustFix } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { passedCardCheck } from "../merge-batch.js";
 import { autoMergeOn } from "../preferences.js";
@@ -107,15 +107,13 @@ export function pmMergeBlockers(
         items.some((w) => w.id === id) &&
         !state.reviews.some(
           (r) =>
-            r.work_item_id === id &&
-            r.verdict === "pass" &&
-            !isReviewStale(r, v),
+            r.work_item_id === id && reviewPassed(r) && !isReviewStale(r, v),
         )
       )
         blockers.push(`验证项 ${id} 未通过当前交付审核`);
     const latest = latestReviews(state, v);
     for (const r of latest.values())
-      if (r.issues.some((i) => i.must_fix && !i.pre_existing))
+      if (unresolvedMustFix(r))
         blockers.push(`审核 ${r.id} 有未处理的 must_fix`);
   }
   return [...new Set(blockers)];
