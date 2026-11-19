@@ -65,16 +65,16 @@ test.each([false, true])(
 );
 
 test.each([0, 1, 3])(
-  "B6: legacy lifetime cap %s does not block independent review before four rejections",
+  "B6: legacy lifetime cap %s does not block independent review before three rejections",
   async (cap) => {
     const { f, review, item } = independentReviewLimitFixture({
       system_review_limit_max_raises: cap,
     });
-    for (let i = 0; i < 4; i++)
+    for (let i = 0; i < 3; i++)
       review(await f.deliver("code", String(i + 1).repeat(40)), true);
     expect(
       f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
     expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
       "waiting_decision",
     );

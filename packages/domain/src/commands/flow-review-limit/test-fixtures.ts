@@ -47,16 +47,20 @@ export function flowReviewFixture(
   const review = (
     target: (typeof f.state.deliveries)[number],
     reject = true,
+    category?: string,
+    description = "Required check is missing",
+    reviewer = f.reviewer,
   ) => {
-    f.start(f.reviewer);
+    f.start(reviewer);
     return f.commit(
       submitReview(
         f.state,
-        f.actor(f.reviewer),
+        f.actor(reviewer),
         {
           delivery_id: target.id,
           target_sha: target.subject.value,
           kind: "code",
+          ...(category ? { rejection_category: category } : {}),
           issues: reject
             ? [
                 {
@@ -64,7 +68,7 @@ export function flowReviewFixture(
                   impact: "functional" as const,
                   must_fix: true,
                   pre_existing: false,
-                  description: "Required check is missing",
+                  description,
                   proof: "Synthetic check fails",
                 },
               ]

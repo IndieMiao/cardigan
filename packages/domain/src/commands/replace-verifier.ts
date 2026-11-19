@@ -13,6 +13,7 @@ import {
 import { isPmOps } from "./delegation.js";
 import { supersedeDelivery } from "./delivery-invalidation.js";
 import { invalidateReviewReuse } from "./review-reuse.js";
+import { requestPlanConfirmation } from "./review-strategy.js";
 import { resolveCardTemplate } from "./templates.js";
 
 export interface ReplaceVerificationWorkItemParams {
@@ -118,6 +119,9 @@ export function replaceVerificationWorkItem(
       ...(old.target_work_item_id
         ? { target_work_item_id: old.target_work_item_id }
         : {}),
+      ...(old.review_plan_target
+        ? { review_plan_target: old.review_plan_target }
+        : {}),
       status: "todo",
     };
     // Withdraw version-bound approvals rather than editing requested_verifiers.
@@ -159,8 +163,9 @@ export function replaceVerificationWorkItem(
     if (retired.status === "passed")
       retired = d.move(retired, "target_withdrawn");
     if (retired.status !== "cancelled") retired = d.move(retired, "cancel");
+    const { review_plan_target, ...historical } = retired;
     d.put("work_items", {
-      ...retired,
+      ...historical,
       required: false,
       replaced_by_work_item_id: replacement.id,
     });
@@ -203,6 +208,12 @@ export function replaceVerificationWorkItem(
         ],
       },
     );
+    if (review_plan_target) {
+      const proposal = d.get("decisions", review_plan_target)
+        .review_intervention?.proposal;
+      if (proposal)
+        requestPlanConfirmation(d, replacement, review_plan_target, proposal);
+    }
     invalidateReviewReuse(d);
     return replacement;
   });

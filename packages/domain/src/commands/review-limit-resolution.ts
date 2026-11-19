@@ -16,14 +16,28 @@ import {
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import {
-  consecutiveReviewRejects,
   currentReviewTarget,
+  rejectionStreak,
   reviewRound,
 } from "./review-round.js";
 
+import { applyReviewStrategy, strategyOptions } from "./review-strategy.js";
+
+export type ReviewLimitOption =
+  | "raise_limit"
+  | "pause"
+  | (typeof strategyOptions)[number]["key"];
+export function isReviewLimitOption(s: string): s is ReviewLimitOption {
+  return (
+    s === "raise_limit" ||
+    s === "pause" ||
+    strategyOptions.some((o) => o.key === s)
+  );
+}
+
 export interface ReviewLimitResolution {
   readonly decision_id: DecisionId;
-  readonly option: "raise_limit" | "pause" | "escalate";
+  readonly option: ReviewLimitOption | "escalate";
   readonly rationale: string;
 }
 
@@ -54,7 +68,9 @@ export function resolveReviewLimit(
   );
   text(p.rationale, "rationale");
   ensure(
-    ["raise_limit", "pause", "escalate"].includes(p.option),
+    p.option === "escalate" ||
+      (isReviewLimitOption(p.option) &&
+        q.options.some((o) => o.key === p.option)),
     "validation_failed",
     "Unknown review limit option",
   );
@@ -109,7 +125,7 @@ export function resolveReviewLimit(
       : {}),
     ...(independent
       ? {
-          notice: `PM 排查后确认独立复核${p.option === "raise_limit" ? "增加一轮" : "暂停"}：${p.rationale}。加轮不等于复核通过或确认合并。`,
+          notice: `PM 排查后确认独立复核${p.option === "raise_limit" ? "增加一轮" : p.option === "pause" ? "暂停" : q.options.find((o) => o.key === p.option)?.description}：${p.rationale}。加轮不等于复核通过或确认合并。`,
         }
       : {}),
     via_chain: [d.author],
@@ -136,11 +152,9 @@ export function raiseVerifierLimit(
     "Review limits require a verifier",
   );
   const limit = Math.max(item.max_review_rounds + 1, reviewRound(d, item));
-  const latest = d
-    .list("reviews")
-    .filter((r) => r.work_item_id === item.id)
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  if (latest && consecutiveReviewRejects(d, item) > 3)
+  const streak = rejectionStreak(d, item);
+  const latest = streak[0];
+  if (latest && streak.length >= 3)
     d.emit("review_limit_rejections_acknowledged", item.card_id, {
       work_item_id: item.id,
       review_id: latest.id,
@@ -206,9 +220,39 @@ export function recordDecisionResolution(
     resolution,
   };
   // Validate the transition before incrementing; repeat resolutions cannot add rounds.
-  if (q.trigger === "review_limit" && resolution.option === "raise_limit")
+  if (q.trigger === "review_limit" && resolution.option !== "pause") {
+    ensure(
+      isReviewLimitOption(resolution.option),
+      "validation_failed",
+      "Unknown review limit option",
+    );
+    if (q.review_intervention) {
+      const id = q.affected_work_items[0];
+      ensure(
+        id &&
+          rejectionStreak(d, d.work(id))[0]?.id ===
+            q.review_intervention.review_id,
+        "stale_target",
+        "驳回依据已变更",
+      );
+    }
+    if (resolution.option !== "raise_limit") {
+      const changesScope = resolution.option !== "change_approach";
+      ensure(
+        d.actor.kind === "human" ||
+          (q.card_id &&
+            delegationAllowed(d, {
+              card_id: q.card_id,
+              category: changesScope ? "scope_change" : "general",
+            })),
+        "unauthorized",
+        "本卡或范围变化未授权，请升级给人",
+      );
+      applyReviewStrategy(d, q, resolution.option, resolution.rationale);
+    }
     for (const id of new Set(q.affected_work_items))
       raiseVerifierLimit(d, d.work(id), q.id, resolution);
+  }
   d.put("decisions", result);
   const resumed: WorkItem[] = [];
   for (const id of new Set(q.affected_work_items)) {

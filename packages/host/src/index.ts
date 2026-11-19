@@ -276,6 +276,7 @@ export * from "./worker-onboarding.js";
 export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,
+  readonlyWorktreeTarget,
   reviewTargetSha,
   type WorktreeProvider,
   type WorktreeRequest,

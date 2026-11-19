@@ -1220,7 +1220,8 @@ async function reviewLimit(delegated = false, repeated = false) {
       const item = tx.work_items.get(project, reviewer.work_item_id as never);
       if (item?.kind !== "verify") throw new Error("Missing verifier");
       tx.work_items.put(project, { ...item, max_review_rounds: 4 });
-      for (let n = 0; n < 3; n++) {
+      // Seed only the two earlier rejects; the real submission triggers the decision.
+      for (let n = 0; n < 2; n++) {
         const priorDelivery = tx.ids.next(project, "delivery");
         const priorRun = tx.ids.next(project, "run");
         const trigger = tx.ids.nextEventId();
@@ -1362,6 +1363,7 @@ test.each([false, true])(
   "PM Ops handles review limits through MCP and routes only human escalations to Needs You (escalate=%s)",
   async (escalate) => {
     const q = await reviewLimit(true, true);
+    expect(q.question).toContain("连续驳回 3 次");
     expect(q.decider).toBe("role:pm");
     const ops = s
       .state()
