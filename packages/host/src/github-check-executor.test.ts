@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -2501,5 +2502,92 @@ test.each([false, true])(
     }
     expect(peer.client.runs).toHaveBeenCalledOnce();
     expect(existsSync(receipt)).toBe(false);
+  },
+);
+
+test.each([false, true])(
+  "a reader exit under contention never turns lost evidence into absence (wrote receipt: %s)",
+  async (retired) => {
+    const dir = mkdtempSync(join(tmpdir(), "cg-scan-interrupt-"));
+    roots.push(dir);
+    const file = join(dir, "repo.db"),
+      f = setup(file);
+    await loseDispatch(f);
+    const [original] = f.journal.unfinished();
+    if (!original) throw new Error("Missing dispatch");
+    const intent = {
+      ...original,
+      abandoned: "superseded" as const,
+    };
+    appendDispatch(f, intent);
+    closeFixtureStore(f.store);
+    let time = now + 3_600_000;
+    // Same DB lock, candidate and process exit in both cases. Only one reader
+    // reaches endListing's fallback before exiting; neither writes the observation to SQLite.
+    execFileSync(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `import assert from 'node:assert/strict';
+       import { DatabaseSync } from 'node:sqlite';
+       import { Store } from ${JSON.stringify(new URL("../../store/dist/index.js", import.meta.url).href)};
+       import { GithubDispatchJournal } from ${JSON.stringify(new URL("../dist/github-dispatch-journal.js", import.meta.url).href)};
+       const file = ${JSON.stringify(file)};
+       const store = Store.open({ dbPath: file });
+       const journal = new GithubDispatchJournal(store);
+       const scan = journal.beginDiscovery(journal.admitted()[0], ${time}, 20_000);
+       const locker = new DatabaseSync(file);
+       store.database.exec('PRAGMA busy_timeout=10');
+       locker.exec('BEGIN IMMEDIATE');
+       assert.throws(() => journal.observeMatches(scan, [123]), /locked/);
+       if (${retired}) assert.throws(() => journal.endListing(scan, [123]), /locked/);
+       process.exit(0);`,
+    ]);
+    let peer = setup(file, false);
+    const [left] = peer.journal.admitted();
+    expect(left?.observedRunIds).toBeUndefined();
+    expect(left?.scanOwner?.id).toBeDefined();
+    expect(
+      existsSync(join(dir, `.cardigan-scan-${left?.scanOwner?.id}.json`)),
+    ).toBe(retired);
+    const recover = () =>
+      new GithubCheckExecutor({
+        ...peer.options,
+        now: () => time,
+      }).recoverAbandoned(peer.request, intent);
+    for (let i = 0; i < 2; i++) {
+      time += 60_000;
+      peer.client.runs.mockResolvedValue([]);
+      await expect(recover()).rejects.toMatchObject({
+        category: "dispatch_unknown",
+      });
+      expect(peer.client.runs).toHaveBeenCalledOnce();
+      const [held] = peer.journal.admitted();
+      expect(held?.attempt).toBe(intent.attempt);
+      expect(held?.undispatched).toBeUndefined();
+      expect(held?.scanOwner).toBeUndefined();
+      expect(held?.scanEvidenceLost).toBe(retired ? undefined : true);
+      expect(held?.observedRunIds).toEqual(retired ? [123] : undefined);
+      closeFixtureStore(peer.store);
+      peer = setup(file, false);
+    }
+    // Online positive discovery still runs. A title alone cannot disambiguate
+    // potentially missing history; the original dispatch response ID can.
+    time += 60_000;
+    if (!retired) {
+      await expect(recover()).rejects.toMatchObject({
+        category: "recovery_incomplete",
+      });
+      expect(peer.client.run).toHaveBeenCalledWith(
+        123,
+        expect.any(AbortSignal),
+      );
+      expect(peer.journal.admitted()[0]?.externalRun).toBeUndefined();
+      time += 60_000;
+      peer.journal.beginDiscovery(intent, time, 20_000, trusted.id);
+      time += 60_000;
+    }
+    expect(await recover()).toBeDefined();
+    expect(peer.journal.admitted()[0]?.externalRun?.run_id).toBe(123);
+    expect(peer.client.dispatch).not.toHaveBeenCalled();
   },
 );

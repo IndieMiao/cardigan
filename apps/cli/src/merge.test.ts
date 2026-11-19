@@ -1467,3 +1467,42 @@ test("finish-undispatched rechecks online after another reader retired under a S
     list.mockRestore();
   }
 });
+
+test("finish-undispatched preserves uncertainty when it is the first to recover an interrupted reader", async () => {
+  const { card, cli, journal, list } = await abandonedCliDispatch();
+  try {
+    const [intent] = journal.admitted();
+    if (!intent) throw new Error("Missing dispatch");
+    const scan = journal.beginDiscovery(intent, Date.now(), 20_000);
+    const owner = scan.scanOwner;
+    if (!owner) throw new Error("Missing scan owner");
+    // Durable state after a reader exits before any receipt; even a reused PID isn't that incarnation.
+    store.uow.run((tx) =>
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: project },
+        type: "github_check_dispatch",
+        payload: JSON.parse(
+          JSON.stringify({
+            ...scan,
+            scanOwner: { ...owner, start: `${owner.start}0` },
+          }),
+        ),
+        created_at: NOW,
+      }),
+    );
+    list.mockResolvedValue([]);
+    for (let i = 0; i < 2; i++) {
+      expect((await cli()).code).not.toBe(0);
+      expect(journal.admitted()).toMatchObject([
+        { attempt: intent.attempt, scanEvidenceLost: true },
+      ]);
+      expect(journal.admitted()[0]?.undispatched).toBeUndefined();
+    }
+    expect(list).not.toHaveBeenCalled();
+  } finally {
+    list.mockRestore();
+  }
+});

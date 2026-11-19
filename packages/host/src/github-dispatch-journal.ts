@@ -57,6 +57,8 @@ export interface GithubDispatchIntent {
   readonly observedRunIds?: readonly number[];
   /** Serialize list IO across the CLI and background, including scans outlasting cadence. */
   readonly scanOwner?: ExecutionOwner & Partial<ScanTicket>;
+  /** Sticky: a former reader exited without accounting for the candidates it saw. */
+  readonly scanEvidenceLost?: true;
   readonly undispatched?: {
     readonly reason: "complete_scan_no_match";
     readonly source: "automatic" | "human";
@@ -125,6 +127,7 @@ export function canFinishUndispatched(
         intent.discoveryDeadlineAt ?? deadline,
         intent.absenceNotBefore,
       ) &&
+    !intent.scanEvidenceLost &&
     !intent.observedRunIds?.length &&
     !intent.postOwner
   );
@@ -805,9 +808,15 @@ export class GithubDispatchJournal {
             : undefined;
         if (id && ids !== undefined) {
           current = this.retiredScan(current, ids);
-          this.save(tx, current);
           replayed = id;
-        } else if (live) throw new GithubRetryLater(retryAt, "attempt");
+        } else {
+          if (live) throw new GithubRetryLater(retryAt, "attempt");
+          // Death ends the lease, not the uncertainty: the reader could have seen
+          // a candidate just before its observation or fallback receipt was saved.
+          const { scanOwner: _, ...released } = current;
+          current = { ...released, scanEvidenceLost: true };
+        }
+        this.save(tx, current);
       }
       const prepared = this.afterWriterExit(
         tx,
@@ -832,14 +841,14 @@ export class GithubDispatchJournal {
         dispatchedRunId === undefined ? executionOwner(process.pid) : undefined;
       if (dispatchedRunId === undefined && !scanOwner)
         throw new GithubExecutorError("recovery_incomplete");
-      const { scanOwner: _stale, ...ready } = prepared;
       const scanning = {
-        ...ready,
+        ...prepared,
         ...(scanOwner
           ? { scanOwner: { ...scanOwner, ...issueScanTicket() } }
           : {}),
         ...(interval !== undefined &&
-        (dispatchedRunId !== undefined || ready.absenceNotBefore !== undefined)
+        (dispatchedRunId !== undefined ||
+          prepared.absenceNotBefore !== undefined)
           ? { nextDiscoveryAt: retryAt }
           : {}),
         ...(dispatchedRunId !== undefined ? { dispatchedRunId } : {}),
@@ -1088,6 +1097,10 @@ export class GithubDispatchJournal {
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))
       )
         throw new GithubExecutorError("security");
+      // A missing observation could be a different exact title match. Only
+      // the original POST response ID can disambiguate in that case.
+      if (current.scanEvidenceLost && !boundByDispatchId)
+        throw new GithubExecutorError("recovery_incomplete");
       if (!current.externalRun || (!current.identity && identity))
         this.save(tx, {
           ...current,
