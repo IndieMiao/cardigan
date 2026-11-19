@@ -525,7 +525,7 @@ function TimeoutMergeSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="保存中…"
         error={setting.error}
         message={setting.message}
@@ -592,7 +592,7 @@ function ReviewRoundsSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="保存中…"
         error={setting.error}
         message={setting.message}
@@ -676,7 +676,7 @@ function MergeMinutesSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="保存中…"
         error={setting.error}
         message={setting.message}
@@ -727,7 +727,7 @@ function PmMergeSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="保存合并授权中…"
         error={setting.error}
         message={setting.message}
@@ -778,7 +778,7 @@ function DelegationSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="保存授权中…"
         error={setting.error}
         message={setting.message}
@@ -861,7 +861,7 @@ function AutoMergeSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage={pause ? "正在保存暂停偏好…" : "正在保存自动合并偏好…"}
         error={setting.error}
         message={setting.message}
@@ -904,7 +904,7 @@ function CrossCardReadSetting({
       />
       <RequestFeedback
         interactive
-        pending={setting.busy}
+        pending={setting.saving}
         pendingMessage="正在保存跨卡只读偏好…"
         error={setting.error}
         message={setting.message}

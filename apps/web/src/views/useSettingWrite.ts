@@ -82,9 +82,9 @@ function beginSave(key: string) {
   inflight.add(key);
   emit();
 }
-function endSave(key: string) {
+function endSave(key: string, at: number) {
   inflight.delete(key);
-  writeEnds.set(key, ++clock);
+  writeEnds.set(key, at);
   if (inflight.size === 0) window.removeEventListener("beforeunload", warn);
   emit();
 }
@@ -181,7 +181,8 @@ export function resetSettingWrites() {
  *   useResource only applies the newest read, which starts after the write.
  * - One save at a time per project and setting, across views: a change while
  *   saving is ignored (callers mark the control `aria-disabled` and keep it
- *   focusable). A view shown again meanwhile reads again when it ends.
+ *   focusable). A view shown again meanwhile reads again when it ends, and
+ *   stays busy until that read arrives: its old value cannot seed an edit.
  * - A failed write keeps its idempotency key for a retry of the same value; a
  *   different value, a success, or a read showing the value retires the key.
  * - Leaving never waits: the save still completes. A failure the reader is no
@@ -213,9 +214,12 @@ export function useSettingWrite<T>({
 }) {
   const [value, setValue] = useState(server);
   const [read, setRead] = useState(source);
+  /** When this view's own write of the setting ended: it knows `value` since then. */
+  const [ownEnd, setOwnEnd] = useState<number | undefined>(undefined);
   if (read !== source) {
     setRead(source);
     setValue(server);
+    setOwnEnd(undefined);
   }
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
@@ -239,8 +243,15 @@ export function useSettingWrite<T>({
   const visible = useFeedbackVisible();
   const key = `${place?.project ?? ""}:${name}`;
   // Completions reach whichever render is current.
-  const latest = useRef({ saved, success, failure, visible, server });
-  latest.current = { saved, success, failure, visible, server };
+  const latest = useRef({
+    saved,
+    success,
+    failure,
+    visible,
+    server,
+    stale: false,
+  });
+  latest.current = { saved, success, failure, visible, server, stale: false };
   const current = useSyncExternalStore(subscribe, () =>
     notices.find((n) => n.key === key),
   );
@@ -249,6 +260,12 @@ export function useSettingWrite<T>({
   // Any write of this setting that ended after this view's read started makes
   // that read old: read again, whichever view wrote and whenever it mounted.
   const ended = useSyncExternalStore(subscribe, () => writeEnds.get(key) ?? 0);
+  // Until that read arrives the value is known to be old: nothing may edit or
+  // send it (a draft seeded from it would write it back). A failed read leaves
+  // the page's load error and retry in view.
+  const since = ownEnd ?? readStart(source);
+  const stale = since !== undefined && since < ended;
+  latest.current.stale = stale;
   useEffect(() => {
     const at = readStart(source);
     if (at !== undefined && at < ended) latest.current.saved();
@@ -329,7 +346,7 @@ export function useSettingWrite<T>({
     return route?.kind === "settings" && route.projectId === place?.project;
   };
   const save = async (next: T): Promise<boolean> => {
-    if (inflight.has(key)) return false;
+    if (inflight.has(key) || latest.current.stale) return false;
     const startedAt = ++clock;
     beginSave(key);
     setError("");
@@ -388,7 +405,9 @@ export function useSettingWrite<T>({
           panel: place.panel,
         });
     } finally {
-      endSave(key);
+      const end = ++clock;
+      if (alive.current) setOwnEnd(end);
+      endSave(key, end);
     }
     return ok;
   };
@@ -397,7 +416,17 @@ export function useSettingWrite<T>({
     setMessage("");
     shown.current = undefined;
   };
-  return { value, busy, error, message, save, clear };
+  // `busy` locks editing; `saving` is the request in flight (the page shows
+  // its own loading while the read again runs).
+  return {
+    value,
+    busy: busy || stale,
+    saving: busy,
+    error,
+    message,
+    save,
+    clear,
+  };
 }
 
 /** Failure wording for an on/off setting. */

@@ -1608,3 +1608,178 @@ describe("ordering and identifiable failures after a quick return", () => {
       expect(alerts().some((x) => x.includes("未能撤销"))).toBe(!applied);
     });
 });
+
+// C-455 review (V-2199, attachment-6569): a return read known to be older than
+// the last write cannot seed an edit; the setting stays busy until the read
+// again arrives.
+describe("a known-old read cannot seed an edit", () => {
+  afterEach(async () => {
+    cleanup();
+    resetSettingWrites();
+    location.hash = "";
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  const dialogName = { name: "催办阈值" };
+  const editName = { name: "编辑催办阈值" };
+  const settleWith = (f: () => void) =>
+    act(async () => {
+      f();
+    });
+  for (const openEarly of [false, true])
+    test(`late, known-stale return read cannot seed a policy edit (open before recheck: ${openEarly})`, async () => {
+      history.replaceState(null, "", "#/p/p-1/help");
+      history.pushState(null, "", "#/p/p-1/settings");
+      let policy: SystemReminderPolicy = {
+        min_minutes: 1,
+        max_minutes: 60,
+        min_count: 1,
+        max_count: 4,
+        unassigned_ready_after_minutes: 15,
+        pre_merge_check_pending_after_minutes: 20,
+        repeat: false,
+        repeat_interval_minutes: null,
+        max_reminders: 1,
+      };
+      const commit = Promise.withResolvers<void>(),
+        oldRead = Promise.withResolvers<void>(),
+        recheck = Promise.withResolvers<void>();
+      const samples: number[] = [];
+      const sent: SystemReminderPolicy[] = [];
+      let returning = false;
+      const client = fakeClient({
+        preferences: async () => {
+          const snapshot = { ...policy };
+          if (returning) {
+            samples.push(snapshot.max_minutes);
+            if (samples.length === 1) await oldRead.promise;
+            else if (samples.length === 2) await recheck.promise;
+          }
+          return {
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            system_reminder_policy: snapshot,
+          };
+        },
+        setSystemRules: async (_p, patch) => {
+          const next = patch.system_reminder_policy;
+          if (!next) throw new Error("expected a reminder policy");
+          sent.push({ ...next });
+          if (sent.length === 1) await commit.promise;
+          policy = { ...next };
+        },
+      });
+      render(<App client={client} />);
+      fireEvent.click(await screen.findByRole("button", editName));
+      let d = within(await screen.findByRole("dialog", dialogName));
+      fireEvent.change(d.getByLabelText("允许的最多分钟数"), {
+        target: { value: "120" },
+      });
+      fireEvent.click(d.getByRole("button", { name: "保存催办阈值" }));
+      expect(sent.map((v) => v.max_minutes)).toEqual([120]);
+      history.back();
+      await screen.findByRole("heading", { name: "帮助", exact: true });
+      returning = true;
+      history.forward();
+      await waitFor(() => expect(samples).toEqual([60]));
+      await settleWith(() => commit.resolve());
+      expect(policy.max_minutes).toBe(120);
+      await settleWith(() => oldRead.resolve());
+      await waitFor(() => expect(samples).toEqual([60, 120]));
+      // Same single project and window. No edit overlaps the first write. Allow
+      // a safe implementation to withhold the editor until its recheck finishes.
+      if (openEarly) {
+        const edit = screen.queryByRole("button", editName);
+        if (edit) fireEvent.click(edit);
+      }
+      await settleWith(() => recheck.resolve());
+      if (!screen.queryByRole("dialog", dialogName))
+        fireEvent.click(await screen.findByRole("button", editName));
+      d = within(await screen.findByRole("dialog", dialogName));
+      const displayedMax = (
+        d.getByLabelText("允许的最多分钟数") as HTMLInputElement
+      ).value;
+      fireEvent.change(d.getByLabelText(/就绪未指派：等待分钟数/), {
+        target: { value: "25" },
+      });
+      fireEvent.click(d.getByRole("button", { name: "保存催办阈值" }));
+      await waitFor(() => expect(sent).toHaveLength(2));
+      expect({
+        displayedMax,
+        sentMax: sent[1]?.max_minutes,
+        storedMax: policy.max_minutes,
+        wait: policy.unassigned_ready_after_minutes,
+      }).toEqual({
+        displayedMax: "120",
+        sentMax: 120,
+        storedMax: 120,
+        wait: 25,
+      });
+    });
+
+  test("a switch shown with a known-old read sends nothing until the read again arrives", async () => {
+    history.replaceState(null, "", "#/p/p-1/help");
+    history.pushState(null, "", "#/p/p-1/settings");
+    let reminders = false;
+    const commit = Promise.withResolvers<void>(),
+      oldRead = Promise.withResolvers<void>(),
+      recheck = Promise.withResolvers<void>();
+    let reads = 0;
+    let returning = false;
+    const sent: boolean[] = [];
+    const client = fakeClient({
+      preferences: async () => {
+        const snapshot = reminders;
+        if (returning) {
+          reads++;
+          if (reads === 1) await oldRead.promise;
+          else if (reads === 2) await recheck.promise;
+        }
+        return {
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          system_reminders: snapshot,
+        };
+      },
+      setSystemRules: async (_p, patch) => {
+        const next = patch.system_reminders === true;
+        sent.push(next);
+        if (sent.length === 1) await commit.promise;
+        reminders = next;
+      },
+    });
+    render(<App client={client} />);
+    fireEvent.click(await screen.findByRole("switch", { name: "催办提醒" }));
+    expect(sent).toEqual([true]);
+    history.back();
+    await screen.findByRole("heading", { name: "帮助", exact: true });
+    returning = true;
+    history.forward();
+    await waitFor(() => expect(reads).toBe(1));
+    await settleWith(() => commit.resolve());
+    await settleWith(() => oldRead.resolve());
+    await waitFor(() => expect(reads).toBe(2));
+    const toggle = await screen.findByRole("switch", { name: "催办提醒" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    // Nothing is saving: the page shows its own loading, the row no saving state.
+    expect(screen.queryByText("正在保存…")).toBeNull();
+    fireEvent.click(toggle);
+    await settleWith(() => {});
+    expect(sent).toEqual([true]);
+    await settleWith(() => recheck.resolve());
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("switch", { name: "催办提醒" })
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    expect(
+      screen
+        .getByRole("switch", { name: "催办提醒" })
+        .getAttribute("aria-disabled"),
+    ).not.toBe("true");
+    fireEvent.click(screen.getByRole("switch", { name: "催办提醒" }));
+    await waitFor(() => expect(sent).toEqual([true, false]));
+  });
+});

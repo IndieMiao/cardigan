@@ -115,7 +115,7 @@ export function SystemRulesSettings({
         />
         <RequestFeedback
           interactive
-          pending={assign.busy}
+          pending={assign.saving}
           pendingMessage="正在保存…"
           error={assign.error}
           message={assign.message}
@@ -136,7 +136,7 @@ export function SystemRulesSettings({
         />
         <RequestFeedback
           interactive
-          pending={remind.busy}
+          pending={remind.saving}
           pendingMessage="正在保存…"
           error={remind.error}
           message={remind.message}
@@ -155,6 +155,7 @@ export function SystemRulesSettings({
         <ReminderPolicyDialog
           policy={policy.value}
           busy={policy.busy}
+          saving={policy.saving}
           error={policy.error}
           message={policy.message}
           save={policy.save}
@@ -172,12 +173,15 @@ export function SystemRulesSettings({
 function ReminderPolicyDialog({
   policy,
   busy,
+  saving,
   error,
   message,
   save,
 }: {
   policy: SystemReminderPolicy | null;
+  /** Editing locked: saving, or the read shown is known to be old. */
   busy: boolean;
+  saving: boolean;
   error: string;
   message: string;
   save: (policy: SystemReminderPolicy | null) => Promise<boolean>;
@@ -292,7 +296,7 @@ function ReminderPolicyDialog({
             </SettingsDialogActions>
             <RequestFeedback
               interactive
-              pending={busy}
+              pending={saving}
               pendingMessage="正在保存催办阈值…"
               error={error}
             />
