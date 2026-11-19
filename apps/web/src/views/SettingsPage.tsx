@@ -39,6 +39,17 @@ import {
   useSettingWrite,
 } from "./useSettingWrite.js";
 
+type SettingsTab =
+  | "preferences"
+  | "authorization"
+  | "roles"
+  | "templates"
+  | "employees"
+  | "capacity";
+/** Panels a link may open (Needs You and the save-failure notice link here). */
+const routeTab = (tab: string | undefined): SettingsTab | undefined =>
+  tab === "authorization" || tab === "capacity" ? tab : undefined;
+
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
   ...Object.keys(categoryLabels).filter((c) => !defaultDelegation[c]),
@@ -59,16 +70,12 @@ export function SettingsPage({
   revision?: number;
 }) {
   const [filters] = useRouteFilters({ kind: "settings", projectId });
-  const [tab, setTab] = useState<
-    | "preferences"
-    | "authorization"
-    | "roles"
-    | "templates"
-    | "employees"
-    | "capacity"
-  >(filters.tab === "authorization" ? "authorization" : "preferences");
+  const [tab, setTab] = useState<SettingsTab>(
+    routeTab(filters.tab) ?? "preferences",
+  );
   useEffect(() => {
-    if (filters.tab === "authorization") setTab("authorization");
+    const linked = routeTab(filters.tab);
+    if (linked) setTab(linked);
   }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
@@ -86,6 +93,14 @@ export function SettingsPage({
       project: projectId,
       panel: "preferences" as const,
       reveal: () => setTab("preferences"),
+    }),
+    [projectId],
+  );
+  const capacityPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "capacity" as const,
+      reveal: () => setTab("capacity"),
     }),
     [projectId],
   );
@@ -149,23 +164,26 @@ export function SettingsPage({
         </>
       }
     >
-      {tab === "capacity" && (
-        <CapacitySettings client={client} projectId={projectId} />
-      )}
-      {tab === "roles" && (
-        <section id="roles" tabIndex={-1} aria-labelledby="roles-title">
-          <h2 id="roles-title">角色</h2>
-          <RolesSettings
-            key={projectId}
+      <RequestFeedbackScope hidden={tab !== "capacity"}>
+        <SettingPlaceContext.Provider value={capacityPlace}>
+          <CapacitySettings
             client={client}
             projectId={projectId}
-            revision={revision}
-            onNewEmployee={(roleId) => {
-              setEmployeeRole(roleId);
-              setTab("employees");
-            }}
+            hidden={tab !== "capacity"}
           />
-        </section>
+        </SettingPlaceContext.Provider>
+      </RequestFeedbackScope>
+      {tab === "roles" && (
+        <RolesSettings
+          key={projectId}
+          client={client}
+          projectId={projectId}
+          revision={revision}
+          onNewEmployee={(roleId) => {
+            setEmployeeRole(roleId);
+            setTab("employees");
+          }}
+        />
       )}
       {tab === "employees" && (
         <EmployeesSettings

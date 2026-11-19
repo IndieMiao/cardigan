@@ -95,7 +95,7 @@ const UNSEEN_MS = 500;
 /** The settings panel a setting is shown in (provided by SettingsPage). */
 export interface SettingPlace {
   project: string;
-  panel: "preferences" | "authorization";
+  panel: "preferences" | "authorization" | "capacity";
   /** Shows the panel when it is hidden behind another one. */
   reveal: () => void;
 }
@@ -143,9 +143,9 @@ export function SettingsSaveNotice() {
     window.location.hash = routeHash({
       kind: "settings",
       projectId: failed.project,
-      ...(failed.panel === "authorization"
-        ? { filters: { tab: "authorization" } }
-        : {}),
+      ...(failed.panel === "preferences"
+        ? {}
+        : { filters: { tab: failed.panel } }),
     });
   };
   return createElement(

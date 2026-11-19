@@ -4,6 +4,7 @@ import { cn } from "../../lib/utils.js";
 import { Tooltip } from "../Tooltip.js";
 import { IconButton } from "../ui/button.js";
 import { Input } from "../ui/input.js";
+import { DataTableLayout } from "./DataTableLayout.js";
 import styles from "./SettingsLayout.module.css";
 
 /**
@@ -19,11 +20,10 @@ export function SettingsLayout({
   nav: ReactNode;
   children: ReactNode;
 }) {
-  // `settings-layout` keeps the legacy panels (roles, templates…) styled until migrated.
   return (
     <div className={cn("ui-workspace", styles.workspace)}>
       {header}
-      <div className={cn("settings-layout", styles.layout)}>
+      <div className={styles.layout}>
         <nav aria-label="设置分栏" className={styles.nav}>
           {nav}
         </nav>
@@ -54,12 +54,15 @@ export function SettingsPanel({
   title,
   titleId,
   help,
+  actions,
   children,
   ...props
 }: Omit<ComponentProps<"section">, "title" | "className"> & {
   title: ReactNode;
   titleId: string;
   help?: ReactNode;
+  /** Panel-wide actions (search, "新建…") at the right of the title. */
+  actions?: ReactNode;
 }) {
   return (
     <section
@@ -71,6 +74,7 @@ export function SettingsPanel({
       <div className={styles.panelHeading}>
         <h2 id={titleId}>{title}</h2>
         {help && <SettingsHelp label={`${title}说明`}>{help}</SettingsHelp>}
+        {actions && <div className={styles.panelActions}>{actions}</div>}
       </div>
       {children}
     </section>
@@ -132,7 +136,7 @@ export function SettingsRow({
   help?: ReactNode;
   warning?: ReactNode;
   status?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
 }) {
   return (
     <div className={styles.row} data-settings-row="">
@@ -159,10 +163,12 @@ export function SettingsRow({
           </p>
         )}
       </div>
-      <div className={styles.control}>
-        {status}
-        {children}
-      </div>
+      {(status || children) && (
+        <div className={styles.control}>
+          {status}
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -232,4 +238,98 @@ export function SettingsDialogFields({ children }: { children: ReactNode }) {
 }
 export function SettingsDialogActions({ children }: { children: ReactNode }) {
   return <div className={styles.dialogActions}>{children}</div>;
+}
+
+/**
+ * List settings (roles, templates, people) use the shared data table, fitted
+ * to the settings column instead of the cards list's 48rem minimum; ≤640px
+ * shows `records`: the `data-record="lead"` / `"aside"` cells share the first
+ * line, the rest follow as labelled lines, one divider per record.
+ */
+export function SettingsTable(props: ComponentProps<typeof DataTableLayout>) {
+  return <DataTableLayout records {...props} className={styles.table} />;
+}
+
+/** Read-only name/value pairs in a settings drawer (role or template detail). */
+export function SettingsFacts({ children }: { children: ReactNode }) {
+  return <dl className={styles.facts}>{children}</dl>;
+}
+export function SettingsFact({
+  label,
+  children,
+}: {
+  label: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className={styles.fact}>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+/** A titled block inside a settings drawer (diff, history, work items). */
+export function SettingsSection({
+  title,
+  children,
+}: {
+  title: ReactNode;
+  children: ReactNode;
+}) {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className={styles.section}>
+      <h3 id={id}>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+/** Long text (instructions, JSON, line diffs): monospace, scrolls inside. */
+export function SettingsText(props: Omit<ComponentProps<"pre">, "className">) {
+  return <pre {...props} className={styles.longText} />;
+}
+/** One diff line or value; additions and removals use the status colours. */
+export function SettingsDiff({
+  op,
+  ...props
+}: Omit<ComponentProps<"span">, "className"> & {
+  op?: "add" | "remove" | undefined;
+}) {
+  return <span {...props} className={styles.diff} data-op={op} />;
+}
+
+/** A risk or validation note inside a settings form: danger colour, icon first. */
+export function SettingsWarning({
+  children,
+  ...props
+}: Omit<ComponentProps<"div">, "className">) {
+  return (
+    <div {...props} className={styles.notice}>
+      <TriangleAlert aria-hidden="true" />
+      <div>{children}</div>
+    </div>
+  );
+}
+
+/** Library portrait or uploaded avatar at identity size (24px, 64px preview). */
+export function SettingsAvatar({
+  large = false,
+  ...props
+}: Omit<ComponentProps<"img">, "className" | "width" | "height"> & {
+  large?: boolean;
+}) {
+  return (
+    <img
+      alt=""
+      {...props}
+      className={styles.avatar}
+      data-large={large || undefined}
+    />
+  );
+}
+/** Avatar and name on one line, wrapping the name when narrow. */
+export function SettingsIdentity({ children }: { children: ReactNode }) {
+  return <span className={styles.identity}>{children}</span>;
 }

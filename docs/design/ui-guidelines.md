@@ -137,7 +137,20 @@
 
 只有人能改、会放宽权限或让系统在无人确认时动作的设置（跨卡只读、自动合并、暂停自动合并、超时自动合并、合并由 PM 代确认、默认交人的授权类别）单独放在 `SettingsGroup tone="caution"`、标题“需谨慎”的分组，放在面板最后。组标题带警示图标并使用状态色 `--status-wait`，可选一句说明；面板边框与普通分组相同，不使用超宽红框。行内风险提示（如“没有合并闸门时……”）用 `SettingsRow warning`，红色图标加一行文字，宽度不超出内容列。
 
-旧设置分栏（并发与容量、角色、卡片模板、员工）暂时保留原内容，由“设置页重新设计（二）”套用本模式。
+### 列表类设置与抽屉（C-479）
+
+并发与容量、角色、卡片模板、员工四个分栏由 C-479 迁入同一框架，不再保留旧样式（对应 `styles.css` 规则和 `ui-legacy.json` 豁免已删除）。证据由同一脚本加 `--panels` 生成，合成数据见 `test-support/settings-panels-data.ts`（2 台 Agent 机器、1 个合并检查目标、3 个角色、3 个模板、60 人物库中 2 人已被占用）。
+
+| 部分 | 唯一入口与实测要求 |
+|---|---|
+| 面板操作 | `SettingsPanel actions`：“新建角色 / 新建模板 / 新建员工”主按钮（28px）及员工页的 `SearchInput` 放在面板标题行右侧，窄屏整组换到标题下方右对齐；不另起工具栏 |
+| 列表 | `SettingsTable`（`DataTableLayout records` 的设置版）：表头、单元格、`DataTableCell nowrap` 规则同非卡片数据表，但宽度贴合 720px 内容列，不用卡片表 48rem 最小宽、不在列内横向滚动；≤640px 为纵向记录，`data-record="lead"`（名称）/ `"aside"`（状态或操作）占首行，每条记录一条分隔线。行名称用 `Button variant="link"`（`aria-haspopup="dialog"`）打开抽屉；空列表只写“没有角色 / 没有模板”；搜索无结果写“没有找到匹配的人物。” |
+| 详情与编辑 | 行详情、编辑、新建都在 `Drawer` + `CardDetailLayout`（`card-page-drawer`）里，不在页面里展开表单。详情操作（停用/启用、编辑、复制为项目模板、为新角色建员工）放抽屉标题行右侧 `actions`，主操作在最右、紧挨关闭按钮；抽屉内区块用 `SettingsSection`（14px/20px、600，区块间 24px），只读字段用 `SettingsFacts` / `SettingsFact`（标签 136px 弱化色，≤760px 上下排列），长文本、JSON 和逐行差异用 `SettingsText`（12px/18px 等宽、最高 50vh 内部滚动），新增/删除行用 `SettingsDiff`（状态色）。版本历史、模板工作项同样用 `SettingsTable` |
+| 抽屉表单 | 字段沿用 `SettingsDialogFields`（标签在上 13px/20px，字段间 12px）与 `SettingsDialogActions`（右对齐，“取消”在前、主按钮在后）；复选用 `ui/checkbox`，单选模式（“从默认角色包复制 / 从现有角色复制”、“从人物库选择 / 自定义名字和头像”）用 `ToggleGroup`（与视图切换相同的 `aria-pressed` 写法），选项列表用 `SelectControl`；风险与填写提示用 `SettingsWarning`（红色图标 + 文字，不加粗框）。表单提交保持原有显式“保存为新版本 / 保存模板 / 创建员工”，这是版本化对象的创建与编辑，不属于即时保存的单项设置 |
+| 并发上限 | 每台机器一行 `SettingsRow` + `SettingsNumberField`（单位“个”），按“即时保存”规则失焦或回车写入，写入入口同为 `useSettingWrite`（保存中只读、失败留草稿、离开后失败在反馈栈提示并可“回到设置”到 `?tab=capacity`）；成功后重新读取共享容量。只读会话只显示“上限 N”，组说明一句“仅人类登录会话可修改并发上限。”；合并检查目标只读，说明在悬停提示 |
+| 头像 | 人物库列表用 `SettingsAvatar`（24px 圆形）+ `SettingsIdentity`；表单中所选人物预览 64px |
+
+长说明（模板版本规则、角色版本固定说明、头像格式限制、旧格式角色说明）放在对应 `SettingsHelp` 悬停提示里，不写在页面上。
 
 ## Needs You 行模式
 
@@ -212,5 +225,5 @@ pnpm --filter @cardigan/web test:ui-snapshots --update C-123
 - [ ] 样式参考 16 图覆盖对应状态，候选实拍与认可图不同会使检查失败；无授权的像素差异不能直接更新图片。
 - [ ] `pnpm lint`（含 check-ui）、相关 Vitest、Web 增量构建、`pnpm check:deps` 通过；远程预检绑定交付 SHA。
 - [ ] 没有新增说明小字、页面 CSS、手写骨架、近似替换图标或第二套样式；历史例外没有扩张。
-- [ ] 设置页：用 `SettingsLayout` 系列组件；页标题和导航与卡片页同位；内容不超过 720px 且无元素超出内容列；布尔设置用开关；保存方式为即时保存（有改动/保存中/成功/失败按“设置页模式”呈现）；危险设置在“需谨慎”分组；长说明在悬停提示里。
+- [ ] 设置页：用 `SettingsLayout` 系列组件；页标题和导航与卡片页同位；内容不超过 720px 且无元素超出内容列；布尔设置用开关；保存方式为即时保存（有改动/保存中/成功/失败按“设置页模式”呈现）；危险设置在“需谨慎”分组；长说明在悬停提示里；列表类分栏用 `SettingsTable`，详情和编辑在抽屉里，抽屉操作在标题行。
 - [ ] Needs You：五个标签页都只用 `NeedsList` / `NeedsRow`；主操作是右列最后一个 28px 共享按钮，同宽下各行右缘一致；展开方式只有行首箭头；空状态只写“没有需要你处理的事”。

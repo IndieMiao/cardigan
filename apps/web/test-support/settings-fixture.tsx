@@ -6,6 +6,7 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
+import { settingsPanels } from "./settings-panels-data.js";
 
 // C-455: one synthetic project preference record; no backend or live data.
 Date.now = () => new Date(NOW).getTime();
@@ -32,6 +33,7 @@ const update = (patch: Partial<PreferencesView>) => {
 // Evidence scene: a change made elsewhere, seen by the next read.
 Object.assign(window, { settingsFixtureUpdate: update });
 const client = fakeClient({
+  ...settingsPanels,
   preferences: async () => preferences,
   setPreferences: async (_p, minutes) => {
     // Evidence scenes: 1439 saves slowly, 1438 fails slowly (leaving waits).

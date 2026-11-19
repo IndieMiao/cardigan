@@ -6,8 +6,9 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   HttpCardiganClient,
@@ -91,6 +92,17 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+// Radix Checkbox measures itself; jsdom has no ResizeObserver.
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 async function open(client = api()) {
   render(<SettingsPage client={client} projectId="p-1" />);
   fireEvent.click(screen.getByRole("button", { name: "卡片模板" }));
@@ -113,8 +125,14 @@ test("settings lists all promised fields, builtin details are readonly with only
   expect(screen.getAllByText("内置，只读")).toHaveLength(3);
   fireEvent.click(screen.getByRole("button", { name: "dev", exact: true }));
   await screen.findByRole("button", { name: "复制为项目模板" });
-  expect(screen.getByText("验证目标：code", { exact: false })).toBeTruthy();
-  expect(screen.getByText("角色：coder", { exact: false })).toBeTruthy();
+  const items = screen.getByRole("table", { name: "工作项" });
+  const cell = (label: string) =>
+    within(items)
+      .getAllByRole("cell")
+      .filter((c) => c.dataset.label === label)
+      .map((c) => c.textContent);
+  expect(cell("验证目标")).toContain("code");
+  expect(cell("角色")).toContain("coder");
   expect(screen.getByText("主产出 key")).toBeTruthy();
   expect(screen.getByText("首个版本，无上一版本。")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "编辑模板" })).toBeNull();

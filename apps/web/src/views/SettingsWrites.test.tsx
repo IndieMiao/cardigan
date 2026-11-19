@@ -852,6 +852,62 @@ test("a revocation that fails after leaving is reported once, and leads back to 
   expect(alerts()).not.toContain("请回到设置重试");
 });
 
+test("a capacity limit that fails after leaving is reported once and leads back to its panel", async () => {
+  window.location.hash = h("settings", "?tab=capacity");
+  const write = Promise.withResolvers<void>();
+  const setRunLimit = vi.fn(() => write.promise);
+  render(
+    <App
+      client={fakeClient({
+        executionCapacity: async () => ({
+          agents: [
+            {
+              machine_id: "local",
+              label: "本机",
+              running: 1,
+              total_running: 1,
+              limit: 4,
+              max_limit: 8,
+              queued: 0,
+              merge_check_slots: 0,
+            },
+          ],
+          merge_checks: [],
+          merge_config_invalid: false,
+        }),
+        setRunLimit,
+      })}
+    />,
+  );
+  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: "本机 Agent 并发上限",
+  });
+  expect(
+    screen
+      .getByRole("button", { name: "并发与容量" })
+      .getAttribute("aria-current"),
+  ).toBe("page");
+  fireEvent.change(input, { target: { value: "6" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(setRunLimit).toHaveBeenCalledOnce();
+  // Saving locks the field (read-only, still focusable).
+  expect(input.readOnly).toBe(true);
+  fireEvent.click(helpLink());
+  await waitFor(() => expect(settingsShown()).toBe(false));
+  await act(async () => write.reject(new Error("测试：上限未保存")));
+  await waitFor(() =>
+    expect(alerts()).toContain("未能保存“本机 Agent 并发上限”，请回到设置重试"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "回到设置" }));
+  await screen.findByRole("spinbutton", { name: "本机 Agent 并发上限" });
+  expect(location.hash).toBe(h("settings", "?tab=capacity"));
+  expect(
+    screen
+      .getByRole("button", { name: "并发与容量" })
+      .getAttribute("aria-current"),
+  ).toBe("page");
+});
+
 test("a failure answered before the route handles the click is still reported", async () => {
   window.location.hash = h("settings");
   const write = await timeoutApp();
