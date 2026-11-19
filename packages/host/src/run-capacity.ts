@@ -271,6 +271,7 @@ export function runCapacitySnapshot(
   const agentOccupied = new Map<string, number>();
   const allAgentOccupied = new Map<string, number>();
   const reservedRuns = new Map<string, ReadonlySet<string>>();
+  const occupiedOwners = new Map<string, ReadonlySet<string>>();
   for (const project of store.listProjects()) {
     const assignments = tx.assignments.list(project.id);
     const runs = tx.runs.list(project.id);
@@ -304,6 +305,7 @@ export function runCapacitySnapshot(
     reservedRuns.set(project.id, reserved);
     const owners = new Map(assignments.map((a) => [a.id, a]));
     const countedOwners = new Set<string>();
+    occupiedOwners.set(project.id, countedOwners);
     for (const { machine_id } of assignments) {
       if (!agentOccupied.has(machine_id)) agentOccupied.set(machine_id, 0);
       if (!allAgentOccupied.has(machine_id))
@@ -382,6 +384,7 @@ export function runCapacitySnapshot(
     occupied,
     agentOccupied,
     allAgentOccupied,
+    occupiedOwners,
     resourcesForMachine: (machine: string): MachineResources =>
       resourceSlots(machine),
     mergeChecks,

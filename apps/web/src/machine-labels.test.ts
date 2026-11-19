@@ -79,6 +79,9 @@ test("MC-5 selection summary explains the chosen candidate in the host's sort or
     remaining_ratio: 1 / 3,
     preference_rank: 0,
   };
+  expect(candidateReasons({ ...candidate, pending_assignments: 2 })).toContain(
+    "剩余容量 33%（占用 8/12，其中待启动 2）",
+  );
   expect(candidateReasons(candidate)).toEqual([
     "验证项优先控制主机",
     "同卡产出已在此机器",

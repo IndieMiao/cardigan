@@ -444,6 +444,11 @@ export interface RuntimeRef {
   readonly branch?: string;
 }
 interface AssignmentFields {
+  /** Backoff before a bell is claimed; no Run or launch reservation is required. */
+  readonly snapshot_retry?: {
+    readonly failures: number;
+    readonly ready_at: Timestamp;
+  };
   /** Confirmed remote loss (PM chooses source) or released first-launch failure (no workspace, use main). */
   readonly recovery?: {
     readonly previous_assignment_id: AssignmentId;

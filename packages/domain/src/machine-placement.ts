@@ -1,3 +1,5 @@
+import type { Assignment, Run, WorkItem } from "./entities.js";
+
 /** Configured physical-machine resource slots; absence of a key means unlimited. */
 export type MachineResources = ReadonlyMap<
   string,
@@ -42,12 +44,19 @@ export interface MachinePlacement {
   }[];
   readonly resources?: MachineResources;
   readonly limit: number;
+  /** Portion of occupied from assigned work not already holding a physical slot. */
+  readonly pending_assignments?: number;
   readonly occupied: number;
 }
 export type ReadMachinePlacement = (
   project: string,
   now: string,
   launchProfile?: string,
+  draft?: {
+    assignments: readonly Assignment[];
+    work_items: readonly WorkItem[];
+    runs: readonly Run[];
+  },
 ) => {
   readonly harness: import("./role.js").Role["harness"] | undefined;
   readonly machines: ReadonlyMap<string, MachinePlacement>;

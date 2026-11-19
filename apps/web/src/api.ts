@@ -285,6 +285,7 @@ export interface MachineSelectionCandidate {
   readonly control_host: boolean;
   readonly limit: number | null;
   readonly occupied: number | null;
+  readonly pending_assignments?: number;
   readonly remaining_ratio: number | null;
   readonly preference_rank: number | null;
   /** Resource slots at selection time; older events omit them. */

@@ -61,6 +61,7 @@ import {
   type ReadResourceLimits,
   RunPreparationDeferred,
   RunTargetDeferred,
+  RuntimeTargetError,
   redactFailureLine,
   refreshTargetWait,
   runCapacitySnapshot,
@@ -775,6 +776,8 @@ export class Dispatcher {
       !hasRunTarget(a, state)
     )
       return;
+    if (a.snapshot_retry && a.snapshot_retry.ready_at > this.clock.now())
+      return;
     let live = false;
     let doneObserved = false;
     let replacement: DispatchRunParams["replacement"];
@@ -866,12 +869,21 @@ export class Dispatcher {
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
     } catch (error) {
+      if (
+        !this.reject(
+          project,
+          notes,
+          a,
+          "snapshot_unavailable",
+          error instanceof RuntimeTargetError && error.transient,
+        )
+      )
+        return;
       this.options.onError?.(
         new Error(
           `bell delivery rejected: project=${project} asg=${a.id} reason=snapshot_unavailable message=${redactFailureLine(error instanceof Error ? error.message : String(error))}`,
         ),
       );
-      this.reject(project, notes, a, "snapshot_unavailable");
       return;
     }
     if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
@@ -1125,7 +1137,13 @@ export class Dispatcher {
     return store.uow.run((tx) => {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
-      if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      if (
+        a?.status !== "active" ||
+        a.external ||
+        !sameRef(a, expected) ||
+        a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
+      )
+        return;
       if (
         continuing &&
         (a.session_ref !== expected.session_ref ||
@@ -1240,6 +1258,11 @@ export class Dispatcher {
         return;
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
       if (!cause && !waiting) return;
+      const { snapshot_retry, ...claimedOwner } = a;
+      if (snapshot_retry) {
+        tx.assignments.put(project, claimedOwner);
+        state = this.loadState(tx, project);
+      }
       let run =
         continuing ??
         this.queued(state, a) ??
@@ -1433,7 +1456,7 @@ export class Dispatcher {
       return {
         attempt,
         run,
-        assignment: a,
+        assignment: claimedOwner,
         bell: [bell, followup].filter(Boolean).join("\n"),
       };
     });
@@ -1800,9 +1823,10 @@ export class Dispatcher {
     notes: readonly Notification[],
     a: Assignment,
     reason: string,
+    transient = false,
   ) {
     const { store } = this.options;
-    store.uow.run((tx) => {
+    return store.uow.run((tx) => {
       const current = store.listNotifications({
         project_id: project,
         ids: notes.map((n) => n.id),
@@ -1816,7 +1840,36 @@ export class Dispatcher {
             r.status === "queued" &&
             r.queue_reason !== undefined,
         );
-      if (!current.length && !queued) return;
+      if (!current.length && !queued) return false;
+      if (reason === "snapshot_unavailable") {
+        const owner = tx.assignments.get(project, a.id);
+        if (
+          owner?.status !== "active" ||
+          owner.external ||
+          !sameRef(owner, a) ||
+          owner.snapshot_retry?.ready_at !== a.snapshot_retry?.ready_at ||
+          unfinishedBellAttempts(store.database, project).some(
+            (attempt) => attempt.assignment_id === a.id,
+          )
+        )
+          return false;
+        const failures = (owner.snapshot_retry?.failures ?? 0) + 1;
+        if (transient && failures <= this.maxRetries) {
+          const ready_at = new Date(
+            Date.parse(this.clock.now()) +
+              this.deliveryRetryBaseMs * 2 ** (failures - 1),
+          ).toISOString();
+          tx.assignments.put(project, {
+            ...owner,
+            snapshot_retry: { failures, ready_at },
+          });
+          return false;
+        }
+        if (owner.snapshot_retry) {
+          const { snapshot_retry: _retry, ...cleared } = owner;
+          tx.assignments.put(project, cleared);
+        }
+      }
       if (queued) {
         const cleared = { ...queued };
         delete cleared.queue_reason;
@@ -1830,6 +1883,7 @@ export class Dispatcher {
           at: this.clock.now(),
         });
       this.escalate(tx, project, current, a.id, reason);
+      return true;
     });
   }
   private escalate(

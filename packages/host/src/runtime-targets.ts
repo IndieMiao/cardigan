@@ -72,6 +72,15 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
 }
 export class RuntimeTargetError extends Error {
+  get transient(): boolean {
+    return [
+      "mcp_timeout",
+      "mcp_unreachable",
+      "worker_unreachable",
+      "machine_check_runtime_timeout",
+      "machine_check_runtime_unavailable",
+    ].includes(this.reason);
+  }
   constructor(readonly reason: string) {
     super(`Runtime target rejected: ${reason}`);
   }

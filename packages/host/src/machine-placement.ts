@@ -24,7 +24,7 @@ export function configureMachinePlacement(
   limits: RunCapacityConfiguration,
   launchConfig: () => LaunchConfig | undefined,
 ) {
-  store.setMachinePlacementReader((tx, project, now, profile) => {
+  store.setMachinePlacementReader((tx, project, now, profile, draft) => {
     const machines = tx.machines.list(project);
     const allowed = new Map<string, RuntimeWorker>();
     const hasRemote = machines.some((m) => m.id !== "local");
@@ -43,11 +43,47 @@ export function configureMachinePlacement(
     const preparation = allowed.size
       ? readWorktreePreparation(env, now)
       : undefined;
-    const { occupied, resourcesForMachine } = runCapacitySnapshot(
-      store,
-      tx,
-      limits.resourcesForMachine,
-    );
+    const { occupied, occupiedOwners, resourcesForMachine } =
+      runCapacitySnapshot(store, tx, limits.resourcesForMachine);
+    // Placement predicts demand; dispatch still admits these owners using physical slots only.
+    const pending = new Map<string, number>();
+    for (const [p, holding] of occupiedOwners) {
+      const work = p === project ? draft : undefined;
+      const runs = work?.runs ?? tx.runs.list(p);
+      const seen = new Set(runs.map((r) => r.assignment_id));
+      const queued = new Set(
+        runs.filter((r) => r.status === "queued").map((r) => r.assignment_id),
+      );
+      const closed = new Set(
+        tx.cards
+          .list(p)
+          .filter((c) => c.status === "done" || c.status === "cancelled")
+          .map((c) => c.id),
+      );
+      const items = new Map(
+        (work?.work_items ?? tx.work_items.list(p)).map((w) => [w.id, w]),
+      );
+      for (const a of work?.assignments ?? tx.assignments.list(p)) {
+        if (
+          a.scope !== "work_item" ||
+          a.external ||
+          a.status !== "active" ||
+          holding.has(a.id) ||
+          (seen.has(a.id) && !queued.has(a.id))
+        )
+          continue;
+        const item = items.get(a.work_item_id);
+        if (
+          item?.assignment_id !== a.id ||
+          closed.has(item.card_id) ||
+          !["todo", "ready", "in_progress", "changes_requested"].includes(
+            item.status,
+          )
+        )
+          continue;
+        pending.set(a.machine_id, (pending.get(a.machine_id) ?? 0) + 1);
+      }
+    }
     let harness: Harness | undefined;
     if (hasRemote && profile) {
       try {
@@ -91,7 +127,8 @@ export function configureMachinePlacement(
                 limits.forMachine,
                 limits.maxForMachine,
               ),
-              occupied: occupied.get(id) ?? 0,
+              occupied: (occupied.get(id) ?? 0) + (pending.get(id) ?? 0),
+              pending_assignments: pending.get(id) ?? 0,
               resources: resourcesForMachine(id),
             } satisfies MachinePlacement,
           ];

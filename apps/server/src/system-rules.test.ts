@@ -12,6 +12,11 @@ import {
   submitReview,
   systemCompleteCard,
 } from "@cardigan/domain";
+import {
+  configureMachinePlacement,
+  loadRunCapacityConfig,
+  runCapacitySnapshot,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -782,6 +787,114 @@ test("C1 disabled legacy switch still projects future assignment failures withou
       .listNotifications({ project_id: f.id })
       .filter((n) => n.recipient.kind === "needs_you"),
   ).toHaveLength(1);
+});
+
+test("one scheduling pass distributes a batch across available slots before any Run starts", async () => {
+  const dir = required(f.dataDir);
+  const small = "a-small";
+  const batch = Array.from(
+    { length: 4 },
+    (_, i) =>
+      f.apply((s, a, p) =>
+        createCard(
+          s,
+          a,
+          {
+            title: `Batch ${i}`,
+            repo: "fixture/repo",
+            goal: "Schedule together",
+            acceptance_criteria: ["Starts"],
+            source: { kind: "quote", text: "Schedule" },
+            base_branch: "main",
+          },
+          p,
+        ),
+      ).data,
+  );
+  f.store.uow.run((tx) => {
+    for (const card of batch) tx.cards.put(f.id, { ...card, status: "todo" });
+    tx.employees.put({
+      id: "E-101",
+      name: "Batch coder",
+      title: "Coder",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.clock.now(),
+      updated_at: f.clock.now(),
+    } as Employee);
+    tx.machines.put(f.id, {
+      ...required(tx.machines.get(f.id, "local")),
+      id: small,
+      label: "Small worker",
+      herdr_machine: small,
+    });
+  });
+  configureMachinePlacement(
+    f.store,
+    dir,
+    { CARDIGAN_CONFIG_DIR: dir },
+    {
+      ...(await loadRunCapacityConfig({ configDir: dir })),
+      forMachine: (id) => (id === small ? 1 : 12),
+    },
+    () => undefined,
+  );
+  runSystemRules(f.store, f.id, f.clock, (tx, project) => {
+    const state = loadCommandState(tx, project);
+    // Stub only external health/binding evidence; use the production transaction's capacity reader.
+    return {
+      ...state,
+      read_machine_placement: (...args) => {
+        const { machines } = required(state.read_machine_placement)(...args);
+        return {
+          harness: "pi",
+          machines: new Map(machines).set(small, {
+            ...required(machines.get(small)),
+            remote_binding: "allowed",
+            observation_target_matches: true,
+            health: { available: true, status: "passed" },
+            capabilities: [
+              { key: "harness.pi", available: true, version: "1" },
+            ],
+          }),
+        };
+      },
+    };
+  });
+  const events = batch.map(
+    (c) =>
+      required(
+        f
+          .state()
+          .events.find(
+            (e) => e.type === "machine_selected" && e.card_id === c.id,
+          ),
+      ).payload,
+  );
+  expect(events).toMatchObject([
+    { machine_id: small },
+    ...batch.slice(1).map(() => ({
+      machine_id: "local",
+      candidates: [
+        { machine_id: "local" },
+        {
+          machine_id: small,
+          occupied: 1,
+          pending_assignments: 1,
+          remaining_ratio: 0,
+        },
+      ],
+    })),
+  ]);
+  // Forecasting a full worker must not prevent its own assignment from starting.
+  expect(
+    f.store.uow.read((tx) =>
+      runCapacitySnapshot(f.store, tx).occupied.get(small),
+    ),
+  ).toBe(0);
 });
 
 test("C-384 first producer is assigned before routing and routine delivery readiness is emitted once", async () => {
