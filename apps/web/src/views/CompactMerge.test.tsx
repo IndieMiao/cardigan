@@ -144,6 +144,7 @@ test("C-205: nonempty gaps show all original text, while critical facts survive 
           issues: [
             {
               severity: "major",
+              impact: "functional",
               must_fix: true,
               pre_existing: false,
               description: "修复失效按钮",
@@ -160,7 +161,7 @@ test("C-205: nonempty gaps show all original text, while critical facts survive 
   expect(gaps.textContent).toContain("另一项尚未覆盖的行为");
   fireEvent.click(screen.getByText("已知遗留 2 项"));
   expect(gaps.open).toBe(false);
-  for (const text of ["需要补齐截图", "必须修复：修复失效按钮"])
+  for (const text of ["需要补齐截图", "必须修复：修复失效按钮 · 功能错误"])
     expect(screen.getByText(text).closest("details")).toBeNull();
   expect(
     screen.getByText(/· 前置条件：先升级角色/).closest("details"),

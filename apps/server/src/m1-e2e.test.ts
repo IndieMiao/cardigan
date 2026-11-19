@@ -364,6 +364,7 @@ test("pm, coder and reviewer walk a dev card from creation to merge readiness", 
           {
             severity: "major",
             description: "fictional bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },

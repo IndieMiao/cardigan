@@ -199,6 +199,9 @@ function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
           work_item_id: r.work_item_id,
           kind: r.kind,
           issues: r.issues,
+          ...(r.followup_card_id
+            ? { followup_card_id: r.followup_card_id }
+            : {}),
           attachments: r.attachments,
           acceptance_evidence: notes,
           acceptance_evidence_missing: notes.length === 0,

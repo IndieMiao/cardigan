@@ -1,3 +1,4 @@
+import { unresolvedMustFix } from "../derived.js";
 import type {
   Actor,
   Decision,
@@ -225,9 +226,7 @@ export function evaluateMergeShadow(
   check(
     9,
     [...deliveries, ...(context.ok ? [context.value.target] : [])].every((v) =>
-      [...latestReviews(state, v).values()].every(
-        (r) => !r.issues.some((i) => i.must_fix && !i.pre_existing),
-      ),
+      [...latestReviews(state, v).values()].every((r) => !unresolvedMustFix(r)),
     ),
     "当前产出或完成申请存在未处理 must_fix",
   );

@@ -146,6 +146,105 @@ function setup(
   };
 }
 
+test.each(["reviewer", "independent_reviewer"])(
+  "%s: only a UX-only follow-up closes the current verification",
+  async (role) => {
+    const f = setup(role);
+    const target = await f.deliver();
+    const current = f.card();
+    const followup = id("card", 2);
+    const base = {
+      description: "Feedback shown twice",
+      severity: "major" as const,
+      must_fix: true,
+      pre_existing: false,
+    };
+    const ux = { ...base, impact: "ux_only" as const };
+    const p = {
+      delivery_id: target.id,
+      target_sha: target.subject.value,
+      kind: "code" as const,
+      issues: [ux],
+      followup_card_id: followup,
+    };
+    const submit = (
+      overrides: Partial<Parameters<typeof submitReview>[2]> = {},
+      state = f.state,
+    ) => submitReview(state, actor(2, role), { ...p, ...overrides }, f.io);
+    for (const issues of [
+      [base],
+      [{ ...base, impact: "wrong" as never }],
+      [],
+      [{ ...ux, pre_existing: true }],
+      ...(["functional", "data_or_permission"] as const).map((impact) => [
+        ux,
+        { ...base, impact },
+      ]),
+    ])
+      expect(submit({ issues })).toMatchObject({
+        ok: false,
+        error: { code: "validation_failed" },
+      });
+    for (const overrides of [
+      { followup_card_id: current.id },
+      { recheck_required: true },
+    ])
+      expect(submit(overrides)).toMatchObject({
+        ok: false,
+        error: { code: "validation_failed" },
+      });
+    for (const change of [
+      { status: "cancelled" as const },
+      { status: "done" as const },
+      { project_id: "other" as never },
+    ])
+      expect(
+        submit(
+          {},
+          {
+            ...f.state,
+            cards: f.state.cards.map((c) =>
+              c.id === followup ? { ...c, ...change } : c,
+            ),
+          },
+        ),
+      ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+    expect(submit({ followup_card_id: id("card", 999) })).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+    expect(value(f.review(target, [ux])).data).toMatchObject({
+      verdict: "reject",
+      blocking: true,
+    });
+    const effect = value(submit());
+    expect(effect.data).toMatchObject({
+      verdict: "conditional",
+      blocking: false,
+      followup_card_id: followup,
+      issues: [ux],
+      recheck_required: false,
+    });
+    expect(effect.events[0]?.payload).toMatchObject({
+      followup_card_id: followup,
+      issues: [ux],
+      rework_allowed: false,
+    });
+    f.apply(effect);
+    expect(f.state.deliveries.find((v) => v.id === target.id)?.status).toBe(
+      "accepted",
+    );
+    expect(
+      f.state.work_items.find((w) => w.id === effect.data.work_item_id)?.status,
+    ).toBe("passed");
+    if (role === "independent_reviewer")
+      expect(f.checks()).toMatchObject([
+        { label, status: "passed", stale: false },
+      ]);
+    expect(f.withdraw().ok).toBe(true);
+  },
+);
+
 test.each([false, true])(
   "independent pass atomically upserts its reserved check (pending=%s)",
   async (pending) => {
@@ -215,6 +314,7 @@ test.each([
           ? [
               {
                 severity: "major",
+                impact: "functional" as const,
                 must_fix: true,
                 pre_existing: preExisting,
                 description: "Permission boundary needs repair",
@@ -292,6 +392,7 @@ test.each(["pass", "reject"] as const)(
             : [
                 {
                   severity: "major",
+                  impact: "functional" as const,
                   must_fix: true,
                   pre_existing: false,
                   description: "Fix permission boundary",

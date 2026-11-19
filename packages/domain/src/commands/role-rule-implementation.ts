@@ -1,4 +1,4 @@
-import { deriveReviewMatrix } from "../derived.js";
+import { deriveReviewMatrix, reviewPassed } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { pmConfirmRoleRuleImplementations } from "../preferences.js";
 import { type RoleRuleInventory, supportedRoleBodyEdit } from "../role-rule.js";
@@ -109,7 +109,7 @@ export function roleRuleMergeReason(
   const matrix = deriveReviewMatrix(deliveries, verifiers, state.reviews ?? []);
   if (
     !deliveries.every((v) =>
-      matrix.some((r) => r.delivery_id === v.id && r.verdict === "pass"),
+      matrix.some((r) => r.delivery_id === v.id && reviewPassed(r)),
     )
   )
     return "角色正文代确认须有覆盖当前交付的必需独立复核通过。";

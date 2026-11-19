@@ -527,6 +527,9 @@ function mergeConfirmation(
         role_id: item?.role_id ?? null,
         kind: review.kind,
         verdict: review.verdict,
+        ...(review.followup_card_id
+          ? { followup_card_id: review.followup_card_id }
+          : {}),
         target_sha: review.target_sha,
         issues: review.issues,
       };

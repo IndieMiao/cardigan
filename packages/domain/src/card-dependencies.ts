@@ -79,7 +79,9 @@ export function cardDependencyComplete(
         const p = e.payload as Record<string, unknown> | null;
         return (
           p?.delivery_id === v.id &&
-          ((e.type === "review_submitted" && p.verdict === "pass") ||
+          ((e.type === "review_submitted" &&
+            (p.verdict === "pass" ||
+              (p.verdict === "conditional" && !!p.followup_card_id))) ||
             (e.type === "completion_reviewed" &&
               e.actor.kind === "human" &&
               p.verdict === "pass") ||

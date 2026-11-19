@@ -337,6 +337,7 @@ test("acknowledgement activates a reviewer made ready by a real delivery; rework
           {
             severity: "major",
             description: "Bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },

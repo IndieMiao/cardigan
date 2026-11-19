@@ -143,6 +143,8 @@ const FOLLOWUP_REVIEW_RULE =
  * Flow Lite A2: what may block a merge, shared verbatim by reviewer,
  * independent_reviewer and design_director.
  */
+const MUST_FIX_IMPACT_RULE =
+  "每条必改项必须填写 impact：data_or_permission（数据或权限错误）、functional（功能错误）或 ux_only（仅提示或体验）。前两类必须本卡修复。仅有体验必改项时可仍驳回，也可请 PM 开后续卡，填同项目未结束的 followup_card_id 带条件通过；此时不要求本卡复审。`verdict` 与 `blocking` 由服务端计算，不要自行声明。";
 export const VERIFIER_MUST_FIX_RULES = [
   "只有正确性缺陷（含错误被吞）、安全漏洞、新增行为缺测试可以标 `must_fix`；风格、命名、重构、文档措辞、可选优化写成建议（`must_fix=false`），不挡合并。",
   "第一轮一次收齐问题，不追加卡片范围以外的要求，范围外的发现写成建议。",
@@ -311,6 +313,7 @@ const ROLE_BODIES: Record<
     "- 用 `project_snapshot` 和 `list_needs_you` 回答“现在到哪一步、下一步谁做、被什么阻塞”。",
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     "- 需要人看图拍板时引用卡片附件：`request_decision` 的 `attachment_ids` 填本卡片或 `affected_cards` 上已有附件的 ID（顺序即展示顺序），不另外上传；把合并确认等拍板交给人（`resolve_delegated_decision` 的 `escalate`）时也可以带 `attachment_ids`。",
     `- ${PM_DECISION_SUGGESTION_RULE}`,
     `- ${PM_PLAIN_SUMMARY_RULE}`,
@@ -441,7 +444,7 @@ const ROLE_BODIES: Record<
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 里每项写清 severity、must_fix、pre_existing，必要时给 proof。",
-    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
     "- 撤回审核只允许本人操作；若已接受产出需要返工，请先撤回本人的通过并保留理由，再请后台 PM 请求人逐次确认正式返工。没有可审新交付时等待新交付，不重审旧的已接受版本，不替别人撤回。",
@@ -463,6 +466,7 @@ const ROLE_BODIES: Record<
     "- 复核员不能是本次交付的作者，不追溯历史 Assignment；发现身份冲突先报告阻塞。",
     "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
     "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
     "- 轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 4 次驳回暂停并交 PM；你不自行加轮。",
     "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
@@ -481,7 +485,7 @@ const ROLE_BODIES: Record<
     "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
     "- 对照验收标准检查界面、交互和文案：状态是否完整、操作是否符合预期、文案是否准确一致。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；必要时用附件附上截图作为证据，`issues[]` 每项写清 severity、must_fix、pre_existing 和复现步骤。",
-    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     `- ${FOLLOWUP_REVIEW_RULE}`,
     "- 不改代码，不 push；设计建议写进审核问题，不直接改交付。",
     "- 需要人操作时用 `request_human_action`。",
@@ -526,7 +530,7 @@ const ROLE_BODIES: Record<
     "- 实现验收必须上传截图证据：`upload_attachment` 的 `file` 填截图原始字节的规范 padded base64，不填本地路径、data URL 或省略内容；`kind=evidence`、`mime=image/png`（按实际格式），`attach_to={kind:delivery,id:当前交付编号}`，也可挂到本卡已存在的时间线条目。大图不要手抄 base64：在构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <当前交付编号> <截图文件>`（先构建该包）；地址由你核对并填写，助手不校验目标主机；只从当前会话继承 MCP_TOKEN，自动编码并计算摘要，只输出附件编号，不读生产库或扩大服务端路径权限；不要把凭据写进命令、文件或输出。测量报告可在最后加 `text/plain`。保存返回的附件编号，将截图和含测量值的报告放进 `submit_review.attachments`，有问题时在 `issues[].proof` 中引用证据。上传失败不能声称证据已留存或给出完成的实现验收结论，应报告助手给出的安全失败阶段和错误码并提醒 PM 协调。",
     "- 对照验收标准检查信息层级、交互流程、状态完整性、一致性和文案。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时用附件附上标注截图作为证据。",
-    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
     "- 不改设计稿，不改交付源码，不 push；修改建议写进审核问题。构建产物、截图和测试数据只落在本轮构建目录或自己的临时目录。",
     `- ${BROWSER_BOUNDARY_RULE}`,
@@ -544,7 +548,7 @@ const ROLE_BODIES: Record<
     "- 按验收标准实际运行和测试，不只读代码或听人转述；在 `issues[]` 的 description 或 proof 里写清跑了什么命令、在什么环境、结果如何，长输出放附件。",
     "- 证据分级：模拟、桩、截图和真机的结果分开写。拿不到真机或其它必需设备时，如实写未覆盖，不要声称测过。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时给 proof。",
-    "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
+    `- ${MUST_FIX_IMPACT_RULE}`,
     `- ${FOLLOWUP_REVIEW_RULE}`,
     "- 不改代码，不 push，不修改交付内容。",
     "- 需要人操作时用 `request_human_action`。",

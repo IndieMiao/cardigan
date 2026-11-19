@@ -285,6 +285,7 @@ test.each(
                       severity: "critical",
                       description: "Permission check bypass",
                       proof: "Unauthorized requests reach the write path",
+                      impact: "functional" as const,
                       must_fix: true,
                       pre_existing: false,
                     },

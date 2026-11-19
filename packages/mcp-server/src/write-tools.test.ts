@@ -416,6 +416,45 @@ test("MCP preserves unauthorized, stale_target, forbidden_tool and idempotency_c
   );
 });
 
+test("must-fix impact and linked UX acceptance survive the MCP write and read paths", async () => {
+  const coder = await connect();
+  const reviewer = await connect(1);
+  await call(coder, "submit_delivery", delivery);
+  const issue = {
+    severity: "major",
+    description: "Duplicated success hint",
+    must_fix: true,
+    pre_existing: false,
+  };
+  const params = { ...review, issues: [issue], followup_card_id: "C-2" };
+  expect(code(await call(reviewer, "submit_review", params))).toBe(
+    "validation_failed",
+  );
+  store.uow.run((tx) =>
+    tx.cards.put(project_id, { ...serverCard, id: "C-2" as never }),
+  );
+  const result = await call(reviewer, "submit_review", {
+    ...params,
+    issues: [{ ...issue, impact: "ux_only" }],
+  });
+  expect(result.structuredContent).toMatchObject({
+    verdict: "conditional",
+    followup_card_id: "C-2",
+    issues: [{ impact: "ux_only" }],
+  });
+  expect(
+    (await call(reviewer, "get_card", { card_id })).structuredContent,
+  ).toMatchObject({
+    reviews: [
+      {
+        verdict: "conditional",
+        followup_card_id: "C-2",
+        issues: [{ impact: "ux_only" }],
+      },
+    ],
+  });
+});
+
 test("a domain failure after allocating a Review ID rolls back counters and leaves the key reusable", async () => {
   const coder = await connect();
   const reviewer = await connect(1);
@@ -433,6 +472,7 @@ test("a domain failure after allocating a Review ID rolls back counters and leav
       {
         severity: "major",
         description: "Bug",
+        impact: "functional" as const,
         must_fix: true,
         pre_existing: false,
       },
@@ -729,6 +769,7 @@ test("flow 5 late review is atomic and idempotent over concurrent MCP requests",
           {
             severity: "major",
             description: "Bug",
+            impact: "functional" as const,
             must_fix: true,
             pre_existing: false,
           },
@@ -810,6 +851,7 @@ test.each(["review-first", "delivery-first"] as const)(
             {
               severity: "major",
               description: "Bug",
+              impact: "functional" as const,
               must_fix: true,
               pre_existing: false,
             },

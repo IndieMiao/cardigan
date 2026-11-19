@@ -131,6 +131,7 @@ async function exhausted(verdict: "reject" | "conditional" = "reject") {
                   {
                     severity: "major",
                     description: "Bug",
+                    impact: "functional" as const,
                     must_fix: true,
                     pre_existing: false,
                   },

@@ -1,3 +1,4 @@
+import { reviewPassed } from "../derived.js";
 import type { Actor, Decision } from "../entities.js";
 import type { DeliveryId, ReviewId, WorkItemId } from "../ids.js";
 import { transition } from "../transitions.js";
@@ -115,7 +116,7 @@ function reworkTarget(
   ensure(
     review.delivery_id === delivery.id &&
       review.target_sha === p.target_sha &&
-      review.verdict === "pass" &&
+      reviewPassed(review) &&
       review.withdrawn &&
       withdrawal &&
       (withdrawal.payload as { rationale?: string }).rationale ===

@@ -63,6 +63,7 @@ function detail(): CardDetail {
           {
             severity: "major",
             description: "<script>alert(1)</script> must fix",
+            impact: "data_or_permission",
             must_fix: true,
             pre_existing: false,
           },
@@ -219,6 +220,7 @@ test("U3 structured delivery, review and decision rows use bound versions and or
   expect(delivery?.textContent).toContain("已取代");
   const review = document.getElementById("entry-C-1#4");
   expect(review?.textContent).toContain("old-sha");
+  expect(review?.textContent).toContain("数据或权限错误");
   expect(review?.textContent).toContain("已驳回");
   expect(review?.textContent).toContain("旧版本结论，已失效");
   expect(review?.textContent).toContain("<script>alert(1)</script> must fix");

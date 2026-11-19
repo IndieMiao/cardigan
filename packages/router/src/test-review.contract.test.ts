@@ -21,6 +21,7 @@ test("a free test delivery routes the original independent verifier and rejectio
       {
         description: "Weakened fixture",
         severity: "major",
+        impact: "functional" as const,
         must_fix: true,
         pre_existing: false,
       },
