@@ -12,6 +12,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { PreferencesView } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { resetSettingWrites } from "./useSettingWrite.js";
 
 // C-455 review (V-2162): write ordering, idempotency keys and feedback.
 vi.stubGlobal(
@@ -22,7 +23,10 @@ vi.stubGlobal(
     disconnect() {}
   },
 );
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  resetSettingWrites();
+});
 
 const on = (control: HTMLElement) =>
   control.getAttribute("aria-checked") === "true";
@@ -590,4 +594,109 @@ test("a keyboard off with an unsaved draft also drops it as a pending commit", a
   await settle();
   expect(f.writes).toEqual([1, null]);
   expect(f.state()).toBeNull();
+});
+
+test("a remounted settings page joins the pending queue, so its later edit wins", async () => {
+  let minutes: number | null = 120;
+  const writes: (number | null)[] = [];
+  const first = Promise.withResolvers<void>();
+  const client = fakeClient({
+    preferences: async () => ({ ...base, auto_merge_after_minutes: minutes }),
+    setPreferences: async (_p, next) => {
+      writes.push(next);
+      if (writes.length === 1) await first.promise;
+      minutes = next;
+    },
+  });
+  const view = render(<SettingsPage client={client} projectId="p-1" />);
+  const input = (await screen.findByLabelText(
+    "等待分钟数",
+  )) as HTMLInputElement;
+  enter(input, "1");
+  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
+  expect(writes).toEqual([1]);
+  // Leave and come back to the same project's settings before 1 returns.
+  view.unmount();
+  render(<SettingsPage client={client} projectId="p-1" />);
+  const again = (await screen.findByLabelText(
+    "等待分钟数",
+  )) as HTMLInputElement;
+  fireEvent.change(again, { target: { value: "60" } });
+  fireEvent.keyDown(again, { key: "Enter" });
+  await act(async () => first.resolve());
+  await waitFor(() => expect(writes).toEqual([1, 60]));
+  await settle();
+  expect(minutes).toBe(60);
+  expect(writes).toEqual([1, 60]);
+  expect(again.value).toBe("60");
+  expect(on(screen.getByRole("switch", { name: "超时自动合并" }))).toBe(true);
+});
+
+/** Keyboard off queued behind a held 1-minute write; the off is rejected. */
+function rejectedOff() {
+  let minutes: number | null = 120;
+  const writes: (number | null)[] = [];
+  const first = Promise.withResolvers<void>();
+  const off = Promise.withResolvers<void>();
+  const client = fakeClient({
+    preferences: async () => ({ ...base, auto_merge_after_minutes: minutes }),
+    setPreferences: async (_p, next) => {
+      writes.push(next);
+      await (next === null ? off.promise : first.promise);
+      minutes = next;
+    },
+  });
+  return { client, writes, first, off, minutes: () => minutes };
+}
+
+test("a background write that fails while the page is back shows its error there", async () => {
+  const f = rejectedOff();
+  const view = render(<SettingsPage client={f.client} projectId="p-1" />);
+  enter(await screen.findByLabelText("等待分钟数"), "1");
+  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
+  view.unmount();
+  await act(async () => f.first.resolve());
+  await waitFor(() => expect(f.writes).toEqual([1, null]));
+  render(<SettingsPage client={f.client} projectId="p-1" />);
+  await screen.findByRole("switch", { name: "超时自动合并" });
+  await act(async () => f.off.reject(new Error("测试：关闭未保存")));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "测试：关闭未保存",
+  );
+  expect(f.minutes()).toBe(1);
+});
+
+test("a background write that failed while nobody watched is shown on return", async () => {
+  const f = rejectedOff();
+  const view = render(<SettingsPage client={f.client} projectId="p-1" />);
+  enter(await screen.findByLabelText("等待分钟数"), "1");
+  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
+  view.unmount();
+  await act(async () => f.first.resolve());
+  await waitFor(() => expect(f.writes).toEqual([1, null]));
+  await act(async () => f.off.reject(new Error("测试：关闭未保存")));
+  render(<SettingsPage client={f.client} projectId="p-1" />);
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "测试：关闭未保存",
+  );
+});
+
+test("another project's settings do not share the queue", async () => {
+  const writes: string[] = [];
+  const first = Promise.withResolvers<void>();
+  const client = fakeClient({
+    setPreferences: async (project, next) => {
+      writes.push(`${project}:${next}`);
+      if (writes.length === 1) await first.promise;
+    },
+  });
+  const view = render(<SettingsPage client={client} projectId="p-1" />);
+  enter(await screen.findByLabelText("等待分钟数"), "1");
+  fireEvent.click(screen.getByRole("switch", { name: "超时自动合并" }));
+  view.unmount();
+  render(<SettingsPage client={client} projectId="p-2" />);
+  fireEvent.click(await screen.findByRole("switch", { name: "超时自动合并" }));
+  // p-1's write is still held; p-2 writes immediately.
+  await waitFor(() => expect(writes).toEqual(["p-1:1", "p-2:10"]));
+  await act(async () => first.resolve());
 });

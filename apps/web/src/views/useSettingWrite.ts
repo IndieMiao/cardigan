@@ -15,6 +15,80 @@ export function useNotice() {
 const same = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
 
+type Write<T> = (value: T, key: string) => Promise<void>;
+interface Listener {
+  start(): void;
+  idle(): void;
+  done(value: unknown): void;
+  failed(message: string): void;
+}
+/**
+ * Write state of one setting of one project, shared by every mounted view of
+ * it and kept across navigation: a view that remounts joins the same queue,
+ * and a failure nobody saw is shown by the next view of that setting.
+ */
+interface Channel {
+  sending: boolean;
+  inFlight: { value: unknown } | undefined;
+  queued: { value: unknown; write: Write<unknown> } | undefined;
+  /** Idempotency key of the newest write not yet confirmed. */
+  pending: { value: unknown; key: string } | undefined;
+  unseenError: string | undefined;
+  listeners: Set<Listener>;
+}
+const channels = new Map<string, Channel>();
+const channel = (id: string) => {
+  let found = channels.get(id);
+  if (!found) {
+    found = {
+      sending: false,
+      inFlight: undefined,
+      queued: undefined,
+      pending: undefined,
+      unseenError: undefined,
+      listeners: new Set(),
+    };
+    channels.set(id, found);
+  }
+  return found;
+};
+/** Test isolation only: forget every shared write channel. */
+export function resetSettingWrites() {
+  channels.clear();
+}
+
+async function run(c: Channel, next: unknown, write: Write<unknown>) {
+  c.sending = true;
+  c.inFlight = { value: next };
+  for (const l of c.listeners) l.start();
+  const key =
+    c.pending && same(c.pending.value, next)
+      ? c.pending.key
+      : crypto.randomUUID();
+  c.pending = { value: next, key };
+  let ok = false;
+  try {
+    await write(next, key);
+    ok = true;
+    if (c.pending?.key === key) c.pending = undefined;
+    c.unseenError = undefined;
+    for (const l of c.listeners) l.done(next);
+  } catch (cause) {
+    const message = describeWriteError(cause);
+    if (c.listeners.size) for (const l of c.listeners) l.failed(message);
+    else c.unseenError = message;
+  } finally {
+    c.sending = false;
+    c.inFlight = undefined;
+    const later = c.queued;
+    c.queued = undefined;
+    if (later && !(ok && same(later.value, next)))
+      void run(c, later.value, later.write);
+    else for (const l of c.listeners) l.idle();
+  }
+  return ok;
+}
+
 /**
  * Instant-save lifecycle of one setting (C-455).
  *
@@ -23,11 +97,14 @@ const same = (a: unknown, b: unknown) =>
  *   useResource only applies the newest read, which starts after the write.
  * - A failed write keeps its idempotency key for a retry of the same value; a
  *   different value, a success, or a read showing the value retires the key.
- * - Writes never overlap; callers keep controls focusable (`aria-disabled`).
- *   A different value chosen during a write runs after it (the latest intent
- *   wins); repeating the in-flight value is ignored.
+ * - Writes of one setting never overlap, across views and navigation (`id`
+ *   names the project and setting). A different value chosen during a write
+ *   runs after it (the latest intent wins, including one made in a remounted
+ *   view); repeating the in-flight value is ignored. Callers keep controls
+ *   focusable (`aria-disabled`).
  */
 export function useSettingWrite<T>({
+  id,
   server,
   source,
   confirmable = true,
@@ -35,89 +112,75 @@ export function useSettingWrite<T>({
   saved,
   success,
 }: {
+  /** Project and setting, e.g. `p-1:auto-merge-after`. */
+  id: string;
   server: T;
   /** Identity of the read that produced `server`; a new read resets `value`. */
   source: unknown;
   /** False when `server` is a derived default that cannot confirm a write. */
   confirmable?: boolean;
-  write: (value: T, key: string) => Promise<void>;
+  write: Write<T>;
   saved: () => void;
   success: (value: T) => string;
 }) {
+  const c = channel(id);
   const [value, setValue] = useState(server);
   const [read, setRead] = useState(source);
   if (read !== source) {
     setRead(source);
     setValue(server);
   }
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(c.sending);
   const [error, setError] = useState("");
   const [message, setMessage] = useNotice();
-  const sending = useRef(false);
-  const pending = useRef<{ value: T; key: string } | undefined>(undefined);
-  const inFlight = useRef<{ value: T } | undefined>(undefined);
-  const queued = useRef<{ value: T } | undefined>(undefined);
-  const mounted = useRef(true);
+  // Completions reach whichever render is current.
+  const latest = useRef({ saved, success });
+  latest.current = { saved, success };
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
+    const listener: Listener = {
+      start() {
+        setBusy(true);
+        setError("");
+        setMessage("");
+      },
+      idle() {
+        setBusy(false);
+      },
+      done(next) {
+        setValue(next as T);
+        setMessage(latest.current.success(next as T));
+        latest.current.saved();
+      },
+      failed(text) {
+        setError(text);
+      },
     };
-  }, []);
+    c.listeners.add(listener);
+    setBusy(c.sending);
+    if (c.unseenError) {
+      setError(c.unseenError);
+      c.unseenError = undefined;
+    }
+    return () => {
+      c.listeners.delete(listener);
+    };
+  }, [c, setMessage]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new read is the trigger.
   useEffect(() => {
     // A read showing the value confirms the write even if its response was lost.
-    if (confirmable && pending.current && same(pending.current.value, server)) {
-      pending.current = undefined;
+    if (confirmable && c.pending && same(c.pending.value, server)) {
+      c.pending = undefined;
       setError("");
     }
   }, [source]);
   const save = async (next: T): Promise<boolean> => {
-    if (sending.current) {
-      queued.current = same(inFlight.current?.value, next)
+    if (c.sending) {
+      c.queued = same(c.inFlight?.value, next)
         ? undefined
-        : { value: next };
+        : { value: next, write: write as Write<unknown> };
       return false;
     }
-    sending.current = true;
-    inFlight.current = { value: next };
-    let ok = false;
-    // State updates only while mounted; a queued write still runs after the
-    // view unmounts (navigation), bound to the project it was chosen for.
-    const live = (update: () => void) => {
-      if (mounted.current) update();
-    };
-    live(() => {
-      setBusy(true);
-      setError("");
-      setMessage("");
-    });
-    const key =
-      pending.current && same(pending.current.value, next)
-        ? pending.current.key
-        : crypto.randomUUID();
-    pending.current = { value: next, key };
-    try {
-      await write(next, key);
-      ok = true;
-      if (pending.current?.key === key) pending.current = undefined;
-      live(() => {
-        setValue(next);
-        setMessage(success(next));
-        saved();
-      });
-      return true;
-    } catch (cause) {
-      live(() => setError(describeWriteError(cause)));
-      return false;
-    } finally {
-      sending.current = false;
-      inFlight.current = undefined;
-      live(() => setBusy(false));
-      const later = queued.current;
-      queued.current = undefined;
-      if (later && !(ok && same(later.value, next))) void save(later.value);
-    }
+    return run(c, next, write as Write<unknown>);
   };
   const clear = () => {
     setError("");

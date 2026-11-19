@@ -13,6 +13,7 @@ import { App } from "../App.js";
 import { HttpCardiganClient } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { resetSettingWrites } from "./useSettingWrite.js";
 
 // Radix tooltips and form-bound switches measure with ResizeObserver.
 vi.stubGlobal(
@@ -244,6 +245,7 @@ test.each([true, false])(
 
 afterEach(() => {
   cleanup();
+  resetSettingWrites();
   window.location.hash = "";
 });
 test("settings navigation opens preferences, default off with editable minutes and the missing-gate warning", async () => {
