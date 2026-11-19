@@ -1,3 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+// Bound only transfers started by merge maintenance. User clones, backups,
+// and other tasks keep their configured budget, even in the same process.
+const mergeTransfer = new AsyncLocalStorage<true>();
+export function withMergeTransferBudget<T>(work: () => T): T {
+  return mergeTransfer.run(true, work);
+}
 export interface GitTimeoutOptions {
   readonly queryTimeoutMs?: number;
   readonly transferTimeoutMs?: number;
@@ -18,7 +26,15 @@ export function gitTimeoutMs(
     throw new Error(
       `${name} (${option}) must be a positive integer no greater than 2147483647`,
     );
-  return timeout;
+  if (!transfer || !mergeTransfer.getStore()) return timeout;
+  const cap = Number(
+    process.env.CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS ?? 180_000,
+  );
+  if (!Number.isSafeInteger(cap) || cap <= 0 || cap > 2_147_483_647)
+    throw new Error(
+      "CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS must be a positive integer no greater than 2147483647",
+    );
+  return Math.min(timeout, cap);
 }
 /** Keep local queries bounded while allowing large packs to finish. */
 export async function withGitTimeout<T>(
@@ -47,7 +63,7 @@ export async function withGitTimeout<T>(
     )
       throw Object.assign(
         new Error(
-          `Git ${command} timed out after ${timeout}ms; configure ${name} (${option})`,
+          `Git ${command} timed out after ${timeout}ms; configure ${name} (${option})${transfer && mergeTransfer.getStore() ? " / CARDIGAN_MERGE_GIT_TRANSFER_TIMEOUT_MS" : ""}`,
           { cause: error },
         ),
         { executionExited: e.executionExited === true },

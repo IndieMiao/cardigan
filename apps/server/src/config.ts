@@ -6,8 +6,8 @@ import {
   parseRuntimeUnknownGraceMs,
 } from "@cardigan/domain";
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
-
 import { resolveAttachmentInlineBytes } from "@cardigan/mcp-server";
+import { DEFAULT_MERGE_WATCHDOG_MS } from "./merge-watchdog.js";
 
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
 /**
@@ -37,6 +37,7 @@ export interface ServerConfig {
   readonly listenRetryIntervalMs?: number;
   readonly listenRetryTimeoutMs?: number;
   /** M4.4 phase loops; every value has a default and is overridable. */
+  readonly mergeWatchdogMs?: number;
   readonly mergeIntervalMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
@@ -83,6 +84,7 @@ export interface ServerEnv extends ExecutionEnv {
    */
   readonly CARDIGAN_WEB_PORT?: string | undefined;
   readonly CARDIGAN_WEB_PUBLIC_ORIGINS?: string | undefined;
+  readonly CARDIGAN_MERGE_WATCHDOG_MS?: string | undefined;
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_MERGE_BLOCKED_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
@@ -234,6 +236,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
             DEFAULT_MERGE_BLOCKED_REMINDER_MS,
           ),
         }),
+    mergeWatchdogMs: interval(
+      env.CARDIGAN_MERGE_WATCHDOG_MS,
+      "CARDIGAN_MERGE_WATCHDOG_MS",
+      DEFAULT_MERGE_WATCHDOG_MS,
+    ),
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",

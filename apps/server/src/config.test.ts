@@ -35,6 +35,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    mergeWatchdogMs: 300_000,
     recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
@@ -110,6 +111,7 @@ test("reads data dir and port from the environment", () => {
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    mergeWatchdogMs: 300_000,
     recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
@@ -338,4 +340,15 @@ test("C-405: merge blocker reminder accepts a positive host duration and default
     expect(() =>
       resolveServerConfig({ CARDIGAN_MERGE_BLOCKED_REMINDER_MS: value }),
     ).toThrow("CARDIGAN_MERGE_BLOCKED_REMINDER_MS");
+});
+
+test("C-466: watchdog duration is host-configurable and rejects overflowing timers", () => {
+  expect(
+    resolveServerConfig({ CARDIGAN_MERGE_WATCHDOG_MS: "120000" })
+      .mergeWatchdogMs,
+  ).toBe(120_000);
+  for (const value of ["0", "-1", "2147483648"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MERGE_WATCHDOG_MS: value }),
+    ).toThrow("CARDIGAN_MERGE_WATCHDOG_MS");
 });
