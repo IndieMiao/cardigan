@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -268,7 +269,7 @@ test("HTTP employee creation uses owner cookies and an idempotency key with the 
   ]);
 });
 
-test("an employee being created keeps its drawer until the reply, and focus returns to the opener", async () => {
+test("an employee being created keeps its drawer until the reply, then focus goes to 新建员工", async () => {
   const reply = Promise.withResolvers<{
     id: string;
     name: string;
@@ -291,9 +292,10 @@ test("an employee being created keeps its drawer until the reply, and focus retu
   reply.resolve({ id: "E-3", name: "孙悟空", role_id: "coder" });
   expect(await screen.findByText("已创建员工 孙悟空（E-3）")).toBeTruthy();
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // The person is taken once created: focus goes to the 新建员工 fallback.
   await waitFor(() =>
     expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "选用孙悟空" }),
+      screen.getByRole("button", { name: "新建员工" }),
     ),
   );
 });
@@ -345,4 +347,42 @@ test("after creating from 选用 the person is taken: focus falls back to 新建
       screen.getByRole("button", { name: "新建员工" }),
     ),
   );
+});
+
+test("focus goes to 新建员工 after creating from 选用 even when the refresh is slow", async () => {
+  const refresh = Promise.withResolvers<EmployeeOptions>();
+  const employeeOptions = vi
+    .fn()
+    .mockResolvedValueOnce(options)
+    .mockImplementation(() => refresh.promise);
+  await open({
+    employeeOptions,
+    createEmployee: vi
+      .fn()
+      .mockResolvedValue({ id: "E-3", name: "悟空", role_id: "coder" }),
+  });
+  const opener = screen.getByRole("button", { name: "选用孙悟空" });
+  opener.focus();
+  fireEvent.click(opener);
+  await screen.findByRole("form", { name: "新建员工" });
+  fields();
+  submit();
+  await screen.findByText("已创建员工 悟空（E-3）");
+  const fallback = screen.getByRole("button", { name: "新建员工" });
+  await waitFor(() => expect(document.activeElement).toBe(fallback));
+  await act(async () =>
+    refresh.resolve({
+      ...options,
+      library: options.library.map((item) =>
+        item.id === "sun-wukong"
+          ? {
+              ...item,
+              occupied_by: { id: "E-3", name: "悟空", status: "active" },
+            }
+          : item,
+      ),
+    }),
+  );
+  expect(screen.queryByRole("button", { name: "选用孙悟空" })).toBeNull();
+  expect(document.activeElement).toBe(fallback);
 });

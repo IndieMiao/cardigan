@@ -118,7 +118,7 @@ export function TemplateSettings({
       setBusy(false);
     }
   };
-  const remember = useDrawerReturnFocus(
+  const { remember } = useDrawerReturnFocus(
     selected !== undefined || editing !== undefined,
   );
   const close = () => {

@@ -361,7 +361,8 @@ export const settingsDrawerClassName = cn(
  * Drawers opened from a table row or a panel button are controlled (no Radix
  * trigger): remember the opener when opening and give it focus back once the
  * drawer is gone. An opener removed meanwhile (a person now taken) gives way
- * to `fallback`. Call the returned function right before opening.
+ * to `fallback`. Call `remember` right before opening; `forget` when the
+ * opener is known to disappear.
  */
 export function useDrawerReturnFocus(
   open: boolean,
@@ -386,10 +387,15 @@ export function useDrawerReturnFocus(
     }
     wasOpen.current = open;
   }, [open]);
-  return useCallback(() => {
+  const remember = useCallback(() => {
     if (wasOpen.current) return;
     const active = document.activeElement;
     if (active instanceof HTMLElement && active !== document.body)
       opener.current = active;
   }, []);
+  /** The opener is about to go away (e.g. the person was just taken): use the fallback. */
+  const forget = useCallback(() => {
+    opener.current = null;
+  }, []);
+  return { remember, forget };
 }

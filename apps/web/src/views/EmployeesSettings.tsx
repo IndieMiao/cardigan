@@ -67,7 +67,7 @@ export function EmployeesSettings({
   const [version, setVersion] = useState(0);
   const visible = options.data?.library.filter((item) => matches(item, search));
   const newEmployee = useRef<HTMLButtonElement>(null);
-  const remember = useDrawerReturnFocus(
+  const { remember, forget } = useDrawerReturnFocus(
     form !== undefined && options.data !== undefined,
     () => newEmployee.current,
   );
@@ -170,6 +170,8 @@ export function EmployeesSettings({
           refresh={options.reload}
           onCancel={() => setForm(undefined)}
           onCreated={(name, id) => {
+            // The chosen person is taken now: its 选用 button goes away.
+            if (form.person) forget();
             setForm(undefined);
             setMessage(copy.created(name, id));
             options.reload();

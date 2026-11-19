@@ -103,6 +103,8 @@ interface SaveNotice {
   cause: string;
   /** The value that was not saved; a read showing it retires the notice. */
   value: unknown;
+  /** When the failed write started: only a read started later can retire it. */
+  since: number;
   project: string;
   panel: SettingPlace["panel"];
 }
@@ -117,13 +119,24 @@ function clearNotice(key: string) {
   notices = notices.filter((n) => n.key !== key);
   emit();
 }
-/** Record what a read shows, newest read wins (also with no row mounted). */
+/**
+ * A read proves a failed write's value only when it started after that write
+ * began. Untracked reads (no start time) keep comparing the value alone.
+ */
+const proves = (at: number | undefined, since: number) =>
+  at === undefined || at > since;
+/**
+ * Record what a read shows (also with no row mounted). A read superseded by a
+ * newer one, or one that started before the failed write, says nothing about
+ * it: a late, older response cannot retire a real failure (C-479 V-2220).
+ */
 function confirmRead(key: string, at: number, value: unknown) {
   const known = confirmed.get(key);
-  if (!known || at > known.at) confirmed.set(key, { at, value });
-  // A read showing the value that was not confirmed retires its notice.
+  if (known && at <= known.at) return;
+  confirmed.set(key, { at, value });
   const reported = notices.find((n) => n.key === key);
-  if (reported && same(reported.value, value)) clearNotice(key);
+  if (reported && proves(at, reported.since) && same(reported.value, value))
+    clearNotice(key);
 }
 onSettingsRead(confirmRead);
 
@@ -236,6 +249,8 @@ export function useSettingWrite<T>({
         text: string;
         cause: string;
         value: unknown;
+        /** When the failed write started (logical clock). */
+        since: number;
         at: number;
         seen: boolean;
         reported: boolean;
@@ -253,9 +268,18 @@ export function useSettingWrite<T>({
     failure,
     visible,
     server,
+    source,
     stale: false,
   });
-  latest.current = { saved, success, failure, visible, server, stale: false };
+  latest.current = {
+    saved,
+    success,
+    failure,
+    visible,
+    server,
+    source,
+    stale: false,
+  };
   const current = useSyncExternalStore(subscribe, () =>
     notices.find((n) => n.key === key),
   );
@@ -299,6 +323,7 @@ export function useSettingWrite<T>({
           message: last.text,
           cause: last.cause,
           value: last.value,
+          since: last.since,
           project: place.project,
           panel: place.panel,
         });
@@ -312,12 +337,18 @@ export function useSettingWrite<T>({
     if (shown.current) shown.current.seen = true;
     if (current?.key !== key || !inView()) return;
     clearNotice(key);
-    if (confirmable && same(current.value, latest.current.server)) return;
+    if (
+      confirmable &&
+      proves(readStart(latest.current.source), current.since) &&
+      same(current.value, latest.current.server)
+    )
+      return;
     setError(current.cause);
     shown.current = {
       text: current.message,
       cause: current.cause,
       value: current.value,
+      since: current.since,
       at: performance.now(),
       seen: true,
       reported: false,
@@ -331,13 +362,20 @@ export function useSettingWrite<T>({
     // A read showing the value confirms the write even if its response was lost.
     if (pending.current && same(pending.current.value, server))
       pending.current = undefined;
-    // ...and retires its failure here and in the shared notice.
-    if (shown.current && same(shown.current.value, server)) {
+    // ...and retires its failure here (the shared notice: `confirmRead`),
+    // when the read started after the failed write began.
+    if (
+      shown.current &&
+      proves(at, shown.current.since) &&
+      same(shown.current.value, server)
+    ) {
       shown.current = undefined;
       setError("");
     }
-    const reported = notices.find((n) => n.key === key);
-    if (reported && same(reported.value, server)) clearNotice(key);
+    if (at === undefined) {
+      const reported = notices.find((n) => n.key === key);
+      if (reported && same(reported.value, server)) clearNotice(key);
+    }
   }, [source]);
   /** Still on this project's settings with the panel shown (URL already counts). */
   const inView = () => {
@@ -392,6 +430,7 @@ export function useSettingWrite<T>({
           text,
           cause,
           value: next,
+          since: startedAt,
           at: performance.now(),
           seen: !away,
           reported: away && !!place,
@@ -403,6 +442,7 @@ export function useSettingWrite<T>({
           message: text,
           cause,
           value: next,
+          since: startedAt,
           project: place.project,
           panel: place.panel,
         });

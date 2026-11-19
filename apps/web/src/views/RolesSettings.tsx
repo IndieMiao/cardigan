@@ -120,7 +120,7 @@ export function RolesSettings({
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
-  const remember = useDrawerReturnFocus(view !== undefined);
+  const { remember } = useDrawerReturnFocus(view !== undefined);
   const open = (next: View | undefined, note = "") => {
     if (next) remember();
     setMessage(note);
