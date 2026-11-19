@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
   Card,
+  DecisionId,
   Delivery,
   GitWorkspaceFiles,
   GitWorktree,
@@ -85,7 +86,9 @@ export interface EnsureWorktreeInput {
   readonly role: Role;
   readonly card?: Card;
   readonly work_item?: WorkItem;
-  /** The delivery commit being reviewed; required for a readonly worktree. */
+  /** A readonly discussion-only checkout uses the card baseline, not a delivery SHA. */
+  readonly review_plan?: DecisionId;
+  /** The delivery commit being reviewed; required for ordinary readonly work. */
   readonly target_sha?: string;
 }
 export interface WorktreeOptions {
@@ -260,7 +263,19 @@ export class GitWorktreeService {
       throw new Error("Repository card requires a base branch");
     const readonly = role.worktree === "readonly";
     if (
+      input.review_plan !== undefined &&
+      (!readonly ||
+        item.kind !== "verify" ||
+        item.status === "cancelled" ||
+        item.review_plan_target !== input.review_plan ||
+        input.target_sha !== undefined)
+    )
+      throw new Error(
+        "Plan checkout requires the assigned verifier's pending plan and no delivery SHA",
+      );
+    if (
       readonly &&
+      !input.review_plan &&
       !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? "")
     )
       throw new Error("Readonly worktree requires a delivery commit SHA");
@@ -308,6 +323,7 @@ export class GitWorktreeService {
       card = input.card as Card;
     const central = await this.central.ensureCentral(project);
     await this.git.ensureClone(central, repository);
+    const checkoutRef = input.target_sha ?? `refs/remotes/${baselineRef}`;
     const existing = (await this.git.listWorktrees(repository)).find(
       (w) => w.path === path,
     );
@@ -318,16 +334,15 @@ export class GitWorktreeService {
         );
       if (
         readonly &&
-        existing.head.toLowerCase() !== input.target_sha?.toLowerCase()
+        (input.review_plan ||
+          existing.head.toLowerCase() !== input.target_sha?.toLowerCase())
       ) {
         if ((await this.git.changes(path)).tracked.length > 0)
           throw new Error("Review worktree has uncommitted changes");
         await this.git.fetch(repository, central);
-        const target = await this.git.resolveCommit(
-          repository,
-          input.target_sha as string,
-        );
-        await this.git.checkoutDetached(path, target);
+        const target = await this.git.resolveCommit(repository, checkoutRef);
+        if (target.toLowerCase() !== existing.head.toLowerCase())
+          await this.git.checkoutDetached(path, target);
       }
       // Refresh the shared clone before every writer Run without touching its
       // branch, original base or uncommitted work. Agent mode pushes from host.
@@ -380,9 +395,7 @@ export class GitWorktreeService {
     await this.git.fetch(repository, central);
     const base_sha = await this.git.resolveCommit(
       repository,
-      readonly
-        ? (input.target_sha as string)
-        : (recovery?.sha ?? `refs/remotes/origin/${card.base_branch}`),
+      readonly ? checkoutRef : (recovery?.sha ?? `refs/remotes/${baselineRef}`),
     );
     await this.git.addWorktree(repository, path, base_sha, branch);
     return {

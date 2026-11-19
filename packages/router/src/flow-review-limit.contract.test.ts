@@ -137,7 +137,7 @@ test.each([false, true])(
   },
 );
 
-test("B6: the fourth consecutive rejection routes one PM decision and suppresses author loops", async () => {
+test("B6: the third consecutive rejection routes one PM decision and suppresses author loops", async () => {
   const { f, review } = flowReviewFixture(null);
   const { work_item_id: _work, ...base } = assignment(900, "pm");
   f.commit({
@@ -155,7 +155,7 @@ test("B6: the fourth consecutive rejection routes one PM decision and suppresses
       token_requests: [],
     },
   });
-  for (let n = 0; n < 4; n++)
+  for (let n = 0; n < 3; n++)
     review(await f.deliver("code", String(n + 1).repeat(40)));
   const event = required(
     f.state.events.findLast((e) => e.type === "review_submitted"),

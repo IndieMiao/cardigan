@@ -73,6 +73,8 @@ function runTargetIndex(state: {
  * Verification Runs need a current target, regardless of their trigger or role:
  * a non-superseded delivery of the same card that is either the target work
  * item's (non-completion) delivery, or a completion request naming this item.
+ * A pending direction proposal is also a Run target for its assigned reviewer,
+ * not a delivery target for submitReview.
  * Lookups are keyed (C-221) instead of scanning deliveries × work items.
  */
 export function hasRunTarget(
@@ -87,6 +89,12 @@ export function hasRunTarget(
   const item = index.items.get(assignment.work_item_id);
   if (!item) return false;
   if (item.kind !== "verify") return true;
+  if (
+    item.review_plan_target &&
+    item.assignment_id === assignment.id &&
+    item.status !== "cancelled"
+  )
+    return true;
   return item.target_work_item_id
     ? index.targets.get(item.target_work_item_id)?.has(item.card_id) === true
     : index.completions.get(item.id)?.has(item.card_id) === true;

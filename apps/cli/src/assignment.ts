@@ -26,8 +26,8 @@ import {
   messageOf,
   type PreparedWorktree,
   RuntimeTargets,
+  readonlyWorktreeTarget,
   resolveMcpUrl,
-  reviewTargetSha,
   scrubRunCredentials,
   settleTestReviewLimits,
   stopRunRuntime,
@@ -201,10 +201,9 @@ async function prepareWorktree(
     assignment,
     role,
     ...(card === undefined ? {} : { card }),
-    ...(workItem === undefined ? {} : { work_item: workItem }),
     ...(role.worktree === "readonly"
-      ? { target_sha: reviewTargetSha(store, project_id, workItem) }
-      : {}),
+      ? readonlyWorktreeTarget(store, project_id, assignment)
+      : { work_item: workItem }),
   });
   if (placed === undefined)
     throw new CliError("Git 服务没有给出 worktree", EXIT.failure);

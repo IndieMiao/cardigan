@@ -858,7 +858,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
     `${delivery_id ?? "the delivery"} was rejected; rework is needed`,
   );
 
-  // Flow Lite B6: only the same verifier's fourth consecutive rejection
+  // Flow Lite B6: only the same verifier's third consecutive rejection
   // escalates, via its durable review-limit decision. Parallel reviewers and
   // repeated routing never create an additional planning exception.
 }
