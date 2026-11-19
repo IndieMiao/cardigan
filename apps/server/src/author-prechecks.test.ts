@@ -1568,3 +1568,39 @@ test.each([false, true])(
     ).toHaveLength(1);
   },
 );
+
+test("a queued author precheck reports the blocking GitHub attempt once across controller restarts", async () => {
+  const { x } = await setupGithubPrechecks();
+  const journal = new GithubDispatchJournal(x.f.store);
+  journal.claim(
+    {
+      project: x.f.project_id,
+      card: x.s.card.id,
+      attempt: "old-dispatch",
+      executor: "github",
+      key: "prior",
+      startedAt: x.f.clock.now(),
+      phase: "dispatching",
+      abandoned: "attempt_finished",
+    },
+    1,
+  );
+  for (let i = 0; i < 2; i++)
+    await (await new AuthorPrechecks(x.options).schedule([x.f.project_id]))
+      .done;
+  const waits = x.f.state().events.filter((e) => e.type === "precheck_waiting");
+  expect(waits).toHaveLength(1);
+  expect(waits[0]?.payload).toMatchObject({
+    attempt_id: x.check().attempt_id,
+    blocking_attempt: "old-dispatch",
+  });
+  expect(
+    x.f
+      .state()
+      .timeline.find(
+        (e) => e.event_seq === waits[0]?.seq && e.card_id === x.s.card.id,
+      )?.body,
+  ).toContain("old-dispatch");
+  expect(x.check().status).toBe("queued");
+  expect(x.reserve).not.toHaveBeenCalled();
+});

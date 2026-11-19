@@ -105,6 +105,11 @@ export {
   type GithubRun,
 } from "./github-client.js";
 export {
+  abandonedGithubRequest,
+  requestChecks,
+  verifyUndispatched,
+} from "./github-dispatch-discovery.js";
+export {
   type ExternalGithubRun,
   type GithubDispatchIntent,
   GithubDispatchJournal,

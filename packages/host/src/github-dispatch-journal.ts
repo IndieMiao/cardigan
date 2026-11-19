@@ -33,6 +33,15 @@ export interface GithubDispatchIntent {
   readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
+  /** Only the dispatching process can still send or receive this POST. */
+  readonly postOwner?: ExecutionOwner;
+  readonly absenceNotBefore?: number;
+  readonly undispatched?: {
+    readonly reason: "complete_scan_no_match";
+    readonly source: "automatic" | "human";
+    readonly scanStartedAt: string;
+    readonly listed: number;
+  };
   readonly nextDiscoveryAt?: number;
   readonly discoveryDeadlineAt?: number;
   /** Unverified dispatch response ID; only a lookup hint until full binding. */
@@ -54,6 +63,42 @@ export interface GithubDispatchIntent {
   /** Permanent fence against dispatch/reuse once cleanup has begun. */
   readonly deleting?: boolean;
   readonly deleted?: boolean;
+}
+function absenceDeadline(
+  intent: GithubDispatchIntent,
+  settledAt: number,
+): number {
+  // Only new records have postOwner; they always persist the original deadline.
+  if (intent.discoveryDeadlineAt === undefined)
+    throw new GithubExecutorError("recovery_incomplete");
+  return (
+    settledAt + (intent.discoveryDeadlineAt - Date.parse(intent.startedAt))
+  );
+}
+/** A negative listing is meaningful only after the original writer and its discovery window. */
+export function canFinishUndispatched(
+  intent: GithubDispatchIntent,
+  at: number,
+  deadline: number,
+): boolean {
+  return (
+    !!intent.abandoned &&
+    intent.phase === "dispatching" &&
+    !intent.finished &&
+    !intent.deleting &&
+    !intent.publisher &&
+    !intent.identity &&
+    !intent.externalRun &&
+    intent.dispatchedRunId === undefined &&
+    Number.isFinite(deadline) &&
+    deadline > Date.parse(intent.startedAt) &&
+    at >=
+      Math.max(
+        intent.discoveryDeadlineAt ?? deadline,
+        intent.absenceNotBefore ?? 0,
+      ) &&
+    !intent.postOwner
+  );
 }
 const projectedIntents = new WeakMap<
   readonly Event[],
@@ -592,8 +637,8 @@ export class GithubDispatchJournal {
     now: number,
     interval: number,
     dispatchedRunId?: number,
-  ): void {
-    this.store.uow.run((tx) => {
+  ): GithubDispatchIntent {
+    return this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
@@ -615,11 +660,21 @@ export class GithubDispatchJournal {
         current.dispatchedRunId !== dispatchedRunId
       )
         throw new GithubExecutorError("security");
-      this.save(tx, {
-        ...current,
+      const { postOwner, ...settled } = current;
+      if (postOwner && executionOwner(postOwner.pid)?.start === postOwner.start)
+        throw new GithubRetryLater(now + interval);
+      // A crashed POST could have reached GitHub just before exit. Give it the
+      // full original visibility window from the first observation of death.
+      const scanning = {
+        ...settled,
+        ...(postOwner
+          ? { absenceNotBefore: absenceDeadline(current, now) }
+          : {}),
         nextDiscoveryAt: now + interval,
         ...(dispatchedRunId !== undefined ? { dispatchedRunId } : {}),
-      });
+      };
+      this.save(tx, scanning);
+      return scanning;
     });
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
@@ -693,11 +748,78 @@ export class GithubDispatchJournal {
         });
         return held ? ("held" as const) : false;
       }
-      this.save(tx, { ...settled, phase: "dispatching" });
+      this.save(tx, {
+        ...settled,
+        phase: "dispatching",
+        ...(_publisher ? { postOwner: _publisher } : {}),
+      });
       return true;
     });
     if (result === "held") throw new CheckExecutorSuspended();
     return result;
+  }
+  /** Persist a returned ID before discovery cadence or a competing scan can hide it. */
+  settleDispatch(
+    intent: GithubDispatchIntent,
+    id: number | undefined,
+    at: number,
+  ): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (i) => i.attempt === intent.attempt,
+      );
+      if (
+        !current?.postOwner ||
+        current.key !== intent.key ||
+        current.phase !== "dispatching" ||
+        current.postOwner.pid !== process.pid
+      )
+        throw new GithubExecutorError("security");
+      const { postOwner: _owner, ...settled } = current;
+      this.save(tx, {
+        ...settled,
+        ...(id !== undefined
+          ? { dispatchedRunId: id }
+          : { absenceNotBefore: absenceDeadline(current, at) }),
+      });
+    });
+  }
+  /** Commit a completed negative scan only against the exact, still-unbound reservation. */
+  finishUndispatched(
+    intent: GithubDispatchIntent,
+    scanStarted: number,
+    deadline: number,
+    listed: number,
+    source: "automatic" | "human",
+  ): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (i) => i.attempt === intent.attempt,
+      );
+      if (
+        this.probeCard ||
+        !current ||
+        current.key !== intent.key ||
+        !canFinishUndispatched(current, scanStarted, deadline) ||
+        current.startedAt !== intent.startedAt ||
+        current.discoveryDeadlineAt !== intent.discoveryDeadlineAt ||
+        current.nextDiscoveryAt !== intent.nextDiscoveryAt ||
+        current.absenceNotBefore !== intent.absenceNotBefore
+      )
+        throw new GithubExecutorError("recovery_incomplete");
+      this.save(tx, {
+        ...current,
+        finished: true,
+        abandonmentReason:
+          "Complete discovery after deadline found no matching run; reservation released",
+        undispatched: {
+          reason: "complete_scan_no_match",
+          source,
+          scanStartedAt: new Date(scanStarted).toISOString(),
+          listed,
+        },
+      });
+    });
   }
   bind(
     intent: GithubDispatchIntent,

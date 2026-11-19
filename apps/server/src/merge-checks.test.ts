@@ -5295,3 +5295,39 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   restarted.stop();
   await restarted.idle();
 });
+
+test("expired abandoned GitHub dispatch is settled after a complete empty scan without repeated maintenance", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.advance(15 * 60_000);
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    await next.idle();
+    expect(journal.admitted()).toEqual([]);
+    expect(journal.all()).toMatchObject([
+      {
+        finished: true,
+        undispatched: { source: "automatic", reason: "complete_scan_no_match" },
+      },
+    ]);
+    const reads = h.client.runs.mock.calls.length;
+    h.advance();
+    await next.tick([h.f.project_id]);
+    await next.idle();
+    expect(h.client.runs).toHaveBeenCalledTimes(reads);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});

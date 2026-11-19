@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { CandidatePushRequest, PushResult } from "@cardigan/git-transport";
 import type {
   CheckExecutor,
@@ -6,7 +6,7 @@ import type {
   CheckRequest,
 } from "./check-executor.js";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
-import { githubCheckScope, githubScopedRequest } from "./github-check-scope.js";
+import { githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
   GithubExecutorError,
@@ -14,6 +14,12 @@ import {
   type GithubRun,
   sameGithubRun,
 } from "./github-client.js";
+import {
+  discoverUnboundGithub,
+  type GithubCheckContext,
+  githubCheckRunName,
+  githubDispatchIdentity,
+} from "./github-dispatch-discovery.js";
 import type {
   ExternalGithubRun,
   GithubDispatchIntent,
@@ -25,19 +31,10 @@ import { boundedCheckSummary, safeCheckDiagnostic } from "./merge-gate-log.js";
 import { validPushBranch } from "./merge-push-config.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
-/** D2 uses this exact six-input expression for workflow run-name. */
-export function githubCheckRunName(
-  inputs: Readonly<Record<string, string>>,
-): string {
-  return `cardigan/${inputs.card}/${inputs.delivery}/${inputs.attempt}/${inputs.kind}/${inputs.sha}/${inputs.tree}`;
-}
-export interface GithubCheckContext {
-  readonly card: string;
-  readonly delivery: string;
-  readonly baselineBranch: string;
-  /** Called with validated public identity, before onReady. May persist a domain running record. */
-  readonly onExternalRun?: (run: ExternalGithubRun) => void;
-}
+export {
+  type GithubCheckContext,
+  githubCheckRunName,
+} from "./github-dispatch-discovery.js";
 /** D4 owns shared polling, cancellation, log redaction and terminal confirmation. */
 export interface GithubCheckLifecycle {
   /** Only the terminal callback releases the reservation; local failures keep tracking it. */
@@ -63,7 +60,7 @@ export class GithubCheckExecutor implements CheckExecutor {
   >();
   private readonly pending = new Map<
     string,
-    { key: string; work: Promise<CheckHandle> }
+    { key: string; work: Promise<CheckHandle | undefined> }
   >();
   constructor(
     private readonly options: {
@@ -81,19 +78,21 @@ export class GithubCheckExecutor implements CheckExecutor {
       now?: () => number;
     },
   ) {}
-  dispatch(request: CheckRequest): Promise<CheckHandle> {
-    return this.request(request);
+  async dispatch(request: CheckRequest): Promise<CheckHandle> {
+    const handle = await this.request(request);
+    if (!handle) throw new GithubExecutorError("security");
+    return handle;
   }
   recoverAbandoned(
     request: CheckRequest,
     intent: GithubDispatchIntent,
-  ): Promise<CheckHandle> {
+  ): Promise<CheckHandle | undefined> {
     return this.request(request, intent);
   }
   private request(
     request: CheckRequest,
     abandoned?: GithubDispatchIntent,
-  ): Promise<CheckHandle> {
+  ): Promise<CheckHandle | undefined> {
     try {
       request = githubScopedRequest(
         request,
@@ -114,31 +113,12 @@ export class GithubCheckExecutor implements CheckExecutor {
         request.signal?.aborted
       )
         throw new GithubExecutorError("security");
-      const inputs = {
-        sha: request.sha,
-        tree: request.tree,
-        card: context.card,
-        delivery: context.delivery,
-        attempt: request.attempt,
-        kind: request.kind,
-        ...(this.options.config.scopedChecks ? githubCheckScope(request) : {}),
-      };
-      // Cleanup policy is not dispatch identity; preserve existing durable keys.
-      const dispatchConfig = { ...this.options.config };
-      delete dispatchConfig.branchRetentionMs;
-      delete dispatchConfig.queueWaitMs;
-      if (dispatchConfig.scopedChecks === false)
-        delete dispatchConfig.scopedChecks;
-      const key = createHash("sha256")
-        .update(
-          JSON.stringify([
-            dispatchConfig,
-            request.project,
-            context.baselineBranch,
-            inputs,
-          ]),
-        )
-        .digest("hex");
+      const { inputs, key } = githubDispatchIdentity(
+        request,
+        context,
+        this.options.config,
+        abandoned?.key,
+      );
       if (
         abandoned &&
         (abandoned.key !== key ||
@@ -173,7 +153,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     inputs: Record<string, string>,
     key: string,
     abandoned?: GithubDispatchIntent,
-  ): Promise<CheckHandle> {
+  ): Promise<CheckHandle | undefined> {
     let recoveringBound = false;
     let dispatchToken = "";
     try {
@@ -249,17 +229,30 @@ export class GithubCheckExecutor implements CheckExecutor {
               dispatch = this.options.journal.beginDispatch(intent, outcome);
             }
             if (!dispatch) throw new GithubExecutorError("dispatch_unknown");
-            runId = await this.options.client.dispatch(
-              context.baselineBranch,
-              inputs,
-            );
+            try {
+              runId = await this.options.client.dispatch(
+                context.baselineBranch,
+                inputs,
+              );
+            } finally {
+              this.options.journal.settleDispatch(
+                intent,
+                runId,
+                this.options.now?.() ?? Date.now(),
+              );
+            }
           } else throw new GithubExecutorError("recovery_incomplete");
         }
         const now = this.options.now?.() ?? Date.now();
         const interval =
           this.options.config.pollIntervalMs ??
           GITHUB_POLL_DEFAULTS.pollIntervalMs;
-        this.options.journal.beginDiscovery(intent, now, interval, runId);
+        const scanning = this.options.journal.beginDiscovery(
+          intent,
+          now,
+          interval,
+          runId,
+        );
         const deferDiscovery = (): never => {
           if (
             !request.signal?.aborted &&
@@ -286,15 +279,19 @@ export class GithubCheckExecutor implements CheckExecutor {
           if (run.id !== runId) throw new GithubExecutorError("security");
           boundByDispatchId = true;
         } else {
-          const listed = await this.options.client.runs(
-            context.baselineBranch,
-            intent.startedAt,
-            request.signal,
-          );
-          const matches = listed.filter(
-            (candidate) =>
-              candidate.display_title === githubCheckRunName(inputs),
-          );
+          const matches = await discoverUnboundGithub({
+            client: this.options.client,
+            journal: this.options.journal,
+            intent: scanning,
+            key,
+            inputs,
+            branch: context.baselineBranch,
+            config: this.options.config,
+            scanStarted: now,
+            signal: request.signal,
+            finishAs: abandoned ? "automatic" : undefined,
+          });
+          if (!matches) return undefined; // Verified absent; there is no remote handle.
           const match = matches[0];
           if (!matches.length) deferDiscovery();
           if (matches.length !== 1 || !match)

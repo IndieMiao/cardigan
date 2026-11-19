@@ -22,7 +22,15 @@ import {
   setMergeSolo,
   setMergeWindow,
 } from "@cardigan/domain";
-import { loadMergeGateConfig, recheckCheckRecovery } from "@cardigan/host";
+import {
+  GithubBudgetJournal,
+  GithubClient,
+  GithubDispatchJournal,
+  GithubRateLimit,
+  loadMergeGateConfig,
+  recheckCheckRecovery,
+  verifyUndispatched,
+} from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
@@ -50,6 +58,7 @@ const USAGE = [
   "  cardigan merge confirm <C-n> [--quote <原话>] [--yes --reason <理由>]  检查通过后确认；强行确认必须同时提供 --yes 和理由",
   "  cardigan merge hold <C-n> --reason <原因> [--until <带时区时间>] [--quote <原话>]  暂缓合并（到期自动恢复）",
   "  cardigan merge request <C-n>                      旧 hold 之后重新发起合并确认",
+  "  cardigan merge finish-undispatched <C-n> <attempt> [--project <p>]  在线核实并收尾未派发的旧检查（仅人）",
   "  cardigan merge recovery-recheck <登记编号> [--project <p>]  显式重查已结束检查的残留登记（仅人）",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
@@ -128,6 +137,8 @@ export async function runMergeCommand(
       return mergeConfirm(rest, io, "hold");
     case "request":
       return mergeRequest(rest, io);
+    case "finish-undispatched":
+      return finishUndispatched(rest, io);
     case "recovery-recheck":
       return mergeRecoveryRecheck(rest, io);
     case "recheck":
@@ -142,6 +153,89 @@ export async function runMergeCommand(
         EXIT.usage,
         [USAGE],
       );
+  }
+}
+
+async function finishUndispatched(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const { positionals, flags } = parseArgs(args);
+  const [rawCard, attempt] = positionals;
+  const card = cardId(rawCard);
+  if (
+    positionals.length !== 2 ||
+    !attempt ||
+    Object.keys(flags).some((f) => !["project", "data-dir"].includes(f))
+  )
+    throw new CliError("请提供卡片和派发记录的 attempt 编号。", EXIT.usage, [
+      USAGE,
+    ]);
+  const store = open(io, flags);
+  try {
+    const project = resolveProject(store, io, optional(flags, "project"));
+    if (resolveActor(io, project, store).kind !== "human")
+      throw new CliError("派发收尾仅限人类操作。", EXIT.usage);
+    const projects = store.listProjects();
+    const dataDir = resolveDataDir(io, optional(flags, "data-dir"));
+    const branches = Object.fromEntries(
+      projects.map((p) => [p.id, p.base_branch ?? "main"]),
+    );
+    const config = await loadMergeGateConfig({
+      dataDir,
+      projectIds: projects.map((p) => p.id),
+      baseBranches: branches,
+      env: io.env,
+    });
+    const branch = branches[project];
+    const settings = config.forProject(project);
+    const journal = new GithubDispatchJournal(store);
+    const intent = journal
+      .unfinished()
+      .find(
+        (i) =>
+          i.project === project && i.card === card && i.attempt === attempt,
+      );
+    const target = intent?.executor && config.forExecutor?.(intent.executor);
+    if (
+      !branch ||
+      !intent ||
+      !target ||
+      target.type !== "github" ||
+      settings.status === "invalid"
+    )
+      throw new CliError(
+        "找不到可核实的 GitHub 派发登记或其原执行器。",
+        EXIT.usage,
+      );
+    try {
+      await verifyUndispatched(
+        store,
+        journal,
+        intent,
+        settings,
+        target,
+        branch,
+        new GithubClient({
+          config: target,
+          dataDir,
+          rate: new GithubRateLimit(
+            target.restBudgetPerHour,
+            Date.now,
+            new GithubBudgetJournal(store, target.name),
+          ),
+        }),
+      );
+    } catch {
+      throw new CliError(
+        "未能核实该派发已过期且没有匹配的 GitHub 运行，未收尾。",
+        EXIT.usage,
+      );
+    }
+    io.stdout(`已核实未派发并释放占用：${card} / ${attempt}`);
+    return EXIT.ok;
+  } finally {
+    store.close();
   }
 }
 

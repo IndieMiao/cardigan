@@ -100,6 +100,7 @@ export const CLI_TOOLS = {
   "merge hold": null,
   "merge request": null,
   "merge request-changes": null,
+  "merge finish-undispatched": null,
   "merge recheck": null,
   "merge push-accept": null,
   "worktree diff": null,

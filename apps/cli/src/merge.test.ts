@@ -46,7 +46,7 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import { Store, writeRole } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -313,6 +313,7 @@ async function seatAwaitingMerge() {
   return {
     card,
     development,
+    completion,
     confirmation: state().decisions.at(-1) as Decision,
   };
 }
@@ -1211,4 +1212,135 @@ test("human can explicitly recheck a residual registration without reopening the
     ),
   ).not.toBe(0);
   expect(state().events).toHaveLength(before);
+});
+
+test("finish-undispatched verifies the original GitHub workflow online; errors and matches never release the slot", async () => {
+  const { card, completion } = await seatAwaitingMerge();
+  const {
+    GithubCheckExecutor,
+    GithubClient,
+    GithubDispatchJournal,
+    loadMergeGateConfig,
+    githubCheckRunName,
+  } = await import("@cardigan/host");
+  writeFileSync(join(dataDir, "ci.key"), "synthetic", { mode: 0o600 });
+  const cfg = {
+    executors: {
+      ci: {
+        type: "github",
+        repo: "fixture/project",
+        workflow: ".github/workflows/check.yml",
+        app_id: 1,
+        installation_id: 2,
+        private_key_file: "ci.key",
+        bot_login: "fixture[bot]",
+        max_concurrent: 1,
+      },
+    },
+    projects: {
+      [project]: { checks: [{ name: "test", run: "true" }], executor: "ci" },
+    },
+  };
+  writeFileSync(join(dataDir, "merge-gate.yaml"), JSON.stringify(cfg), {
+    mode: 0o600,
+  });
+  const config = (
+    await loadMergeGateConfig({ dataDir, env: io().env })
+  ).forExecutor?.("ci");
+  if (config?.type !== "github") throw new Error("Missing test executor");
+  const attempt = "old-cli-check",
+    tree = "b".repeat(40);
+  apply(
+    (s, a, p) =>
+      recordMergeCheck(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        {
+          card_id: card.id,
+          completion_id: completion.id,
+          attempt_id: attempt,
+          candidate_sha: SHA,
+          tree_sha: tree,
+          status: "queued",
+          executor: { name: "ci", type: "github" },
+        },
+        p,
+      ),
+    { kind: "system", project_id: project },
+  );
+  const journal = new GithubDispatchJournal(store);
+  const request = {
+    kind: "merge_check" as const,
+    project,
+    attempt,
+    sha: SHA,
+    tree,
+    checks: [{ name: "test", run: "true" }],
+  };
+  const executor = new GithubCheckExecutor({
+    config,
+    journal,
+    now: () => Date.parse("2020-01-01T00:00:00Z"),
+    context: () => ({
+      card: card.id,
+      delivery: completion.id,
+      baselineBranch: "main",
+    }),
+    client: {
+      token: async () => "fixture",
+      dispatch: async () => undefined,
+      runs: async () => [],
+      run: vi.fn(),
+    },
+    push: async () => ({ status: "pushed" }),
+    isBaselineAncestor: async () => true,
+    lifecycle: { cancel: vi.fn(), poll: vi.fn(), fetchFailureLog: vi.fn() },
+  });
+  await expect(executor.dispatch(request)).rejects.toMatchObject({
+    retryAt: expect.any(Number),
+  });
+  journal.reconcile([project], () => ({ status: "disabled" }));
+  const cli = () => cardigan("merge", "finish-undispatched", card.id, attempt);
+  const list = vi.spyOn(GithubClient.prototype, "runs");
+  try {
+    list.mockRejectedValueOnce(new Error("partial listing"));
+    expect((await cli()).code).not.toBe(0);
+    expect(journal.admitted()).toHaveLength(1);
+    list.mockResolvedValueOnce([
+      {
+        id: 123,
+        run_attempt: 1,
+        path: config.workflow,
+        event: "workflow_dispatch",
+        head_branch: "main",
+        head_sha: SHA,
+        actor: { login: config.botLogin },
+        html_url: `https://github.com/${config.repo}/actions/runs/123`,
+        created_at: "2020-01-01T00:00:00Z",
+        display_title: githubCheckRunName({
+          sha: SHA,
+          tree,
+          attempt,
+          kind: "merge_check",
+          card: card.id,
+          delivery: completion.id,
+        }),
+      },
+    ]);
+    expect((await cli()).code).not.toBe(0);
+    expect(journal.admitted()).toHaveLength(1);
+    list.mockResolvedValueOnce([]);
+    expect(await cli()).toMatchObject({
+      code: 0,
+      out: expect.stringContaining("已核实未派发"),
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(journal.admitted()).toEqual([]);
+    expect(journal.all()[0]?.undispatched).toMatchObject({
+      source: "human",
+      listed: 0,
+    });
+  } finally {
+    list.mockRestore();
+  }
 });
