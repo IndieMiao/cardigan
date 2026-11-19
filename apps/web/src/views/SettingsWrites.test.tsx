@@ -1106,10 +1106,11 @@ describe("save failure notice lifecycle", () => {
     expect(f.setDelegation).toHaveBeenCalledTimes(1);
     fireEvent.click(tab("偏好"));
     await act(async () => f.write.reject(new TypeError("reply lost")));
-    expect(alerts()).toContain(failed);
-    fireEvent.click(tab("回到设置"));
-    await row();
-    act(() => f.refresh());
+    // Q-928: the read after the write shows the revocation took effect, so
+    // the lost reply is not reported (6531 expected a notice before a manual
+    // refresh confirmed it).
+    expect(alerts()).not.toContain(failed);
+    fireEvent.click(tab("授权"));
     await waitFor(() =>
       expect(
         screen
@@ -1117,7 +1118,7 @@ describe("save failure notice lifecycle", () => {
           .getAttribute("aria-checked"),
       ).toBe("false"),
     );
-    // A fresh server read confirms the requested value; the local error is gone.
+    act(() => f.refresh());
     await waitFor(() => expect(alerts().trim()).toBe(""));
     await act(async () => {
       await new Promise((r) => setTimeout(r, 550));
@@ -1295,4 +1296,315 @@ describe("requests across views", () => {
     expect(alerts()).toContain("publish refused");
     expect(alerts()).toContain("spending refused");
   });
+});
+
+// C-455 review (V-2197, attachment-6556): a read confirming the change voids a
+// later lost reply; a read that started before a write ended is read again.
+describe("results ordered by when reads and writes happened", () => {
+  afterEach(async () => {
+    cleanup();
+    resetSettingWrites();
+    location.hash = "";
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  const settings = "#/p/p-1/settings?tab=authorization";
+  const alerts = () =>
+    screen
+      .queryAllByRole("alert")
+      .map((el) => el.textContent)
+      .join(" ");
+  const row = () => screen.findByRole("switch", { name: /^对外发布/ });
+  const _tab = (s: string) =>
+    screen.getByRole("button", { name: s, exact: true });
+  async function leave() {
+    fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: "设置", exact: true }),
+      ).toBeNull(),
+    );
+  }
+  function setup(applied = false) {
+    location.hash = settings;
+    const write = Promise.withResolvers<void>();
+    let publish = true,
+      stream: StreamCallbacks | undefined;
+    const preferences = vi.fn(async () => {
+      return {
+        auto_merge_after_minutes: null,
+        merge_gate_enabled: true,
+        decision_delegation: { publish },
+      };
+    });
+    const setDelegation = vi.fn(
+      async (_project: string, _category: string, next: boolean) => {
+        if (applied) publish = next;
+        await write.promise;
+      },
+    );
+    render(
+      <App
+        client={fakeClient({
+          preferences,
+          setDelegation,
+          subscribe: (_, s) => {
+            stream = s;
+            s.status("live");
+            return () => {};
+          },
+        })}
+      />,
+    );
+    return {
+      write,
+      preferences,
+      setDelegation,
+      refresh: () =>
+        stream?.change({
+          type: "preferences_updated",
+          stream: "project",
+          seq: 1,
+        }),
+    };
+  }
+  const failed = "未能撤销“对外发布”授权";
+  // One write, then a fresh project read, then a lost write acknowledgement.
+  for (const applied of [false, true])
+    test(`confirmed server read before the old reply rejects: applied=${applied}`, async () => {
+      const f = setup(applied);
+      const sw = await row();
+      expect(sw.getAttribute("aria-checked")).toBe("true");
+      fireEvent.click(sw);
+      expect(f.setDelegation).toHaveBeenCalledTimes(1);
+      f.preferences.mockClear();
+      act(() => f.refresh());
+      await waitFor(() => expect(f.preferences).toHaveBeenCalled());
+      const readBack = await f.preferences.mock.results.at(-1)?.value;
+      expect(readBack.decision_delegation.publish).toBe(!applied);
+      await waitFor(() =>
+        expect(sw.getAttribute("aria-checked")).toBe(String(!applied)),
+      );
+      expect(alerts().trim()).toBe("");
+      await leave();
+      await act(async () => f.write.reject(new TypeError("reply lost")));
+      expect(location.hash).toBe("#/p/p-1/help");
+      expect(f.setDelegation).toHaveBeenCalledTimes(1);
+      if (applied) expect(alerts()).not.toContain(failed);
+      else expect(alerts()).toContain(failed);
+    });
+
+  // The first returned read takes a snapshot while revocation is pending. Only
+  // delivery of that read differs; there are no subsequent edits or stream events.
+  for (const lateRead of [false, true])
+    test(`returned authorization reflects an acknowledged write, slow first snapshot=${lateRead}`, async () => {
+      location.hash = settings;
+      let publish = true,
+        returning = false;
+      const write = Promise.withResolvers<void>(),
+        firstRead = Promise.withResolvers<void>();
+      const returnedReads: boolean[] = [];
+      const preferences = vi.fn(async () => {
+        const snapshot = publish;
+        if (returning) {
+          returnedReads.push(snapshot);
+          if (returnedReads.length === 1) await firstRead.promise;
+        }
+        return {
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          decision_delegation: { publish: snapshot },
+        };
+      });
+      const setDelegation = vi.fn(
+        async (_project: string, _c: string, next: boolean) => {
+          await write.promise;
+          publish = next;
+        },
+      );
+      render(<App client={fakeClient({ preferences, setDelegation })} />);
+      const original = await row();
+      expect(original.getAttribute("aria-checked")).toBe("true");
+      fireEvent.click(original);
+      await leave();
+      returning = true;
+      history.back();
+      await waitFor(() => expect(returnedReads).toEqual([true]));
+      if (!lateRead) {
+        await act(async () => firstRead.resolve());
+        expect((await row()).getAttribute("aria-disabled")).toBe("true");
+      }
+      await act(async () => write.resolve());
+      expect(publish).toBe(false);
+      if (lateRead) await act(async () => firstRead.resolve());
+      await row();
+      expect(setDelegation).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(
+          screen
+            .getByRole("switch", { name: /^对外发布/ })
+            .getAttribute("aria-checked"),
+          `return read snapshots: ${JSON.stringify(returnedReads)}, server: ${publish}`,
+        ).toBe(String(publish)),
+      );
+    });
+});
+
+// C-455 review (V-2198, attachment-6559): the same orders in both directions,
+// and failures taken over by returning rows stay identifiable.
+describe("ordering and identifiable failures after a quick return", () => {
+  const auth = "#/p/p-1/settings?tab=authorization";
+  afterEach(async () => {
+    cleanup();
+    resetSettingWrites();
+    history.replaceState(null, "", "#/p/p-1/cards");
+    await new Promise((r) => setTimeout(r, 40));
+  });
+  const sw = (n: string) =>
+    screen.findByRole("switch", { name: new RegExp(`^${n}`) });
+  const alerts = () =>
+    screen.queryAllByRole("alert").map((el) => el.textContent || "");
+  async function leave() {
+    fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+    await screen.findByRole("heading", { name: "帮助", exact: true });
+  }
+  function setup() {
+    history.replaceState(null, "", auth);
+    const state: Record<string, boolean> = { publish: true, spending: false };
+    const writes: {
+      p: string;
+      c: string;
+      next: boolean;
+      q: ReturnType<typeof Promise.withResolvers<void>>;
+    }[] = [];
+    const reads: Record<string, boolean>[] = [];
+    const gate = Promise.withResolvers<void>();
+    let hold = false,
+      stream: StreamCallbacks | undefined;
+    render(
+      <App
+        client={fakeClient({
+          subscribe: (_, s) => {
+            stream = s;
+            s.status("live");
+            return () => {};
+          },
+          preferences: async () => {
+            const snap = { ...state };
+            reads.push(snap);
+            if (hold) await gate.promise;
+            return {
+              merge_gate_enabled: true,
+              auto_merge_after_minutes: null,
+              decision_delegation: snap,
+            };
+          },
+          setDelegation: async (p, c, next) => {
+            const q = Promise.withResolvers<void>();
+            writes.push({ p, c, next, q });
+            await q.promise;
+            state[c] = next;
+          },
+        })}
+      />,
+    );
+    return {
+      state,
+      writes,
+      reads,
+      hold: () => {
+        hold = true;
+      },
+      release: () => {
+        hold = false;
+        gate.resolve();
+      },
+      refresh: () =>
+        stream?.change({
+          type: "project_preferences_updated",
+          stream: "project",
+          seq: 9,
+        }),
+    };
+  }
+  const network = () => new TypeError("Failed to fetch");
+  for (const readFirst of [true, false])
+    test(`return GET samples before commit, arrives ${readFirst ? "before" : "after"} write completion`, async () => {
+      const f = setup();
+      fireEvent.click(await sw("花钱"));
+      expect(f.writes).toHaveLength(1);
+      await leave();
+      f.hold();
+      history.back();
+      await waitFor(() => expect(f.reads.length).toBe(2));
+      expect(f.reads[1]?.spending).toBe(false);
+      if (readFirst) {
+        await act(async () => f.release());
+        await sw("花钱");
+      }
+      await act(async () => f.writes[0]?.q.resolve());
+      expect(f.state.spending).toBe(true);
+      if (!readFirst) await act(async () => f.release());
+      const row = await sw("花钱");
+      expect(f.writes).toHaveLength(1);
+      // No writes/replay are needed: the returned value must match the committed grant.
+      await waitFor(
+        () =>
+          expect({
+            checked: row.getAttribute("aria-checked"),
+            busy: row.getAttribute("aria-disabled"),
+          }).toEqual({ checked: "true", busy: "false" }),
+        { onTimeout: (e) => e },
+      );
+    });
+  for (const returnFirst of [false, true])
+    test(`both connection failures remain identifiable (back before replies: ${returnFirst})`, async () => {
+      const f = setup();
+      fireEvent.click(await sw("对外发布"));
+      fireEvent.click(await sw("花钱"));
+      expect(f.writes.map((w) => [w.c, w.next])).toEqual([
+        ["publish", false],
+        ["spending", true],
+      ]);
+      await leave();
+      if (returnFirst) {
+        history.back();
+        await sw("对外发布");
+      }
+      await act(async () => {
+        for (const w of f.writes) w.q.reject(network());
+      });
+      const items = screen.queryAllByRole("alert");
+      expect(items).toHaveLength(2);
+      // Accept a named alert, an explicit accessible label, or a visible inline error in its named setting row.
+      const context = items.map((el) =>
+        [
+          el.textContent,
+          el.getAttribute("aria-label"),
+          ...(el.getAttribute("aria-labelledby") ?? "")
+            .split(/\s+/)
+            .map((id) => document.getElementById(id)?.textContent),
+          el.closest("[data-settings-row]")?.textContent,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+      expect(context.some((x) => x.includes("对外发布"))).toBe(true);
+      expect(context.some((x) => x.includes("花钱"))).toBe(true);
+    });
+  for (const applied of [false, true])
+    test(`late response loss after a fresh ${applied ? "confirming" : "nonconfirming"} read and navigation`, async () => {
+      const f = setup();
+      fireEvent.click(await sw("对外发布"));
+      if (applied) f.state.publish = false;
+      act(() => f.refresh());
+      await waitFor(() => expect(f.reads.length).toBeGreaterThanOrEqual(2));
+      const row = await sw("对外发布");
+      await waitFor(() =>
+        expect(row.getAttribute("aria-checked")).toBe(String(!applied)),
+      );
+      await leave();
+      await act(async () => f.writes[0]?.q.reject(network()));
+      expect(f.writes).toHaveLength(1);
+      expect(alerts().some((x) => x.includes("未能撤销"))).toBe(!applied);
+    });
 });

@@ -42,6 +42,32 @@ const subscribe = (listener: () => void) => {
 };
 
 /**
+ * Ordering instead of server versions (C-455, Q-928): a logical clock stamps
+ * when each settings read starts and when each write starts and ends. A read
+ * that started before a setting's last write ended is old for that setting;
+ * the view reads again. A failure is void when a read that started after the
+ * write began already shows its value.
+ */
+let clock = 0;
+const readStarts = new WeakMap<object, number>();
+/** Last write end per project and setting. */
+const writeEnds = new Map<string, number>();
+/** Newest read per project and setting: when it started and what it showed. */
+const confirmed = new Map<string, { at: number; value: unknown }>();
+/** Wraps a settings read so its start can be compared with writes. */
+export function trackSettingsRead<T extends object>(read: Promise<T>) {
+  const at = ++clock;
+  return read.then((data) => {
+    readStarts.set(data, at);
+    return data;
+  });
+}
+const readStart = (source: unknown) =>
+  typeof source === "object" && source !== null
+    ? readStarts.get(source)
+    : undefined;
+
+/**
  * Saves in flight per project and setting, shared by every view of it: a
  * page shown again while the first request runs cannot send a second one.
  * Closing or reloading the tab asks first while any save is in flight.
@@ -58,6 +84,7 @@ function beginSave(key: string) {
 }
 function endSave(key: string) {
   inflight.delete(key);
+  writeEnds.set(key, ++clock);
   if (inflight.size === 0) window.removeEventListener("beforeunload", warn);
   emit();
 }
@@ -86,7 +113,7 @@ export const SettingPlaceContext = createContext<SettingPlace | undefined>(
 interface SaveNotice {
   key: string;
   message: string;
-  /** The server's reason, shown on the row when a view takes the notice over. */
+  /** What failed and why (names the setting), shown on the row when a view takes the notice over. */
   cause: string;
   /** The value that was not saved; a read showing it retires the notice. */
   value: unknown;
@@ -138,6 +165,8 @@ export function SettingsSaveNotice() {
 /** Test isolation only: forget saves and notices a test left behind. */
 export function resetSettingWrites() {
   inflight.clear();
+  writeEnds.clear();
+  confirmed.clear();
   window.removeEventListener("beforeunload", warn);
   reveals.clear();
   notices = [];
@@ -217,16 +246,13 @@ export function useSettingWrite<T>({
   );
   // Busy while any view's request for this project and setting runs.
   const busy = useSyncExternalStore(subscribe, () => inflight.has(key));
-  // When another view's request ends, read again to show its outcome.
-  const wasBusy = useRef(busy);
-  const ownEnded = useRef(false);
+  // Any write of this setting that ended after this view's read started makes
+  // that read old: read again, whichever view wrote and whenever it mounted.
+  const ended = useSyncExternalStore(subscribe, () => writeEnds.get(key) ?? 0);
   useEffect(() => {
-    if (wasBusy.current && !busy) {
-      if (ownEnded.current) ownEnded.current = false;
-      else latest.current.saved();
-    }
-    wasBusy.current = busy;
-  }, [busy]);
+    const at = readStart(source);
+    if (at !== undefined && at < ended) latest.current.saved();
+  }, [ended, source]);
   // A view replaced meanwhile (another project) ignores the response.
   const alive = useRef(true);
   const home = useRef("");
@@ -279,6 +305,10 @@ export function useSettingWrite<T>({
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new read is the trigger.
   useEffect(() => {
     if (!confirmable) return;
+    const at = readStart(source);
+    const known = confirmed.get(key);
+    if (at !== undefined && (!known || at > known.at))
+      confirmed.set(key, { at, value: server });
     // A read showing the value confirms the write even if its response was lost.
     if (pending.current && same(pending.current.value, server))
       pending.current = undefined;
@@ -300,6 +330,7 @@ export function useSettingWrite<T>({
   };
   const save = async (next: T): Promise<boolean> => {
     if (inflight.has(key)) return false;
+    const startedAt = ++clock;
     beginSave(key);
     setError("");
     setMessage("");
@@ -318,10 +349,23 @@ export function useSettingWrite<T>({
       pending.current = undefined;
       setValue(next);
       setMessage(latest.current.success(next));
-      latest.current.saved();
     } catch (thrown) {
-      const text = `${latest.current.failure?.(next) ?? `未能保存“${name}”`}，请回到设置重试`;
-      const cause = describeWriteError(thrown);
+      // A read that started after this write began already shows its value:
+      // the write took effect and only its reply was lost.
+      const read = confirmed.get(key);
+      if (
+        confirmable &&
+        read &&
+        read.at > startedAt &&
+        same(read.value, next)
+      ) {
+        if (alive.current) pending.current = undefined;
+        return true;
+      }
+      const what = latest.current.failure?.(next) ?? `未能保存“${name}”`;
+      const text = `${what}，请回到设置重试`;
+      // Named, so failures shown together stay identifiable.
+      const cause = `${what}：${describeWriteError(thrown)}`;
       const away = !inView();
       if (alive.current) {
         setError(cause);
@@ -344,7 +388,6 @@ export function useSettingWrite<T>({
           panel: place.panel,
         });
     } finally {
-      if (alive.current) ownEnded.current = true;
       endSave(key);
     }
     return ok;

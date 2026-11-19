@@ -34,6 +34,7 @@ import { TemplateSettings } from "./TemplateSettings.js";
 import {
   SettingPlaceContext,
   toggleFailure,
+  trackSettingsRead,
   useNumberDraft,
   useSettingWrite,
 } from "./useSettingWrite.js";
@@ -71,7 +72,7 @@ export function SettingsPage({
   }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
-    () => client.preferences(projectId),
+    () => trackSettingsRead(client.preferences(projectId)),
     [client, projectId],
   );
   const resource = useResource(load, revision);

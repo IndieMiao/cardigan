@@ -1073,9 +1073,11 @@ test("A3b committed response loss, refresh and reverse switches never replay an 
     name: "暂停自动合并",
   });
   fireEvent.click(checkbox);
-  await screen.findByRole("alert");
+  // The write committed; the read after it (C-455, Q-928) shows that, so the
+  // lost response is not reported as a failure.
+  await waitFor(() => expect(on(checkbox)).toBe(true));
   expect(paused).toBe(true);
-  expect(on(checkbox)).toBe(false);
+  expect(screen.queryByRole("alert")).toBeNull();
   view.rerender(<SettingsPage projectId="p-1" client={client} revision={1} />);
   await waitFor(() => expect(on(checkbox)).toBe(true));
   fireEvent.click(checkbox);
