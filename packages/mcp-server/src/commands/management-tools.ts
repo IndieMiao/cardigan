@@ -389,6 +389,10 @@ const schemas = {
       .describe(
         "Additional machine requirements by template work-item key; template defaults and role requirements are retained.",
       ),
+    is_ui_framework: z
+      .boolean()
+      .optional()
+      .describe("界面框架卡；有后续依赖时提醒常驻 PM"),
     depends_on_cards: z
       .array(id("card"))
       .optional()
@@ -440,6 +444,10 @@ const schemas = {
     template_id: text.optional(),
   },
   update_card: {
+    is_ui_framework: z
+      .boolean()
+      .optional()
+      .describe("界面框架卡；有后续依赖时提醒常驻 PM"),
     depends_on_cards: z
       .array(id("card"))
       .optional()
@@ -733,6 +741,7 @@ export function managementTools(clock?: Clock) {
             const {
               state_and_save,
               depends_on_cards,
+              is_ui_framework,
               wait_for_dependencies,
               early_start,
               dependency_reason,
@@ -760,6 +769,7 @@ export function managementTools(clock?: Clock) {
                   ...(depends_on_cards === undefined
                     ? {}
                     : { depends_on_cards }),
+                  ...(is_ui_framework === undefined ? {} : { is_ui_framework }),
                   ...(wait_for_dependencies === undefined
                     ? {}
                     : { wait_for_dependencies }),

@@ -848,3 +848,16 @@ test("UI producers and design directors use the same state and save guideline", 
       expect(rules).toContain(phrase);
   }
 });
+
+test("PM planning splits UI framework from complex writes without splitting ordinary UI", () => {
+  const planning = corePromptFor("pm")
+    .split("## 拆卡和派活")[1]
+    ?.split("## ")[0];
+  for (const requirement of [
+    "页面框架／布局和复杂写入交互",
+    "先合并的框架卡（is_ui_framework=true）",
+    "只需要框架的后续卡只依赖框架卡",
+    "普通界面卡不要求拆分",
+  ])
+    expect(planning).toContain(requirement);
+});

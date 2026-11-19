@@ -15,8 +15,13 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import {
+  DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
+  remindFrameworkWaits,
+} from "./framework-dependencies.js";
 
 export interface CardDependencyInput {
+  readonly is_ui_framework?: boolean;
   readonly depends_on_cards?: readonly CardId[];
   readonly wait_for_dependencies?: boolean;
   readonly early_start?: boolean;
@@ -28,6 +33,8 @@ export function dependencyChangeNotice(
   p: CardDependencyInput,
 ): string {
   const notes = [card.title];
+  if (p.is_ui_framework !== undefined)
+    notes.push(p.is_ui_framework ? "已标记为界面框架卡" : "已取消界面框架标记");
   if (p.depends_on_cards !== undefined)
     notes.push(`前置卡：${card.depends_on_cards?.join("、") || "无"}`);
   if (p.wait_for_dependencies !== undefined)
@@ -72,6 +79,7 @@ export function applyCardDependencies(
   p: CardDependencyInput,
 ): Card {
   if (
+    p.is_ui_framework === undefined &&
     p.depends_on_cards === undefined &&
     p.wait_for_dependencies === undefined &&
     p.early_start === undefined &&
@@ -98,6 +106,14 @@ export function applyCardDependencies(
       "提前开工理由须与标记一同提交",
     );
   let result = card;
+  if (p.is_ui_framework !== undefined) {
+    ensure(
+      typeof p.is_ui_framework === "boolean",
+      "validation_failed",
+      "界面框架标记须为布尔值",
+    );
+    result = { ...result, is_ui_framework: p.is_ui_framework };
+  }
   if (p.depends_on_cards !== undefined) {
     ensure(
       Array.isArray(p.depends_on_cards),
@@ -188,6 +204,7 @@ export function refreshCardDependencies(
   state: CommandState,
   actor: Actor,
   ports: CommandPorts,
+  frameworkWaitReminderMs = DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
 ) {
   return command(state, actor, "refresh_card_dependencies", ports, (d) => {
     if (
@@ -196,6 +213,7 @@ export function refreshCardDependencies(
       )
     )
       return null;
+    remindFrameworkWaits(d, frameworkWaitReminderMs);
     const snapshot = dependencyState(d);
     for (const card of d.list("cards")) {
       if (

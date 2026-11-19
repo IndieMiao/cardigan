@@ -352,3 +352,15 @@ test("C-466: watchdog duration is host-configurable and rejects overflowing time
       resolveServerConfig({ CARDIGAN_MERGE_WATCHDOG_MS: value }),
     ).toThrow("CARDIGAN_MERGE_WATCHDOG_MS");
 });
+
+test("framework dependency reminder accepts a positive host duration", () => {
+  expect(resolveServerConfig({}).frameworkWaitReminderMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS: "60000" })
+      .frameworkWaitReminderMs,
+  ).toBe(60000);
+  for (const value of ["0", "-1", "1.5", "Infinity"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS: value }),
+    ).toThrow("CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS");
+});

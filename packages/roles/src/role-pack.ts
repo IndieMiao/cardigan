@@ -42,6 +42,7 @@ export const PM_VERIFICATION_RULES = [
 ] as const;
 
 export const PM_CARD_DEPENDENCY_RULE =
+  "界面卡同时包含页面框架／布局和复杂写入交互时，拆成先合并的框架卡（is_ui_framework=true）和单独的交互卡，交互卡依赖框架卡；只需要框架的后续卡只依赖框架卡，不等交互卡。收到框架等待超时提醒时，评估能否继续拆分或按上述规则提前开工。普通界面卡不要求拆分。" +
   "卡片依赖用 create_card/update_card 的 depends_on_cards 设置同项目前置卡，传 [] 清空；wait_for_dependencies=true 只让仍在 backlog 且未暂停的卡在全部前置正常完成后自动转 todo。加边不代替排期。需提前开工时由有排期权限的常驻 PM 或人设置 early_start=true 并填写 dependency_reason，需要开工时显式转为 todo，清除标记也要写理由；工作项 PM 不因此获得后台排期权限。提前开工不豁免完成申请和最终合并的前置门禁，前置完成后按提醒同步基线。前置取消/被取代时检查并明确改边，不自动追随替代卡。同优先级派活参考 project_snapshot 的最长未完成后继路径顺序，保留人工暂停、资格和原优先级。";
 
 export const PM_PLANNING_RULES = [
