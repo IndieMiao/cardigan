@@ -53,6 +53,9 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
       "--separate-git-dir",
       join(root, "central/cardigan.git"),
     );
+    const lockfile =
+      "lockfileVersion: '9.0'\nimporters: {}\npackages: {}\nsnapshots: {}\n";
+    await commit("pnpm-lock.yaml", lockfile);
     const supervisor = await commit("package.json", "{}");
     const script = `#!/bin/sh\nfor arg do if [ "$arg" = -C ]; then echo ${supervisor}; exit 0; fi; done\nPATH=\${PATH#*:} exec git "$@"\n`;
     await writeFile(join(bin, "git"), script, { mode: 0o700 });
@@ -87,7 +90,17 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
     );
     const bad = await commit("package.json", "not valid JSON");
     expect(await watch.main()).toBe(bad);
-    expect(actions().every((h) => h.status === "open")).toBe(true);
+    await watch.main();
+    await driver().main();
+    const unknown = () =>
+      store
+        .getUpdates({ project_id: "cardigan" })
+        .events.filter(
+          (e) => e.type === "host_deployment_supervisor_comparison_unavailable",
+        )
+        .map((e) => e.payload);
+    expect(unknown()).toEqual([{ supervisor, main: bad }]);
+    expect(actions().map((h) => h.status)).toEqual(["open", "open"]);
     await commit("package.json", "{}");
     await watch.main();
     expect(actions()).toMatchObject([
@@ -97,6 +110,13 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
       },
       { status: "open" },
     ]);
+    // The lockfile remains valid, but its blob exceeds the bounded Git read. It is not evidence either way.
+    const oversized = await commit(
+      "pnpm-lock.yaml",
+      `${lockfile}#${"x".repeat(2 * 1024 * 1024)}\n`,
+    );
+    await watch.main();
+    expect(actions().map((h) => h.status)).toEqual(["cancelled", "open"]);
     const main = await commit(
       "packages/host/src/deployment-config.ts",
       "config",
@@ -105,8 +125,13 @@ test("watch retires false alarms, retries unknown evidence, and asks exactly onc
     await watch.main();
     await driver().main();
     expect(actions()).toHaveLength(3);
+    expect(unknown()).toEqual([
+      { supervisor, main: bad },
+      { supervisor, main: oversized },
+    ]);
     const current = actions().at(-1);
     expect(current?.status).toBe("open");
+    expect(current?.instructions).not.toContain("pnpm-lock.yaml");
     for (const part of [
       supervisor,
       main,

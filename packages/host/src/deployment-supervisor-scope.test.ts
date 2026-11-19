@@ -67,3 +67,15 @@ test("manifest dependencies and the reachable lock graph, not unrelated importer
   next.packages["child@1"] = { resolution: { integrity: "changed" } };
   expect(await scope("pnpm-lock.yaml", lock, next)).toEqual(["pnpm-lock.yaml"]);
 });
+
+test("an unreadable manifest before a verified dependency change cannot mask that change", async () => {
+  const affected = await supervisorChanges("old", "new", async (args) => {
+    if (args[0] === "diff")
+      return "M\0package.json\0M\0packages/host/package.json\0";
+    if (args.at(-1) === "new:package.json") throw new Error("blob unavailable");
+    return args.at(-1) === "new:packages/host/package.json"
+      ? '{"dependencies":{"yaml":"2"}}'
+      : "{}";
+  });
+  expect(affected).toEqual(["packages/host/package.json"]);
+});

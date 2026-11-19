@@ -369,3 +369,29 @@ export function writeSupervisorComparison(
     );
   });
 }
+
+/** Project activity only: an incomplete comparison is neither a deployment record nor a human action. */
+export function writeSupervisorComparisonUnavailable(
+  store: Store,
+  supervisor: string,
+  main: string,
+) {
+  const type = "host_deployment_supervisor_comparison_unavailable";
+  store.uow.run((tx) => {
+    if (
+      store.database
+        .prepare(`SELECT 1 FROM events WHERE project_id = ? AND type = ? AND card_id IS NULL
+      AND json_extract(doc, '$.payload.supervisor') = ? AND json_extract(doc, '$.payload.main') = ? LIMIT 1`)
+        .get("cardigan", type, supervisor, main)
+    )
+      return;
+    tx.events.append("cardigan", {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence("cardigan"),
+      type,
+      actor: { kind: "system", project_id: "cardigan" },
+      created_at: new Date().toISOString(),
+      payload: { supervisor, main },
+    });
+  });
+}

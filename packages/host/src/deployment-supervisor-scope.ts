@@ -109,6 +109,7 @@ export async function supervisorChanges(
   git: ReadGit,
 ) {
   const affected = new Set<string>();
+  let incomplete = false;
   if (from === to) return [];
   const fields = (
     await git([
@@ -142,12 +143,17 @@ export async function supervisorChanges(
           path === "pnpm-lock.yaml"
             ? lockProjection
             : (text: string) => manifest(text, !dir);
-        const [before, after] = await Promise.all(
-          [from, to].map(async (sha) =>
-            project(await git(["cat-file", "blob", `${sha}:${path}`])),
-          ),
-        );
-        if (isDeepStrictEqual(before, after)) continue;
+        try {
+          const [before, after] = await Promise.all(
+            [from, to].map(async (sha) =>
+              project(await git(["cat-file", "blob", `${sha}:${path}`])),
+            ),
+          );
+          if (isDeepStrictEqual(before, after)) continue;
+        } catch {
+          incomplete = true;
+          continue; // Other files can still independently prove the supervisor needs an upgrade.
+        }
       }
       affected.add(path);
     } else if (
@@ -159,5 +165,8 @@ export async function supervisorChanges(
       affected.add(dir);
     } else if (path === "tsconfig.base.json") affected.add(path);
   }
+  // Only a complete negative comparison can retire the running version's notice.
+  if (incomplete && !affected.size)
+    throw new Error("Incomplete supervisor comparison");
   return [...affected].sort();
 }

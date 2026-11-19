@@ -33,6 +33,7 @@ import {
   writeDeploymentStop,
   writeServerLogAudit,
   writeSupervisorComparison,
+  writeSupervisorComparisonUnavailable,
 } from "./deployment-audit.js";
 import {
   acquireDeploymentCapacity,
@@ -486,9 +487,19 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         this.checkedSupervisorMain = sha;
       } catch {
         // An unavailable comparison is neither upgrade evidence nor proof that an open notice is obsolete.
-        if (this.failedSupervisorMain !== sha)
+        if (this.failedSupervisorMain !== sha) {
           console.warn("未能核对部署监督器差异；保留现有提醒，下轮重试");
-        this.failedSupervisorMain = sha;
+          try {
+            writeSupervisorComparisonUnavailable(
+              this.options.store,
+              supervisor,
+              sha,
+            );
+            this.failedSupervisorMain = sha;
+          } catch {
+            // Retry a failed audit too; notice bookkeeping must not block deployment.
+          }
+        }
       }
     }
     return sha;
