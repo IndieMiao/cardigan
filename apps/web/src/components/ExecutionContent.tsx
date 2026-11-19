@@ -1,4 +1,6 @@
 import {
+  HARNESS_CATALOG,
+  isHarness,
   sessionMaintenanceNeedsAttention,
   sessionMaintenanceReasons,
 } from "@cardigan/domain";
@@ -127,15 +129,12 @@ export function RunLine({ run }: { readonly run: RunView }) {
   );
 }
 const NONE = "—";
-const harnessLabel: Readonly<Record<string, string>> = {
-  "claude-code": "claude",
-  codex: "codex",
-  pi: "pi",
-};
 /** C-106: the Harness; unknown or missing shows "—". */
 export function runHarness(run: RunView | undefined): string {
   if (!run?.harness) return NONE;
-  return harnessLabel[run.harness] ?? run.harness;
+  return isHarness(run.harness)
+    ? HARNESS_CATALOG[run.harness].displayName
+    : run.harness;
 }
 /** C-106: "model / effort"; an unknown part shows "—". */
 export function runModelEffort(run: RunView | undefined): string {

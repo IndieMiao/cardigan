@@ -197,6 +197,14 @@ export { eventById, eventsOfType } from "./event-index.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";
+export {
+  type AgentBinary,
+  HARNESS_CATALOG,
+  HARNESSES,
+  type Harness,
+  isAgentBinary,
+  isHarness,
+} from "./harness.js";
 export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";

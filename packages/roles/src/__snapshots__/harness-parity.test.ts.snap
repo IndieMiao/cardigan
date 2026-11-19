@@ -1,0 +1,179 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`claude-code LP-2 launch parity 1`] = `
+{
+  "args": [
+    "--settings",
+    "/fixture/run/cardigan-assignment.selected.claude-settings.json",
+    "--model",
+    "example",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "/fixture/run/mcp.json",
+    "--append-system-prompt-file",
+    "/fixture/run/core.md",
+    "--allowedTools",
+    "mcp__card__whoami",
+    "--",
+  ],
+  "browser": false,
+  "command": "claude",
+  "env": {
+    "CLAUDE_CONFIG_DIR": "/fixture/run/claude",
+    "DISABLE_AUTOUPDATER": "1",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/fixture/work",
+  },
+  "files": [
+    {
+      "mode": 384,
+      "path": "/fixture/run/core.md",
+      "sha256": "8aa8b265c1cfc7563f9c3b70400816a835cc888c194b31c0c71da85ae6f1f19b",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/first.md",
+      "sha256": "b088e4e28d5fc7c19be3971d64460de6a54c58cac82756fa7d73b7753d9acb1a",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/cardigan-assignment.selected.claude-settings.json",
+      "sha256": "8fb9ceeb5b7f2715a1eb9817f8aa8091f3eb018a2ea39637a8e927add87d81fc",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/mcp.json",
+      "sha256": "0fcb4c7da0327ea5986b192ae77c66cb77d86f6d9a8699b23a095102eeeb0a6c",
+    },
+    {
+      "mode": 448,
+      "path": "/fixture/run/launch.sh",
+      "sha256": "e0412437a842a30bef61edf100848bdb289db02b14d58d400facd3195450411d",
+    },
+  ],
+  "harness": "claude-code",
+  "launch_script": "/fixture/run/launch.sh",
+  "mcp_tool_names": [
+    "mcp__card__whoami",
+  ],
+  "profile": "selected",
+  "role_id": "coder",
+  "secret_env": {},
+  "token_file": "/fixture/run/token",
+}
+`;
+
+exports[`codex LP-2 launch parity 1`] = `
+{
+  "args": [
+    "-m",
+    "example",
+  ],
+  "browser": false,
+  "command": "codex",
+  "env": {
+    "CODEX_HOME": "/fixture/run/codex",
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/fixture/work",
+  },
+  "files": [
+    {
+      "mode": 384,
+      "path": "/fixture/run/core.md",
+      "sha256": "8aa8b265c1cfc7563f9c3b70400816a835cc888c194b31c0c71da85ae6f1f19b",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/first.md",
+      "sha256": "b088e4e28d5fc7c19be3971d64460de6a54c58cac82756fa7d73b7753d9acb1a",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/codex/config.toml",
+      "sha256": "2da31d0a0f7d44040a6fb62c173b4cfba1f5887199737f634c9dac885dc32da4",
+    },
+    {
+      "mode": 448,
+      "path": "/fixture/run/launch.sh",
+      "sha256": "3a38b40976953e1eb1cc714bd19e65edfc4bd9aa5e4b5333cf83efb20d4d4514",
+    },
+  ],
+  "harness": "codex",
+  "launch_script": "/fixture/run/launch.sh",
+  "mcp_tool_names": [
+    "mcp__card__whoami",
+  ],
+  "profile": "selected",
+  "role_id": "coder",
+  "secret_env": {},
+  "token_file": "/fixture/run/token",
+}
+`;
+
+exports[`pi LP-2 launch parity 1`] = `
+{
+  "args": [
+    "--model",
+    "example",
+    "--append-system-prompt",
+    "/fixture/run/core.md",
+  ],
+  "browser": false,
+  "command": "pi",
+  "env": {
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "safe.directory",
+    "GIT_CONFIG_KEY_1": "safe.directory",
+    "GIT_CONFIG_VALUE_0": "",
+    "GIT_CONFIG_VALUE_1": "/fixture/work",
+    "PI_CODING_AGENT_DIR": "/fixture/run/pi",
+  },
+  "files": [
+    {
+      "mode": 384,
+      "path": "/fixture/run/core.md",
+      "sha256": "8aa8b265c1cfc7563f9c3b70400816a835cc888c194b31c0c71da85ae6f1f19b",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/first.md",
+      "sha256": "b088e4e28d5fc7c19be3971d64460de6a54c58cac82756fa7d73b7753d9acb1a",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/pi/mcp.json",
+      "sha256": "5a00f203115288a6663f12d6ca69db3571f2bae7135142037418f2f4cfca8d05",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/pi/extensions/cardigan-context-usage.js",
+      "sha256": "61288084ca22eb90e09005c64d69744e679d00095bc20fc8ceb9c4b47ad5de92",
+    },
+    {
+      "mode": 384,
+      "path": "/fixture/run/pi/trust.json",
+      "sha256": "d76ebf6a4233eea32d566a08011634fd5c6b8e698075022ee067b4053218ab32",
+    },
+    {
+      "mode": 448,
+      "path": "/fixture/run/launch.sh",
+      "sha256": "eaf0075b65527bf87813342778aa84f0a817b6ec58b1446d274c8b1fafb23671",
+    },
+  ],
+  "harness": "pi",
+  "launch_script": "/fixture/run/launch.sh",
+  "mcp_tool_names": [
+    "mcp__card__whoami",
+  ],
+  "profile": "selected",
+  "role_id": "coder",
+  "secret_env": {},
+  "token_file": "/fixture/run/token",
+}
+`;

@@ -35,6 +35,7 @@ import type {
   RuntimeWakeOptions,
   RuntimeWakeResult,
 } from "@cardigan/domain";
+import { type AgentBinary, isAgentBinary } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
 import {
   type GovernedHcClient,
@@ -529,7 +530,7 @@ export class HerdrRuntime implements Runtime {
   }
   /** Host orchestration only: run Git or inspect an installed Agent CLI as agent. */
   async captureAgent(
-    command: "git" | "claude" | "codex" | "pi",
+    command: "git" | AgentBinary,
     args: readonly string[],
     timeoutMs?: number,
   ): Promise<
@@ -545,7 +546,7 @@ export class HerdrRuntime implements Runtime {
     const captured = await result(async () => {
       if (
         this.execution.mode !== "agent-ssh" ||
-        !["git", "claude", "codex", "pi"].includes(command)
+        (command !== "git" && !isAgentBinary(command))
       )
         fail(
           "invalid_launch",

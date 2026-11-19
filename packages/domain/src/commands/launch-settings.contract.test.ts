@@ -1,5 +1,12 @@
 import { beforeEach, expect, test } from "vitest";
-import { acknowledgeRun, dispatchRun, finishRun, queueRun } from "../index.js";
+import {
+  acknowledgeRun,
+  dispatchRun,
+  finishRun,
+  HARNESSES,
+  type Harness,
+  queueRun,
+} from "../index.js";
 import { CommandDraft } from "./core.js";
 import {
   actor,
@@ -19,7 +26,7 @@ const runOf = (runId: string) => f.state.runs.find((r) => r.id === runId);
 const launch = (
   runId: string,
   settings: {
-    harness?: "claude-code" | "codex" | "pi";
+    harness?: Harness;
     effort?: string;
     launch_fingerprint?: string;
   },
@@ -77,8 +84,22 @@ test("C-106 invariant 12: queueRun records the launch settings snapshot beside t
   expect(runOf(bare.id)).not.toHaveProperty("effort");
 });
 
+test.each(HARNESSES)(
+  "LP-3 invariant 12: dispatch preserves registered harness %s in the Run snapshot",
+  (harness) => {
+    const run = commit(queue());
+    launch(run.id, { harness });
+    expect(runOf(run.id)?.harness).toBe(harness);
+  },
+);
+
 test("C-106: invalid launch settings are rejected", () => {
-  for (const settings of [{ harness: "vim" }, { effort: " " }]) {
+  for (const settings of [
+    { harness: "vim" },
+    { harness: "toString" },
+    { harness: "claude" },
+    { effort: " " },
+  ]) {
     const result = queueRun(
       f.state,
       human,
