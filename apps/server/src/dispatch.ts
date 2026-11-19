@@ -24,7 +24,6 @@ import {
   dispatchRun,
   dispatchRunKind,
   dispatchTier,
-  eventById,
   expireMergeSnoozes,
   type HarnessActivity,
   hasRunTarget,
@@ -43,7 +42,6 @@ import {
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
-  reviewWakeBlocked,
   runnableQueuedRun,
   runsOf,
   standingRunDormant,
@@ -1709,17 +1707,8 @@ export class Dispatcher {
   ) {
     if (job.run.status !== "running")
       return (
-        !(
-          owner.scope === "work_item" &&
-          reviewWakeBlocked(
-            state,
-            eventById(state.events, run.trigger_event_id),
-            owner.work_item_id,
-            true,
-          )
-        ) &&
-        (["queued", "dispatched"].includes(run.status) ||
-          (run.status === "completed" && job.run.status === "completed"))
+        ["queued", "dispatched"].includes(run.status) ||
+        (run.status === "completed" && job.run.status === "completed")
       );
     if (
       this.closing ||

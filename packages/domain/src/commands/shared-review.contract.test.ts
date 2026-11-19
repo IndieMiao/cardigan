@@ -37,6 +37,16 @@ test.each([2, 3])(
     expect(f.decide(other, "raise_limit").ok).toBe(true);
     expect(f.decide(n, "raise_limit").ok).toBe(false);
     expect(
+      f.state.events
+        .filter((e) => e.type === "decision_resolved")
+        .map((e) => e.payload),
+    ).toMatchObject([
+      { rework_work_item_id: f.target.work_item_id, resume_work_items: [] },
+    ]);
+    expect(b.issues.map((i) => i.finding_id).sort()).toEqual(
+      a.issues.map((i) => i.finding_id).sort(),
+    );
+    expect(
       f.state.work_items
         .filter((w) => w.kind === "verify")
         .map((w) => [w.status, w.kind === "verify" && w.max_review_rounds]),

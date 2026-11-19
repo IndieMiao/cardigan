@@ -15,7 +15,10 @@ import {
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
-import { reviewWakeBlocked } from "../shared-review-wake.js";
+import {
+  reviewRunWakeDisposition,
+  reviewWakeBlocked,
+} from "../shared-review-wake.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
 import {
@@ -97,7 +100,6 @@ function checkReviewWake(
   state: CommandState,
   a: Assignment,
   trigger?: EventId,
-  alreadyQueued = false,
 ) {
   if (a.scope === "work_item" && trigger)
     ensure(
@@ -105,7 +107,6 @@ function checkReviewWake(
         state,
         eventById(state.events, trigger),
         a.work_item_id,
-        alreadyQueued,
       ),
       "illegal_transition",
       "审核已暂停返工或目标已变更，请等待当前任务",
@@ -500,7 +501,11 @@ export function dispatchRun(
       "illegal_transition",
       "验证工作项尚无当前可审交付，请等待交付后再启动",
     );
-    checkReviewWake(state, assignment, run.trigger_event_id, true);
+    ensure(
+      !reviewRunWakeDisposition(state, assignment, run),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
+    );
     snapshot(run, assignment);
     const status = unwrap(transition("run", run.status, "dispatch"));
     const ref = p.runtime_ref ?? assignment.runtime_ref;
@@ -701,6 +706,11 @@ export function acknowledgeRun(
         recoveryTargetCurrent(state, run),
       "stale_target",
       "Automatic recovery business target changed",
+    );
+    ensure(
+      !reviewRunWakeDisposition(state, assignment, run),
+      "illegal_transition",
+      "审核已暂停返工或目标已变更，请等待当前任务",
     );
     requireTestReviewBudget(d, assignment);
     exclusive(d, assignment, run.id);

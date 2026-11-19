@@ -1,8 +1,8 @@
 import type { CommandState } from "./commands/core.js";
 import { latestMergeCheck } from "./commands/merge-check.js";
 import type { Assignment, Event, Run } from "./entities.js";
-import { eventById } from "./event-index.js";
 import { runById } from "./run-index.js";
+import { originalRunTrigger } from "./run-trigger.js";
 
 type DispatchState = Pick<
   CommandState,
@@ -39,41 +39,6 @@ export function dispatchRunKind(
     : "followup";
 }
 
-/** Recovery preserves provenance only through fully bound host records. */
-function originalTrigger(state: DispatchState, run: Run): Event | undefined {
-  let source = run;
-  let event = eventById(state.events, source.trigger_event_id);
-  const visited = new Set<string>();
-  while (
-    event &&
-    [
-      "run_dispatch_recovered",
-      "run_preparation_recovered",
-      "host_ops_action_finished",
-    ].includes(event.type)
-  ) {
-    if (visited.has(event.id)) return undefined;
-    visited.add(event.id);
-    const p = event.payload as Record<string, unknown> | null;
-    const host = event.type === "host_ops_action_finished";
-    const previous = runById(state.runs, host ? p?.previous_run_id : p?.run_id);
-    if (
-      event.actor.kind !== "system" ||
-      event.actor.project_id !== state.project_id ||
-      p?.assignment_id !== source.assignment_id ||
-      (host ? p?.run_id : p?.replacement_run_id) !== source.id ||
-      !previous ||
-      previous.assignment_id !== source.assignment_id ||
-      previous.kind !== source.kind ||
-      previous.trigger_event_id !== p?.original_trigger_event_id
-    )
-      return undefined;
-    source = previous;
-    event = eventById(state.events, source.trigger_event_id);
-  }
-  return event;
-}
-
 /** Ranking only: callers must still apply every existing eligibility fence. */
 export function dispatchTier(
   state: DispatchState,
@@ -87,7 +52,7 @@ export function dispatchTier(
       ? state.work_items.find((w) => w.id === assignment.work_item_id)
       : undefined;
   if (item) {
-    const cause = run ? originalTrigger(state, run) : trigger;
+    const cause = run ? originalRunTrigger(state, run) : trigger;
     const p = cause?.payload as Record<string, unknown> | null | undefined;
     const completion = state.deliveries.find(
       (d) => d.id === p?.completion_id && d.kind === "card_completion",

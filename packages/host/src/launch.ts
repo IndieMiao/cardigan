@@ -1051,7 +1051,13 @@ async function launch(
         ),
     });
     publication?.update("dispatched", { runtime_ref: dispatchRef });
-    if (publication || input.run.recovery_policy) requireTarget();
+    if (
+      publication ||
+      input.run.recovery_policy ||
+      input.run.kind === "rework" ||
+      input.run.kind === "decision_resumed"
+    )
+      requireTarget();
 
     // Only now may the wrapper start the Agent (M2 §4 step 5–8).
     step = "sentinel write";

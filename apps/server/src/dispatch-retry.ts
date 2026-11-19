@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
   type Assignment,
-  assignmentCardHeld,
   type Clock,
   type CommandEffect,
   type CommandState,
@@ -21,8 +20,10 @@ import {
   recoverDispatch,
   recoveryChainUsed,
   refreshRunTargetWait,
+  retireObsoleteQueuedRun,
   retireRecoveryQueuedRun,
-  retireUnreadableQueuedRun,
+  reviewRunWakeDisposition,
+  runTargetWaitReason,
   startDispatchStop,
   stoppedByHuman,
   unreadableCommentTrigger,
@@ -339,7 +340,10 @@ export async function retryDispatchedRuns(
     }
     if (
       candidate.status === "queued" &&
-      unreadableCommentTrigger(candidates, candidate)
+      (unreadableCommentTrigger(candidates, candidate) ||
+        (owner &&
+          reviewRunWakeDisposition(candidates, owner, candidate) ===
+            "obsolete"))
     ) {
       store.uow.run((tx) => {
         if (
@@ -352,7 +356,7 @@ export async function retryDispatchedRuns(
           tx,
           project,
           unwrap(
-            retireUnreadableQueuedRun(
+            retireObsoleteQueuedRun(
               loadState(tx, project),
               actor,
               { run_id: candidate.id },
@@ -411,28 +415,15 @@ export async function retryDispatchedRuns(
     }
     if (!["dispatched", "queued"].includes(candidate.status)) continue;
     if (
-      (candidate.dispatch_target_wait ||
-        (owner &&
-          (!hasRunTarget(owner, candidates) ||
-            (candidate.status === "queued" &&
-              assignmentCardHeld(
-                owner,
-                candidates,
-                candidate.trigger_event_id,
-              ))))) &&
+      (candidate.dispatch_target_wait?.since ||
+        (owner && runTargetWaitReason(candidates, owner, candidate))) &&
       refreshTargetWait(store, project, candidate.id, clock)
     )
       continue;
     const inspect = (state = read(), tx?: StoreTransactionContext) => {
       const run = state.runs.find((r) => r.id === candidate.id);
       const a = state.assignments.find((a) => a.id === run?.assignment_id);
-      if (
-        run &&
-        a &&
-        (!hasRunTarget(a, state) ||
-          (run.status === "queued" &&
-            assignmentCardHeld(a, state, run.trigger_event_id)))
-      ) {
+      if (run && a && runTargetWaitReason(state, a, run)) {
         // Persist the pause at the observation, including after awaited status.
         // A restart must not count the intervening target wait as a timeout.
         if (tx)
@@ -509,7 +500,7 @@ export async function retryDispatchedRuns(
         a,
         failures,
         recover,
-        retry: retry && !unreadable,
+        retry: retry && !unreadable && !reviewRunWakeDisposition(state, a, run),
         at,
         last,
       };
@@ -520,7 +511,12 @@ export async function retryDispatchedRuns(
       const used =
         dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
         recoveryChainUsed(observed.state, observed.run);
-      if (used && !unreadableCommentTrigger(observed.state, observed.run))
+      if (
+        used &&
+        !unreadableCommentTrigger(observed.state, observed.run) &&
+        reviewRunWakeDisposition(observed.state, observed.a, observed.run) !==
+          "obsolete"
+      )
         store.uow.run((tx) => {
           const current = inspect(loadState(tx, project), tx);
           if (current?.recover)

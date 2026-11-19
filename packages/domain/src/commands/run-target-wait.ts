@@ -1,7 +1,8 @@
 import { assignmentCardHeld } from "../card-hold.js";
-import type { Actor, Run } from "../entities.js";
+import type { Actor, Assignment, Run } from "../entities.js";
 import type { RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewRunWakeDisposition } from "../shared-review-wake.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 
 export function dispatchTargetWaitMs(run: Run, now: string): number {
@@ -10,6 +11,22 @@ export function dispatchTargetWaitMs(run: Run, now: string): number {
     (wait?.elapsed_ms ?? 0) +
     (wait?.since ? Math.max(0, Date.parse(now) - Date.parse(wait.since)) : 0)
   );
+}
+
+export function runTargetWaitReason(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  if (
+    run.status === "queued" &&
+    assignmentCardHeld(owner, state, run.trigger_event_id)
+  )
+    return "card_held";
+  if (!hasRunTarget(owner, state)) return "review_target_unavailable";
+  if (reviewRunWakeDisposition(state, owner, run) === "paused")
+    return "shared_review_paused";
+  return undefined;
 }
 
 /** Recheck target waits without changing Run status, review budget or delivery history. */
@@ -26,15 +43,13 @@ export function refreshRunTargetWait(
       owner.scope === "work_item"
         ? d.get("work_items", owner.work_item_id).card_id
         : undefined;
-    const held =
-      run.status === "queued" &&
-      assignmentCardHeld(owner, state, run.trigger_event_id);
+    const reason = runTargetWaitReason(state, owner, run);
     if (p.withdrawn_attempt_id)
       d.emit("run_dispatch_deferred", card, {
         run_id: run.id,
         assignment_id: owner.id,
         attempt_id: p.withdrawn_attempt_id,
-        reason: held ? "card_held" : "review_target_unavailable",
+        reason: reason ?? "review_target_unavailable",
       });
     if (
       !["queued", "dispatched"].includes(run.status) ||
@@ -43,7 +58,7 @@ export function refreshRunTargetWait(
       run.inactivity_stop
     )
       return false;
-    const waiting = held || !hasRunTarget(owner, state);
+    const waiting = reason !== undefined;
     if (waiting && !run.dispatch_target_wait?.since) {
       d.put("runs", {
         ...run,
@@ -68,6 +83,10 @@ export function refreshRunTargetWait(
         assignment_id: owner.id,
       });
     }
-    return waiting;
+    // A superseded target also cannot be sent, but must not freeze the
+    // recovery clock: ordinary fenced cleanup can retire the obsolete Run.
+    return (
+      waiting || reviewRunWakeDisposition(state, owner, run) === "obsolete"
+    );
   });
 }

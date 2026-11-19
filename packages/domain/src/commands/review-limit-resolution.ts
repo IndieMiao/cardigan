@@ -1,7 +1,7 @@
 import type { Decision, WorkItem } from "../entities.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
-import { sharedReworkItem } from "../shared-review-wake.js";
+import { dispatchedRepair, sharedReworkItem } from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { verificationTarget } from "../verification-activity.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
@@ -292,6 +292,14 @@ export function recordDecisionResolution(
             q,
           )
         : undefined;
+    const pendingRepair =
+      rework &&
+      q.review_limit_group &&
+      dispatchedRepair(
+        { ...d.state, decisions: d.list("decisions") },
+        rework,
+        q.review_limit_group.delivery_id,
+      );
     const event = d.emit(
       result.status === "provisional"
         ? "decision_provisionally_resolved"
@@ -341,7 +349,11 @@ export function recordDecisionResolution(
           ? { merge_override: resolution.merge_override }
           : {}),
         status: result.status,
-        ...(rework ? { rework_work_item_id: rework.id } : {}),
+        ...(pendingRepair
+          ? { rework_run_id: pendingRepair.id }
+          : rework
+            ? { rework_work_item_id: rework.id }
+            : {}),
         resume_work_items: unblocked.map((w) => w.id),
       },
       {
