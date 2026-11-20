@@ -15,7 +15,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 
-export { acquireHcFileSlot as acquireHostFileSlot } from "./call-lock-helper.js";
 export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
 export * from "./worker-files.js";

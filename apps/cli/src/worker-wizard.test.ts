@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -9,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { toolNames } from "@cardigan/domain";
 import {
   type CapabilityProbe,
@@ -20,6 +23,8 @@ import {
 import { readMachineObservations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
+import { MachineChecks } from "../../server/src/web/machine-checks.js";
+import { machineHost } from "../../server/src/web/machine-host.js";
 import { CLI_TOOLS, requireCliTool } from "./command-access.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -253,6 +258,106 @@ test("worker check reports a failed capability refresh instead of claiming succe
     store.close();
   }
 });
+
+test.skipIf(process.platform !== "linux")(
+  "Web joins a live CLI worker by id and reports its final capability failure; the second CLI fails busy",
+  async () => {
+    await bootstrap();
+    expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+      0,
+    );
+    writeFileSync(
+      join(configRoot, "machine-capabilities.yaml"),
+      "version: 1\ncapabilities:\n  node:\n    check: [echo, forged]\n",
+      { mode: 0o600 },
+    );
+    const dataDir = join(root, "data");
+    const store = Store.open({ dataDir });
+    const host = machineHost(store, { mode: "local", dataDir }, "test", io.env);
+    const check = vi.fn(host.check);
+    const checks = new MachineChecks(
+      store,
+      { now: () => new Date().toISOString() },
+      new AbortController().signal,
+      { ...host, check },
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../test-support/held-worker-check.mjs", import.meta.url),
+        ),
+        ...args,
+      ],
+      {
+        env: { ...io.env, PATH: process.env.PATH },
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 20_000,
+      },
+    );
+    const closed = once(child, "close");
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (s) => {
+      stderr += s;
+    });
+    child.stdout.resume();
+    const latest = () => checks.latest("worker-a", "example", "worker");
+    try {
+      await vi.waitFor(
+        () =>
+          expect(latest()).toMatchObject({ status: "running", step: "ssh" }),
+        { timeout: 10_000 },
+      );
+      const actual = latest();
+      const joined = checks.start(
+        "example",
+        "worker-a",
+        "machine",
+        () => "fixture-human",
+      );
+      expect(joined).toEqual(actual);
+      expect(host.workerRecord("example", "worker-a")).toMatchObject({
+        status: "checking",
+      });
+      const secondProbe = vi.fn(async () => true);
+      await expect(
+        runWorkerCommand(["check", ...args], io, secondProbe),
+      ).rejects.toThrow("worker_busy");
+      expect(secondProbe).not.toHaveBeenCalled();
+      child.stdin.end("release\n");
+      expect(await closed).toEqual([1, null]);
+      expect(stderr).toContain("worker_capability_check_failed");
+      await checks.settled();
+      expect(check).not.toHaveBeenCalled();
+      const final = checks.read("worker-a", joined.id);
+      expect(final).toMatchObject({
+        kind: "worker",
+        status: "failed",
+        failed_steps: ["capabilities"],
+      });
+      expect(latest()).toEqual(final);
+      expect(host.workerRecord("example", "worker-a")).toEqual({
+        status: "failed",
+        checked_at: final?.checked_at,
+        failed_steps: ["capabilities"],
+      });
+      expect(
+        store.uow.read((tx) => tx.global_events.listAfter(0)),
+      ).toContainEqual(
+        expect.objectContaining({
+          type: "machine_check_joined",
+          payload: expect.objectContaining({ check_id: joined.id }),
+        }),
+      );
+    } finally {
+      child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+      store.close();
+    }
+  },
+  30_000,
+);
 
 test("dry-run has no filesystem, database or process side effects even with nonexistent configuration", async () => {
   const probe = vi.fn(async () => true);

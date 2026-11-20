@@ -3,7 +3,7 @@ import { effectiveRunLimit, type ReadResourceLimits } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 import { machineObservationView } from "./execution-state.js";
 import type { MachineHost } from "./machine-host.js";
-import { readDocs } from "./sql-state.js";
+import { inIds, readDocs } from "./sql-state.js";
 
 export interface MachineViewOptions {
   readonly checks: import("./machine-checks.js").MachineChecks;
@@ -48,6 +48,11 @@ export function machineView(
         "runs",
         "json_extract(doc,'$.status') IN ('running','acked','dispatched')",
       );
+      const triggers = new Map(
+        readDocs(store, p.id, "events", inIds("id"), [
+          JSON.stringify(runs.map((r) => r.trigger_event_id)),
+        ]).map((e) => [e.id, e.card_id]),
+      );
       return registrations.map((m) => {
         const observed = machineObservationView(store, p.id, m, now);
         const assignments = active
@@ -66,7 +71,12 @@ export function machineView(
               card_id: work?.card_id ?? null,
               runs: runs
                 .filter((r) => r.assignment_id === a.id)
-                .map((r) => ({ id: r.id, status: r.status })),
+                .map((r) => ({
+                  id: r.id,
+                  status: r.status,
+                  card_id:
+                    work?.card_id ?? triggers.get(r.trigger_event_id) ?? null,
+                })),
             };
           });
         return {

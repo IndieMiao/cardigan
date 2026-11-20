@@ -7,8 +7,17 @@ import {
   Store,
 } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
+import {
+  assignment,
+  card,
+  fixture,
+  run,
+} from "../../../../packages/domain/src/commands/test-fixtures.js";
+import { event } from "../../../../packages/store/src/test-support.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { MachineChecks } from "./machine-checks.js";
 import { type MachineHost, machineHost } from "./machine-host.js";
+import { machineView } from "./machine-view.js";
 
 test("global read, atomic drain/resume, authenticated single-flight checks and durable results", async () => {
   const gate = Promise.withResolvers<void>();
@@ -281,6 +290,7 @@ test("host adapter projects a private worker binding and reads a blocked worker 
         "worker",
         (step) => steps.push(step),
         new AbortController().signal,
+        "fixture-check",
       );
       expect(steps).toEqual(["configuration", "registration"]);
       expect(result).toEqual({
@@ -296,5 +306,54 @@ test("host adapter projects a private worker binding and reads a blocked worker 
   } finally {
     store.close();
     await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("active runs use the work item's card, then their own trigger's card, otherwise null", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    const project = "example";
+    store.createProject({ id: project });
+    store.uow.run((tx) => {
+      const triggerCard = card(8);
+      tx.cards.put(project, { ...triggerCard, project_id: project });
+      const work = fixture().work_items[0];
+      if (!work) throw new Error("missing work item");
+      tx.work_items.put(project, work);
+      tx.assignments.put(project, assignment(1));
+      const { work_item_id: _work, ...standing } = assignment(2, "pm");
+      tx.assignments.put(project, { ...standing, scope: "standing" });
+      const fromCard = event({ seq: 1, card_id: triggerCard.id });
+      const { card_id: _card, ...fromProject } = event({ seq: 2 });
+      for (const trigger of [fromCard, fromProject])
+        tx.events.append(project, trigger);
+      tx.runs.put(project, { ...run(1, 1), trigger_event_id: fromCard.id });
+      tx.runs.put(project, { ...run(2, 2), trigger_event_id: fromCard.id });
+      tx.runs.put(project, { ...run(3, 2), trigger_event_id: fromProject.id });
+    });
+    const clock = { now: () => new Date().toISOString() };
+    const checks = new MachineChecks(
+      store,
+      clock,
+      new AbortController().signal,
+    );
+    const assignments = machineView(
+      store,
+      project,
+      { checks },
+      clock.now(),
+      "local",
+    )[0]?.bindings[0]?.assignments;
+    expect(
+      assignments
+        ?.flatMap((a) => a.runs)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    ).toEqual([
+      { id: "R-1", status: "running", card_id: "C-1" },
+      { id: "R-2", status: "running", card_id: "C-8" },
+      { id: "R-3", status: "running", card_id: null },
+    ]);
+  } finally {
+    store.close();
   }
 });

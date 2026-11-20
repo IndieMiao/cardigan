@@ -903,7 +903,6 @@ async function machineCommand(
         const machine = selected[0] as Machine;
         const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
         const observations = await checkRegisteredMachine(
-          dataDir,
           { store, project: project_id, machine: machine.id, env: io.env },
           async () => {
             const connection = await terminalExecution(
