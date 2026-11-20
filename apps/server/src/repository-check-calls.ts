@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type CardId,
   type Clock,
-  type MergeBatch,
+  latestMergeCheck,
   type MergeCheckView,
   mergeBatches,
   type ProjectId,
@@ -11,48 +11,65 @@ import { mergeCheckAttemptRunningInTransaction } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import {
-  batchCallHistory,
   callOpened,
   callSettled,
   type RepositoryCall,
   type RepositoryReceipt,
+  type RepositoryTarget,
+  repositoryCard,
   repositoryCheckWait,
+  targetCallHistory,
 } from "./repository-check-wait.js";
 
 /** Host-only observation journal. A registration is NOT evidence that a push
  * never started. Provider recovery and dispatch fences remain authoritative. */
-export class BatchRepositoryCalls {
+export class RepositoryCheckCalls {
   constructor(
     private store: Store,
     private clock: Clock,
   ) {}
-  begin(batch: MergeBatch, check: MergeCheckView, delays: readonly number[]) {
+  begin(
+    target: RepositoryTarget,
+    check: MergeCheckView,
+    delays: readonly number[],
+  ) {
     return this.store.uow.run((tx) => {
-      const events = loadCommandState(tx, batch.project_id).events;
-      const current = mergeBatches(events).find((b) => b.id === batch.id);
-      const card = batch.members.at(-1)?.card_id;
+      const project = target.project_id;
+      const batch = "members" in target ? target : undefined;
+      const card = repositoryCard(target);
+      if (!card) return { kind: "wait" } as const;
+      const events = batch
+        ? loadCommandState(tx, project).events
+        : tx.events.listAfter(project, card, 0);
+      const current = batch
+        ? mergeBatches(events).find((b) => b.id === batch.id)
+        : undefined;
+      const latest = batch
+        ? current?.check
+        : latestMergeCheck(events, card, check.completion_id);
       if (
-        !card ||
-        current?.status !== "checking" ||
-        current.check?.status !== "queued" ||
-        current.check.recheck_requested ||
-        current.check.attempt_id !== check.attempt_id
+        (batch && current?.status !== "checking") ||
+        latest?.status !== "queued" ||
+        latest.recheck_requested ||
+        latest.attempt_id !== check.attempt_id
       )
         return { kind: "wait" } as const;
-      const { epoch, pending } = batchCallHistory(events, batch);
+      const history = targetCallHistory(events, target, check);
       const { timeouts, retryAt, exhausted } = repositoryCheckWait(
         events,
         check,
+        target,
+        history,
       );
       if (exhausted) return { kind: "exhausted", timeouts } as const;
       if (
         (retryAt && Date.parse(this.clock.now()) < Date.parse(retryAt)) ||
-        [...pending.values()].some(
+        [...history.pending.values()].some(
           (call) =>
             call.attempt_id !== check.attempt_id &&
             mergeCheckAttemptRunningInTransaction(
               this.store,
-              batch.project_id,
+              project,
               call.attempt_id,
             ),
         )
@@ -60,13 +77,15 @@ export class BatchRepositoryCalls {
         return { kind: "wait" } as const;
       const call: RepositoryCall = {
         call_id: randomUUID(),
-        epoch,
-        batch_id: batch.id,
+        epoch: history.epoch,
+        ...(batch
+          ? { batch_id: batch.id }
+          : { completion_id: check.completion_id }),
         attempt_id: check.attempt_id,
         prior_timeouts: timeouts,
         retry_delays_ms: [...delays],
       };
-      this.append(tx, batch.project_id, card, callOpened, call);
+      this.append(tx, project, card, callOpened, call);
       return { kind: "opened", id: call.call_id } as const;
     });
   }

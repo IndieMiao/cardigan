@@ -59,6 +59,7 @@ import {
   deploymentInProgress,
   ExecutorPreparationError,
   type ExternalGithubRun,
+  executionOwner,
   executorExecution,
   GITHUB_POLL_DEFAULTS,
   GithubBranchCleaner,
@@ -99,7 +100,6 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
-import { BatchRepositoryCalls } from "./batch-repository-calls.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
   CandidatePushNotStarted,
@@ -115,15 +115,19 @@ import {
   MergeMutex,
   tryPublication,
 } from "./publication-lock.js";
+import { RepositoryCheckCalls } from "./repository-check-calls.js";
 import {
+  type RepositoryReceipt,
+  type RepositoryTarget,
+  repositoryCard,
   repositoryCheckWait,
   repositoryRetryDelays,
 } from "./repository-check-wait.js";
 import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
-class BatchWaitExhausted extends Error {
+class RepositoryWaitExhausted extends Error {
   constructor(readonly timeouts: number) {
-    super("Batch repository wait exhausted");
+    super("Repository wait exhausted");
   }
 }
 class StaleCheckTarget extends CheckExecutorSuspended {}
@@ -198,6 +202,15 @@ interface Task {
   publishable?: boolean;
 }
 
+function repositoryTarget(task: Task): RepositoryTarget {
+  return (
+    task.batch ?? {
+      project_id: task.project.project_id,
+      card_id: task.plan.card_id,
+    }
+  );
+}
+
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
   private readonly github = new Map<
@@ -269,7 +282,7 @@ export class MergeChecks {
     ProjectId,
     Promise<{ done: Promise<void> }>
   >();
-  private readonly repositoryCalls: BatchRepositoryCalls;
+  private readonly repositoryCalls: RepositoryCheckCalls;
   private readonly lockBackoff: readonly number[];
   private readonly gitPasses = new Map<string, Promise<void>>();
   private readonly prepared = new Map<
@@ -286,7 +299,7 @@ export class MergeChecks {
       report?: (message: string) => void;
     },
   ) {
-    this.repositoryCalls = new BatchRepositoryCalls(
+    this.repositoryCalls = new RepositoryCheckCalls(
       options.store,
       options.clock,
     );
@@ -785,7 +798,11 @@ export class MergeChecks {
           (event.payload as { attempt?: unknown } | null)?.attempt ===
             latest.attempt_id,
       );
-    const repositoryWait = repositoryCheckWait(events, latest);
+    const repositoryWait = repositoryCheckWait(
+      events,
+      latest,
+      repositoryTarget(task),
+    );
     const sameCandidate =
       latest &&
       (latest.level ?? "single") ===
@@ -1062,12 +1079,7 @@ export class MergeChecks {
     return this.slot({ settings }, () => undefined);
   }
   /** Persist only actual waits; observations never acquire or release capacity. */
-  private waiting(
-    task: Task,
-    reason: string,
-    check?: MergeCheckView,
-    retryAt?: string,
-  ): false {
+  private waiting(task: Task, reason: string, check?: MergeCheckView): false {
     return this.waitingFor(
       task.project.project_id,
       task.plan.card_id,
@@ -1075,7 +1087,6 @@ export class MergeChecks {
       reason,
       check ?? (task.batch ? this.latest(task) : undefined),
       task.batch?.id,
-      retryAt,
     );
   }
   private waitingFor(
@@ -1085,7 +1096,6 @@ export class MergeChecks {
     reason: string,
     target?: MergeCheckView,
     batch?: MergeBatch["id"],
-    retryAt?: string,
   ): false {
     this.command(project, (s, a, p) =>
       recordMergeCheckWait(
@@ -1102,7 +1112,6 @@ export class MergeChecks {
             "",
           reason,
           ...(batch ? { batch_id: batch } : {}),
-          ...(retryAt ? { repository_retry_at: retryAt } : {}),
         },
         p,
       ),
@@ -1150,6 +1159,16 @@ export class MergeChecks {
           intent.card === task.plan.card_id &&
           intent.attempt === latest?.attempt_id,
       );
+      // A detached supervisor can leave its actual publisher inside Git. Within
+      // the existing startup window, wait for that live writer's settlement;
+      // neither its ownership nor a mere registration certifies a timeout.
+      if (
+        own?.phase === "publishing" &&
+        own.publisher &&
+        Date.parse(this.options.clock.now()) < (own.discoveryDeadlineAt ?? 0) &&
+        executionOwner(own.publisher.pid)?.start === own.publisher.start
+      )
+        return this.waiting(task, "等待本次候选推送结束");
       if (
         own &&
         Date.parse(this.options.clock.now()) <
@@ -1248,6 +1267,7 @@ export class MergeChecks {
     check: MergeCheckView,
     config: GithubMergeGateExecutor,
     bind: (run: ExternalGithubRun) => void,
+    publish: typeof pushCheckCandidateOrWait,
   ): CheckExecutor {
     const { client, poller } = this.githubProvider(config);
     const { pushCheckCandidate, isBaselineAncestor } = this.options.git;
@@ -1269,7 +1289,7 @@ export class MergeChecks {
         },
       }),
       push: (input) =>
-        pushCheckCandidateOrWait(() =>
+        publish(() =>
           pushCheckCandidate.call(this.options.git, task.project, input),
         ),
       isBaselineAncestor: (sha, branch) =>
@@ -1409,6 +1429,29 @@ export class MergeChecks {
     let connected = false;
     let repositoryBusy = false;
     let callId: string | undefined;
+    let receipt: RepositoryReceipt | undefined;
+    const settle = (id: string, outcome: RepositoryReceipt["outcome"]) =>
+      this.repositoryCalls.settle(
+        task.project.project_id,
+        task.plan.card_id,
+        id,
+        outcome,
+      );
+    const publish: typeof pushCheckCandidateOrWait = async (push) => {
+      // The writer, not its detachable supervisor, owns this call until the
+      // actual adapter settles. Persist the fact BEFORE releasing its fence.
+      const id = callId;
+      if (!id) throw new CheckExecutorSuspended();
+      callId = undefined;
+      let outcome: RepositoryReceipt["outcome"] = "other";
+      try {
+        const result = await pushCheckCandidateOrWait(push);
+        if (result.status === "not_started") outcome = "timeout";
+        return result;
+      } finally {
+        receipt = settle(id, outcome);
+      }
+    };
     let bound = check.external_run;
     const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
@@ -1495,9 +1538,15 @@ export class MergeChecks {
         );
       const executor =
         (executedOn?.type === "github"
-          ? this.githubExecutor(task, check, executedOn, (run) => {
-              bound = run;
-            })
+          ? this.githubExecutor(
+              task,
+              check,
+              executedOn,
+              (run) => {
+                bound = run;
+              },
+              publish,
+            )
           : this.options.checkExecutor) ??
         new SshCheckExecutor({
           execution,
@@ -1522,7 +1571,6 @@ export class MergeChecks {
         : runCheckExecutor;
       if (this.held(task, check)) return;
       if (
-        task.batch &&
         check.status === "queued" &&
         !bound &&
         !(
@@ -1536,13 +1584,13 @@ export class MergeChecks {
         )
       ) {
         const admission = this.repositoryCalls.begin(
-          task.batch,
+          repositoryTarget(task),
           check,
           this.lockBackoff,
         );
         if (admission.kind === "wait") return;
         if (admission.kind === "exhausted")
-          throw new BatchWaitExhausted(admission.timeouts);
+          throw new RepositoryWaitExhausted(admission.timeouts);
         callId = admission.id;
       }
       this.waiting(
@@ -1651,44 +1699,26 @@ export class MergeChecks {
       if (error instanceof StaleCheckTarget) return;
       if (
         error instanceof CandidateRepositoryBusy ||
-        error instanceof BatchWaitExhausted
+        error instanceof RepositoryWaitExhausted
       ) {
-        // Settle the original call even if another tick already aborted its
-        // batch. Recording a fact does not authorize a business transition.
-        const receipt =
-          callId && task.batch
-            ? this.repositoryCalls.settle(
-                task.batch.project_id,
-                task.plan.card_id,
-                callId,
-                "timeout",
-              )
-            : undefined;
-        if (receipt) callId = undefined;
+        // A non-GitHub executor returns its proof to the supervisor directly.
+        if (callId && error instanceof CandidateRepositoryBusy) {
+          receipt = settle(callId, "timeout");
+          callId = undefined;
+        }
         const timeouts =
-          error instanceof BatchWaitExhausted
+          error instanceof RepositoryWaitExhausted
             ? error.timeouts
-            : (receipt?.ordinal ??
-              repositoryCheckWait(
-                this.state(task.project.project_id).events,
-                check,
-              ).timeouts + 1);
-        const delay = this.lockBackoff[timeouts - 1];
-        const retryAt =
-          error instanceof BatchWaitExhausted
-            ? undefined
-            : receipt
-              ? receipt.retry_at
-              : delay === undefined
-                ? undefined
-                : new Date(
-                    Date.parse(this.options.clock.now()) + delay,
-                  ).toISOString();
+            : receipt?.outcome === "timeout"
+              ? receipt.ordinal
+              : undefined;
+        if (timeouts === undefined)
+          throw new Error("Missing repository timeout receipt");
+        const retryAt = receipt?.retry_at;
         const current = this.validLockObservation(task, check);
         if (retryAt) {
           const reason = repositoryWaitReason(timeouts, retryAt);
-          if (current)
-            this.waiting(task, reason, check, receipt ? undefined : retryAt);
+          if (current) this.waiting(task, reason, check);
           await log?.waiting(reason);
           return;
         }
@@ -1744,13 +1774,10 @@ export class MergeChecks {
       // Always release runtime occupancy, even if a returned/cancelled target
       // makes the subsequent business result command reject.
       try {
-        if (callId && task.batch)
-          this.repositoryCalls.settle(
-            task.batch.project_id,
-            task.plan.card_id,
-            callId,
-            "other",
-          );
+        if (callId) {
+          settle(callId, "other");
+          callId = undefined;
+        }
       } finally {
         releaseCapacity();
         this.executions.delete(this.key(task));
@@ -2412,25 +2439,33 @@ export class MergeChecks {
       const state = this.state(id);
       const observeCooldown = (
         check: MergeCheckView | undefined,
-        batch?: MergeBatch,
+        target: RepositoryTarget,
       ) => {
-        const { retryAt, timeouts } = repositoryCheckWait(state.events, check);
+        const { retryAt, timeouts } = repositoryCheckWait(
+          state.events,
+          check,
+          target,
+        );
+        const batch = "members" in target ? target : undefined;
         const cooling =
           retryAt !== undefined &&
           Date.parse(this.options.clock.now()) < Date.parse(retryAt);
-        const owner = batch?.members.at(-1);
-        if (cooling && batch && owner && check) {
+        const card = repositoryCard(target);
+        if (cooling && card && check) {
           const reason = repositoryWaitReason(timeouts, retryAt);
           // A regrouped attempt can inherit a deadline without making a call.
           // Report the existing wait; do not charge another repository timeout.
-          if (batchQueueWait(state.events, batch)?.reason !== reason)
+          const wait = batch
+            ? batchQueueWait(state.events, batch)
+            : check.queue_wait;
+          if (wait?.reason !== reason)
             this.waitingFor(
               id,
-              owner.card_id,
+              card,
               check.completion_id,
               reason,
               check,
-              batch.id,
+              batch?.id,
             );
         }
         return cooling;
@@ -2544,7 +2579,10 @@ export class MergeChecks {
           plan: plan.value,
           settings,
           entered,
-          repositoryCooling: observeCooldown(check),
+          repositoryCooling: observeCooldown(check, {
+            project_id: id,
+            card_id: card.id,
+          }),
           publishable: !settings.queue && check?.status === "passed",
           priority: card.priority,
         });

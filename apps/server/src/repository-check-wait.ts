@@ -1,8 +1,10 @@
 import {
+  type CardId,
   type Event,
   type MergeBatch,
   type MergeCheckView,
   mergeBatches,
+  type ProjectId,
 } from "@cardigan/domain";
 
 /** Trusted assembly override; never a card or candidate input. */
@@ -92,7 +94,8 @@ export const callOpened = "repository_check_call_opened";
 export const callSettled = "repository_check_call_settled";
 export type RepositoryCall = {
   call_id: string;
-  batch_id: string;
+  batch_id?: string;
+  completion_id?: string;
   attempt_id: string;
   epoch: string;
   prior_timeouts: number;
@@ -104,16 +107,54 @@ export type RepositoryReceipt = RepositoryCall & {
   retry_at: string | null;
 };
 
+type CardTarget = { project_id: ProjectId; card_id: CardId };
+export type RepositoryTarget = MergeBatch | CardTarget;
+export function repositoryCard(target: RepositoryTarget) {
+  return "members" in target ? target.members.at(-1)?.card_id : target.card_id;
+}
 export function batchCallHistory(events: readonly Event[], batch: MergeBatch) {
-  const epoch = batchWaitEpoch(events, batch);
+  return callHistory(
+    events,
+    batch.project_id,
+    repositoryCard(batch),
+    batchWaitEpoch(events, batch),
+  );
+}
+export function targetCallHistory(
+  events: readonly Event[],
+  target: RepositoryTarget,
+  check: MergeCheckView,
+) {
+  if ("members" in target) return batchCallHistory(events, target);
+  const reset = events.findLast(
+    (e) =>
+      e.type === "merge_check_requeued" &&
+      e.card_id === target.card_id &&
+      (e.payload as Partial<MergeCheckView>).completion_id ===
+        check.completion_id,
+  );
+  const epoch = JSON.stringify([
+    "card",
+    target.card_id,
+    check.completion_id,
+    reset?.id,
+  ]);
+  return callHistory(events, target.project_id, target.card_id, epoch);
+}
+function callHistory(
+  events: readonly Event[],
+  project: ProjectId,
+  card: CardId | undefined,
+  epoch: string,
+) {
   const pending = new Map<string, RepositoryCall>();
   let timeout: RepositoryReceipt | undefined;
   let lastCall: RepositoryCall | RepositoryReceipt | undefined;
   for (const e of events) {
     if (
-      e.card_id !== batch.members.at(-1)?.card_id ||
+      e.card_id !== card ||
       e.actor.kind !== "system" ||
-      e.actor.project_id !== batch.project_id ||
+      e.actor.project_id !== project ||
       (e.type !== callOpened && e.type !== callSettled)
     )
       continue;
@@ -138,7 +179,9 @@ export function batchCallHistory(events: readonly Event[], batch: MergeBatch) {
  * Only the exact unstarted attempt can be resumed; an explicit recheck starts a new budget. */
 export function repositoryCheckWait(
   events: readonly Event[],
-  check?: MergeCheckView,
+  check: MergeCheckView | undefined,
+  target: RepositoryTarget,
+  history?: ReturnType<typeof targetCallHistory>,
 ) {
   let timeouts = 0;
   // For exact-attempt recovery only: the scheduler records a new wait *before*
@@ -150,6 +193,7 @@ export function repositoryCheckWait(
       check.batch_id && interruptedPredecessors(events, check.batch_id);
     for (const e of events) {
       if (
+        ("card_id" in target && e.card_id !== target.card_id) ||
         ![
           "merge_check_waiting",
           "merge_check_requeued",
@@ -175,6 +219,7 @@ export function repositoryCheckWait(
           p.completion_id === check.completion_id)
       ) {
         timeouts = 0;
+        retryAt = undefined;
         continue;
       }
       if (
@@ -193,24 +238,18 @@ export function repositoryCheckWait(
     }
   }
   let exhausted = false;
-  if (
-    check?.batch_id &&
-    check.status === "queued" &&
-    !check.recheck_requested
-  ) {
-    const batch = mergeBatches(events).find((b) => b.id === check.batch_id);
-    if (batch) {
-      const { lastCall, timeout } = batchCallHistory(events, batch);
-      if (lastCall)
-        lastWaitWasLockTimeout =
-          lastCall.attempt_id === check.attempt_id &&
-          "outcome" in lastCall &&
-          lastCall.outcome === "timeout";
-      if (timeout) {
-        timeouts = timeout.ordinal;
-        retryAt = timeout.retry_at ?? undefined;
-        exhausted = timeout.retry_at === null;
-      }
+  if (check?.status === "queued" && !check.recheck_requested) {
+    const { lastCall, timeout } =
+      history ?? targetCallHistory(events, target, check);
+    if (lastCall)
+      lastWaitWasLockTimeout =
+        lastCall.attempt_id === check.attempt_id &&
+        "outcome" in lastCall &&
+        lastCall.outcome === "timeout";
+    if (timeout) {
+      timeouts = timeout.ordinal;
+      retryAt = timeout.retry_at ?? undefined;
+      exhausted = timeout.retry_at === null;
     }
   }
   return { timeouts, retryAt, exhausted, lastWaitWasLockTimeout };
