@@ -140,6 +140,7 @@ export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
+export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
 export {
   DEFAULT_MCP_HOST,
@@ -295,6 +296,7 @@ export {
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
 export { WorkerGitTransport } from "./worker-git.js";
+export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
 export {
   prepareReadonlyWorktree,

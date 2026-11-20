@@ -768,7 +768,7 @@ test.each(["card_created", "card_updated"])(
       connections.last.emit("change", { stream: "C-99", seq: 1, type }),
     );
     await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(before));
-    await screen.findByRole("link", { name: /C-99.*新后继/ });
+    await screen.findByRole("button", { name: /C-99.*新后继/ });
     expect(screen.getByText("最长未完成链：2 张")).toBeDefined();
     // Clearing or moving the edge must also remove the old successor.
     read.mockResolvedValue(detail);
@@ -780,7 +780,7 @@ test.each(["card_created", "card_updated"])(
       }),
     );
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: /C-99.*新后继/ })).toBeNull(),
+      expect(screen.queryByRole("button", { name: /C-99.*新后继/ })).toBeNull(),
     );
     const cleared = read.mock.calls.length;
     act(() =>

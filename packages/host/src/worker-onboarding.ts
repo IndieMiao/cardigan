@@ -139,6 +139,7 @@ export interface WorkerOnboardingOptions {
   /** Must query existing facts and only register offline when allowed. */
   readonly registration: (create: boolean) => Promise<boolean>;
   readonly probe?: WorkerProbeRunner;
+  readonly beforeStep?: (step: Step) => void;
   readonly report: (
     step: Step,
     state: State,
@@ -262,6 +263,7 @@ export async function onboardWorker(
     };
     persist();
     for (const step of WORKER_STEPS) {
+      options.beforeStep?.(step);
       journal.steps[step] = "running";
       persist(); // Durable intent before any effect; retries query facts again.
       let passed = false;
