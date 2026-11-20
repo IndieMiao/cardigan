@@ -9,7 +9,7 @@ import { useCapacity } from "./Capacity.js";
 import { StatusTag, Time } from "./Foundation.js";
 import { CardDetailLayout } from "./layout/CardDetailLayout.js";
 
-const CAPABILITY_TAGS: Readonly<
+export const CAPABILITY_TAGS: Readonly<
   Record<
     CapabilityState,
     { readonly status: string; readonly label: string; readonly order: number }
