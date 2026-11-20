@@ -1,37 +1,64 @@
-// Executed only by the explicit private Vite entry, in the project that owns
-// the installed Vite. This process is the sole reader of the lifetime record.
+// This process owns one registration. Replies can only explain retention;
+// they do not grant the supervisor any authority to stop another process.
+import { lstatSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { Socket } from 'node:net';
-import { createServer } from 'vite';
+import { createServer, version } from 'vite';
 
-const control = new Socket({ fd: Number(process.env.CARDIGAN_PRIVATE_LIFETIME_FD), readable: true, writable: false });
-// Do not advertise a stale descriptor to plugin children. Only this owner
-// manages the server object and its private plugin resources.
+const control = new Socket({ fd: Number(process.env.CARDIGAN_PRIVATE_LIFETIME_FD) });
 delete process.env.CARDIGAN_PRIVATE_LIFETIME_FD;
-const server = await createServer({ server: { host: '127.0.0.1', port: Number(process.argv[1]), strictPort: true, hmr: false, open: false } });
-const http = server.httpServer;
-if (!http || http.listening) throw new Error('Private Vite listener unavailable');
-const clients = new Set();
-http.prependListener('connection', socket => {
-  clients.add(socket);
-  socket.once('close', () => clients.delete(socket));
+control.on('error', () => { /* Losing the capability is not settlement. */ });
+
+const host = '127.0.0.1';
+const port = Number(process.argv[1]);
+// Run configured projects normally, but do not claim to observe listeners
+// created by their config or plugins. Pin configFile:false on the proven path:
+// a config appearing after this decision must not silently introduce an inlet.
+const singleIngress = version === '8.3.5' && ['js', 'mjs', 'ts', 'cjs', 'mts', 'cts'].every(ext => {
+  try { return !lstatSync(`vite.config.${ext}`, { throwIfNoEntry: false }); }
+  catch { return false; }
 });
-await server.listen();
-server.printUrls();
-const marker = 'cardigan-private-settled-v1\n';
-let received = '';
-control.on('error', () => { /* Unknown is never a stop request. */ });
+const vite = await createServer({
+  ...(singleIngress ? { configFile: false, devtools: false } : {}),
+  server: { host, port, strictPort: true, open: false, hmr: false,
+    ...(singleIngress ? { ws: false, middlewareMode: true } : {}) },
+});
+let ingress;
+let admitted = false;
+let observedFromStart = false;
+if (singleIngress) {
+  // Vite has no listener of its own in this mode. Our entry point stays the
+  // same even if Vite reinitializes its middleware. Mark admission before HTTP
+  // dispatch (including requests that never finish). Never reset on close.
+  ingress = createHttpServer(vite.middlewares);
+  observedFromStart = vite.httpServer === null && vite.config.server.ws === false &&
+    vite.config.server.middlewareMode === true && vite.config.configFile === undefined;
+  ingress.prependListener('connection', () => { admitted = true; });
+  ingress.on('error', () => { observedFromStart = false; });
+  ingress.once('close', () => { observedFromStart = false; });
+  await new Promise((resolve, reject) => {
+    ingress.once('error', reject);
+    ingress.listen(port, host, resolve);
+  });
+  console.log(`  Local: http://${host}:${ingress.address().port}/`);
+} else {
+  await vite.listen();
+  vite.printUrls();
+}
+
+const marker = Buffer.from('cardigan-private-settled-v1\n');
+let offset = 0;
 control.on('data', block => {
-  received += block.toString('ascii');
-  if (!marker.startsWith(received)) { control.destroy(); return; }
-  if (received !== marker) return;
+  if (!marker.subarray(offset, offset + block.length).equals(block)) { control.destroy(); return; }
+  offset += block.length;
+  if (offset !== marker.length) return;
   control.pause();
-  // Actual connections tracked from before listen(), not a /proc snapshot.
-  // If a consumer is present leave admission and all clients untouched.
-  if (clients.size) return;
-  // Fence new accepts synchronously; finish Vite/plugin teardown only after
-  // the listener itself confirms closure, never destroy a consumer socket.
-  http.close(error => {
-    if (error || clients.size) return;
-    void server.close().then(() => control.destroy(), () => control.destroy());
+  if (!observedFromStart || !ingress?.listening) { control.end('?'); return; }
+  if (admitted) { control.end('U'); return; }
+  // First admission and this fence run on the same event loop, with no await
+  // in between. Do not tear down middleware until the sole listener is closed.
+  ingress.close(error => {
+    if (error || admitted) { control.end('?'); return; }
+    void vite.close().then(() => control.destroy(), () => control.end('?'));
   });
 });

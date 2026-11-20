@@ -1,5 +1,6 @@
 """Only processes created by this fixture and its private temp root are used."""
 import fcntl
+import http.client as http_client
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -64,12 +65,25 @@ cached_audit = f"""class AuditSink:
 m['audit'].__globals__['syslog'] = AuditSink()"""
 
 
-def entry(audit_sink=""):
-    return f"""import runpy,sys,os,hashlib
+def entry(audit_sink="", vite_entry=False):
+    setup = f"""import runpy,sys,os,hashlib
 m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated','fixture-token-id',{public!r}]
 {audit_sink}
 c=m['Confirmation'](sys.argv[3],hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest(),interval=0.05)
-sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5],confirmation=c))"""
+"""
+    if not vite_entry:
+        return setup + "sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5],confirmation=c))"
+    # Exercise --private-vite itself. Only replace the scratch root, test
+    # controller and wrapper used to reap the fixture's own Node process.
+    return setup + """tag,key,pid,base,wrapper,owner,port=sys.argv[2:]
+command=m['command']
+def fixture_command(tag,key,pid,argv,**opts):
+ return command(tag,key,pid,[sys.executable,'-IB','-c',wrapper,*argv],base=base,confirmation=c,**opts)
+m['main'].__globals__.update(VITE_OWNER=owner,command=fixture_command)
+session,run=key.rsplit('.',1)
+os.environ.update(CARDIGAN_RESOURCE_TARGET=tag,CARDIGAN_RESOURCE_SESSION=session,
+ CARDIGAN_SESSION_PID=pid,CARDIGAN_SESSION_BIRTH=m['birth'](int(pid)))
+sys.argv[1:]=[run,'--private-vite',port];m['main']()"""
 
 
 stub = entry()
@@ -242,41 +256,90 @@ pathlib.Path(sys.argv[2]).write_text(str(p.pid));time.sleep(20)""", str(source),
         client.sendall(b'b'); assert client.recv(1) == b'b'
 
 
-def vite_owner(base, in_use):
-    # A real Vite from the locked workspace, in a private copy of an empty app.
-    # The test owns the child directly so even a failed assertion cleans up it alone.
+# Only the fixture owns stdin. Closing it cleans up the Vite child it created,
+# even if an assertion fails after the real supervisor correctly retains it.
+VITE_FIXTURE_PARENT = """import os,sys,subprocess,pathlib,select
+fd=int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD'])
+child=subprocess.Popen(sys.argv[1:],pass_fds=(fd,),stdin=subprocess.DEVNULL)
+os.close(fd)
+try:
+ while child.poll() is None and not select.select([0],[],[],0.05)[0]: pass
+finally:
+ if child.poll() is None: child.terminate()
+ pathlib.Path('vite.exit').write_text(str(child.wait(timeout=4)))
+"""
+
+
+def vite_owner(base, mode, key):
+    # Same signed lifecycle query, guardian, audit and locked Vite as the entry;
+    # stdout readiness does not consume a connection on the never-used case.
     work = pathlib.Path(base)
     (work/'node_modules').mkdir()
     (work/'node_modules'/'vite').symlink_to(source.parents[1]/'apps/web/node_modules/vite', target_is_directory=True)
-    (work/'index.html').write_text('<title>private-preview</title>')
+    (work/'public').mkdir()
+    (work/'public'/'manifest.json').write_text('{"next":"/asset.txt"}')
+    (work/'public'/'asset.txt').write_text('fixture asset')
+    if mode == 'custom':
+        # A plugin can expose a completely separate endpoint. Its client never
+        # touches Vite's main listener; the adapter cannot prove exclusivity.
+        (work/'vite.config.mjs').write_text("""import {createServer} from 'node:http';
+export default {plugins:[{name:'fixture',configureServer(){
+ const s=createServer((_,res)=>res.end('plugin asset'));
+ s.listen(0,'127.0.0.1',()=>console.log('plugin-port='+s.address().port));
+}}]};""")
     owner = source.with_name('run-vite-owner.mjs').read_text()
-    sender, reader = socket.socketpair()
-    with sender, reader, subprocess.Popen(['node','--input-type=module','-e',owner,'0'],cwd=base,
-        env={'PATH':os.environ['PATH'],'HOME':base,'TMPDIR':base,'NO_COLOR':'1','CARDIGAN_PRIVATE_LIFETIME_FD':str(reader.fileno())},
-        pass_fds=(reader.fileno(),),stdout=subprocess.PIPE,stderr=subprocess.STDOUT) as child:
-        reader.close()
+    with socket.socket() as reserve:
+        reserve.bind(('127.0.0.1',0))
+        assigned = reserve.getsockname()[1]
+    args = [sys.executable, '-IB', '-c', entry(cached_audit, vite_entry=True), str(source), TAG,
+            key, str(os.getpid()), base, VITE_FIXTURE_PARENT, owner, str(assigned)]
+    with subprocess.Popen(args,cwd=base, env={'PATH':os.environ['PATH'],'HOME':base,'TMPDIR':base,
+            'NO_COLOR':'1','CI':'true','MCP_TOKEN':'synthetic'}, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT) as job:
         client = None
         try:
             output = b''
-            deadline=time.monotonic()+10
-            while not (match:=re.search(rb'127[.]0[.]0[.]1:(\d+)/',output)):
-                assert time.monotonic()<deadline and child.poll() is None, output[-600:]
-                if select.select([child.stdout],[],[],0.2)[0]: output+=os.read(child.stdout.fileno(),4096)
-            if in_use:
-                client=socket.create_connection(('127.0.0.1',int(match[1])),timeout=4)
-                # In-flight incomplete request before the terminal record.
-                client.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n')
-                time.sleep(0.15)
-            sender.sendall(m['SETTLED']); sender.shutdown(socket.SHUT_WR)
-            if in_use:
-                time.sleep(0.2); assert child.poll() is None
-                client.sendall(b'\r\n')
-                assert b'200 OK' in client.recv(4096)
+            deadline = time.monotonic()+10
+            while not (match:=re.search(rb'127[.]0[.]0[.]1:(\d+)/',output)) or (mode == 'custom' and not re.search(rb'plugin-port=(\d+)\n', output)):
+                assert time.monotonic()<deadline and job.poll() is None, output[-600:]
+                if select.select([job.stdout],[],[],0.2)[0]: output+=os.read(job.stdout.fileno(),4096)
+            port = int(match[1])
+            assert port == assigned
+            endpoint = int(re.search(rb'plugin-port=(\d+)',output)[1]) if mode == 'custom' else port
+            client = http_client.HTTPConnection('127.0.0.1', endpoint, timeout=4)
+            def get(path, close=True):
+                client.request('GET', path, headers={'Connection':'close' if close else 'keep-alive'})
+                response = client.getresponse()
+                assert response.status == 200
+                return response.read()
+            if mode in ('between', 'inflight'):
+                resource = json.loads(get('/manifest.json', close=mode=='between'))['next']
+                if mode == 'between': assert client.sock is None  # same caller, no TCP connection
+                else: client.sock.sendall(b'GET /asset.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n')
+            if mode == 'custom': assert get('/') == b'plugin asset'
+            states[key] = 'bad-signature'
+            until(lambda: served[key, 'bad-signature'] >= 2)
+            assert job.poll() is None
+            states[key] = 'ended'
+            expected = 'private_participants_released' if mode == 'unused' else (
+                'vite_ingress_unproven_retained' if mode == 'custom' else 'vite_external_use_unreleased_retained')
+            assert job.wait(timeout=6) == (143 if mode == 'unused' else 125)
+            assert f'cardigan run_resource {key} {expected}' in (pathlib.Path(keydir.name)/'audit').read_text().splitlines()
+            if mode == 'unused':
+                assert (work/'vite.exit').read_text() == '0'
+                with socket.socket() as check: check.bind(('127.0.0.1',port))
+            elif mode == 'between': assert get(resource) == b'fixture asset'
+            elif mode == 'custom': assert get('/') == b'plugin asset'
             else:
-                assert child.wait(timeout=6)==0
+                client.sock.sendall(b'\r\n')
+                response = http_client.HTTPResponse(client.sock); response.begin()
+                assert response.status == 200 and response.read() == b'fixture asset'
         finally:
             if client: client.close()
-            if child.poll() is None: child.terminate(); child.wait(timeout=4)
+            job.stdin.close()
+            if job.poll() is None: job.wait(timeout=6)
+            # Wait for the fixture parent to reap its own child before tmp cleanup.
+            if mode != 'unused' and output: until(lambda: (work/'vite.exit').exists())
 
 
 def observer_enrollment():
@@ -358,8 +421,8 @@ with tempfile.TemporaryDirectory() as base:
 for detached in (False, True):
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
         registered_service(base, detached)
-for in_use in (False, True):
+for i, mode in enumerate(('between', 'unused', 'inflight', 'custom'), 1):
     with tempfile.TemporaryDirectory() as base:
-        vite_owner(base, in_use)
+        vite_owner(base, mode, f'A-8.R-1.R-{i}')
 http.shutdown(); http.server_close(); keydir.cleanup()
 print('isolated run resources passed', sys.platform)
