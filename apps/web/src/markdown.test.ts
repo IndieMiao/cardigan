@@ -75,3 +75,47 @@ test("ordinary Markdown still works", () => {
   expect(html).toContain("<strong>粗</strong>");
   expect(html).toContain("<li>一</li>");
 });
+
+// C-534: tables share one look (theme.css) and scroll in their own box.
+test("tables are wrapped for scrolling and keep only column alignment", () => {
+  const html = renderMarkdown(
+    "| 左 | 中 | 右 | 默认 |\n|:---|:---:|---:|---|\n| a | b | c | d |",
+  );
+  expect(html).toMatch(/^<div class="ui-markdown-table"><table>/u);
+  expect(html).toMatch(/<\/table>\s*<\/div>\s*$/u);
+  expect(html).not.toContain("style=");
+  expect(html).toContain('<th data-align="left">左</th>');
+  expect(html).toContain('<th data-align="center">中</th>');
+  expect(html).toContain('<td data-align="right">c</td>');
+  expect(html).toContain("<th>默认</th>");
+});
+
+test("only a column with a long cell wraps at a reading width", () => {
+  const html = renderMarkdown(
+    "| # | 卡 | 依赖 |\n|---|---|---|\n| 1 | 启动配置读写接口：读取与写入 | — |\n| 2 | [C-494](#/p/p-1/cards/C-494) | 1 |",
+  );
+  // The long cell marks its whole column, header included; the short ones
+  // (including the 8-character limit itself) stay on one line.
+  expect(html.match(/data-wide=""/gu)).toHaveLength(3);
+  expect(html).toContain('<th data-wide="">卡</th>');
+  expect(html).toContain('<td data-wide="">启动配置读写接口');
+  expect(html).toContain('<td data-wide=""><a href="#/p/p-1/cards/C-494"');
+  expect(renderMarkdown("| a |\n|---|\n| 一二三四五六七八 |")).not.toContain(
+    "data-wide",
+  );
+  expect(renderMarkdown("| a |\n|---|\n| 一二三四五六七八九 |")).toContain(
+    "data-wide",
+  );
+});
+
+test("table cells stay escaped and keep tags, code and safe links", () => {
+  const html = renderMarkdown(
+    '| a | b |\n|---|---|\n| <b onclick="x">粗</b> `code` | [C-494](#/p/p-1/cards/C-494) [x](javascript:alert(1)) |',
+  );
+  expect(html).toContain("&lt;b onclick=&quot;x&quot;&gt;粗&lt;/b&gt;");
+  expect(html).not.toContain("<b ");
+  expect(html).toContain("<code>code</code>");
+  expect(html).toContain('class="id-tag"');
+  expect(html).toContain('data-ui="id-badge"');
+  expect(html).not.toMatch(/href="javascript:/iu);
+});

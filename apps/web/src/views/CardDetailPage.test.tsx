@@ -532,6 +532,59 @@ test("an Agent body with HTML or javascript: links stays inert", async () => {
   expect(entry?.textContent).toContain("<script>");
 });
 
+test("C-534: the card goal uses the shared Markdown renderer, tables included", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        goal: "目标\n\n| 列 | 数 |\n|---|---:|\n| <img src=x onerror=alert(1)> | 1 |\n\n[点我](javascript:alert(1))",
+      },
+    }),
+  });
+  const purpose = (
+    await screen.findByRole("region", { name: "目标和验收标准" })
+  ).querySelector(".markdown");
+  const table = purpose?.querySelector(".ui-markdown-table > table");
+  expect(table?.querySelector('td[data-align="right"]')?.textContent).toBe("1");
+  expect(purpose?.querySelector("img, script, [style]")).toBeNull();
+  expect(purpose?.querySelector("a")).toBeNull();
+  expect(purpose?.textContent).toContain("<img src=x onerror=alert(1)>");
+});
+
+test("C-534: an acceptance criterion stays a list item and renders its table safely", async () => {
+  const detail = cardDetail();
+  const table = "| 项 | 数 |\n|---|---:|\n| 成功 | 1 |";
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        acceptance_criteria: [
+          "测试通过",
+          table,
+          "<script>alert(1)</script> [x](javascript:alert(1))",
+        ],
+      },
+    }),
+  });
+  const list = (
+    await screen.findByRole("region", { name: "目标和验收标准" })
+  ).querySelector(".acceptance-criteria ul");
+  const items = list?.querySelectorAll(":scope > li") ?? [];
+  expect(items).toHaveLength(3);
+  expect(items[0]?.textContent?.trim()).toBe("测试通过");
+  const cell = items[1]?.querySelector(
+    ".markdown > .ui-markdown-table > table td[data-align='right']",
+  );
+  expect(cell?.textContent).toBe("1");
+  expect(items[1]?.textContent).not.toContain("|");
+  expect(list?.querySelector("script, [style]")).toBeNull();
+  expect(items[2]?.querySelector("a")).toBeNull();
+  expect(items[2]?.textContent).toContain("<script>alert(1)</script>");
+});
+
 test("C-370 detail subscribes to prerequisite and successor revisions, C-487 across the whole graph", async () => {
   const detail = cardDetail();
   const observed: string[][] = [];
