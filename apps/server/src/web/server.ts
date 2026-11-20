@@ -119,6 +119,7 @@ export interface WebServerOptions {
   readonly launchSettings?: {
     dir: string;
     effective: () => import("@cardigan/roles").LaunchConfig;
+    adopt: (generation: import("../live-launch.js").LaunchGeneration) => void;
   };
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
@@ -256,6 +257,7 @@ export async function startWebServer(
         options.launchSettings.dir,
         dataDir,
         options.launchSettings.effective,
+        options.launchSettings.adopt,
       )
     : undefined;
   const host = config.host;

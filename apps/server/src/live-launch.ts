@@ -2,14 +2,16 @@ import { launchFilesStamp as stamp } from "@cardigan/host";
 
 import type { LaunchConfig } from "@cardigan/roles";
 
+export interface LaunchGeneration {
+  config: LaunchConfig;
+  secrets: Readonly<Record<string, string>>;
+}
+
 /** Choices must describe a generation the host actually accepted, not the files it last attempted. */
 export function selectableLaunchConfig({
   config,
   secrets,
-}: {
-  config: LaunchConfig;
-  secrets: Readonly<Record<string, string>>;
-}): LaunchConfig {
+}: LaunchGeneration): LaunchConfig {
   const privateValues = Object.values(secrets).filter(Boolean);
   return {
     ...config,
@@ -30,7 +32,7 @@ export async function liveLaunch<T>(
   warn: () => void,
 ) {
   let seen = stamp(dir);
-  let current = await load();
+  let current: T = await load();
   if (seen !== stamp(dir)) throw new Error("启动时配置文件正在被修改，请重试");
   let pending: Promise<T> | undefined;
   const refresh = async () => {
@@ -46,8 +48,10 @@ export async function liveLaunch<T>(
         }
       } catch {
         // Do not include parser errors: YAML diagnostics can quote private values.
-        warn();
-        seen = key;
+        if (stamp(dir) === key) {
+          warn();
+          seen = key;
+        }
       }
       return current;
     })().finally(() => {
@@ -55,5 +59,11 @@ export async function liveLaunch<T>(
     });
     return pending;
   };
-  return { current: () => current, refresh };
+  // A web install already resolved and validated the complete pair. Adopt synchronously
+  // inside the publication lock so subsequent reference writes cannot see a deleted profile.
+  // Do not mark the disk stamp seen: a concurrent external edit must still be checked.
+  const adopt = (next: T) => {
+    current = next;
+  };
+  return { current: () => current, refresh, adopt };
 }

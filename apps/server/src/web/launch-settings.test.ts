@@ -54,6 +54,17 @@ const post = (rest: string, body: unknown, key = "one", session = cookie) =>
     },
     body: JSON.stringify(body),
   });
+const writeProject = (route: string, body: unknown, key: string) =>
+  call(h.port, `/api/projects/p/${route}`, {
+    method: "POST",
+    cookie,
+    headers: {
+      origin: `http://${h.hostHeader}`,
+      "content-type": "application/json",
+      "idempotency-key": key,
+    },
+    body: JSON.stringify(body),
+  });
 const preview = (change: unknown) => post("preview", { version, change });
 async function confirmation(change: unknown) {
   const response = await preview(change);
@@ -80,6 +91,7 @@ beforeEach(async () => {
     launchSettings: {
       dir,
       effective: () => selectableLaunchConfig(live.current()),
+      adopt: (generation) => live.adopt(generation),
     },
   });
   // Purely local fixtures; no catalog fetch unless a test explicitly supplies a fake upstream.
@@ -315,7 +327,6 @@ test("creation, copy, edit, provider remap and unreferenced delete keep both vie
     expect(ok.status, ok.body).toBe(200);
     const view = JSON.parse((await get()).body);
     version = view.version;
-    await live.refresh();
     return view;
   }
   await install({
@@ -466,7 +477,7 @@ test("confirm revalidates stale catalog entries with the real reload loader befo
   expect((await live.refresh()).config.profiles.a?.model).toBe("first");
 });
 
-test("employees and roles validate the accepted generation, excluding model-less profiles", async () => {
+function projectWithRoleUsingA() {
   h.store.createProject({ id: "p" });
   h.store.uow.run((tx) =>
     tx.roles.put(
@@ -480,6 +491,10 @@ test("employees and roles validate the accepted generation, excluding model-less
       }),
     ),
   );
+}
+
+test("employees and roles validate the accepted generation, excluding model-less profiles", async () => {
+  projectWithRoleUsingA();
   writeFileSync(file, config.replace("  b: ", "  new: "));
   writeFileSync(join(dir, "secrets.env"), "");
   await live.refresh();
@@ -489,23 +504,12 @@ test("employees and roles validate the accepted generation, excluding model-less
     ),
   ).toEqual(["a", "new", "no-model"]);
   expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
-  const write = (route: string, body: unknown, key: string) =>
-    call(h.port, `/api/projects/p/${route}`, {
-      method: "POST",
-      cookie,
-      headers: {
-        origin: `http://${h.hostHeader}`,
-        "content-type": "application/json",
-        "idempotency-key": key,
-      },
-      body: JSON.stringify(body),
-    });
   for (const [name, status] of [
     ["new", 400],
     ["no-model", 400],
     ["b", 200],
   ] as const) {
-    const employee = await write(
+    const employee = await writeProject(
       "employees",
       {
         name: "Writer",
@@ -517,7 +521,7 @@ test("employees and roles validate the accepted generation, excluding model-less
       `employee-${name}`,
     );
     expect(employee.status, employee.body).toBe(status);
-    const role = await write(
+    const role = await writeProject(
       "role-document/preview",
       {
         markdown: `---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: ${name}\n---\nDraft.`,
@@ -601,4 +605,158 @@ test("secret values can collide with protocol keys, statuses and snapshot charac
   });
   expect((await live.refresh()).config.profiles.a?.model).toBe("second");
   expect((await get()).body).not.toContain(secret);
+});
+
+test("delete installs the accepted generation before any employee or role can save another reference", async () => {
+  projectWithRoleUsingA();
+  const markdown = `---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: b\n---\nDraft.`;
+  const rolePreview = await writeProject(
+    "role-document/preview",
+    { markdown },
+    "preview-role",
+  );
+  expect(rolePreview.status).toBe(200);
+  const deletion = await confirmation({ op: "delete_profile", name: "b" });
+  expect((await post("confirm", deletion)).status).toBe(200);
+  // No live.refresh() or timer between the success response and these writes.
+  expect(live.current().config.profiles.b).toBeUndefined();
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a"] });
+  const employee = await writeProject(
+    "employees",
+    {
+      name: "Writer",
+      title: "Dev",
+      avatar: "library:guan-yu",
+      role_id: "coder",
+      launch_profile_ref: "b",
+    },
+    "late-employee",
+  );
+  expect(employee.status).toBe(400);
+  const oldRole = await writeProject(
+    "role-document/apply",
+    { markdown, snapshot: JSON.parse(rolePreview.body).snapshot },
+    "stale-role",
+  );
+  expect([400, 409]).toContain(oldRole.status);
+  expect(
+    (await writeProject("role-document/preview", { markdown }, "late-role"))
+      .status,
+  ).toBe(400);
+  expect(h.store.uow.read((tx) => tx.employees.list())).toEqual([]);
+  expect((await live.refresh()).config.profiles.b).toBeUndefined();
+});
+
+test("a stale confirm discards the fetched catalog without invalidating the active YAML or its preview", async () => {
+  const cache = join(h.dataDir, "models-dev.json");
+  const entries = ["first", "new"].map((id) => ({
+    provider: "gateway",
+    id,
+    context_window: 32000,
+  }));
+  const previous = JSON.stringify({
+    fetched_at: new Date(0).toISOString(),
+    entries,
+  });
+  writeFileSync(cache, previous);
+  const original = config.replace("context_window: 32000, ", "");
+  writeFileSync(file, original);
+  version = JSON.parse((await get()).body).version;
+  const change = { op: "set_model", name: "primary", id: "new" };
+  const data = await confirmation(change);
+  const delayed = Promise.withResolvers<Response>();
+  const fetch = vi.fn(() => delayed.promise);
+  vi.stubGlobal("fetch", fetch);
+  const attempt = post("confirm", data);
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  writeFileSync(join(dir, "secrets.env"), `KEY=${secret}\nOTHER=changed`);
+  delayed.resolve(
+    Response.json({
+      gateway: { models: { new: { limit: { context: 64000 } } } },
+    }),
+  );
+  expect((await attempt).json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(readFileSync(cache, "utf8")).toBe(previous);
+  expect(
+    readdirSync(h.dataDir).filter((n) => n.startsWith(".models-dev.json.")),
+  ).toEqual([]);
+  const read = await get();
+  expect(read.status).toBe(200);
+  expect(JSON.parse(read.body).profiles[0].model_id).toBe("first");
+  version = JSON.parse(read.body).version;
+  const retry = await confirmation(change);
+  // An older poll may still be fetching the previous generation when the retry commits.
+  const oldCatalog = Promise.withResolvers<Response>();
+  fetch.mockImplementationOnce(() => oldCatalog.promise);
+  const polling = live.refresh();
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  fetch.mockImplementationOnce(async () =>
+    Response.json({
+      gateway: { models: { new: { limit: { context: 64000 } } } },
+    }),
+  );
+  expect((await post("confirm", retry)).status).toBe(200);
+  oldCatalog.resolve(
+    Response.json({
+      gateway: { models: { first: { limit: { context: 32000 } } } },
+    }),
+  );
+  expect((await polling).config.profiles.a?.model).toBe("new");
+  expect(live.current().config.profiles.a?.model).toBe("new");
+  expect(JSON.parse(readFileSync(cache, "utf8")).entries).toEqual([
+    { provider: "gateway", id: "new", context_window: 64000 },
+  ]);
+  expect(
+    JSON.parse((await get()).body).profiles[0].metadata.context_window,
+  ).toBe(64000);
+});
+
+test("a masked probe destination is rejected before any network request; offline checks remain available", async () => {
+  const network = vi.fn();
+  vi.stubGlobal("fetch", network);
+  writeFileSync(join(dir, "secrets.env"), `KEY=${secret}\nMASK=example`);
+  const details = JSON.parse((await get()).body);
+  expect(details.providers[0].base_url).toBe("***");
+  const request = { profile: "a", version: details.version };
+  const rejected = await post("checks", { ...request, mode: "online" });
+  expect(rejected.status).toBe(400);
+  expect(rejected.body).not.toContain(secret);
+  expect(
+    h.store.database.prepare("SELECT id FROM launch_profile_checks").all(),
+  ).toEqual([]);
+  expect((await post("checks", { ...request, mode: "metadata" })).status).toBe(
+    202,
+  );
+  await vi.waitFor(async () =>
+    expect(
+      JSON.parse((await get()).body).profiles[0].last_check.finished_at,
+    ).toBeTruthy(),
+  );
+  expect(network).not.toHaveBeenCalled();
+});
+
+test("a settled confirmation replays after unrelated invalid edits but never for a different request or session", async () => {
+  const data = await confirmation({
+    op: "set_model",
+    name: "primary",
+    id: "second",
+  });
+  const first = await post("confirm", data);
+  expect(first.status).toBe(200);
+  writeFileSync(file, "profiles: [");
+  const replay = await post("confirm", data);
+  expect(replay.status).toBe(200);
+  expect(replay.json).toEqual(first.json);
+  expect(
+    (await post("confirm", { ...data, version: "0".repeat(64) })).status,
+  ).toBe(409);
+  expect(
+    (await post("confirm", data, "one", await h.login("launch-password")))
+      .status,
+  ).not.toBe(200);
+  expect(readFileSync(file, "utf8")).toBe("profiles: [");
+  expect(readdirSync(dir).filter((n) => n.endsWith(".bak"))).toHaveLength(1);
 });

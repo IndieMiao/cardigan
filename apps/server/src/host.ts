@@ -13,14 +13,15 @@ import type {
 import {
   agentCliVersion,
   harnessBinary,
+  launchFilesStamp,
   launchFingerprint,
-  loadModelLaunchConfig,
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
   recordLaunchNotice,
   recoverLaunchPublications,
   resolveMcpUrl,
+  stageModelLaunchConfig,
   withPreparationQueue,
   withPreparationRetry,
   worktreeBaselinePrompt,
@@ -46,7 +47,11 @@ import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
-import { liveLaunch, selectableLaunchConfig } from "./live-launch.js";
+import {
+  type LaunchGeneration,
+  liveLaunch,
+  selectableLaunchConfig,
+} from "./live-launch.js";
 
 const exec = promisify(execFile);
 
@@ -59,6 +64,7 @@ export interface HostWiring {
   readonly recoverLaunches: (project: ProjectId) => Promise<void>;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
+  readonly adoptLaunch: (generation: LaunchGeneration) => void;
   readonly selectableLaunchConfig: () => LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
@@ -92,10 +98,8 @@ export async function loadLaunchFiles(
   dir: string,
   report: (message: string) => void = console.warn,
   dataDir = resolveDataDirectory(),
-): Promise<{
-  config: LaunchConfig;
-  secrets: Readonly<Record<string, string>>;
-}> {
+): Promise<LaunchGeneration> {
+  const generation = launchFilesStamp(dir);
   const launchFile = join(dir, "launch.yaml"),
     secretsFile = join(dir, "secrets.env");
   let text: string;
@@ -108,8 +112,6 @@ export async function loadLaunchFiles(
   }
   const raw = parseYaml(text, { prettyErrors: false });
   if (raw == null) throw new Error("启动配置为空");
-  const config = await loadModelLaunchConfig(raw, dataDir);
-  reportLaunchWarnings(config, report);
   let secrets: Readonly<Record<string, string>> = {};
   try {
     const file = await open(secretsFile, "r");
@@ -123,8 +125,18 @@ export async function loadLaunchFiles(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  validateLaunchSecrets(config, secrets);
-  return { config, secrets };
+  const staged = await stageModelLaunchConfig(raw, dataDir);
+  try {
+    validateLaunchSecrets(staged.config, secrets);
+    // A slow background refresh must not overwrite the cache of a newer web install.
+    if (generation !== launchFilesStamp(dir))
+      throw new Error("加载期间配置已变化");
+    reportLaunchWarnings(staged.config, report);
+    staged.cache?.publish();
+    return { config: staged.config, secrets };
+  } finally {
+    staged.cache?.discard();
+  }
 }
 
 /** Ask the harness binary for its version (local mode only); the Run records it. */
@@ -212,6 +224,7 @@ export async function createHostWiring(options: {
       return live.current().config;
     },
     refreshLaunch: live.refresh,
+    adoptLaunch: live.adopt,
     selectableLaunchConfig: () => selectableLaunchConfig(live.current()),
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).

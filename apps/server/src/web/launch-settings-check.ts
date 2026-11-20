@@ -112,6 +112,20 @@ export class ProfileChecks {
       throw invalid("profile");
     if (this.active.has(profile))
       throw new HttpRejection(409, "check_running", "该配置已有检查在进行");
+    const resolved = resolveProfile(file.config, profile);
+    if (mode === "online") {
+      const provider = resolved.provider;
+      const url = provider?.definition.base_url;
+      // probeModel sends credentials to this literal endpoint. A snapshot of a
+      // masked destination is not informed confirmation of that destination.
+      if (
+        !provider ||
+        !url ||
+        publicFields(provider.name, file.secrets) !== provider.name ||
+        publicFields(url, file.secrets) !== url
+      )
+        throw invalid("base_url");
+    }
     const id = randomUUID();
     this.store.database
       .prepare(
@@ -123,7 +137,6 @@ export class ProfileChecks {
         const problems: string[] = [];
         let version: string | null = null;
         try {
-          const resolved = resolveProfile(file.config, profile);
           const cli = await this.cli(resolved.profile.harness);
           version = cli.version;
           if (!cli.path) problems.push("cli_missing");

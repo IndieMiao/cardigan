@@ -191,6 +191,7 @@ export {
 export {
   loadModelLaunchConfig,
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "./model-catalog.js";
 export {
   agentNameFor,

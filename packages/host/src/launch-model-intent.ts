@@ -60,6 +60,7 @@ export function publishModelFile(
   notice: string,
   web?: {
     reserve: () => void;
+    didInstall: () => void;
     checkReferences: (tx: StoreTransactionContext) => void;
   },
 ) {
@@ -99,6 +100,8 @@ export function publishModelFile(
     }
     web?.checkReferences(tx);
     renameSync(temp, path);
+    // Disk no longer describes the previous generation, even if settling its receipt fails.
+    web?.didInstall();
     settle(store, tx, path, candidate);
     return true;
   });

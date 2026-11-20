@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
-  loadModelLaunchConfig,
   parseCachedLaunchConfig,
   publishModelFile,
   readSettledModelFile,
+  stageModelLaunchConfig,
 } from "@cardigan/host";
 import {
   type LaunchConfig,
@@ -14,6 +14,7 @@ import {
 } from "@cardigan/roles";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
 import { z } from "zod";
+import type { LaunchGeneration } from "../live-launch.js";
 import {
   HttpRejection,
   methodNotAllowed,
@@ -76,6 +77,7 @@ export class LaunchSettings {
     private readonly dir: string,
     private readonly dataDir: string,
     readonly effective: () => LaunchConfig,
+    private readonly adopt: (generation: LaunchGeneration) => void,
   ) {
     this.checks = new ProfileChecks(store, () => snapshot(dir));
   }
@@ -198,10 +200,7 @@ export class LaunchSettings {
       throw invalid();
     const { version, preview_id: id } = parsed.data,
       requestKey = digest(`${owner}:${key}`);
-    const f = this.file();
-    const path = realpathSync(f.path);
-    readSettledModelFile(this.store, path); // also repairs a committed rename after an interrupted response
-    const installed = () => {
+    const replay = (allowUnsettled: boolean) => {
       const receipt = this.store.database
         .prepare(
           "SELECT operation,snapshot,installed FROM launch_web_changes WHERE request_key=?",
@@ -215,12 +214,17 @@ export class LaunchSettings {
             "此幂等键已用于其它预览",
           );
         if (receipt.installed) return true;
-        throw stale();
+        if (!allowUnsettled) throw stale();
       }
       return false;
     };
     const success = { ok: true, preview_id: id };
-    if (installed()) return success;
+    // A settled receipt is scoped to this session and request; later disk edits cannot undo it.
+    if (replay(true)) return success;
+    const f = this.file();
+    const path = realpathSync(f.path);
+    readSettledModelFile(this.store, path); // also repairs a committed rename after an interrupted response
+    if (replay(false)) return success;
     const pending = this.previews.get(id);
     if (
       !pending ||
@@ -233,60 +237,71 @@ export class LaunchSettings {
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
     const { text, raw } = candidate(f, change);
     // The host reloads via the refresh-aware catalog loader, not the offline preview cache.
-    try {
-      validateLaunchSecrets(
-        await loadModelLaunchConfig(raw, this.dataDir),
-        f.secrets,
-      );
-    } catch {
+    const staged = await stageModelLaunchConfig(raw, this.dataDir).catch(() => {
       throw invalid();
-    }
-    const actor = authorize().member_id ?? "human";
-    if (installed()) return success; // a concurrent identical request finished during preflight
-    if (digest(text) !== pending.after || snapshot(this.dir) !== version)
-      throw stale();
-    const suffix = randomUUID(),
-      temp = `${path}.${suffix}.tmp`,
-      opts = { flag: "wx", mode: 0o600 };
-    writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+    });
     try {
-      writeFileSync(temp, text, opts);
-      publishModelFile(
-        this.store,
-        path,
-        temp,
-        id,
-        f.original,
-        text,
-        () => snapshot(this.dir) === version,
-        "人员已确认修改启动配置，新运行将使用更新后的配置。",
-        {
-          reserve: () =>
-            this.store.database
-              .prepare(
-                "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
-              )
-              .run(
-                id,
-                requestKey,
-                version,
-                change.op,
-                change.name,
-                actor,
-                new Date().toISOString(),
-              ),
-          checkReferences: (tx) => this.guardDelete(f, change, tx),
-        },
-      );
-    } catch (error) {
-      if (error instanceof HttpRejection) throw error;
-      if (snapshot(this.dir) !== version) throw stale();
-      throw error;
+      try {
+        validateLaunchSecrets(staged.config, f.secrets);
+      } catch {
+        throw invalid();
+      }
+      const actor = authorize().member_id ?? "human";
+      if (replay(false)) return success; // a concurrent identical request finished during preflight
+      if (digest(text) !== pending.after || snapshot(this.dir) !== version)
+        throw stale();
+      // A reference can be added while awaiting the catalog. Reject before even backing up,
+      // then check once more under the SQLite publication lock.
+      this.store.uow.read((tx) => this.guardDelete(f, change, tx));
+      const suffix = randomUUID(),
+        temp = `${path}.${suffix}.tmp`,
+        opts = { flag: "wx", mode: 0o600 };
+      writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+      try {
+        writeFileSync(temp, text, opts);
+        publishModelFile(
+          this.store,
+          path,
+          temp,
+          id,
+          f.original,
+          text,
+          () => snapshot(this.dir) === version,
+          "人员已确认修改启动配置，新运行将使用更新后的配置。",
+          {
+            reserve: () =>
+              this.store.database
+                .prepare(
+                  "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
+                )
+                .run(
+                  id,
+                  requestKey,
+                  version,
+                  change.op,
+                  change.name,
+                  actor,
+                  new Date().toISOString(),
+                ),
+            checkReferences: (tx) => this.guardDelete(f, change, tx),
+            didInstall: () => {
+              this.adopt({ config: staged.config, secrets: f.secrets });
+              staged.cache?.publish();
+            },
+          },
+        );
+      } catch (error) {
+        if (error instanceof HttpRejection) throw error;
+        if (snapshot(this.dir) !== version) throw stale();
+        throw error;
+      } finally {
+        rmSync(temp, { force: true });
+      }
+      this.previews.delete(id);
+      return success;
     } finally {
-      rmSync(temp, { force: true });
+      staged.cache?.discard();
     }
-    this.previews.delete(id);
-    return { ok: true, preview_id: id };
   }
   async serve(
     rest: string,

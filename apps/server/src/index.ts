@@ -144,6 +144,7 @@ export async function runServer(
         launchSettings: {
           dir: configDir(env),
           effective: host.selectableLaunchConfig,
+          adopt: host.adoptLaunch,
         },
       },
       dispatcher: {
