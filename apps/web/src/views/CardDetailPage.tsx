@@ -10,6 +10,7 @@ import {
   type CardDetail,
   type CardiganClient,
   type CardReadOptions,
+  describeError,
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
@@ -51,7 +52,10 @@ import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
-import { TimelineControls } from "../components/TimelineControls.js";
+import {
+  TimelineControls,
+  TimelinePager,
+} from "../components/TimelineControls.js";
 import { Button } from "../components/ui/button.js";
 import { Prose } from "../components/ui/prose.js";
 import { Skeleton } from "../components/ui/skeleton.js";
@@ -59,6 +63,30 @@ import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
 import { MergeConfirmation, SuggestedDecision } from "./NeedsYouPage.js";
+
+/** Timeline entries per read; older pages load as the reader scrolls. */
+const PAGE_SIZE = 20;
+type PagerStatus = { loading: true } | { error: string } | undefined;
+const historyKey = (
+  projectId: string,
+  cardId: string,
+  options: CardReadOptions,
+) =>
+  JSON.stringify([
+    projectId,
+    cardId,
+    options.at,
+    options.type,
+    options.author,
+    options.limit,
+  ]);
+/** One newest-first timeline without duplicate rows. */
+const mergeTimeline = (
+  ...pages: CardDetail["timeline"][]
+): CardDetail["timeline"] =>
+  [...new Map(pages.flat().map((entry) => [entry.id, entry])).values()].sort(
+    (a, b) => b.event_seq - a.event_seq,
+  );
 
 export interface CardDetailPageProps {
   readonly client: CardiganClient;
@@ -102,11 +130,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
   }, [routeLocation]);
   const locate = (id: string | undefined) =>
     setLocalAnchor({ id, routeLocation });
-  const pageSize = [20, 50, 100].includes(Number(routeFilters.count))
-    ? Number(routeFilters.count)
-    : 20;
   const query = useRef<CardReadOptions>({
-    limit: pageSize,
+    limit: PAGE_SIZE,
     ...(anchor ? { at: anchor } : {}),
     ...(routeFilters.type ? { type: routeFilters.type } : {}),
     ...(routeFilters.author ? { author: routeFilters.author } : {}),
@@ -115,7 +140,6 @@ export function CardDetailPage(props: CardDetailPageProps) {
     undefined,
   );
   const loadGeneration = useRef(0);
-  const previousSize = useRef(pageSize);
   const previousFilters = useRef(
     `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`,
   );
@@ -123,56 +147,103 @@ export function CardDetailPage(props: CardDetailPageProps) {
     try {
       const request = ++loadGeneration.current;
       const options = { ...query.current };
-      const key = JSON.stringify([
-        projectId,
-        cardId,
-        options.at,
-        options.type,
-        options.author,
-        options.limit,
-      ]);
+      const key = historyKey(projectId, cardId, options);
       const detail = await client.card(projectId, cardId, options);
+      // Read after the response: an older page may have landed meanwhile.
       const previous =
         history.current?.key === key ? history.current.detail : undefined;
       // A disconnected refresh can skip an entire page. Keep cached history only
       // when the new window connects to it; otherwise restart from its cursor.
-      const connected =
-        options.before ||
-        detail.timeline.some((entry) =>
-          previous?.timeline.some((old) => old.id === entry.id),
-        );
+      const connected = detail.timeline.some((entry) =>
+        previous?.timeline.some((old) => old.id === entry.id),
+      );
       const merged =
         previous && connected && detail.timeline_next_cursor !== undefined
           ? {
               ...detail,
-              timeline: [
-                ...new Map(
-                  [...previous.timeline, ...detail.timeline].map((entry) => [
-                    entry.id,
-                    entry,
-                  ]),
-                ).values(),
-              ].sort((a, b) => b.event_seq - a.event_seq),
-              timeline_next_cursor: options.before
-                ? detail.timeline_next_cursor
-                : (previous.timeline_next_cursor ?? null),
+              timeline: mergeTimeline(previous.timeline, detail.timeline),
+              timeline_next_cursor: previous.timeline_next_cursor ?? null,
             }
           : detail;
-      if (request === loadGeneration.current) {
+      if (request === loadGeneration.current)
         history.current = { key, detail: merged };
-        const { before: _before, ...current } = query.current;
-        query.current = current;
-      }
       return merged;
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
       throw error;
     }
   }, [client, projectId, cardId]);
-  const { data, error, reload, pending, interactive } = useResource(
+  const { data, error, reload, pending, interactive, replace } = useResource(
     load,
     cardRevision ? cardRevision(cardId, affectedCards) : revision,
   );
+  // Older pages are read beside the live head refresh: at most one at a time,
+  // dropped when filters, anchors or the card change while it is in flight.
+  const [pager, setPager] = useState<PagerStatus>();
+  const paging = useRef<object | undefined>(undefined);
+  const resetPaging = useCallback(() => {
+    paging.current = undefined;
+    setPager(undefined);
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the card identity is the reset signal.
+  useEffect(resetPaging, [projectId, cardId, resetPaging]);
+  const loadOlder = useCallback(async () => {
+    const base = history.current;
+    if (paging.current || !base) return;
+    const { timeline, timeline_next_cursor: cursor, counts } = base.detail;
+    if (
+      cursor === null ||
+      (cursor === undefined && timeline.length >= counts.timeline)
+    )
+      return;
+    const token = {};
+    paging.current = token;
+    setPager({ loading: true });
+    const head = { ...query.current };
+    // Servers without cursors widen the head window instead.
+    const options =
+      cursor === undefined
+        ? {
+            ...head,
+            limit:
+              Math.max(head.limit ?? PAGE_SIZE, timeline.length) + PAGE_SIZE,
+          }
+        : { ...head, before: cursor, limit: PAGE_SIZE };
+    try {
+      const detail = await client.card(projectId, cardId, options);
+      if (paging.current !== token) return;
+      const latest = history.current;
+      if (cursor === undefined) {
+        if (latest?.key === base.key) {
+          query.current = { ...query.current, limit: options.limit };
+          history.current = {
+            key: historyKey(projectId, cardId, options),
+            detail,
+          };
+          replace(detail);
+        }
+      } else if (
+        latest?.key === base.key &&
+        latest.detail.timeline_next_cursor === cursor
+      ) {
+        // A disconnected head refresh moves the cursor; that page is skipped
+        // and the sentinel asks again from the new cursor.
+        const merged = {
+          ...latest.detail,
+          timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
+          timeline_next_cursor: detail.timeline_next_cursor ?? null,
+        };
+        history.current = { key: base.key, detail: merged };
+        replace(merged);
+      }
+      paging.current = undefined;
+      setPager(undefined);
+    } catch (error) {
+      if (paging.current !== token) return;
+      paging.current = undefined;
+      setPager({ error: describeError(error) });
+    }
+  }, [client, projectId, cardId, replace]);
   useEffect(() => {
     if (data?.card.title) onTitleChange?.(data.card.title, data);
   }, [data, onTitleChange]);
@@ -204,23 +275,19 @@ export function CardDetailPage(props: CardDetailPageProps) {
   }, [data, cardId]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
-    if (
-      query.current.at === anchor &&
-      previousSize.current === pageSize &&
-      previousFilters.current === filterKey
-    )
+    if (query.current.at === anchor && previousFilters.current === filterKey)
       return;
     query.current = {
-      limit: pageSize,
+      limit: PAGE_SIZE,
       ...(anchor ? { at: anchor } : {}),
       ...(routeFilters.type ? { type: routeFilters.type } : {}),
       ...(routeFilters.author ? { author: routeFilters.author } : {}),
     };
-    previousSize.current = pageSize;
     previousFilters.current = filterKey;
     history.current = undefined;
+    resetPaging();
     reload();
-  }, [anchor, pageSize, routeFilters.type, routeFilters.author, reload]);
+  }, [anchor, routeFilters.type, routeFilters.author, reload, resetPaging]);
   const back = routeHash({ kind: "cards", projectId });
   if (data === null)
     return (
@@ -263,7 +330,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
           }}
           onCommentConflict={() => {
             locate(undefined);
-            query.current = { limit: pageSize };
+            query.current = { limit: PAGE_SIZE };
+            resetPaging();
             if (!inDrawer)
               window.location.hash = routeHash({
                 kind: "card",
@@ -274,28 +342,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
             reload();
           }}
           reload={reload}
-          pending={pending}
           anchorReady={!anchor || (query.current.at === anchor && !pending)}
-          pageSize={pageSize}
-          loadEarlier={() => {
-            if (data.timeline_next_cursor) {
-              query.current = {
-                ...query.current,
-                before: data.timeline_next_cursor,
-                limit: pageSize,
-              };
-            } else if (data.timeline_next_cursor === undefined) {
-              query.current = {
-                ...query.current,
-                limit:
-                  Math.max(
-                    query.current.limit ?? pageSize,
-                    data.timeline.length,
-                  ) + pageSize,
-              };
-            } else return;
-            reload();
-          }}
+          pager={pager}
+          loadOlder={loadOlder}
         />
       )}
     </>
@@ -313,9 +362,8 @@ function CardContent({
   onPosted,
   onCommentConflict,
   reload,
-  pending,
-  pageSize,
-  loadEarlier,
+  pager,
+  loadOlder,
   anchorReady,
 }: {
   detail: CardDetail;
@@ -329,9 +377,8 @@ function CardContent({
   onCommentConflict: () => void;
   reload: () => void;
   anchorReady: boolean;
-  pending: boolean;
-  pageSize: number;
-  loadEarlier: () => void;
+  pager: PagerStatus;
+  loadOlder: () => void;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "card",
@@ -347,6 +394,13 @@ function CardContent({
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
   const [selectedSection, setSelectedSection] = useState<string>();
+  const timelineRoot = useCallback(
+    () =>
+      inDrawer
+        ? (article.current?.closest<HTMLElement>(".drawer-body") ?? null)
+        : null,
+    [inDrawer],
+  );
   const activeSection = selectedSection ?? `card-${cardId}-overview`;
   useLayoutEffect(() => {
     if (!anchor || !anchorReady) return;
@@ -715,14 +769,6 @@ function CardContent({
             onChange={setFilters}
             loaded={detail.timeline.length}
             total={detail.counts.timeline}
-            hasMore={
-              detail.timeline_next_cursor === undefined
-                ? detail.timeline.length < detail.counts.timeline
-                : detail.timeline_next_cursor !== null
-            }
-            pageSize={pageSize}
-            pending={pending}
-            loadEarlier={loadEarlier}
           />
           <CommentBox
             ref={commentBox}
@@ -753,6 +799,17 @@ function CardContent({
               typeFilter={filters.type ?? ""}
               authorFilter={filters.author ?? ""}
               anchor={anchor}
+            />
+            <TimelinePager
+              loaded={detail.timeline.length}
+              hasMore={
+                detail.timeline_next_cursor === undefined
+                  ? detail.timeline.length < detail.counts.timeline
+                  : detail.timeline_next_cursor !== null
+              }
+              status={pager}
+              scrollRoot={timelineRoot}
+              onLoad={loadOlder}
             />
           </section>
         </section>

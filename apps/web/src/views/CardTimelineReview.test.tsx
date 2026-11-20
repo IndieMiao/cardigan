@@ -13,7 +13,6 @@ import { App } from "../App.js";
 import { type CardReadOptions, HttpCardiganClient } from "../api.js";
 import { selectCardTab } from "../testing/card-tabs.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
-import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(() => {
@@ -72,23 +71,6 @@ test("U3 starts with 20 page-flow records, loads older records and keeps the com
   expect(screen.getByText("已加载 40 / 65 条")).toBeTruthy();
 });
 
-test("U3 history size survives route changes and remounting", async () => {
-  const { client } = history();
-  const page = render(
-    <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
-  );
-  await selectCardTab(/^时间线/);
-  await screen.findByText("Original comment 65");
-  await selectMenu(/^每次加载：/, "50 条");
-  await waitFor(() =>
-    expect(document.querySelectorAll(".timeline-entry")).toHaveLength(50),
-  );
-  expect(window.location.hash).toContain("count=50");
-  page.unmount();
-  render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
-  await screen.findByText("Original comment 16");
-  expect(document.querySelectorAll(".timeline-entry")).toHaveLength(50);
-});
 test("U3 a copied old anchor loads its record automatically before scrolling the row", async () => {
   window.location.hash = "#/p/p-1/cards/C-1?at=entry-C-1%231";
   const { client, card } = history(),
@@ -298,7 +280,7 @@ test.each([false, true])(
       const box = screen.getByRole("region", { name: "写评论" });
       expect(
         screen
-          .getByRole("group", { name: "时间线筛选与加载" })
+          .getByRole("group", { name: "时间线筛选" })
           .compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
       expect(
