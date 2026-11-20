@@ -9,7 +9,9 @@ import "../src/components/ui/theme.css";
 
 // C-514: one synthetic card (the shared cardDetail sample) and 9 synthetic
 // active employees, 3 of them on this card; library avatars for 7, initials
-// for 2. No backend, no production data.
+// for 2. `?roster=long` adds 31 more (long names and titles, names with
+// spaces), 40 in all; `window.__c514Roster` replaces the roster for the next
+// read. No backend, no production data.
 Date.now = () => new Date(NOW).getTime();
 const person = (
   id: string,
@@ -35,6 +37,33 @@ const employees = [
   person("E-12", "森·刘邦", "游戏程序", "liu-bei"),
   person("E-15", "Bob", "游戏策划与关卡、数值、剧情统筹", null),
 ];
+if (new URLSearchParams(location.search).get("roster") === "long")
+  employees.unshift(
+    person(
+      "E-105",
+      "员工05",
+      "很长很长的职位名称用于检查省略与截断表现",
+      null,
+      true,
+    ),
+    person("E-100", "测试员工非常非常长的名字0号", "运营", "lin-daiyu", true),
+    person("E-101", "Mary Jane", "视觉设计", null),
+    person("E-102", "Mary Jo", "交互设计", null),
+    ...Array.from({ length: 27 }, (_, n) =>
+      person(
+        `E-${110 + n}`,
+        `合成员工${String(n + 1).padStart(2, "0")}`,
+        n % 3 === 0 ? "负责发布流程、合并检查与主机运维的工程师" : "开发工程师",
+        null,
+      ),
+    ),
+  );
+declare global {
+  interface Window {
+    __c514Roster?: MentionCandidate[];
+    __c514Reads?: number;
+  }
+}
 const cards = [
   { ...card, waiting_on: [], why: "进行中" },
   ...[2, 3].map((n) => ({
@@ -63,7 +92,10 @@ const client = fakeClient({
       card: { ...base.card, ...cards.find((c) => c.id === id) },
     };
   },
-  mentionCandidates: async () => ({ employees }),
+  mentionCandidates: async () => {
+    window.__c514Reads = (window.__c514Reads ?? 0) + 1;
+    return { employees: window.__c514Roster ?? employees };
+  },
 });
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing root");
