@@ -11,6 +11,7 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import {
+  ApiError,
   type CardiganClient,
   type ExecutionCapacity,
   HttpCardiganClient,
@@ -867,4 +868,118 @@ test("Q-1017: a retry that succeeds while the user is on another panel shows the
   expect(listCell()).not.toContain("—");
   expect(screen.queryByText(/并发读数未能更新/)).toBeNull();
   expect(screen.queryByText("正在重新读取并发读数…")).toBeNull();
+});
+
+/** V-2475: the machine read can be refused (401/403) or no longer visible (404). */
+function visibilityCase(status: number) {
+  const machine = byId("local");
+  const state = { allowed: true, gate: undefined as Promise<void> | undefined };
+  const refused = () =>
+    new ApiError(
+      status,
+      status === 404 ? "not_found" : "unauthorized",
+      "合成：机器不再可见",
+    );
+  const c = client({
+    machines: vi.fn(async () => {
+      if (state.gate) await state.gate;
+      if (state.allowed) return { machines: [machine] };
+      if (status === 404) return { machines: [] };
+      throw refused();
+    }),
+    machine: vi.fn(async () => {
+      if (state.gate) await state.gate;
+      if (!state.allowed) throw refused();
+      return { machine };
+    }),
+  });
+  const page = (revision: number) => (
+    <SettingsPage projectId="p-1" client={c} revision={revision} />
+  );
+  return { machine, state, page };
+}
+const listed = () =>
+  document.querySelector('table[aria-label="机器列表"]')?.textContent ?? "";
+const drawerTable = (name: string) =>
+  document.querySelector(`[role="dialog"] table[aria-label="${name}"]`);
+
+test.each([401, 403, 404])(
+  "V-2475: after a %s reply the earlier machine facts are taken down",
+  async (status) => {
+    const { machine, state, page } = visibilityCase(status);
+    const view = render(page(0));
+    fireEvent.click(screen.getByRole("button", { name: "机器" }));
+    fireEvent.click(await screen.findByRole("button", { name: machine.label }));
+    await within(await screen.findByRole("dialog")).findByRole("table", {
+      name: "在跑任务",
+    });
+    state.allowed = false;
+    view.rerender(page(1));
+    if (status === 404) {
+      // The list still reads (empty); the open detail is no longer visible.
+      expect(await screen.findByText("没有机器")).toBeTruthy();
+      const dialog = within(screen.getByRole("dialog"));
+      expect(await dialog.findByText(/合成：机器不再可见/)).toBeTruthy();
+      expect(dialog.getByRole("heading", { level: 2 }).textContent).toBe(
+        "机器",
+      );
+    } else {
+      // A refused list takes its open detail down with it.
+      expect(
+        await screen.findByText(
+          status === 401 ? "会话已失效，请重新登录。" : "没有权限执行此操作。",
+        ),
+      ).toBeTruthy();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+    expect(listed()).not.toContain(machine.label);
+    expect(drawerTable("项目绑定")).toBeNull();
+    expect(drawerTable("在跑任务")).toBeNull();
+    expect(document.body.textContent).not.toContain("peer/cards");
+    expect(document.querySelector('a[href="#/p/peer/cards/C-40"]')).toBeNull();
+  },
+);
+
+test("V-2475: a retry in flight after a refusal keeps the facts down until a read succeeds", async () => {
+  const { machine, state, page } = visibilityCase(403);
+  const view = render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  state.allowed = false;
+  view.rerender(page(1));
+  const alert = (await screen.findByText("没有权限执行此操作。")).closest(
+    "[role=alert]",
+  ) as HTMLElement;
+  expect(listed()).not.toContain(machine.label);
+  state.allowed = true;
+  const held = Promise.withResolvers<void>();
+  state.gate = held.promise;
+  fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
+  expect(await screen.findByText("正在加载机器…")).toBeTruthy();
+  expect(listed()).not.toContain(machine.label);
+  expect(screen.queryByRole("button", { name: machine.label })).toBeNull();
+  state.gate = undefined;
+  await act(async () => held.resolve());
+  expect(
+    await screen.findByRole("button", { name: machine.label }),
+  ).toBeTruthy();
+  expect(screen.queryByText("没有权限执行此操作。")).toBeNull();
+});
+
+test("V-2475 guard: any other failed refresh keeps the last good read beside the error", async () => {
+  const machine = byId("local");
+  let fail = false;
+  const c = client({
+    machines: vi.fn(async () => {
+      if (fail) throw new ApiError(500, "internal", "合成：服务内部错误");
+      return { machines: [machine] };
+    }),
+  });
+  const view = render(<SettingsPage projectId="p-1" client={c} revision={0} />);
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("button", { name: machine.label });
+  fail = true;
+  view.rerender(<SettingsPage projectId="p-1" client={c} revision={1} />);
+  expect(await screen.findByText(/合成：服务内部错误/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: machine.label })).toBeTruthy();
 });

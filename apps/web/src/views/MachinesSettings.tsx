@@ -1,9 +1,11 @@
-import { useCallback, useState } from "react";
-import type {
-  CardiganClient,
-  ExecutionCapacity,
-  MachineBindingView,
-  MachineView,
+import { useEffect, useMemo, useState } from "react";
+import {
+  ApiError,
+  type CardiganClient,
+  describeError,
+  type ExecutionCapacity,
+  type MachineBindingView,
+  type MachineView,
 } from "../api.js";
 import { useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
@@ -40,6 +42,31 @@ import {
   machineActiveRuns,
 } from "../machine-labels.js";
 import { useResource } from "../useResource.js";
+
+/** A read the server refused (401/403) or that is no longer visible (404). */
+type Withdrawn = { readonly withdrawn: string };
+const WITHDRAWN_STATUSES = new Set([401, 403, 404]);
+/**
+ * C-512 (V-2475): such a reply replaces what was read before instead of
+ * leaving it on screen beside the error. It stays in place through a retry
+ * in flight until a read succeeds. Other failures keep the last good read.
+ */
+function withdrawable<T>(read: () => Promise<T>) {
+  return async (): Promise<T | Withdrawn> => {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof ApiError && WITHDRAWN_STATUSES.has(error.status))
+        return { withdrawn: describeError(error) };
+      throw error;
+    }
+  };
+}
+function withdrawnOf(data: object | undefined): string | undefined {
+  return data && "withdrawn" in data
+    ? (data as Withdrawn).withdrawn
+    : undefined;
+}
 
 const platform = (m: MachineView) =>
   [m.os, m.arch].filter(Boolean).join(" / ") || "—";
@@ -122,14 +149,22 @@ export function MachinesSettings({
   projectId: string;
   revision?: number;
 }) {
-  const load = useCallback(
-    () => client.machines(projectId),
+  const load = useMemo(
+    () => withdrawable(() => client.machines(projectId)),
     [client, projectId],
   );
   const list = useResource(load, revision);
   const [open, setOpen] = useState<MachineView>();
   const { remember } = useDrawerReturnFocus(open !== undefined);
-  const machines = list.data?.machines;
+  const withdrawn = withdrawnOf(list.data);
+  const machines =
+    list.data && !withdrawn && "machines" in list.data
+      ? list.data.machines
+      : undefined;
+  // A list the server no longer allows takes its open detail with it.
+  useEffect(() => {
+    if (withdrawn) setOpen(undefined);
+  }, [withdrawn]);
   const capacity = useMachineCapacity();
   return (
     <SettingsPanel
@@ -140,6 +175,7 @@ export function MachinesSettings({
     >
       <RequestFeedback
         {...list}
+        error={list.error ?? (list.pending ? undefined : withdrawn)}
         retry={list.reload}
         pendingMessage="正在加载机器…"
       />
@@ -199,7 +235,7 @@ export function MachinesSettings({
           </TableBody>
         </SettingsTable>
       )}
-      {open && (
+      {open && !withdrawn && (
         <MachineDrawer
           key={open.id}
           client={client}
@@ -230,12 +266,16 @@ function MachineDrawer({
   capacity: MachineCapacity;
   onClose: () => void;
 }) {
-  const load = useCallback(
-    () => client.machine(projectId, summary.id),
+  const load = useMemo(
+    () => withdrawable(() => client.machine(projectId, summary.id)),
     [client, projectId, summary.id],
   );
   const detail = useResource(load, revision);
-  const machine = detail.data?.machine;
+  const withdrawn = withdrawnOf(detail.data);
+  const machine =
+    detail.data && !withdrawn && "machine" in detail.data
+      ? detail.data.machine
+      : undefined;
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -243,17 +283,18 @@ function MachineDrawer({
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
-      title={machine?.label ?? summary.label}
-      description={`机器 ${summary.id} 详情`}
+      title={machine?.label ?? (withdrawn ? "机器" : summary.label)}
+      description={withdrawn ? "机器详情" : `机器 ${summary.id} 详情`}
       initialFocus="close"
     >
       <CardDetailLayout
         className="card-page-drawer"
-        aria-label={`机器 ${summary.id}`}
+        aria-label={withdrawn ? "机器详情" : `机器 ${summary.id}`}
       >
         <SettingsDrawerFeedback>
           <RequestFeedback
             {...detail}
+            error={detail.error ?? (detail.pending ? undefined : withdrawn)}
             retry={detail.reload}
             pendingMessage="正在加载机器…"
           />
