@@ -540,6 +540,20 @@ try {
       await until("!!document.querySelector('[role=dialog] form input')");
       await fill("端点", "https://gateway.example.test");
       await scene("models-provider", measureDrawer);
+      // A key secrets.env no longer has: shown as 已失效, not choosable.
+      await models(theme);
+      await row("codex-sol");
+      await click("编辑 Provider");
+      await until("!!document.querySelector('[role=dialog] form input')");
+      await choose("密钥引用 OPENAI_API_KEY");
+      await scene("models-provider-stale-key", measureDrawer);
+      assert(
+        results["models-provider-stale-key"].options.includes(
+          "OPENAI_API_KEY（已失效）",
+        ),
+      );
+      await key("Escape", 27);
+      await until("!document.querySelector('[role=listbox]')");
       // Alias: point it at another id.
       await models(theme);
       await row("claude-opus");

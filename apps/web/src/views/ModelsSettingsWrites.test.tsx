@@ -643,3 +643,182 @@ test("error details reach the page", async () => {
     references: [{ employee_id: "E-1", name: "甲" }],
   });
 });
+
+// D-2012 review cases (林黛玉, V-2562), kept as regression tests.
+test("a stale re-preview keeps someone else's change to a field this person did not edit", async () => {
+  let current = launchSettingsFixture;
+  const api = harness({
+    launchSettings: vi.fn(async () => current),
+    confirmLaunchChange: vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, "stale_snapshot", "stale")),
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  const click = (name: string) =>
+    fireEvent.click(within(d).getByRole("button", { name }));
+  click("编辑");
+  fireEvent.change(field(d, "推理强度"), { target: { value: "medium" } });
+  click("预览修改");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("确认保存");
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  current = {
+    ...current,
+    version: V2,
+    profiles: current.profiles.map((p) =>
+      p.name === "claude-opus"
+        ? { ...p, parameters: { ...p.parameters, auto_update: true } }
+        : p,
+    ),
+  };
+  click("刷新并重新预览");
+  await waitFor(() =>
+    expect(
+      within(d).queryByRole("button", { name: "刷新并重新预览" }),
+    ).toBeNull(),
+  );
+  await within(d).findByRole("button", { name: "返回修改" });
+  click("返回修改");
+  click("预览修改");
+  expect(api.previewLaunchChange.mock.lastCall).toEqual([
+    V2,
+    { op: "edit_profile", name: "claude-opus", fields: { effort: "medium" } },
+  ]);
+});
+
+test("an accepted check keeps both actions unavailable until a read shows it", async () => {
+  const api = harness({
+    launchSettings: vi
+      .fn()
+      .mockResolvedValueOnce(launchSettingsFixture)
+      .mockImplementation(() => new Promise(() => {})),
+  });
+  await openModels(api.client);
+  const d = await openProfile("pi-deepseek");
+  fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+  await waitFor(() =>
+    expect(api.client.launchSettings).toHaveBeenCalledTimes(2),
+  );
+  expect(
+    within(d)
+      .getByRole("button", { name: "本地检查" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(
+    within(d)
+      .getByRole("button", { name: "在线探测" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(await within(d).findByText("在线探测中")).toBeTruthy();
+  expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+});
+
+test("an endpoint with a query or fragment is marked in place and cannot be previewed", async () => {
+  const api = harness();
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  fireEvent.click(within(d).getByRole("button", { name: "编辑 Provider" }));
+  const endpoint = field(d, "端点");
+  for (const value of [
+    "https://fixture.example.test/v1?region=demo",
+    "https://fixture.example.test/v1#part",
+  ]) {
+    fireEvent.change(endpoint, { target: { value } });
+    expect(endpoint.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      within(d)
+        .getByRole("button", { name: "预览修改" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  }
+  expect(api.previewLaunchChange).not.toHaveBeenCalled();
+});
+
+test("a reference found at confirmation makes the delete unavailable", async () => {
+  const confirmLaunchChange = vi.fn().mockRejectedValue(
+    new ApiError(409, "profile_in_use", "使用中", false, {
+      references: [{ employee_id: "E-9", name: "样例" }],
+    }),
+  );
+  const api = harness({ confirmLaunchChange });
+  await openModels(api.client);
+  const d = await openProfile("pi-deepseek");
+  fireEvent.click(within(d).getByRole("button", { name: "删除" }));
+  fireEvent.click(within(d).getByRole("button", { name: "预览删除" }));
+  fireEvent.click(await within(d).findByRole("button", { name: "确认删除" }));
+  expect((await within(d).findByRole("alert")).textContent).toContain("样例");
+  const confirm = within(d).queryByRole("button", { name: "确认删除" });
+  expect(!confirm || confirm.hasAttribute("disabled")).toBe(true);
+  await waitFor(() =>
+    expect(
+      within(d)
+        .getByRole("button", { name: "预览删除" })
+        .hasAttribute("disabled"),
+    ).toBe(true),
+  );
+  // The settings are read again so the list and users catch up.
+  await waitFor(() => expect(api.launchSettings).toHaveBeenCalledTimes(2));
+  expect(confirmLaunchChange).toHaveBeenCalledTimes(1);
+});
+
+test("a secret key secrets.env no longer has is shown but not choosable", async () => {
+  const api = harness();
+  await openModels(api.client);
+  const d = await openProfile("codex-sol");
+  fireEvent.click(within(d).getByRole("button", { name: "编辑 Provider" }));
+  const choice = within(d).getByRole("combobox", {
+    name: /密钥引用 OPENAI_API_KEY/,
+  });
+  expect(choice.textContent).toContain("（已失效）");
+  fireEvent.keyDown(choice, { key: "ArrowDown" });
+  const enabled = screen
+    .getAllByRole("option")
+    .filter((x) => x.getAttribute("aria-disabled") !== "true")
+    .map((x) => x.textContent);
+  expect(enabled).toEqual(launchSettingsFixture.secret_keys);
+});
+
+test("the Provider form also keeps someone else's endpoint after a stale re-preview", async () => {
+  let current = launchSettingsFixture;
+  const api = harness({
+    launchSettings: vi.fn(async () => current),
+    confirmLaunchChange: vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, "stale_snapshot", "stale")),
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  const click = (name: string) =>
+    fireEvent.click(within(d).getByRole("button", { name }));
+  click("编辑 Provider");
+  fireEvent.change(field(d, "名称"), { target: { value: "Anthropic 网关" } });
+  click("预览修改");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("确认保存");
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  current = {
+    ...current,
+    version: V2,
+    providers: current.providers.map((p) =>
+      p.id === "anthropic"
+        ? { ...p, base_url: "https://other.example.test" }
+        : p,
+    ),
+  };
+  click("刷新并重新预览");
+  await within(d).findByRole("button", { name: "返回修改" });
+  click("返回修改");
+  expect((field(d, "端点") as HTMLInputElement).value).toBe(
+    "https://other.example.test",
+  );
+  click("预览修改");
+  expect(api.previewLaunchChange.mock.lastCall).toEqual([
+    V2,
+    {
+      op: "edit_provider",
+      name: "anthropic",
+      fields: { name: "Anthropic 网关" },
+    },
+  ]);
+});

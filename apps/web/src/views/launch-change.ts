@@ -37,12 +37,15 @@ export const urlProblem = (value: string) => {
   const text = textProblem(value);
   if (text) return text;
   const url = URL.parse(value);
+  // Same rule as the host (`packages/roles` provider schema).
   return url &&
     ["http:", "https:"].includes(url.protocol) &&
     !url.username &&
-    !url.password
+    !url.password &&
+    !url.search &&
+    !url.hash
     ? undefined
-    : "请填写 http(s) 地址，不要在地址里写账号或密钥。";
+    : "请填写 http(s) 地址，不要带账号、密钥、查询参数或 # 片段。";
 };
 
 /** What went wrong with a preview, confirmation or check, for display in place. */

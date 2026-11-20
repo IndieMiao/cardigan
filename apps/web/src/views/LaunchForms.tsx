@@ -94,6 +94,26 @@ function useLaunchChange(context: EditorContext) {
       if (alive.current) setBusy(false);
     }
   }, []);
+  /**
+   * A reference appeared since the read (a delete answered `profile_in_use`):
+   * drop the preview and read the settings again, so the form shows who uses
+   * it. The delete stays unavailable in this form (see `LaunchEditor`).
+   */
+  const refused = useCallback(
+    async (next: LaunchProblem) => {
+      setPreview(undefined);
+      setProblem(next);
+      try {
+        const settings = await client.launchSettings();
+        if (!alive.current) return;
+        onRefreshed(settings);
+        setVersion(settings.version);
+      } catch {
+        // The notice from the refusal stays; the delete stays unavailable.
+      }
+    },
+    [client, onRefreshed],
+  );
   const requestPreview = useCallback(
     (change: LaunchChange, at: string) =>
       run(async () => {
@@ -101,10 +121,13 @@ function useLaunchChange(context: EditorContext) {
           const result = await client.previewLaunchChange(at, change);
           if (alive.current) setPreview({ change, result });
         } catch (error) {
-          if (alive.current) setProblem(launchProblem(error, change.op));
+          if (!alive.current) return;
+          const next = launchProblem(error, change.op);
+          if (next.kind === "in_use") await refused(next);
+          else setProblem(next);
         }
       }),
-    [client, run],
+    [client, run, refused],
   );
   return {
     busy,
@@ -149,6 +172,7 @@ function useLaunchChange(context: EditorContext) {
         } catch (error) {
           if (!alive.current) return;
           const next = launchProblem(error, preview.change.op);
+          if (next.kind === "in_use") return await refused(next);
           // The host rejected the file or a field: correct it in the form.
           if (next.kind === "field") setPreview(undefined);
           setProblem(next);
@@ -215,7 +239,12 @@ function LaunchEditor({
         ? ({ kind: "form", message: problem.message } as const)
         : problem
       : undefined;
-  const notice = general && <ProblemNote problem={general} />;
+  // Known to be referenced: no further delete from this form.
+  const inUse = problem?.kind === "in_use";
+  // When the new read already lists the users, the form shows them instead.
+  const notice = general && !(inUse && change === undefined) && (
+    <ProblemNote problem={general} />
+  );
   // A stale snapshot: the main action becomes reading it again and previewing anew.
   const pending = editor.preview?.change ?? change;
   const refresh = general?.kind === "stale" && pending && (
@@ -235,6 +264,7 @@ function LaunchEditor({
           aria-label={`确认${label}`}
           onSubmit={(event) => {
             event.preventDefault();
+            if (inUse) return;
             void editor.confirm(() =>
               onSaved(SAVED[previewed.op](previewed.name)),
             );
@@ -252,7 +282,7 @@ function LaunchEditor({
               <Button
                 type="submit"
                 variant={destructive ? "destructive" : "primary"}
-                disabled={editor.busy}
+                disabled={editor.busy || inUse}
               >
                 {editor.busy ? "正在保存…" : confirmLabel}
               </Button>
@@ -268,7 +298,7 @@ function LaunchEditor({
       noValidate
       onSubmit={(event) => {
         event.preventDefault();
-        if (change && !editor.busy) void editor.start(change);
+        if (change && !editor.busy && !inUse) void editor.start(change);
       }}
     >
       <SettingsDialogFields>
@@ -283,7 +313,7 @@ function LaunchEditor({
           <Button
             type="submit"
             variant="primary"
-            disabled={editor.busy || change === undefined}
+            disabled={editor.busy || change === undefined || inUse}
           >
             {editor.busy ? "正在生成预览…" : submitLabel}
           </Button>
@@ -451,12 +481,15 @@ export function ProfileForm({
         ? ""
         : String(profile.parameters.auto_update),
   };
-  const [draft, setDraft] = useState(initial);
+  // Only what the person edited; untouched fields follow the latest read,
+  // so a refreshed snapshot never turns someone else's change into ours.
+  const [edits, setEdits] = useState<Partial<ProfileDraft>>({});
+  const draft: ProfileDraft = { ...initial, ...edits };
   const [custom, setCustom] = useState(
     initial.model !== "" && !aliases.includes(initial.model),
   );
-  const patch = (next: Partial<typeof draft>) =>
-    setDraft((old) => ({ ...old, ...next }));
+  const patch = (next: Partial<ProfileDraft>) =>
+    setEdits((old) => ({ ...old, ...next }));
   const creating = profile === undefined;
   const taken =
     creating && settings.profiles.some((p) => p.name === draft.name.trim());
@@ -503,7 +536,9 @@ export function ProfileForm({
     valid && changed
       ? { op: creating ? "create_profile" : "edit_profile", name, fields }
       : undefined;
-  const dirty = JSON.stringify(draft) !== JSON.stringify(initial);
+  const dirty = Object.entries(edits).some(
+    ([key, value]) => value !== initial[key as keyof ProfileDraft],
+  );
   return (
     <LaunchEditor
       context={context}
@@ -768,12 +803,18 @@ export function ProviderForm({
 }) {
   const { settings } = context;
   const keys = settings.secret_keys ?? [];
-  const initial = {
+  const initial: ProviderDraft = {
     name: provider.name,
     base_url: provider.base_url ?? "",
     secret_env: { ...(provider.secret_env ?? {}) },
   };
-  const [draft, setDraft] = useState(initial);
+  // Only what the person edited, over the latest read (see `ProfileForm`).
+  const [edits, setEdits] = useState<ProviderEdits>({ secret_env: {} });
+  const draft: ProviderDraft = {
+    name: edits.name ?? initial.name,
+    base_url: edits.base_url ?? initial.base_url,
+    secret_env: { ...initial.secret_env, ...edits.secret_env },
+  };
   const problems = {
     name: textProblem(draft.name),
     base_url:
@@ -811,7 +852,13 @@ export function ProviderForm({
           used={used}
           keys={keys}
           draft={draft}
-          setDraft={setDraft}
+          patch={(next) =>
+            setEdits((old) => ({
+              ...old,
+              ...next,
+              secret_env: { ...old.secret_env, ...next.secret_env },
+            }))
+          }
           problems={{
             ...problems,
             base_url:
@@ -825,27 +872,27 @@ export function ProviderForm({
     />
   );
 }
+interface ProviderDraft {
+  name: string;
+  base_url: string;
+  secret_env: Record<string, string>;
+}
+type ProviderEdits = Partial<Omit<ProviderDraft, "secret_env">> & {
+  secret_env: Record<string, string>;
+};
 function ProviderFields({
   id,
   used,
   keys,
   draft,
-  setDraft,
+  patch,
   problems,
 }: {
   id: string;
   used: readonly string[];
   keys: readonly string[];
-  draft: {
-    name: string;
-    base_url: string;
-    secret_env: Record<string, string>;
-  };
-  setDraft: (next: {
-    name: string;
-    base_url: string;
-    secret_env: Record<string, string>;
-  }) => void;
+  draft: ProviderDraft;
+  patch: (next: Partial<ProviderEdits>) => void;
   problems: Record<"name" | "base_url" | "secret_env", string | undefined>;
 }) {
   return (
@@ -862,14 +909,14 @@ function ProviderFields({
         label="名称"
         error={problems.name}
         value={draft.name}
-        onChange={(value) => setDraft({ ...draft, name: value })}
+        onChange={(value) => patch({ name: value })}
       />
       <TextField
         label="端点"
         error={problems.base_url}
         value={draft.base_url}
         url
-        onChange={(value) => setDraft({ ...draft, base_url: value })}
+        onChange={(value) => patch({ base_url: value })}
       />
       {Object.entries(draft.secret_env).map(([env, key]) => (
         <SettingsField
@@ -882,14 +929,15 @@ function ProviderFields({
               value={key}
               aria-invalid={field.invalid}
               aria-describedby={field.describedBy}
-              onValueChange={(next) =>
-                setDraft({
-                  ...draft,
-                  secret_env: { ...draft.secret_env, [env]: next },
-                })
-              }
+              onValueChange={(next) => patch({ secret_env: { [env]: next } })}
             >
-              {(keys.includes(key) ? keys : [key, ...keys]).map((k) => (
+              {/* A key secrets.env no longer has stays visible, not choosable. */}
+              {!keys.includes(key) && (
+                <option value={key} disabled>
+                  {key}（已失效）
+                </option>
+              )}
+              {keys.map((k) => (
                 <option key={k} value={k}>
                   {k}
                 </option>
@@ -912,7 +960,9 @@ export function AliasForm({
 }) {
   const model = context.settings.models?.[alias];
   const initial = model?.id ?? "";
-  const [id, setId] = useState(initial);
+  // The person's edit, if any; otherwise the latest read (see `ProfileForm`).
+  const [edit, setId] = useState<string>();
+  const id = edit ?? initial;
   const local = textProblem(id);
   const used = context.settings.profiles
     .filter((p) => p.model_alias === alias)

@@ -234,7 +234,14 @@ const client = fakeClient({
     setCheck(profile, check(mode, "running"));
     if (query.get("check") !== "hold")
       window.setTimeout(() => setCheck(profile, check(mode, "passed")), 1200);
-    return { id: "c", profile, mode, version, status: "running" };
+    // The same id the read reports, so the page sees this check arrive.
+    return {
+      id: "00000000-0000-4000-8000-0000000000c5",
+      profile,
+      mode,
+      version,
+      status: "running",
+    };
   },
 });
 const root = document.getElementById("root");

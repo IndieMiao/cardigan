@@ -568,13 +568,31 @@ function Checks({
       alive.current = false;
     };
   }, []);
-  const running = profile.last_check?.status === "running";
+  // The check the host accepted from this click, until a read shows it.
+  const [accepted, setAccepted] = useState<{
+    readonly id: string;
+    readonly mode: LaunchProfileCheck["mode"];
+  }>();
+  const waiting =
+    accepted !== undefined && profile.last_check?.id !== accepted.id;
+  const running = waiting || profile.last_check?.status === "running";
+  // Re-read (GET only) until the accepted check appears, also after a failed read.
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = window.setInterval(onRefresh, CHECK_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [waiting, onRefresh]);
   const start = async (mode: LaunchProfileCheck["mode"]) => {
     if (starting || running) return;
     setStarting(mode);
     setProblem(undefined);
     try {
-      await client.startLaunchCheck(settings.version, profile.name, mode);
+      const check = await client.startLaunchCheck(
+        settings.version,
+        profile.name,
+        mode,
+      );
+      if (alive.current) setAccepted({ id: check.id, mode });
     } catch (error) {
       if (alive.current) setProblem(launchProblem(error, "check"));
     } finally {
@@ -585,7 +603,27 @@ function Checks({
   };
   return (
     <SettingsSection title="检查">
-      {profile.last_check ? (
+      {waiting ? (
+        <SettingsFacts>
+          <SettingsFact label="结果">
+            <CheckStatus
+              check={{
+                id: accepted.id,
+                version: settings.version,
+                mode: accepted.mode,
+                started_at: "",
+                finished_at: null,
+                status: "running",
+                problems: [],
+                cli_version: null,
+              }}
+            />
+          </SettingsFact>
+          <SettingsFact label="方式">
+            {checkModeLabel(accepted.mode)}
+          </SettingsFact>
+        </SettingsFacts>
+      ) : profile.last_check ? (
         <LastCheck check={profile.last_check} />
       ) : (
         <EmptyState>未检查</EmptyState>
