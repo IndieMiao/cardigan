@@ -119,11 +119,12 @@ try {
     })()`);
     await delay(100);
   };
-  // Scroll the last (10-column) table of the scope into view and to its end.
+  // Scroll the widest (10-column) table of the scope into view and to its end.
   const wideEnd = (scope) =>
     evaluate(`(() => {
       const tables = document.querySelectorAll(${JSON.stringify(`${scope} table`)});
-      const table = tables[tables.length - 1];
+      // The 10-column table: the one with the most header cells.
+      const table = Array.from(tables).sort((a, b) => b.querySelectorAll('th').length - a.querySelectorAll('th').length)[0];
       if (!table) return null; // The baseline goal is plain text.
       const scroller = table.parentElement;
       scroller.scrollIntoView({ block: 'center' });

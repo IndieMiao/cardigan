@@ -49,7 +49,15 @@ const entries = [
   }),
 ];
 const detail = cardDetail({
-  card: { ...card, title: "Markdown 表格样式合成卡片", goal: C534_TABLES },
+  card: {
+    ...card,
+    title: "Markdown 表格样式合成卡片",
+    goal: C534_TABLES,
+    acceptance_criteria: [
+      "测试通过",
+      "| 场景 | 结果 |\n|---|---:|\n| 窄屏抽屉 | 1 |",
+    ],
+  },
   timeline: entries,
   counts: { timeline: 1, deliveries: 0, reviews: 0, open_decisions: 0 },
 });

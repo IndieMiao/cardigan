@@ -49,7 +49,7 @@ import {
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
-import { Markdown } from "../components/Operations.js";
+import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
@@ -774,7 +774,9 @@ function CardContent({
               <LongContent>
                 <ul>
                   {card.acceptance_criteria.map((criterion) => (
-                    <li key={criterion}>{criterion}</li>
+                    <li key={criterion}>
+                      <MarkdownBody body={criterion} />
+                    </li>
                   ))}
                 </ul>
               </LongContent>
