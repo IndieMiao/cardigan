@@ -287,11 +287,11 @@ test("v39 seeds ui for flow 5 without rewriting historical cards or existing tem
   }
 });
 
-test("upgrading from resource leases v45 seeds the builtin beside conflicting custom names without editing pinned snapshots", () => {
+test("upgrading from the check journal v46 seeds the builtin beside conflicting custom names without editing pinned snapshots", () => {
   const migrationsDir = mkdtempSync(join(tmpdir(), "cardigan-story-upgrade-"));
   for (const { version, name, sql } of listMigrations(
     defaultMigrationsDir,
-  ).filter((m) => m.version <= 45))
+  ).filter((m) => m.version <= 46))
     writeFileSync(
       join(migrationsDir, `${String(version).padStart(4, "0")}_${name}.sql`),
       sql,
@@ -320,12 +320,12 @@ test("upgrading from resource leases v45 seeds the builtin beside conflicting cu
         tx.card_templates.put("legacy", t);
     });
     const pinned = { template: "story", template_version: 1 };
-    const upgrade = "0046_story_template.sql";
+    const upgrade = "0047_story_template.sql";
     copyFileSync(
       join(defaultMigrationsDir, upgrade),
       join(migrationsDir, upgrade),
     );
-    expect(store.migrate()).toEqual([{ version: 46, name: "story_template" }]);
+    expect(store.migrate()).toEqual([{ version: 47, name: "story_template" }]);
     for (let pass = 0; pass < 2; pass++) {
       if (pass === 1) {
         expect(store.migrate()).toEqual([]);

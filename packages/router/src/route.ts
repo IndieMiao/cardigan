@@ -13,6 +13,7 @@ import type {
 } from "@cardigan/domain";
 import {
   assignmentCanReadCard,
+  authorPrecheckWaitHandled,
   canStartWork,
   cardTemplate,
   employeeNameKey,
@@ -1865,6 +1866,18 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const item = itemOf(input, p.work_item_id);
+      // A registered wait has its own durable wake. Don't dispatch the result
+      // before the scanner clears the blocker, or again after it has done so.
+      const blocker = item?.reported_blocker;
+      if (
+        (!conflict &&
+          blocker?.resume_when?.kind === "precheck_finished" &&
+          blocker.resume_when.target_id === p.attempt_id &&
+          blocker.reported_by === `assignment:${p.assignment_id}` &&
+          blocker.needs === "role") ||
+        authorPrecheckWaitHandled(input.snapshot.events, input.event)
+      )
+        break;
       const card = input.snapshot.cards.find(
         (c) => c.id === input.event.card_id,
       );
@@ -2132,6 +2145,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           payloadString(input.event.payload, "body") ?? "系统已恢复等待工作项",
         );
       break;
+    case "precheck_wait_escalated":
     case "baseline_conflict_limit_reached":
       if (
         input.event.actor.kind === "system" &&

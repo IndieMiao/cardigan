@@ -73,6 +73,7 @@ import {
 } from "./merge-delegation.js";
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
+import { authorPrecheckWait } from "./precheck-wait.js";
 import {
   isReviewLimitOption,
   resolveReviewLimit,
@@ -424,9 +425,12 @@ export function reportBlocker(
       (condition?.kind === "baseline_updated" ||
         (condition?.kind === "precheck_finished" &&
           condition.target_id === latestConflict.attempt_id));
+    const authorWait = authorPrecheckWait(d, item, condition, p.needs);
     const disabled = conflictWait
       ? !conflict
-      : autoResumeUsed(d, item, condition);
+      : authorWait
+        ? authorWait.consumed
+        : autoResumeUsed(d, item, condition);
     paused(d, item, "blocked");
     d.put("work_items", {
       ...d.work(item.id),
@@ -454,11 +458,13 @@ export function reportBlocker(
       work_item_id: item.id,
       guidance: disabled
         ? "自动恢复后再次阻塞，请 PM 核查并人工恢复"
-        : condition
-          ? "系统将在解除条件满足且其它阻塞清除后自动恢复一次，请结束当前 Run 等待"
-          : p.needs === "human"
-            ? "Use request_human_action or request_decision to request human intervention"
-            : "Notify the responsible role",
+        : authorWait
+          ? "请结束当前 Run。预检结束后系统按本次预检恢复；同一提交反复失败交 PM 核查。"
+          : condition
+            ? "系统将在解除条件满足且其它阻塞清除后自动恢复一次，请结束当前 Run 等待"
+            : p.needs === "human"
+              ? "Use request_human_action or request_decision to request human intervention"
+              : "Notify the responsible role",
     };
   });
 }
