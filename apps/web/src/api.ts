@@ -1317,6 +1317,7 @@ export interface RoleListView {
 }
 
 export interface EmployeeOptions {
+  readonly employees?: readonly CreatedEmployee[];
   readonly library: readonly {
     readonly id: string;
     readonly name: string;
@@ -1334,6 +1335,7 @@ export interface EmployeeOptions {
   }[];
 }
 export interface CreateEmployeeInput {
+  readonly projects?: readonly string[];
   readonly launch_profile_ref?: string | null;
   readonly name: string;
   readonly title: string;
@@ -1344,6 +1346,7 @@ export interface CreateEmployeeInput {
   readonly avatar_file?: string;
 }
 export interface CreatedEmployee {
+  readonly projects?: readonly string[];
   readonly id: string;
   readonly name: string;
   readonly role_id: string;

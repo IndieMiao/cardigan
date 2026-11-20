@@ -320,3 +320,14 @@ test.each([
     expect(snapshot()).toEqual(before);
   },
 );
+
+test("--projects round trips multiple memberships; omitted preserves and empty clears", async () => {
+  expect(await run([...add, "--projects", "one, two"])).toBe(0);
+  expect(await run(["update", "E-1", "--title", "架构师"])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual(["one", "two"]);
+  expect(await run(["update", "E-1", "--projects=two,one,one"])).toBe(2);
+  expect(await run(["update", "E-1", "--projects=two"])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual(["two"]);
+  expect(await run(["update", "E-1", "--projects="])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual([]);
+});

@@ -497,6 +497,21 @@ test("bootstrap pins the role and employee; disabled or ambiguous new identities
     created_at: now,
     updated_at: now,
   };
+  const scoped = {
+    ...state(),
+    employees: [{ ...employee, projects: ["other"] }],
+  };
+  for (const [params, reason] of [
+    [{}, "本项目没有可用员工"],
+    [{ employee_id: employee.id }, "不属于本项目"],
+  ] as const) {
+    expect(
+      createHostOpsAssignment(scoped, human, params, ports()),
+    ).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(reason) },
+    });
+  }
   const base = { ...state(), employees: [employee] };
   const effect = value(createHostOpsAssignment(base, human, {}, ports()));
   expect(effect.data.assignment.employee_id).toBe(employee.id);

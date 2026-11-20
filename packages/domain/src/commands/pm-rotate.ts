@@ -12,7 +12,10 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { resolveEmployee } from "./employee-assignment.js";
+import {
+  resolveEmployee,
+  selectStandingEmployee,
+} from "./employee-assignment.js";
 
 export interface RotateStandingPmResult {
   /** True when the role version and explicitly requested identity already match. */
@@ -191,7 +194,7 @@ function rotate(
         "员工角色必须与 pm 一致",
       );
     }
-    const employee_id = employee?.id ?? previous.employee_id;
+    const requestedId = employee?.id ?? previous.employee_id;
     const result = {
       previous,
       from_version: previous.role_version,
@@ -199,7 +202,7 @@ function rotate(
     };
     if (
       latest.role_version === previous.role_version &&
-      employee_id === previous.employee_id &&
+      requestedId === previous.employee_id &&
       (p.external === undefined || p.external === (previous.external ?? false))
     )
       return {
@@ -210,6 +213,14 @@ function rotate(
         human_actions: [],
         cancelled_run_ids: [],
       };
+    const employee_id = unwrap(
+      selectStandingEmployee(
+        state.employees ?? [],
+        state.project_id,
+        "pm",
+        requestedId,
+      ),
+    )?.id;
     ensure(
       latest.role_version >= previous.role_version,
       "invariant_violation",

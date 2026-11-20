@@ -392,3 +392,44 @@ test.each(["code", "card_completion"] as const)(
     );
   },
 );
+
+test("work-item ownership is selected within the project; editing membership never rebinds an existing assignment", () => {
+  const local = state().project_id;
+  const foreign = employee(1, { projects: ["other"] });
+  const member = employee(2, { projects: [local, "shared"] });
+  const scoped = { ...state(), employees: [foreign, member] };
+  expect(
+    value(projectSnapshot(scoped, human)).data.available_employees.map(
+      (e) => e.id,
+    ),
+  ).toEqual([member.id]);
+  const assigned = value(assignItem(scoped));
+  expect(assigned.data.employee_id).toBe(member.id);
+  for (const reference of [foreign.id, foreign.name])
+    expect(assignItem(scoped, 1, reference)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("不属于本项目") },
+    });
+  const removed = [foreign, { ...member, projects: ["shared"] }];
+  expect(assignItem({ ...scoped, employees: removed })).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("本项目没有可用员工") },
+  });
+  const replay = value(
+    assignItem(
+      { ...apply(scoped, assigned), employees: removed },
+      1,
+      member.id,
+    ),
+  );
+  expect(replay.data).toEqual(assigned.data);
+  expect(replay.changes).toEqual([]);
+  expect(
+    value(
+      assignItem({
+        ...scoped,
+        employees: [foreign, { ...member, projects: [] }],
+      }),
+    ).data.employee_id,
+  ).toBe(member.id);
+});

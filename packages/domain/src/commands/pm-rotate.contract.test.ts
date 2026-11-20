@@ -431,6 +431,7 @@ test("external Office rotates at the same version, validates employee, and prese
   for (const invalid of [
     { ...employee, status: "inactive" as const },
     { ...employee, role_id: "coder" },
+    { ...employee, projects: ["other"] },
   ]) {
     expect(
       rotateStandingPm(

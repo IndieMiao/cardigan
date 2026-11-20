@@ -13,6 +13,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { selectStandingEmployee } from "./employee-assignment.js";
 
 function target(d: CommandDraft) {
   ensure(
@@ -47,16 +48,17 @@ function target(d: CommandDraft) {
     "invariant_violation",
     "host_ops 最新版本低于在岗版本",
   );
-  if (previous.employee_id) {
-    const employee = d.state.employees?.find(
-      (e) => e.id === previous.employee_id,
-    );
-    ensure(
-      employee?.status === "active" && employee.role_id === "host_ops",
-      "validation_failed",
-      "原员工须为在职的主机运维",
-    );
-  }
+  const employeeId =
+    latest.role_version === previous.role_version
+      ? previous.employee_id
+      : unwrap(
+          selectStandingEmployee(
+            d.state.employees ?? [],
+            d.state.project_id,
+            "host_ops",
+            previous.employee_id,
+          ),
+        )?.id;
   ensure(
     !pendingHostOpsActions(d.state.events).some(
       (a) => a.assignment_id === previous.id,
@@ -75,7 +77,7 @@ function target(d: CommandDraft) {
     "illegal_transition",
     "主机运维有自动停止操作，等待其完成后再轮换",
   );
-  return { previous, latest };
+  return { previous, latest, employeeId };
 }
 
 /** Read-only preflight; failed exit confirmation must leave the old identity on duty. */
@@ -106,7 +108,7 @@ export function finishHostOpsRotation(
   ports: CommandPorts,
 ): Result<CommandEffect<{ previous: Assignment; assignment: Assignment }>> {
   return command(state, actor, "rotate_host_ops_assignment", ports, (d) => {
-    const { previous, latest } = target(d);
+    const { previous, latest, employeeId } = target(d);
     ensure(
       previous.id === p.previous_assignment_id && previous.status === "active",
       "stale_target",
@@ -129,7 +131,7 @@ export function finishHostOpsRotation(
       runtime_ref: null,
       mcp_token_id: "host-ops",
       created_at: d.now,
-      ...(previous.employee_id ? { employee_id: previous.employee_id } : {}),
+      ...(employeeId ? { employee_id: employeeId } : {}),
     };
     d.put("assignments", assignment);
     for (const cursor of d.list("cursors"))

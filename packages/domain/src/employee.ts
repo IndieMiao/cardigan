@@ -4,7 +4,7 @@ export type { GlobalEvent, GlobalIdAllocator } from "./global.js";
 
 import type { Clock } from "./clock.js";
 import type { Timestamp } from "./entities.js";
-import type { EmployeeId, RoleId } from "./ids.js";
+import type { EmployeeId, ProjectId, RoleId } from "./ids.js";
 import type { MemberRepository } from "./member.js";
 import type { EmployeeStatus } from "./states.js";
 
@@ -16,10 +16,19 @@ export interface Employee {
   readonly bio: string;
   readonly avatar: string | null;
   readonly role_id: RoleId;
+  /** Empty (or absent in old snapshots) keeps legacy all-project eligibility. */
+  readonly projects?: readonly ProjectId[];
   readonly launch_profile_ref: string | null;
   readonly status: EmployeeStatus;
   readonly created_at: Timestamp;
   readonly updated_at: Timestamp;
+}
+
+export function employeeInProject(
+  employee: Employee,
+  projectId: ProjectId,
+): boolean {
+  return !employee.projects?.length || employee.projects.includes(projectId);
 }
 
 export type EmployeeActor = GlobalActor;

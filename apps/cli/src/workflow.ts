@@ -34,6 +34,7 @@ import {
   projectSnapshot,
   runtimeUnknownDeferred,
   saveMachine,
+  selectStandingEmployee,
   setCardSensitive,
   standingTools,
   supersedeCard,
@@ -104,7 +105,7 @@ const USAGE = [
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
-  "  cardigan pm create --office|--ops [--project <p>]",
+  "  cardigan pm create --office|--ops [--employee <E-n 或名字>] [--project <p>]",
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
   "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
@@ -2017,12 +2018,28 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         );
       }
 
+      const reference = optional(parsed.flags, "employee");
+      let employeeId = existing?.employee_id;
+      if (!existing || reference !== undefined) {
+        const selected = selectStandingEmployee(
+          tx.employees.list(),
+          project_id,
+          "pm",
+          reference,
+        );
+        if (!selected.ok)
+          throw new CliError(selected.error.message, EXIT.usage);
+        if (existing && selected.value?.id !== employeeId)
+          throw new CliError("Assignment 的员工创建后不能修改", EXIT.usage);
+        employeeId = selected.value?.id;
+      }
       const stamped =
         existing === undefined
           ? applyStandingMode(
               {
                 id: tx.ids.next(project_id, "assignment"),
                 scope: "standing",
+                ...(employeeId ? { employee_id: employeeId } : {}),
                 role_id: "pm",
                 role_version: latest.role_version,
                 status: "active",

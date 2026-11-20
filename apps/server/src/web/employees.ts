@@ -57,6 +57,7 @@ const employeeInput = z
     name: boundedEmployeeText(40),
     title: boundedEmployeeText(40),
     role_id: z.string(),
+    projects: z.array(z.string()).optional(),
     launch_profile_ref: z.string().nullable().optional(),
     bio: boundedEmployeeText(200).optional(),
     avatar: z.string().optional(),
@@ -127,6 +128,12 @@ export async function serveEmployees(
         listRoleVersions(tx, c.project_id).map((role) => [role.role_id, role]),
       );
       return {
+        employees: employees.map((e) => ({
+          id: e.id,
+          name: e.name,
+          role_id: e.role_id,
+          projects: e.projects ?? [],
+        })),
         library: AVATAR_LIBRARY.map(([id, name, source]) => {
           const used = employees.find(
             (employee) => employee.avatar === `library:${id}`,
@@ -186,18 +193,33 @@ export async function serveEmployees(
   };
   if (update) {
     const parsed = z
-      .object({ launch_profile_ref: z.string().nullable() })
+      .object({
+        launch_profile_ref: z.string().nullable().optional(),
+        projects: z.array(z.string()).optional(),
+      })
       .strict()
+      .refine((patch) => Object.keys(patch).length > 0)
       .safeParse(body);
     if (!parsed.success)
-      throw new HttpRejection(400, "validation_failed", "请指定启动配置");
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        "请指定所属项目或启动配置",
+      );
     const result = execute((tx) => {
       const effect = must(
         updateEmployee(
           tx.employees.list(),
           { kind: "human" },
           update as EmployeeId,
-          parsed.data,
+          {
+            ...(parsed.data.projects === undefined
+              ? {}
+              : { projects: parsed.data.projects }),
+            ...(parsed.data.launch_profile_ref === undefined
+              ? {}
+              : { launch_profile_ref: parsed.data.launch_profile_ref }),
+          },
           {
             clock: c.clock,
             ids: tx.global_ids,
@@ -205,13 +227,14 @@ export async function serveEmployees(
           },
         ),
       );
-      if (effect.data.launch_profile_ref === null) {
+      if (parsed.data.launch_profile_ref === null) {
         checkInheritedProfile(c, tx, effect.data.role_id);
       }
       persistEmployeeEffect(tx, effect);
       return {
         id: effect.data.id,
         launch_profile_ref: effect.data.launch_profile_ref,
+        projects: effect.data.projects ?? [],
       };
     });
     sendJson(c.res, 200, result);
@@ -269,6 +292,7 @@ export async function serveEmployees(
           name: fields.name,
           title: fields.title,
           role_id: fields.role_id,
+          projects: fields.projects ?? [c.project_id],
           ...(fields.launch_profile_ref === undefined
             ? {}
             : { launch_profile_ref: fields.launch_profile_ref }),
@@ -323,7 +347,7 @@ export async function serveEmployees(
     const effect = prepare(tx, tx.global_ids, avatar);
     persistEmployeeEffect(tx, effect);
     const { id, name, role_id } = effect.data;
-    return { id, name, role_id };
+    return { id, name, role_id, projects: effect.data.projects ?? [] };
   });
   sendJson(c.res, 200, created);
   return true;

@@ -21,11 +21,11 @@ import { cliLaunchPaths } from "./paths.js";
 
 const USAGE = [
   "用法：cardigan employee <命令>（全局员工，无需选择项目）",
-  "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
+  "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>] [--projects <项目1,项目2>]",
   "  list [--role <角色>] [--all]",
-  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
+  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>] [--projects <项目1,项目2>]",
   "  deactivate <E-n> / activate <E-n>",
-  "可用 --data-dir <目录> 指定数据库；update 的简介、头像、启动配置传空字符串可清空。",
+  "可用 --data-dir <目录> 指定数据库；update 的简介、头像、启动配置传空字符串可清空；--projects 传空字符串表示不限项目。",
 ].join("\n");
 const editableFlags = [
   "name",
@@ -34,6 +34,7 @@ const editableFlags = [
   "avatar",
   "avatar-file",
   "launch-profile",
+  "projects",
 ];
 
 function parse(args: readonly string[]) {
@@ -77,6 +78,7 @@ function parse(args: readonly string[]) {
       throw new CliError(`--${key} 需要一个值`, EXIT.usage);
     if (
       value.length === 0 &&
+      key !== "projects" &&
       !(
         command === "update" &&
         ["bio", "avatar", "launch-profile"].includes(key)
@@ -154,7 +156,7 @@ export async function runEmployeeCommand(
           : employees
               .map(
                 (employee) =>
-                  `${employee.id}  ${employee.name}  ${employee.title}  角色：${employee.role_id}  ${employee.status === "active" ? "在职" : "已停用"}`,
+                  `${employee.id}  ${employee.name}  ${employee.title}  角色：${employee.role_id}  ${employee.status === "active" ? "在职" : "已停用"}  项目：${employee.projects?.join(", ") || "不限"}`,
               )
               .join("\n"),
       );
@@ -168,6 +170,14 @@ export async function runEmployeeCommand(
         ...(profiles === undefined ? {} : { launch_profiles: profiles }),
       };
       const patch: UpdateEmployeeInput = {
+        ...(flags.projects === undefined
+          ? {}
+          : {
+              projects:
+                flags.projects === ""
+                  ? []
+                  : flags.projects.split(",").map((id) => id.trim()),
+            }),
         ...(flags.name === undefined ? {} : { name: flags.name }),
         ...(flags.title === undefined ? {} : { title: flags.title }),
         ...(flags.bio === undefined ? {} : { bio: flags.bio }),

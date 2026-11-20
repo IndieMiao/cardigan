@@ -849,6 +849,47 @@ test("office and ops are separate standing assignments with independent tokens",
   expect(printed()).toContain("复用常驻 PM Ops：A-2");
 });
 
+test("pm create only binds active project members, including when selected by name", async () => {
+  await run(["init"]);
+  await run(["project", "create", "p-work"]);
+  await run([
+    "role",
+    "add",
+    "p-work",
+    "pm",
+    "--allowed-tools",
+    "create_card,record_decision",
+  ]);
+  const add = (name: string, projects: string) =>
+    run([
+      "employee",
+      "add",
+      "--name",
+      name,
+      "--title",
+      "经理",
+      "--role",
+      "pm",
+      "--projects",
+      projects,
+    ]);
+  expect(await add("外部", "other")).toBe(0);
+  expect(await run(["pm", "create", "--ops"])).toBe(2);
+  expect(errors.join("\n")).toContain("本项目没有可用员工");
+  expect(await add("本地", "p-work")).toBe(0);
+  expect(await run(["pm", "create", "--ops", "--employee", "外部"])).toBe(2);
+  expect(errors.join("\n")).toContain("不属于本项目");
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => tx.assignments.list("p-work"))).toMatchObject(
+      [{ employee_id: "E-2" }],
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("pm create --ops drops record_decision and needs the role to have it", async () => {
   expect(await run(["init"])).toBe(0);
   await run(["project", "create", "p-work"]);

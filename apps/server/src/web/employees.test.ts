@@ -70,7 +70,12 @@ const createdEvents = () =>
 test("owner creates audited global employees; options include all characters and active project roles with inactive occupancy", async () => {
   const response = await post({ ...input, name: "云长", bio: "负责开发" });
   expect(response.status).toBe(200);
-  expect(response.json).toEqual({ id: "E-1", name: "云长", role_id: "coder" });
+  expect(response.json).toEqual({
+    id: "E-1",
+    name: "云长",
+    role_id: "coder",
+    projects: ["p-test"],
+  });
   expect(createdEvents()).toEqual([
     expect.objectContaining({
       actor: { kind: "human" },
@@ -483,4 +488,26 @@ test("creation without an override rejects a role whose profile was removed", as
     error: { message: expect.stringContaining("removed") },
   });
   expect(employees()).toHaveLength(0);
+});
+
+test("owner can create and update project memberships without changing the launch profile", async () => {
+  const projects = ["p-test", "other"];
+  expect((await post({ ...input, projects })).json).toMatchObject({ projects });
+  const update = (projects: unknown) =>
+    call(h.port, `${path}/E-1/update`, {
+      method: "POST",
+      cookie,
+      body: JSON.stringify({ projects }),
+      headers: {
+        origin: `http://${h.hostHeader}`,
+        "content-type": "application/json",
+        "idempotency-key": `membership-${++sequence}`,
+      },
+    });
+  expect((await update([""])).status).toBe(400);
+  expect(employees()[0]?.projects).toEqual(projects);
+  expect((await update([])).json).toMatchObject({ projects: [] });
+  expect(
+    (await call(h.port, `${path}/options`, { cookie })).json,
+  ).toMatchObject({ employees: [{ id: "E-1", projects: [] }] });
 });
