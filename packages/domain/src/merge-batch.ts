@@ -33,6 +33,36 @@ export interface MergeBatch {
   readonly published_prefix?: MergeBatchId;
 }
 
+/** Queue observations live on the tail member's card stream, not in the
+ * batch lifecycle. Only the current queued attempt can display one. */
+export function batchQueueWait(events: readonly Event[], batch: MergeBatch) {
+  const check = batch.check;
+  if (
+    batch.status !== "checking" ||
+    check?.status !== "queued" ||
+    check.recheck_requested
+  )
+    return undefined;
+  const owner = batch.members.at(-1)?.card_id;
+  if (!owner) return undefined;
+  const wait = events.findLast((e) => {
+    if (
+      e.type !== "merge_check_waiting" ||
+      e.card_id !== owner ||
+      e.actor.kind !== "system" ||
+      e.actor.project_id !== batch.project_id
+    )
+      return false;
+    const p = e.payload as Partial<MergeCheckView> | null;
+    return (
+      p?.batch_id === batch.id &&
+      p.attempt_id === check.attempt_id &&
+      p.completion_id === check.completion_id
+    );
+  })?.payload as MergeCheckView["queue_wait"];
+  return wait && { reason: wait.reason, queued_at: wait.queued_at };
+}
+
 /** A check that never started cannot implicate a member or justify a confirmation run. */
 export function hasBatchFailureEvidence(check?: MergeCheckView): boolean {
   return (

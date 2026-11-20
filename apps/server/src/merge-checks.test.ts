@@ -6437,6 +6437,10 @@ test.each([
           ),
       ).toHaveLength(1);
       if (at === 1) {
+        const detail = cardDetail(h.f.state(), h.scenario.card.id);
+        expect(
+          detail?.card.merge_stage?.batch_check?.queue_wait?.reason,
+        ).toContain(last.retry_at);
         h.advance(29_899);
         await next.tick(project);
         expect(pushes).toBe(1);
@@ -6630,5 +6634,101 @@ test("Q-1022: a registration with no result is not proof of a pre-transport time
     next?.stop();
     await gate.idle();
     await next?.idle();
+  }
+});
+
+test("Q-1028: every regrouped member sees the original lock deadline until the batch starts", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const began = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+    began.resolve();
+    await release.promise;
+    throw new CandidatePushNotStarted(30_000);
+  });
+  const batches = () => mergeBatches(h.f.state().events);
+  const holdAll = (hold: boolean) => {
+    for (const { scenario } of h.cards)
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: scenario.card.id,
+            hold: hold ? { reason: "wait", resume_condition: "ready" } : null,
+          },
+          p,
+        ),
+      );
+  };
+  const cardChecks = () =>
+    h.cards.map(
+      ({ scenario }) =>
+        cardDetail(h.f.state(), scenario.card.id)?.card.merge_stage
+          ?.batch_check,
+    );
+  try {
+    const original = await gate.schedule(project);
+    await began.promise;
+    holdAll(true);
+    await gate.tick(project);
+    expect(batches()[0]?.status).toBe("aborted");
+    release.resolve();
+    await original.done;
+    const receipt = required(
+      h.f.state().events.findLast((e) => e.type === callSettled),
+    ).payload as RepositoryReceipt;
+    expect(receipt).toMatchObject({
+      outcome: "timeout",
+      ordinal: 1,
+      retry_at: new Date(h.now() + 30_000).toISOString(),
+    });
+    holdAll(false);
+    await gate.tick(project);
+    const successor = required(batches()[1]);
+    for (const check of cardChecks()) {
+      expect(check).toMatchObject({
+        batch_id: successor.id,
+        status: "queued",
+        queue_wait: { reason: expect.stringContaining("仓库忙") },
+      });
+      expect(check?.queue_wait?.reason).toContain(
+        `第 ${receipt.ordinal} 次等待锁超时，${receipt.retry_at}`,
+      );
+    }
+    h.advance(29_999);
+    await gate.tick(project);
+    const waits = h.f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "merge_check_waiting" &&
+          (e.payload as { batch_id?: string }).batch_id === successor.id &&
+          (e.payload as { reason: string }).reason.includes("仓库忙"),
+      );
+    expect(waits).toHaveLength(1);
+    expect(waits[0]?.payload).not.toHaveProperty("repository_retry_at");
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(publish).not.toHaveBeenCalled();
+    h.advance(1);
+    await gate.schedule(project);
+    await vi.waitFor(() => expect(batches()[1]?.check?.status).toBe("running"));
+    for (const check of cardChecks()) expect(check?.queue_wait).toBeUndefined();
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    required(
+      h.runs.get(required(batches()[1]?.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await gate.schedule(project);
+    await gate.idle();
+    await gate.tick(project);
+    expect(batches().map((b) => b.status)).toEqual(["aborted", "published"]);
+    expect(publish).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    gate.stop();
+    await gate.idle();
   }
 });

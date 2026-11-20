@@ -1,6 +1,6 @@
 import type { Actor, MergeCheckView } from "../entities.js";
 import type { CardId, MergeBatchId } from "../ids.js";
-import { mergeBatches } from "../merge-batch.js";
+import { batchQueueWait, mergeBatches } from "../merge-batch.js";
 import {
   attempt,
   type CommandPorts,
@@ -31,27 +31,27 @@ export function recordMergeCheckWait(
     const context = attempt(() => mergeContext(state, p.card_id));
     if (!context.ok || context.value.target.id !== p.completion_id) return;
     const card = context.value.card;
+    const batch =
+      p.batch_id &&
+      mergeBatches(state.events).find(
+        (b) => b.id === p.batch_id && b.members.at(-1)?.card_id === p.card_id,
+      );
+    if (
+      p.batch_id &&
+      (batch?.status !== "checking" || batch.check?.recheck_requested)
+    )
+      return;
     const check = p.batch_id
-      ? mergeBatches(state.events).find(
-          (b) => b.id === p.batch_id && b.members.at(-1)?.card_id === p.card_id,
-        )?.check
+      ? batch?.check
       : latestMergeCheck(state.events, p.card_id, p.completion_id);
+    const wait = batch
+      ? batchQueueWait(state.events, batch)
+      : check?.queue_wait;
     if (
       check?.status !== "queued" ||
       check.completion_id !== p.completion_id ||
       check.attempt_id !== p.attempt_id ||
-      (p.batch_id
-        ? (
-            state.events.findLast(
-              (e) =>
-                e.card_id === p.card_id &&
-                e.actor.kind === "system" &&
-                e.type === "merge_check_waiting" &&
-                (e.payload as { attempt_id?: string })?.attempt_id ===
-                  p.attempt_id,
-            )?.payload as { reason?: string } | undefined
-          )?.reason
-        : check.queue_wait?.reason) === p.reason
+      wait?.reason === p.reason
     )
       return;
     d.emit(
@@ -65,7 +65,7 @@ export function recordMergeCheckWait(
         ...(p.repository_retry_at
           ? { repository_retry_at: p.repository_retry_at }
           : {}),
-        queued_at: check.queue_wait?.queued_at ?? check.updated_at,
+        queued_at: wait?.queued_at ?? check.updated_at,
       },
       { type: "system", body: `合并检查排队：${p.reason}` },
     );

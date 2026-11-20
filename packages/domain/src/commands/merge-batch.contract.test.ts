@@ -25,6 +25,7 @@ import {
   recordMergeBatchCheck,
   recordMergeBatchResult,
   recordMergeCheck,
+  recordMergeCheckWait,
   recordMergeResult,
   referenceProjectSnapshot,
   referenceReadState,
@@ -133,7 +134,7 @@ async function fixture(count = 3, flow_version = 1) {
     );
   const check = (
     batch: MergeBatch,
-    status: "passed" | "failed" | "repository_busy",
+    status: "queued" | "passed" | "failed" | "repository_busy",
     attempt = `batch-${batch.id}`,
     summary = status as string,
   ) => {
@@ -161,6 +162,7 @@ async function fixture(count = 3, flow_version = 1) {
         io,
       ),
     );
+    if (status === "queued") return;
     if (status === "repository_busy") {
       commit(
         recordMergeBatchCheck(
@@ -253,6 +255,64 @@ test("MB identifiers do not alias members, and card checks cannot authorize publ
       f.io,
     ).ok,
   ).toBe(false);
+});
+
+test("only a matching host wait is visible to batch members; it is not check evidence", async () => {
+  const f = await fixture(2),
+    batch = f.form(),
+    tail = batch.members.at(-1),
+    peer = batch.members[0];
+  if (!tail || !peer) throw new Error("Missing members");
+  f.check(batch, "queued");
+  const observe = (reason: string) =>
+    recordMergeCheckWait(
+      f.state(),
+      system,
+      {
+        card_id: tail.card_id,
+        completion_id: tail.completion_id,
+        batch_id: batch.id,
+        attempt_id: `batch-${batch.id}`,
+        reason,
+      },
+      f.io,
+    );
+  const before = mergeBatches(f.state().events);
+  f.commit(observe("first wait"));
+  f.commit(observe("current wait"));
+  expect(value(observe("current wait")).events).toEqual([]);
+  expect(mergeBatches(f.state().events)).toEqual(before);
+  expect(
+    beginMergeBatchPublish(f.state(), system, { batch_id: batch.id }, f.io).ok,
+  ).toBe(false);
+  const state = f.state(),
+    wait = state.events.findLast((e) => e.type === "merge_check_waiting");
+  if (!wait) throw new Error("Missing observation");
+  const payload = {
+    ...(wait.payload as Record<string, string>),
+    reason: "unrelated wait",
+  };
+  // A newer observation on another target or stream must not shadow this one.
+  const events = [
+    ...state.events,
+    { ...wait, payload, actor: human },
+    { ...wait, payload, actor: { ...system, project_id: "other" } },
+    { ...wait, payload, card_id: peer.card_id },
+    ...[
+      { batch_id: "MB-999" },
+      { attempt_id: "other" },
+      { completion_id: "D-999" },
+    ].map((change) => ({ ...wait, payload: { ...payload, ...change } })),
+  ];
+  for (const card of state.cards)
+    expect(
+      mergeStage({ ...state, events }, card)?.batch_check?.queue_wait?.reason,
+    ).toBe("current wait");
+  f.check(batch, "passed");
+  for (const card of f.state().cards)
+    expect(
+      mergeStage(f.state(), card)?.batch_check?.queue_wait,
+    ).toBeUndefined();
 });
 
 test("one batch owns all three cards and only a passed final tree publishes all members atomically", async () => {

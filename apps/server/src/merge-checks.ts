@@ -15,6 +15,7 @@ import type {
   Result,
 } from "@cardigan/domain";
 import {
+  batchQueueWait,
   cardTemplate,
   flowAtLeast,
   hasPassedMergeCheck,
@@ -181,6 +182,10 @@ export interface MergeCheckOptions {
   readonly recoveryInspectionIntervalMs?: number;
   readonly repositoryRetryDelaysMs?: readonly number[];
 }
+function repositoryWaitReason(timeouts: number, retryAt: string) {
+  return `仓库忙，候选尚未分发；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
+}
+
 interface Task {
   project: CentralProject;
   plan: MergePlan;
@@ -1681,7 +1686,7 @@ export class MergeChecks {
                   ).toISOString();
         const current = this.validLockObservation(task, check);
         if (retryAt) {
-          const reason = `仓库忙，候选尚未分发；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
+          const reason = repositoryWaitReason(timeouts, retryAt);
           if (current)
             this.waiting(task, reason, check, receipt ? undefined : retryAt);
           await log?.waiting(reason);
@@ -2405,12 +2410,30 @@ export class MergeChecks {
       )
         continue;
       const state = this.state(id);
-      const cooling = (check: MergeCheckView | undefined) => {
-        const { retryAt } = repositoryCheckWait(state.events, check);
-        return (
+      const observeCooldown = (
+        check: MergeCheckView | undefined,
+        batch?: MergeBatch,
+      ) => {
+        const { retryAt, timeouts } = repositoryCheckWait(state.events, check);
+        const cooling =
           retryAt !== undefined &&
-          Date.parse(this.options.clock.now()) < Date.parse(retryAt)
-        );
+          Date.parse(this.options.clock.now()) < Date.parse(retryAt);
+        const owner = batch?.members.at(-1);
+        if (cooling && batch && owner && check) {
+          const reason = repositoryWaitReason(timeouts, retryAt);
+          // A regrouped attempt can inherit a deadline without making a call.
+          // Report the existing wait; do not charge another repository timeout.
+          if (batchQueueWait(state.events, batch)?.reason !== reason)
+            this.waitingFor(
+              id,
+              owner.card_id,
+              check.completion_id,
+              reason,
+              check,
+              batch.id,
+            );
+        }
+        return cooling;
       };
       if (settings.queue) {
         for (const batch of mergeBatches(state.events).filter(
@@ -2424,7 +2447,7 @@ export class MergeChecks {
               plan: plan.value,
               settings,
               batch,
-              repositoryCooling: cooling(batch.check),
+              repositoryCooling: observeCooldown(batch.check, batch),
               entered: batch.formed_at,
               priority: batch.priority,
             });
@@ -2521,7 +2544,7 @@ export class MergeChecks {
           plan: plan.value,
           settings,
           entered,
-          repositoryCooling: cooling(check),
+          repositoryCooling: observeCooldown(check),
           publishable: !settings.queue && check?.status === "passed",
           priority: card.priority,
         });
