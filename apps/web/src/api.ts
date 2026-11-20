@@ -1516,6 +1516,8 @@ export interface CreatedEmployee {
   readonly id: string;
   readonly name: string;
   readonly role_id: string;
+  /** C-516 (employee options): a pinned launch profile; null follows the role. */
+  readonly launch_profile_ref?: string | null;
 }
 
 /** One saved role version (V9a `Role`). */
@@ -1619,6 +1621,8 @@ export interface CardiganClient {
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
   /** Global launch profiles (not project scoped). */
   launchSettings(): Promise<LaunchSettingsView>;
+  /** C-515: names of the host's valid launch profiles, for role and employee pickers. */
+  launchProfileNames(): Promise<{ readonly profiles: readonly string[] }>;
   /** C-515: a diff of one change against `version`; nothing is written. */
   previewLaunchChange(
     version: string,
@@ -2501,6 +2505,9 @@ export class HttpCardiganClient implements CardiganClient {
   }
   launchSettings(): Promise<LaunchSettingsView> {
     return this.request("/api/launch-settings");
+  }
+  launchProfileNames(): Promise<{ readonly profiles: readonly string[] }> {
+    return this.request("/api/launch-settings/profiles");
   }
   previewLaunchChange(
     version: string,

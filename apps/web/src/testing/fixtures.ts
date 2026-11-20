@@ -179,6 +179,7 @@ export function fakeClient(
       profiles: [],
       providers: [],
     }),
+    launchProfileNames: async () => ({ profiles: [] }),
     previewLaunchChange: async (version, change) => ({
       version,
       preview_id: "00000000-0000-4000-8000-000000000000",

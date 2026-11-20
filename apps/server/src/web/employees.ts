@@ -158,6 +158,8 @@ export async function serveEmployees(
           name: e.name,
           role_id: e.role_id,
           projects: e.projects ?? [],
+          // C-516: an explicit launch profile, or null to follow the role.
+          launch_profile_ref: e.launch_profile_ref ?? null,
         })),
         library: AVATAR_LIBRARY.map(([id, name, source]) => {
           const used = employees.find(

@@ -124,6 +124,16 @@ test("owner creates audited global employees; options include all characters and
     library: expect.any(Array),
     roles: [{ role_id: "coder", display_name: expect.any(String) }],
   });
+  // C-516: each employee says whether it pins a launch profile (null: follow the role).
+  expect((options.json as { employees: unknown[] }).employees).toEqual([
+    {
+      id: "E-1",
+      name: "云长",
+      role_id: "coder",
+      projects: ["p-test"],
+      launch_profile_ref: null,
+    },
+  ]);
   const library = (options.json as { library: unknown[] }).library;
   expect(library).toHaveLength(60);
   expect(library).toContainEqual({
