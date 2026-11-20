@@ -697,7 +697,9 @@ async function assembleServer(
               inspectHarnessActivity: (
                 project: ProjectId,
                 stopTarget?: Assignment["id"],
-              ) => hostOps.inspectHarnessActivity(project, stopTarget),
+                localOnly?: boolean,
+              ) =>
+                hostOps.inspectHarnessActivity(project, stopTarget, localOnly),
               harnessActivity: (
                 project: ProjectId,
                 assignment: Assignment["id"],

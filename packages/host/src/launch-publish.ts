@@ -20,6 +20,7 @@ import {
   workerFiles,
   workerLaunchPath,
   workerPublishLimits,
+  workerSessionPath,
 } from "@cardigan/runtime-herdr";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
 import { wallClock } from "./commands.js";
@@ -99,14 +100,7 @@ export class LaunchPublication {
       target: execution.target?.fingerprint ?? "",
     };
     this.runDir = workerLaunchPath(execution, this.identity).value;
-    this.sessionDir = posix.join(
-      execution.agentRoot,
-      "runs",
-      project,
-      assignment.id,
-      "sessions",
-      generation,
-    );
+    this.sessionDir = workerSessionPath(execution, this.identity);
     workerPublishLimits(execution.publication);
     if (!execution.fileHelper)
       throw new Error("Worker file helper is not configured");

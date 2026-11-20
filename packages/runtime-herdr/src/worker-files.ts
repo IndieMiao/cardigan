@@ -77,9 +77,22 @@ const rejected = (): never => {
   throw new Error("Worker publication rejected");
 };
 
+export function workerSessionPath(
+  config: WorkerExecution,
+  identity: WorkerFileIdentity,
+) {
+  return generationPath(config, identity, "sessions").value;
+}
 export function workerLaunchPath(
   config: WorkerExecution,
   identity: WorkerFileIdentity,
+) {
+  return generationPath(config, identity, "generations");
+}
+function generationPath(
+  config: WorkerExecution,
+  identity: WorkerFileIdentity,
+  parent: "sessions" | "generations",
 ): WorkerRemotePath {
   if (
     !config.target ||
@@ -99,7 +112,7 @@ export function workerLaunchPath(
       "runs",
       identity.project,
       identity.assignment,
-      "generations",
+      parent,
       identity.generation,
     ),
   };

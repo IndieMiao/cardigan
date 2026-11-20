@@ -13,7 +13,9 @@ import {
   currentHarnessActivity,
   type HarnessActivity,
   isHarness,
+  type ProjectId,
   projectPreferences,
+  type RuntimeRef,
 } from "@cardigan/domain";
 import {
   type ActivityMetadata,
@@ -38,9 +40,13 @@ import {
   agentProcessCommand,
   type ExecutionConfig,
   executionPaths,
+  runtimeOwnsRef,
+  workerLaunchPath,
+  workerSessionPath,
 } from "@cardigan/runtime-herdr";
 import { CLAUDE_CONTEXT_READER } from "./claude-context-reader.js";
 import { files, readParts } from "./session-files.js";
+import { WORKER_CLAUDE_OPENER } from "./worker-claude-transcript.js";
 
 function profileEnv(launch: LaunchConfig | undefined, ref: string | undefined) {
   return launch && ref
@@ -78,11 +84,29 @@ async function privateTranscript(
   try {
     // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
     // the host cannot read them; use the existing credential-checked channel.
-    // Paths come only from executionPaths, never RuntimeRef/cached metadata.
+    // Roots come from validated execution paths, never transcript metadata.
     const args = ["-e", CLAUDE_CONTEXT_READER, "--", root, session ?? ""];
+    const worker = execution.target && execution.target.machine_id !== "local";
+    if (worker && (execution.mode !== "agent-ssh" || !execution.fileHelper)) {
+      onReadFailure();
+      return;
+    }
+    const remoteArgs =
+      worker && execution.mode === "agent-ssh" && execution.fileHelper
+        ? [
+            execution.fileHelper.python,
+            "-I",
+            "-B",
+            "-c",
+            WORKER_CLAUDE_OPENER,
+            root,
+            session ?? "",
+            CLAUDE_CONTEXT_READER,
+          ]
+        : ["node", ...args];
     const command =
       execution.mode === "agent-ssh"
-        ? await agentProcessCommand(execution, ["node", ...args])
+        ? await agentProcessCommand(execution, remoteArgs)
         : { file: process.execPath, args };
     if (signal?.aborted) return undefined;
     const pending = capture(command.file, command.args, {
@@ -164,11 +188,42 @@ export interface SessionContextDiagnostic {
   activity_error?: HarnessActivity["error"];
 }
 
+export type ResolveActivityExecution = (
+  ref: RuntimeRef,
+  project: ProjectId,
+) => ExecutionConfig | undefined | Promise<ExecutionConfig | undefined>;
+
+async function workerPaths(
+  a: Assignment,
+  project: ProjectId,
+  resolver?: ResolveActivityExecution,
+) {
+  const ref = a.runtime_ref;
+  if (!ref?.target || ref.machine_id !== a.machine_id || !ref.launch_generation)
+    return;
+  const execution = await resolver?.(ref, project);
+  if (execution?.mode !== "agent-ssh" || !runtimeOwnsRef(execution, ref))
+    return;
+  const identity = {
+    project,
+    assignment: a.id,
+    run: ref.launch_generation.run_id,
+    generation: ref.launch_generation.generation,
+    target: ref.target.fingerprint,
+  };
+  return {
+    execution,
+    root: workerSessionPath(execution, identity),
+    cwd: workerLaunchPath(execution, identity).value,
+  };
+}
+
 export async function readSessionContexts(
   state: CommandState,
   options: ContextUsageOptions | undefined,
   now: string,
   projectCwd?: string | null,
+  resolveWorker?: ResolveActivityExecution,
 ): Promise<SessionContextDiagnostic[]> {
   const shared = (await caches(options?.cacheDir)).filter(measured);
   const consumed = new Set<ContextUsage>();
@@ -177,16 +232,28 @@ export async function readSessionContexts(
   const staleMs = options?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
   for (const a of active) {
     if (options?.signal?.aborted) break;
-    const root = options
-      ? executionPaths(options.execution, state.project_id, a.id).runDir
-      : undefined;
+    const remote = !!a.machine_id && a.machine_id !== "local";
+    const run = state.runs.findLast((r) => r.assignment_id === a.id);
+    const boundPaths = () =>
+      workerPaths(a, state.project_id, resolveWorker).catch(() => undefined);
+    const worker =
+      remote && options && !a.external && run?.harness === "claude-code"
+        ? await boundPaths()
+        : undefined;
+    const execution = remote ? worker?.execution : options?.execution;
+    const root =
+      worker?.root ??
+      (!remote && execution
+        ? executionPaths(execution, state.project_id, a.id).runDir
+        : undefined);
     const cwd =
       a.worktree_path ??
       a.runtime_ref?.worktree_path ??
-      (a.external ? projectCwd : root);
+      (a.external ? projectCwd : (worker?.cwd ?? root));
     const session = a.runtime_ref?.agent_session_id ?? a.session_ref;
     const matches = shared.filter(
       (v) =>
+        !remote &&
         v.agent === "claude" &&
         cwd &&
         resolve(v.cwd) === resolve(cwd) &&
@@ -206,11 +273,10 @@ export async function readSessionContexts(
       activityReadFailed = true;
     };
     let source: string | null = null;
-    const run = [...state.runs].reverse().find((r) => r.assignment_id === a.id);
     const harness = run?.harness;
     const adapter =
       harness && isHarness(harness) ? getHarnessAdapter(harness) : undefined;
-    if (!a.external && root && options && adapter) {
+    if (!a.external && execution && root && options && adapter) {
       const reading = await adapter.readContext({
         root,
         model: run?.model,
@@ -221,16 +287,19 @@ export async function readSessionContexts(
         caches,
         readPrivateTranscript: () =>
           privateTranscript(
-            options.execution,
+            execution,
             root,
             session,
             readFailed,
             options.signal,
           ),
       });
-      usage = reading?.usage;
-      activityMetadata = reading?.activity;
-      progress = reading?.progress;
+      // A target may have been replaced while its SSH read was in flight.
+      if (reading && (!worker || (await boundPaths())?.root === worker.root)) {
+        usage = reading.usage;
+        activityMetadata = reading.activity;
+        progress = reading.progress;
+      }
       source = adapter.contextSource;
     }
     if (
@@ -340,7 +409,7 @@ export async function readSessionContexts(
       activity_status: activityStatus,
       activity_diagnostic:
         activityStatus !== "fresh"
-          ? `活动来源缺失：${({ missing: "没有可用记录", stale: "记录过期或时间无效", unassociated: "会话未关联", read_failed: "读取失败" } as const)[activityStatus]}；活动未知`
+          ? `${remote && activityStatus !== "stale" ? "远程活动来源缺失" : "活动来源缺失"}：${({ missing: "没有可用记录", stale: "记录过期或时间无效", unassociated: "会话未关联", read_failed: "读取失败" } as const)[activityStatus]}；活动未知`
           : activity?.error === "unclassified"
             ? "缺少结构化上游错误类别，不读取错误正文"
             : (adapter?.activityDiagnostic ?? "会话活动元信息可用"),

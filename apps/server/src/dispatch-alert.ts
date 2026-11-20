@@ -167,7 +167,7 @@ export function dispatchAlert(
     assignment: Assignment;
     type: string;
     reason: string;
-    audience: AlertAudience | "host_ops_only";
+    audience: AlertAudience | "host_ops_only" | "activity_log";
     card_id?: CardId | undefined;
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
@@ -231,6 +231,7 @@ export function dispatchAlert(
     },
   };
   tx.events.append(project, event);
+  if (input.audience === "activity_log") return;
   const record = (recipient: Notification["recipient"]) =>
     recordNotification(store.database, {
       project_id: project,

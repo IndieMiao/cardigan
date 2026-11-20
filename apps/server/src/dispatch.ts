@@ -167,6 +167,7 @@ export interface DispatcherOptions {
   readonly inspectHarnessActivity?: (
     project: ProjectId,
     stopTarget?: Assignment["id"],
+    localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsTick?: () => Promise<void>;
@@ -339,6 +340,7 @@ export class Dispatcher {
       runtime: options.runtime,
       clock: this.clock,
       afterMs: cancelAfterMs,
+      onError: (error) => options.onError?.(error),
       onUnknown: (project, assignment, run, row) =>
         this.inactivityAlerts.publish(
           project,
@@ -386,14 +388,16 @@ export class Dispatcher {
     });
   }
   /**
-   * C-247: stop claiming new work. Idempotent and synchronous so a shutdown
+   * C-247: stop claiming new work synchronously so a shutdown
    * signal takes effect before the current tick reaches its next delivery. A
    * delivery already past its claim finishes; one not yet woken or launched
    * withdraws its intent and leaves the Run queued for the next process.
+   * Await the result before closing resources used by in-flight worker stops.
    */
-  close(): void {
+  close(): Promise<void> {
     this.closing = true;
     this.inactivityAlerts.close();
+    return this.inactive.close();
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
   // Keep the legacy argument for callers; scheduling always spans all projects.

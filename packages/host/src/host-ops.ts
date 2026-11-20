@@ -59,6 +59,7 @@ import {
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
   type HarnessActivityInspection,
+  type ResolveActivityExecution,
   readSessionContexts,
   type SessionContextDiagnostic,
 } from "./context-usage.js";
@@ -71,7 +72,10 @@ interface Options {
   upstream?: LaunchConfig | undefined;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
-  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">>;
+  runtime: Runtime &
+    Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">> & {
+      executionForRef?: ResolveActivityExecution;
+    };
   snapshot: (
     a: Assignment,
     project: ProjectId,
@@ -628,6 +632,7 @@ export class HostOpsService {
         : usage,
       this.clock.now(),
       this.options.store.getProject(project)?.repo_path,
+      (ref, p) => this.options.runtime.executionForRef?.(ref, p),
     )
       .then((samples) => {
         if (!this.closing)
@@ -738,9 +743,10 @@ export class HostOpsService {
   async inspectHarnessActivity(
     project: ProjectId,
     stopTarget?: AssignmentId,
+    localOnly = false,
   ): Promise<ReadonlyMap<AssignmentId, HarnessActivityInspection>> {
     let samples: SessionContextDiagnostic[];
-    if (stopTarget) {
+    if (stopTarget || localOnly) {
       const usage = this.options.contextUsage;
       if (this.closing || !usage) return new Map();
       const state = this.options.store.uow.read((tx) =>
@@ -750,7 +756,9 @@ export class HostOpsService {
         {
           ...state,
           assignments: state.assignments.filter(
-            (a) => a.id === stopTarget && !a.external,
+            (a) =>
+              (stopTarget ? a.id === stopTarget : a.machine_id === "local") &&
+              !a.external,
           ),
         },
         {
@@ -761,6 +769,8 @@ export class HostOpsService {
           signal: this.contextAbort.signal,
         },
         this.clock.now(),
+        undefined,
+        (ref, p) => this.options.runtime.executionForRef?.(ref, p),
       );
       if (this.closing) return new Map();
     } else samples = await this.sessions(project);

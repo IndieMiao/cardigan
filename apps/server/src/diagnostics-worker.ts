@@ -22,7 +22,7 @@ const services = new Set<HostOpsService>();
 const reads = new Set<Promise<void>>();
 let serial = 0;
 let closing = false;
-// Only status IO uses the existing host runtime. No new runtime or request concurrency limit.
+// Observations and target resolution use the existing host runtime.
 const status = (ref: Parameters<Runtime["status"]>[0]) =>
   new Promise<Awaited<ReturnType<Runtime["status"]>> | undefined>((resolve) => {
     if (closing) {
@@ -66,6 +66,19 @@ async function read(message: {
     store,
     runtime: {
       status,
+      executionForRef: (
+        ref: Parameters<Runtime["status"]>[0],
+        project: ProjectId,
+      ) =>
+        new Promise((resolve) => {
+          if (closing) {
+            resolve(undefined);
+            return;
+          }
+          const id = ++serial;
+          pending.set(id, resolve);
+          port?.postMessage({ kind: "activityExecution", id, ref, project });
+        }),
       ...(options.interactionAvailable ? { interaction } : {}),
     } as unknown as Runtime,
     clock: { now: () => message.now ?? new Date().toISOString() },
@@ -115,7 +128,11 @@ port.on("message", (message) => {
     options.upstream = message.upstream;
     return;
   }
-  if (message.kind === "status" || message.kind === "interaction") {
+  if (
+    message.kind === "status" ||
+    message.kind === "interaction" ||
+    message.kind === "activityExecution"
+  ) {
     pending.get(message.id)?.(message.result);
     pending.delete(message.id);
     return;
