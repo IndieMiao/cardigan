@@ -294,22 +294,39 @@ export function markCardDone(
   return command(state, actor, "mark_card_done", ports, (d) => {
     ensure(canMarkCardDone(actor), "forbidden_tool", "只有人能标记卡片完成");
     const card = d.card(p.card_id);
-    ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
-    requireCardDependencies(d, card);
+    if (!card.story) {
+      ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
+      requireCardDependencies(d, card);
+    }
     ensure(
       resolveCardTemplate(d, card).completion.mode === "human_mark_done",
       "illegal_transition",
       "该模板不允许人标记完成",
     );
     text(p.result, "完成结果");
-    ensure(
-      d
+    if (card.story) {
+      const item = d
         .list("work_items")
-        .filter((w) => w.card_id === card.id && w.required)
-        .every(workCompleted),
-      "invariant_violation",
-      "必需工作项尚未全部完成",
-    );
+        .find(
+          (w) => w.card_id === card.id && w.template_key === "decomposition",
+        );
+      if (item && item.status !== "cancelled")
+        d.put(
+          "work_items",
+          d.move(
+            item,
+            item.status === "delivered" ? "verifiers_passed" : "cancel",
+          ),
+        );
+    } else
+      ensure(
+        d
+          .list("work_items")
+          .filter((w) => w.card_id === card.id && w.required)
+          .every(workCompleted),
+        "invariant_violation",
+        "必需工作项尚未全部完成",
+      );
     for (const id of p.attachments ?? [])
       ensure(
         d.get("attachments", id).card_id === card.id,

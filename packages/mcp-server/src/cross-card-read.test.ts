@@ -926,3 +926,47 @@ test("external standing sessions keep Assignment identity and reference-only sem
     ),
   ).toMatchObject({ source_card_id: other });
 });
+
+test("child references inherit only currently readable parent attachment IDs, never ownership", async () => {
+  const f = fixture();
+  f.store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, parent_card_id: other });
+    tx.cards.put(project_id, {
+      ...serverCard,
+      id: other,
+      template: "story",
+      story: {},
+    });
+  });
+  const own = () => getCardTool.handler({ card_id: serverCard.id }, f.context);
+  expect(await own()).toMatchObject({
+    parent_reference: {
+      source_card_id: other,
+      attachment_ids: ["ATT-1"],
+      reference_notice: expect.any(String),
+    },
+  });
+  expect(await f.read()).toMatchObject({
+    card: { story_progress: { total: 1, children: [{ id: serverCard.id }] } },
+  });
+  f.store.uow.run((tx) =>
+    tx.cards.put(project_id, {
+      ...serverCard,
+      id: other,
+      template: "story",
+      story: {},
+      sensitive: true,
+    }),
+  );
+  expect(await own()).not.toHaveProperty("parent_reference");
+  expect(await f.read()).not.toHaveProperty("card.story_progress");
+  f.store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, id: other, story: {} });
+    tx.project_preferences.put(project_id, {
+      id: project_id,
+      auto_merge_after_minutes: null,
+      cross_card_read: false,
+    });
+  });
+  expect(await own()).not.toHaveProperty("parent_reference");
+});

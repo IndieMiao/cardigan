@@ -162,6 +162,21 @@ export const generalCardTemplate = {
   completion: { mode: "human_mark_done" },
   work_items: [],
 } as const satisfies CardTemplate;
+export const storyCardTemplate = {
+  ...generalCardTemplate,
+  id: "story",
+  title: "需求卡",
+  description: "由 Office 拆解需求，人确认完成",
+  work_items: [
+    {
+      key: "decomposition",
+      title: "拆解",
+      kind: "produce",
+      role_id: "pm",
+      required: true,
+    },
+  ],
+} as const satisfies CardTemplate;
 export const artifactCardTemplate = {
   id: "artifact",
   title: "产出物",
@@ -226,6 +241,7 @@ export const designCardTemplate = {
 export const builtinCardTemplates: readonly CardTemplate[] = [
   developmentCardTemplate,
   generalCardTemplate,
+  storyCardTemplate,
   artifactCardTemplate,
   designCardTemplate,
 ];
@@ -237,6 +253,7 @@ export function builtinCardTemplatesForFlow(
     ? [
         developmentCardTemplateV2,
         generalCardTemplate,
+        storyCardTemplate,
         artifactCardTemplate,
         designCardTemplate,
         productCardTemplate,

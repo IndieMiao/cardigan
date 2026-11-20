@@ -69,6 +69,9 @@ export type RuleId =
   | "D6/missing independent reviewer"
   | "6.4/system rules"
   // §6.4 rows
+  | "story/decompose"
+  | "story/summary"
+  | "story/confirm"
   | "6.4/card needs planning"
   | "6.4/work-item comment"
   | "6.4/card comment without mention"

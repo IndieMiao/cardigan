@@ -32,6 +32,7 @@ import {
   requesterNotificationRecipient,
   reviewPassed,
   reviewWakeBlocked,
+  storyTerminal,
   verificationTarget,
 } from "@cardigan/domain";
 import {
@@ -236,6 +237,18 @@ const systemScheduled = (input: RouteInput): boolean =>
 function routeCardPlanning(input: RouteInput, draft: Draft): void {
   const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
   if (!card || ["done", "cancelled"].includes(card.status)) return;
+  if (card.story) {
+    if (card.status !== "backlog")
+      note(
+        input,
+        draft,
+        recipient.pm_office(),
+        "card",
+        "story/decompose",
+        `${card.id} 需要 Office 拆解。`,
+      );
+    return;
+  }
   // First assignment and its exceptional fallback already carry the next action.
   if (
     input.snapshot.events.some(
@@ -1577,6 +1590,13 @@ export function routeEvent(input: RouteInput): RouteResult {
         "6.4/card dependencies",
         message,
       );
+      if (
+        input.event.type === "card_dependencies_released" &&
+        input.snapshot.cards.some(
+          (c) => c.id === input.event.card_id && c.story,
+        )
+      )
+        routeCardPlanning(input, draft);
       if (input.event.type === "card_dependencies_ready")
         for (const item of input.snapshot.work_items)
           if (
@@ -1593,6 +1613,51 @@ export function routeEvent(input: RouteInput): RouteResult {
               "6.4/card dependencies",
               message,
             );
+      break;
+    }
+    case "story_children_settled": {
+      const parent = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        input.event.actor.kind !== "system" ||
+        !parent?.story ||
+        parent.story.summary_entry_id ||
+        storyTerminal(parent) ||
+        input.snapshot.cards.some(
+          (c) => c.parent_card_id === parent.id && !storyTerminal(c),
+        )
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.pm_office(),
+        "card",
+        "story/summary",
+        "子卡均已结束，请在需求卡用 post_comment(story_summary=true) 提交对照总结。",
+      );
+      break;
+    }
+    case "story_summary_submitted": {
+      const parent = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !parent?.story?.summary_entry_id ||
+        storyTerminal(parent) ||
+        parent.story.summary_entry_id !==
+          payloadString(input.event.payload, "entry_id")
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "card",
+        "story/confirm",
+        "Office 已提交需求对照总结，请确认完成。",
+      );
       break;
     }
     case "card_created":

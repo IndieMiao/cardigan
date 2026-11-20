@@ -88,7 +88,7 @@ const USAGE = [
   "  cardigan work-item create <C-n> --title <标题> --role <角色> --kind produce|verify [--required on|off] [--acceptance <标准>] [--target <W-n>] [--requirements <JSON>]",
   "  cardigan work-item update <W-n> --requirements <JSON> | work-item show <W-n>",
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
-  "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
+  "  cardigan card create [--template <id>] [--parent-card <C-id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
@@ -754,6 +754,12 @@ async function workItemCommand(
 
 async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(args, []);
+  const parent =
+    parsed.flags["parent-card"] === undefined
+      ? undefined
+      : parseId("card", required(parsed.flags, "parent-card"));
+  if (parent && !parent.ok)
+    throw new CliError("--parent-card 须为需求卡编号", EXIT.usage, [USAGE]);
   const template = optional(parsed.flags, "template") ?? "dev";
   const acceptance = list(optional(parsed.flags, "acceptance") ?? "");
   const repo = optional(parsed.flags, "repo");
@@ -803,6 +809,7 @@ async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
             source: { kind: "quote", text: required(parsed.flags, "goal") },
             ...(repo === undefined ? {} : { repo }),
             ...(base === undefined ? {} : { base_branch: base }),
+            ...(parent?.ok ? { parent_card_id: parent.value.id } : {}),
             template_id: template,
           },
           ports,

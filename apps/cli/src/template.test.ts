@@ -264,3 +264,20 @@ test("flow 5 exposes registered templates without rewriting an existing project'
     before,
   );
 });
+
+test("CLI can parent a card without implying a dependency", async () => {
+  store.uow.run((tx) =>
+    tx.roles.put("templates", {
+      role_id: "pm",
+      role_version: 1,
+      allowed_tools: ["post_comment", "submit_delivery"],
+      capabilities: ["verify"],
+    }),
+  );
+  expect(await run(card("story")), errors.join("\n")).toBe(0);
+  expect(await run([...card("general"), "--parent-card", "C-1"])).toBe(0);
+  expect(store.uow.read((tx) => tx.cards.list("templates"))[1]).toMatchObject({
+    parent_card_id: "C-1",
+    status: "todo",
+  });
+});

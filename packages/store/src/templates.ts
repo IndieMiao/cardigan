@@ -3,6 +3,7 @@ import {
   builtinCardTemplates,
   type CardTemplate,
   designCardTemplate,
+  storyCardTemplate,
   uiCardTemplate,
 } from "@cardigan/domain";
 
@@ -53,6 +54,13 @@ export function seedDesignTemplate(db: DatabaseSync): void {
     .prepare("SELECT id FROM projects UNION SELECT project_id AS id FROM cards")
     .all())
     insertTemplates(db, String(row.id), [designCardTemplate]);
+}
+
+export function seedStoryTemplates(db: DatabaseSync): void {
+  for (const row of db
+    .prepare("SELECT id FROM projects UNION SELECT project_id AS id FROM cards")
+    .all())
+    insertTemplates(db, String(row.id), [storyCardTemplate]);
 }
 
 function insertTemplates(

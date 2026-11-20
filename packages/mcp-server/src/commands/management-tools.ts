@@ -116,6 +116,10 @@ const schemas = {
     body: text,
   },
   post_comment: {
+    story_summary: z
+      .boolean()
+      .optional()
+      .describe("常驻 Office 在子卡全部结束后提交对照总结，由人标记需求卡完成"),
     card_id: id("card"),
     body: text,
     work_item_id: id("work_item").optional(),
@@ -394,6 +398,7 @@ const schemas = {
     due: text.optional(),
   },
   create_card: {
+    parent_card_id: id("card").optional(),
     state_and_save: z
       .union([
         z.literal("无写入"),
@@ -772,6 +777,7 @@ export function managementTools(clock?: Clock) {
               dependency_reason,
               out_of_scope,
               related_cards,
+              parent_card_id,
               priority,
               deadline,
               template,
@@ -787,6 +793,7 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
+                  ...(parent_card_id === undefined ? {} : { parent_card_id }),
                   ...(state_and_save === undefined ? {} : { state_and_save }),
                   ...(work_item_requirements === undefined
                     ? {}

@@ -11,6 +11,7 @@ import {
   type CardUpdateInput,
   type CardView,
   describeWriteError,
+  type StoryChildChoice,
 } from "../api.js";
 import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
@@ -22,7 +23,7 @@ import { Textarea } from "./ui/textarea.js";
 type Mode = "edit" | "cancel" | "supersede";
 type Operation =
   | { mode: "edit"; input: CardUpdateInput }
-  | { mode: "cancel"; reason: string }
+  | { mode: "cancel"; reason: string; children?: StoryChildChoice }
   | { mode: "supersede"; target: string };
 const labels = {
   edit: "编辑卡片",
@@ -141,7 +142,13 @@ export function CardActions({
     if (operation.mode === "edit")
       await client.updateCard(projectId, card.id, operation.input, key);
     else if (operation.mode === "cancel")
-      await client.cancelCard(projectId, card.id, operation.reason, key);
+      await client.cancelCard(
+        projectId,
+        card.id,
+        operation.reason,
+        key,
+        ...(operation.children ? [operation.children] : []),
+      );
     else await client.supersedeCard(projectId, card.id, operation.target, key);
     keys.current.delete(request);
     setMode(undefined);
@@ -284,6 +291,16 @@ function CardActionForm({
     })),
   );
   const [priority, setPriority] = useState(card.priority);
+  const activeChildren =
+    card.story_progress?.children.filter(
+      (c) => c.status !== "done" && c.status !== "cancelled",
+    ) ?? [];
+  const childIds = activeChildren.map((c) => c.id).sort();
+  const [choice, setChoice] = useState<StoryChildChoice>();
+  const confirmed =
+    choice && JSON.stringify(choice.ids) === JSON.stringify(childIds)
+      ? choice
+      : undefined;
   const [reason, setReason] = useState("");
   const [target, setTarget] = useState(card.superseded_by ?? "");
   const [error, setError] = useState("");
@@ -302,7 +319,7 @@ function CardActionForm({
         criteria.every((row) => row.value.trim())
       : mode === "supersede"
         ? /^C-[1-9]\d*$/u.test(target.trim()) && target.trim() !== card.id
-        : true;
+        : !activeChildren.length || !!confirmed;
   return (
     <form
       ref={form}
@@ -334,7 +351,11 @@ function CardActionForm({
                   },
                 }
               : mode === "cancel"
-                ? { mode, reason }
+                ? {
+                    mode,
+                    reason,
+                    ...(confirmed ? { children: confirmed } : {}),
+                  }
                 : { mode, target: target.trim() },
           );
         } catch (failure) {
@@ -433,6 +454,29 @@ function CardActionForm({
               确认取消 {card.id}
               ？取消后将同步取消尚未通过的工作项，已通过的验证项保留。未完成的人工待办也会随卡取消（不记为完成）。
             </p>
+            {activeChildren.length > 0 && (
+              <fieldset>
+                <legend>未结束的子卡</legend>
+                <ul>
+                  {activeChildren.map((c) => (
+                    <li key={c.id}>
+                      {c.id} · {c.title}
+                    </li>
+                  ))}
+                </ul>
+                {(["detach", "cancel"] as const).map((action) => (
+                  <label key={action}>
+                    <Input
+                      type="radio"
+                      name="story-children"
+                      checked={confirmed?.action === action}
+                      onChange={() => setChoice({ action, ids: childIds })}
+                    />
+                    {action === "detach" ? "保留并脱离需求卡" : "一并取消"}
+                  </label>
+                ))}
+              </fieldset>
+            )}
             <label>
               取消原因（可选）
               <Textarea

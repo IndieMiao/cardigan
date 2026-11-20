@@ -1,5 +1,6 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
+import { storyProgress } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
@@ -182,6 +183,9 @@ export function readPagedCard(
         .map((row) => [String(row.id), String(row.card_id) as CardId] as const),
     );
     return cardDetail(state, cardId, {
+      ...(card.story
+        ? { storyProgress: storyProgress(tx.cards.list(project), card) }
+        : {}),
       dependencyState: readCardDependencies(store, tx, project),
       mergeState: readMergeQueueState(tx, project),
       ...options,

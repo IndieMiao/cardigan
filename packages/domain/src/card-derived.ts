@@ -254,6 +254,17 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
     );
   }
 
+  if (
+    input.card.story &&
+    !["done", "cancelled", "backlog"].includes(input.card.status)
+  ) {
+    add(
+      input.card.story.summary_entry_id
+        ? { kind: "human", ref: "human" }
+        : { kind: "role", ref: "pm" },
+    );
+    return owners;
+  }
   const assignments = new Map(
     (input.assignments ?? []).map((assignment) => [assignment.id, assignment]),
   );

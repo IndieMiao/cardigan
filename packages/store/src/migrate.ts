@@ -19,6 +19,7 @@ import { installSnapshotTriggers } from "./snapshot-migration.js";
 import {
   seedCardTemplates,
   seedDesignTemplate,
+  seedStoryTemplates,
   seedUiTemplates,
 } from "./templates.js";
 
@@ -119,6 +120,7 @@ export function migrate(
         migrateCardPriorities(db);
       if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
+      if (migration.name === "story_template") seedStoryTemplates(db);
       if (migration.version === 39 && migration.name === "ui_template")
         seedUiTemplates(db);
       if (migration.version === 26 && migration.name === "machine_registry")

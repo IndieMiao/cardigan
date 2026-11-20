@@ -23,6 +23,7 @@ import {
   CardSupersededTip,
 } from "../components/CardStatusTip.js";
 import { CardsViewSwitch } from "../components/CardsViewSwitch.js";
+import { CreateCardButton } from "../components/CreateCardButton.js";
 import { DisplayMenu } from "../components/DisplayMenu.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
@@ -600,6 +601,15 @@ export function CardListPage({
             } catch {
               /* Optional preference. */
             }
+          }}
+        />
+        <CreateCardButton
+          key={projectId}
+          projectId={projectId}
+          client={client}
+          onCreated={(id) => {
+            reload();
+            openCard(id);
           }}
         />
         <CardsViewSwitch

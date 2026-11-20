@@ -121,7 +121,27 @@ export interface MergeBatchView {
   readonly solo: boolean;
   readonly check?: MergeCheckView;
 }
+export interface StoryChildChoice {
+  action: "cancel" | "detach";
+  ids: readonly string[];
+}
+export interface CreateCardInput {
+  title: string;
+  goal: string;
+  template_id: string;
+  acceptance_criteria?: string[];
+  parent_card_id?: string;
+  state_and_save?: import("@cardigan/domain").UiStateAndSave;
+}
 export interface CardView {
+  readonly parent_card_id?: string;
+  readonly story?: { summary_entry_id?: string };
+  readonly story_progress?: {
+    children: { id: string; title: string; status: CardStatus }[];
+    counts: Record<CardStatus, number>;
+    finished: number;
+    total: number;
+  };
   readonly merge_solo?: boolean;
   readonly merge_stage?: MergeStageView;
   readonly depends_on_cards?: readonly string[];
@@ -1226,6 +1246,7 @@ export interface TemplateDefinition {
     | { mode: "review"; reviewer: string };
 }
 export interface TemplateView extends TemplateDefinition {
+  requires_state_and_save?: boolean;
   version: number;
   builtin: boolean;
   status: "active" | "inactive";
@@ -1597,11 +1618,17 @@ export interface CardiganClient {
       | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
+  createCard(
+    projectId: string,
+    input: CreateCardInput,
+    key: string,
+  ): Promise<{ id: string }>;
   cancelCard(
     projectId: string,
     cardId: string,
     reason: string,
     idempotencyKey?: string,
+    children?: StoryChildChoice,
   ): Promise<void>;
   supersedeCard(
     projectId: string,
@@ -2580,16 +2607,27 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  createCard(
+    projectId: string,
+    input: CreateCardInput,
+    idempotencyKey: string,
+  ): Promise<{ id: string }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards`,
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
+    );
+  }
   async cancelCard(
     projectId: string,
     cardId: string,
     reason: string,
     idempotencyKey = crypto.randomUUID(),
+    children?: StoryChildChoice,
   ): Promise<void> {
     await this.write(
       projectId,
       `cards/${encodeURIComponent(cardId)}/cancel`,
-      { reason },
+      { reason, ...(children ? { story_children: children } : {}) },
       idempotencyKey,
     );
   }

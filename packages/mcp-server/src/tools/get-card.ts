@@ -7,6 +7,7 @@ import type {
 } from "@cardigan/domain";
 import {
   authorView,
+  CROSS_CARD_REFERENCE_NOTICE,
   cardDependencyView,
   cardReadAccess,
   cardTemplate,
@@ -27,6 +28,7 @@ import {
   roleRuleInventory,
   runAuthorView,
   sharedMustFixes,
+  storyProgress,
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -70,7 +72,7 @@ export const getCardTool = defineTool({
         card: { id: card.id, title: card.title, status: card.status },
       };
     }
-    const { state, dependency, merge_stage } = store.uow.read((tx) => {
+    const projection = store.uow.read((tx) => {
       try {
         const project = identity.actor.project_id;
         const streams = tx.events.listStreams?.(project);
@@ -165,6 +167,9 @@ export const getCardTool = defineTool({
             : stage;
         return {
           state: referenceReadState(snapshot, read.assignment),
+          story_progress: card.story
+            ? storyProgress(visibleCards, card)
+            : undefined,
           dependency,
           merge_stage: safeStage,
         };
@@ -172,6 +177,7 @@ export const getCardTool = defineTool({
         throw ToolError.validation("检查日志列表读取失败。");
       }
     });
+    const { state, dependency, merge_stage, story_progress } = projection;
     const work_items = state.work_items.filter((w) => w.card_id === cardId);
     const works = new Set(work_items.map((w) => w.id));
     const assignments = state.assignments.filter(
@@ -261,9 +267,29 @@ export const getCardTool = defineTool({
       },
       cardId,
     );
-    auditReferenceRead(context, [cardId], "get_card");
+    // Metadata is inherited as a reference, never as a child-owned upload. The
+    // filtered source state and the final audit both enforce current access.
+    const parentAttachments = card.parent_card_id
+      ? state.attachments
+          .filter((a) => a.card_id === card.parent_card_id)
+          .map((a) => a.id)
+      : [];
+    const parentReference =
+      card.parent_card_id && parentAttachments.length
+        ? {
+            source_card_id: card.parent_card_id,
+            reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+            attachment_ids: parentAttachments,
+          }
+        : undefined;
+    auditReferenceRead(
+      context,
+      parentReference ? [cardId, parentReference.source_card_id] : [cardId],
+      "get_card",
+    );
     return publicSourceMergeData({
       ...read.provenance,
+      ...(parentReference ? { parent_reference: parentReference } : {}),
       timeline: state.timeline
         .filter((entry) => entry.card_id === cardId)
         .map((entry) => ({
@@ -276,6 +302,7 @@ export const getCardTool = defineTool({
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
+        ...(story_progress ? { story_progress } : {}),
         ...(dependency ? { dependency } : {}),
         ...(card.merge_classification
           ? {

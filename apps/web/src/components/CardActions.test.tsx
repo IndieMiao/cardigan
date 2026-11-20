@@ -714,3 +714,49 @@ test("C-72: the client reads whether the flag changed", async () => {
     ),
   ).toEqual({ changed: true, auto_merge_due_at: null });
 });
+
+test("story cancellation requires choosing what happens to the listed active children", async () => {
+  const cancelCard = vi.fn<CardiganClient["cancelCard"]>().mockResolvedValue();
+  const card = {
+    ...cardDetail().card,
+    story: {},
+    story_progress: {
+      total: 1,
+      finished: 0,
+      counts: {
+        backlog: 0,
+        todo: 1,
+        in_progress: 0,
+        review: 0,
+        awaiting_merge: 0,
+        done: 0,
+        cancelled: 0,
+      },
+      children: [{ id: "C-2", title: "Child", status: "todo" as const }],
+    },
+  };
+  render(
+    <CardActions
+      card={card}
+      client={fakeClient({ cancelCard })}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  await selectMenu(/^更多$/, "取消卡片");
+  const submit = screen.getByRole("button", {
+    name: "确认取消卡片",
+  }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  fireEvent.click(screen.getByRole("radio", { name: "保留并脱离需求卡" }));
+  fireEvent.click(submit);
+  await waitFor(() =>
+    expect(cancelCard).toHaveBeenCalledWith(
+      "p-1",
+      card.id,
+      "",
+      expect.any(String),
+      { action: "detach", ids: ["C-2"] },
+    ),
+  );
+});
