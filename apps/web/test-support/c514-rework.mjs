@@ -4,8 +4,8 @@
 // carry over to the next comment, a new `@` re-reads the roster, a name with
 // spaces keeps filtering, choosing inside an existing mention replaces it, a
 // new `@` before a word keeps the word (V-2490 cases by keyboard and click),
-// a completed name can be swapped (Q-1043 S1-S3) and a pending read offers no
-// old names.
+// a completed name can be swapped (Q-1043 S1-S3) without taking in the text
+// after it (Q-1047) and a pending read offers no old names.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c514-rework.mjs <new output dir>
 // C514_BASELINE_REF=<git ref> serves that ref's list for before shots (no
 // behaviour checks).
@@ -428,6 +428,62 @@ try {
       }
     }
 
+    // 10. Q-1047: with Bob Smith and Bo Smith on the roster, swapping the
+    // chosen Bob, or an edited Bob, keeps the file name after it.
+    await run(() => {
+      const person = (id, name) => ({
+        id,
+        name,
+        title: "测试",
+        avatar: null,
+        related: false,
+      });
+      window.__c514Roster = [
+        person("E-3", "Bob"),
+        person("E-9", "Bobby"),
+        person("E-10", "Bob Smith"),
+        person("E-11", "Bo Smith"),
+        person("E-14", "薛宝钗"),
+      ];
+    });
+    checks.smith = {};
+    for (const how of ["keyboard", "click"]) {
+      for (const [label, file, edit] of [
+        ["smith", "Smith.txt", false],
+        ["readme", "README.md", false],
+        ["edited", "Smith.txt", true],
+      ]) {
+        await focusBox();
+        await type(`附件 ${file}`);
+        await run(() =>
+          document.querySelector(".comment-input").setSelectionRange(3, 3),
+        );
+        await type("@");
+        await type("B");
+        await until("document.querySelectorAll('[role=option]').length > 0");
+        await choose(how, "Bob");
+        const completed = await value();
+        if (edit) {
+          await key("ArrowLeft", "ArrowLeft", 37);
+          await key("Backspace", "Backspace", 8);
+        } else
+          for (let i = 0; i < 3; i++) await key("ArrowLeft", "ArrowLeft", 37);
+        const changed = await value();
+        await until("document.querySelectorAll('[role=option]').length > 0");
+        if (how === "click" && label === "edited")
+          await shot("check-smith-edited-1440-light.png");
+        await choose(how, "Bobby");
+        checks.smith[`${label}-${how}`] = {
+          completed,
+          changed,
+          value: await value(),
+        };
+      }
+    }
+    await run(() => {
+      delete window.__c514Roster;
+    });
+
     // 6. While a new read is under way, the previous names cannot be chosen.
     await key("Escape", "Escape", 27);
     await run(() => {
@@ -524,6 +580,14 @@ try {
       assert.equal(swap("S2").value, "@Bobby ", `S2 ${how}`);
       assert.equal(swap("S3").completed, "附件 @Bob README.md", how);
       assert.equal(swap("S3").value, "附件 @Bobby README.md", `S3 ${how}`);
+    }
+    for (const how of ["keyboard", "click"]) {
+      const smith = (label) => checks.smith[`${label}-${how}`];
+      assert.equal(smith("smith").completed, "附件 @Bob Smith.txt", how);
+      assert.equal(smith("smith").value, "附件 @Bobby Smith.txt", how);
+      assert.equal(smith("readme").value, "附件 @Bobby README.md", how);
+      assert.equal(smith("edited").changed, "附件 @Bo Smith.txt", how);
+      assert.equal(smith("edited").value, "附件 @Bobby Smith.txt", how);
     }
     assert.deepEqual(checks.pending.options, []);
     assert.equal(checks.pending.status, "正在加载员工…");

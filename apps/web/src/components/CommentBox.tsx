@@ -90,6 +90,8 @@ export function CommentBox({
   // An `@` the user typed (keeping the text from `keep` on), as opposed to the
   // caret moved into an old one: choosing a name never replaces that text.
   const [typed, setTyped] = useState<TypedMention>();
+  // Where chosen names sit, followed through every edit.
+  const [memory, setMemory] = useState<MentionMemory>(NO_MEMORY);
   // The selection each input began with, read from the native `beforeinput`.
   const intent = useRef<InputIntent | undefined>(undefined);
   const compositionStart = useRef<number | undefined>(undefined);
@@ -157,7 +159,7 @@ export function CommentBox({
   const mention =
     cursor === undefined
       ? undefined
-      : mentionQuery(body, cursor, ordered, typed);
+      : mentionQuery(body, cursor, ordered, typed, memory);
   const matches = mention ? matchMentionCandidates(ordered, mention.query) : [];
   const suggesting =
     expanded &&
@@ -255,6 +257,10 @@ export function CommentBox({
     setTyped(
       followTyped(start === occurrence ? typed : undefined, start, edit),
     );
+    if (edit !== undefined)
+      setMemory((current) =>
+        value === "" ? NO_MEMORY : followChosen(current, edit),
+      );
     if (
       start !== occurrence ||
       value.slice(0, selectionStart) !== body.slice(0, cursor)
@@ -269,6 +275,19 @@ export function CommentBox({
     const next = insertMention(body, mention, candidate.name);
     caret.current = next.caret;
     setBody(next.body);
+    const at = next.body.indexOf("@", mention.start);
+    setMemory((current) => ({
+      ...current,
+      chosen: [
+        ...followChosen(current, {
+          start: mention.start,
+          end: mention.end,
+          inserted:
+            next.body.length - body.length + mention.end - mention.start,
+        }).chosen,
+        { start: at, end: at + 1 + candidate.name.length, valid: true },
+      ],
+    }));
     // The finished `@<name> ` offers nothing more; staying on it reads nothing.
     setCursor(next.caret);
     // Choosing ends the typed `@`: the inserted name is an existing mention
@@ -354,6 +373,7 @@ export function CommentBox({
       setTab("write");
       setCursor(undefined);
       setDismissedAt(undefined);
+      setMemory(NO_MEMORY);
       if (section.current?.contains(document.activeElement))
         (document.activeElement as HTMLElement).blur();
       setFocused(false);
@@ -645,6 +665,50 @@ export interface TypedMention {
   readonly keep: number | undefined;
 }
 
+/** A name put in by choosing it: `@` at `start`, the name up to `end`. */
+export interface ChosenMention {
+  readonly start: number;
+  readonly end: number;
+  /** False once an edit touched the name: its end is no longer proven. */
+  readonly valid: boolean;
+}
+
+export interface MentionMemory {
+  readonly chosen: readonly ChosenMention[];
+  /** An edit of unknown range happened while names were recorded. */
+  readonly lost: boolean;
+}
+
+export const NO_MEMORY: MentionMemory = { chosen: [], lost: false };
+
+/**
+ * Follow chosen names through one change (`null` when its range is not
+ * known): an edit before a name moves it, one after it leaves it, one that
+ * touches the name (or types right after it) leaves only its `@` known, and
+ * one that removes the `@` drops it. Without a known range nothing can be
+ * followed, so every `@` counts as edited from then on.
+ */
+export function followChosen(
+  memory: MentionMemory,
+  edit: TextEdit | null,
+): MentionMemory {
+  if (edit === null)
+    return memory.chosen.length > 0 ? { chosen: [], lost: true } : memory;
+  const grown = edit.inserted - (edit.end - edit.start);
+  const chosen: ChosenMention[] = [];
+  for (const name of memory.chosen) {
+    if (edit.end <= name.start)
+      chosen.push({
+        ...name,
+        start: name.start + grown,
+        end: name.end + grown,
+      });
+    else if (edit.start > name.end) chosen.push(name);
+    else if (edit.start > name.start) chosen.push({ ...name, valid: false });
+  }
+  return { ...memory, chosen };
+}
+
 /**
  * Follow a typed `@` through one change (`edit`; `null` when its range is not
  * known; undefined for a caret move). An `@` counts as typed when the edit
@@ -693,14 +757,17 @@ export function mentionAt(text: string, caret: number): number | undefined {
  * name or Latin word it spells, never the text kept from before (nothing is
  * offered with the caret inside that text, and when the range is not known
  * only the text before the caret is replaced). With the caret moved into an
- * old mention, a name the text fully spells up to a space, punctuation or the
- * end is replaced; inside any other word nothing is offered.
+ * old mention, the shortest name the text fully spells up to a space,
+ * punctuation or the end is replaced; inside any other word nothing is
+ * offered. A chosen name (`memory`) is replaced exactly as it was put in;
+ * once edited, or after an edit of unknown range, only up to the caret.
  */
 export function mentionQuery(
   text: string,
   caret: number,
   candidates: readonly MentionCandidate[] = [],
   typed?: TypedMention,
+  memory: MentionMemory = NO_MEMORY,
 ): MentionQuery | undefined {
   const start = mentionAt(text, caret);
   if (start === undefined) return undefined;
@@ -714,6 +781,13 @@ export function mentionQuery(
     )
       return undefined;
   }
+  const chosen = memory.chosen.find((name) => name.start === start);
+  if (chosen)
+    return {
+      start,
+      query,
+      end: chosen.valid && caret <= chosen.end ? chosen.end : caret,
+    };
   if (typed?.start === start) {
     const { keep } = typed;
     if (keep === undefined) return { start, query, end: caret };
@@ -726,6 +800,7 @@ export function mentionQuery(
       );
     return { start, query, end };
   }
+  if (memory.lost) return { start, query, end: caret };
   const end = spelledEnd(text, start, caret, candidates, true);
   if (end === caret && WORD.test(text.slice(caret))) return undefined;
   return { start, query, end };
@@ -734,9 +809,11 @@ export function mentionQuery(
 const WORD = /^[\p{L}\p{N}\p{M}_-]/u;
 
 /**
- * The end of the longest candidate name spelled after the `@`, if past the
- * caret. A Latin name must end its word (`@Bobx` does not spell Bob); `whole`
- * asks any name to be followed by a space, punctuation or the end.
+ * The end of the shortest candidate name spelled after the `@` that reaches
+ * the caret, else the caret: text after it that only a longer name would
+ * take in stays. A Latin name must end its word (`@Bobx` does not spell
+ * Bob); `whole` asks any name to be followed by a space, punctuation or the
+ * end.
  */
 function spelledEnd(
   text: string,
@@ -746,7 +823,7 @@ function spelledEnd(
   whole: boolean,
 ): number {
   const latin = /^[A-Za-z0-9_-]/u;
-  let end = caret;
+  let end: number | undefined;
   for (const { name } of candidates) {
     const after = start + 1 + name.length;
     const next = text.slice(after);
@@ -754,12 +831,13 @@ function spelledEnd(
       ? WORD.test(next)
       : /[A-Za-z0-9_-]$/u.test(name) && latin.test(next);
     if (
+      after >= caret &&
       !runsOn &&
       text.slice(start + 1, after).toLowerCase() === name.toLowerCase()
     )
-      end = Math.max(end, after);
+      end = Math.min(end ?? after, after);
   }
-  return end;
+  return end ?? caret;
 }
 
 /** The card's own people first, then everyone; each group by name. */

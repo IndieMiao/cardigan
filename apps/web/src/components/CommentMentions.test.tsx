@@ -18,11 +18,13 @@ import type { CommentInput, MentionCandidate } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import {
   CommentBox,
+  followChosen,
   followTyped,
   inputEdit,
   insertMention,
   matchMentionCandidates,
   mentionQuery,
+  NO_MEMORY,
   orderMentionCandidates,
 } from "./CommentBox.js";
 
@@ -107,6 +109,20 @@ function setup(
   const typeKeys = (text: string) => {
     for (const key of text) insert(key);
   };
+  /** Backspace with a collapsed caret, as a browser does. */
+  const backspace = () => {
+    const { selectionStart: caret, value } = input;
+    input.dispatchEvent(
+      new InputEvent("beforeinput", {
+        inputType: "deleteContentBackward",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    setValue(value.slice(0, caret - 1) + value.slice(caret));
+    input.setSelectionRange(caret - 1, caret - 1);
+    fireEvent.input(input);
+  };
   const moveTo = (start: number, end = start) => {
     act(() => input.setSelectionRange(start, end));
     fireEvent.select(input);
@@ -132,6 +148,7 @@ function setup(
     typeAt,
     insert,
     typeKeys,
+    backspace,
     moveTo,
     click,
     names,
@@ -320,6 +337,15 @@ test("a name with spaces keeps filtering; a finished mention lets the text go on
 
 const MINGMING = [person("E-8", "明明", "运营"), ...EMPLOYEES];
 
+/** Q-1047: names a following file name could complete. */
+const SMITH = [
+  person("E-2", "薛宝钗", "前端工程师", true),
+  person("E-3", "Bob", "测试"),
+  person("E-9", "Bobby", "设计"),
+  person("E-10", "Bob Smith", "运维"),
+  person("E-11", "Bo Smith", "运营"),
+];
+
 /** Q-1043: Bob and Bobby to complete and then swap, by whole sequences. */
 const SWAP = [
   person("E-1", "森·刘邦", "游戏程序", true),
@@ -330,8 +356,8 @@ const SWAP = [
 ];
 
 for (const how of ["keyboard", "click"] as const) {
-  const sequence = () => {
-    const box = setup(async () => ({ employees: SWAP }));
+  const sequence = (roster = SWAP) => {
+    const box = setup(async () => ({ employees: roster }));
     /** Choose `name` from the open list, by arrow keys and Enter or a click. */
     const pick = async (name: string) => {
       await waitFor(() => expect(box.names()).toContain(name));
@@ -383,6 +409,60 @@ for (const how of ["keyboard", "click"] as const) {
     await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
     await pick("Bobby");
     expect(input.value).toBe("附件 @Bobby README.md");
+  });
+
+  for (const file of ["Smith.txt", "README.md"])
+    test(`Q-1047 a swap only replaces the chosen Bob, keeping ${file} (${how})`, async () => {
+      const { input, type, typeKeys, moveTo, left, pick, names } =
+        sequence(SMITH);
+      type(`附件 ${file}`);
+      moveTo(3);
+      typeKeys("@B");
+      await pick("Bob");
+      expect(input.value).toBe(`附件 @Bob ${file}`);
+      left(3);
+      await waitFor(() => expect(names()).toContain("Bobby"));
+      await pick("Bobby");
+      expect(input.value).toBe(`附件 @Bobby ${file}`);
+    });
+
+  test(`Q-1047 an edited chosen name only gives way up to the caret (${how})`, async () => {
+    const { input, type, typeKeys, backspace, moveTo, left, pick } =
+      sequence(SMITH);
+    type("附件 Smith.txt");
+    moveTo(3);
+    typeKeys("@B");
+    await pick("Bob");
+    expect(input.value).toBe("附件 @Bob Smith.txt");
+    left(1);
+    backspace();
+    expect(input.value).toBe("附件 @Bo Smith.txt");
+    // `Bo Smith` is a name, but the edited Bob proves no end past the caret.
+    await pick("Bobby");
+    expect(input.value).toBe("附件 @Bobby Smith.txt");
+  });
+
+  test(`Q-1047 two chosen names: swapping the first leaves the second (${how})`, async () => {
+    const { input, typeKeys, moveTo, pick } = sequence(SMITH);
+    typeKeys("@B");
+    await pick("Bob");
+    typeKeys("和 @薛");
+    await pick("薛宝钗");
+    expect(input.value).toBe("@Bob 和 @薛宝钗 ");
+    moveTo(4);
+    moveTo(3);
+    moveTo(2);
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby 和 @薛宝钗 ");
+  });
+
+  test(`Q-1047 a pasted @Bob Smith.txt swaps only Bob (${how})`, async () => {
+    const { input, insert, moveTo, pick } = sequence(SMITH);
+    insert("@Bob Smith.txt", "insertFromPaste");
+    moveTo(3);
+    moveTo(2);
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby Smith.txt");
   });
 }
 
@@ -475,7 +555,9 @@ test("choosing with the caret inside a typed or an existing mention replaces the
   fireEvent.keyDown(input, { key: "Enter" });
   expect(input.value).toBe("@bobby 请看");
   expect(input.selectionStart).toBe("@bobby ".length);
-  // Already in the draft: the caret leaves the line, then moves into it.
+  // Already in a fresh draft (cleared first, so nothing chosen is recorded):
+  // the caret leaves the line, then moves into it.
+  type("");
   type("x\n@Bob 请看");
   moveTo(1);
   moveTo(4);
@@ -483,6 +565,7 @@ test("choosing with the caret inside a typed or an existing mention replaces the
   fireEvent.keyDown(input, { key: "Enter" });
   expect(input.value).toBe("x\n@Bob 请看");
   // Inside an old word that spells no name, nothing is offered.
+  type("");
   type("x\n@Bobx 请看");
   moveTo(1);
   moveTo(4);
@@ -645,6 +728,62 @@ test("followTyped starts a typed @ only when the edit inserted it and moves the 
   expect(followTyped(typed, undefined, edit(0, 0, 1))).toBeUndefined();
   // Unknown once, unknown for the rest of this `@`.
   expect(followTyped(typed, 3, null)).toEqual({ start: 3, keep: undefined });
+});
+
+test("followChosen moves, keeps, marks or drops chosen names by the real edit", () => {
+  const bob = { start: 3, end: 7, valid: true };
+  const memory = { chosen: [bob], lost: false };
+  const edit = (start: number, end: number, inserted: number) => ({
+    start,
+    end,
+    inserted,
+  });
+  // Typed before the `@`: moved.
+  expect(followChosen(memory, edit(0, 0, 2)).chosen).toEqual([
+    { start: 5, end: 9, valid: true },
+  ]);
+  // Typed after the space that follows the name: kept.
+  expect(followChosen(memory, edit(8, 8, 1)).chosen).toEqual([bob]);
+  // Inside the name, or right after it: only the `@` is still known.
+  expect(followChosen(memory, edit(6, 7, 0)).chosen).toEqual([
+    { ...bob, valid: false },
+  ]);
+  expect(followChosen(memory, edit(7, 7, 1)).chosen).toEqual([
+    { ...bob, valid: false },
+  ]);
+  // The `@` removed: dropped.
+  expect(followChosen(memory, edit(2, 4, 0)).chosen).toEqual([]);
+  // Unknown range: nothing can be followed any more.
+  expect(followChosen(memory, null)).toEqual({ chosen: [], lost: true });
+  expect(followChosen(NO_MEMORY, null)).toEqual(NO_MEMORY);
+});
+
+test("mentionQuery replaces a chosen name exactly, and an edited or lost one only up to the caret", () => {
+  const roster = [
+    person("E-3", "Bob", "测试"),
+    person("E-10", "Bob Smith", "运维"),
+    person("E-11", "Bo Smith", "运营"),
+  ];
+  const chosen = (valid: boolean) => ({
+    chosen: [{ start: 0, end: 4, valid }],
+    lost: false,
+  });
+  expect(
+    mentionQuery("@Bob Smith.txt", 2, roster, undefined, chosen(true))?.end,
+  ).toBe(4);
+  expect(
+    mentionQuery("@Bo Smith.txt", 3, roster, undefined, chosen(false))?.end,
+  ).toBe(3);
+  expect(
+    mentionQuery("@Bob Smith.txt", 2, roster, undefined, {
+      chosen: [],
+      lost: true,
+    })?.end,
+  ).toBe(2);
+  // Never chosen: the shortest name reaching the caret, not the longest.
+  expect(mentionQuery("@Bob Smith.txt", 2, roster)?.end).toBe(4);
+  expect(mentionQuery("@Bob Sm", 7, roster)?.end).toBe(7);
+  expect(mentionQuery("@Bob Smith", 7, roster)?.end).toBe(10);
 });
 
 test("candidates order card people first, then by name; filtering keeps that order", () => {
