@@ -122,7 +122,17 @@ def session_watch(pid, expected=None):
         poll = select.poll()
         poll.register(fd, select.POLLIN)
         require(expected is None or birth(pid) == expected)
-        return lambda: bool(poll.poll(0))
+        # Only a readable pidfd proves exit. An invalid handle or an
+        # observation error cannot authorize a settlement notification.
+        valid = True
+        def observed_exit():
+            nonlocal valid
+            if valid:
+                for _, flags in poll.poll(0):
+                    valid = not flags & (select.POLLNVAL | select.POLLERR)
+                    return valid and bool(flags & select.POLLIN)
+            return False
+        return observed_exit
     if sys.platform == 'darwin':
         queue = select.kqueue()
         event = select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD,
@@ -260,7 +270,9 @@ def supervise(key, argv, confirmation, exited, env, cancellation):
             if cancelled or exited() or confirmation.state() == 'ended':
                 try:
                     publisher.sendall(SETTLED)
-                    publisher.shutdown(socket.SHUT_WR)
+                    # Keep our write half open. With the participant's write
+                    # half already closed, shutting down ours can cause HUP
+                    # while a detached reader still holds the capability.
                     # Only the participant can relinquish its own work after it
                     # has closed admission/drained users. Silence is never a
                     # positive reply or permission to kill it or its siblings.
@@ -313,6 +325,10 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None):
     reader, writer = os.pipe()
     cancel_read, cancel_write = os.pipe()
     if os.fork() == 0:
+        # The parent has already audited the retained directory. libc can
+        # cache its log socket across fork: release it through its owner before
+        # recycling fd numbers for a pidfd, cancellation or lifetime socket.
+        syslog.closelog()
         retain_fds({writer, cancel_read})
         status_pipe = writer
         try:

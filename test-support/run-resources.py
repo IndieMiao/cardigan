@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from unittest import mock
 from types import SimpleNamespace
 
@@ -28,6 +29,7 @@ private = str(pathlib.Path(keydir.name)/'controller.pem')
 subprocess.run(['/usr/bin/openssl','genpkey','-algorithm','EC','-pkeyopt','ec_paramgen_curve:P-256','-out',private], check=True, stderr=subprocess.DEVNULL)
 public = subprocess.check_output(['/usr/bin/openssl','pkey','-in',private,'-pubout']).decode()
 states = {}
+served = Counter()
 class Authority(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
@@ -43,13 +45,34 @@ class Authority(BaseHTTPRequestHandler):
         sig = subprocess.run(['/usr/bin/openssl','dgst','-sha256','-sign',private], input=payload.encode(),check=True,stdout=subprocess.PIPE).stdout
         row = dict(payload=payload,signature=base64.b64encode(sig if state != 'bad-signature' else b'invalid').decode())
         self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
+        served[key, state] += 1
 
 http = ThreadingHTTPServer(('127.0.0.1', 0), Authority)
 threading.Thread(target=http.serve_forever, daemon=True).start()
-stub = f"""import runpy,sys,os,hashlib
+# A syslog implementation with a cached descriptor, independent of the host's
+# log daemon. Never write through a descriptor if the guardian has recycled it.
+cached_audit = f"""class AuditSink:
+    LOG_NOTICE = 5
+    fd = None
+    path = {str(pathlib.Path(keydir.name)/'audit')!r}
+    def syslog(self, level, message):
+        if self.fd is None: self.fd = os.open(self.path, os.O_APPEND|os.O_WRONLY|os.O_CREAT, 0o600)
+        assert os.path.samestat(os.fstat(self.fd), os.stat(self.path)), 'stale audit descriptor'
+        os.write(self.fd, (message+chr(10)).encode())
+    def closelog(self):
+        if self.fd is not None: os.close(self.fd); self.fd = None
+m['audit'].__globals__['syslog'] = AuditSink()"""
+
+
+def entry(audit_sink=""):
+    return f"""import runpy,sys,os,hashlib
 m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated','fixture-token-id',{public!r}]
+{audit_sink}
 c=m['Confirmation'](sys.argv[3],hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest(),interval=0.05)
 sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5],confirmation=c))"""
+
+
+stub = entry()
 
 
 def until(pred):
@@ -93,17 +116,16 @@ sub=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.enviro
         # A shell that launches a service and exits returns its own status;
         # the guardian must still clean the service, not recycle the old PGID.
         starter = f"import pathlib,os,sys,subprocess; p=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']),),start_new_session=True); pathlib.Path(os.environ['TMPDIR'],'orphan').write_text(str(p.pid));sys.exit(7)"
-        status = subprocess.run([sys.executable, '-I', '-B', '-c', stub, str(source), TAG, keys[0], str(session.pid), base,
+        status = subprocess.run([sys.executable, '-I', '-B', '-c', entry(cached_audit), str(source), TAG, keys[0], str(session.pid), base,
                                  sys.executable, '-I', '-c', starter], timeout=4)
         assert status.returncode == 7
         orphan_exit = m['session_watch'](int((parent/m['scope_name'](keys[0])/'tmp/orphan').read_text()))
         scratch = parent/m['scope_name'](keys[0])
         (scratch/'end').touch()  # disk hints have no authority
-        for answer in ('unknown','bad-signature','stale'):
-            states[keys[0]] = answer; time.sleep(0.4)
-            assert jobs[0].poll() is None and not orphan_exit()
-        states[keys[0]] = 'expired_preview'; time.sleep(0.4)
-        assert jobs[0].poll() is None and not orphan_exit()
+        for answer in ('unknown','bad-signature','stale','expired_preview'):
+            states[keys[0]] = answer
+            until(lambda: served[keys[0], answer] >= 3)
+            assert jobs[0].poll() is None and not orphan_exit(), answer
         kept = scratch/'tmp'/'artifact'
         with kept.open() as reference:
             (scratch/'tmp').rename(scratch/'original')
@@ -163,10 +185,10 @@ def foreground_contracts(base):
     assert (scope/'tmp'/'service.sock').exists()
 
 
-def registered_service(base):
+def registered_service(base, detached=False):
     # Real listener with an in-flight external consumer. Even --private does
     # not entitle Cardigan to interrupt this connection or force-kill the job.
-    key = 'A-5.R-1.R-2'
+    key = 'A-5.R-1.R-3' if detached else 'A-5.R-1.R-2'
     ready = pathlib.Path(base)/'listener'
     service = """import os,sys,socket,pathlib
 s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[2]);s.listen(1);s.settimeout(12)
@@ -175,6 +197,13 @@ c,_=s.accept();c.settimeout(12)
 with c:
  while (b:=c.recv(1)): c.sendall(b)
 """
+    if detached:
+        # The direct child cooperates immediately; a cross-group holder still
+        # has a live client. Its retained channel must not be counted as closed.
+        service = f"""import os,sys,subprocess
+subprocess.Popen([sys.executable,'-I','-c',{service!r},*sys.argv[1:]],
+                 pass_fds=(int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']),),start_new_session=True)
+{WAIT}"""
     path = str(pathlib.Path(base)/'socket')
     with subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(20)']) as session:
         try:
@@ -268,6 +297,19 @@ def observer_enrollment():
         system.close.assert_called_once_with(42)
 
 
+def linux_watch_errors():
+    ns = m['session_watch'].__globals__
+    for invalid in (select.POLLNVAL, select.POLLERR):
+        poller = mock.Mock()
+        poller.poll.side_effect = [[(42, invalid)], [(42, select.POLLIN)]]
+        native = SimpleNamespace(poll=lambda:poller, POLLIN=select.POLLIN,
+                                 POLLNVAL=select.POLLNVAL, POLLERR=select.POLLERR)
+        with mock.patch.dict(ns, sys=SimpleNamespace(platform='linux'), select=native,
+                             os=SimpleNamespace(pidfd_open=lambda _:42)):
+            watch = m['session_watch'](123)
+            assert not watch() and not watch()  # lost pin never becomes exit proof
+
+
 def darwin_watch():
     ns = m['session_watch'].__globals__
     queue = mock.Mock()
@@ -305,6 +347,7 @@ reply = mock.Mock(side_effect=[TimeoutError(), 'expired_preview', 'ended'])
 check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=reply, interval=0)
 assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ended']
 darwin_watch()
+linux_watch_errors()
 observer_enrollment()
 with tempfile.TemporaryDirectory(dir='/tmp', prefix='cr') as base:
     foreground_contracts(base)
@@ -312,8 +355,9 @@ with tempfile.TemporaryDirectory() as base:
     test_runs(base)
 with tempfile.TemporaryDirectory() as base:
     session_bypass(base)
-with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
-    registered_service(base)
+for detached in (False, True):
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
+        registered_service(base, detached)
 for in_use in (False, True):
     with tempfile.TemporaryDirectory() as base:
         vite_owner(base, in_use)
