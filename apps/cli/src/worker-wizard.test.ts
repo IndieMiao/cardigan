@@ -31,11 +31,11 @@ vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
-    refreshMachineObservations: (
-      options: Parameters<typeof host.refreshMachineObservations>[0],
+    refreshWorkerObservations: (
+      ...args: Parameters<typeof host.refreshWorkerObservations>
     ) =>
-      host.refreshMachineObservations({
-        ...options,
+      host.refreshWorkerObservations(args[0], args[1], args[2], args[3], {
+        ...args[4],
         probe: capabilityProbe,
       }),
   };

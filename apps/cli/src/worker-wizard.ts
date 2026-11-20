@@ -5,12 +5,12 @@ import {
   onboardWorker,
   parseWorkerOnboarding,
   readOnboardingYaml,
-  refreshMachineObservations,
-  runtimeTargetBinding,
+  refreshWorkerObservations,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
   type WorkerProbeRunner,
+  withMachineCheck,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -166,60 +166,28 @@ export async function runWorkerCommand(
         )) === EXIT.ok
       );
     };
-    const passed = await onboardWorker({
-      config,
-      configRoot,
-      dataDir,
-      mode,
-      ...(flags["confirm-config"]
-        ? { confirmConfig: flags["confirm-config"] }
-        : {}),
-      registration,
-      ...(probe ? { probe } : {}),
-      report: (step, state, reason, next) =>
-        io.stdout(`${step}: ${state} (${reason})${next ? `\n${next}` : ""}`),
-    });
-    const store = openStore({ dataDir });
-    try {
-      const checkedRegistration = () => {
-        const registered = store.uow.read((tx) =>
-          tx.machines.get(project, machine),
-        );
-        return registered && matchesCheckedWorker(registered)
-          ? registered
-          : undefined;
-      };
-      if (checkedRegistration()) {
-        const execution = {
-          ...config.worker.execution,
-          target: runtimeTargetBinding(config.worker),
-        };
-        const observations = await refreshMachineObservations({
-          store,
-          project,
-          machine,
-          env: io.env,
-          // The wizard probes its input configuration, not an arbitrary later registration.
-          // Resolve both sides of the observation fence against that same worker.
-          target: () => {
-            const registered = checkedRegistration();
-            if (!registered)
-              throw new WorkerOnboardingError("worker_identity_conflict");
-            return { execution, machine: registered };
-          },
-          check: async () => ({
-            blockers: passed ? [] : ["worker_check_failed"],
-            launch_enabled: false,
-          }),
-        });
-        if (passed && !observations.health?.available)
-          throw new WorkerOnboardingError("worker_capability_check_failed");
-      } else if (passed) {
-        throw new WorkerOnboardingError("worker_identity_conflict");
+    const passed = await withMachineCheck(dataDir, machine, async () => {
+      const passed = await onboardWorker({
+        config,
+        configRoot,
+        dataDir,
+        mode,
+        ...(flags["confirm-config"]
+          ? { confirmConfig: flags["confirm-config"] }
+          : {}),
+        registration,
+        ...(probe ? { probe } : {}),
+        report: (step, state, reason, next) =>
+          io.stdout(`${step}: ${state} (${reason})${next ? `\n${next}` : ""}`),
+      });
+      const store = openStore({ dataDir });
+      try {
+        await refreshWorkerObservations(store, config.worker, passed, io.env);
+      } finally {
+        store.close();
       }
-    } finally {
-      store.close();
-    }
+      return passed;
+    });
     if (passed)
       io.stdout(
         "接入检查通过；未启用远程派发。MCP 已验证 HTTPS 可达和未鉴权拒绝，启动鉴权由运行目标检查负责。",

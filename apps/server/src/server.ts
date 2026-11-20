@@ -76,6 +76,7 @@ import {
   tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
+import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -563,6 +564,9 @@ async function assembleServer(
                     : hostOps.executionDiagnostics(project),
               }
             : {}),
+          machineHost: machineHost(store, execution, session, {
+            ...runtimeEnv,
+          }),
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,
           capabilityCatalog: () =>

@@ -40,6 +40,7 @@ export interface MachineObservationOptions {
   readonly machine: string;
   /** Resolve runtime configuration inside the observation fence, before any probe. */
   readonly target: () => ObservationTarget | Promise<ObservationTarget>;
+  readonly progress?: (step: "runtime" | "capabilities") => void;
   readonly check: () => Promise<
     Pick<MachineHealth, "blockers" | "launch_enabled">
   >;
@@ -85,6 +86,7 @@ export async function refreshMachineObservations(
       : (
           options.catalog ?? (() => loadMachineCapabilityCatalog(options.env))
         )();
+    if (catalog.length) options.progress?.("capabilities");
     const probe = options.probe ?? probeMachineCapability;
     for (const entry of catalog) {
       options.signal?.throwIfAborted();

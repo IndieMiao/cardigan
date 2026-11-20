@@ -79,6 +79,9 @@ import {
   unauthorized,
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { MachineChecks } from "./machine-checks.js";
+import type { MachineHost } from "./machine-host.js";
+import { serveMachines } from "./machines.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -114,6 +117,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly machineHost?: MachineHost;
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
     | undefined;
@@ -180,6 +184,8 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly checks: MachineChecks;
+  readonly host: MachineHost | undefined;
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
@@ -247,6 +253,12 @@ export async function startWebServer(
   let boundPort = 0;
   // Aborted by close(): SSE streams end, and responses stop keeping sockets.
   const shutdown = new AbortController();
+  const checks = new MachineChecks(
+    store,
+    clock,
+    shutdown.signal,
+    options.machineHost,
+  );
 
   const http = createServer((req, res) => {
     if (shutdown.signal.aborted) res.setHeader("Connection", "close");
@@ -336,6 +348,8 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        checks,
+        host: options.machineHost,
         buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
@@ -400,7 +414,7 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           if (error) reject(error);
-          else resolve();
+          else void checks.settled().then(resolve, reject);
         });
         shutdown.abort();
         http.closeIdleConnections();
@@ -513,6 +527,14 @@ async function serveProjectRoute(
 ): Promise<void> {
   const { req, res, url, clock, store } = context;
   const now = clock.now();
+
+  if (rest === "/machines" || rest.startsWith("/machines/")) {
+    return serveMachines(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
+      rest,
+    );
+  }
 
   if (rest === "/stream") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);

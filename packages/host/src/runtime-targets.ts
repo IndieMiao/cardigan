@@ -27,6 +27,7 @@ import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
+import { withMachineCheck } from "./machine-check-lock.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
@@ -480,23 +481,20 @@ export class RuntimeTargets implements Runtime {
     machine: string,
     overrides: Pick<
       MachineObservationOptions,
-      "catalog" | "probe" | "now" | "signal"
+      "catalog" | "probe" | "now" | "signal" | "progress"
     > = {},
   ) {
-    return refreshMachineObservations({
-      store: this.options.store,
-      project,
-      machine,
-      ...(this.options.env ? { env: this.options.env } : {}),
-      target: () => this.resolve(project, machine),
-      check: async () => {
-        const checked = await this.check(project, machine);
-        return checked.ok
-          ? checked.value
-          : { blockers: [checked.error.code], launch_enabled: false };
+    return checkRegisteredMachine(
+      this.options.execution.dataDir,
+      {
+        store: this.options.store,
+        project,
+        machine,
+        ...(this.options.env ? { env: this.options.env } : {}),
+        ...overrides,
       },
-      ...overrides,
-    });
+      () => this,
+    );
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
     return this.targetForRef(ref, project).execution;
@@ -789,4 +787,33 @@ export class RuntimeTargets implements Runtime {
       (runtime) => runtime.captureAgent(command, args, timeout),
     );
   }
+}
+
+/** Construct the target inside the observation fence: invalid private configuration must
+ * revoke stale health/capabilities just like a failed probe. Used by CLI, Web and patrol. */
+export function checkRegisteredMachine(
+  dataDir: string,
+  options: Omit<MachineObservationOptions, "target" | "check">,
+  create: () => Promise<RuntimeTargets> | RuntimeTargets,
+) {
+  const { project, machine } = options;
+  return withMachineCheck(
+    dataDir,
+    machine,
+    () => {
+      let runtime: RuntimeTargets | undefined;
+      const ready = async () => (runtime ??= await create());
+      return refreshMachineObservations({
+        ...options,
+        target: async () => (await ready()).resolve(project, machine),
+        check: async () => {
+          const checked = await (await ready()).check(project, machine);
+          return checked.ok
+            ? checked.value
+            : { blockers: [checked.error.code], launch_enabled: false };
+        },
+      });
+    },
+    options.signal,
+  );
 }
