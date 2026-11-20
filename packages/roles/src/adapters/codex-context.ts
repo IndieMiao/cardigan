@@ -77,7 +77,7 @@ export async function readCodexContext({
             latest,
             parts.tailStart,
           ),
-          activity: parseCodexActivity(parts.head, parts.tail, parts.tailStart),
+          ...parseCodexActivity(parts.head, parts.tail, parts.tailStart),
         }
       : undefined;
   } catch {
@@ -91,7 +91,13 @@ function codexError(info: unknown): HarnessActivity["error"] {
   const v = object(info);
   if (v?.stream_disconnected !== undefined || info === "stream_disconnected")
     return "stream_disconnected";
-  const status = object(v?.http_connection_failed)?.http_status_code;
+  const connection = object(v?.http_connection_failed);
+  if (
+    info === "http_connection_failed" ||
+    (connection && connection.http_status_code == null)
+  )
+    return "stream_disconnected";
+  const status = connection?.http_status_code;
   return status === 429
     ? "rate_limit"
     : typeof status === "number" &&
@@ -105,7 +111,7 @@ export function parseCodexActivity(
   head: string,
   tail: string,
   start = 0,
-): ActivityMetadata | undefined {
+): Pick<ContextReading, "activity" | "startupFailure"> {
   const meta = object(
     head
       .split("\n")
@@ -113,9 +119,42 @@ export function parseCodexActivity(
       .find((v) => v?.type === "session_meta")?.payload,
   );
   let last: ActivityMetadata | undefined;
-  for (const event of records(tail, start)) {
+  let fault: ActivityMetadata | undefined;
+  // Never infer silence from a truncated prefix or an unreadable record.
+  const events = records(tail, start);
+  let silentSince =
+    !start &&
+    tail.split("\n").length <= 256 &&
+    events.every(
+      (v, i) => !!v || (i === events.length - 1 && tail.endsWith("\n")),
+    )
+      ? 0
+      : undefined;
+  for (const event of events) {
     const payload = object(event?.payload);
     const error = event?.type === "event_msg" && payload?.type === "error";
+    const agentMessage =
+      event?.type === "event_msg" &&
+      [
+        "agent_message",
+        "agent_reasoning",
+        "agent_reasoning_raw_content",
+      ].includes(String(payload?.type));
+    const modelOutput =
+      agentMessage ||
+      (event?.type === "response_item" &&
+        !["user", "developer", "system"].includes(String(payload?.role))) ||
+      (event?.type === "event_msg" &&
+        ((payload?.type === "task_complete" && !!payload.last_agent_message) ||
+          (payload?.type === "token_count" && payload.info != null)));
+    if (modelOutput) {
+      fault = undefined;
+      const timestamp = Date.parse(String(event?.timestamp));
+      silentSince =
+        silentSince !== undefined && Number.isFinite(timestamp)
+          ? Math.max(timestamp, silentSince)
+          : undefined;
+    }
     if (
       !(
         event?.type === "response_item" ||
@@ -141,8 +180,17 @@ export function parseCodexActivity(
       !sample ||
       (last && Date.parse(sample.updated_at) < Date.parse(last.updated_at))
     )
-      return;
+      return {};
+    if (error) fault = sample;
     last = sample;
   }
-  return last;
+  return {
+    activity: last,
+    startupFailure:
+      fault?.error &&
+      fault.error !== "unclassified" &&
+      silentSince !== undefined
+        ? { ...fault, model_silent_since: silentSince }
+        : undefined,
+  };
 }

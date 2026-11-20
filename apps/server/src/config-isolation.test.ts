@@ -11,6 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { loadMergeGateConfig } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
+import { Store } from "@cardigan/store";
 import { afterEach, beforeAll, expect, test, vi } from "vitest";
 import { loadConfig, loadOptionalConfigSync } from "../../cli/src/config.js";
 import { resolveLaunchPaths } from "../../cli/src/paths.js";
@@ -132,8 +133,9 @@ profiles:
     }),
   );
   vi.stubGlobal("fetch", fetch);
+  const store = Store.open({ dataDir });
   try {
-    const server = await loadLaunchFiles(root, undefined, dataDir);
+    const server = await loadLaunchFiles(root, undefined, dataDir, store);
     expect(server.config.profiles.employee?.model).toBe("fixture-v1");
     const paths = resolveLaunchPaths({
       CARDIGAN_CONFIG_DIR: root,
@@ -142,8 +144,9 @@ profiles:
     expect(await loadConfig(paths)).toEqual(server.config);
     expect(loadOptionalConfigSync(paths)).toEqual(server.config);
     expect(fetch).toHaveBeenCalledOnce();
-    expect(readdirSync(dataDir)).toEqual(["models-dev.json"]);
+    expect(readdirSync(dataDir)).toContain("models-dev.json");
   } finally {
+    store.close();
     vi.unstubAllGlobals();
   }
 });

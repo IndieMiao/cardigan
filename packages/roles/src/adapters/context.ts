@@ -93,6 +93,7 @@ export interface ActivityMetadata {
   session_id: string;
   cwd: string;
   updated_at: string;
+  model_silent_since?: number;
   turn_ended?: true;
   error?: HarnessActivity["error"];
 }
@@ -122,6 +123,11 @@ export function parseActivityMetadata(
     session_id: v.session_id,
     cwd: v.cwd,
     updated_at: v.updated_at,
+    ...(typeof v.model_silent_since === "number" &&
+    Number.isSafeInteger(v.model_silent_since) &&
+    v.model_silent_since >= 0
+      ? { model_silent_since: v.model_silent_since }
+      : {}),
     ...(v.turn_ended === true && !v.error ? { turn_ended: true as const } : {}),
     ...(v.error ? { error: v.error as HarnessActivity["error"] } : {}),
   };
@@ -154,4 +160,6 @@ export interface ContextReading {
   usage?: ContextSample | undefined;
   activity?: ActivityMetadata | undefined;
   progress?: ActivityMetadata | undefined;
+  /** Original fault record, separate from the latest activity used for idle detection. */
+  startupFailure?: ActivityMetadata | undefined;
 }

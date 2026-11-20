@@ -925,6 +925,10 @@ export interface NeedsPage {
   readonly notices_next_cursor?: string | null;
   /** C-153: who looks after lost runtimes; older servers omit it. */
   readonly incident_handling?: IncidentHandling;
+  readonly provider_incidents?: readonly {
+    readonly profile: string;
+    readonly paused: boolean;
+  }[];
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -1024,10 +1028,12 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
+  readonly failure_reason?: "provider_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
-    | "awaiting_dispatch";
+    | "awaiting_dispatch"
+    | "provider_unavailable";
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;

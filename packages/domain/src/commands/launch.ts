@@ -14,6 +14,7 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { providerStarted } from "../provider-start.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import {
@@ -784,6 +785,7 @@ export function acknowledgeRun(
       const active = activeWork(d, item);
       if (active.status !== item.status) d.put("work_items", active);
     }
+    providerStarted(d, run);
     d.emit("run_started", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
