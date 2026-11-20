@@ -166,6 +166,12 @@ test.runIf(process.platform === "linux")(
       await message(background, "reconciling");
       // Web never started this loop; background holds external IO without a SQL transaction.
       expect(web.messages.some((m) => m.type === "reconciling")).toBe(false);
+      expect(web.messages.some((m) => m.type === "publisher-start")).toBe(
+        false,
+      );
+      expect(
+        background.messages.some((m) => m.type === "publisher-start"),
+      ).toBe(true);
       expect((await fetch(`${webUrl}/api/session`)).status).toBe(200);
       // Reconciliation and dispatch run independently. Its IPC signal only
       // proves that Git IO started, not that dispatch committed coordination.
@@ -191,12 +197,18 @@ test.runIf(process.platform === "linux")(
       children.push(duplicate.process);
       await message(duplicate, "failed");
       expect(await duplicate.exited).toBe(1);
+      expect(duplicate.messages.some((m) => m.type === "publisher-start")).toBe(
+        false,
+      );
       // Stop drains the blocked reconciliation instead of releasing its ownership early.
       background.process.send("stop");
       await message(background, "stopping");
       expect(background.process.exitCode).toBeNull();
       background.process.send("release");
       expect(await background.exited).toBe(0);
+      expect(background.messages.some((m) => m.type === "publisher-stop")).toBe(
+        true,
+      );
       await vi.waitFor(() =>
         expect(frames).toContain('"type":"reconcile_finding"'),
       );

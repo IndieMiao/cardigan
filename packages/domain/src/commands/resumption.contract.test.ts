@@ -190,7 +190,18 @@ test.each([false, true])(
     expect(state.runs.filter((r) => r.status === "queued")).toHaveLength(
       ended ? 1 : 0,
     );
+    const created = result.events.filter(
+      (event) => event.type === "run_queued",
+    );
+    expect(created).toHaveLength(ended ? 1 : 0);
     if (ended) {
+      const queued = state.runs.find((run) => run.status === "queued");
+      expect(created[0]?.payload).toMatchObject({
+        run_id: queued?.id,
+        assignment_id: queued?.assignment_id,
+        trigger_event_id: result.events[0]?.id,
+      });
+      expect(queued?.queue_reason).toBe("awaiting_dispatch");
       expect(state.runs.find((r) => r.id === id("run", 1))).toMatchObject({
         status: "completed",
         outcome: "blocked",
@@ -651,7 +662,10 @@ test.each(["reject"] as const)(
       status: "ready",
       max_review_rounds: 2,
     });
-    expect(recorded.events.at(-1)?.payload).toMatchObject({
+    const resolved = recorded.events.find(
+      (e) => e.type === "decision_resolved",
+    );
+    expect(resolved?.payload).toMatchObject({
       resume_work_items: [reviewer],
     });
     expect(state.runs.find((r) => r.id === id("run", 2))).toMatchObject({
@@ -662,7 +676,7 @@ test.each(["reject"] as const)(
     expect(state.runs.find((r) => r.status === "queued")).toMatchObject({
       assignment_id: id("assignment", 2),
       kind: "decision_resumed",
-      trigger_event_id: recorded.events.at(-1)?.id,
+      trigger_event_id: resolved?.id,
       role_version: 1,
       model: "fixture-model",
       agent_cli_version: "1.0",
@@ -906,6 +920,7 @@ test.each([human, office])(
     expect(effect.events.map((e) => e.type)).toEqual([
       "work_item_updated",
       "decision_resolved",
+      "run_queued",
     ]);
     expect(state.work_items.find((w) => w.id === reviewer)).toMatchObject({
       status: "ready",

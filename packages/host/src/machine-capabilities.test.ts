@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -9,9 +10,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
-import { Store } from "@cardigan/store";
+import {
+  readMachineObservations,
+  recordAcceptedBrowserPath,
+  Store,
+} from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import {
@@ -22,6 +27,7 @@ import {
 } from "./machine-capability-catalog.js";
 import {
   CAPABILITY_PROBE_SCRIPT,
+  type CapabilityCommand,
   probeMachineCapability,
 } from "./machine-capability-probe.js";
 
@@ -102,6 +108,86 @@ test("private custom catalog cannot replace builtins or load unsafe files", () =
     ).toThrow();
 });
 
+test.each([
+  ["linux", "chromium-8/chrome-linux64/chrome"],
+  ["linux", "chromium_headless_shell-8/chrome-linux/headless_shell"],
+  ["darwin", "chromium-8/chrome-mac/Chromium.app/Contents/MacOS/Chromium"],
+  [
+    "darwin",
+    "chromium-8/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  ],
+])(
+  "%s Chromium probe prefers the literal configured registry (%s) over the Run PATH",
+  (os, layout) => {
+    const home = temp(),
+      path = join(home, "bin"),
+      registry = join(home, "registry $(false) [abc] '");
+    const install = (file: string, version: string, code = 0) => {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        `#!/bin/sh\n[ "$1" = --version ] || exit 1\necho 'Chromium ${version}'\nexit ${code}\n`,
+        { mode: 0o700 },
+      );
+    };
+    install(join(path, "chromium"), "2.0");
+    const browser = join(registry, layout);
+    install(browser, "152.1.2.3");
+    const entry = parseMachineCapabilityCatalog(undefined, registry, os).find(
+      (c) => c.key === "browser.chromium",
+    );
+    if (!entry) throw new Error("Missing browser probe");
+    // Exercise the real worker protocol with a synthetic OS layout. PATH is isolated;
+    // the wrapper still verifies the actual OS and restores the actual worker account.
+    const python = execFileSync(
+      "python3",
+      ["-c", "import sys; print(sys.executable)"],
+      { encoding: "utf8" },
+    ).trim();
+    const plan = entry.check;
+    if (!("scopes" in plan)) throw new Error("Missing search plan");
+    const run = () => {
+      const output = execFileSync(
+        python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          CAPABILITY_PROBE_SCRIPT,
+          JSON.stringify({
+            os: process.platform,
+            argv: {
+              ...plan,
+              scopes: plan.scopes.map((s) =>
+                s.kind === "cache"
+                  ? { ...s, kind: "registry", value: join(home, s.value) }
+                  : s,
+              ),
+            },
+            timeout_ms: 1000,
+          }),
+        ],
+        { env: { PATH: path }, encoding: "utf8" },
+      );
+      const result = JSON.parse(output);
+      return result.ok ? entry.parseVersion(result.output) : null;
+    };
+    expect(run()).toBe("152.1.2.3");
+    install(browser, "99.9", 1);
+    expect(run()).toBe("2.0"); // Ignore the failed binary's banner.
+    install(browser, "unknown"); // A successful exit without a version must not mask PATH.
+    expect(run()).toBe("2.0");
+    chmodSync(browser, 0o600);
+    expect(run()).toBe("2.0");
+    if (os === "linux") {
+      rmSync(join(path, "chromium"));
+      expect(run()).toBeNull();
+      install(join(home, ".cache/ms-playwright", layout), "3.0");
+      expect(run()).toBe("3.0");
+    }
+  },
+);
+
 test.each(["linux", "darwin"])(
   "refresh probes %s as the configured project worker, persists only safe proof, and revokes failures",
   async (os) => {
@@ -130,7 +216,7 @@ test.each(["linux", "darwin"])(
         async (
           _execution: ExecutionConfig,
           _os: string,
-          _command: readonly string[],
+          _command: CapabilityCommand,
           _signal?: AbortSignal,
         ) => ({
           ok: true,
@@ -366,5 +452,116 @@ test("cancelling a running local probe drains its child process", async () => {
   } finally {
     controller.abort();
     await pending;
+  }
+});
+
+test("a timed-out configured candidate leaves time for PATH and no surviving child", async () => {
+  const dir = temp(),
+    root = join(dir, "registry"),
+    bin = join(dir, "bin"),
+    pid = join(dir, "child.pid");
+  const browser = join(root, "chromium-9/chrome-linux64/chrome");
+  mkdirSync(dirname(browser), { recursive: true });
+  mkdirSync(bin);
+  writeFileSync(
+    browser,
+    `#!/bin/sh\necho $$ > '${pid}'\nexec /bin/sleep 30\n`,
+    { mode: 0o700 },
+  );
+  writeFileSync(
+    join(bin, "chromium"),
+    "#!/bin/sh\necho 'Chromium 150.2.3.4'\n",
+    { mode: 0o700 },
+  );
+  const plan = parseMachineCapabilityCatalog(undefined, root, "linux").find(
+    (c) => c.key === "browser.chromium",
+  )?.check;
+  if (!plan || !("scopes" in plan)) throw new Error("Missing browser plan");
+  vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+  const result = await probeMachineCapability(
+    { mode: "local", dataDir: dir },
+    process.platform,
+    plan,
+  );
+  expect(result).toEqual({ ok: true, output: "150.2.3.4" });
+  expect(existsSync(pid)).toBe(true);
+  expect(() => process.kill(Number(readFileSync(pid, "utf8")), 0)).toThrow();
+});
+
+test("a browser path change fences an in-flight result in either commit order without losing node", async () => {
+  const dataDir = temp(),
+    store = Store.open({ dataDir }),
+    publisher = Store.open({ dataDir });
+  try {
+    store.createProject({ id: "a" });
+    const machine = store.uow.read((tx) => tx.machines.get("a", "local"));
+    if (!machine) throw new Error("Missing machine");
+    const path = "/fixture/A",
+      changed = "/fixture/B";
+    recordAcceptedBrowserPath(publisher, path);
+    const started = Promise.withResolvers<void>(),
+      finish = Promise.withResolvers<void>();
+    const options = {
+      store,
+      project: "a",
+      machine: "local",
+      target: () => ({
+        machine,
+        execution: { mode: "local" as const, dataDir },
+      }),
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      browsersPath: () => path,
+      probe: async (
+        _execution: ExecutionConfig,
+        _os: string,
+        cmd: CapabilityCommand,
+      ) => {
+        if ("scopes" in cmd) {
+          started.resolve();
+          await finish.promise;
+          return { ok: true, output: "Chromium 150.1" };
+        }
+        return { ok: cmd[0] === "node", output: "Node 24.1" };
+      },
+    };
+    const first = refreshMachineObservations(options);
+    await started.promise;
+    recordAcceptedBrowserPath(publisher, changed);
+    finish.resolve();
+    const result = await first;
+    expect(result.health?.available).toBe(true);
+    expect(result.capabilities.map((c) => c.key)).toEqual(["node"]);
+    recordAcceptedBrowserPath(publisher, path);
+    expect(
+      (await refreshMachineObservations(options)).capabilities.map(
+        (c) => c.key,
+      ),
+    ).toEqual(["browser.chromium", "node"]);
+    recordAcceptedBrowserPath(publisher, changed);
+    expect(
+      readMachineObservations(store, "a", "local").capabilities.map(
+        (c) => c.key,
+      ),
+    ).toEqual(["node"]);
+    const partial = await refreshMachineObservations({
+      ...options,
+      browsersPath: () => changed,
+      probe: async () => ({
+        ok: false,
+        output: "private-error",
+        attempted: 1,
+        incomplete: true,
+      }),
+    });
+    expect(partial.health?.capability_failures).toEqual([
+      {
+        key: "browser.chromium",
+        search_locations: ["launch.yaml:browser.browsers_path"],
+        search_incomplete: true,
+      },
+    ]);
+  } finally {
+    publisher.close();
+    store.close();
   }
 });

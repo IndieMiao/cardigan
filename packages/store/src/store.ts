@@ -31,6 +31,7 @@ import {
   CommandSnapshots,
   type SnapshotTransaction,
 } from "./command-snapshots.js";
+import { unfinishedBellAttempts } from "./dispatcher.js";
 import {
   createGlobalIdAllocator,
   createGlobalRepositories,
@@ -475,6 +476,17 @@ export class Store {
       const repositories = createRepositories(this.#db, snapshots);
       const reader = this.#placement;
       const tx: StoreTransactionContext = {
+        unreservedAssignment: (project, assignment) => {
+          if (!active) throw new Error("Reservation transaction has ended");
+          return (
+            !unfinishedBellAttempts(this.#db, project, assignment).length &&
+            !this.#db
+              .prepare(
+                "SELECT 1 FROM machine_resource_leases WHERE project=? AND assignment_id=? AND verified_at IS NULL LIMIT 1",
+              )
+              .get(project, assignment)
+          );
+        },
         ...(reader
           ? {
               read_machine_placement: (...args) => {

@@ -130,6 +130,7 @@ export async function runServer(
     refresh = host.refreshLaunch;
     server = await startCardiganServer({
       role: options.role ?? "web",
+      onBackgroundOwner: host.publishWhileBackgroundOwner,
       config,
       env,
       store,

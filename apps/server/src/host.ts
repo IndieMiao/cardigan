@@ -40,7 +40,11 @@ import {
   resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
-import { getRoleVersion, type Store } from "@cardigan/store";
+import {
+  getRoleVersion,
+  recordAcceptedBrowserPath,
+  type Store,
+} from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { standingResolver } from "./assembly.js";
 import type { ServerEnv } from "./config.js";
@@ -58,6 +62,7 @@ const exec = promisify(execFile);
  */
 export interface HostWiring {
   readonly recoverLaunches: (project: ProjectId) => Promise<void>;
+  readonly publishWhileBackgroundOwner: () => () => void;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
   readonly adoptLaunch: (generation: LaunchGeneration) => void;
@@ -197,6 +202,8 @@ export async function createHostWiring(options: {
   const created = await RuntimeTargets.create({
     store: options.store,
     env: { ...env },
+    browsersPath: async () =>
+      (await live.refresh()).config.browser?.browsers_path,
     execution,
     session: env.CARDIGAN_HC_SESSION ?? "cardigan",
     ...(options.client === undefined ? {} : { client: options.client }),
@@ -242,6 +249,10 @@ export async function createHostWiring(options: {
         ? selectableLaunchConfig(current)
         : { ...current.config, profiles: {} };
     },
+    publishWhileBackgroundOwner: () =>
+      live.publishWhileOwned(({ config }) =>
+        recordAcceptedBrowserPath(options.store, config.browser?.browsers_path),
+      ),
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

@@ -180,6 +180,9 @@ export function executeCommand<P, T>(
                 reduce(state, actor, params, {
                   clock,
                   ids: tx.ids,
+                  ...(tx.unreservedAssignment
+                    ? { unreservedAssignment: tx.unreservedAssignment }
+                    : {}),
                 }),
               ),
             );

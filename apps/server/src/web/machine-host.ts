@@ -60,6 +60,7 @@ export function machineHost(
   execution: ExecutionConfig,
   session: string,
   env: NodeJS.ProcessEnv,
+  browsersPath: () => string | undefined = () => undefined,
 ): MachineHost {
   const file = runtimeWorkersPath(env),
     root = dirname(file),
@@ -121,7 +122,16 @@ export function machineHost(
       if (kind === "machine") {
         progress("runtime");
         const result = await observeRegisteredMachine(
-          { store, project, machine, env, signal, progress, observationId },
+          {
+            store,
+            project,
+            machine,
+            env,
+            signal,
+            progress,
+            observationId,
+            browsersPath,
+          },
           async () => {
             const runtime = await RuntimeTargets.create({
               store,
@@ -182,6 +192,7 @@ export function machineHost(
       if (passed) progress("capabilities");
       await refreshWorkerObservations(store, config.worker, passed, env, {
         signal,
+        browsersPath,
       });
       return {
         status: passed ? "passed" : "failed",
