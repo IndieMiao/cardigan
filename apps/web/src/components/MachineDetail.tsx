@@ -1,4 +1,4 @@
-import type { ExecutionCapacity, ExecutionMachine } from "../api.js";
+import type { ExecutionMachine } from "../api.js";
 import {
   type CapabilityState,
   capabilityState,
@@ -8,8 +8,6 @@ import {
 import { useCapacity } from "./Capacity.js";
 import { StatusTag, Time } from "./Foundation.js";
 import { CardDetailLayout } from "./layout/CardDetailLayout.js";
-
-type AgentCapacity = ExecutionCapacity["agents"][number];
 
 const CAPABILITY_TAGS: Readonly<
   Record<
@@ -35,12 +33,6 @@ export function MachineHealthTag({
       subdued={health.subdued}
     />
   );
-}
-
-export function machineCapacityText(capacity: AgentCapacity | undefined) {
-  return capacity
-    ? `${capacity.running}/${capacity.limit || "不可用"}`
-    : undefined;
 }
 
 /** MC-5: read-only machine facts. Registry and limits are changed elsewhere by a human. */
