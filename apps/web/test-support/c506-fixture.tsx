@@ -45,7 +45,8 @@ const node = (id: string, extra: Partial<DependencyCard> = {}) => ({
   id,
   title: titles[id] ?? `长链第 ${Number(id.slice(2)) - 460} 张`,
   status: status[id] ?? (Number(id.slice(2)) < 470 ? "done" : "todo"),
-  satisfied: (status[id] ?? "") === "done" || Number(id.slice(2)) < 470,
+  // Only a finished card meets a dependency; the long chain is done below 470.
+  satisfied: status[id] ? status[id] === "done" : Number(id.slice(2)) < 470,
   ...extra,
 });
 const edges = (...pairs: string[]) =>
