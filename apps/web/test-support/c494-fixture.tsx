@@ -82,24 +82,36 @@ const proofreader = {
   required_machine_tags: [],
 };
 const dev = (await base.templates("p-1")).templates[0] as TemplateVersion;
+/** V-2528 scene: a long title and key that must wrap inside the column. */
+const longItem = {
+  key: "integration_verification_long_key",
+  title: "集成环境里的长时间验证",
+  kind: "verify" as const,
+  role_id: "reviewer",
+  required: true,
+  target_work_item_key: "development",
+};
 /** V-2525 scene: an update that drops machine limits and moves the reviewer. */
 const limitedDev = {
   ...dev,
   id: "copy",
   builtin: false,
   completion: { mode: "review" as const, reviewer: "role:qa-one" },
-  work_items: dev.work_items.map((w) =>
-    w.key === "development"
-      ? {
-          ...w,
-          requirements: {
-            os: "linux",
-            tags: ["isolated-machine", "gpu-box"],
-            capabilities: ["verified-environment"],
-          },
-        }
-      : w,
-  ),
+  work_items: [
+    ...dev.work_items.map((w) =>
+      w.key === "development"
+        ? {
+            ...w,
+            requirements: {
+              os: "linux",
+              tags: ["isolated-machine", "gpu-box"],
+              capabilities: ["verified-environment"],
+            },
+          }
+        : w,
+    ),
+    { ...longItem, requirements: { tags: ["isolated-machine"] } },
+  ],
 };
 const longChange = (): RoleDocumentPreview => ({
   snapshot: "1".repeat(64),
@@ -112,6 +124,7 @@ const longChange = (): RoleDocumentPreview => ({
       id: "copy",
       version: 3,
       completion: { mode: "review", reviewer: "role:proofreader" },
+      work_items: [...dev.work_items, { ...longItem, required: false }],
     },
   },
   employees: [],

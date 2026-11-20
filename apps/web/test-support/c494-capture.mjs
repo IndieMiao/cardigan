@@ -434,6 +434,28 @@ try {
             return out;
           }),
         );
+        // V-2528: the table fits its column; every cell stays inside it.
+        report.tableFit ??= {};
+        report.tableFit[`${width}-${theme}`] = await run(() => {
+          const table = document.querySelector(
+            "[role=dialog] table[aria-label=模板工作项]",
+          );
+          const scroll = table.parentElement;
+          const box = scroll.getBoundingClientRect();
+          const outside = [...table.querySelectorAll("td")].filter((td) => {
+            const r = td.getBoundingClientRect();
+            return (
+              r.width > 0 &&
+              (r.right > box.right + 0.5 || r.left < box.left - 0.5)
+            );
+          }).length;
+          return {
+            tableWidth: Math.round(table.getBoundingClientRect().width),
+            scrollWidth: scroll.scrollWidth,
+            clientWidth: scroll.clientWidth,
+            cellsOutside: outside,
+          };
+        });
       });
       await scene("discard-dialog", width, theme, async () => {
         await roles();

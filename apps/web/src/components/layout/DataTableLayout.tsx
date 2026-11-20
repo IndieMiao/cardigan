@@ -47,6 +47,16 @@ export function DataTableLayout({
 }
 
 /**
+ * Keeps an identifier (a key, an id with its trailing punctuation) in one
+ * piece inside a wrapping cell: the cell text still wraps around it.
+ */
+export function DataTableKeep(
+  props: Omit<ComponentProps<"span">, "className">,
+) {
+  return <span {...props} className={styles.keep} />;
+}
+
+/**
  * Short values (ids, statuses, names, times) keep one line on wide screens so
  * a long text column takes the remaining width; stacked records still wrap.
  */

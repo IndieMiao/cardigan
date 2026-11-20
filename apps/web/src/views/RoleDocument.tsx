@@ -12,7 +12,10 @@ import {
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
-import { DataTableCell } from "../components/layout/DataTableLayout.js";
+import {
+  DataTableCell,
+  DataTableKeep,
+} from "../components/layout/DataTableLayout.js";
 import {
   SettingsDialogActions,
   SettingsDialogFields,
@@ -485,17 +488,25 @@ export function RoleDocumentPreviewView({
                   : status;
                 return (
                   <TableRow key={key}>
-                    <DataTableCell nowrap data-record="lead">
-                      {w.title}（<code>{w.key}</code>）
+                    <DataTableCell data-record="lead">
+                      {w.title}（
+                      <DataTableKeep>
+                        <code>{w.key}</code>）
+                      </DataTableKeep>
                     </DataTableCell>
                     <DataTableCell nowrap data-label="角色">
                       <code>{w.role_id}</code>
                     </DataTableCell>
-                    <DataTableCell nowrap data-label="类型">
-                      {w.kind === "verify"
-                        ? `验证${w.target_work_item_key ? ` ${w.target_work_item_key}` : ""}`
-                        : "产出"}
-                      {w.required ? "，必需" : "，可选"}
+                    <DataTableCell data-label="类型">
+                      {w.kind === "verify" ? "验证" : "产出"}
+                      {w.kind === "verify" && w.target_work_item_key && " "}
+                      <DataTableKeep>
+                        {w.kind === "verify"
+                          ? (w.target_work_item_key ?? "")
+                          : ""}
+                        ，
+                      </DataTableKeep>
+                      {w.required ? "必需" : "可选"}
                     </DataTableCell>
                     <DataTableCell data-label="机器要求">
                       {requirementsText(w) || "不限"}

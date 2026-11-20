@@ -8,6 +8,11 @@
     white-space: nowrap;
     overflow-wrap: normal;
   }
+  /* An identifier moves to the next line whole instead of breaking inside. */
+  .keep {
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
   .detail {
     margin: 0;
     max-block-size: 50vh;
