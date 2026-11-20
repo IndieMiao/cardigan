@@ -11,6 +11,7 @@ import {
   resolveProfile,
 } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
+import { drainTasks } from "./drain-tasks.js";
 import { HttpRejection } from "./http.js";
 import {
   invalid,
@@ -77,7 +78,7 @@ export class ProfileChecks {
   }
 
   async drain() {
-    await Promise.all(this.active.values());
+    await drainTasks(this.active.values());
   }
   latest(profile: string) {
     const row = this.store.database

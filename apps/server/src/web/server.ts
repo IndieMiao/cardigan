@@ -54,6 +54,7 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
+import { drainTasks } from "./drain-tasks.js";
 import {
   executionCapacity,
   executionCapacityRevision,
@@ -455,13 +456,14 @@ export async function startWebServer(
         // connections that are already idle.
         http.close((error) => {
           cancel();
-          if (error) reject(error);
-          else
-            void Promise.all([
-              checks.settled(),
-              wizards.settled(),
-              launchSettings?.checks.drain(),
-            ]).then(() => resolve(), reject);
+          void drainTasks([
+            checks.settled(),
+            wizards.settled(),
+            launchSettings?.checks.drain(),
+          ]).then(
+            () => (error ? reject(error) : resolve()),
+            (reason) => reject(error ?? reason),
+          );
         });
         shutdown.abort();
         http.closeIdleConnections();
