@@ -339,10 +339,10 @@ test("C-207: abnormal Assignment status and a bad Run outcome stay in the row", 
   const state = cells("A-1").state;
   expect(state).toContain("已暂停");
   expect(state).toContain("失败");
-  expect(state).not.toContain("最近执行失败");
+  expect(state).not.toContain("最近执行：失败");
   fireEvent.focus(screen.getByRole("button", { name: "A-1 状态详情" }));
   expect((await screen.findByRole("tooltip")).textContent).toContain(
-    "最近执行失败",
+    "最近执行：失败",
   );
 });
 

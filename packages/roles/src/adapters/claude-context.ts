@@ -29,6 +29,9 @@ export async function readClaudeContext({
             claudeContextWindow(expandClaudeModel(model, providerEnv)),
           ),
           activity: parseActivityMetadata(event.activity),
+          startupFailure: parseActivityMetadata(
+            object(event.activity)?.startup_failure,
+          ),
           progress: parseActivityMetadata(object(event.activity)?.progress),
         }
       : undefined;

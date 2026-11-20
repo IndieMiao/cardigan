@@ -55,6 +55,7 @@ const groups = {
     "degraded",
     "delivery_failed",
     "executor_unreachable",
+    "provider_unavailable",
   ],
   cancelled: [
     "cancelled",

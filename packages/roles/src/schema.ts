@@ -130,6 +130,7 @@ function normalizeConfig(
         entry.provider === (model.catalog_provider ?? model.provider) &&
         entry.id === model.id,
     );
+    model.cost ??= upstream?.cost;
     model.context_window ??= upstream?.context_window;
     model.max_output_tokens ??= upstream?.max_output_tokens;
     model.reasoning_efforts ??= upstream?.reasoning_efforts;
