@@ -264,6 +264,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
               (card) => card.id,
             ),
             ...(data.card.dependency?.successors ?? []).map((card) => card.id),
+            ...(data.card.dependency?.graph?.nodes ?? []).map(
+              (card) => card.id,
+            ),
           ]),
       ),
     ].sort();

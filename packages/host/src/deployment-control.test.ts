@@ -11,66 +11,88 @@ import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import { changeDeployment } from "./deployment-control.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 
-test("supervisor lag is visibly audited once and never triggers a supervisor upgrade", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cg-supervisor-version-"));
-  const store = Store.open({ dataDir: root });
-  const old = "a".repeat(40),
-    next = "b".repeat(40);
-  store.createProject({ id: "cardigan" });
-  const driver = new NodeDeploymentDriver({
-    store,
-    dataDir: root,
-    env: {},
-    config: {
-      enabled: true,
-      initial_release: root,
-      initial_sha: old,
-      ready_timeout_ms: 1000,
-      stop_timeout_ms: 1000,
-      poll_interval_ms: 1000,
-      build_timeout_ms: 1000,
-    },
-  });
-  const command = vi
-    .spyOn(
-      driver as unknown as {
-        command(
-          file: string,
-          args: string[],
-          cwd: string,
-          env: NodeJS.ProcessEnv,
-        ): Promise<{ code: number; text: string }>;
+test.each([
+  { path: "packages/host/src/deployment-node.ts", count: 1 },
+  { path: "apps/cli/src/self-deploy.ts", count: 1 },
+  { path: "apps/web/src/view.ts", count: 0 },
+])(
+  "supervisor lag for $path produces $count action(s) and never upgrades automatically",
+  async ({ path, count }) => {
+    const root = await mkdtemp(join(tmpdir(), "cg-supervisor-version-"));
+    const store = Store.open({ dataDir: root });
+    const old = "a".repeat(40),
+      next = "b".repeat(40);
+    store.createProject({ id: "cardigan" });
+    const driver = new NodeDeploymentDriver({
+      store,
+      dataDir: root,
+      env: {},
+      config: {
+        enabled: true,
+        initial_release: root,
+        initial_sha: old,
+        ready_timeout_ms: 1000,
+        stop_timeout_ms: 1000,
+        poll_interval_ms: 1000,
+        build_timeout_ms: 1000,
       },
-      "command",
-    )
-    .mockImplementation(async (_file, args) => ({
-      code: 0,
-      text: args.includes("HEAD") ? old : next,
-    }));
-  vi.spyOn(driver, "isFastForward").mockResolvedValue(true);
-  const start = vi.spyOn(driver, "start");
-  try {
-    for (let i = 0; i < 3; i++) expect(await driver.main()).toBe(next);
-    const actions = store.uow.read((tx) => tx.human_actions.list("cardigan"));
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({
-      triage: "human",
-      blocked_work_items: [],
     });
-    expect(actions[0]?.instructions).toContain(old);
-    expect(actions[0]?.instructions).toContain("系统不会自我升级");
-    expect(
-      command.mock.calls.every(
-        ([file, args]) => file === "git" && args.includes("rev-parse"),
-      ),
-    ).toBe(true);
-    expect(start).not.toHaveBeenCalled();
-  } finally {
-    vi.restoreAllMocks();
-    store.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
+    const command = vi
+      .spyOn(
+        driver as unknown as {
+          command(
+            file: string,
+            args: string[],
+            cwd: string,
+            env: NodeJS.ProcessEnv,
+          ): Promise<{ code: number; text: string }>;
+        },
+        "command",
+      )
+      .mockImplementation(async (_file, args) => ({
+        code: 0,
+        text: args.includes("HEAD") ? old : next,
+      }));
+    const diff = vi
+      .spyOn(
+        driver as unknown as {
+          readSupervisorGit(args: string[]): Promise<string>;
+        },
+        "readSupervisorGit",
+      )
+      .mockResolvedValue(`M\0${path}\0`);
+    vi.spyOn(driver, "isFastForward").mockResolvedValue(true);
+    const start = vi.spyOn(driver, "start");
+    try {
+      for (let i = 0; i < 3; i++) expect(await driver.main()).toBe(next);
+      const actions = store.uow.read((tx) => tx.human_actions.list("cardigan"));
+      expect(diff).toHaveBeenCalledTimes(1);
+      expect(diff.mock.calls[0]?.[0][0]).toBe("diff");
+      expect(diff.mock.calls[0]?.[0]).toEqual(
+        expect.arrayContaining([old, next]),
+      );
+      expect(actions).toHaveLength(count);
+      if (count) {
+        expect(actions[0]).toMatchObject({
+          triage: "human",
+          blocked_work_items: [],
+        });
+        expect(actions[0]?.instructions).toContain(old);
+        expect(actions[0]?.instructions).toContain("系统不会自我升级");
+      }
+      expect(
+        command.mock.calls.every(
+          ([file, args]) => file === "git" && args.includes("rev-parse"),
+        ),
+      ).toBe(true);
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      store.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("human controls validate central history, audit adoption and persist a pin across supervisor instances", async () => {
   const root = await mkdtemp(join(tmpdir(), "cg-deploy-control-"));

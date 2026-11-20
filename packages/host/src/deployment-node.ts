@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -17,6 +17,7 @@ import { connect } from "node:net";
 import { delimiter, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import type {
   DeploymentBuild,
   DeploymentDriver,
@@ -28,10 +29,11 @@ import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
-  writeDeploymentNotice,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeServerLogAudit,
+  writeSupervisorComparison,
+  writeSupervisorComparisonUnavailable,
 } from "./deployment-audit.js";
 import {
   acquireDeploymentCapacity,
@@ -49,9 +51,11 @@ import {
   DeploymentServerLog,
   taggedServerOutput,
 } from "./deployment-server-log.js";
+import { supervisorChanges } from "./deployment-supervisor-scope.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
+const exec = promisify(execFile);
 const PROJECT = "cardigan";
 class DeploymentCommandUnavailable extends Error {}
 interface State {
@@ -85,7 +89,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
   private supervisorSha: string | null | undefined;
-  private supervisorWarningRecorded = false;
+  private checkedSupervisorMain?: string;
+  private failedSupervisorMain?: string;
   constructor(
     private readonly options: {
       store: Store;
@@ -463,18 +468,39 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           ? version.text.trim()
           : null;
     }
+    const supervisor = this.supervisorSha;
     if (
-      this.supervisorSha &&
-      !this.supervisorWarningRecorded &&
-      this.supervisorSha !== sha &&
-      (await this.isFastForward(this.supervisorSha, sha))
+      supervisor &&
+      this.checkedSupervisorMain !== sha &&
+      (supervisor === sha || (await this.isFastForward(supervisor, sha)))
     ) {
-      writeDeploymentNotice(
-        this.options.store,
-        `supervisor-outdated:${this.supervisorSha}`,
-        `部署监督器仍运行 ${this.supervisorSha}，中心 main 已前进至 ${sha}。请在合适的维护窗口更新监督器；系统不会自我升级。`,
-      );
-      this.supervisorWarningRecorded = true;
+      try {
+        const affected = await supervisorChanges(supervisor, sha, (args) =>
+          this.readSupervisorGit(args),
+        );
+        writeSupervisorComparison(
+          this.options.store,
+          supervisor,
+          sha,
+          affected,
+        );
+        this.checkedSupervisorMain = sha;
+      } catch {
+        // An unavailable comparison is neither upgrade evidence nor proof that an open notice is obsolete.
+        if (this.failedSupervisorMain !== sha) {
+          console.warn("未能核对部署监督器差异；保留现有提醒，下轮重试");
+          try {
+            writeSupervisorComparisonUnavailable(
+              this.options.store,
+              supervisor,
+              sha,
+            );
+            this.failedSupervisorMain = sha;
+          } catch {
+            // Retry a failed audit too; notice bookkeeping must not block deployment.
+          }
+        }
+      }
     }
     return sha;
   }
@@ -1056,6 +1082,21 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       GIT_TERMINAL_PROMPT: "0",
       GIT_NO_REPLACE_OBJECTS: "1",
     };
+  }
+  // A tree comparison must not silently truncate stdout or mix in stderr as a build log can.
+  private async readSupervisorGit(args: string[]) {
+    const { stdout } = await exec(
+      "git",
+      [...gitSafetyArguments, "--git-dir", this.central, ...args],
+      {
+        env: this.gitEnv(),
+        cwd: this.directory,
+        maxBuffer: 2 * 1024 * 1024,
+        timeout: this.options.config.build_timeout_ms,
+        encoding: "utf8",
+      },
+    );
+    return stdout;
   }
   private git(args: string[]) {
     return this.command(
