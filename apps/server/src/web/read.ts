@@ -269,7 +269,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           name: employee.name,
           title: employee.title,
           bio: employee.bio,
-          role_id: employee.role_id,
+          role_id: assignment?.role_id ?? employee.role_id,
           avatar:
             avatar?.kind === "library"
               ? `/avatars/v1/${avatar.id}/head-64.webp`
