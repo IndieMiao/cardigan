@@ -22,6 +22,7 @@
     "@cardigan/roles": "workspace:*",
     "@cardigan/runtime-herdr": "workspace:*",
     "@cardigan/store": "workspace:*",
+    "@larksuiteoapi/node-sdk": "1.76.0",
     "yaml": "2.9.1"
   }
 }

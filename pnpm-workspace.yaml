@@ -2,3 +2,5 @@ packages:
   - packages/*
   - apps/*
   - e2e
+allowBuilds:
+  protobufjs: false
