@@ -34,6 +34,10 @@ import {
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import {
+  type MobileSigningOptions,
+  mobileSigningTool,
+} from "./tools/mobile-signing.js";
+import {
   type ReservationOptions,
   reservationTool,
 } from "./tools/resource-reservation.js";
@@ -46,6 +50,7 @@ export interface McpServerOptions
     HostOpsToolOptions,
     CheckLogOptions,
     ReservationOptions,
+    MobileSigningOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
@@ -104,12 +109,14 @@ export function serverTools(
     HostOpsToolOptions &
     CheckLogOptions &
     ReservationOptions &
+    MobileSigningOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    mobileSigningTool(options),
     reservationTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),

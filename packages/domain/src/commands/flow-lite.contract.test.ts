@@ -208,6 +208,9 @@ test.each([
 
 test.each([
   "packages/store/migrations/0035.sql",
+  "deploy/mobile-signing/worker.py",
+  "apps/server/src/mobile-signing.ts",
+  "packages/mcp-server/src/tools/mobile-signing.ts",
   "packages/host/src/deployment.ts",
   "packages/runtime-herdr/src/agent-ssh.ts",
   ".github/workflows/check.yml",

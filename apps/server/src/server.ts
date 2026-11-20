@@ -67,6 +67,7 @@ import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
+import { requestMobileSignature } from "./mobile-signing.js";
 import { serverProbes } from "./probes.js";
 import {
   clearTickProfileSync,
@@ -474,6 +475,13 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              ...(execution.mode === "agent-ssh" &&
+              runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1"
+                ? {
+                    signMobile: (scope, current) =>
+                      requestMobileSignature(config.dataDir, scope, current),
+                  }
+                : {}),
               reserveResource: (actor, input, revalidate) =>
                 leases.reserve(
                   actor,
