@@ -151,6 +151,11 @@ export async function runSelfDeployCommand(
         }
         try {
           await controller.tick();
+          try {
+            await driver.maintainDisk();
+          } catch {
+            io.stderr("本次磁盘回收未完成，请核对清单和主机审计");
+          }
         } catch (error) {
           if (error instanceof DeploymentServerUnavailable) throw error;
           io.stderr("主机自动部署本轮未完成，请核对部署记录和主机配置");

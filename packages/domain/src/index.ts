@@ -186,6 +186,10 @@ export * from "./commands/upstream-health.js";
 export { resumeWorkWaits } from "./commands/work-waits.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export {
+  categoryAuthorization,
+  categoryDelegated,
+} from "./decision-authorization.js";
 export * from "./decision-groups.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
