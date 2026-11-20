@@ -3,6 +3,7 @@ import { flowAtLeast } from "../flow.js";
 import type { MergeBatchId } from "../ids.js";
 import {
   activeMergeFamilies,
+  hasBatchFailureEvidence,
   type MergeBatch,
   type MergeBatchMember,
   mergeBatches,
@@ -236,7 +237,9 @@ export function startMergeBatchBisect(
   return command(state, actor, "manage_merge_batch", ports, (d) => {
     const batch = batchOf(state, p.batch_id);
     ensure(
-      batch.purpose === "main" && batch.status === "failed",
+      batch.purpose === "main" &&
+        batch.status === "failed" &&
+        hasBatchFailureEvidence(batch.check),
       "illegal_transition",
       "Only a failed main batch can bisect",
     );
@@ -257,6 +260,7 @@ export function formBisectProbe(
     ensure(
       parent.purpose === "main" &&
         parent.status === "bisecting" &&
+        hasBatchFailureEvidence(parent.check) &&
         Number.isSafeInteger(p.length) &&
         p.length > 0 &&
         p.length < parent.members.length,
@@ -381,7 +385,8 @@ export function requeueMergeBatch(
   return command(state, actor, "manage_merge_batch", ports, (d) => {
     const batch = batchOf(state, p.batch_id);
     ensure(
-      ["failed", "bisecting"].includes(batch.status) && failed(batch.check),
+      ["failed", "bisecting"].includes(batch.status) &&
+        hasBatchFailureEvidence(batch.check),
       "illegal_transition",
       "Batch has no failed check to confirm",
     );
@@ -399,14 +404,16 @@ export function requeueMergeBatch(
   });
 }
 
-function batchFailures(events: readonly Event[], id: MergeBatchId) {
+export function batchFailures(events: readonly Event[], id: MergeBatchId) {
   return events.filter(
     (e) =>
       e.actor.kind === "system" &&
       !e.card_id &&
       e.type === "merge_batch_check_finished" &&
       (e.payload as unknown as { batch_id: string }).batch_id === id &&
-      failed((e.payload as unknown as { check: MergeCheckView }).check),
+      hasBatchFailureEvidence(
+        (e.payload as unknown as { check: MergeCheckView }).check,
+      ),
   );
 }
 
@@ -427,7 +434,8 @@ export function identifyMergeBatchCulprit(
       batch.purpose === "main" &&
         ["failed", "bisecting"].includes(batch.status) &&
         (probe.id === batch.id || probe.parent_batch_id === batch.id) &&
-        failed(probe.check),
+        hasBatchFailureEvidence(batch.check) &&
+        hasBatchFailureEvidence(probe.check),
       "illegal_transition",
       "Invalid failed prefix evidence",
     );

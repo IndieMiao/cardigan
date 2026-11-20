@@ -753,12 +753,19 @@ export class MergeChecks {
       (latest.level ?? "single") ===
         (task.settings.queue ? (task.batch ? "batch" : "card") : "single") &&
       latest.tree_sha === candidate.tree_sha &&
-      (!repositoryWait.unstarted ||
-        latest.candidate_sha === candidate.candidate_sha) &&
       (latest.base_sha === undefined ||
         latest.base_sha === candidate.previous_sha) &&
       (binding
-        ? candidate.previous_sha !== undefined &&
+        ? (latest.candidate_sha === candidate.candidate_sha ||
+            new GithubDispatchJournal(
+              this.options.store,
+            ).crossedDispatchBoundary(
+              task.project.project_id,
+              plan.card_id,
+              latest.attempt_id,
+              latest.candidate_sha,
+            )) &&
+          candidate.previous_sha !== undefined &&
           (binding.payload as { basis?: unknown }).basis === basis &&
           (binding.payload as { sha?: unknown }).sha === latest.candidate_sha
         : latest.candidate_sha === candidate.candidate_sha);
@@ -783,7 +790,8 @@ export class MergeChecks {
       !latest.recheck_requested
     ) {
       if (
-        (this.seen.has(latest.attempt_id) || repositoryWait.unstarted) &&
+        (this.seen.has(latest.attempt_id) ||
+          repositoryWait.lastWaitWasLockTimeout) &&
         latest.executor?.name === task.settings.executor?.name &&
         latest.executor?.type ===
           (task.settings.executor

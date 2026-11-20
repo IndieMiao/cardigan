@@ -3,6 +3,7 @@ import {
   type Actor,
   abortMergeBatch,
   abortMergeBatchPublish,
+  batchFailures,
   beginMergeBatchPublish,
   type CommandEffect,
   type CommandState,
@@ -132,7 +133,7 @@ async function fixture(count = 3, flow_version = 1) {
     );
   const check = (
     batch: MergeBatch,
-    status: "passed" | "failed",
+    status: "passed" | "failed" | "repository_busy",
     attempt = `batch-${batch.id}`,
     summary = status as string,
   ) => {
@@ -160,6 +161,27 @@ async function fixture(count = 3, flow_version = 1) {
         io,
       ),
     );
+    if (status === "repository_busy") {
+      commit(
+        recordMergeBatchCheck(
+          state,
+          system,
+          {
+            ...p,
+            check: {
+              ...identity,
+              status: "failed",
+              startup_failure: status,
+              checks: [],
+              summary,
+              log_ref: `${attempt}.log`,
+            },
+          },
+          io,
+        ),
+      );
+      return;
+    }
     commit(
       recordMergeBatchCheck(
         state,
@@ -423,6 +445,43 @@ test.each(["passed", "failed"] as const)(
       );
       expect(mergeQueue(f.state())).toEqual([]);
     }
+  },
+);
+
+test.each(["main", "probe"])(
+  "C-533: a repository-busy %s cannot confirm a failure or implicate a batch member",
+  async (kind) => {
+    const f = await fixture(2, 2),
+      batch = f.form();
+    let target = batch;
+    if (kind === "probe") {
+      f.check(batch, "failed");
+      f.commit(
+        startMergeBatchBisect(f.state(), system, { batch_id: batch.id }, f.io),
+      );
+      target = f.commit(
+        formBisectProbe(
+          f.state(),
+          system,
+          { batch_id: batch.id, length: 1 },
+          f.io,
+        ),
+      );
+    }
+    f.check(target, "repository_busy");
+    const id = { batch_id: target.id };
+    expect(startMergeBatchBisect(f.state(), system, id, f.io).ok).toBe(false);
+    expect(requeueMergeBatch(f.state(), system, id, f.io).ok).toBe(false);
+    expect(batchFailures(f.state().events, target.id)).toEqual([]);
+    expect(
+      identifyMergeBatchCulprit(
+        f.state(),
+        system,
+        { batch_id: batch.id, failed_batch_id: target.id },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    expect(beginMergeBatchPublish(f.state(), system, id, f.io).ok).toBe(false);
   },
 );
 

@@ -4562,9 +4562,20 @@ test.each([false, true])(
 test("C-375: 204 then a same-tree rebuild after restart discovers the original candidate without an outage or second POST", async () => {
   const h = await reworkGithubFixture({ noRunId: true });
   const first = h.create();
+  h.git.pushCheckCandidate.mockRejectedValueOnce(
+    new CandidatePushNotStarted(30_000),
+  );
+  await first.tick([h.f.project_id]);
+  const waiting = required(h.check());
+  expect(h.client.dispatch).not.toHaveBeenCalled();
+  h.advance(30_000);
   await first.tick([h.f.project_id]);
   const original = required(h.check());
-  expect(original.status).toBe("queued");
+  expect(original).toMatchObject({
+    status: "queued",
+    attempt_id: waiting.attempt_id,
+  });
+  expect(h.client.dispatch).toHaveBeenCalledOnce();
   first.stop();
   h.git.prepare.mockResolvedValue({
     status: "candidate",
@@ -4592,7 +4603,7 @@ test("C-375: 204 then a same-tree rebuild after restart discovers the original c
       candidate_sha: original.candidate_sha,
     });
     expect(h.client.dispatch).toHaveBeenCalledOnce();
-    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
     expect(h.client.cancel).not.toHaveBeenCalled();
     expect(
       h.f
@@ -5302,8 +5313,8 @@ test("C-400: deployment waiting allows existing GitHub results to settle and pre
   }
 });
 
-test("C-391: GitHub batch survives controller restart without redispatch and binds all three completions", async () => {
-  const h = await parallelGithub(3);
+async function confirmedGithubBatch(count: number) {
+  const h = await parallelGithub(count);
   const initial = h.c.options.configuration.forProject();
   if (initial.status !== "enabled") throw new Error("Missing config");
   h.c.setConfig({
@@ -5336,10 +5347,9 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   });
   const gate = h.create();
   await gate.schedule([h.f.project_id]);
-  await h.running(0, 1, 2);
-  h.finish(0);
-  h.finish(1);
-  h.finish(2);
+  const indices = h.cards.map((_, i) => i);
+  await h.running(...indices);
+  for (const i of indices) h.finish(i);
   await gate.schedule([h.f.project_id]);
   await gate.idle();
   for (const item of h.cards)
@@ -5347,6 +5357,11 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
       required(mergeConfirmation(h.f, item.scenario.card.id)),
       "merge",
     );
+  return { h, gate, publish };
+}
+
+test("C-391: GitHub batch survives controller restart without redispatch and binds all three completions", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(3);
   await gate.schedule([h.f.project_id]);
   await vi.waitFor(() => {
     expect(h.c.errors.mock.calls.map((c) => String(c[0]))).toEqual([]);
@@ -6004,8 +6019,16 @@ test("C-533: a rebuilt candidate does not inherit dispatch identity or reset the
   const first = gate();
   await first.tick(project);
   const old = required(h.check());
+  const setHold = (hold: { reason: string; resume_condition: string } | null) =>
+    h.f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+    );
+  setHold({ reason: "wait", resume_condition: "ready" });
+  await first.tick(project);
+  expect(h.check()?.queue_wait?.reason).toContain("暂停");
   first.stop();
   await first.idle();
+  setHold(null);
   h.git.prepare.mockResolvedValue({
     status: "candidate",
     candidate_sha: "9".repeat(40),
@@ -6024,11 +6047,59 @@ test("C-533: a rebuilt candidate does not inherit dispatch identity or reset the
       startup_failure: "repository_busy",
       candidate_sha: "9".repeat(40),
     });
+    expect(h.git.pushCheckCandidate).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sha: "9".repeat(40) }),
+    );
     expect(h.check()?.attempt_id).not.toBe(old.attempt_id);
     expect(h.client.dispatch).not.toHaveBeenCalled();
     expect(h.git.publish).not.toHaveBeenCalled();
   } finally {
     second.stop();
     await second.idle();
+  }
+});
+
+test("C-533: exhaustion is a batch startup failure, never a confirmation rerun or evidence against a member", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(1);
+  const project = [h.f.project_id];
+  h.git.pushCheckCandidate
+    .mockClear()
+    .mockRejectedValue(new CandidatePushNotStarted(30_000));
+  const batch = () => required(mergeBatches(h.f.state().events)[0]);
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await gate.tick(project);
+    }
+    expect(batch().check).toMatchObject({
+      status: "failed",
+      startup_failure: "repository_busy",
+      checks: [],
+    });
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+  const next = h.create();
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await next.tick(project);
+    }
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(3);
+    expect(batch().status).toBe("failed");
+    expect(h.f.state().events.map((e) => e.type)).not.toContain(
+      "merge_batch_requeued",
+    );
+    expect(h.f.state().events.map((e) => e.type)).not.toContain(
+      "merge_batch_culprit_identified",
+    );
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1); // Only the card check.
+    expect(publish).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
   }
 });

@@ -542,6 +542,23 @@ export class GithubDispatchJournal {
       if (!current.deleted) this.save(tx, { ...current, deleted: true });
     });
   }
+  /** A same-tree rebuild may discover an existing POST, never push an old SHA.
+   * Only dispatching is irreversible; a live publisher can still settle to reserved. */
+  crossedDispatchBoundary(
+    project: string,
+    card: string,
+    attempt: string,
+    sha: string,
+  ): boolean {
+    return this.store.uow.read((tx) =>
+      this.current(tx, project, card).some(
+        (intent) =>
+          intent.attempt === attempt &&
+          intent.candidate?.sha === sha &&
+          intent.phase === "dispatching",
+      ),
+    );
+  }
   /** Scope recovery to its exact card/attempt; never scan other cards to retry. */
   hasUnboundIntent(project: string, card: string, attempt: string): boolean {
     return this.store.uow.read((tx) =>

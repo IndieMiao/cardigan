@@ -33,6 +33,15 @@ export interface MergeBatch {
   readonly published_prefix?: MergeBatchId;
 }
 
+/** A check that never started cannot implicate a member or justify a confirmation run. */
+export function hasBatchFailureEvidence(check?: MergeCheckView): boolean {
+  return (
+    !!check &&
+    !check.startup_failure &&
+    ["failed", "timed_out"].includes(check.status)
+  );
+}
+
 const batchCache = new WeakMap<readonly Event[], readonly MergeBatch[]>();
 
 /** Only host events in this project's stream can establish batch evidence. */

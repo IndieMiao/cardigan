@@ -21,7 +21,9 @@ export function repositoryCheckWait(
   check?: MergeCheckView,
 ) {
   let timeouts = 0;
-  let unstarted = false;
+  // For exact-attempt recovery only: the scheduler records a new wait *before*
+  // invoking an executor, so an older timeout cannot certify an unstarted SSH worker.
+  let lastWaitWasLockTimeout = false;
   let retryAt: string | undefined;
   if (check?.status === "queued" && !check.recheck_requested) {
     for (const e of events) {
@@ -56,10 +58,10 @@ export function repositoryCheckWait(
         continue;
       if (p.repository_retry_at) timeouts++;
       if (p.attempt_id === check.attempt_id) {
-        unstarted = p.repository_retry_at !== undefined;
+        lastWaitWasLockTimeout = p.repository_retry_at !== undefined;
         if (p.repository_retry_at) retryAt = p.repository_retry_at;
       }
     }
   }
-  return { timeouts, retryAt, unstarted };
+  return { timeouts, retryAt, lastWaitWasLockTimeout };
 }
