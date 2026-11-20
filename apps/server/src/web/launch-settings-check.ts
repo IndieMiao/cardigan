@@ -11,7 +11,6 @@ import {
   resolveProfile,
 } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
-import { drainTasks } from "./drain-tasks.js";
 import { HttpRejection } from "./http.js";
 import {
   invalid,
@@ -53,6 +52,7 @@ async function cliVersion(path: string, harness: Harness) {
 export type CheckMode = "metadata" | "online";
 export class ProfileChecks {
   private readonly active = new Map<string, Promise<void>>();
+  private shutdown?: { firstFailure?: { reason: unknown } };
   constructor(
     private readonly store: Store,
     private readonly currentVersion: () => string,
@@ -77,8 +77,15 @@ export class ProfileChecks {
     return { path, version: await entry.version };
   }
 
+  beginShutdown() {
+    this.shutdown ??= {};
+  }
   async drain() {
-    await drainTasks(this.active.values());
+    const results = await Promise.allSettled(this.active.values());
+    const failure =
+      this.shutdown?.firstFailure ??
+      results.find((r) => r.status === "rejected");
+    if (failure) throw failure.reason;
   }
   latest(profile: string) {
     const row = this.store.database
@@ -133,62 +140,67 @@ export class ProfileChecks {
         "INSERT INTO launch_profile_checks(id,profile,snapshot,kind,actor,started_at) VALUES(?,?,?,?,?,?)",
       )
       .run(id, profile, file.version, mode, actor, new Date().toISOString());
-    const work = Promise.resolve()
-      .then(async () => {
-        const problems: string[] = [];
-        let version: string | null = null;
-        try {
-          const cli = await this.cli(resolved.profile.harness);
-          version = cli.version;
-          if (!cli.path) problems.push("cli_missing");
-          const missing = requiredSecretKeys(file.config, profile).some(
-            (key) => !Object.hasOwn(file.secrets, key) || !file.secrets[key],
-          );
-          if (missing) problems.push("missing_secret");
-          if (mode === "metadata") {
-            const alias = file.raw.profiles[profile].model;
-            const model = Object.hasOwn(file.config.models ?? {}, alias)
-              ? file.config.models?.[alias]
-              : undefined;
-            if (model)
-              for (const key of [
-                "context_window",
-                "max_output_tokens",
-                "reasoning_efforts",
-              ] as const)
-                if (model[key] === undefined) problems.push(`missing_${key}`);
-          } else if (this.currentVersion() !== file.version) {
-            problems.push("stale_snapshot");
-          } else if (
-            !missing &&
-            (await probeModel(
-              resolved,
-              file.secrets,
-              false,
-              file.config.launch_check,
-            ))
-          )
-            problems.push("online_failed");
-        } catch {
-          problems.push(mode === "online" ? "online_failed" : "check_failed");
-        }
-        this.store.database
-          .prepare(
-            "UPDATE launch_profile_checks SET finished_at=?,result=? WHERE id=?",
-          )
-          .run(
-            new Date().toISOString(),
-            JSON.stringify({
-              ok: !problems.length,
-              problems,
-              cli_version: publicFields(version, file.secrets),
-            }),
-            id,
-          );
-      })
-      .finally(() => this.active.delete(profile));
+    const work = Promise.resolve().then(async () => {
+      const problems: string[] = [];
+      let version: string | null = null;
+      try {
+        const cli = await this.cli(resolved.profile.harness);
+        version = cli.version;
+        if (!cli.path) problems.push("cli_missing");
+        const missing = requiredSecretKeys(file.config, profile).some(
+          (key) => !Object.hasOwn(file.secrets, key) || !file.secrets[key],
+        );
+        if (missing) problems.push("missing_secret");
+        if (mode === "metadata") {
+          const alias = file.raw.profiles[profile].model;
+          const model = Object.hasOwn(file.config.models ?? {}, alias)
+            ? file.config.models?.[alias]
+            : undefined;
+          if (model)
+            for (const key of [
+              "context_window",
+              "max_output_tokens",
+              "reasoning_efforts",
+            ] as const)
+              if (model[key] === undefined) problems.push(`missing_${key}`);
+        } else if (this.currentVersion() !== file.version) {
+          problems.push("stale_snapshot");
+        } else if (
+          !missing &&
+          (await probeModel(
+            resolved,
+            file.secrets,
+            false,
+            file.config.launch_check,
+          ))
+        )
+          problems.push("online_failed");
+      } catch {
+        problems.push(mode === "online" ? "online_failed" : "check_failed");
+      }
+      this.store.database
+        .prepare(
+          "UPDATE launch_profile_checks SET finished_at=?,result=? WHERE id=?",
+        )
+        .run(
+          new Date().toISOString(),
+          JSON.stringify({
+            ok: !problems.length,
+            problems,
+            cli_version: publicFields(version, file.secrets),
+          }),
+          id,
+        );
+    });
     this.active.set(profile, work);
-    void work.catch(() => {}); // a persistence failure is shown as interrupted, never as passed
+    void work.then(
+      () => this.active.delete(profile),
+      (reason: unknown) => {
+        // The HTTP listener may still be draining requests when this check leaves active.
+        if (this.shutdown) this.shutdown.firstFailure ??= { reason };
+        this.active.delete(profile);
+      },
+    );
     return { id, profile, mode, version: file.version, status: "running" };
   }
 }

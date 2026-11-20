@@ -422,13 +422,16 @@ test.runIf(process.platform === "linux").each(["linux", "macos"])(
   },
 );
 
-test.runIf(process.platform === "linux").each(["wizard", "profile"])(
+test
+  .runIf(process.platform === "linux")
+  .each(["wizard", "profile", "HTTP read"])(
   "an audit write failure does not release the store before the last %s finishes",
   async (last) => {
     const worker = Promise.withResolvers<void>();
     const started = Promise.withResolvers<void>();
     const first = Promise.withResolvers<void>();
     const second = Promise.withResolvers<void>();
+    const read = Promise.withResolvers<void>();
     const f = await fixture(async (step) => {
       if (step === "account") {
         started.resolve();
@@ -474,10 +477,23 @@ test.runIf(process.platform === "linux").each(["wizard", "profile"])(
           ).status,
         ).toBe(202);
       }
+      let reading: Promise<ResponseBody> | undefined;
+      if (last === "HTTP read") {
+        const entered = Promise.withResolvers<void>();
+        cli.mockImplementationOnce(async () => {
+          entered.resolve();
+          await read.promise;
+          return { path: null, version: null };
+        });
+        reading = f.call("/api/launch-settings");
+        await entered.promise;
+      }
       // Fail only the first audit; no sleeps, production timeout changes or repeated probes.
       const db = f.store().database;
+      let attempts = 0;
+      db.function("count_attempt", () => ++attempts);
       db.exec(`CREATE TRIGGER fail_first BEFORE UPDATE ON launch_profile_checks WHEN OLD.profile='first'
-        BEGIN SELECT RAISE(ABORT, 'fixture audit failed'); END;`);
+        BEGIN SELECT count_attempt(); SELECT RAISE(ABORT, 'fixture audit failed'); END;`);
       let settled = false;
       const outcome = f.web
         .close()
@@ -488,15 +504,23 @@ test.runIf(process.platform === "linux").each(["wizard", "profile"])(
         .finally(() => {
           settled = true;
         });
-      await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+      if (!reading)
+        await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
       first.resolve();
-      if (last === "wizard") second.resolve();
-      else worker.resolve();
+      if (last !== "profile") second.resolve();
+      if (last !== "wizard") worker.resolve();
       await tick();
+      expect(attempts).toBe(1);
       expect(settled).toBe(false);
+      if (reading) {
+        expect(drain).not.toHaveBeenCalled();
+        read.resolve();
+        expect((await reading).status).toBe(200);
+      }
       worker.resolve();
       second.resolve();
       expect(await outcome).toMatchObject({ message: "fixture audit failed" });
+      expect(attempts).toBe(1);
       expect(
         db
           .prepare(
@@ -519,6 +543,7 @@ test.runIf(process.platform === "linux").each(["wizard", "profile"])(
           .filter((e) => e.type === "worker_wizard_check_finished"),
       ).toHaveLength(1);
     } finally {
+      read.resolve();
       first.resolve();
       second.resolve();
       worker.resolve();

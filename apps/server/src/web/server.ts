@@ -457,6 +457,7 @@ export async function startWebServer(
     url: `http://${bracket(host)}:${address.port}`,
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
+        launchSettings?.checks.beginShutdown();
         let cancel = (): void => {};
         // Stop listening first, then end the streams; `close` also drops the
         // connections that are already idle.

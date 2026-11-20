@@ -331,6 +331,20 @@ test("metadata and online jobs run on demand, mutually exclude one profile, and 
   ).not.toMatch(/hidden-version-banner|fixture-value-private/);
 });
 
+test("a write failure that finished before shutdown stays interrupted without failing close", async () => {
+  h.store.database.exec(`CREATE TEMP TRIGGER fail_result BEFORE UPDATE ON launch_profile_checks
+    BEGIN SELECT RAISE(ABORT, 'fixture audit failed'); END;`);
+  expect(
+    (await post("checks", { profile: "a", mode: "metadata", version })).status,
+  ).toBe(202);
+  await vi.waitFor(async () => {
+    expect(JSON.parse((await get()).body).profiles[0].last_check.status).toBe(
+      "interrupted",
+    );
+  });
+  await expect(h.server.close()).resolves.toBeUndefined();
+});
+
 test("creation, copy, edit, provider remap and unreferenced delete keep both views in sync", async () => {
   let sequence = 0;
   async function install(change: unknown) {
