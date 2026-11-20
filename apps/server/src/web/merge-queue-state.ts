@@ -1,4 +1,4 @@
-import type { CommandState, ProjectId } from "@cardigan/domain";
+import type { Card, CommandState, ProjectId } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories } from "@cardigan/store";
 
@@ -6,13 +6,20 @@ import type { ReadRepositories } from "@cardigan/store";
 export function readMergeQueueState(
   tx: ReadRepositories,
   project: ProjectId,
+  detail?: { card: Card; state: CommandState },
 ): CommandState | undefined {
-  const config = tx.events
-    .listAfter(project, undefined, 0)
-    .findLast(
-      (e) => e.actor.kind === "system" && e.type === "merge_queue_configured",
-    );
+  if (detail && !["done", "awaiting_merge"].includes(detail.card.status))
+    return undefined;
+  const events =
+    tx.projectMergeEvents?.(project) ??
+    tx.events.listAfter(project, undefined, 0);
+  const config = events.findLast(
+    (e) => e.actor.kind === "system" && e.type === "merge_queue_configured",
+  );
   if (!config) return undefined;
+  // A closed card can show its published batch but never has a queue position.
+  if (detail?.card.status === "done")
+    return { ...detail.state, events: [...detail.state.events, ...events] };
   return loadCommandState(tx, project, {
     merge_gate_enabled: true,
     ...(config.payload

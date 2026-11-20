@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
 import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
@@ -32,6 +33,10 @@ import {
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import {
+  type ReservationOptions,
+  reservationTool,
+} from "./tools/resource-reservation.js";
 import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
 import type { ToolDefinition } from "./tools/types.js";
 
@@ -40,8 +45,11 @@ export interface McpServerOptions
     SupportToolOptions,
     HostOpsToolOptions,
     CheckLogOptions,
+    ReservationOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
+  /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
+  readonly bodyTimeoutMs?: number;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
   /** `0` picks a free port (tests). */
@@ -69,6 +77,21 @@ export interface RunningServer {
 
 const MCP_PATH = "/mcp";
 
+/** Per-request, not per-socket: a later keep-alive request never inherits an upload exemption. */
+function bodyDeadline(req: IncomingMessage, res: ServerResponse, ms: number) {
+  const timer = setTimeout(() => {
+    if (req.complete || req.destroyed) return;
+    if (res.headersSent || res.destroyed) req.destroy();
+    else res.writeHead(408, { Connection: "close" }).end(() => req.destroy());
+  }, ms).unref();
+  const clear = () => clearTimeout(timer);
+  req.once("close", clear);
+  req.once("end", clear);
+  return () => {
+    if (!req.complete && !req.destroyed) timer.refresh();
+  };
+}
+
 /** IPv6 literals need brackets in a URL and in a Host header. */
 function bracket(host: string): string {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -80,12 +103,14 @@ export function serverTools(
     SupportToolOptions &
     HostOpsToolOptions &
     CheckLogOptions &
+    ReservationOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    reservationTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -124,7 +149,9 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const sink = options.log ?? stdoutLogger;
-  const tools = options.tools ?? serverTools({ ...options, log: sink });
+  const artifactUploads = new ArtifactUploads(options.dataDir, options.clock);
+  const tools =
+    options.tools ?? serverTools({ ...options, artifactUploads, log: sink });
 
   const catalogs = new Map<string, string>();
 
@@ -165,6 +192,11 @@ export async function startMcpServer(
     startedAt: number,
     log: Logger,
   ): Promise<void> {
+    const noteProgress = bodyDeadline(
+      req,
+      res,
+      options.bodyTimeoutMs ?? 5 * 60_000,
+    );
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
     if (url.pathname !== MCP_PATH) {
       res.writeHead(404).end();
@@ -209,6 +241,69 @@ export async function startMcpServer(
         ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
       );
 
+    if (req.method === "POST" && url.searchParams.has("artifact_upload")) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined && req.headers.origin !== url.origin)
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      if (
+        !identity.value.actor.allowed_tools.includes("upload_attachment") ||
+        !tools.some((t) => t.name === "upload_attachment")
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      try {
+        if (url.searchParams.size !== 1)
+          throw ToolError.validation("Expected only artifact_upload");
+        const result = await artifactUploads.accept(
+          url.searchParams.get("artifact_upload") ?? "",
+          req,
+          {
+            store: options.store,
+            identity: identity.value,
+            revalidateToken: () => {
+              const token = bearerToken(req.headers.authorization);
+              const fresh = token
+                ? options.store.verifyToken(token)
+                : undefined;
+              if (
+                fresh?.id !== identity.value.token.id ||
+                !fresh.allowed_tools.includes("upload_attachment")
+              )
+                throw new ToolError("unauthorized", "Token is no longer valid");
+            },
+          },
+          noteProgress,
+        );
+        res
+          .writeHead(201, { "Content-Type": "application/json" })
+          .end(JSON.stringify(result));
+      } catch (err) {
+        if (res.headersSent || res.destroyed) return; // idle timeout or disconnect
+        const safe =
+          err instanceof ToolError
+            ? err
+            : ToolError.validation(
+                "Artifact upload failed; request a new address and retry",
+              );
+        res
+          .writeHead(
+            safe.code === "not_found"
+              ? 404
+              : safe.code === "unauthorized"
+                ? 401
+                : 400,
+            { "Content-Type": "application/json" },
+          )
+          .end(JSON.stringify({ error: safe.toDomainError() }));
+      }
+      return;
+    }
     if (req.method === "GET" && url.searchParams.has("attachment_id")) {
       if (!tools.some((tool) => tool.name === "read_attachment")) {
         res.writeHead(404).end();
@@ -233,6 +328,7 @@ export async function startMcpServer(
           },
         },
         allowedHosts,
+        options.dataDir,
       );
       log({
         event: "http",
@@ -274,6 +370,9 @@ export async function startMcpServer(
     });
   }
 
+  // The Node parser's requestTimeout is an absolute ceiling, not an idle timer.
+  // Keep its separate header deadline and a hard stop even for validated uploads.
+  http.requestTimeout = 24 * 60 * 60_000;
   await new Promise<void>((resolve, reject) => {
     http.once("error", reject);
     http.listen(options.port ?? 0, host, () => resolve());

@@ -113,7 +113,7 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 计划：[p2v-1-employee.md §3 V1a](../../docs/plans/p2v-1-employee.md)。入口均从 `@cardigan/domain` 导出，不增加 MCP 工具。
 
 - `createEmployee(employees, actor, input, ports)`：只有 human 可创建，`name/title/role_id` 必填，`bio` 默认空、`avatar/launch_profile_ref` 默认 null；产生 active 员工和 `employee_created`。编号由独立 `GlobalIdAllocator` 分配 `E-n`，不接受项目参数。
-- `updateEmployee(employees, actor, id, patch, ports)`：只有 human 可修改名字、职位、简介、头像引用和启动配置；至少一个字段，拒绝角色、状态、编号和审计字段。`avatar/launch_profile_ref=null` 清空，简介用空字符串。保留 `created_at`，更新 `updated_at`，产生 `employee_updated`。
+- `updateEmployee(employees, actor, id, patch, ports)`：只有 human 可修改名字、职位、角色、简介、头像引用和启动配置；至少一个字段，拒绝状态、编号和审计字段。`avatar/launch_profile_ref=null` 清空，简介用空字符串。保留 `created_at`，更新 `updated_at`，普通更新产生 `employee_updated`。转岗须在同一事务核实全局至少一个项目的最新角色版本启用，且该员工无未释放指派、无未结束 Run；产生 `employee_role_changed`，记录原岗位与新岗位，不回写派活历史（[C-493](../../docs/plans/C-493.md)）。
 - `deactivateEmployee / activateEmployee(employees, actor, id, ports)`：只有 human 可停用／恢复，经 employee 状态机迁移，产生 `employee_deactivated / employee_activated`；重复设置已有状态无变化、无事件。没有删除入口，不修改任何 Assignment。
 - 名字／职位／简介上限为 40 / 40 / 200 个 Unicode 字符，拒绝控制和格式控制字符；去除首尾空白，名字的全角空格转半角。所有项目的 active 名字按 Unicode `toLowerCase()` 不区分大小写比较，显示名保留大小写；创建、重命名和恢复均检查，inactive 可以重名。
 - 设置非空配置引用必须存在于 `ports.launch_profiles`（主机读取 `launch.yaml` 后注入）。普通修改和停用／恢复不要求旧配置还存在。配置选择不改变角色。domain 不做文件 IO；项目角色登记由下述 assign 命令检查。
@@ -182,3 +182,5 @@ C-414：`report_blocker.resume_when={kind,target_id}` 可选；支持 `precheck_
 `finish_run.wait_for={kind:"baseline_updated"}` 记录作者的主机登记基线，或传 `{kind:"deployment_ready",target_id:<完整 SHA>}` 等部署成功；仅进行中的产出项可声明。不改变工作项业务状态；旧调用无等待含义。unknown 的延迟结束保留条件，仍须原有身份和重连证明后结算。系统维护消费受信事实，重核人工暂停、停止栅栏、当前负责人、其它阻塞和在途 Run，在同事务恢复、记录证据并请求 followup；重复扫描和重启不重复唤醒，同轮结果汇总通知 PM。
 
 C-420：`report_blocker.resume_when` 增加 `baseline_updated`，`target_id` 须为当前作者主机登记的基线 SHA。当前作者最新预检候选冲突会自动纳入同一恢复扫描，无需作者报告或声明等待；新 Run 仍由原主机准备链同步基线，不自动合入或解冲突。每个工作项同一 HEAD 默认最多自动同步 3 次（内部 Dispatcher 可配置），每个 attempt 仅消费一次；达到上限只向 PM 发一次 `baseline_conflict_limit_reached`。受信历史候选冲突与明确基线原因匹配时兼容解除旧阻塞，不解除其它原因的报告。
+
+C-521：当前作者等待本产出项自己的预检时，每个新 attempt 可独立恢复，不受此前普通等待次数影响；同一 HEAD 连续检查失败交 PM（默认两次，可由 Dispatcher 配置）。等待的 attempt 已通过时，提交匹配 HEAD 的交付可在同一事务解除该等待，不清除其它阻塞。其它项目内等待与候选冲突仍按原规则处理。

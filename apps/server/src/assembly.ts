@@ -57,6 +57,8 @@ export interface ControlPlaneOptions {
   readonly snapshot: DispatcherOptions["snapshot"];
   readonly toolCatalog?: DispatcherOptions["toolCatalog"];
   readonly runLimit?: DispatcherOptions["runLimit"];
+  readonly leases?: DispatcherOptions["leases"];
+  readonly projectQuota?: DispatcherOptions["projectQuota"];
   readonly resourceLimits?: DispatcherOptions["resourceLimits"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
@@ -64,6 +66,7 @@ export interface ControlPlaneOptions {
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly frameworkWaitReminderMs?: number;
   readonly baselineConflictMaxResumes?: number;
+  readonly authorPrecheckFailureLimit?: number;
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
   readonly intervalMs?: number;
@@ -181,6 +184,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.frameworkWaitReminderMs !== undefined
       ? { frameworkWaitReminderMs: options.frameworkWaitReminderMs }
       : {}),
+    ...(options.authorPrecheckFailureLimit !== undefined
+      ? { authorPrecheckFailureLimit: options.authorPrecheckFailureLimit }
+      : {}),
     ...(options.baselineConflictMaxResumes !== undefined
       ? { baselineConflictMaxResumes: options.baselineConflictMaxResumes }
       : {}),
@@ -220,6 +226,8 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
+    ...(options.leases ? { leases: options.leases } : {}),
+    ...(options.projectQuota ? { projectQuota: options.projectQuota } : {}),
     ...(options.resourceLimits
       ? { resourceLimits: options.resourceLimits }
       : {}),

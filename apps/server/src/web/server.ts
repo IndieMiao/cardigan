@@ -41,6 +41,7 @@ import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
+import { cardSectionPayload } from "./card-sections.js";
 import {
   type CardsCacheOptions,
   readCachedCardsPage,
@@ -79,6 +80,9 @@ import {
   unauthorized,
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { MachineChecks } from "./machine-checks.js";
+import type { MachineHost } from "./machine-host.js";
+import { serveMachines } from "./machines.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -114,6 +118,10 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly machineHost?: MachineHost;
+  readonly roleLaunchConfig?: () =>
+    | import("@cardigan/roles").LaunchConfig
+    | undefined;
   readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
@@ -177,6 +185,10 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly checks: MachineChecks;
+  readonly host: MachineHost | undefined;
+  readonly recordTiming: (stage: string, ms: number) => void;
+  readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
@@ -243,6 +255,12 @@ export async function startWebServer(
   let boundPort = 0;
   // Aborted by close(): SSE streams end, and responses stop keeping sockets.
   const shutdown = new AbortController();
+  const checks = new MachineChecks(
+    store,
+    clock,
+    shutdown.signal,
+    options.machineHost,
+  );
 
   const http = createServer((req, res) => {
     if (shutdown.signal.aborted) res.setHeader("Connection", "close");
@@ -272,6 +290,7 @@ export async function startWebServer(
     } catch {
       /* Invalid URLs are handled below. */
     }
+    const phases: Record<string, number> = {};
     let logged = false;
     const completed = () => {
       if (logged) return;
@@ -283,6 +302,7 @@ export async function startWebServer(
         pid: process.pid,
         request_id: requestId,
         phases_ms: {
+          ...phases,
           to_headers: (headersAt ?? performance.now()) - startedAt,
           response: performance.now() - (headersAt ?? startedAt),
         },
@@ -295,7 +315,9 @@ export async function startWebServer(
     };
     res.once("finish", completed);
     res.once("close", completed);
-    void handle(req, res).catch((error: unknown) => {
+    void handle(req, res, (stage, ms) => {
+      phases[stage] = ms;
+    }).catch((error: unknown) => {
       code = error instanceof HttpRejection ? error.code : "internal_error";
       if (!(error instanceof HttpRejection)) {
         if (!res.headersSent) {
@@ -319,6 +341,7 @@ export async function startWebServer(
   async function handle(
     req: IncomingMessage,
     res: ServerResponse,
+    recordTiming: RequestContext["recordTiming"],
   ): Promise<void> {
     applySecurityHeaders(res);
     // Parsing against a fixed base keeps the URL independent of the Host header;
@@ -332,6 +355,9 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        checks,
+        host: options.machineHost,
+        recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
@@ -347,6 +373,7 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
+        roleLaunchConfig: options.roleLaunchConfig,
         launchProfiles: options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
@@ -395,7 +422,7 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           if (error) reject(error);
-          else resolve();
+          else void checks.settled().then(resolve, reject);
         });
         shutdown.abort();
         http.closeIdleConnections();
@@ -509,6 +536,14 @@ async function serveProjectRoute(
   const { req, res, url, clock, store } = context;
   const now = clock.now();
 
+  if (rest === "/machines" || rest.startsWith("/machines/")) {
+    return serveMachines(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
+      rest,
+    );
+  }
+
   if (rest === "/stream") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     let after: StreamCursor[];
@@ -535,6 +570,8 @@ async function serveProjectRoute(
           context.runLimitMaximum,
           context.machineDisplayName,
           context.resourceLimits,
+          project_id,
+          clock.now(),
         ),
       ...(context.stream?.pollMs === undefined
         ? {}
@@ -563,6 +600,7 @@ async function serveProjectRoute(
         project_id,
         clock,
         dataDir: context.dataDir,
+        roleLaunchConfig: context.roleLaunchConfig,
         launchProfiles: context.launchProfiles,
         mergeGate: context.mergeGate?.forProject(project_id),
         runLimit: context.runLimit,
@@ -587,6 +625,8 @@ async function serveProjectRoute(
         context.runLimitMaximum,
         context.machineDisplayName,
         context.resourceLimits,
+        project_id,
+        clock.now(),
       ),
     );
     return;
@@ -733,6 +773,7 @@ async function serveProjectRoute(
   if (card !== null) {
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
     const detail = readPagedCard(store, project_id, card_id, url, {
+      recordTiming: context.recordTiming,
       mergeGateStatus:
         context.mergeGate?.forProject(project_id).status ?? "disabled",
       now,
@@ -743,7 +784,10 @@ async function serveProjectRoute(
     if (detail === undefined) {
       throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
     }
-    sendJson(res, 200, { project_id, ...detail });
+    sendJson(res, 200, {
+      project_id,
+      ...cardSectionPayload(detail, url.searchParams.get("section")),
+    });
     return;
   }
 

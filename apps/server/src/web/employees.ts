@@ -8,6 +8,7 @@ import {
   type EmployeeId,
   type EventId,
   MAX_AVATAR_BYTES,
+  type MemberId,
   parseAvatarReference,
   type Result,
   updateEmployee,
@@ -64,10 +65,10 @@ const employeeInput = z
   })
   .strict();
 
-function owner(
+export function requireEmployeeOwner(
   c: EmployeeContext,
   tx: Pick<ReadRepositories, "members">,
-): void {
+): MemberId {
   const session = c.authorize();
   const member = activeOwner(tx.members.list());
   if (
@@ -81,8 +82,9 @@ function owner(
     throw new HttpRejection(
       403,
       "unauthorized",
-      "只有所有者登录后可以创建员工",
+      "只有所有者登录后可以管理员工",
     );
+  return member.id;
 }
 
 function must<T>(result: Result<T>): T {
@@ -99,14 +101,37 @@ function checkInheritedProfile(
   c: EmployeeContext,
   tx: Pick<ReadRepositories, "roles">,
   roleId: string,
+  globalEmployee = false,
 ) {
   const role = getRoleVersion(tx, c.project_id, roleId);
-  if (!role || !c.launchProfiles?.().includes(role.launch_profile_ref))
+  const profiles = c.launchProfiles?.() ?? [];
+  if (role && role.status !== "inactive") {
+    if (profiles.includes(role.launch_profile_ref)) return;
     throw new HttpRejection(
       400,
       "validation_failed",
-      `员工角色 ${roleId} 的启动配置 ${role?.launch_profile_ref ?? ""} 不存在，请选用已有配置`,
+      `员工角色 ${roleId} 的启动配置 ${role.launch_profile_ref} 不存在，请选用已有配置`,
     );
+  }
+  // Without an enabled local role, only an enabled role elsewhere can supply the profile.
+  if (
+    globalEmployee &&
+    c.store.listProjects().some(({ id }) => {
+      if (id === c.project_id) return false;
+      const other = getRoleVersion(tx, id, roleId);
+      return (
+        other &&
+        other.status !== "inactive" &&
+        profiles.includes(other.launch_profile_ref)
+      );
+    })
+  )
+    return;
+  throw new HttpRejection(
+    400,
+    "validation_failed",
+    `员工角色 ${roleId} 没有可继承的启动配置，请选用已有配置`,
+  );
 }
 
 /** Only owner sessions reach this transport; the global domain command audits human writes. */
@@ -117,11 +142,11 @@ export async function serveEmployees(
   const update = /^\/employees\/(E-[1-9]\d*)\/update$/u.exec(rest)?.[1];
   if (!update && rest !== "/employees/options" && rest !== "/employees")
     return false;
-  c.store.uow.read((tx) => owner(c, tx));
+  c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
   if (rest === "/employees/options") {
     if (c.req.method !== "GET") methodNotAllowed(["GET"]);
     const options = c.store.uow.read((tx) => {
-      owner(c, tx);
+      requireEmployeeOwner(c, tx);
       const employees = tx.employees.list();
       const roles = new Map(
         listRoleVersions(tx, c.project_id).map((role) => [role.role_id, role]),
@@ -154,7 +179,7 @@ export async function serveEmployees(
   }
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   const body = await readJsonBody(c.req, maxBase64 + MAX_JSON_BODY_BYTES);
-  c.store.uow.read((tx) => owner(c, tx));
+  c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
   const key = z
     .string()
     .trim()
@@ -167,9 +192,11 @@ export async function serveEmployees(
       "validation_failed",
       "提交的内容不完整，请刷新页面后重试",
     );
-  const execute = <T>(operation: (tx: StoreTransactionContext) => T): T => {
+  const execute = <T>(
+    operation: (tx: StoreTransactionContext, ownerId: MemberId) => T,
+  ): T => {
     // Check again even on an idempotent replay; body/blob IO may have outlived the session.
-    c.store.uow.read((tx) => owner(c, tx));
+    c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
     return must(
       c.store.runHumanIdempotent(
         {
@@ -177,40 +204,46 @@ export async function serveEmployees(
           key: key.data,
           request: { method: "POST", rest, body },
         },
-        (tx) => {
-          owner(c, tx);
-          return operation(tx);
-        },
+        (tx) => operation(tx, requireEmployeeOwner(c, tx)),
       ),
     ).value;
   };
   if (update) {
     const parsed = z
-      .object({ launch_profile_ref: z.string().nullable() })
+      .object({
+        role_id: z.string().optional(),
+        launch_profile_ref: z.string().nullable().optional(),
+      })
       .strict()
       .safeParse(body);
-    if (!parsed.success)
-      throw new HttpRejection(400, "validation_failed", "请指定启动配置");
-    const result = execute((tx) => {
+    if (!parsed.success || Object.keys(parsed.data).length === 0)
+      throw new HttpRejection(400, "validation_failed", "请指定角色或启动配置");
+    const { role_id, launch_profile_ref } = parsed.data;
+    const result = execute((tx, ownerId) => {
       const effect = must(
         updateEmployee(
           tx.employees.list(),
-          { kind: "human" },
+          { kind: "human", member_id: ownerId },
           update as EmployeeId,
-          parsed.data,
+          {
+            ...(role_id === undefined ? {} : { role_id }),
+            ...(launch_profile_ref === undefined ? {} : { launch_profile_ref }),
+          },
           {
             clock: c.clock,
             ids: tx.global_ids,
+            roleTransferFacts: tx.employees.roleTransferFacts,
             launch_profiles: c.launchProfiles?.() ?? [],
           },
         ),
       );
-      if (effect.data.launch_profile_ref === null) {
-        checkInheritedProfile(c, tx, effect.data.role_id);
+      if (launch_profile_ref === null) {
+        checkInheritedProfile(c, tx, effect.data.role_id, true);
       }
       persistEmployeeEffect(tx, effect);
       return {
         id: effect.data.id,
+        role_id: effect.data.role_id,
         launch_profile_ref: effect.data.launch_profile_ref,
       };
     });
@@ -280,7 +313,7 @@ export async function serveEmployees(
     );
   };
   c.store.uow.read((tx) => {
-    owner(c, tx);
+    requireEmployeeOwner(c, tx);
     // Preview the same domain command before blob IO. Discard its effect and
     // use synthetic IDs: failed forms must not allocate IDs or write events.
     prepare(

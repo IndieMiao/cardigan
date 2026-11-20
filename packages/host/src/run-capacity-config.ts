@@ -11,10 +11,23 @@ import {
 } from "@cardigan/domain";
 import { parseDocument } from "yaml";
 
+import {
+  type ProjectQuota,
+  parseProjectQuotas,
+  type ReadProjectQuota,
+} from "./project-quotas.js";
+
+import {
+  type MachinePolicy,
+  parseResourcePolicies,
+} from "./resource-policy.js";
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
   resourcesForMachine(machine: string): ReadonlyMap<string, number>;
+  policies(machine: string): MachinePolicy | undefined;
+  preferred(machine: string): string | undefined;
+  readonly projectQuota: ReadProjectQuota;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
   readonly inboxStallAfterMs: number;
@@ -40,7 +53,10 @@ export async function loadRunCapacityConfig(
   const limits = new Map<string, number>();
   const maximums = new Map<string, number>();
   const resources = new Map<string, ReadonlyMap<string, number>>();
+  const projects = new Map<string, ReadonlyMap<string, ProjectQuota>>();
   const unlimited: ReadonlyMap<string, number> = new Map();
+  const policies = new Map<string, MachinePolicy>(),
+    preferred = new Map<string, string>();
   const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
@@ -56,6 +72,11 @@ export async function loadRunCapacityConfig(
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
     resourcesForMachine: (machine) =>
       errors.length ? unlimited : (resources.get(machine) ?? unlimited),
+    policies: (machine) => (errors.length ? undefined : policies.get(machine)),
+    preferred: (machine) =>
+      errors.length ? undefined : preferred.get(machine),
+    projectQuota: (machine, project) =>
+      errors.length ? undefined : projects.get(machine)?.get(project),
     maxForMachine: (machine) =>
       errors.length ? 0 : (maximums.get(machine) ?? DEFAULT_MAX_RUN_LIMIT),
     displayNameForMachine: (machine) =>
@@ -139,7 +160,15 @@ export async function loadRunCapacityConfig(
       if (
         Object.keys(settings).some(
           (key) =>
-            !["limit", "max_limit", "display_name", "resources"].includes(key),
+            ![
+              "limit",
+              "max_limit",
+              "display_name",
+              "resources",
+              "projects",
+              "resource_policies",
+              "preferred_project",
+            ].includes(key),
         )
       )
         throw new Error("Invalid machine fields");
@@ -179,6 +208,31 @@ export async function loadRunCapacityConfig(
         }
         resources.set(machine, slots);
       }
+      if (settings.resource_policies !== undefined)
+        policies.set(
+          machine,
+          parseResourcePolicies(
+            settings.resource_policies,
+            resources.get(machine) ?? unlimited,
+          ),
+        );
+      if (settings.preferred_project !== undefined) {
+        if (
+          typeof settings.preferred_project !== "string" ||
+          !settings.preferred_project.trim()
+        )
+          throw new Error("Invalid preferred project");
+        preferred.set(machine, settings.preferred_project);
+      }
+      if (settings.projects !== undefined)
+        projects.set(
+          machine,
+          parseProjectQuotas(
+            settings.projects,
+            maximum,
+            resources.get(machine) ?? unlimited,
+          ),
+        );
       if (settings.display_name !== undefined) {
         const name = settings.display_name;
         if (

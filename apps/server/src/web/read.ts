@@ -5,12 +5,10 @@ import type {
   Author,
   CardId,
   CardView,
-  CommandPorts,
   CommandState,
   ContextObservation,
   Decision,
   Event,
-  EventId,
   Machine,
   MergeCheckBlocker,
   MergeCheckView,
@@ -37,7 +35,6 @@ import {
   effectivePreMergeChecks,
   eventById,
   extractReferences,
-  formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
@@ -64,8 +61,12 @@ import {
   suggestionView,
   verificationActivity,
 } from "@cardigan/domain";
-import type { ProjectMergeGate } from "@cardigan/host";
-import { loadCommandState } from "@cardigan/mcp-server";
+import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
+import {
+  loadCommandState,
+  type RecordReadTiming,
+  timeRead,
+} from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
@@ -114,25 +115,6 @@ export function projectState(
   project_id: ProjectId,
 ): CommandState {
   return store.uow.read((tx) => loadCommandState(tx, project_id));
-}
-
-/** Preview pure commands without persisting effects or allocating database IDs. */
-export function previewPorts(now: string): CommandPorts {
-  return {
-    clock: { now: () => now },
-    ids: {
-      next: () => {
-        throw new Error("Preview cannot allocate entity IDs");
-      },
-      nextAttachmentId: () => {
-        throw new Error("Preview cannot allocate attachments");
-      },
-      nextEventId: () => "preview" as EventId,
-      nextEventSequence: () => 1,
-      nextTimelineEntryId: (_project, card) =>
-        unwrap(formatTimelineEntryId(card, 1)),
-    },
-  };
 }
 
 export function templateHistory(state: CommandState, id: string) {
@@ -291,7 +273,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           name: employee.name,
           title: employee.title,
           bio: employee.bio,
-          role_id: employee.role_id,
+          role_id: assignment?.role_id ?? employee.role_id,
           avatar:
             avatar?.kind === "library"
               ? `/avatars/v1/${avatar.id}/head-64.webp`
@@ -598,7 +580,9 @@ function attachmentViewMapper(state: CommandState) {
       uploaded_at: uploaded.get(attachment.id) ?? null,
       basis,
       supersedes: attachment.supersedes ?? null,
-      inline: INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
+      inline:
+        !attachment.streamed_artifact &&
+        INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
       // §6 C-95: the same authenticated download route serves decision previews.
       download_path: `/api/projects/${encodeURIComponent(
         state.project_id,
@@ -618,6 +602,7 @@ export function attachmentViews(
   ]);
   return state.attachments
     .filter((attachment) => {
+      if (attachment.streamed_artifact?.expired) return false;
       if (attachment.card_id === card_id) return true;
       if (attachment.attach_to.kind === "timeline_entry") {
         return entryCard.get(attachment.attach_to.id) === card_id;
@@ -727,6 +712,8 @@ export function cardDetail(
     readonly mergeGateStatus?: ProjectMergeGate["status"];
     readonly timelineLimit?: number;
     readonly timelineAnchor?: string;
+    readonly recordTiming?: RecordReadTiming;
+    readonly overviewOnly?: boolean;
     readonly timelineEntries?: readonly TimelineEntry[];
     readonly timelineTotal?: number;
     readonly conclusionEntries?: readonly TimelineEntry[];
@@ -917,7 +904,9 @@ export function cardDetail(
   const roles = new Map<string, string>(
     state.assignments.map((a) => [a.id, a.role_id]),
   );
-  const review_matrix = deriveReviewMatrix(deliveries, work_items, reviews);
+  const review_matrix = timeRead(options.recordTiming, "review_matrix", () =>
+    deriveReviewMatrix(deliveries, work_items, reviews),
+  );
   const updated_at =
     [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
     card.created_at;
@@ -1044,7 +1033,9 @@ export function cardDetail(
         ? {
             dependency: {
               ...card.dependency,
-              graph: cardDependencyGraph(dependencySource, graphSource),
+              graph: timeRead(options.recordTiming, "dependency_graph", () =>
+                cardDependencyGraph(dependencySource, graphSource),
+              ),
             },
           }
         : {}),
@@ -1055,14 +1046,18 @@ export function cardDetail(
       references: references(description),
     },
     work_items: work_items.map((item) => {
-      const selection = machineSelection(state.events, item.id);
+      const selection = options.overviewOnly
+        ? undefined
+        : machineSelection(state.events, item.id);
       return {
         ...item,
         verification_activity: verificationActivity(item, state),
         ...(selection ? { machine_selection: selection } : {}),
       };
     }),
-    timeline: timeline.map(timelineView),
+    timeline: timeRead(options.recordTiming, "timeline_view", () =>
+      timeline.map(timelineView),
+    ),
     recent_conclusions: conclusionEntries
       .map(timelineView)
       .filter(
@@ -1095,7 +1090,9 @@ export function cardDetail(
       ...action,
       ...webAuthorView(state, action.requested_by),
     })),
-    attachments: attachmentViews(state, card_id, options.attachmentEntryCards),
+    attachments: timeRead(options.recordTiming, "attachment_views", () =>
+      attachmentViews(state, card_id, options.attachmentEntryCards),
+    ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
       decisions: decisions.map((decision) => ({

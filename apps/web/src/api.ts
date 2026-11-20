@@ -585,7 +585,32 @@ export interface CardRelations {
   }[];
 }
 
+export type CardPanel = "work" | "records" | "attachments" | "timeline";
 export interface CardDetail {
+  readonly overview?: {
+    work_count: number;
+    completed_work_count: number;
+    verifiers: readonly (Pick<
+      WorkItemView,
+      "id" | "role_id" | "completion_criteria"
+    > &
+      Pick<ReviewMatrixRow, "verdict">)[];
+    attachment_count: number;
+    completion_id?: string;
+    waiting_delivery: readonly string[];
+    conclusion_reviews: readonly {
+      id: string;
+      verdict: string;
+      delivery_id: string;
+      work_title?: string;
+      delivery_kind?: string;
+      delivery_status?: string;
+    }[];
+  };
+  readonly work_delivery_links?: readonly Pick<
+    DeliveryView,
+    "id" | "work_item_id" | "status"
+  >[];
   readonly timeline_next_cursor?: string | null;
   /** Whether the project has an active default recipient for human comments. */
   readonly has_pm_ops?: boolean;
@@ -1085,6 +1110,7 @@ export interface ExecutionCapacity {
     max_limit: number;
     queued: number;
     merge_check_slots: number;
+    lease_details?: readonly string[];
     /** MC-5: configured per-machine resource slots; older servers omit it. */
     resources?: readonly {
       key: string;
@@ -1175,6 +1201,7 @@ export interface ActivityData {
 }
 
 export interface CardReadOptions {
+  readonly section?: "overview";
   readonly before?: string;
   readonly type?: string;
   readonly author?: string;
@@ -1721,6 +1748,11 @@ export interface CardiganClient {
     cardId: string,
     options?: CardReadOptions,
   ): Promise<CardDetail>;
+  cardPanel?(
+    projectId: string,
+    cardId: string,
+    panel: CardPanel,
+  ): Promise<Partial<CardDetail>>;
   addComment(
     projectId: string,
     cardId: string,
@@ -1900,14 +1932,34 @@ export class HttpCardiganClient implements CardiganClient {
     options: CardReadOptions = {},
   ): Promise<CardDetail> {
     const params = new URLSearchParams();
+    if (options.section) params.set("section", options.section);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.at) params.set("at", options.at);
     if (options.before) params.set("before", options.before);
     if (options.type) params.set("type", options.type);
     if (options.author) params.set("author", options.author);
     const query = params.size ? `?${params}` : "";
-    return this.request<CardDetail>(
+    const detail = await this.request<CardDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,
+    );
+    if (!detail.overview) return detail;
+    return {
+      ...detail,
+      work_items: [],
+      deliveries: [],
+      reviews: [],
+      review_matrix: [],
+      attachments: [],
+    };
+  }
+
+  cardPanel(
+    projectId: string,
+    cardId: string,
+    panel: CardPanel,
+  ): Promise<Partial<CardDetail>> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}?section=${panel}`,
     );
   }
 

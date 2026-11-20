@@ -69,6 +69,7 @@ export const toolNames = [
   "update_card",
   "set_merge_solo",
   "set_merge_window",
+  "reserve_machine_resource",
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
@@ -1171,7 +1172,17 @@ export interface Machine {
   readonly status: MachineStatus;
   readonly last_seen: Timestamp;
 }
+export interface StreamedArtifact {
+  readonly blob_id: string;
+  readonly run_id: RunId;
+  readonly created_at: Timestamp;
+  readonly expired?: {
+    readonly at: Timestamp;
+    readonly reason: "age" | "capacity";
+  };
+}
 interface AttachmentFields {
+  readonly streamed_artifact?: StreamedArtifact;
   readonly id: AttachmentId;
   /** Display metadata only; storage is addressed by sha256. */
   readonly original_filename?: string;

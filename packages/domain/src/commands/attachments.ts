@@ -1,7 +1,9 @@
 import type { Actor, Attachment } from "../entities.js";
 import type { Result } from "../errors.js";
+import type { RunId } from "../ids.js";
 import type { AttachmentStore } from "../ports.js";
 import {
+  type CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -74,68 +76,112 @@ export async function prepareAttachment(
     };
   }
 }
+export type AttachmentTarget = Pick<
+  Attachment,
+  "card_id" | "mime" | "kind" | "attach_to"
+> &
+  Partial<
+    Pick<Attachment, "basis" | "supersedes" | "original_filename" | "note">
+  >;
+function validateTarget(d: CommandDraft, p: AttachmentTarget) {
+  d.card(p.card_id);
+  text(p.mime, "mime");
+  const original_filename = displayText(
+    p.original_filename,
+    "original_filename",
+  );
+  const note = displayText(p.note, "note");
+  ensure(
+    p.kind === "artifact" || p.kind === "evidence",
+    "validation_failed",
+    "Unknown attachment kind",
+  );
+  ensure(
+    p.kind !== "artifact" || p.basis,
+    "validation_failed",
+    "Artifacts require a decision basis",
+  );
+  if (p.basis)
+    ensure(
+      d.list("decisions").some((q) => q.key === p.basis),
+      "not_found",
+      "Attachment basis was not found",
+    );
+  ensure(
+    p.attach_to && ["timeline_entry", "delivery"].includes(p.attach_to.kind),
+    "validation_failed",
+    "attach_to is required",
+  );
+  const targetCard =
+    p.attach_to.kind === "delivery"
+      ? d.work(d.get("deliveries", p.attach_to.id).work_item_id).card_id
+      : d.state.timeline.find((e) => e.id === p.attach_to.id)?.card_id;
+  ensure(targetCard, "not_found", "Attachment target was not found");
+  ensure(
+    targetCard === p.card_id,
+    "validation_failed",
+    "Attachment target belongs to another card",
+  );
+  if (p.supersedes)
+    ensure(
+      d.get("attachments", p.supersedes).card_id === p.card_id,
+      "validation_failed",
+      "Superseded attachment belongs to another card",
+    );
+  return { original_filename, note };
+}
+export function artifactUploadRun(
+  state: CommandState,
+  actor: Actor,
+  p: AttachmentTarget,
+) {
+  return command(state, actor, "upload_attachment", undefined, (d) => {
+    validateTarget(d, p);
+    return d.currentRun().id;
+  });
+}
+/** IO lives in the adapter; mint the receipt only after its stream completed. */
+export async function prepareStreamedArtifact(
+  run_id: RunId,
+  put: () => Promise<{ id: string; sha256: string; size: number }>,
+) {
+  const { id: blob_id, sha256, size } = await put();
+  return {
+    [stored]: true as const,
+    sha256,
+    size,
+    storage_path: `artifacts/${blob_id}`,
+    stream: { blob_id, run_id },
+  };
+}
 export function uploadAttachment(
   state: CommandState,
   actor: Actor,
-  p: Pick<Attachment, "card_id" | "mime" | "kind" | "attach_to"> &
-    Partial<
-      Pick<Attachment, "basis" | "supersedes" | "original_filename" | "note">
-    >,
-  receipt: StoredAttachment,
+  p: AttachmentTarget,
+  receipt:
+    | StoredAttachment
+    | Awaited<ReturnType<typeof prepareStreamedArtifact>>,
   ports: CommandPorts,
 ) {
   return command(state, actor, "upload_attachment", ports, (d) => {
-    d.card(p.card_id);
-    text(p.mime, "mime");
-    const original_filename = displayText(
-      p.original_filename,
-      "original_filename",
-    );
-    const note = displayText(p.note, "note");
+    const { original_filename, note } = validateTarget(d, p);
     ensure(
       receipt?.[stored],
       "validation_failed",
       "A stored attachment receipt is required",
     );
-    ensure(
-      p.kind === "artifact" || p.kind === "evidence",
-      "validation_failed",
-      "Unknown attachment kind",
-    );
-    ensure(
-      p.kind !== "artifact" || p.basis,
-      "validation_failed",
-      "Artifacts require a decision basis",
-    );
-    if (p.basis)
+    const stream = "stream" in receipt ? receipt.stream : undefined;
+    if (stream)
       ensure(
-        d.list("decisions").some((q) => q.key === p.basis),
-        "not_found",
-        "Attachment basis was not found",
-      );
-    ensure(
-      p.attach_to && ["timeline_entry", "delivery"].includes(p.attach_to.kind),
-      "validation_failed",
-      "attach_to is required",
-    );
-    const targetCard =
-      p.attach_to.kind === "delivery"
-        ? d.work(d.get("deliveries", p.attach_to.id).work_item_id).card_id
-        : state.timeline.find((e) => e.id === p.attach_to.id)?.card_id;
-    ensure(targetCard, "not_found", "Attachment target was not found");
-    ensure(
-      targetCard === p.card_id,
-      "validation_failed",
-      "Attachment target belongs to another card",
-    );
-    if (p.supersedes)
-      ensure(
-        d.get("attachments", p.supersedes).card_id === p.card_id,
-        "validation_failed",
-        "Superseded attachment belongs to another card",
+        stream.run_id === d.currentRun().id,
+        "illegal_transition",
+        "Artifact upload Run is no longer current",
       );
     const common = {
       id: d.ids.nextAttachmentId(state.project_id),
+      ...(stream
+        ? { streamed_artifact: { ...stream, created_at: ports.clock.now() } }
+        : {}),
       sha256: receipt.sha256,
       size: receipt.size,
       storage_path: receipt.storage_path,

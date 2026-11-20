@@ -1,3 +1,8 @@
+export {
+  ARTIFACT_BLOB_ID,
+  artifactPath,
+  sendArtifact,
+} from "./artifact-files.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
@@ -47,6 +52,7 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+export { type RecordReadTiming, timeRead } from "./read-timing.js";
 export {
   defaultToolCatalog,
   type McpServerOptions,
@@ -70,5 +76,4 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
-
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

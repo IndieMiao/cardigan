@@ -116,7 +116,7 @@ test("read views resolve employees through original author identities, retaining
   state = {
     ...state,
     employees: [
-      employee,
+      { ...employee, role_id: "reviewer" },
       { ...employee, id: id("employee", 2), name: "Bob", status: "active" },
     ],
     assignments: [

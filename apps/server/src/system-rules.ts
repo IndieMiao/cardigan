@@ -38,9 +38,11 @@ export function runSystemRules(
   baseline?: { branch: string; sha: string },
   {
     baselineConflictMaxResumes: conflictMaxResumes,
+    authorPrecheckFailureLimit,
     frameworkWaitReminderMs,
   }: {
     baselineConflictMaxResumes?: number;
+    authorPrecheckFailureLimit?: number;
     frameworkWaitReminderMs?: number;
   } = {},
 ) {
@@ -78,6 +80,9 @@ export function runSystemRules(
       actor,
       {
         ...(baseline ? { baseline } : {}),
+        ...(authorPrecheckFailureLimit !== undefined
+          ? { precheck_failure_limit: authorPrecheckFailureLimit }
+          : {}),
         ...(conflictMaxResumes !== undefined
           ? { conflict_max_resumes: conflictMaxResumes }
           : {}),

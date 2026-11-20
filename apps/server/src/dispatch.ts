@@ -62,7 +62,11 @@ import {
   HostLaunchError,
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  type MachineLeases,
+  type ReadProjectQuota,
   type ReadResourceLimits,
+  type ResourceAccess,
+  type ResourceAdmission,
   RunPreflightDeferred,
   RunPreparationDeferred,
   RunTargetDeferred,
@@ -177,6 +181,7 @@ export interface DispatcherOptions {
   readonly frameworkWaitReminderMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
+  readonly authorPrecheckFailureLimit?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -189,6 +194,8 @@ export interface DispatcherOptions {
   readonly maxRetries?: number;
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
+  readonly leases?: MachineLeases;
+  readonly projectQuota?: ReadProjectQuota;
   readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
@@ -217,6 +224,9 @@ export interface DispatcherOptions {
     assignment: Assignment;
     run: Run;
     bell: string;
+    resourceAccess?: ResourceAccess;
+    resourceGate?: () => boolean;
+    resourcePreflight?: () => Promise<boolean>;
     snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
@@ -238,6 +248,7 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.acked_seq >= n.seq,
   );
 interface Job {
+  resourceAccess?: ResourceAccess;
   attempt: BellAttempt;
   run: Run;
   assignment: Assignment;
@@ -420,7 +431,16 @@ export class Dispatcher {
             this.options.store.listProjects().map((p) => p.id),
           ),
         );
-        candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
+        const preferred = (c: Candidate) =>
+          Number(
+            this.options.leases?.config.preferred(c.assignment.machine_id) ===
+              c.project,
+          );
+        candidates.sort(
+          (a, b) =>
+            preferred(b) - preferred(a) ||
+            compareDispatchOrder(a.order, b.order),
+        );
         await profileSpan("deliver", async () => {
           for (const candidate of orderPmCandidates(candidates, (c) =>
             this.state(c.project),
@@ -452,6 +472,7 @@ export class Dispatcher {
     // synchronous (no added await), so step order and interleaving are unchanged.
     const step = <T>(name: string, run: () => T) =>
       profileSpanSync(`route.${name}`, run);
+    await this.options.leases?.reconcile(project, () => this.clock.now());
     step("patrol_host_ops", () =>
       patrolHostOps(
         store,
@@ -801,6 +822,7 @@ export class Dispatcher {
     // A previously enqueued Run already has its snapshot. Skip remote IO while
     // it cannot compete; the authoritative check remains inside claim().
     if (
+      !this.options.leases?.configured(project, a.machine_id) &&
       queued?.queue_reason === "concurrency_limit" &&
       !this.options.store.uow.read((tx) =>
         this.availableResources(tx, state, a, queued),
@@ -863,9 +885,10 @@ export class Dispatcher {
     const catalog = this.catalog(a, project);
     const replaceCatalog =
       live &&
-      catalog !== undefined &&
-      prior?.tool_catalog !== undefined &&
-      prior.tool_catalog !== catalog;
+      ((!continuing && this.options.leases?.freshSession(project, a)) ||
+        (catalog !== undefined &&
+          prior?.tool_catalog !== undefined &&
+          prior.tool_catalog !== catalog));
     try {
       if (continuing) snapshot = continuing;
       else if (
@@ -943,6 +966,11 @@ export class Dispatcher {
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
     if (this.closing) return;
+    const inspection =
+      !continuing && this.options.leases?.configured(project, a.machine_id)
+        ? await this.options.leases?.inspect(project, a)
+        : undefined;
+    if (this.closing) return;
     let job: Job | undefined;
     try {
       job = profileSpanSync("deliver.claim", () =>
@@ -953,6 +981,7 @@ export class Dispatcher {
           snapshot,
           live,
           sessionCatalog,
+          inspection,
           continuing,
         ),
       );
@@ -978,6 +1007,18 @@ export class Dispatcher {
       throw error;
     }
     if (!job) return;
+    const leases = this.options.leases;
+    const preflight =
+      job.resourceAccess?.target && leases && !continuing
+        ? () =>
+            leases.canPublish(
+              project,
+              a,
+              job.run,
+              () => this.clock.now(),
+              job.resourceAccess,
+            )
+        : undefined;
     let sent = false,
       reason = "delivery_failed",
       failure: DeliveryFailure | undefined,
@@ -1009,6 +1050,16 @@ export class Dispatcher {
           return;
         }
         if (this.withdrawOnClose(job, queued?.queue_reason)) return;
+        if (preflight && !(await preflight())) {
+          this.options.store.uow.run(() =>
+            withdrawBellAttempt(
+              this.options.store.database,
+              project,
+              job.attempt.id,
+            ),
+          );
+          return;
+        }
         if (!profileSpanSync("deliver.activate", () => this.activate(job)))
           return;
         const scope = () =>
@@ -1033,9 +1084,18 @@ export class Dispatcher {
                   ? { observed_guard: { state: "done" as const } }
                   : { if_idle: true }
                 : {}),
+              ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
                 scope() === reviewPrompt &&
+                (continuing ||
+                  !this.options.leases?.startBlocked(
+                    project,
+                    a,
+                    job.run,
+                    this.clock.now(),
+                    job.resourceAccess,
+                  )) &&
                 (job.attempt.review_wake
                   ? crossRepairSendBoundary(
                       this.options.store,
@@ -1084,6 +1144,22 @@ export class Dispatcher {
             run: job.run,
             bell: job.bell,
             snapshot,
+            ...(job.resourceAccess
+              ? { resourceAccess: job.resourceAccess }
+              : {}),
+            ...(preflight ? { resourcePreflight: preflight } : {}),
+            ...(this.options.leases
+              ? {
+                  resourceGate: () =>
+                    !this.options.leases?.startBlocked(
+                      project,
+                      a,
+                      job.run,
+                      this.clock.now(),
+                      job.resourceAccess,
+                    ),
+                }
+              : {}),
             ...(replacement ? { replacement } : {}),
           }),
         );
@@ -1203,9 +1279,11 @@ export class Dispatcher {
       this.options.store,
       tx,
       this.options.resourceLimits,
+      this.options.projectQuota,
     );
     const slots = capacity.resourcesForMachine(a.machine_id);
     const keys = assignmentResourceKeys(tx, project, a);
+    if (!capacity.withinProjectQuota(project, a, keys)) return undefined;
     const trigger = state.events.find((e) => e.id === run.trigger_event_id);
     const order = {
       ...dispatchTier(state, a, run, trigger),
@@ -1224,10 +1302,18 @@ export class Dispatcher {
       slots,
       this.clock.now(),
       (p, owner) =>
+        !this.options.leases?.waitingElsewhere(
+          p,
+          owner,
+          this.clock.now(),
+          tx,
+        ) &&
+        capacity.withinProjectQuota(p, owner) &&
         hasRunTarget(owner, {
           work_items: tx.work_items.list(p),
           deliveries: tx.deliveries.list(p),
         }),
+      this.options.leases?.config.preferred(a.machine_id),
     );
     if (
       remainingResourceRatio(keys, slots) <= 0 ||
@@ -1253,6 +1339,7 @@ export class Dispatcher {
     snapshot: LaunchSnapshot,
     live: boolean,
     catalog: string | undefined,
+    inspection: ResourceAdmission | undefined,
     continuing?: Run,
   ): Job | undefined {
     const { store } = this.options;
@@ -1429,8 +1516,29 @@ export class Dispatcher {
         return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
-        const keys = this.availableResources(tx, state, a, run);
+        const leases = this.options.leases;
+        const keysNeeded = assignmentResourceKeys(tx, project, a);
+        const blocked = leases?.blocked(
+          project,
+          a.machine_id,
+          keysNeeded,
+          at,
+          inspection,
+        );
+        const keys = blocked
+          ? undefined
+          : this.availableResources(tx, state, a, run);
         if (!keys) {
+          if (leases?.configured(project, a.machine_id))
+            leases.wait(
+              tx,
+              project,
+              a,
+              run,
+              blocked ?? "并发额度或排队顺序",
+              at,
+              !!blocked,
+            );
           if (run.queue_reason !== "concurrency_limit")
             tx.runs.put(project, { ...run, queue_reason: "concurrency_limit" });
           return;
@@ -1511,6 +1619,18 @@ export class Dispatcher {
         started_at: at,
         lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
       };
+      const access =
+        run.status === "queued" && inspection
+          ? this.options.leases?.acquire(
+              tx,
+              project,
+              a,
+              run,
+              run.resource_keys ?? [],
+              inspection,
+              at,
+            )
+          : undefined;
       let attempt = ready.length
         ? beginBellAttempt(store.database, intent)
         : beginLaunchAttempt(store.database, intent);
@@ -1519,6 +1639,7 @@ export class Dispatcher {
       if (
         live &&
         run.status === "queued" &&
+        !this.options.leases?.configured(project, a.machine_id) &&
         state.work_items.find((w) => w.id === a.work_item_id)?.kind !== "verify"
       ) {
         const effect = unwrap(
@@ -1534,6 +1655,7 @@ export class Dispatcher {
         a.id,
       );
       return {
+        ...(access ? { resourceAccess: access } : {}),
         attempt,
         run,
         assignment: a,
@@ -1724,6 +1846,30 @@ export class Dispatcher {
               ),
             ),
           );
+        return false;
+      }
+      const denied =
+        job.run.status !== "running" &&
+        this.options.leases?.startBlocked(
+          project,
+          owner,
+          run,
+          this.clock.now(),
+          job.resourceAccess,
+          tx,
+        );
+      if (denied) {
+        this.options.leases?.wait(
+          tx,
+          project,
+          owner,
+          run,
+          denied,
+          this.clock.now(),
+        );
+        withdrawBellAttempt(store.database, project, job.attempt.id);
+        if (run.status === "queued")
+          tx.runs.put(project, { ...run, queue_reason: "concurrency_limit" });
         return false;
       }
       if (run?.status === "queued")
