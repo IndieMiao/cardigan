@@ -705,9 +705,11 @@ test("the receiver's explicit deadline also covers a peer withholding the header
 });
 test.each(["codex", "pi"])(
   "native %s wrapper preserves its isolated session state",
-  checkNativeSession,
+  (name) => checkNativeSession(name),
 );
-async function checkNativeSession(harnessName: string) {
+test("worker startup refuses a changed launch descriptor before consuming its token", () =>
+  checkNativeSession("codex", true));
+async function checkNativeSession(harnessName: string, changed = false) {
   const path = disk();
   const workerPolicy = {
     ...policy,
@@ -732,6 +734,7 @@ async function checkNativeSession(harnessName: string) {
       XDG_CACHE_HOME: "/shared/cache",
     },
     cwd: path,
+    secret_keys: ["SYNTHETIC_PROVIDER"],
     nice: 0,
   };
   const contents = [
@@ -786,9 +789,12 @@ async function checkNativeSession(harnessName: string) {
       workerPolicy,
     ).status,
   ).toBe(0);
+  const pin = createHash("sha256")
+    .update(JSON.stringify(envelope))
+    .digest("hex");
   const runHarness = harness.replace(
     "print(json.dumps(m.operate(fd,h,sys.stdin.buffer,p)))",
-    "h['root']=root_path; m.run_worker(fd,h,p)",
+    `h['root']=root_path; m.run_worker(fd,h,p,'${pin}')`,
   );
   const child = spawn(
     "python3",
@@ -809,7 +815,18 @@ async function checkNativeSession(harnessName: string) {
       .toBe(true);
     expect(existsSync(join(path, "sessions"))).toBe(false);
     expect(existsSync(join(generationDir(path), "token"))).toBe(true);
+    if (changed)
+      writeFileSync(
+        join(generationDir(path), "launch.json"),
+        JSON.stringify({ ...envelope, nice: 1 }),
+      );
     expect(run(path, request("commit")).status).toBe(0);
+    if (changed) {
+      expect(await finished).not.toBe(0);
+      expect(output).toBe("");
+      expect(existsSync(join(generationDir(path), "token"))).toBe(true);
+      return;
+    }
     expect(await finished).toBe(0);
     expect(output).toBe("ok\n");
     expect(existsSync(join(generationDir(path), "token"))).toBe(false);

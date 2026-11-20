@@ -10,6 +10,7 @@ import pwd
 import re
 import signal
 import stat
+import subprocess
 import sys
 import time
 import uuid
@@ -20,7 +21,7 @@ native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 TRAILER = b'\nCARDIGAN-PUBLISH-1\n'
-FILES = re.compile(r'(core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
+FILES = re.compile(r'(core\.md|first\.md|run-command\.py|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
 
 
 def require(ok):
@@ -355,7 +356,7 @@ def namespace(header):
         raise
 
 
-def run_worker(namespace, header, policy):
+def run_worker(namespace, header, policy, launch_digest=None):
     assignment = namespace.assignment
     generations = child(assignment, 'generations')
     try:
@@ -386,7 +387,11 @@ def run_worker(namespace, header, policy):
             raise TimeoutError()
         require(exists(generation, 'published'))
         require(json.loads(read_file(generation, 'start', policy['header_max_bytes'])) == binding(header))
-        launch = json.loads(read_file(generation, 'launch.json', policy['file_max_bytes']))
+        data = read_file(generation, 'launch.json', policy['file_max_bytes'])
+        if launch_digest is not None:
+            require(hashlib.sha256(data).hexdigest() == launch_digest)
+        launch = json.loads(data)
+        require('CARDIGAN_RUN_COMMAND' not in launch['env'] or launch_digest is not None)
         token_bytes = read_file(generation, 'token', policy['file_max_bytes'])
         os.unlink('token', dir_fd=generation)
         token = token_bytes.decode().strip()
@@ -396,6 +401,8 @@ def run_worker(namespace, header, policy):
             os.unlink('secrets.env', dir_fd=generation)
             secret = json.loads(secret_bytes)
         require(token and all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', k) and type(v) is str for k, v in secret.items()))
+        if launch_digest is not None:
+            require(set(secret) == set(launch['secret_keys']) and not set(secret).intersection(launch['env']))
         first = read_file(generation, 'first.md', policy['file_max_bytes']).decode()
         sessions = child(assignment, 'sessions', True)
         try:
@@ -435,6 +442,17 @@ def run_worker(namespace, header, policy):
         os.unlink('start', dir_fd=generation)
         write_file(generation, 'running', b'')
         env = dict(os.environ, **launch['env'], **secret, MCP_TOKEN=token)
+        if 'CARDIGAN_RUN_COMMAND' in env:
+            pid = os.getpid()
+            try:
+                # Unprivileged observer, same live CLI PID across exec. No launch
+                # credentials or publication FDs are passed into the helper.
+                stamp = subprocess.check_output([sys.executable, '-IB', '-c', env['CARDIGAN_RUN_COMMAND'],
+                    'observe-session', str(pid), env['CARDIGAN_RESOURCE_SESSION']], cwd='/',
+                    env={'PATH':'/usr/bin:/bin'}, timeout=5, text=True).strip()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                stamp = 'unavailable'  # fail task registration, not the interactive session
+            env.update(CARDIGAN_SESSION_PID=str(pid), CARDIGAN_SESSION_BIRTH=stamp)
         env['HOME'] = pwd.getpwuid(os.getuid()).pw_dir
         # Runtime defaults must not send project data to a cross-account temp/cache.
         for name in ('temporary', 'cache'):
@@ -455,7 +473,7 @@ def run_worker(namespace, header, policy):
 
 def main():
     policy = limits(json.loads(sys.argv[1]))
-    running = len(sys.argv) == 4 and sys.argv[2] == 'run'
+    running = len(sys.argv) in (4, 5) and sys.argv[2] == 'run'
     if running:
         header = manifest(io.BytesIO((sys.argv[3] + '\n').encode()), policy)
     else:
@@ -465,7 +483,7 @@ def main():
     assignment = namespace(header)
     try:
         if running:
-            run_worker(assignment, header, policy)
+            run_worker(assignment, header, policy, sys.argv[4] if len(sys.argv) == 5 else None)
         else:
             response = operate(assignment, header, sys.stdin.buffer, policy)
             sys.stdout.write(json.dumps(response) + '\n')

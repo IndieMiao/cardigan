@@ -43,8 +43,14 @@ export function authenticate(
     return unauthorized("missing bearer token");
   }
 
-  const record = store.verifyToken(token);
-  if (record === undefined) {
+  return recordIdentity(store, store.verifyToken(token));
+}
+
+export function recordIdentity(
+  store: McpBackend,
+  record: McpToken | undefined,
+): Result<Identity> {
+  if (record === undefined || record.revoked_at !== null) {
     return unauthorized("invalid bearer token");
   }
 
