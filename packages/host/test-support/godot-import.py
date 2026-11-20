@@ -1,6 +1,8 @@
-"""Synthetic import contracts; real Git worktrees, no Godot SDK or devices."""
+"""Import contracts in real Git worktrees; optionally use a real macOS Godot."""
+import contextlib
 import importlib.util
 import io
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -131,6 +133,62 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(run.inputs, [])
         with self.assertRaises(ValueError):
             helper.prepare(self.repo, run)
+
+    def test_separate_git_dir_is_not_a_linked_worktree(self):
+        self.git('init', '-q', '--separate-git-dir', str(self.base / 'metadata'))
+        self.assertTrue((self.repo / '.git').is_file())
+        def never_run(*args, **kwargs):
+            self.fail('must reject the primary checkout before starting Godot')
+        with self.assertRaises(ValueError):
+            helper.prepare(self.repo, never_run)
+        self.assertFalse((self.repo / '.godot').exists())
+        # A linked task checkout from that very same repository is legitimate.
+        run = FakeImport()
+        helper.prepare(self.tree(), run)
+        self.assertEqual(run.inputs, [{}])
+
+    def test_failed_pack_can_be_retried_without_overwriting(self):
+        root = self.tree()
+        helper.prepare(root, FakeImport())
+        cache = root / '.godot'
+        bad = cache / 'imported' / 'unsupported'
+        bad.mkdir()
+        with self.assertRaises(ValueError):
+            helper.pack(cache, self.seed, {})
+        self.assertFalse(self.seed.exists())
+        bad.rmdir()
+        sha = helper.pack(cache, self.seed, {})
+        with self.assertRaises(FileExistsError):
+            helper.pack(cache, self.seed, {'changed': True})
+        self.assertEqual(self.seed_sha(), sha)
+
+    @unittest.skipUnless(os.environ.get('CARDIGAN_TEST_GODOT'), 'set absolute path to real macOS Godot 4')
+    def test_godot_loads_resource_and_scene_in_both_trees(self):
+        engine = Path(os.environ['CARDIGAN_TEST_GODOT'])
+        shutil.copytree(Path(__file__).with_name('godot-fixture'), self.repo, dirs_exist_ok=True)
+        self.git('add', '.')
+        self.commit()
+        seed, cold, restored = self.tree(), self.tree(), self.tree()
+        with tempfile.TemporaryDirectory() as home:
+            helper.prepare(seed, helper.offline(engine, home), self.seed, seed=True)
+        manifests = []
+        for root in (cold, restored):
+            with tempfile.TemporaryDirectory() as home, contextlib.redirect_stdout(io.StringIO()) as output:
+                run = helper.offline(engine, home)
+                if root == restored:
+                    helper.prepare(root, run, self.seed, self.seed_sha())
+                    self.assertIn('import=restored', output.getvalue().splitlines())
+                else:
+                    helper.prepare(root, run)
+                    self.assertIn('import=cold', output.getvalue().splitlines())
+                imported = root / '.godot/imported'
+                manifest = {p.relative_to(imported) for p in imported.rglob('*') if p.is_file()}
+                self.assertTrue(any(p.suffix == '.ctex' for p in manifest))
+                manifests.append(manifest)
+                result = run('--headless', '--path', str(root), '--quit-after', '30',
+                             '--script', 'res://probe.gd', capture=True)
+                self.assertIn('SCENE_AND_TEXTURE_OK', result.stdout.splitlines())
+        self.assertEqual(*manifests)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'requires real macOS sandbox')
     def test_offline_boundary(self):

@@ -38,8 +38,16 @@ def offline(engine, home):
 def worktree_key(root, run):
     def git(*args):
         return subprocess.check_output(['/usr/bin/git', '-c', 'core.fsmonitor=false', *args],
-                                       cwd=root, text=True).strip()
-    if (root != Path(git('rev-parse', '--show-toplevel')) or not (root / '.git').is_file()
+                                       cwd=root, text=True, env={
+                                           'PATH': os.defpath, 'GIT_OPTIONAL_LOCKS': '0',
+                                           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+                                       }).rstrip('\n')
+    # A primary checkout with --separate-git-dir also has a regular .git file.
+    # Only a registered linked checkout has its own per-worktree metadata.
+    git_dir = Path(git('rev-parse', '--absolute-git-dir')).resolve()
+    common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+    if (git_dir.parent != common / 'worktrees' or (root / '.git').is_symlink()
+            or root != Path(git('rev-parse', '--show-toplevel')) or not (root / '.git').is_file()
             or (root / 'project.godot').is_symlink() or not (root / 'project.godot').is_file()
             or git('status', '--porcelain', '--untracked-files=all', '--ignored=matching')
             or git('ls-files', '--', '.godot')):
@@ -65,7 +73,9 @@ def pack(cache, snapshot, key):
         raise ValueError('no imported assets to publish')
     # Create a staging artifact, not a live cache: publish separately only
     # after the producing job succeeds, reviews diagnostics and pins the hash.
-    with snapshot.open('x+b') as dst:
+    # Work in the destination filesystem, then publish without replacing any
+    # existing name. No partially written file can occupy the requested path.
+    with tempfile.NamedTemporaryFile(dir=snapshot.parent) as dst:
         with zipfile.ZipFile(dst, 'w', zipfile.ZIP_STORED) as archive:
             for f in sorted(imported.iterdir()):
                 if not stat.S_ISREG(f.lstat().st_mode) or not flat_name(f.name):
@@ -75,7 +85,9 @@ def pack(cache, snapshot, key):
                 raise ValueError('empty import; do not publish')
             archive.comment = json.dumps(key).encode()
         dst.seek(0)
-        return digest(dst)
+        sha = digest(dst)
+        os.link(dst.name, snapshot)
+        return sha
 
 
 def restore(cache, snapshot, sha, key):
