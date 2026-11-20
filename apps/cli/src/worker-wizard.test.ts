@@ -17,10 +17,16 @@ import {
   type CapabilityProbe,
   configureMachinePlacement,
   loadRunCapacityConfig,
+  onboardWorker,
   parseWorkerOnboarding,
+  RuntimeTargets,
   WORKER_PROBES,
 } from "@cardigan/host";
-import { readMachineObservations, Store } from "@cardigan/store";
+import {
+  readMachineObservations,
+  recordAcceptedBrowserPath,
+  Store,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
 import { MachineChecks } from "../../server/src/web/machine-checks.js";
@@ -36,6 +42,14 @@ vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
+    onboardWorker: vi.fn(host.onboardWorker),
+    observeRegisteredMachine: (
+      ...[options, create]: Parameters<typeof host.observeRegisteredMachine>
+    ) =>
+      host.observeRegisteredMachine(
+        { ...options, probe: capabilityProbe },
+        create,
+      ),
     refreshWorkerObservations: (
       ...args: Parameters<typeof host.refreshWorkerObservations>
     ) =>
@@ -161,6 +175,65 @@ test("macOS add/resume/check/status preserve offline identity and recheck capaci
     ]);
   }
   expect(lines.join("\n")).not.toContain("systemctl");
+});
+
+test("CLI and Workbench checks use only the dispatch owner's accepted browser directory", async () => {
+  await bootstrap();
+  const dataDir = join(root, "data"),
+    store = Store.open({ dataDir });
+  const directory = "/fixture/registry";
+  let webPath = directory;
+  const execution = { mode: "local" as const, dataDir };
+  const host = machineHost(store, execution, "example", io.env, () => webPath);
+  const runtimeCheck = vi
+    .spyOn(RuntimeTargets.prototype, "check")
+    .mockResolvedValue({
+      ok: true,
+      value: { machine_id: "local", blockers: [], launch_enabled: false },
+    });
+  const browserScopes = () =>
+    capabilityProbe.mock.calls.flatMap(([, , cmd]) =>
+      "scopes" in cmd
+        ? [cmd.scopes.filter((s) => s.kind === "registry").map((s) => s.value)]
+        : [],
+    );
+  try {
+    writeFileSync(
+      join(configRoot, "launch.yaml"),
+      stringify({
+        browser: { command: "/fixture/mcp", browsers_path: directory },
+      }),
+    );
+    recordAcceptedBrowserPath(store, directory);
+    expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+      0,
+    );
+    expect(browserScopes()).toEqual([[directory]]);
+    for (const kind of ["machine", "worker"] as const) {
+      for (webPath of [directory, "/fixture/unaccepted"]) {
+        capabilityProbe.mockClear();
+        if (kind === "worker")
+          vi.mocked(onboardWorker).mockResolvedValueOnce(true);
+        const machine = kind === "worker" ? "worker-a" : "local";
+        expect(
+          await host.check(
+            "example",
+            machine,
+            kind,
+            () => {},
+            new AbortController().signal,
+            "fixture-job",
+          ),
+        ).toMatchObject({ status: "passed" });
+        expect(browserScopes()).toEqual([
+          webPath === directory ? [directory] : [],
+        ]);
+      }
+    }
+  } finally {
+    runtimeCheck.mockRestore();
+    store.close();
+  }
 });
 
 test("a changed session offers exact-digest confirmation and preserves CLI config selection", async () => {
@@ -498,7 +571,9 @@ test.each(["wizard", "capability"] as const)(
       dataDir = join(root, "data");
     const version = { ok: true, output: "codex-cli 1.2.3" };
     capabilityProbe.mockImplementation(async (_e, _os, command) =>
-      command[0] === "codex" ? version : { ok: false, output: "" },
+      !("scopes" in command) && command[0] === "codex"
+        ? version
+        : { ok: false, output: "" },
     );
     expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
       0,
@@ -551,7 +626,8 @@ test.each(["wizard", "capability"] as const)(
       capabilityProbe
         .mockClear()
         .mockImplementation(async (_e, _os, command) => {
-          if (command[0] !== "codex") return { ok: false, output: "" };
+          if ("scopes" in command || command[0] !== "codex")
+            return { ok: false, output: "" };
           if (phase === "capability") await changeRegistry();
           return version; // Result from the x64 worker, even when the registry now says arm64.
         });

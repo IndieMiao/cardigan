@@ -6,6 +6,7 @@ import {
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   DEFAULT_INBOX_STALL_AFTER_MS,
   DEFAULT_MAX_RUN_LIMIT,
+  DEFAULT_QUEUED_RECHECK_AFTER_MS,
   DEFAULT_RUN_LIMIT,
   parseCapabilityRequirement,
 } from "@cardigan/domain";
@@ -30,6 +31,7 @@ export interface RunCapacityConfiguration {
   readonly projectQuota: ReadProjectQuota;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
+  readonly queuedRecheckAfterMs: number;
   readonly inboxStallAfterMs: number;
   readonly inactiveCancelAfterMs: number | null;
 }
@@ -60,9 +62,13 @@ export async function loadRunCapacityConfig(
   const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
+  let queuedRecheckAfterMs = DEFAULT_QUEUED_RECHECK_AFTER_MS;
   let inboxStallAfterMs = DEFAULT_INBOX_STALL_AFTER_MS;
   const result = (): RunCapacityConfiguration => ({
     errors,
+    queuedRecheckAfterMs: errors.length
+      ? DEFAULT_QUEUED_RECHECK_AFTER_MS
+      : queuedRecheckAfterMs,
     inboxStallAfterMs: errors.length
       ? DEFAULT_INBOX_STALL_AFTER_MS
       : inboxStallAfterMs,
@@ -133,6 +139,7 @@ export async function loadRunCapacityConfig(
             "machines",
             "inactive_cancel_after_minutes",
             "inbox_stall_after_minutes",
+            "queued_recheck_after_minutes",
           ].includes(key),
       ) ||
       !object(raw.machines)
@@ -141,6 +148,7 @@ export async function loadRunCapacityConfig(
     for (const key of [
       "inactive_cancel_after_minutes",
       "inbox_stall_after_minutes",
+      "queued_recheck_after_minutes",
     ]) {
       const minutes = raw[key];
       if (minutes === undefined) continue;
@@ -153,6 +161,8 @@ export async function loadRunCapacityConfig(
         throw new Error("Invalid inactivity grace");
       if (key === "inbox_stall_after_minutes")
         inboxStallAfterMs = minutes * 60_000;
+      else if (key === "queued_recheck_after_minutes")
+        queuedRecheckAfterMs = minutes * 60_000;
       else inactiveCancelAfterMs = minutes * 60_000;
     }
     for (const [machine, entry] of Object.entries(raw.machines)) {
@@ -250,7 +260,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes 须为允许范围的正整数，display_name 须为有效文字，resources 须按能力名设置正整数上限。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

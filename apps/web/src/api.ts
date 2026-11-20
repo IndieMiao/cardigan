@@ -1017,7 +1017,10 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
-  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  readonly queue_reason?:
+    | "concurrency_limit"
+    | "runtime_unavailable"
+    | "awaiting_dispatch";
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;

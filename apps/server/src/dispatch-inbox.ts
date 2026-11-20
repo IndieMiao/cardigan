@@ -3,8 +3,10 @@ import {
   type CardId,
   type Clock,
   type CommandState,
+  cancelledQueueRelease,
   type DecisionId,
   type Event,
+  eventById,
   type HumanActionId,
   NEEDS_YOU_ITEM_READY,
   type Notification,
@@ -72,6 +74,98 @@ function recordInboxNotice(
     retracted: false,
     created_at: at,
   });
+}
+/** A deliberate pre-launch move retires only the old owner's pre-release bells.
+ * No ACK impersonation, deletion or suppression of later delivery failures. */
+export function retireCancelledQueueNotes(
+  store: Store,
+  state: CommandState,
+  owner: AssignmentId,
+  notes: readonly Notification[],
+  at: string,
+) {
+  const rest: Notification[] = [];
+  for (const n of notes) {
+    const release =
+      n.status === "pending" &&
+      n.card_id &&
+      n.recipient.kind === "assignment" &&
+      n.recipient.assignment_id === owner &&
+      cancelledQueueRelease(state, n.card_id, owner);
+    if (!release || n.seq >= release.seq) {
+      rest.push(n);
+      continue;
+    }
+    moveNotification(store.database, {
+      project_id: state.project_id,
+      id: n.id,
+      event: "resolve",
+      at,
+      patch: { cancelled_queue_release_id: release.id },
+    });
+  }
+  return rest;
+}
+
+/** Hand existing work to its new owner without forwarding private mentions,
+ * reviving already-settled bells, or changing human assign's explicit-start rule. */
+function routeQueueHandoff(
+  store: Store,
+  state: CommandState,
+  event: Event,
+  at: string,
+) {
+  if (event.type !== "work_item_assigned" || !event.card_id) return;
+  const p = event.payload as {
+    assignment_id?: AssignmentId;
+    work_item_id?: string;
+    recovery?: { previous_assignment_id?: AssignmentId };
+  };
+  if (!p?.recovery?.previous_assignment_id) return;
+  const owner = state.assignments.find((a) => a.id === p.assignment_id);
+  const previous = owner?.recovery?.previous_assignment_id;
+  if (
+    !previous ||
+    previous !== p.recovery.previous_assignment_id ||
+    owner?.status !== "active" ||
+    owner.scope !== "work_item" ||
+    !state.work_items.some(
+      (w) =>
+        w.id === owner.work_item_id &&
+        w.id === p.work_item_id &&
+        w.card_id === event.card_id &&
+        w.assignment_id === owner.id,
+    )
+  )
+    return;
+  const release = cancelledQueueRelease(state, event.card_id, previous);
+  if (!release || event.seq <= release.seq) return;
+  const query = {
+    project_id: state.project_id,
+    card_id: event.card_id,
+    assignment_id: previous,
+  };
+  retireCancelledQueueNotes(
+    store,
+    state,
+    previous,
+    store.listNotifications({ ...query, status: "pending" }),
+    at,
+  );
+  for (const n of store.listNotifications({ ...query, status: "resolved" })) {
+    if (n.cancelled_queue_release_id !== release.id) continue;
+    const source = eventById(state.events, n.event_id);
+    if (!source || source.card_id !== event.card_id) continue;
+    const note = routeEvent({
+      event: source,
+      snapshot: state,
+    }).notifications.find(
+      (note) =>
+        note.recipient.kind === "assignment" &&
+        note.recipient.assignment_id === owner.id,
+    );
+    if (note) recordRoute(store, state.project_id, note, at);
+  }
 }
 function recordReadyNotice(
   tx: StoreTransactionContext,
@@ -159,6 +253,7 @@ export function routeStreamEvents(
       at = (options.clock ?? dispatcherClock).now();
     const announced = new Set<string>();
     for (const event of events) {
+      routeQueueHandoff(store, snapshot, event, at);
       const routed = routeEvent({ event, snapshot });
       // C-212: a host action wakes host_ops once it is shown, unless it names
       // an external operator; a deferred one wakes it when it becomes ready.

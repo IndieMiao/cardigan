@@ -47,7 +47,7 @@ export function onboardingDigest(value: unknown): string {
 }
 
 /** Reuse the host's pinned-directory and private-file boundary; never echo input. */
-export function readOnboardingYaml(file: string): unknown | undefined {
+export function readWorkerPrivateFile(file: string): Buffer | undefined {
   const dir = new CpuProfileDirectory(dirname(file));
   let fd: number | undefined;
   try {
@@ -83,11 +83,16 @@ export function readOnboardingYaml(file: string): unknown | undefined {
     )
       return onboardingFail("worker_private_file_invalid");
     dir.verify();
-    return parse(buffer.subarray(0, count).toString("utf8"));
+    return buffer.subarray(0, count);
   } finally {
     if (fd !== undefined) closeSync(fd);
     dir.close();
   }
+}
+
+export function readOnboardingYaml(file: string): unknown | undefined {
+  const bytes = readWorkerPrivateFile(file);
+  return bytes && parse(bytes.toString("utf8"));
 }
 
 export interface WorkerOnboardingConfig {
