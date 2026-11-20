@@ -28,6 +28,7 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { ModelsSettings } from "./ModelsSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -45,10 +46,16 @@ type SettingsTab =
   | "roles"
   | "templates"
   | "employees"
+  | "models"
   | "capacity";
-/** Panels a link may open (Needs You and the save-failure notice link here). */
+/** Panels a link may open (Needs You, the save-failure notice and the models page link here). */
 const routeTab = (tab: string | undefined): SettingsTab | undefined =>
-  tab === "authorization" || tab === "capacity" ? tab : undefined;
+  tab === "authorization" ||
+  tab === "capacity" ||
+  tab === "roles" ||
+  tab === "models"
+    ? tab
+    : undefined;
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -69,10 +76,15 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
-  const [filters] = useRouteFilters({ kind: "settings", projectId });
+  const [filters, setFilters] = useRouteFilters({
+    kind: "settings",
+    projectId,
+  });
   const [tab, setTab] = useState<SettingsTab>(
     routeTab(filters.tab) ?? "preferences",
   );
+  // A role reference on the models page opens that role's detail (C-518).
+  const linkedRole = filters.tab === "roles" ? filters.role : undefined;
   useEffect(() => {
     const linked = routeTab(filters.tab);
     if (linked) setTab(linked);
@@ -161,6 +173,12 @@ export function SettingsPage({
           >
             {employeeCopy.tab}
           </SettingsNavItem>
+          <SettingsNavItem
+            current={tab === "models"}
+            onClick={() => setTab("models")}
+          >
+            模型
+          </SettingsNavItem>
         </>
       }
     >
@@ -179,6 +197,9 @@ export function SettingsPage({
           client={client}
           projectId={projectId}
           revision={revision}
+          linkedRole={linkedRole}
+          // Closing the linked detail drops the link, so following it again reopens it.
+          onLinkedRoleClosed={() => setFilters({}, { replace: true })}
           onNewEmployee={(roleId) => {
             setEmployeeRole(roleId);
             setTab("employees");
@@ -193,6 +214,9 @@ export function SettingsPage({
           initialRole={employeeRole}
           revision={revision}
         />
+      )}
+      {tab === "models" && (
+        <ModelsSettings key={projectId} client={client} projectId={projectId} />
       )}
       {tab === "templates" && (
         <TemplateSettings

@@ -110,23 +110,39 @@ export function RolesSettings({
   projectId,
   revision = 0,
   onNewEmployee,
+  linkedRole,
+  onLinkedRoleClosed,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
   onNewEmployee?: (roleId: string) => void;
+  /** A role opened from a link (the models page lists who uses a profile). */
+  linkedRole?: string | undefined;
+  onLinkedRoleClosed?: () => void;
 }) {
-  const [view, setView] = useState<View>();
+  const [view, setView] = useState<View | undefined>(
+    linkedRole ? { kind: "detail", roleId: linkedRole } : undefined,
+  );
+  useEffect(() => {
+    if (linkedRole) setView({ kind: "detail", roleId: linkedRole });
+  }, [linkedRole]);
   const [createdRole, setCreatedRole] = useState<string>();
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
-  const { remember } = useDrawerReturnFocus(view !== undefined);
+  // A linked detail has no opener on this page: focus returns to the panel.
+  const { remember } = useDrawerReturnFocus(view !== undefined, () =>
+    document.getElementById("roles"),
+  );
   const open = (next: View | undefined, note = "") => {
     if (next) remember();
     setMessage(note);
     setView(next);
-    if (next === undefined) list.reload();
+    if (next === undefined) {
+      list.reload();
+      if (linkedRole) onLinkedRoleClosed?.();
+    }
   };
   const roleId = view && view.kind !== "new" ? view.roleId : undefined;
   return (
