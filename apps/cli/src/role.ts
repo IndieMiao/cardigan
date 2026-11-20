@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   activateRole,
   copyRole,
@@ -17,11 +20,18 @@ import {
   upgradeRole,
 } from "@cardigan/domain";
 import {
+  applyRoleDocument,
+  previewRoleDocument,
+  RoleDocumentError,
+} from "@cardigan/host";
+import {
   convertLegacyRole,
   DEFAULT_ROLE_LAUNCH,
   defaultRoleDefinition,
+  exportRoleMarkdown,
   isDefaultRoleId,
   isHarness,
+  RoleMarkdownError,
 } from "@cardigan/roles";
 import {
   getRoleVersion,
@@ -29,7 +39,7 @@ import {
   persistRoleEffect,
   Store,
 } from "@cardigan/store";
-import { validProfileNames } from "./config.js";
+import { validLaunchConfig, validProfileNames } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
@@ -45,6 +55,8 @@ const USAGE = [
   "用法：cardigan role <命令> [--project <项目>] [--data-dir <目录>]",
   "  list [--all]",
   "  show <角色> [--version <n>] [--history]",
+  "  apply <file.md> [--yes]（默认只预览）",
+  "  export <角色> > file.md",
   "  add|update --file <role.yaml>",
   "  copy <源角色> <新角色> [--from-project <项目> | --from-default --harness <CLI> --launch-profile <配置>] [--version <n>] [--name <显示名>]",
   "    ui_ux_designer、design_director、frontend_engineer 从默认角色包复制时可省略 --harness 和 --launch-profile；设计师默认 codex/codex-astra，设计总监和前端工程师默认 claude-code/claude-opus。",
@@ -74,10 +86,14 @@ function parse(args: readonly string[]) {
       "activate",
       "rollback",
       "upgrade",
+      "apply",
+      "export",
     ].includes(command ?? "")
   )
     fail("请指定有效的角色命令");
   const perCommand: Record<string, string[]> = {
+    apply: ["yes"],
+    export: [],
     list: ["all"],
     show: ["version", "history"],
     add: ["file", "version", "allowed-tools", "capabilities"],
@@ -106,6 +122,7 @@ function parse(args: readonly string[]) {
     "from-default",
     "convert-legacy",
     "dry-run",
+    "yes",
   ];
   const flags: Record<string, string> = {};
   const positionals: string[] = [];
@@ -134,7 +151,10 @@ function parse(args: readonly string[]) {
         ? 2
         : 1;
   if (positionals.length !== expected) fail("角色命令的位置参数不正确");
-  if (positionals.some((id) => !/^[a-z0-9][a-z0-9._-]*$/u.test(id)))
+  if (
+    command !== "apply" &&
+    positionals.some((id) => !/^[a-z0-9][a-z0-9._-]*$/u.test(id))
+  )
     fail("角色或项目编号不合法");
   if (command === "update" && !flags.file && !flags["convert-legacy"])
     fail("role update 需要 --file <role.yaml> 或 --convert-legacy");
@@ -205,6 +225,37 @@ export async function runRoleCommand(
       legacyAdd ? positionals[0] : flags.project,
     );
     const id = (legacyAdd ? positionals[1] : positionals[0]) as string;
+    if (command === "export") {
+      const role = store.uow.read((tx) => getRoleVersion(tx, project, id));
+      if (!role) fail(`角色 ${id} 不存在`);
+      io.stdout(exportRoleMarkdown(role).slice(0, -1)); // stdout adds the framing newline
+      return EXIT.ok;
+    }
+    if (command === "apply") {
+      const markdown = await readFile(resolve(io.cwd, id), "utf8");
+      const context = {
+        store,
+        project_id: project,
+        actor: resolveActor(io, project, store),
+        clock: systemClock,
+        launchConfig: () =>
+          validLaunchConfig(cliLaunchPaths(io, flags["data-dir"])),
+        authorize: () => {},
+      }; // CLI human-only policy; no web session
+      try {
+        const preview = previewRoleDocument(context, markdown);
+        io.stdout(JSON.stringify(preview, null, 2));
+        if (flags.yes) {
+          applyRoleDocument(context, markdown, preview.snapshot, randomUUID());
+          io.stdout("已应用");
+        }
+      } catch (e) {
+        if (e instanceof RoleDocumentError || e instanceof RoleMarkdownError)
+          fail(e.message);
+        throw e;
+      }
+      return EXIT.ok;
+    }
     if (command === "list" || command === "show") {
       const roles = store.uow.read((tx) => listRoleVersions(tx, project));
       if (command === "list") {

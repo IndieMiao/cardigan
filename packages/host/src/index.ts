@@ -203,6 +203,7 @@ export {
   preparationRevision,
   withPreparationQueue,
 } from "./preparation-queue.js";
+export { previewPorts } from "./preview-ports.js";
 export * from "./probe-config.js";
 export * from "./probe-service.js";
 export type { ReadProjectQuota } from "./project-quotas.js";
@@ -219,6 +220,11 @@ export {
 } from "./resource-leases.js";
 export { targetProbe } from "./resource-probe.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
+export {
+  applyRoleDocument,
+  previewRoleDocument,
+  RoleDocumentError,
+} from "./role-document.js";
 export {
   effectiveRunLimit,
   hasEarlierCapacityWait,

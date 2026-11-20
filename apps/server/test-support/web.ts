@@ -36,6 +36,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  readonly roleLaunchConfig?: WebServerOptions["roleLaunchConfig"];
   readonly executionDiagnostics?: WebServerOptions["executionDiagnostics"];
   readonly mergeGate?: WebServerOptions["mergeGate"];
   readonly contextUsage?: WebServerOptions["contextUsage"];
@@ -73,6 +74,9 @@ export async function webHarness(
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
+    roleLaunchConfig:
+      options.roleLaunchConfig ??
+      (() => ({ profiles: { fixture: { harness: "codex" } }, providers: {} })),
     launchProfiles: () => ["fixture"],
     log: options.log ?? (() => undefined),
     store,

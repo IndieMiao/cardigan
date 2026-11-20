@@ -597,6 +597,7 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          roleLaunchConfig: () => options.dispatcher?.upstream,
           launchProfiles: () =>
             Object.keys(options.dispatcher?.upstream?.profiles ?? {}),
           hcSession: session,
