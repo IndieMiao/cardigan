@@ -89,7 +89,7 @@ function fixture(sample: (typeof samples)[number] = samples[0]) {
     ),
     pollRuns: vi.fn(async () => ({ unchanged: false, runs: [] })),
     cancel: vi.fn(async () => {}),
-    jobLog: vi.fn(async () => ""),
+    jobLog: vi.fn(async () => {}),
   };
   return {
     client,
@@ -142,6 +142,11 @@ test.each(samples)(
     );
     expect(diagnostic.checks.map((check) => check.name)).toEqual(
       GITHUB_CHECK_NAMES,
+    );
+    expect(diagnostic.logSource).toEqual(
+      sample.conclusion === "success"
+        ? undefined
+        : { url: f.expectedRun.html_url, jobId: at(f.jobs, 0).id },
     );
     expect(f.client.run).toHaveBeenCalledExactlyOnceWith(sample.id);
     expect(f.client.jobs).toHaveBeenCalledExactlyOnceWith(sample.id);
@@ -253,6 +258,15 @@ test.each([
     checks: [],
     reason: expect.stringContaining("合同不符"),
   });
+});
+
+test("C-529: a different job attempt never supplies a log locator", async () => {
+  const f = fixture(samples[1]);
+  f.client.jobs.mockResolvedValueOnce([{ ...at(f.jobs, 0), run_attempt: 2 }]);
+  expect((await f.inspect()).logSource).toEqual({
+    url: f.expectedRun.html_url,
+  });
+  expect(f.client.jobLog).not.toHaveBeenCalled();
 });
 
 test.each([

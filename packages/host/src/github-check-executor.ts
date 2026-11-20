@@ -4,6 +4,7 @@ import type {
   CheckExecutor,
   CheckHandle,
   CheckRequest,
+  OpenFailureLog,
 } from "./check-executor.js";
 import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { githubScopedRequest } from "./github-check-scope.js";
@@ -54,7 +55,11 @@ export interface GithubCheckLifecycle {
   ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
-  fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined>;
+  fetchFailureLog(
+    run: ExternalGithubRun,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 /** Trusted dispatch adapter; handles share the configured executor lifecycle. */
 export class GithubCheckExecutor implements CheckExecutor {
@@ -489,11 +494,15 @@ export class GithubCheckExecutor implements CheckExecutor {
       throw new GithubExecutorError("api");
     }
   }
-  async fetchFailureLog(handle: CheckHandle) {
-    try {
-      return await this.options.lifecycle.fetchFailureLog(this.run(handle));
-    } catch {
-      throw new GithubExecutorError("api");
-    }
+  async fetchFailureLog(
+    handle: CheckHandle,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ) {
+    await this.options.lifecycle.fetchFailureLog(
+      this.run(handle),
+      open,
+      signal,
+    );
   }
 }

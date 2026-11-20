@@ -103,10 +103,26 @@ export function pendingPrecheckConflict(
 }
 
 /** The host uses this exact predicate before persisting a projected diagnostic. */
-export function validPrecheckSummary(summary: string): boolean {
+export function validPrecheckSummary(
+  summary: string,
+  external?: Precheck["external_run"],
+): boolean {
+  // The one URL a failure diagnostic can carry is the bound github.com run,
+  // optionally followed by a numeric job. Never exempt other paths in the line.
+  const locator =
+    /(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/([1-9]\d*))(?:\/job\/[1-9]\d*)?$/u.exec(
+      summary,
+    );
+  const diagnostic =
+    locator &&
+    external &&
+    Number(locator[2]) === external.run_id &&
+    locator[1] === external.html_url
+      ? summary.slice(0, locator.index)
+      : summary;
   return (
     summary.length <= 12000 &&
-    !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(summary)
+    !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(diagnostic)
   );
 }
 
