@@ -126,38 +126,31 @@ function sheet() {
   return style;
 }
 
-test("U5c filters, count and paging share one nonwrapping row with public menus", async () => {
+test("U5c filters and count share one nonwrapping row with public menus", async () => {
   const style = sheet();
   try {
-    const change = vi.fn(),
-      load = vi.fn();
+    const change = vi.fn();
     render(
       <TimelineControls
         filters={{ author: "pm" }}
         onChange={change}
         loaded={20}
         total={61}
-        pageSize={20}
-        pending={false}
-        loadEarlier={load}
       />,
     );
-    const controls = screen.getByRole("group", { name: "时间线筛选与加载" });
+    const controls = screen.getByRole("group", { name: "时间线筛选" });
     expect(getComputedStyle(controls).display).toBe("flex");
     expect(getComputedStyle(controls).flexWrap).toBe("nowrap");
     expect(getComputedStyle(controls).whiteSpace).toBe("nowrap");
-    for (const text of [/条目类型：/, /发言方：/, /加载更早/, /每次加载：/])
+    for (const text of [/条目类型：/, /发言方：/])
       expect(
         within(controls).getByRole("button", { name: text }).parentElement,
       ).toBe(controls);
+    expect(within(controls).getAllByRole("button")).toHaveLength(2);
     expect(within(controls).getByText("已加载 20 / 61 条")).toBeTruthy();
     expect(within(controls).queryByRole("combobox")).toBeNull();
     await selectMenu(/^条目类型：/, "审核");
     expect(change).toHaveBeenCalledWith({ author: "pm", type: "review" });
-    await selectMenu(/^每次加载：/, "50 条");
-    expect(change).toHaveBeenCalledWith({ author: "pm", count: "50" });
-    fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
-    expect(load).toHaveBeenCalledOnce();
   } finally {
     style.remove();
   }

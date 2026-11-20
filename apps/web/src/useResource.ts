@@ -53,6 +53,12 @@ export function useResource<T>(
   const reload = useCallback(() => start(true), [start]);
   /** Periodic background read: quiet unless it outlasts the slow threshold. */
   const refresh = useCallback(() => start(false), [start]);
+  /** Show data read outside `load` (e.g. an older page) without abandoning a read in flight. */
+  const replace = useCallback(
+    (data: T) =>
+      setState((old) => (old.source === load ? { ...old, data } : old)),
+    [load],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision is an explicit external invalidation signal.
   useEffect(() => {
     if (!enabled) return;
@@ -68,5 +74,6 @@ export function useResource<T>(
     interactive: state.source === load && state.interactive,
     reload,
     refresh,
+    replace,
   };
 }
