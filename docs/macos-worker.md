@@ -263,6 +263,12 @@ cardigan worker check --project example --machine worker-a
 
 journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录 0700、文件 0600，沿用 [Linux 向导的恢复合同](linux-worker.md#5-控制主机add续跑check-和-status)。管理员核对草案后才合入 `runtime-workers.yaml`，保留其它机器/项目；`allow_remote_launch` 仍须按远程启动门禁显式启用。检查通过不会自动启用机器或改变 Assignment。
 
+### 检查浏览器能力
+
+运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到版本号即可，不需要向缓存建链接。CLI 只查服务已接受的配置目录；配置无法读取、尚未生效，或候选程序超时、没有返回可解析版本时，继续检查后续位置，不影响其它能力。再查项目账号 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，然后查 `/Applications/Google Chrome.app` 和该账号的 `$HOME/Library/Caches/ms-playwright`。
+
+本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 只列出能确认尝试过的范围（配置键、命令名和账号缓存），不会回显私有目录或命令报错。`search_incomplete: true` 表示未能完成或确认本次检查，可再运行 `machine check`。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
+
 ### 从 Data 卷旧路径原地迁移（现有 Mac）
 
 1. **控制主机停派发。** `cardigan machine drain worker-a --project example`，等旧 Assignment、Run、终端、清理和 Git 操作全部结束；不能确认退出就停在这里。关闭此绑定的远程启动，备份私有向导 YAML 和正式配置。用旧 HOME/session 正常停止空闲的 hc 核心（见第 4 节）；不删除锁、仓库、工作树或上次失败的 `.clone-*`。如仍有旧路径绑定的工作树，先按原流程收尾，不手改 Git 注册记录。
@@ -287,3 +293,5 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 | `worker_config_conflict` | 核对物理身份、其它项目或已应用配置冲突；确认参数不能绕过，也不改绑活跃 Assignment |
 
 本卡自动测试均为合成夹具，**未现场验证 Mac**。合并后由 human_action 跟进：专用账号安装/许可、无桌面登录及锁屏/重启后的核心、add/check/resume、空 Run、真实开发 commit/回传/同 SHA 预检、失联后准确退出证明。现场结果分别记录；未知退出保留占用，不建第二个 Run，不把本向导当作接管授权。
+
+Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新可写工作区的第一次** `godot --headless --import`。不在机器登记或普通 worktree 检出时自动运行。预热、只读包发布、损坏回退和计时口径见 [C-498](plans/C-498.md)。
