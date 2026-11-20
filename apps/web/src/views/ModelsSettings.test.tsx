@@ -80,10 +80,10 @@ test("the list shows each profile's harness, model, parameters, secrets, referen
   const table = await screen.findByRole("table", { name: "启动配置" });
   const rows = within(table).getAllByRole("row").slice(1);
   expect(rows.map((r) => r.textContent)).toEqual([
-    "claude-opusclaude-codeopus → claude-opus-fixture-1effort high、bypassPermissions、不自动更新、自定义配置 1已设置3通过",
-    "codex-solcodexgpt-fixture-soleffort medium、provider openai、自定义参数 21 项未设置1未通过",
+    "claude-opusclaude-codeopus → claude-opus-fixture-1effort high、bypassPermissions、不自动更新、自定义配置 1已设置3本地检查通过",
+    "codex-solcodexgpt-fixture-soleffort medium、provider openai、自定义参数 21 项未设置1在线探测未通过",
     "pi-deepseekpideepseek-chat自动更新已设置0未检查",
-    "claude-localclaude-code———1检查中",
+    "claude-localclaude-code———1本地检查中",
   ]);
 });
 
@@ -108,14 +108,23 @@ test("the detail shows metadata, provider, CLI, secret key names and who uses th
     "本地检查",
   ])
     expect(text).toContain(fact);
-  // Read only: no write controls, no secret value field.
+  // C-516: writes and checks are explicit buttons; no field, no secret value.
   expect(within(dialog).queryByRole("textbox")).toBeNull();
   expect(within(dialog).queryByRole("switch")).toBeNull();
   expect(
     within(dialog)
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent),
-  ).toEqual(["关闭抽屉"]);
+  ).toEqual([
+    "复制",
+    "删除",
+    "编辑",
+    "关闭抽屉",
+    "编辑 Provider",
+    "编辑模型别名",
+    "本地检查",
+    "在线探测",
+  ]);
   const users = within(dialog).getByRole("table", { name: "使用者" });
   expect(
     within(users).getByRole("link", { name: "文档写手" }).getAttribute("href"),
@@ -137,8 +146,8 @@ test("missing values, unset secrets, failed checks and unused profiles read as f
   let dialog = await screen.findByRole("dialog", { name: "codex-sol" });
   expect(dialog.textContent).toContain("OPENAI_API_KEY未设置");
   expect(dialog.textContent).toContain("OPENAI_ORG已设置");
-  expect(dialog.textContent).toContain("未通过");
-  expect(dialog.textContent).toContain("在线探测");
+  expect(dialog.textContent).toContain("在线探测未通过");
+  expect(dialog.textContent).toContain("在线探测（只列出模型，不调用推理）");
   expect(dialog.textContent).toContain("secret_missing");
   fireEvent.click(within(dialog).getByRole("button", { name: "关闭抽屉" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -151,7 +160,7 @@ test("missing values, unset secrets, failed checks and unused profiles read as f
   fireEvent.click(screen.getByRole("button", { name: "claude-local" }));
   dialog = await screen.findByRole("dialog", { name: "claude-local" });
   expect(dialog.textContent).toContain("不需要密钥");
-  expect(dialog.textContent).toContain("检查中");
+  expect(dialog.textContent).toContain("本地检查中");
 });
 
 test("loading, empty and failed reads have distinct states", async () => {

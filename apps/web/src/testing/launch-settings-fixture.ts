@@ -4,6 +4,8 @@ import type { LaunchSettingsView } from "../api.js";
  * C-518 synthetic launch settings (C-515 read contract): 4 profiles, 3
  * providers, 3 role and 2 employee references. No real host, endpoint or
  * credential; secrets carry only key names and whether they are set.
+ * C-516 adds what the forms read: 2 model aliases, each provider's secret key
+ * reference and 4 secrets.env key names (never values).
  */
 export const launchSettingsFixture: LaunchSettingsView = {
   version: "a".repeat(64),
@@ -12,13 +14,41 @@ export const launchSettingsFixture: LaunchSettingsView = {
       id: "anthropic",
       name: "Anthropic",
       base_url: "https://anthropic.example.test",
+      secret_env: { ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY" },
     },
-    { id: "openai", name: "OpenAI", base_url: null },
+    {
+      id: "openai",
+      name: "OpenAI",
+      base_url: null,
+      secret_env: { OPENAI_API_KEY: "OPENAI_API_KEY" },
+    },
     {
       id: "deepseek",
       name: "DeepSeek",
       base_url: "https://deepseek.example.test/v1",
+      secret_env: { DEEPSEEK_API_KEY: "DEEPSEEK_API_KEY" },
     },
+  ],
+  models: {
+    opus: {
+      id: "claude-opus-fixture-1",
+      provider: "anthropic",
+      cost: { input: 15, output: 75 },
+      context_window: 200000,
+      max_output_tokens: 32000,
+      reasoning_efforts: ["low", "medium", "high"],
+    },
+    "deepseek-chat": {
+      id: "deepseek-chat",
+      provider: "deepseek",
+      context_window: 64000,
+    },
+  },
+  secret_keys: [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY_SPARE",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_ORG",
   ],
   profiles: [
     {

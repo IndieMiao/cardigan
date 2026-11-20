@@ -179,6 +179,19 @@ export function fakeClient(
       profiles: [],
       providers: [],
     }),
+    previewLaunchChange: async (version, change) => ({
+      version,
+      preview_id: "00000000-0000-4000-8000-000000000000",
+      diff: [{ field: `profiles.${change.name}`, before: null, after: null }],
+    }),
+    confirmLaunchChange: async () => {},
+    startLaunchCheck: async (version, profile, mode) => ({
+      id: "00000000-0000-4000-8000-000000000000",
+      profile,
+      mode,
+      version,
+      status: "running",
+    }),
     createEmployee: async (_projectId, input) => ({
       id: "E-1",
       name: input.name,
