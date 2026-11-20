@@ -194,6 +194,7 @@ export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export { eventById, eventsOfType } from "./event-index.js";
+export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";

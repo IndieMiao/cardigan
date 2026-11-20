@@ -28,6 +28,7 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { FeishuSettings } from "./FeishuSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -40,6 +41,7 @@ import {
 } from "./useSettingWrite.js";
 
 type SettingsTab =
+  | "feishu"
   | "preferences"
   | "authorization"
   | "roles"
@@ -48,7 +50,9 @@ type SettingsTab =
   | "capacity";
 /** Panels a link may open (Needs You and the save-failure notice link here). */
 const routeTab = (tab: string | undefined): SettingsTab | undefined =>
-  tab === "authorization" || tab === "capacity" ? tab : undefined;
+  tab === "authorization" || tab === "capacity" || tab === "feishu"
+    ? tab
+    : undefined;
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -104,6 +108,14 @@ export function SettingsPage({
     }),
     [projectId],
   );
+  const feishuPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "feishu" as const,
+      reveal: () => setTab("feishu"),
+    }),
+    [projectId],
+  );
   const authorizationPlace = useMemo(
     () => ({
       project: projectId,
@@ -136,6 +148,12 @@ export function SettingsPage({
             授权
           </SettingsNavItem>
           <SettingsNavItem
+            current={tab === "feishu"}
+            onClick={() => setTab("feishu")}
+          >
+            飞书绑定
+          </SettingsNavItem>
+          <SettingsNavItem
             current={tab === "roles"}
             onClick={() => {
               setTab("roles");
@@ -164,6 +182,11 @@ export function SettingsPage({
         </>
       }
     >
+      <RequestFeedbackScope hidden={tab !== "feishu"}>
+        <SettingPlaceContext.Provider value={feishuPlace}>
+          <FeishuSettings key={projectId} client={client} />
+        </SettingPlaceContext.Provider>
+      </RequestFeedbackScope>
       <RequestFeedbackScope hidden={tab !== "capacity"}>
         <SettingPlaceContext.Provider value={capacityPlace}>
           <CapacitySettings
