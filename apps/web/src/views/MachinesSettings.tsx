@@ -161,10 +161,21 @@ export function MachinesSettings({
     list.data && !withdrawn && "machines" in list.data
       ? list.data.machines
       : undefined;
-  // A list the server no longer allows takes its open detail with it.
+  // A list the server no longer allows takes its open detail with it, and
+  // so does a list read that no longer contains the open machine (V-2482):
+  // its earlier detail must not outlive it, whatever the detail read says.
+  // While the list still contains it, a failed detail refresh keeps the last
+  // good detail as before.
+  const openId = open?.id;
   useEffect(() => {
     if (withdrawn) setOpen(undefined);
-  }, [withdrawn]);
+    else if (
+      openId !== undefined &&
+      machines &&
+      !machines.some((m) => m.id === openId)
+    )
+      setOpen(undefined);
+  }, [withdrawn, machines, openId]);
   const capacity = useMachineCapacity();
   return (
     <SettingsPanel

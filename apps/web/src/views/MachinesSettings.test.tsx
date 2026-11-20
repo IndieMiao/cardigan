@@ -916,13 +916,9 @@ test.each([401, 403, 404])(
     state.allowed = false;
     view.rerender(page(1));
     if (status === 404) {
-      // The list still reads (empty); the open detail is no longer visible.
+      // The list still reads, without it: its open detail goes (V-2482).
       expect(await screen.findByText("没有机器")).toBeTruthy();
-      const dialog = within(screen.getByRole("dialog"));
-      expect(await dialog.findByText(/合成：机器不再可见/)).toBeTruthy();
-      expect(dialog.getByRole("heading", { level: 2 }).textContent).toBe(
-        "机器",
-      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     } else {
       // A refused list takes its open detail down with it.
       expect(
@@ -982,4 +978,78 @@ test("V-2475 guard: any other failed refresh keeps the last good read beside the
   view.rerender(<SettingsPage projectId="p-1" client={c} revision={1} />);
   expect(await screen.findByText(/合成：服务内部错误/)).toBeTruthy();
   expect(screen.getByRole("button", { name: machine.label })).toBeTruthy();
+});
+
+test.each([false, true])(
+  "V-2482: a failed detail refresh keeps the detail only while the list still has the machine (removed=%s)",
+  async (removed) => {
+    const item: MachineView = {
+      ...byId("local"),
+      id: "sample",
+      label: "样机",
+      bindings: [],
+      resources: [],
+    };
+    let refreshing = false;
+    const c = client({
+      machines: async () => ({
+        machines: refreshing && removed ? [] : [item],
+      }),
+      machine: async () => {
+        if (refreshing) throw new Error("详情暂未更新");
+        return { machine: item };
+      },
+    });
+    const view = render(
+      <SettingsPage projectId="p-1" client={c} revision={0} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "机器" }));
+    const opener = await screen.findByRole("button", { name: "样机" });
+    opener.focus();
+    fireEvent.click(opener);
+    await within(await screen.findByRole("dialog")).findByText("资源上限");
+    refreshing = true;
+    view.rerender(<SettingsPage projectId="p-1" client={c} revision={1} />);
+    if (removed) {
+      // The list read succeeded without it: its detail goes, whatever the
+      // detail read said.
+      expect(await screen.findByText("没有机器")).toBeTruthy();
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(document.body.textContent).not.toContain("资源上限");
+      expect(document.body.textContent).not.toContain("样机");
+    } else {
+      const dialog = within(screen.getByRole("dialog"));
+      expect(await dialog.findByText(/详情暂未更新/)).toBeTruthy();
+      expect(dialog.getByText("资源上限")).toBeTruthy();
+      expect(dialog.getByRole("heading", { level: 2 }).textContent).toBe(
+        "样机",
+      );
+    }
+  },
+);
+
+test("V-2475: a detail answered 404 while the list still has the machine takes its facts down in the drawer", async () => {
+  const machine = byId("local");
+  let gone = false;
+  const c = client({
+    machines: async () => ({ machines: [machine] }),
+    machine: async () => {
+      if (gone) throw new ApiError(404, "not_found", "合成：机器不再可见");
+      return { machine };
+    },
+  });
+  const view = render(<SettingsPage projectId="p-1" client={c} revision={0} />);
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  fireEvent.click(await screen.findByRole("button", { name: machine.label }));
+  await within(await screen.findByRole("dialog")).findByRole("table", {
+    name: "在跑任务",
+  });
+  gone = true;
+  view.rerender(<SettingsPage projectId="p-1" client={c} revision={1} />);
+  const dialog = within(screen.getByRole("dialog"));
+  expect(await dialog.findByText(/合成：机器不再可见/)).toBeTruthy();
+  expect(dialog.getByRole("heading", { level: 2 }).textContent).toBe("机器");
+  expect(drawerTable("项目绑定")).toBeNull();
+  expect(drawerTable("在跑任务")).toBeNull();
+  expect(dialog.queryByText("资源上限")).toBeNull();
 });
