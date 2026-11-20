@@ -322,6 +322,11 @@
     max-height: none;
     margin-top: var(--ui-space-3);
   }
+  /* Preview results come before the actions that apply them. */
+  .section ~ .dialogActions,
+  .section ~ .notice {
+    margin-block-start: var(--ui-space-4);
+  }
   .dialogActions {
     display: flex;
     flex-wrap: wrap;

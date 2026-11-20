@@ -282,7 +282,7 @@ export function RoleDocumentPreviewView({
             {ACTION_LABELS[role.action]}
           </SettingsFact>
         </SettingsFacts>
-        {role.action !== "unchanged" && (
+        {role.action !== "unchanged" && role.fields.length > 0 && (
           <RoleDiffView
             title={
               role.action === "create"

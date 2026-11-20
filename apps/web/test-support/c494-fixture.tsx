@@ -89,7 +89,25 @@ const preview = (markdown: string): RoleDocumentPreview => {
     role: {
       action: append ? "unchanged" : "create",
       role: proofreader,
-      fields: [],
+      // A new role reports every field it will save (before: null).
+      fields: append
+        ? []
+        : (
+            [
+              "display_name",
+              "kind",
+              "instructions",
+              "harness",
+              "launch_profile_ref",
+              "worktree",
+              "allowed_tools",
+              "capabilities",
+            ] as const
+          ).map((field) => ({
+            field,
+            before: null,
+            after: proofreader[field],
+          })),
       relaxations: append ? [] : ["新增可用工具：submit_delivery"],
     },
     template: append
