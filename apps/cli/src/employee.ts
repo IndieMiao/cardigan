@@ -1,5 +1,6 @@
 import {
   activateEmployee,
+  activeOwner,
   createEmployee,
   deactivateEmployee,
   type Employee,
@@ -23,11 +24,12 @@ const USAGE = [
   "用法：cardigan employee <命令>（全局员工，无需选择项目）",
   "  add --name <名字> --title <职位> --role <角色> [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
   "  list [--role <角色>] [--all]",
-  "  update <E-n> [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
+  "  update <E-n> [--role <角色>] [--name <名字>] [--title <职位>] [--bio <简介>] [--avatar library:<人物 id> | --avatar-file <路径>] [--launch-profile <名字>]",
   "  deactivate <E-n> / activate <E-n>",
   "可用 --data-dir <目录> 指定数据库；update 的简介、头像、启动配置传空字符串可清空。",
 ].join("\n");
 const editableFlags = [
+  "role",
   "name",
   "title",
   "bio",
@@ -45,13 +47,11 @@ function parse(args: readonly string[]) {
   }
   const allowed = new Set([
     "data-dir",
-    ...(command === "add"
-      ? [...editableFlags, "role"]
-      : command === "update"
-        ? editableFlags
-        : command === "list"
-          ? ["role", "all"]
-          : []),
+    ...(command === "add" || command === "update"
+      ? editableFlags
+      : command === "list"
+        ? ["role", "all"]
+        : []),
   ]);
   const flags: Record<string, string> = {};
   const positionals: string[] = [];
@@ -165,9 +165,11 @@ export async function runEmployeeCommand(
       const ports: EmployeeCommandPorts = {
         clock: systemClock,
         ids: tx.global_ids,
+        roleTransferFacts: tx.employees.roleTransferFacts,
         ...(profiles === undefined ? {} : { launch_profiles: profiles }),
       };
       const patch: UpdateEmployeeInput = {
+        ...(flags.role === undefined ? {} : { role_id: flags.role }),
         ...(flags.name === undefined ? {} : { name: flags.name }),
         ...(flags.title === undefined ? {} : { title: flags.title }),
         ...(flags.bio === undefined ? {} : { bio: flags.bio }),
@@ -191,9 +193,17 @@ export async function runEmployeeCommand(
             ports,
           );
           break;
-        case "update":
-          result = updateEmployee(employees, actor, id, patch, ports);
+        case "update": {
+          const owner = activeOwner(tx.members.list());
+          result = updateEmployee(
+            employees,
+            owner ? { ...actor, member_id: owner.id } : actor,
+            id,
+            patch,
+            ports,
+          );
           break;
+        }
         case "activate":
           result = activateEmployee(employees, actor, id, ports);
           break;

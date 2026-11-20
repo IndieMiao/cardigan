@@ -5,12 +5,10 @@ import type {
   Author,
   CardId,
   CardView,
-  CommandPorts,
   CommandState,
   ContextObservation,
   Decision,
   Event,
-  EventId,
   Machine,
   MergeCheckBlocker,
   MergeCheckView,
@@ -37,7 +35,6 @@ import {
   effectivePreMergeChecks,
   eventById,
   extractReferences,
-  formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
@@ -64,7 +61,7 @@ import {
   suggestionView,
   verificationActivity,
 } from "@cardigan/domain";
-import type { ProjectMergeGate } from "@cardigan/host";
+import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
@@ -114,25 +111,6 @@ export function projectState(
   project_id: ProjectId,
 ): CommandState {
   return store.uow.read((tx) => loadCommandState(tx, project_id));
-}
-
-/** Preview pure commands without persisting effects or allocating database IDs. */
-export function previewPorts(now: string): CommandPorts {
-  return {
-    clock: { now: () => now },
-    ids: {
-      next: () => {
-        throw new Error("Preview cannot allocate entity IDs");
-      },
-      nextAttachmentId: () => {
-        throw new Error("Preview cannot allocate attachments");
-      },
-      nextEventId: () => "preview" as EventId,
-      nextEventSequence: () => 1,
-      nextTimelineEntryId: (_project, card) =>
-        unwrap(formatTimelineEntryId(card, 1)),
-    },
-  };
 }
 
 export function templateHistory(state: CommandState, id: string) {
@@ -291,7 +269,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           name: employee.name,
           title: employee.title,
           bio: employee.bio,
-          role_id: employee.role_id,
+          role_id: assignment?.role_id ?? employee.role_id,
           avatar:
             avatar?.kind === "library"
               ? `/avatars/v1/${avatar.id}/head-64.webp`
