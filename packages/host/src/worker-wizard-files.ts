@@ -1,9 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { fsyncSync, linkSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { parse, parseDocument, stringify } from "yaml";
+import { isDeepStrictEqual } from "node:util";
+import { isScalar, parse, parseDocument, stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
-import { parseRuntimeWorkers } from "./runtime-workers-config.js";
+import {
+  parseRuntimeWorkers,
+  type RuntimeWorker,
+} from "./runtime-workers-config.js";
+import { withWorkerBindingCheck } from "./worker-onboarding.js";
 import {
   checkWorkerDraft,
   onboardingFail,
@@ -23,6 +28,11 @@ function snapshot(root: string, name: string) {
   };
 }
 export interface WizardFilePlan {
+  binding: {
+    config: WorkerOnboardingConfig;
+    dataDir: string;
+    priorDigest: string | undefined;
+  };
   name: string;
   revision: string | null;
   bytes: Buffer;
@@ -98,19 +108,23 @@ export function planWorkerFile(
       onboardingFail("worker_config_conflict");
   } else if (launch) onboardingFail("worker_config_changed");
   checkWorkerDraft(config, live.parsed, dataDir, "applied");
-  if (
-    live.bytes &&
-    parseRuntimeWorkers(live.parsed, dataDir).some(
-      (w) =>
-        w.machine_id === machine_id &&
-        w.project_id === project_id &&
-        w.allow_remote_launch,
-    )
-  )
+  const before = live.bytes ? parseRuntimeWorkers(live.parsed, dataDir) : [];
+  const target = (w: RuntimeWorker) =>
+    w.machine_id === machine_id && w.project_id === project_id;
+  if (before.find(target)?.allow_remote_launch)
     onboardingFail("worker_already_enabled");
+  const priorDigest = withWorkerBindingCheck(
+    root,
+    config,
+    dataDir,
+    false,
+    (d) => d,
+  );
+  const reservation = { config, dataDir, priorDigest };
   if (!launch) {
     const diff = differences(draft.parsed, raw);
     return {
+      binding: reservation,
       name,
       revision: draft.revision,
       bytes:
@@ -141,24 +155,29 @@ export function planWorkerFile(
     );
     if (p === undefined) return onboardingFail("worker_config_invalid");
     if (p === -1) doc.addIn(["machines", index, "projects"], next);
-    else
-      doc.setIn(
-        ["machines", index, "projects", p, "allow_remote_launch"],
-        true,
-      );
+    else {
+      const key = ["machines", index, "projects", p, "allow_remote_launch"];
+      // An anchored scalar may be referenced outside this project. Never edit it in place.
+      const gate = doc.getIn(key, true);
+      if (isScalar(gate) && gate.anchor)
+        return onboardingFail("worker_shared_yaml");
+      doc.setIn(key, true);
+    }
   }
   const bytes = Buffer.from(doc.toString());
   const merged = parseRuntimeWorkers(parse(bytes.toString("utf8")), dataDir);
   if (
-    !merged.some(
-      (w) =>
-        w.machine_id === machine_id &&
-        w.project_id === project_id &&
-        w.allow_remote_launch,
+    !isDeepStrictEqual(merged.filter(target), [
+      { ...config.worker, allow_remote_launch: true },
+    ]) ||
+    !isDeepStrictEqual(
+      merged.filter((w) => !target(w)),
+      before.filter((w) => !target(w)),
     )
   )
-    onboardingFail("worker_config_invalid");
+    return onboardingFail("worker_config_conflict");
   return {
+    binding: reservation,
     name: "runtime-workers.yaml",
     revision: live.revision,
     guardName: name,
@@ -178,6 +197,17 @@ export function commitWorkerFile(
   root: string,
   plan: WizardFilePlan,
   transaction: (apply: () => void) => void = (apply) => apply(),
+) {
+  const { config, dataDir, priorDigest } = plan.binding;
+  withWorkerBindingCheck(root, config, dataDir, true, (digest) => {
+    if (digest !== priorDigest) return onboardingFail("worker_preview_stale");
+    publishWorkerFile(root, plan, transaction);
+  });
+}
+function publishWorkerFile(
+  root: string,
+  plan: WizardFilePlan,
+  transaction: (apply: () => void) => void,
 ) {
   if (plan.bytes.length > 65536) onboardingFail("worker_private_file_invalid");
   const dir = new CpuProfileDirectory(root);

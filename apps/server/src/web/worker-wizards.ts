@@ -8,7 +8,6 @@ import {
   planWorkerFile,
   type WizardFilePlan,
   WorkerOnboardingError,
-  workerOnboardingStatus,
   workerWizardForm,
 } from "@cardigan/host";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
@@ -21,6 +20,7 @@ import {
 import { machineAudit } from "./machine-checks.js";
 import type { WizardHost } from "./machine-host.js";
 import {
+  checkRegistryCompatibility,
   checkWizard,
   type Draft,
   initialSteps,
@@ -156,17 +156,16 @@ export class WorkerWizards {
       if (!id) {
         const draft = workerWizardForm(host.root, host.dataDir, project, body),
           machine = draft.config.worker.machine_id;
+        this.store.uow.read((tx) =>
+          checkRegistryCompatibility(this.store, tx, draft),
+        );
         const plan = planWorkerFile(
           host.root,
           host.dataDir,
           draft.raw,
           draft.config,
         );
-        const priorDigest = workerOnboardingStatus(
-          host.root,
-          project,
-          machine,
-        )?.digest;
+        const { priorDigest } = plan.binding;
         if (priorDigest && priorDigest !== draft.config.digest)
           plan.diff.push({ field: "completed_checks", change: "reset" });
         for (const s of this.sessions.values())
@@ -251,6 +250,7 @@ export class WorkerWizards {
             this.store.uow.run((tx) => {
               authorize(tx);
               if (action === "enable") assertPassed(tx);
+              else checkRegistryCompatibility(this.store, tx, s.draft);
               apply();
               machineAudit(
                 tx,
@@ -316,7 +316,9 @@ export class WorkerWizards {
           ? 400
           : 409,
         code,
-        "请核对向导配置、文件权限和当前预览。",
+        code === "worker_shared_yaml"
+          ? "派发开关使用 YAML 锚点，请在主机上核对并拆分共享字段后重新预览。"
+          : "请核对向导配置、文件权限和当前预览。",
       );
     }
   }

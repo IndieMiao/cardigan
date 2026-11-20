@@ -12,9 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { stringify } from "yaml";
+import { Document, stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
 import { loadRuntimeWorkers } from "./runtime-workers-config.js";
+import { onboardWorker } from "./worker-onboarding.js";
 import { commitWorkerFile, planWorkerFile } from "./worker-wizard-files.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
 
@@ -166,6 +167,22 @@ test.runIf(process.platform === "linux")(
     const before = loadRuntimeWorkers(data, path);
     commitWorkerFile(root, planWorkerFile(root, data, d.raw, d.config));
     expect(loadRuntimeWorkers(data, path)).toEqual(before);
+    // Even valid serialized output must be refused if an unrelated binding changed.
+    const originalToString = Document.prototype.toString;
+    const serialization = vi
+      .spyOn(Document.prototype, "toString")
+      .mockImplementationOnce(function (this: Document, opts) {
+        this.setIn(["machines", 0, "projects", 0, "session"], "other-session");
+        return originalToString.call(this, opts);
+      });
+    try {
+      expect(() => planWorkerFile(root, data, d.raw, d.config, true)).toThrow(
+        "worker_config_conflict",
+      );
+    } finally {
+      serialization.mockRestore();
+    }
+    expect(loadRuntimeWorkers(data, path)).toEqual(before);
     const p = planWorkerFile(root, data, d.raw, d.config, true);
     commitWorkerFile(root, p);
     const after = loadRuntimeWorkers(data, path);
@@ -178,5 +195,75 @@ test.runIf(process.platform === "linux")(
     expect(() => planWorkerFile(root, data, d.raw, d.config)).toThrow(
       "worker_already_enabled",
     );
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "identity and draft reservations are checked both before preview and under the onboarding lock before writing",
+  async () => {
+    const d = setup();
+    const file = join(root, "worker-worker-a-example.yaml");
+    const original = stringify(d.raw);
+    writeFileSync(file, original, { mode: 0o600 });
+    const moved = workerWizardForm(root, data, "example", {
+      ...form,
+      host: "moved.invalid",
+    });
+    // The operator previews before a concurrent CLI add has claimed the machine.
+    const plan = () => planWorkerFile(root, data, moved.raw, moved.config),
+      p = plan();
+    const peer = workerWizardForm(root, data, "peer", form);
+    expect(
+      await onboardWorker({
+        config: peer.config,
+        configRoot: root,
+        dataDir: data,
+        mode: "add",
+        registration: async () => true,
+        probe: async () => true,
+        report: () => {},
+      }),
+    ).toBe(true);
+    expect(() => commitWorkerFile(root, p)).toThrow("worker_config_conflict");
+    expect(plan).toThrow("worker_config_conflict");
+    // Even with unchanged machine identity the peer's project draft reserves its account and group.
+    expect(() => planWorkerFile(root, data, d.raw, d.config)).toThrow(
+      "worker_config_conflict",
+    );
+    expect(readFileSync(file, "utf8")).toBe(original);
+    expect(readdirSync(root).filter((f) => f.endsWith(".bak"))).toEqual([]);
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "refuses an anchored launch field without rewriting the runtime file",
+  () => {
+    const d = setup();
+    commitWorkerFile(root, planWorkerFile(root, data, d.raw, d.config));
+    const m = d.raw.runtime.machines[0];
+    if (!m) throw Error("missing fixture");
+    const live = {
+      version: 1,
+      machines: [
+        {
+          ...m,
+          projects: m.projects.map((p) => ({
+            ...p,
+            allow_remote_launch: false,
+          })),
+        },
+      ],
+    };
+    const path = join(root, "runtime-workers.yaml");
+    const text = stringify(live).replace(
+      "allow_remote_launch: false",
+      "allow_remote_launch: &gate false",
+    );
+    writeFileSync(path, text, { mode: 0o600 });
+    expect(() => planWorkerFile(root, data, d.raw, d.config, true)).toThrow(
+      "worker_shared_yaml",
+    );
+    expect(readFileSync(path, "utf8")).toBe(text);
+    expect(loadRuntimeWorkers(data, path)[0]?.allow_remote_launch).toBe(false);
   },
 );

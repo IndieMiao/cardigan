@@ -22,20 +22,23 @@ import { machineAudit } from "./machine-checks.js";
 import type { WizardHost } from "./machine-host.js";
 import { emptyState } from "./sql-state.js";
 
-type Step = (typeof WORKER_STEPS)[number] | "capabilities";
+type Step = (typeof WORKER_STEPS)[number] | "configuration" | "capabilities";
 export type StepRecord = {
   step: Step;
   state: "pending" | "running" | "passed" | "blocked";
   elapsed_ms: number;
   reason?: string;
   next?: string;
+  command_key?: keyof ReturnType<typeof workerWizardForm>["commands"];
 };
 export const initialSteps = (): StepRecord[] =>
-  [...WORKER_STEPS, "capabilities" as const].map((step) => ({
-    step,
-    state: "pending",
-    elapsed_ms: 0,
-  }));
+  ["configuration" as const, ...WORKER_STEPS, "capabilities" as const].map(
+    (step) => ({
+      step,
+      state: "pending",
+      elapsed_ms: 0,
+    }),
+  );
 export type Draft = ReturnType<typeof workerWizardForm>;
 function registry(store: Store, tx: ReadRepositories, draft: Draft) {
   const w = draft.config.worker,
@@ -50,6 +53,14 @@ function registry(store: Store, tx: ReadRepositories, draft: Draft) {
     label: peers[0]?.label ?? draft.label,
     registered: !!tx.machines.get(w.project_id, id),
   };
+}
+export function checkRegistryCompatibility(
+  store: Store,
+  tx: ReadRepositories,
+  draft: Draft,
+) {
+  if (!registry(store, tx, draft).compatible)
+    throw new WorkerOnboardingError("worker_identity_conflict");
 }
 export function isRegistered(store: Store, tx: ReadRepositories, draft: Draft) {
   const r = registry(store, tx, draft);
@@ -137,7 +148,10 @@ export function checkWizard(options: {
       });
     },
   );
-  let failed = "configuration";
+  let failed: Step = "configuration";
+  let failure:
+    | { step: Step; elapsed_ms: number; reason: string; next: string }
+    | undefined;
   const done = checks.execute(
     job,
     async (progress) => {
@@ -145,25 +159,45 @@ export function checkWizard(options: {
         signal.throwIfAborted();
         if (authorize() !== member) throw new Error("authorization changed");
       };
-      validate();
-      const current = parseWorkerOnboarding(
-        readOnboardingYaml(
-          join(host.root, `worker-${machine}-${project}.yaml`),
-        ),
-        host.dataDir,
-      );
-      if (current.digest !== config.digest)
-        throw new WorkerOnboardingError("worker_config_changed");
-      const old = workerOnboardingStatus(host.root, project, machine);
       const record = (step: Step) => {
         const found = steps.find((s) => s.step === step);
         if (!found) throw new Error("missing wizard step");
         return found;
       };
       let start = 0;
+      const end = (
+        step: Step,
+        passed: boolean,
+        reason: string,
+        next?: string,
+      ) => {
+        const elapsed_ms = Math.round(performance.now() - start);
+        Object.assign(record(step), {
+          state: passed ? "passed" : "blocked",
+          elapsed_ms,
+          reason,
+          next,
+          command_key: !passed && step === "helpers" ? "helpers" : undefined,
+        });
+        if (!passed)
+          failure = {
+            step,
+            elapsed_ms,
+            reason,
+            next:
+              step === "configuration"
+                ? "核对当前配置与绑定，重新预览并确认。"
+                : step === "helpers"
+                  ? "使用向导的 helper 命令；已有文件不一致时停下核对。"
+                  : "核对向导中的失败步骤和修复建议。",
+          };
+      };
       const begin = (step: Step) => {
-        validate();
-        progress(step);
+        if (
+          step !== "configuration" &&
+          record("configuration").state === "running"
+        )
+          end("configuration", true, "ok");
         failed = step;
         start = performance.now();
         Object.assign(record(step), {
@@ -171,46 +205,53 @@ export function checkWizard(options: {
           elapsed_ms: 0,
           reason: undefined,
           next: undefined,
+          command_key: undefined,
         });
+        progress(step);
+        validate();
       };
-      const end = (
-        step: Step,
-        passed: boolean,
-        reason: string,
-        next?: string,
-      ) => {
-        Object.assign(record(step), {
-          state: passed ? "passed" : "blocked",
-          elapsed_ms: Math.round(performance.now() - start),
-          reason,
-          next,
-        });
-      };
-      const passed = await onboardWorker({
-        config,
-        configRoot: host.root,
-        dataDir: host.dataDir,
-        mode: old ? "resume" : "add",
-        ...(old &&
-        old.digest === options.priorDigest &&
-        old.digest !== config.digest
-          ? { confirmConfig: config.digest }
-          : {}),
-        completed: WORKER_STEPS.filter((key) =>
-          steps.some((s) => s.step === key && s.state === "passed"),
-        ),
-        registration: async (create) =>
-          store.uow.run((tx) => {
-            authorize(tx);
-            return registration(store, tx, clock, draft, create, limit);
-          }),
-        ...(host.probe ? { probe: host.probe } : {}),
-        beforeStep: begin,
-        report: (step, state, reason, next) =>
-          end(step, state === "passed", reason, next),
-      });
-      if (passed) begin("capabilities");
       try {
+        begin("configuration");
+        const current = parseWorkerOnboarding(
+          readOnboardingYaml(
+            join(host.root, `worker-${machine}-${project}.yaml`),
+          ),
+          host.dataDir,
+        );
+        if (current.digest !== config.digest)
+          throw new WorkerOnboardingError("worker_config_changed");
+        const old = workerOnboardingStatus(host.root, project, machine);
+        const passed = await onboardWorker({
+          config,
+          configRoot: host.root,
+          dataDir: host.dataDir,
+          mode: old ? "resume" : "add",
+          ...(old &&
+          old.digest === options.priorDigest &&
+          old.digest !== config.digest
+            ? { confirmConfig: config.digest }
+            : {}),
+          completed: WORKER_STEPS.filter((key) =>
+            steps.some((s) => s.step === key && s.state === "passed"),
+          ),
+          registration: async (create) =>
+            store.uow.run((tx) => {
+              authorize(tx);
+              return registration(store, tx, clock, draft, create, limit);
+            }),
+          ...(host.probe ? { probe: host.probe } : {}),
+          beforeStep: begin,
+          report: (step, state, reason, next) =>
+            end(
+              step,
+              state === "passed",
+              reason,
+              step === "helpers" && state === "blocked"
+                ? "请使用向导的 helper 安装命令；若已有文件不同，请停下核对版本，不要覆盖。"
+                : next,
+            ),
+        });
+        if (passed) begin("capabilities");
         validate();
         await (host.refresh ?? refreshWorkerObservations)(
           store,
@@ -219,18 +260,30 @@ export function checkWizard(options: {
           host.env,
           { signal },
         );
+        if (passed) end("capabilities", true, "ok");
+        return passed;
       } catch (error) {
-        if (passed)
+        // Never leave the active phase pending/running or publish raw backend exceptions.
+        if (!failure) {
+          const reason =
+            error instanceof WorkerOnboardingError
+              ? error.code
+              : failed === "capabilities"
+                ? "worker_capability_check_failed"
+                : "worker_operation_failed";
           end(
-            "capabilities",
+            failed,
             false,
-            "worker_capability_check_failed",
-            "核对已登记的平台与能力采样后重试。",
+            reason,
+            failed === "configuration"
+              ? "核对当前接入配置和机器绑定，重新预览并确认后再检查。"
+              : failed === "capabilities"
+                ? "核对已登记的平台与能力采样后重试。"
+                : "核对会话权限与主机状态后重试。",
           );
+        }
         throw error;
       }
-      if (passed) end("capabilities", true, "ok");
-      return passed;
     },
     (ok) => ({
       status: ok ? "passed" : "failed",
@@ -241,7 +294,12 @@ export function checkWizard(options: {
         tx,
         clock,
         "worker_wizard_check_finished",
-        { ...j, wizard_id: id, member_id: member },
+        {
+          ...j,
+          wizard_id: id,
+          member_id: member,
+          ...(failure ? { failure } : {}),
+        },
         "system",
       ),
   );

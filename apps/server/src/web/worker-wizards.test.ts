@@ -74,7 +74,15 @@ function wizard(response: ResponseBody, status = 200) {
         id: string;
         phase: string;
         preview: { preview_id: string; diff: unknown[] };
-        steps: { step: string; state: string; elapsed_ms: number }[];
+        commands: Record<string, string>;
+        steps: {
+          step: string;
+          state: string;
+          elapsed_ms: number;
+          next?: string;
+          reason?: string;
+          command_key?: string;
+        }[];
       };
     }
   ).wizard;
@@ -311,6 +319,89 @@ test.runIf(process.platform === "linux")(
       );
     } finally {
       gate.resolve();
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "changed confirmed configuration blocks preflight visibly and records the same failure in the audit",
+  async () => {
+    const probe = vi.fn<WorkerProbeRunner>(async () => true),
+      f = await fixture(probe);
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const s = wizard(await f.post("", form), 201);
+      const path = `/${s.id}`;
+      wizard(
+        await f.post(`${path}/confirm`, { preview_id: s.preview.preview_id }),
+      );
+      const file = join(
+        f.root,
+        `worker-${form.machine_id}-${f.project.project_id}.yaml`,
+      );
+      writeFileSync(file, `${readFileSync(file, "utf8")}\ntimeout_ms: 4500\n`);
+      expect((await f.post(`${path}/run`)).status).toBe(202);
+      await vi.waitFor(async () => {
+        const result = wizard(await f.call(f.base + path));
+        expect(result.phase).toBe("failed");
+        const step = result.steps.find((s) => s.step === "configuration");
+        expect(step).toMatchObject({
+          state: "blocked",
+          reason: "worker_config_changed",
+          elapsed_ms: expect.any(Number),
+          next: expect.stringContaining("重新预览"),
+        });
+        const audit = f
+          .store()
+          .uow.read((tx) => tx.global_events.listAfter(0))
+          .find((e) => e.type === "worker_wizard_check_finished");
+        expect(audit?.payload).toMatchObject({
+          failed_steps: ["configuration"],
+          failure: {
+            step: "configuration",
+            reason: "worker_config_changed",
+            elapsed_ms: step?.elapsed_ms,
+            next: expect.stringContaining("重新预览"),
+          },
+        });
+      });
+      expect(probe).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux").each(["linux", "macos"])(
+  "%s: a blocked helper step refers to the guarded command without supplying a second installer",
+  async (os) => {
+    const f = await fixture(async (step) => step !== "helpers");
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const s = wizard(await f.post("", { ...form, os, arch: "arm64" }), 201),
+        path = `/${s.id}`;
+      wizard(
+        await f.post(`${path}/confirm`, { preview_id: s.preview.preview_id }),
+      );
+      expect((await f.post(`${path}/run`)).status).toBe(202);
+      await vi.waitFor(async () => {
+        const result = wizard(await f.call(f.base + path));
+        expect(result.phase).toBe("failed");
+        const step = result.steps.find((s) => s.step === "helpers");
+        expect(step).toMatchObject({
+          state: "blocked",
+          command_key: "helpers",
+          next: expect.stringContaining("不要覆盖"),
+        });
+        expect(step?.next).not.toContain("sudo");
+        expect(result.commands[String(step?.command_key)]).toContain(
+          "sudo cmp -s",
+        );
+      });
+    } finally {
       await f.close();
     }
   },
