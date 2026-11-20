@@ -1,6 +1,8 @@
 import { expect, test, vi } from "vitest";
 import {
   activateEmployee,
+  autoAssignProducer,
+  type CommandState,
   createEmployee,
   deactivateEmployee,
   type Employee,
@@ -14,7 +16,15 @@ import {
   type UpdateEmployeeInput,
   updateEmployee,
 } from "../index.js";
-import { actor, now, ports as projectPorts, value } from "./test-fixtures.js";
+import {
+  actor,
+  assignment,
+  fixture,
+  id,
+  now,
+  ports as projectPorts,
+  value,
+} from "./test-fixtures.js";
 
 const human = { kind: "human" } as const;
 const input = { name: "诸葛亮", title: "产品经理", role_id: "pm" };
@@ -289,12 +299,12 @@ test("length limits count Unicode characters and allow empty optional fields", (
   expect(created().launch_profile_ref).toBeNull();
 });
 
-test("updates cannot change role, identity, status or audit fields; missing and malformed IDs fail", () => {
+test("updates cannot change identity, status or audit fields; missing and malformed IDs fail", () => {
   const p = ports();
   const employee = created(p);
   for (const patch of [
     {},
-    { role_id: "coder" },
+    { updated_at: "tomorrow" },
     { id: "E-2" },
     { status: "inactive" },
     { created_at: "yesterday" },
@@ -360,3 +370,120 @@ test.each([
     rejects(activateEmployee([first, inactive], human, inactive.id, p));
   },
 );
+
+const idle = {
+  role_enabled: true,
+  has_unreleased_assignment: false,
+  has_unfinished_run: false,
+};
+test("a transfer keeps one identity and audits the owner and both roles; only new assignments use the new role", () => {
+  const p = { ...ports(), roleTransferFacts: vi.fn(() => idle) };
+  const original = created(p);
+  const transfer = value(
+    updateEmployee(
+      [original],
+      { ...human, member_id: id("member", 1) },
+      original.id,
+      { role_id: "coder" },
+      p,
+    ),
+  );
+  expect(p.roleTransferFacts).toHaveBeenCalledWith(original.id, "coder");
+  expect(transfer.employees).toEqual([{ ...original, role_id: "coder" }]);
+  expect(transfer.events).toHaveLength(1);
+  expect(transfer.events[0]).toMatchObject({
+    type: "employee_role_changed",
+    actor: human,
+    payload: {
+      changed_by_member_id: "M-1",
+      from_role_id: "pm",
+      to_role_id: "coder",
+      employee: { id: original.id },
+    },
+  });
+  const base = fixture();
+  const history = {
+    ...assignment(99, "pm"),
+    status: "released" as const,
+    employee_id: original.id,
+  };
+  const state: CommandState = {
+    ...base,
+    employees: transfer.employees,
+    assignments: [history],
+    runs: [],
+    cards: base.cards.map((c) => ({ ...c, status: "todo" })),
+    work_items: base.work_items.map(({ assignment_id: _unused, ...w }) =>
+      w.kind === "produce" ? { ...w, status: "todo" } : w,
+    ),
+  };
+  const auto = (s: CommandState) =>
+    value(
+      autoAssignProducer(
+        s,
+        { kind: "system", project_id: s.project_id },
+        { work_item_id: id("work_item", 1) },
+        projectPorts(),
+      ),
+    ).data;
+  expect(auto({ ...state, employees: [original] })).toBeNull();
+  expect(auto(state)).toMatchObject({
+    employee_id: original.id,
+    role_id: "coder",
+  });
+  expect(state.assignments).toEqual([{ ...history, role_id: "pm" }]);
+});
+
+test.each([
+  [{ ...idle, role_enabled: false }, "validation_failed"],
+  [{ ...idle, has_unreleased_assignment: true }, "invariant_violation"],
+  [{ ...idle, has_unfinished_run: true }, "invariant_violation"],
+] as const)(
+  "a transfer fails atomically for global facts %j",
+  (facts, code) => {
+    const p = { ...ports(), roleTransferFacts: vi.fn(() => facts) };
+    const employee = created(p);
+    rejects(
+      updateEmployee(
+        [employee],
+        human,
+        employee.id,
+        { role_id: "coder", title: "新职位" },
+        p,
+      ),
+      code,
+    );
+    expect(p.ids.nextEventSequence).toHaveBeenCalledTimes(1);
+    expect(employee).toMatchObject(input);
+    p.roleTransferFacts.mockClear();
+    const same = value(
+      updateEmployee(
+        [employee],
+        human,
+        employee.id,
+        { title: "新职位", role_id: employee.role_id },
+        p,
+      ),
+    );
+    expect(same.events[0]?.type).toBe("employee_updated");
+    expect(p.roleTransferFacts).not.toHaveBeenCalled();
+  },
+);
+
+test("a transfer requires trusted global facts and a human actor", () => {
+  const p = ports();
+  const employee = created(p);
+  rejects(
+    updateEmployee([employee], human, employee.id, { role_id: "coder" }, p),
+  );
+  rejects(
+    updateEmployee(
+      [employee],
+      actor(),
+      employee.id,
+      { role_id: "coder" },
+      { ...p, roleTransferFacts: () => idle },
+    ),
+    "forbidden_tool",
+  );
+});
