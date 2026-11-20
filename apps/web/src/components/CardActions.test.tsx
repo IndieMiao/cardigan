@@ -795,6 +795,11 @@ test("story detail creates a child from the contextual menu with the parent pref
     />,
   );
   await selectMenu(/^更多$/, "新建子卡");
+  const firstDialog = await screen.findByRole("dialog", { name: "新建子卡" });
+  fireEvent.click(within(firstDialog).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(createCard).not.toHaveBeenCalled();
+  await selectMenu(/^更多$/, "新建子卡");
   const dialog = within(
     await screen.findByRole("dialog", { name: "新建子卡" }),
   );

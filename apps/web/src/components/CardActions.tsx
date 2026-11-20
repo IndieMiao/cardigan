@@ -19,7 +19,7 @@ import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
-import { Input } from "./ui/input.js";
+import { Input, RadioChoice } from "./ui/input.js";
 import { Textarea } from "./ui/textarea.js";
 
 type Mode = "edit" | "cancel" | "supersede";
@@ -494,15 +494,14 @@ function CardActionForm({
                   ))}
                 </ul>
                 {(["detach", "cancel"] as const).map((action) => (
-                  <label key={action}>
-                    <Input
-                      type="radio"
-                      name="story-children"
-                      checked={confirmed?.action === action}
-                      onChange={() => setChoice({ action, ids: childIds })}
-                    />
+                  <RadioChoice
+                    key={action}
+                    name="story-children"
+                    checked={confirmed?.action === action}
+                    onChange={() => setChoice({ action, ids: childIds })}
+                  >
                     {action === "detach" ? "保留并脱离需求卡" : "一并取消"}
-                  </label>
+                  </RadioChoice>
                 ))}
               </fieldset>
             )}

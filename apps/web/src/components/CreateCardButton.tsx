@@ -9,6 +9,7 @@ import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogTitle,
   DialogTrigger,
@@ -83,6 +84,7 @@ export function CreateCardDialog({
         </DialogTrigger>
       )}
       <DialogContent
+        inlineFeedback
         aria-describedby={undefined}
         onCloseAutoFocus={(event) => {
           if (restoreFocus) {
@@ -208,9 +210,14 @@ export function CreateCardDialog({
                 required={selected?.require_acceptance_criteria}
               />
             </label>
-            <Button type="submit" disabled={!selected}>
-              创建
-            </Button>
+            <div className="card-action-buttons">
+              <Button type="submit" disabled={!selected}>
+                创建
+              </Button>
+              <DialogClose asChild>
+                <Button variant="ghost">取消</Button>
+              </DialogClose>
+            </div>
           </fieldset>
           <RequestFeedback
             interactive

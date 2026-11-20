@@ -53,12 +53,23 @@ export function DialogDescription({
 }
 export function DialogContent({
   children,
+  inlineFeedback = false,
+  className,
   ...props
-}: React.ComponentProps<typeof DialogPanel>) {
+}: React.ComponentProps<typeof DialogPanel> & { inlineFeedback?: boolean }) {
   return (
     <Portal>
       <DialogOverlay />
-      <DialogPanel {...props}>{children}</DialogPanel>
+      <DialogPanel
+        {...props}
+        className={cn(
+          inlineFeedback &&
+            "[&>.request-feedback-region]:static [&>.request-feedback-region]:max-w-none [&>.request-feedback-region]:items-stretch",
+          className,
+        )}
+      >
+        {children}
+      </DialogPanel>
     </Portal>
   );
 }
