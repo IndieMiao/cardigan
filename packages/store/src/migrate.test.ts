@@ -167,7 +167,8 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 42, name: "bell_continuation" },
       { version: 43, name: "review_wake_boundary" },
       { version: 44, name: "launch_generations" },
-      { version: 45, name: "accepted_browser_path" },
+      { version: 45, name: "machine_resource_leases" },
+      { version: 46, name: "accepted_browser_path" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

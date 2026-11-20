@@ -485,9 +485,15 @@ export class HerdrRuntime implements Runtime {
             doorbell,
           ],
           options?.before_send ?? (() => true),
-          guard &&
+          (guard || options?.resource_preflight) &&
             (async (raw) => {
               try {
+                if (
+                  options?.resource_preflight &&
+                  !(await options.resource_preflight())
+                )
+                  return false;
+                if (!guard) return true;
                 // Read through the reserved slot, not the queue (capacity may be one).
                 const terminalState = async () => {
                   const t: Terminal = JSON.parse(
