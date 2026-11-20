@@ -35,6 +35,7 @@ import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { prechecks, precheckView } from "../precheck.js";
 import { crossCardRead } from "../preferences.js";
+import { providerIncidents } from "../provider-start.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
@@ -750,7 +751,7 @@ function selectNeedsYou<T>(
   now: string | undefined,
   options: NeedsYouOptions,
   view: (q: Decision) => T,
-  decisionDetails = true,
+  includeDetails = true,
 ) {
   const state = d.state,
     actor = d.actor;
@@ -888,6 +889,13 @@ function selectNeedsYou<T>(
           },
         }
       : {}),
+    provider_incidents:
+      includeDetails && includes("actions")
+        ? [...providerIncidents(state.events)].map(([profile, incident]) => ({
+            profile,
+            paused: !!incident.retry_at,
+          }))
+        : [],
     incidents: !includes("actions")
       ? []
       : d
@@ -968,7 +976,7 @@ function selectNeedsYou<T>(
               !mergeConfirmationWaitingForCheck(state, q) ||
               !!mergeCheckEndedWithoutPass(state, q),
         ),
-      { details: decisionDetails },
+      { details: includeDetails },
     ).map(view),
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.

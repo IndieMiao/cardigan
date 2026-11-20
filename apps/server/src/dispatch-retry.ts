@@ -11,9 +11,11 @@ import {
   dispatchRecoveryQueuedAt,
   dispatchRecoveryUsed,
   dispatchTargetWaitMs,
+  type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
   type ProjectId,
+  providerStartFailed,
   type Run,
   type RunId,
   type Runtime,
@@ -36,6 +38,7 @@ import {
   crossRepairSendBoundary,
   deferIfTargetWait,
   failAutomaticContextRun,
+  type HarnessActivityInspection,
   type MachineLeases,
   refreshTargetWait,
   testReviewRunPrompt,
@@ -72,6 +75,28 @@ import {
   legacyRepairWake,
 } from "./legacy-repair-wake.js";
 
+interface ProviderWatch {
+  inspectHarnessActivity?: (
+    project: ProjectId,
+    target: Assignment["id"],
+  ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
+  providerFailureThreshold?: number;
+  providerCooldownMs?: number;
+}
+async function providerSample(
+  options: ProviderWatch,
+  project: ProjectId,
+  id: Assignment["id"],
+) {
+  try {
+    const row = (await options.inspectHarnessActivity?.(project, id))?.get(id);
+    return row && (row.status === "fresh" || row.status === "stale")
+      ? row.startupFailure
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 export interface DispatchRecoveryPolicy {
   timeoutMs: number;
   maxRetries: number;
@@ -112,7 +137,7 @@ function failedRecoveryRuns(
  * the same domain rules and the same stall escalation.
  */
 export function dispatchRecovery(
-  options: {
+  options: ProviderWatch & {
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
@@ -192,9 +217,46 @@ export function dispatchRecovery(
   const stopRun = async (
     runId: RunId,
     reason: NonNullable<Run["dispatch_stop"]>["reason"],
+    initialSample?: HarnessActivity,
   ) => {
     if (failAutomaticContextRun(store, project, runId, reason, clock))
       return "not_exited" as const;
+    // On restart/confirmed exit, preserve provider attribution instead of spending
+    // a generic recovery. Leave an early exit to the dispatch timeout path.
+    if (
+      options.inspectHarnessActivity &&
+      ["server_restart", "runtime_exited"].includes(reason)
+    ) {
+      const state = store.uow.read((tx) => loadState(tx, project));
+      const run = state.runs.find((r) => r.id === runId);
+      if (run?.launch_profile_ref && !run.started_at && !run.dispatch_stop) {
+        initialSample = await providerSample(
+          options,
+          project,
+          run.assignment_id,
+        );
+        if (providerStartFailed(state, run, initialSample, clock.now(), 0)) {
+          if (
+            !providerStartFailed(
+              state,
+              run,
+              initialSample,
+              clock.now(),
+              policy.timeoutMs,
+            )
+          )
+            return "provider_wait" as const;
+          reason = "provider_unavailable";
+        }
+      }
+    }
+    const owner =
+      reason === "provider_unavailable"
+        ? store.uow.read((tx) => tx.runs.get(project, runId)?.assignment_id)
+        : undefined;
+    let sample =
+      initialSample ??
+      (owner && (await providerSample(options, project, owner)));
     return runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
@@ -212,6 +274,8 @@ export function dispatchRecovery(
             run_id: runId,
             reason,
             lease_ms: policy.leaseMs,
+            provider_sample: sample,
+            timeout_ms: policy.timeoutMs,
           },
           ports,
         );
@@ -246,6 +310,13 @@ export function dispatchRecovery(
           },
           ports,
         ),
+      ...(owner
+        ? {
+            beforeStart: async () => {
+              sample = await providerSample(options, project, owner);
+            },
+          }
+        : {}),
       start: (state, ports, run, stop) =>
         startDispatchStop(
           state,
@@ -253,6 +324,8 @@ export function dispatchRecovery(
           {
             run_id: run.id,
             attempt_id: stop.attempt_id,
+            provider_sample: sample,
+            timeout_ms: policy.timeoutMs,
           },
           ports,
         ),
@@ -266,6 +339,12 @@ export function dispatchRecovery(
             failed_attempts: 0,
             max_failures: policy.maxRetries + 1,
             stop_id: stop.attempt_id,
+            ...(options.providerFailureThreshold
+              ? { provider_failure_threshold: options.providerFailureThreshold }
+              : {}),
+            ...(options.providerCooldownMs
+              ? { provider_cooldown_ms: options.providerCooldownMs }
+              : {}),
             ...(exited
               ? { stopped_runtime: stop.runtime_ref }
               : { stop_failed: true }),
@@ -282,7 +361,7 @@ export function dispatchRecovery(
 
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
 export async function retryDispatchedRuns(
-  options: {
+  options: ProviderWatch & {
     leases?: MachineLeases;
     loadState?: StateLoader;
     store: Store;
@@ -329,9 +408,13 @@ export async function retryDispatchedRuns(
     (run) =>
       run.dispatch_stop ||
       c3ExitCandidate(candidates, run) ||
+      (run.status === "unknown" &&
+        !run.started_at &&
+        !!run.launch_profile_ref) ||
       run.status === "dispatched" ||
       run.status === "queued" ||
       (!run.started_at &&
+        run.failure_reason !== "provider_unavailable" &&
         ["cancelled", "failed"].includes(run.status) &&
         failures.has(run.id)),
   );
@@ -408,6 +491,38 @@ export async function retryDispatchedRuns(
         );
       });
     }
+    if (
+      owner &&
+      options.inspectHarnessActivity &&
+      candidate.launch_profile_ref &&
+      !candidate.started_at &&
+      ["dispatched", "unknown"].includes(candidate.status)
+    ) {
+      const since = dispatchedAt(candidates, candidate);
+      if (
+        since &&
+        Date.parse(clock.now()) -
+          Date.parse(since) -
+          dispatchTargetWaitMs(candidate, clock.now()) >=
+          policy.timeoutMs &&
+        !runTargetWaitReason(candidates, owner, candidate)
+      ) {
+        const sample = await providerSample(options, project, owner.id);
+        if (options.closing?.()) return;
+        if (
+          providerStartFailed(
+            read(),
+            candidate,
+            sample,
+            clock.now(),
+            policy.timeoutMs,
+          )
+        ) {
+          await stopRun(candidate.id, "provider_unavailable", sample);
+          continue;
+        }
+      }
+    }
     if (c3ExitCandidate(read(), candidate)) {
       const ref = candidate.recovery_runtime;
       const observed =
@@ -465,7 +580,8 @@ export async function retryDispatchedRuns(
         stoppedByHuman(state.events, candidate.assignment_id) ||
         hostOpsPending(state.events, candidate.assignment_id) ||
         // C-54 owns capacity waits; a healthy queued recovery must wait its turn.
-        ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
+        run.queue_reason === "concurrency_limit" ||
+        run.queue_reason === "provider_unavailable" ||
         a?.status !== "active" ||
         !hasRunTarget(a, state) ||
         unfinishedBellAttempts(store.database, project, a.id).length > 0 ||

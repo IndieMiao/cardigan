@@ -1,6 +1,8 @@
 import type { Actor, Run } from "../entities.js";
+import type { HarnessActivity } from "../harness-activity.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import { providerStartFailed } from "../provider-start.js";
 import { c3ExitCandidate } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { reviewRunWakeDisposition } from "../shared-review-wake.js";
@@ -34,6 +36,8 @@ export function claimDispatchStop(
   p: {
     run_id: RunId;
     lease_ms: number;
+    provider_sample?: HarnessActivity | undefined;
+    timeout_ms?: number;
     reason: NonNullable<Run["dispatch_stop"]>["reason"];
   },
   ports: CommandPorts,
@@ -51,6 +55,20 @@ export function claimDispatchStop(
     const exitRecovery = (old?.reason ?? p.reason) === "runtime_exited";
     if (exitRecovery && !old?.stopping && !c3ExitCandidate(state, run)) {
       if (old) clear(d, run, "recovery_target_unavailable");
+      return;
+    }
+    if (
+      (old?.reason ?? p.reason) === "provider_unavailable" &&
+      !old?.stopping &&
+      !providerStartFailed(
+        state,
+        run,
+        p.provider_sample,
+        d.now,
+        p.timeout_ms ?? Infinity,
+      )
+    ) {
+      if (old) clear(d, run, "provider_evidence_changed");
       return;
     }
     if (run.inactivity_stop) return;
@@ -80,7 +98,10 @@ export function claimDispatchStop(
         ? // C-247: a startup check may also take a Run the monitor already
           // marked unknown; it still has to prove exit before cancelling.
           run.status !== "dispatched" &&
-          !(p.reason === "server_restart" && run.status === "unknown")
+          !(
+            ["server_restart", "provider_unavailable"].includes(p.reason) &&
+            run.status === "unknown"
+          )
         : !["dispatched", "unknown"].includes(run.status)) ||
         run.started_at ||
         a.status !== "active" ||
@@ -114,7 +135,12 @@ export function claimDispatchStop(
 export function startDispatchStop(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId; attempt_id: string },
+  p: {
+    run_id: RunId;
+    attempt_id: string;
+    provider_sample?: HarnessActivity | undefined;
+    timeout_ms?: number;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_dispatch_stop", ports, (d) => {
@@ -148,6 +174,20 @@ export function startDispatchStop(
           closed)
     ) {
       clear(d, run, "activity_resumed");
+      return false;
+    }
+    if (
+      !stop.stopping &&
+      stop.reason === "provider_unavailable" &&
+      !providerStartFailed(
+        state,
+        run,
+        p.provider_sample,
+        d.now,
+        p.timeout_ms ?? Infinity,
+      )
+    ) {
+      clear(d, run, "provider_evidence_changed");
       return false;
     }
     if (!stop.stopping) {

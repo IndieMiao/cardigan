@@ -291,7 +291,12 @@ export class HostOpsService {
         ),
         context_thresholds: contextThresholdView(state),
         sessions: sessions.map(
-          ({ observation: _observation, activity: _activity, ...view }) => view,
+          ({
+            observation: _observation,
+            activity: _activity,
+            startupFailure: _startupFailure,
+            ...view
+          }) => view,
         ),
       };
     });
@@ -783,6 +788,9 @@ export class HostOpsService {
                 {
                   status: s.activity_status ?? "missing",
                   ...(s.activity ? { activity: s.activity } : {}),
+                  ...(s.startupFailure
+                    ? { startupFailure: s.startupFailure }
+                    : {}),
                 },
               ] as const,
             ]

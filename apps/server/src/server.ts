@@ -727,6 +727,12 @@ async function assembleServer(
                 assignment,
               );
         },
+        ...(config.providerFailureThreshold !== undefined
+          ? { providerFailureThreshold: config.providerFailureThreshold }
+          : {}),
+        ...(config.providerCooldownMs !== undefined
+          ? { providerCooldownMs: config.providerCooldownMs }
+          : {}),
         ...options.dispatcher,
         ...((options.dispatcher.runtimeFailureLimit ??
           config.runtimeFailureLimit) === undefined
