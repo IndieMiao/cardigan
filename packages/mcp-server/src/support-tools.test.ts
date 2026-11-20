@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -11,6 +12,8 @@ import {
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import type {
   Assignment,
@@ -1780,4 +1783,198 @@ test("C-414 finish_run preserves explicit baseline waits and idempotency through
   expect(await ok(coder, "finish_run", params, "wait-baseline-once")).toEqual(
     result,
   );
+});
+
+const streamTarget = {
+  card_id,
+  mime: "application/vnd.android.package-archive",
+  original_filename: "fixture.apk",
+  kind: "evidence",
+  attach_to: upload.attach_to,
+};
+const grantArtifact = (size: number, digest: string, key: string) =>
+  ok<{ upload_query: string }>(
+    coder,
+    "upload_attachment",
+    { ...streamTarget, artifact_size: size, sha256: digest },
+    key,
+  );
+const binaryHeaders = (bearer: string) => ({
+  authorization: `Bearer ${bearer}`,
+  "content-type": "application/octet-stream",
+});
+
+test("streamed artifact: single-use authenticated transport, provenance, verification and delivery reference", async () => {
+  const digest = sha256(content),
+    key = "package-upload";
+  const { upload_query } = await grantArtifact(content.length, digest, key);
+  const post = (bearer: string) =>
+    fetch(server.url + upload_query, {
+      method: "POST",
+      headers: binaryHeaders(bearer),
+      body: content,
+    });
+  expect((await post(token)).status).toBe(404);
+  const response = await post(coderToken);
+  expect(response.status).toBe(201);
+  const a = (await response.json()) as Attachment;
+  expect(a).toMatchObject({
+    sha256: digest,
+    size: content.length,
+    streamed_artifact: { run_id: "R-1" },
+    card_id,
+    attach_to: upload.attach_to,
+  });
+  expect(await grantArtifact(content.length, digest, key)).toMatchObject({
+    id: a.id,
+  });
+  expect((await post(coderToken)).status).toBe(404);
+  expect(
+    await ok(coder, "read_attachment", {
+      attachment_id: a.id,
+      verify_sha256: digest,
+    }),
+  ).toMatchObject({ verified: true, sha256: digest });
+  const path = join(dataDir, "fixture-download.apk");
+  expect(
+    await downloadAttachment(server.url, a.id, path, coderToken),
+  ).toMatchObject({ size: a.size, sha256: digest });
+  expect(await readFile(path)).toEqual(content);
+  store.uow.run((tx) =>
+    tx.work_items.put(project_id, {
+      ...workItems,
+      assignment_id: "A-1" as never,
+      status: "in_progress",
+    }),
+  );
+  expect(
+    await ok(coder, "submit_delivery", {
+      work_item_id: workItems.id,
+      kind: "other",
+      summary: `${a.id} ${digest}`,
+      subject: { kind: "artifact_sha256", value: digest },
+      requested_verifiers: [],
+      attachments: [a.id],
+    }),
+  ).toMatchObject({ attachments: [a.id] });
+  await writeFile(join(dataDir, a.storage_path), Buffer.alloc(content.length));
+  expect(
+    code(
+      await call(coder, "read_attachment", {
+        attachment_id: a.id,
+        verify_sha256: digest,
+      }),
+    ),
+  ).toBe("validation_failed");
+});
+
+test("streamed artifact: rejected checksum and interrupted body publish no record or partial file", async () => {
+  const before = counts(),
+    digest = sha256(content);
+  let g = await grantArtifact(content.length, digest, "retry-package");
+  expect(
+    (
+      await fetch(server.url + g.upload_query, {
+        method: "POST",
+        headers: binaryHeaders(coderToken),
+        body: Buffer.alloc(content.length),
+      })
+    ).status,
+  ).toBe(400);
+  g = await grantArtifact(content.length, digest, "retry-package");
+  const req = request(server.url + g.upload_query, {
+    method: "POST",
+    headers: { ...binaryHeaders(coderToken), "content-length": content.length },
+  });
+  req.on("error", () => {});
+  req.write(content.subarray(0, 1));
+  const names = () => readdir(join(dataDir, "artifacts"));
+  await vi.waitFor(async () => expect(await names()).toHaveLength(1));
+  req.destroy();
+  await vi.waitFor(async () => expect(await names()).toEqual([]));
+  expect(counts()).toEqual(before);
+});
+
+// Regular CI exercises the same network + disk stream. Opt in to reproduce the full boundary.
+test("round trip at the configured artifact streaming boundary", async () => {
+  const chunks = process.env.CARDIGAN_TEST_2GIB === "1" ? 2048 : 12,
+    block = Buffer.alloc(1024 ** 2, 42),
+    size = chunks * block.length;
+  const hash = createHash("sha256");
+  for (let i = 0; i < chunks; i++) hash.update(block);
+  const digest = hash.digest("hex"),
+    g = await grantArtifact(size, digest, "stream-boundary");
+  const req = request(server.url + g.upload_query, {
+    method: "POST",
+    headers: { ...binaryHeaders(coderToken), "content-length": size },
+  });
+  const result = new Promise<Attachment>((resolve, reject) => {
+    req.once("error", reject);
+    req.on("response", (res) => {
+      let json = "";
+      res
+        .setEncoding("utf8")
+        .on("data", (part) => {
+          json += part;
+        })
+        .on("end", () => {
+          if (res.statusCode !== 201) reject(new Error(json));
+          else resolve(JSON.parse(json));
+        });
+    });
+  });
+  const [a] = await Promise.all([
+    result,
+    pipeline(
+      Readable.from(
+        (function* () {
+          for (let i = 0; i < chunks; i++) yield block;
+        })(),
+      ),
+      req,
+    ),
+  ]);
+  const res = await fetch(`${server.url}?attachment_id=${a.id}`, {
+    headers: binaryHeaders(coderToken),
+  });
+  expect(res.headers.get("x-attachment-sha256")).toBe(digest);
+  expect(res.headers.get("content-disposition")).toContain("attachment");
+  const got = createHash("sha256");
+  let bytes = 0;
+  if (!res.body) throw Error("Missing body");
+  for await (const part of res.body) {
+    got.update(part);
+    bytes += part.length;
+  }
+  expect(bytes).toBe(size);
+  expect(got.digest("hex")).toBe(digest);
+}, 180000);
+
+test("streamed artifact: token revoked during transfer cannot publish the verified file", async () => {
+  const g = await grantArtifact(
+    content.length,
+    sha256(content),
+    "revoke-package",
+  );
+  const req = request(server.url + g.upload_query, {
+    method: "POST",
+    headers: { ...binaryHeaders(coderToken), "content-length": content.length },
+  });
+  const status = new Promise<number | undefined>((resolve, reject) => {
+    req.once("error", reject);
+    req.once("response", (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+  });
+  req.write(content.subarray(0, 1));
+  const directory = join(dataDir, "artifacts");
+  await vi.waitFor(async () =>
+    expect(await readdir(directory)).toHaveLength(1),
+  );
+  store.revokeToken("tok_coder");
+  req.end(content.subarray(1));
+  expect(await status).toBe(401);
+  expect(await readdir(directory)).toEqual([]);
+  expect(counts().attachments).toBe(0);
 });

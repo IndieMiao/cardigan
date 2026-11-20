@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
 import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
@@ -124,7 +125,9 @@ export async function startMcpServer(
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
   const sink = options.log ?? stdoutLogger;
-  const tools = options.tools ?? serverTools({ ...options, log: sink });
+  const artifactUploads = new ArtifactUploads(options.dataDir, options.clock);
+  const tools =
+    options.tools ?? serverTools({ ...options, artifactUploads, log: sink });
 
   const catalogs = new Map<string, string>();
 
@@ -209,6 +212,67 @@ export async function startMcpServer(
         ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
       );
 
+    if (req.method === "POST" && url.searchParams.has("artifact_upload")) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined && req.headers.origin !== url.origin)
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      if (
+        !identity.value.actor.allowed_tools.includes("upload_attachment") ||
+        !tools.some((t) => t.name === "upload_attachment")
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      try {
+        if (url.searchParams.size !== 1)
+          throw ToolError.validation("Expected only artifact_upload");
+        const result = await artifactUploads.accept(
+          url.searchParams.get("artifact_upload") ?? "",
+          req,
+          {
+            store: options.store,
+            identity: identity.value,
+            revalidateToken: () => {
+              const token = bearerToken(req.headers.authorization);
+              const fresh = token
+                ? options.store.verifyToken(token)
+                : undefined;
+              if (
+                fresh?.id !== identity.value.token.id ||
+                !fresh.allowed_tools.includes("upload_attachment")
+              )
+                throw new ToolError("unauthorized", "Token is no longer valid");
+            },
+          },
+        );
+        res
+          .writeHead(201, { "Content-Type": "application/json" })
+          .end(JSON.stringify(result));
+      } catch (err) {
+        const safe =
+          err instanceof ToolError
+            ? err
+            : ToolError.validation(
+                "Artifact upload failed; request a new address and retry",
+              );
+        res
+          .writeHead(
+            safe.code === "not_found"
+              ? 404
+              : safe.code === "unauthorized"
+                ? 401
+                : 400,
+            { "Content-Type": "application/json" },
+          )
+          .end(JSON.stringify({ error: safe.toDomainError() }));
+      }
+      return;
+    }
     if (req.method === "GET" && url.searchParams.has("attachment_id")) {
       if (!tools.some((tool) => tool.name === "read_attachment")) {
         res.writeHead(404).end();
@@ -233,6 +297,7 @@ export async function startMcpServer(
           },
         },
         allowedHosts,
+        options.dataDir,
       );
       log({
         event: "http",
