@@ -34,17 +34,20 @@ vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
-    checkRegisteredMachine: (
-      ...[options, create, source]: Parameters<
-        typeof host.checkRegisteredMachine
-      >
-    ) =>
+    // Keep the check journal and observation writes real, but never run host tools.
+    checkRegisteredMachine: (options, create, source) =>
       host.checkRegisteredMachine(
-        { ...options, catalog: () => [] },
+        {
+          ...options,
+          probe: async (_target, _os, command) =>
+            command[0] === "node"
+              ? { ok: true, output: "v0.0.528" }
+              : { ok: false, output: "" },
+        },
         create,
         source,
       ),
-  };
+  } satisfies typeof host;
 });
 
 const TEST_PLAIN_SUMMARY = {
@@ -244,6 +247,7 @@ test("machine check reports actual remote results without a blanket field-verifi
       });
       expect(await run(["machine", "check", "worker-a"])).toBe(0);
       expect(printed()).toContain(`"launch_enabled": ${launch_enabled}`);
+      expect(printed()).toContain('"version": "0.0.528"');
     }
     check.mockResolvedValueOnce({
       ok: true,
