@@ -223,6 +223,8 @@ export function ExecutionPage({
           return (
             matchesView(a, view) &&
             (!filters.machine || machine === filters.machine) &&
+            // C-518: a usage link names one employee by id, not by search text.
+            (!filters.employee || a.employee?.id === filters.employee) &&
             (!query ||
               [
                 a.id,
@@ -266,6 +268,13 @@ export function ExecutionPage({
       value,
       label: machineLabel(value, data?.machines ?? []),
     }));
+  const employeeOptions = [
+    ...new Map(
+      (data?.assignments ?? []).flatMap((a) =>
+        a.employee ? [[a.employee.id, a.employee.name] as const] : [],
+      ),
+    ),
+  ].map(([value, label]) => ({ value, label }));
   const rowProps = (assignment: ExecutionAssignment): RowProps => ({
     a: assignment,
     run: latestRun(assignment.id),
@@ -320,6 +329,7 @@ export function ExecutionPage({
           filters={{ ...filters, view }}
           onFilterChange={setFilters}
           machineOptions={machineOptions}
+          employeeOptions={employeeOptions}
           display={display}
           onDisplayChange={(next) => {
             if (next.groupBy !== display.groupBy) setCollapsed(new Set());

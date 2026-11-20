@@ -1688,6 +1688,7 @@ export class MergeChecks {
                   ),
               }
             : {}),
+          resetFailureLog: (name) => log?.resetOutput(name),
           onOutput: (name, text) => log?.append(name, text),
         },
         (error) => this.report(error),
@@ -1820,7 +1821,10 @@ export class MergeChecks {
     };
     try {
       finished = log
-        ? await log.finish(result)
+        ? await log.finish(
+            result,
+            executedOn?.type === "github" ? bound : undefined,
+          )
         : {
             ...result,
             summary: "检查日志无法创建，检查未执行",

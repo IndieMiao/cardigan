@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-518 设置页“模型”：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c518-capture.mjs <新输出目录>`（仓库根目录运行）。设 `C518_BASELINE_REF=<基线提交>` 加载该提交的设置页、角色面板、api 与测试夹具，只截改前的角色面板与卡片列表；再设 `C518_BEFORE=<改前目录>` 运行改后，统计同名截图差异像素。合成数据为 `src/testing/launch-settings-fixture.ts`（4 个启动配置、3 个 provider、3 个角色引用和 2 个员工引用，只有虚构键名，没有密钥值）与 `settings-panels-data.ts`，固定时钟 2026-01-01，非生产规模，不连接业务服务。覆盖 1440/390 亮暗：模型列表、键盘打开详情（含使用者表）、未通过检查与未设置密钥、角色引用跳转到角色详情（关闭后去掉链接参数）、无数据、读取失败、加载中，并输出与角色面板和卡片列表同宽同主题的并排图与 `measurements.json`；断言无横向溢出、详情无写入控件、Esc 后焦点回到行按钮。
+
 C-463 卡片详情抽屉宽度与加载占位：`CHROMIUM_PATH=<本机 Chromium> pnpm exec node apps/web/test-support/c463-drawer-width.mjs <新输出目录>`（仓库根目录运行）。固定内存夹具 3 张合成卡片，详情请求挂起到脚本放行，从卡片列表真实点击打开抽屉（不存在的 C-404 走同一抽屉路由）；点击前在页面内安装 MutationObserver（抽屉插入后、首次绘制前）和逐帧 requestAnimationFrame 采样，记录每一帧抽屉宽度、加载占位和内容状态。1440/390、亮暗下覆盖首次、重复、换卡和空内容，断言插入与首个绘制帧即有占位、所有帧宽度等于 min(760px, 视口)、占位与内容不同时出现、最终为内容或“找不到卡片”，且无横向溢出。输出加载中/加载后/空内容/卡片页截图和 `measurements.json`。设 `C463_BASELINE_REF=<基线提交>` 加载该提交的样式与详情/列表页组件，只采样截图不断言，用作改前对照。只启动本地 Vite，不连接业务服务。
 
 C-426 / Q-849 正文弱化回归：`CHROMIUM_PATH=<本机 Chromium> pnpm --filter @cardigan/web exec node test-support/prose-layout.mjs <新输出目录>`。使用真实 App、Timeline、统一主题和固定内存夹具（1 张卡、7 条评论/指令、2 个工作项，固定时钟 2026-01-01，无随机种子，非生产规模），核对 390/768/1440、亮暗、抽屉/完整页/非详情上下文共 18 组。断言实际段落的颜色、字号、行高与 AA 对比度，覆盖长评论/指令、159/160 个 Unicode 字符、空白和结构化内容；输出 12 张当前截图及绑定 HEAD/工作区状态的 measurements.json。只启动本地 Vite，不连接业务服务。此脚本不替代五标签布局、键盘交互及 axe 的正式界面验收。
