@@ -132,7 +132,12 @@ export class ArtifactUploads {
         "Append upload_query to the configured MCP URL. Send raw bytes with this session Bearer, no redirects. Use the returned attachment id and sha256 as evidence.",
     };
   }
-  async accept(id: string, req: IncomingMessage, ctx: ToolContext) {
+  async accept(
+    id: string,
+    req: IncomingMessage,
+    ctx: ToolContext,
+    noteProgress: () => void,
+  ) {
     const g = this.grants.get(id);
     if (
       !g ||
@@ -152,7 +157,7 @@ export class ArtifactUploads {
       )
         throw ToolError.validation("Invalid artifact content type or length");
       const receipt = await prepareStreamedArtifact(g.run, () =>
-        receiveArtifact(req, this.dir, p.artifact_size, p.sha256),
+        receiveArtifact(req, this.dir, p.artifact_size, p.sha256, noteProgress),
       );
       let published = false;
       try {

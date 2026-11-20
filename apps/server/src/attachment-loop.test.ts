@@ -250,68 +250,83 @@ test("stores the blob bytes and never rewrites referenced files", async () => {
   expect(readFileSync(path, "utf8")).toBe(before);
 });
 
-test("retention expires oldest unpinned artifacts per project, keeps delivery and decision evidence and records why", async () => {
-  const f = fixture(),
-    project = "p-1",
-    directory = join(f.dataDir, "artifacts");
-  mkdirSync(directory);
-  const paths: string[] = [];
-  for (let n = 1; n <= 6; n++) {
-    const blob_id = randomUUID(),
-      age = n < 4 ? 40 : 7 - n;
-    record(f.store, `F-${n}`, String(n).repeat(64));
-    paths.push(blob(directory, blob_id, age * DAY));
-    f.store.uow.run((tx) => {
-      const a = tx.attachments.get(project, `F-${n}`);
-      if (!a) throw Error("Missing attachment");
-      tx.attachments.put(project, {
-        ...a,
-        size: 10,
-        storage_path: `artifacts/${blob_id}`,
-        streamed_artifact: {
-          blob_id,
-          run_id: "R-1" as never,
-          created_at: new Date(NOW - age * DAY).toISOString(),
-        },
+test.each(["artifact", "evidence"] as const)(
+  "%s retention pins incoming delivery and decision references but not a creation basis",
+  async (kind) => {
+    const f = fixture(),
+      project = "p-1",
+      directory = join(f.dataDir, "artifacts");
+    mkdirSync(directory);
+    const paths: string[] = [];
+    for (let n = 1; n <= 6; n++) {
+      const blob_id = randomUUID(),
+        age = n < 4 ? 40 : 7 - n;
+      record(f.store, `F-${n}`, String(n).repeat(64));
+      paths.push(blob(directory, blob_id, age * DAY));
+      f.store.uow.run((tx) => {
+        const a = tx.attachments.get(project, `F-${n}`);
+        if (!a) throw Error("Missing attachment");
+        tx.attachments.put(project, {
+          ...a,
+          kind,
+          basis: "Q-2" as Decision["id"],
+          size: 10,
+          storage_path: `artifacts/${blob_id}`,
+          streamed_artifact: {
+            blob_id,
+            run_id: "R-1" as never,
+            created_at: new Date(NOW - age * DAY).toISOString(),
+          },
+        });
       });
+    }
+    f.store.uow.run((tx) => {
+      tx.deliveries.put(project, {
+        id: "D-1",
+        work_item_id: "W-1",
+        subject: { kind: "artifact_sha256", value: "2".repeat(64) },
+        attachments: ["F-1"],
+      } as Delivery);
+      tx.decisions.put(project, {
+        id: "Q-1",
+        kind: "choose",
+        attachment_ids: ["F-3"],
+      } as Decision);
+      // Q-2 authorized creating all six packages. It does not reference any.
+      tx.decisions.put(project, {
+        id: "Q-2",
+        key: "Q-2",
+        kind: "choose",
+        attachment_ids: [],
+      } as unknown as Decision);
     });
-  }
-  f.store.uow.run((tx) => {
-    tx.deliveries.put(project, {
-      id: "D-1",
-      work_item_id: "W-1",
-      subject: { kind: "artifact_sha256", value: "2".repeat(64) },
-      attachments: ["F-1"],
-    } as Delivery);
-    tx.decisions.put(project, {
-      id: "Q-1",
-      kind: "choose",
-      attachment_ids: ["F-3"],
-    } as Decision);
-  });
-  const config = join(f.dataDir, "artifact-retention.json");
-  writeFileSync(config, '{"p-1":{"days":-1,"max_bytes":2}}');
-  await expect(
-    sweepArtifacts(f.store, f.dataDir, clock.now()),
-  ).rejects.toThrow();
-  expect(paths.every((path) => existsSync(path))).toBe(true);
-  writeFileSync(config, '{"p-1":{"days":2,"max_bytes":40}}');
-  await sweepArtifacts(f.store, f.dataDir, clock.now());
-  expect(paths.map((path) => existsSync(path))).toEqual([
-    true,
-    true,
-    true,
-    false,
-    false,
-    true,
-  ]);
-  const row = (id: string) =>
-    f.store.uow.read(
-      (tx) => tx.attachments.get(project, id)?.streamed_artifact,
-    );
-  expect(row("F-4")?.expired).toEqual({ at: clock.now(), reason: "age" });
-  writeFileSync(config, '{"p-1":{"days":30,"max_bytes":1}}');
-  await sweepArtifacts(f.store, f.dataDir, clock.now());
-  expect(row("F-6")?.expired).toEqual({ at: clock.now(), reason: "capacity" });
-  expect(paths.slice(0, 3).every((path) => existsSync(path))).toBe(true);
-});
+    const config = join(f.dataDir, "artifact-retention.json");
+    writeFileSync(config, '{"p-1":{"days":-1,"max_bytes":2}}');
+    await expect(
+      sweepArtifacts(f.store, f.dataDir, clock.now()),
+    ).rejects.toThrow();
+    expect(paths.every((path) => existsSync(path))).toBe(true);
+    writeFileSync(config, '{"p-1":{"days":2,"max_bytes":40}}');
+    await sweepArtifacts(f.store, f.dataDir, clock.now());
+    expect(paths.map((path) => existsSync(path))).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+    ]);
+    const row = (id: string) =>
+      f.store.uow.read(
+        (tx) => tx.attachments.get(project, id)?.streamed_artifact,
+      );
+    expect(row("F-4")?.expired).toEqual({ at: clock.now(), reason: "age" });
+    writeFileSync(config, '{"p-1":{"days":30,"max_bytes":1}}');
+    await sweepArtifacts(f.store, f.dataDir, clock.now());
+    expect(row("F-6")?.expired).toEqual({
+      at: clock.now(),
+      reason: "capacity",
+    });
+    expect(paths.slice(0, 3).every((path) => existsSync(path))).toBe(true);
+  },
+);

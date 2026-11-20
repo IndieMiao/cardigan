@@ -43,6 +43,8 @@ export interface McpServerOptions
     CheckLogOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
+  /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
+  readonly bodyTimeoutMs?: number;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
   /** `0` picks a free port (tests). */
@@ -69,6 +71,21 @@ export interface RunningServer {
 }
 
 const MCP_PATH = "/mcp";
+
+/** Per-request, not per-socket: a later keep-alive request never inherits an upload exemption. */
+function bodyDeadline(req: IncomingMessage, res: ServerResponse, ms: number) {
+  const timer = setTimeout(() => {
+    if (req.complete || req.destroyed) return;
+    if (res.headersSent || res.destroyed) req.destroy();
+    else res.writeHead(408, { Connection: "close" }).end(() => req.destroy());
+  }, ms).unref();
+  const clear = () => clearTimeout(timer);
+  req.once("close", clear);
+  req.once("end", clear);
+  return () => {
+    if (!req.complete && !req.destroyed) timer.refresh();
+  };
+}
 
 /** IPv6 literals need brackets in a URL and in a Host header. */
 function bracket(host: string): string {
@@ -168,6 +185,11 @@ export async function startMcpServer(
     startedAt: number,
     log: Logger,
   ): Promise<void> {
+    const noteProgress = bodyDeadline(
+      req,
+      res,
+      options.bodyTimeoutMs ?? 5 * 60_000,
+    );
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
     if (url.pathname !== MCP_PATH) {
       res.writeHead(404).end();
@@ -249,11 +271,13 @@ export async function startMcpServer(
                 throw new ToolError("unauthorized", "Token is no longer valid");
             },
           },
+          noteProgress,
         );
         res
           .writeHead(201, { "Content-Type": "application/json" })
           .end(JSON.stringify(result));
       } catch (err) {
+        if (res.headersSent || res.destroyed) return; // idle timeout or disconnect
         const safe =
           err instanceof ToolError
             ? err
@@ -339,6 +363,9 @@ export async function startMcpServer(
     });
   }
 
+  // The Node parser's requestTimeout is an absolute ceiling, not an idle timer.
+  // Keep its separate header deadline and a hard stop even for validated uploads.
+  http.requestTimeout = 24 * 60 * 60_000;
   await new Promise<void>((resolve, reject) => {
     http.once("error", reject);
     http.listen(options.port ?? 0, host, () => resolve());

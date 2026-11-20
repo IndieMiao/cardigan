@@ -27,6 +27,7 @@ export async function receiveArtifact(
   dir: string | undefined,
   size: number,
   digest: string,
+  noteProgress: () => void,
 ) {
   if (!Number.isSafeInteger(size) || size < 0 || size > MAX_ARTIFACT_BYTES)
     throw ToolError.validation("Invalid artifact size");
@@ -46,6 +47,7 @@ export async function receiveArtifact(
           bytes += chunk.length;
           if (bytes > size)
             return cb(ToolError.validation("Artifact size exceeded"));
+          noteProgress();
           hash.update(chunk);
           cb(null, chunk);
         },

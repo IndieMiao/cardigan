@@ -9,7 +9,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { request } from "node:http";
+import { request, Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -1978,3 +1978,85 @@ test("streamed artifact: token revoked during transfer cannot publish the verifi
   expect(await readdir(directory)).toEqual([]);
   expect(counts().attachments).toBe(0);
 });
+
+test("only an admitted artifact with byte progress can outlive the ordinary body deadline", async () => {
+  // Advancing our short body clock does not advance Node's native parser clock:
+  // check the real listener too, so restoring its five-minute cap fails this test.
+  const listen = vi.spyOn(Server.prototype, "listen");
+  const server = await startMcpServer({
+    store,
+    dataDir,
+    bodyTimeoutMs: 650,
+    log: logger.log,
+    deliveryVerifier: acceptingVerifierFor,
+  });
+  const client = new Client({ name: "slow-worker", version: "1" });
+  const file = Buffer.alloc(24, 42);
+  const grant = async (key: string) =>
+    (
+      await ok<{ upload_query: string }>(
+        client,
+        "upload_attachment",
+        { ...streamTarget, artifact_size: file.length, sha256: sha256(file) },
+        key,
+      )
+    ).upload_query;
+  // The same wire cadence is used for the JSON control and the binary stream.
+  function post(query: string, mode: "progress" | "stall") {
+    return new Promise<number | undefined>((resolve, reject) => {
+      const req = request(server.url + query, {
+        method: "POST",
+        headers: {
+          ...binaryHeaders(coderToken),
+          "content-type": query
+            ? "application/octet-stream"
+            : "application/json",
+          accept: "application/json, text/event-stream",
+          "content-length": file.length,
+        },
+      });
+      req.once("response", (res) => {
+        res.resume();
+        res.once("end", () => resolve(res.statusCode));
+      });
+      req.once("error", reject);
+      req.write(file.subarray(0, 1));
+      if (mode === "stall") return;
+      let sent = 1;
+      const interval = setInterval(() => {
+        if (sent === file.length - 1) {
+          clearInterval(interval);
+          req.end(file.subarray(sent));
+        } else {
+          req.write(file.subarray(sent, sent + 1));
+          sent++;
+        }
+      }, 60);
+      req.once("close", () => clearInterval(interval));
+    });
+  }
+  try {
+    const listener = listen.mock.contexts[0] as Server;
+    expect(listener.requestTimeout).toBe(24 * 60 * 60_000);
+    expect(listener.headersTimeout).toBeGreaterThan(0);
+    expect(listener.headersTimeout).toBeLessThanOrEqual(60_000);
+    listen.mockRestore();
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(server.url), {
+        requestInit: { headers: { authorization: `Bearer ${coderToken}` } },
+      }),
+    );
+    const before = counts().attachments;
+    expect(await post("", "progress")).toBe(408);
+    expect(await post(await grant("idle-stream"), "stall")).toBe(408);
+    await vi.waitFor(async () =>
+      expect(await readdir(join(dataDir, "artifacts"))).toEqual([]),
+    );
+    expect(counts().attachments).toBe(before);
+    expect(await post(await grant("slow-stream"), "progress")).toBe(201);
+    expect(counts().attachments).toBe(before + 1);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}, 15_000);

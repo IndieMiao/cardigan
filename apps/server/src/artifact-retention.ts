@@ -99,7 +99,6 @@ function expire(
           : undefined;
     if (
       !reason ||
-      a.basis ||
       a.attach_to.kind === "delivery" ||
       pins.has(a.id) ||
       hashes.has(a.sha256)
