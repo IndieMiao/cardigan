@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Actor, Assignment, JsonValue, Run } from "@cardigan/domain";
-import { runOccupiesSlot } from "@cardigan/domain";
+import { awaitsStartPublication, runOccupiesSlot } from "@cardigan/domain";
 import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { BindingClearances } from "./resource-clearance.js";
 import { bindingIdentity, endpoints, fingerprint } from "./resource-policy.js";
 import type { ResourceProbe } from "./resource-probe.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
@@ -71,14 +72,25 @@ const canonicalTime = (s: string) => {
     !Number.isFinite(Date.parse(s))
   )
     throw new Error("预约需要带时区的绝对时间");
+  // Date.parse normalizes e.g. February 30. Validate the local calendar
+  // before applying the offset (which may legitimately change the UTC day).
+  const date = s.slice(0, 10);
+  if (
+    new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date ||
+    Number(s.slice(11, 13)) > 23
+  )
+    throw new Error("无效预约日期或时间");
   return new Date(s).toISOString();
 };
 export class MachineLeases {
+  private clearances: BindingClearances;
   constructor(
     readonly store: Store,
     readonly config: RunCapacityConfiguration,
     private probe: ResourceProbe,
-  ) {}
+  ) {
+    this.clearances = new BindingClearances(store, probe);
+  }
   private rows(sql: string, ...args: string[]): Lease[] {
     return this.store.database
       .prepare(`SELECT * FROM machine_resource_leases WHERE ${sql}`)
@@ -163,8 +175,7 @@ export class MachineLeases {
     if (
       actor.kind === "system" ||
       !this.config.resourcesForMachine(machine).has(key) ||
-      starts >= ends ||
-      ends <= now()
+      starts >= ends
     )
       throw new Error("无效预约");
     const p = this.config.policies(machine)?.get(key),
@@ -186,27 +197,15 @@ export class MachineLeases {
       )
         throw new Error("仅限常驻 PM");
     };
-    this.store.uow.read(authorize);
-    if (p?.bindings.size && !b) throw new Error("资源不属于此项目");
-    const target =
-      b?.release &&
-      (await this.probe(b.release, {
-        action: "available",
-        project,
-        machine,
-        key,
-      }));
-    if (b && (!target || !b.release))
-      throw new Error("实体资源缺少目标或释放核验");
-    return this.store.uow.run((tx) => {
-      request?.revalidate();
-      authorize(tx);
-      const generation =
-        actor.kind === "assignment" && request
-          ? fingerprint([project, actor.assignment_id, request.key])
-          : randomUUID();
+    const generation =
+      actor.kind === "assignment" && request
+        ? fingerprint([project, actor.assignment_id, request.key])
+        : randomUUID();
+    const receipt = (revalidate?: () => void) => {
+      if (actor.kind !== "assignment") return;
       const prior = this.rows("generation=?", generation)[0];
       if (prior) {
+        revalidate?.();
         if (
           prior.resource !== key ||
           prior.machine !== machine ||
@@ -216,6 +215,27 @@ export class MachineLeases {
           throw new Error("幂等键冲突");
         return generation;
       }
+    };
+    const existing = this.store.uow.read((tx) => {
+      authorize(tx);
+      return receipt(request?.revalidate);
+    });
+    if (existing) return existing;
+    if (ends <= now()) throw new Error("无效预约");
+    if (p?.bindings.size && !b) throw new Error("资源不属于此项目");
+    const target =
+      b?.release &&
+      (await this.probe(b.release, {
+        action: "available",
+        project,
+        machine,
+        key,
+      }));
+    return this.store.uow.run((tx) => {
+      request?.revalidate();
+      authorize(tx);
+      if (receipt()) return generation;
+      if (b && !target) throw new Error("实体资源缺少目标或释放核验");
       const at = now();
       if (
         !tx.machines.get(project, machine) ||
@@ -261,7 +281,18 @@ export class MachineLeases {
         assignmentResourceKeys(tx, project, a),
       ),
       machine = a.machine_id;
-    const result: ResourceAdmission = { signature: fingerprint(keys) };
+    return this.inspectKeys(project, machine, keys);
+  }
+  private async inspectKeys(
+    project: string,
+    machine: string,
+    keys: readonly string[],
+    publication?: { target: string | undefined },
+  ) {
+    const result: ResourceAdmission = {
+      signature: fingerprint(keys),
+      ...(publication?.target ? { target: publication.target } : {}),
+    };
     for (const key of keys) {
       const policy = this.config.policies(machine)?.get(key);
       if (!policy) continue;
@@ -278,7 +309,7 @@ export class MachineLeases {
       };
       for (const [name, cmd] of policy.checks) {
         const target = await this.probe(cmd, context, result.target);
-        if (!target)
+        if (!target || (result.target && result.target !== target))
           return { ...result, failure: `${key}：前置检查 ${name} 未通过` };
         result.target = target;
       }
@@ -289,7 +320,13 @@ export class MachineLeases {
           { ...context, action: "available" },
           result.target,
         );
-        if (!target) return { ...result, failure: `${key}：目标机不可核验` };
+        if (!target || (result.target && result.target !== target))
+          return { ...result, failure: `${key}：目标机不可核验` };
+        if (
+          !publication &&
+          !(await this.clearances.prepare(machine, key, project, b, target))
+        )
+          return { ...result, failure: `${key}：等待目标机清场核验` };
         result.target = target;
       }
     }
@@ -314,6 +351,12 @@ export class MachineLeases {
       const policy = this.config.policies(machine)?.get(key),
         b = policy?.bindings.get(project);
       if (policy?.bindings.size && !b) return `${key}：未获分配`;
+      if (
+        b &&
+        inspection &&
+        !this.clearances.verified(machine, key, project, b, inspection.target)
+      )
+        return `${key}：等待目标机清场核验`;
       const ids = b ? endpoints(b) : [];
       for (const l of leases) {
         if (own?.bindings.some((b) => b.generation === l.generation)) continue;
@@ -327,6 +370,92 @@ export class MachineLeases {
         } else if (l.binding && !l.verified_at) return `${key}：等待释放核验`;
       }
     }
+  }
+  private policySignature(
+    machine: string,
+    project: string,
+    keys: readonly string[],
+  ) {
+    return fingerprint(
+      keys.map((key) => {
+        const policy = this.config.policies(machine)?.get(key);
+        return [
+          key,
+          [...(policy?.checks ?? [])],
+          policy?.bindings.get(project),
+        ];
+      }),
+    );
+  }
+  private probeTarget(project: string, run: Run) {
+    return this.store.database
+      .prepare(
+        "SELECT target,policy FROM machine_run_probe_targets WHERE project=? AND run_id=?",
+      )
+      .get(project, run.id);
+  }
+  hasProbeTarget(project: string, run: Run) {
+    return !!this.probeTarget(project, run);
+  }
+  publicationWait(project: string, run: Run) {
+    return !!this.store.database
+      .prepare(
+        "SELECT 1 FROM machine_resource_waits WHERE project=? AND run_id=? AND publication_wait=1",
+      )
+      .get(project, run.id);
+  }
+  /** Only new starts call this. Probe the durable Run snapshot (not mutable
+   * work-item requirements) and keep the reason visible while delivery waits. */
+  async canPublish(
+    project: string,
+    a: Assignment,
+    run: Run,
+    now: () => string,
+    access?: ResourceAccess,
+  ) {
+    const current = this.store.uow.read((tx) => tx.runs.get(project, run.id));
+    if (!current || !awaitsStartPublication(current)) return false;
+    const keys =
+      current.resource_keys ??
+      this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a));
+    const policy = this.config.policies(a.machine_id);
+    const pin = this.probeTarget(project, run);
+    if (
+      !pin &&
+      !keys.some(
+        (k) => policy?.get(k)?.checks.size || policy?.get(k)?.bindings.size,
+      )
+    )
+      return !this.startBlocked(project, a, current, now(), access);
+    const pinned = pin?.target as string | undefined;
+    const matches =
+      pinned &&
+      (!access?.target || access.target === pinned) &&
+      pin?.policy === this.policySignature(a.machine_id, project, keys);
+    const result = matches
+      ? await this.inspectKeys(project, a.machine_id, keys, { target: pinned })
+      : undefined;
+    return this.store.uow.run((tx) => {
+      const fresh = tx.runs.get(project, run.id);
+      if (!fresh || !awaitsStartPublication(fresh)) return false;
+      const at = now();
+      const reason = !result
+        ? "原执行目标或前置检查配置已变化"
+        : (result.failure ??
+          this.startBlocked(project, a, fresh, at, access, tx));
+      if (reason) {
+        this.wait(tx, project, a, fresh, reason, at, true, true);
+        if (fresh.status === "queued")
+          tx.runs.put(project, { ...fresh, queue_reason: "concurrency_limit" });
+        return false;
+      }
+      this.store.database
+        .prepare(
+          "DELETE FROM machine_resource_waits WHERE project=? AND run_id=?",
+        )
+        .run(project, fresh.id);
+      return true;
+    });
   }
   /** Recheck the pinned grant immediately before publication, including a retry of a previously dispatched bell. */
   startBlocked(
@@ -396,6 +525,17 @@ export class MachineLeases {
         "DELETE FROM machine_resource_waits WHERE project=? AND run_id=?",
       )
       .run(project, run.id);
+    if (i.target)
+      this.store.database
+        .prepare(
+          "INSERT INTO machine_run_probe_targets VALUES (?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET target=excluded.target, policy=excluded.policy",
+        )
+        .run(
+          project,
+          run.id,
+          i.target,
+          this.policySignature(machine, project, keys),
+        );
     if (!this.managed(machine) && !i.target) return;
     const access: ResourceAccess = {
       ...(i.target ? { target: i.target } : {}),
@@ -446,12 +586,20 @@ export class MachineLeases {
     reason: string,
     now: string,
     policyWait = true,
+    publicationWait = false,
   ) {
     const changed = this.store.database
       .prepare(
-        `INSERT INTO machine_resource_waits VALUES(?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET reason=excluded.reason,policy_wait=excluded.policy_wait WHERE reason<>excluded.reason`,
+        `INSERT INTO machine_resource_waits VALUES(?,?,?,?,?,?) ON CONFLICT(project,run_id) DO UPDATE SET reason=excluded.reason,policy_wait=excluded.policy_wait,publication_wait=excluded.publication_wait WHERE reason<>excluded.reason OR policy_wait<>excluded.policy_wait OR publication_wait<>excluded.publication_wait`,
       )
-      .run(project, run.id, a.machine_id, reason, Number(policyWait)).changes;
+      .run(
+        project,
+        run.id,
+        a.machine_id,
+        reason,
+        Number(policyWait),
+        Number(publicationWait),
+      ).changes;
     if (changed)
       event(tx, system(project), "machine_resource_waiting", now, {
         machine: a.machine_id,

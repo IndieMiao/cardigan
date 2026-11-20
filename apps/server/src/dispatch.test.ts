@@ -3137,3 +3137,85 @@ test("C-497 priority project takes the next free slot ahead of an earlier borrow
   ]);
   expect(runtime.wake).toHaveBeenCalledOnce();
 });
+
+test.each(["preparation", "backoff", "send slot"])(
+  "C-497 a lost mount during %s does not publish or consume retries while waiting",
+  async (stage) => {
+    requireCapabilities(target.item, ["godot"]);
+    await writeFile(
+      join(f.dataDir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            resources: { godot: 1 },
+            resource_policies: {
+              godot: { checks: { mount: ["/test/check"] } },
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const { loadRunCapacityConfig, MachineLeases } = await import(
+      "@cardigan/host"
+    );
+    const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+    let mounted = true,
+      breakAtBoundary = true,
+      sends = 0;
+    const leases = new MachineLeases(f.store, cfg, async () =>
+      mounted ? "local" : undefined,
+    );
+    vi.mocked(runtime.wake).mockImplementation(async (_ref, _msg, opts) => {
+      if (stage === "send slot" && breakAtBoundary) mounted = false;
+      if (opts?.resource_preflight && !(await opts.resource_preflight()))
+        return { ok: true, value: { sent: false, withdrawn: true } };
+      if (opts?.before_send && !opts.before_send())
+        return { ok: true, value: { sent: false, withdrawn: true } };
+      if (stage === "backoff" && breakAtBoundary)
+        return {
+          ok: false,
+          error: { code: "runtime_timeout", message: "synthetic" },
+        };
+      sends++;
+      return { ok: true, value: { sent: true } };
+    });
+    const d = new Dispatcher({
+      ...options,
+      leases,
+      resourceLimits: cfg.resourcesForMachine,
+      deliveryRetryBaseMs: 100,
+      beforeWake: async () => {
+        if (stage === "preparation" && breakAtBoundary) mounted = false;
+        return undefined;
+      },
+    });
+    comment();
+    await d.tick();
+    if (stage === "backoff") {
+      mounted = false;
+      f.advance(100);
+      await d.tick();
+    }
+    expect(sends).toBe(0);
+    const waits = () =>
+      f.store.database
+        .prepare(
+          "SELECT run_id,reason FROM machine_resource_waits WHERE project=?",
+        )
+        .all(f.project);
+    expect(waits()).toEqual([
+      expect.objectContaining({ reason: expect.stringContaining("mount") }),
+    ]);
+    const id = waits()[0]?.run_id;
+    // Do not time out an explicitly withheld send during a long outage.
+    f.advance(600_000);
+    await d.tick();
+    expect(sends).toBe(0);
+    breakAtBoundary = false;
+    mounted = true;
+    await d.tick();
+    expect(sends).toBe(1);
+    expect(f.state().runs.find((r) => r.id === id)?.status).toBe("dispatched");
+  },
+);

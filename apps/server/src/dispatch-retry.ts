@@ -535,6 +535,12 @@ export async function retryDispatchedRuns(
           shared &&
           last?.outcome === "failed" &&
           !binding.sending_at);
+      const resourceWait =
+        !unconfirmed &&
+        run.status === "dispatched" &&
+        !run.started_at &&
+        (!last || last.outcome === "failed") &&
+        options.leases?.publicationWait(project, run);
       const ackSince = reconcile
         ? last?.finished_at
         : shared
@@ -542,17 +548,21 @@ export async function retryDispatchedRuns(
             (last?.outcome === "sent" ? last.finished_at : undefined))
           : fromWithdrawal
             ? last?.finished_at
-            : undefined;
+            : last?.outcome === "sent" &&
+                options.leases?.configured(project, a.machine_id)
+              ? last.finished_at
+              : undefined;
       const timedOut =
         started &&
         Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
           policy.timeoutMs;
       const recover =
-        (timedOut &&
+        !resourceWait &&
+        ((timedOut &&
           !noSendYet &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-        (!unconfirmed && failures >= policy.maxRetries + 1);
+          (!unconfirmed && failures >= policy.maxRetries + 1));
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
@@ -575,7 +585,7 @@ export async function retryDispatchedRuns(
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
-          (withdrawn || (retry && !unconfirmed)) &&
+          (withdrawn || ((retry || resourceWait) && !unconfirmed)) &&
           !unreadable &&
           (!binding || sameTarget) &&
           !disposition,
@@ -758,10 +768,31 @@ export async function retryDispatchedRuns(
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (currentRun.status !== "dispatched") sent = true;
       else {
+        const leases = options.leases;
+        const preflight =
+          leases &&
+          (leases.configured(project, job.a.machine_id) ||
+            leases.hasProbeTarget(project, job.run))
+            ? () =>
+                leases.canPublish(project, job.a, job.run, () => clock.now())
+            : undefined;
+        if (preflight && !(await preflight())) {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
+        if (preflight && currentWakeRun()?.status !== "dispatched") {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
         const result = await runtime.wake(
           job.a.runtime_ref,
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
+            ...(preflight ? { resource_preflight: preflight } : {}),
             before_send: () => {
               if (
                 options.leases?.startBlocked(

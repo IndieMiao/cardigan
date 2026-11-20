@@ -1,9 +1,25 @@
-import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "@cardigan/store";
+import {
+  beginLaunchAttempt,
+  defaultMigrationsDir,
+  listMigrations,
+  Store,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { assignment, run } from "../../domain/src/commands/test-fixtures.js";
+import {
+  assignment,
+  fixture,
+  run,
+} from "../../domain/src/commands/test-fixtures.js";
 import { MachineLeases } from "./resource-leases.js";
 import { type ResourceProbe, targetProbe } from "./resource-probe.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
@@ -58,6 +74,16 @@ async function config(bound = true) {
   const cfg = await loadRunCapacityConfig({ configDir: dir });
   expect(cfg.errors).toEqual([]);
   return cfg;
+}
+function requireFixture(project = "first") {
+  const item = fixture().work_items[0];
+  if (!item) throw new Error("missing item");
+  store.uow.run((tx) =>
+    tx.work_items.put(project, {
+      ...item,
+      requirements: { capabilities: ["fixture"] },
+    }),
+  );
 }
 test("calendar is half-open, rejects overlaps across projects, and audits the actual deadline once after restart", async () => {
   const cfg = await config(false);
@@ -162,17 +188,10 @@ test("Run holders survive finish, release result racing the next owner cannot cl
     tx.runs.put("first", { ...r, status: "completed" });
   });
   const acquire = async (l: MachineLeases) => {
-    const { fingerprint } = await import("./resource-policy.js");
+    requireFixture();
+    const inspected = await l.inspect("first", owner);
     return store.uow.run((tx) =>
-      l.acquire(
-        tx,
-        "first",
-        owner,
-        r,
-        ["fixture"],
-        { signature: fingerprint(["fixture"]), target: "target" },
-        start,
-      ),
+      l.acquire(tx, "first", owner, r, ["fixture"], inspected, start),
     );
   };
   const first = await acquire(fast);
@@ -328,3 +347,227 @@ test("production probe fails closed on timeout, failed status and unreachable ta
     await offline(await syntheticProbe(printGeneration), ctx, "local"),
   ).toBeUndefined();
 }, 15_000);
+
+test("calendar checks the civil date before applying its timezone", async () => {
+  const l = new MachineLeases(store, await config(false), vi.fn());
+  for (const day of ["2031-02-29", "2032-02-30", "2032-04-31"]) {
+    await expect(
+      l.reserve(
+        human,
+        "local",
+        "fixture",
+        `${day}T09:00:00+08:00`,
+        `${day}T10:00:00+08:00`,
+        () => start,
+      ),
+    ).rejects.toThrow("日期");
+  }
+  expect(
+    store.database.prepare("SELECT * FROM machine_resource_leases").all(),
+  ).toHaveLength(0);
+  await l.reserve(
+    human,
+    "local",
+    "fixture",
+    "2032-02-29T01:00:00+08:00",
+    "2032-02-29T02:00:00+08:00",
+    () => start,
+  );
+  expect(
+    store.database
+      .prepare("SELECT starts_at FROM machine_resource_leases")
+      .get()?.starts_at,
+  ).toBe("2032-02-28T17:00:00.000Z");
+});
+
+test("a bound reservation replays its authorized receipt after expiry and loss of target", async () => {
+  const { work_item_id: _, ...a } = assignment(1, "pm");
+  store.uow.run((tx) =>
+    tx.assignments.put("first", { ...a, scope: "standing" }),
+  );
+  const pm = {
+    kind: "assignment" as const,
+    project_id: "first",
+    assignment_id: a.id,
+    role_id: "pm",
+    role_version: 1,
+    allowed_tools: ["reserve_machine_resource" as const],
+    capabilities: [],
+  };
+  const probe = vi.fn<ResourceProbe>().mockResolvedValueOnce("target");
+  const l = new MachineLeases(store, await config(), probe);
+  const req = { key: "receipt", revalidate: vi.fn() };
+  const original = await l.reserve(
+    pm,
+    "local",
+    "fixture",
+    start,
+    end,
+    () => start,
+    req,
+  );
+  expect(
+    await l.reserve(pm, "local", "fixture", start, end, () => end, req),
+  ).toBe(original);
+  await expect(
+    l.reserve(
+      pm,
+      "local",
+      "fixture",
+      start,
+      "2032-02-01T03:00:00Z",
+      () => end,
+      req,
+    ),
+  ).rejects.toThrow("幂等");
+  req.revalidate.mockImplementation(() => {
+    throw new Error("revoked");
+  });
+  await expect(
+    l.reserve(pm, "local", "fixture", start, end, () => end, req),
+  ).rejects.toThrow("revoked");
+  expect(probe).toHaveBeenCalledTimes(1);
+});
+
+test("v44 in-flight ownership and later unbound use both require a fresh first-handoff proof", async () => {
+  const old = join(dir, "v44");
+  await mkdir(old);
+  for (const m of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 44,
+  ))
+    await writeFile(
+      join(old, `${String(m.version).padStart(4, "0")}_${m.name}.sql`),
+      m.sql,
+    );
+  store.close();
+  const dataDir = join(dir, "legacy");
+  store = Store.open({ dataDir, migrationsDir: old });
+  store.createProject({ id: "first" });
+  store.createProject({ id: "second" });
+  const owner = assignment();
+  const user = { ...run(), resource_keys: ["fixture"] };
+  store.uow.run((tx) => {
+    tx.assignments.put("second", owner);
+    tx.runs.put("second", user);
+  });
+  store.close();
+  store = Store.open({ dataDir });
+  requireFixture();
+  let clean = false;
+  const probe = vi.fn<ResourceProbe>(async (_cmd, ctx) =>
+    ctx.action !== "release" || clean ? "target" : undefined,
+  );
+  const cfg = await config();
+  const l = new MachineLeases(store, cfg, probe);
+  expect((await l.inspect("first", owner)).failure).toContain("清场");
+  expect(probe.mock.calls.some(([, c]) => c.action === "release")).toBe(false);
+  store.uow.run((tx) =>
+    tx.runs.put("second", { ...user, status: "completed" }),
+  );
+  expect((await l.inspect("first", owner)).failure).toContain("清场");
+  clean = true;
+  const inspection = await l.inspect("first", owner);
+  expect(inspection.failure).toBeUndefined();
+  expect(probe).toHaveBeenCalledWith(
+    binding.release,
+    expect.objectContaining({
+      action: "release",
+      purpose: "activation",
+      generation: expect.any(String),
+      port: binding.adb_port,
+    }),
+    "target",
+  );
+  expect(
+    store
+      .getUpdates({ project_id: "first" })
+      .events.filter((e) => e.type === "machine_binding_clearance_verified"),
+  ).toHaveLength(1);
+  store.close();
+  store = Store.open({ dataDir });
+  const reboot = new MachineLeases(store, cfg, probe);
+  expect((await reboot.inspect("first", owner)).failure).toBeUndefined();
+  store.uow.run((tx) => {
+    tx.runs.put("second", { ...user, status: "queued" });
+    beginLaunchAttempt(store.database, {
+      id: "legacy-start",
+      project_id: "second",
+      assignment_id: owner.id,
+      run_id: user.id,
+      notification_ids: [],
+      started_at: start,
+      lease_until: end,
+    });
+  });
+  expect(
+    reboot.blocked("first", "local", ["fixture"], start, inspection),
+  ).toContain("清场");
+  expect((await reboot.inspect("first", owner)).failure).toContain("清场");
+});
+
+test("retry checks the pinned Run keys and target after restart; policy removal or target drift does not authorize sending", async () => {
+  const make = async (check: boolean) => {
+    await writeFile(
+      join(dir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            resources: { fixture: 1 },
+            ...(check
+              ? {
+                  resource_policies: {
+                    fixture: { checks: { mount: ["/synthetic/check"] } },
+                  },
+                }
+              : {}),
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    return loadRunCapacityConfig({ configDir: dir });
+  };
+  const owner = assignment();
+  requireFixture();
+  const cfg = await make(true);
+  const r = {
+    ...run(),
+    status: "dispatched" as const,
+    resource_keys: ["fixture"],
+  };
+  const l = new MachineLeases(store, cfg, async () => "original");
+  const grant = await l.inspect("first", owner);
+  store.uow.run((tx) => {
+    tx.assignments.put("first", owner);
+    tx.runs.put("first", r);
+    l.acquire(tx, "first", owner, r, r.resource_keys, grant, start);
+  });
+  // Changing today's requirements does not change the already claimed Run.
+  const item = fixture().work_items[0];
+  if (!item) throw new Error("missing item");
+  store.uow.run((tx) => tx.work_items.put("first", item));
+  store.close();
+  store = Store.open({ dataDir: dir });
+  const probe = vi.fn<ResourceProbe>().mockResolvedValue("different");
+  const reboot = new MachineLeases(store, cfg, probe);
+  expect(await reboot.canPublish("first", owner, r, () => start)).toBe(false);
+  expect(probe).toHaveBeenCalledWith(
+    ["/synthetic/check"],
+    expect.objectContaining({ key: "fixture" }),
+    "original",
+  );
+  expect(
+    await new MachineLeases(store, await make(false), probe).canPublish(
+      "first",
+      owner,
+      r,
+      () => start,
+    ),
+  ).toBe(false);
+  probe.mockResolvedValue("original");
+  expect(await reboot.canPublish("first", owner, r, () => start)).toBe(true);
+  store.uow.run((tx) => tx.runs.put("first", { ...r, status: "running" }));
+  probe.mockClear();
+  expect(await reboot.canPublish("first", owner, r, () => start)).toBe(false);
+  expect(probe).not.toHaveBeenCalled();
+});

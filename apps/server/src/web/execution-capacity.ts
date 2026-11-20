@@ -144,7 +144,11 @@ function leaseDetails(
         "SELECT run_id,reason FROM machine_resource_waits WHERE machine=? AND project=? ORDER BY run_id",
       )
       .all(machine, project)) {
-      if (tx.runs.get(project, row.run_id as RunId)?.status === "queued")
+      if (
+        ["queued", "dispatched"].includes(
+          tx.runs.get(project, row.run_id as RunId)?.status ?? "",
+        )
+      )
         details.push(`${row.run_id}：${row.reason}`);
     }
   return details.length ? { lease_details: [...new Set(details)] } : {};

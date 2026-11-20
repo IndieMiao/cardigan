@@ -312,6 +312,9 @@ export async function createHostWiring(options: {
           ...(input.resourceAccess
             ? { resourceAccess: input.resourceAccess }
             : {}),
+          ...(input.resourcePreflight
+            ? { resourcePreflight: input.resourcePreflight }
+            : {}),
           ...(input.resourceGate ? { resourceGate: input.resourceGate } : {}),
           ...(input.replacement ? { replacement: input.replacement } : {}),
         },

@@ -46,6 +46,7 @@ export interface StartRunInput {
   readonly run: Run;
   readonly bell: string;
   readonly resourceAccess?: ResourceAccess;
+  readonly resourcePreflight?: () => Promise<boolean>;
   readonly resourceGate?: () => boolean;
   readonly replacement?: DispatchRunParams["replacement"];
 }
@@ -77,6 +78,9 @@ export async function startQueuedRun(
     run: input.run,
     actor: hostActor(input.project),
     ...(input.resourceAccess ? { resourceAccess: input.resourceAccess } : {}),
+    ...(input.resourcePreflight
+      ? { resourcePreflight: input.resourcePreflight }
+      : {}),
     ...(input.resourceGate ? { resourceGate: input.resourceGate } : {}),
     first_prompt: input.bell,
     retry_target_preflight: true,

@@ -182,6 +182,7 @@ export class RunPreflightDeferred extends Error {}
 
 export interface LaunchRunInput {
   readonly resourceAccess?: ResourceAccess;
+  readonly resourcePreflight?: () => Promise<boolean>;
   readonly resourceGate?: () => boolean;
   readonly project: ProjectId;
   readonly assignment_id: Assignment["id"];
@@ -498,6 +499,7 @@ async function launchWithClaim(
   let sent = false;
   let deferred = false;
   let withdrawn = false;
+  const leases = host.leases;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
@@ -506,6 +508,18 @@ async function launchWithClaim(
       {
         ...input,
         ...(access ? { resourceAccess: access } : {}),
+        ...(leases && owner && access?.target
+          ? {
+              resourcePreflight: () =>
+                leases.canPublish(
+                  input.project,
+                  owner,
+                  input.run,
+                  () => clock.now(),
+                  access,
+                ),
+            }
+          : {}),
         ...(host.leases && owner
           ? {
               resourceGate: () =>
@@ -794,7 +808,10 @@ async function launch(
         worktree ??= await prepare();
         requireTarget();
         requireWakeCurrent();
-        if (input.resourceGate && !input.resourceGate())
+        if (
+          (input.resourcePreflight && !(await input.resourcePreflight())) ||
+          (input.resourceGate && !input.resourceGate())
+        )
           throw new RunTargetDeferred();
         run ??= dispatch();
         preparedReviewPrompt = reviewPrompt();
@@ -806,6 +823,9 @@ async function launch(
             .filter(Boolean)
             .join("\n"),
           {
+            ...(input.resourcePreflight
+              ? { resource_preflight: input.resourcePreflight }
+              : {}),
             before_send: () => {
               if (input.resourceGate && !input.resourceGate()) return false;
               if (attempt?.review_wake) {
@@ -1161,7 +1181,10 @@ async function launch(
           };
     const baseSha = worktree?.base_sha ?? assignment.base_sha;
     step = "dispatch";
-    if (input.resourceGate && !input.resourceGate())
+    if (
+      (input.resourcePreflight && !(await input.resourcePreflight())) ||
+      (input.resourceGate && !input.resourceGate())
+    )
       throw new RunTargetDeferred();
     applyCommand(host.store, {
       project,
@@ -1209,8 +1232,15 @@ async function launch(
     )
       requireTarget();
 
-    // Only now may the wrapper start the Agent (M2 §4 step 5–8).
-    if (input.resourceGate && !input.resourceGate())
+    // Local dispatch and sentinel publication are consecutive synchronous
+    // decisions after the last probe. Do not park a local dispatched Run to
+    // repeat asynchronous IO. Remote publication has its own withdrawal journal.
+    if (
+      (publication &&
+        input.resourcePreflight &&
+        !(await input.resourcePreflight())) ||
+      (input.resourceGate && !input.resourceGate())
+    )
       throw new RunTargetDeferred();
     step = "sentinel write";
     if (publication) await publication.commit();

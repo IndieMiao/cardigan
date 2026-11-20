@@ -225,6 +225,7 @@ export interface DispatcherOptions {
     bell: string;
     resourceAccess?: ResourceAccess;
     resourceGate?: () => boolean;
+    resourcePreflight?: () => Promise<boolean>;
     snapshot?: LaunchSnapshot;
     replacement?: DispatchRunParams["replacement"];
   }) => Promise<void>;
@@ -1005,6 +1006,18 @@ export class Dispatcher {
       throw error;
     }
     if (!job) return;
+    const leases = this.options.leases;
+    const preflight =
+      job.resourceAccess?.target && leases && !continuing
+        ? () =>
+            leases.canPublish(
+              project,
+              a,
+              job.run,
+              () => this.clock.now(),
+              job.resourceAccess,
+            )
+        : undefined;
     let sent = false,
       reason = "delivery_failed",
       failure: DeliveryFailure | undefined,
@@ -1036,6 +1049,16 @@ export class Dispatcher {
           return;
         }
         if (this.withdrawOnClose(job, queued?.queue_reason)) return;
+        if (preflight && !(await preflight())) {
+          this.options.store.uow.run(() =>
+            withdrawBellAttempt(
+              this.options.store.database,
+              project,
+              job.attempt.id,
+            ),
+          );
+          return;
+        }
         if (!profileSpanSync("deliver.activate", () => this.activate(job)))
           return;
         const scope = () =>
@@ -1060,6 +1083,7 @@ export class Dispatcher {
                   ? { observed_guard: { state: "done" as const } }
                   : { if_idle: true }
                 : {}),
+              ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
                 scope() === reviewPrompt &&
@@ -1122,6 +1146,7 @@ export class Dispatcher {
             ...(job.resourceAccess
               ? { resourceAccess: job.resourceAccess }
               : {}),
+            ...(preflight ? { resourcePreflight: preflight } : {}),
             ...(this.options.leases
               ? {
                   resourceGate: () =>

@@ -23,6 +23,7 @@ export type ProbeContext = {
   machine: string;
   key: string;
   generation?: string;
+  purpose?: "activation";
   run_id?: string;
   port?: number;
   device?: string;
