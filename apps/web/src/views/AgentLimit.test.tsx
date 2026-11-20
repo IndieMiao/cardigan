@@ -255,7 +255,10 @@ test("an unchanged value writes nothing and a read-only session has no write con
   );
   expect(screen.queryByRole("spinbutton")).toBeNull();
   expect(screen.getByText("上限 6")).toBeTruthy();
-  expect(screen.getByText("仅人类登录会话可修改并发上限。")).toBeTruthy();
+  expect(screen.queryByText("仅人类登录会话可修改并发上限。")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Agent 并发上限说明" }),
+  ).toBeTruthy();
   expect(setRunLimit).not.toHaveBeenCalled();
 });
 

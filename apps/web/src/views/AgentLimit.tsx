@@ -115,10 +115,7 @@ export function AgentLimitRow({
 /** The limit where this session may not change it. */
 export function AgentLimitReadOnly({ limit }: { limit: number }) {
   return (
-    <SettingsRow
-      label="Agent 并发上限"
-      description="仅人类登录会话可修改并发上限。"
-    >
+    <SettingsRow label="Agent 并发上限" help="仅人类登录会话可修改并发上限。">
       <SettingsValue>上限 {limit || "不可用"}</SettingsValue>
     </SettingsRow>
   );
@@ -177,11 +174,18 @@ export function MachineAgentLimit({
   );
 }
 
-/** C-511: merge check targets from the shared capacity read, read only. */
+/**
+ * C-511: merge check targets from the shared capacity read, read only. Like
+ * the machine list (Q-1013/Q-1017), a failed read makes the kept counts
+ * "—" until a later read succeeds; the panel shows the error and retry.
+ */
 export function MergeCheckCapacity() {
-  const data = useCapacity()?.data;
+  const capacity = useCapacity();
+  const data = capacity?.data;
+  const stale = capacity?.stale ?? false;
   if (!data || (data.merge_checks.length === 0 && !data.merge_config_invalid))
     return null;
+  const count = (n: number) => (stale ? "—" : n);
   return (
     <SettingsGroup title="合并检查">
       {data.merge_checks.map((machine) => (
@@ -190,13 +194,15 @@ export function MergeCheckCapacity() {
           label={machine.machine_id}
           description={[
             checkCapacityPolicy(machine),
-            `运行中 ${machine.running} / 排队 ${machine.queued}`,
+            `运行中 ${count(machine.running)} / 排队 ${count(machine.queued)}`,
           ]
             .filter(Boolean)
             .join("；")}
           help="需要主机预置，找张良"
         >
-          <SettingsValue>上限 {machine.limit || "不可用"}</SettingsValue>
+          <SettingsValue>
+            上限 {stale ? "—" : machine.limit || "不可用"}
+          </SettingsValue>
         </SettingsRow>
       ))}
       {data.merge_config_invalid && (

@@ -82,7 +82,7 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
   };
   const preview = (diff: NonNullable<WorkerWizardView["preview"]>["diff"]) => ({
     preview_id: `pv-${writes.length}-${polls}`,
-    expires_at: "2026-01-01T00:15:00.000Z",
+    expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
     file: "worker-studio-p-1.yaml",
     diff,
   });
@@ -165,7 +165,40 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
       },
     ),
   };
-  return { client, writes, current: () => wizard };
+  return {
+    client,
+    writes,
+    current: () => wizard,
+    /** Change the session as the server would between two reads. */
+    mutate: (change: (w: WorkerWizardView) => WorkerWizardView) => {
+      if (wizard) wizard = change(wizard);
+    },
+  };
+}
+/** Fill, preview, confirm and pass the checks: the remote-launch state. */
+async function toPassed(fake: ReturnType<typeof backend>) {
+  page(fake.client);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 worker" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await fill(dialog);
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "开始检查" }));
+  await dialog.findByRole("button", { name: "复查" });
+  return dialog;
+}
+/** Resume a ready session this browser holds, as after leaving the page. */
+async function heldSession(fake: ReturnType<typeof backend>) {
+  await fake.client.createWorkerWizard("p-1", input);
+  await fake.client.workerWizardAction("p-1", "x", {
+    kind: "confirm",
+    preview_id: fake.current()?.preview?.preview_id ?? "",
+  });
+  window.localStorage.setItem(
+    "cardigan.worker-wizard.p-1",
+    fake.current()?.id ?? "",
+  );
+  fake.writes.length = 0;
 }
 
 function page(extra: Partial<CardiganClient>) {
@@ -469,4 +502,186 @@ test("the wizard requests are same-origin JSON to the C-510 routes, without auto
     expect(headers.get("authorization")).toBeNull();
     expect(init.credentials).toBe("same-origin");
   }
+});
+
+test("V-2530: the remote-launch tick belongs to one preview; a replaced preview needs a new tick", async () => {
+  const fake = backend(["passed"]);
+  const dialog = await toPassed(fake);
+  fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
+  await dialog.findByRole("table", { name: "派发配置差异" });
+  fireEvent.click(dialog.getByRole("checkbox", { name: "我确认开启远程派发" }));
+  // Meanwhile the server replaced the preview (e.g. another tab).
+  fake.mutate((w) => ({
+    ...w,
+    preview: {
+      ...(w.preview as NonNullable<WorkerWizardView["preview"]>),
+      preview_id: "pv-other",
+      diff: [{ field: "machine", change: "add" }],
+    },
+  }));
+  vi.mocked(fake.client.workerWizardAction).mockRejectedValueOnce(
+    new ApiError(409, "worker_preview_stale", "预览已过期"),
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "开启远程派发" }));
+  await dialog.findByText(
+    "预览已过期或状态已改变，已重新读取，请核对后再确认。",
+  );
+  // The new preview is shown, unticked, and cannot be sent unticked.
+  await within(dialog.getByRole("table", { name: "派发配置差异" })).findByText(
+    "machine",
+  );
+  const box = dialog.getByRole("checkbox", { name: "我确认开启远程派发" });
+  expect(box.getAttribute("aria-checked")).toBe("false");
+  expect(
+    (dialog.getByRole("button", { name: "开启远程派发" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(fake.current()?.phase).toBe("passed");
+});
+
+test("V-2530: an expired launch preview is fetched again instead of sent", async () => {
+  const fake = backend(["passed"]);
+  const dialog = await toPassed(fake);
+  // This preview expires shortly after it is shown.
+  const action = fake.client.workerWizardAction;
+  vi.mocked(action).mockImplementationOnce(async (p, id, a) => {
+    const reply = await action.getMockImplementation()?.(p, id, a);
+    fake.mutate((w) => ({
+      ...w,
+      preview: {
+        ...(w.preview as NonNullable<WorkerWizardView["preview"]>),
+        expires_at: new Date(Date.now() + 150).toISOString(),
+      },
+    }));
+    return { ...(reply as object), wizard: fake.current() } as never;
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
+  await dialog.findByRole("button", { name: "开启远程派发" });
+  fireEvent.click(dialog.getByRole("checkbox", { name: "我确认开启远程派发" }));
+  // Once it expires it can no longer be sent; it is fetched again.
+  await dialog.findByText("派发预览已过期，请重新预览。", undefined, {
+    timeout: 2000,
+  });
+  expect(dialog.queryByRole("checkbox")).toBeNull();
+  expect(dialog.queryByRole("button", { name: "开启远程派发" })).toBeNull();
+  fireEvent.click(dialog.getByRole("button", { name: "重新预览" }));
+  const enable = await dialog.findByRole("button", { name: "开启远程派发" });
+  // The new preview needs its own tick.
+  expect((enable as HTMLButtonElement).disabled).toBe(true);
+  expect(fake.writes.filter((w) => w === "launch-preview")).toHaveLength(2);
+  expect(fake.writes).not.toContain("enable");
+});
+
+test("V-2530: a refused read takes the owner-only content down until a read is allowed again", async () => {
+  const fake = backend([]);
+  await heldSession(fake);
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "继续添加 worker" }),
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  await dialog.findByRole("table", { name: "目标机命令" });
+  // The owner changed: the action and the reread are refused.
+  const refused = new ApiError(403, "unauthorized", "仅限当前所有者");
+  vi.mocked(fake.client.workerWizardAction).mockRejectedValueOnce(refused);
+  fake.client.workerWizard.mockRejectedValueOnce(refused);
+  fireEvent.click(dialog.getByRole("button", { name: "开始检查" }));
+  await dialog.findByText(/没有权限查看这个向导/);
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
+  expect(dialog.queryByText(/sudo/)).toBeNull();
+  expect(dialog.queryByRole("button", { name: "预览配置" })).toBeNull();
+  expect(header()).toEqual(["关闭抽屉"]);
+  // A retry that is refused again keeps it down.
+  fake.client.workerWizard.mockRejectedValueOnce(refused);
+  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  await waitFor(() =>
+    expect(fake.client.workerWizard.mock.calls.length).toBeGreaterThanOrEqual(
+      3,
+    ),
+  );
+  await dialog.findByText(/没有权限查看这个向导/);
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
+  // Allowed again: the session comes back where it was.
+  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  await dialog.findByRole("table", { name: "目标机命令" });
+  expect(header()).toEqual(["放弃", "开始检查", "关闭抽屉"]);
+});
+
+test("V-2530: a retried progress read resumes polling until the check ends", async () => {
+  const fake = backend(["ssh"]);
+  await heldSession(fake);
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "继续添加 worker" }),
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  fireEvent.click(await dialog.findByRole("button", { name: "开始检查" }));
+  fake.client.workerWizard.mockRejectedValueOnce(new TypeError("network"));
+  await dialog.findByText(/未能读取向导进度/);
+  const reads = fake.client.workerWizard.mock.calls.length;
+  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  // Polling continues after the manual read until the check ends.
+  await waitFor(() =>
+    expect(header()).toEqual(["放弃", "继续检查", "关闭抽屉"]),
+  );
+  expect(fake.client.workerWizard.mock.calls.length).toBeGreaterThan(reads + 1);
+});
+
+test("V-2530: a held session that cannot be read now is not replaced by a blank form", async () => {
+  const fake = backend([]);
+  await heldSession(fake);
+  fake.client.workerWizard.mockRejectedValueOnce(new TypeError("network"));
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "继续添加 worker" }),
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  await dialog.findByText(/未能读取向导进度/);
+  expect(dialog.queryByRole("button", { name: "预览配置" })).toBeNull();
+  expect(header()).toEqual(["放弃并重新填写", "关闭抽屉"]);
+  // Retry continues the held session.
+  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  await dialog.findByRole("button", { name: "开始检查" });
+  cleanup();
+  // Or the reader gives it up explicitly and starts afresh.
+  fake.client.workerWizard.mockRejectedValueOnce(new TypeError("network"));
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "继续添加 worker" }),
+  );
+  const again = within(await screen.findByRole("dialog"));
+  await again.findByText(/未能读取向导进度/);
+  fireEvent.click(again.getByRole("button", { name: "放弃并重新填写" }));
+  expect(again.getByRole("button", { name: "预览配置" })).toBeTruthy();
+  expect(window.localStorage.length).toBe(0);
+  expect(fake.current()?.phase).toBe("ready");
+});
+
+test("V-2530: a preview the server accepted after the page was left can still be continued", async () => {
+  const fake = backend([]);
+  const held = Promise.withResolvers<void>();
+  const create = fake.client.createWorkerWizard;
+  fake.client.createWorkerWizard = vi.fn(async (p, body) => {
+    const reply = await create(p, body);
+    await held.promise;
+    return reply;
+  });
+  page(fake.client);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 worker" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await fill(dialog);
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await waitFor(() => expect(fake.current()).toBeTruthy());
+  // Leave (e.g. another settings panel) before the reply arrives.
+  cleanup();
+  await act(async () => held.resolve());
+  expect(window.localStorage.getItem("cardigan.worker-wizard.p-1")).toBe(
+    fake.current()?.id,
+  );
+  page(fake.client);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "继续添加 worker" }),
+  );
+  const again = within(await screen.findByRole("dialog"));
+  await again.findByRole("button", { name: "确认写入配置" });
 });

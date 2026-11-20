@@ -1938,10 +1938,14 @@ export interface CardiganClient {
    * (C-510). Optional so read-only fixtures need not provide them; the page
    * hides an action its client lacks.
    */
+  /**
+   * Not retried automatically: the server keys neither the check nor the
+   * drain, so a resent request could act twice (a check that just ended is
+   * not joined). After a failure the page reads the machine again instead.
+   */
   checkMachine?(
     projectId: string,
     machineId: string,
-    idempotencyKey: string,
   ): Promise<{ check: MachineCheckJob }>;
   machineCheck?(
     projectId: string,
@@ -1952,7 +1956,6 @@ export interface CardiganClient {
     projectId: string,
     machineId: string,
     drain: boolean,
-    idempotencyKey: string,
   ): Promise<{ machine_id: string; status: string }>;
   createWorkerWizard?(
     projectId: string,
@@ -2349,13 +2352,11 @@ export class HttpCardiganClient implements CardiganClient {
   checkMachine(
     projectId: string,
     machineId: string,
-    idempotencyKey: string,
   ): Promise<{ check: MachineCheckJob }> {
-    // The host joins a check already running on the machine, so a retried
-    // request never starts a second one.
+    // No idempotency key, so no automatic resend (see the interface).
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/check`,
-      { method: "POST", body: "{}", idempotencyKey },
+      { method: "POST", body: "{}" },
     );
   }
   machineCheck(
@@ -2371,12 +2372,11 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     machineId: string,
     drain: boolean,
-    idempotencyKey: string,
   ): Promise<{ machine_id: string; status: string }> {
-    // Draining a drained machine (or resuming an online one) changes nothing.
+    // Not resent: a late duplicate could undo a later opposite action.
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/${drain ? "drain" : "resume"}`,
-      { method: "POST", body: "{}", idempotencyKey },
+      { method: "POST", body: "{}" },
     );
   }
   createWorkerWizard(

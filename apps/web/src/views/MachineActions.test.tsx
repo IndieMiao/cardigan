@@ -81,10 +81,28 @@ function client(overrides: Partial<CardiganClient> = {}) {
   });
   return c;
 }
-function Page({ c, canEdit = true }: { c: CardiganClient; canEdit?: boolean }) {
+function Page({
+  c,
+  canEdit = true,
+  revision = 0,
+}: {
+  c: CardiganClient;
+  canEdit?: boolean;
+  revision?: number;
+}) {
   return (
-    <CapacityProvider client={c} projectId="p-1" revision={0} canEdit={canEdit}>
-      <MachinesSettings client={c} projectId="p-1" pollMs={5} />
+    <CapacityProvider
+      client={c}
+      projectId="p-1"
+      revision={revision}
+      canEdit={canEdit}
+    >
+      <MachinesSettings
+        client={c}
+        projectId="p-1"
+        pollMs={5}
+        revision={revision}
+      />
     </CapacityProvider>
   );
 }
@@ -120,11 +138,7 @@ test("立即检查 shows its progress, cannot start twice, and rereads the machi
   fireEvent.click(dialog.getByRole("button", { name: "立即检查" }));
   const running = await dialog.findByRole("button", { name: "检查中…" });
   expect(running.getAttribute("aria-disabled")).toBe("true");
-  expect(c.checkMachine).toHaveBeenCalledWith(
-    "p-1",
-    "local",
-    expect.any(String),
-  );
+  expect(c.checkMachine).toHaveBeenCalledWith("p-1", "local");
   await dialog.findByText("正在检查：SSH…");
   // A second press while it runs starts nothing.
   fireEvent.click(running);
@@ -198,12 +212,7 @@ test("排空 and 恢复 submit at once, report the result and reread list, detai
   const dialog = await openDetail(c);
   const capacityReads = vi.mocked(c.executionCapacity).mock.calls.length;
   fireEvent.click(dialog.getByRole("button", { name: "排空" }));
-  expect(c.setMachineDrain).toHaveBeenCalledWith(
-    "p-1",
-    "local",
-    true,
-    expect.any(String),
-  );
+  expect(c.setMachineDrain).toHaveBeenCalledWith("p-1", "local", true);
   await dialog.findByText("已排空，不再接收新任务");
   // The reread detail is draining now, so the action turns into 恢复.
   const resume = await dialog.findByRole("button", { name: "恢复" });
@@ -211,12 +220,7 @@ test("排空 and 恢复 submit at once, report the result and reread list, detai
     capacityReads,
   );
   fireEvent.click(resume);
-  expect(c.setMachineDrain).toHaveBeenLastCalledWith(
-    "p-1",
-    "local",
-    false,
-    expect.any(String),
-  );
+  expect(c.setMachineDrain).toHaveBeenLastCalledWith("p-1", "local", false);
   await dialog.findByText("已恢复接收新任务");
   await dialog.findByRole("button", { name: "排空" });
 });
@@ -291,21 +295,25 @@ test("a read-only session gets no action, no wizard and a read-only limit", asyn
   const dialog = await openDetail(c, "本机", false);
   expect(header(dialog)).toEqual(["关闭抽屉"]);
   expect(dialog.queryByRole("spinbutton")).toBeNull();
-  expect(dialog.getByText("仅人类登录会话可修改并发上限。")).toBeTruthy();
+  // The reason is in the row's help, not a line under it.
+  expect(dialog.queryByText("仅人类登录会话可修改并发上限。")).toBeNull();
+  expect(
+    dialog.getByRole("button", { name: "Agent 并发上限说明" }),
+  ).toBeTruthy();
   expect(
     screen.queryByRole("button", { name: /添加 worker/, hidden: true }),
   ).toBeNull();
 });
 
-test("the machine actions are same-origin JSON posts to the human-only routes", async () => {
+test("the machine actions are same-origin JSON posts without a resend key (V-2530)", async () => {
   const fetcher = vi.fn(
     async () => new Response(JSON.stringify({ check: job() })),
   );
   const http = new HttpCardiganClient(fetcher);
-  await http.checkMachine("a b", "mac mini", "k-1");
+  await http.checkMachine("a b", "mac mini");
   await http.machineCheck("a b", "mac mini", "chk 1");
-  await http.setMachineDrain("a b", "mac mini", true, "k-2");
-  await http.setMachineDrain("a b", "mac mini", false, "k-3");
+  await http.setMachineDrain("a b", "mac mini", true);
+  await http.setMachineDrain("a b", "mac mini", false);
   const calls = fetcher.mock.calls as unknown as [string, RequestInit][];
   expect(calls.map(([url, init]) => [url, init.method, init.body])).toEqual([
     ["/api/projects/a%20b/machines/mac%20mini/check", "POST", "{}"],
@@ -318,7 +326,134 @@ test("the machine actions are same-origin JSON posts to the human-only routes", 
     ["/api/projects/a%20b/machines/mac%20mini/resume", "POST", "{}"],
   ]);
   for (const [, init] of calls) {
+    const headers = new Headers(init.headers);
     expect(init.credentials).toBe("same-origin");
-    expect(new Headers(init.headers).get("authorization")).toBeNull();
+    expect(headers.get("authorization")).toBeNull();
+    // The server keys neither action: a key would only enable blind resends.
+    expect(headers.get("idempotency-key")).toBeNull();
   }
+});
+
+test("V-2530: a check whose reply is lost (503) is sent once; the machine is reread", async () => {
+  let calls = 0;
+  const fetcher = vi.fn(async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ error: { code: "x", message: "" } }), {
+      status: 503,
+    });
+  });
+  const http = new HttpCardiganClient(fetcher);
+  await expect(http.checkMachine("p", "local")).rejects.toBeTruthy();
+  expect(calls).toBe(1);
+  // In the page, the failed start reads the machine again; a check the
+  // server did start is then followed instead of started again.
+  const local = byId("local");
+  let started = false;
+  const running: MachineView = {
+    ...local,
+    bindings: local.bindings.map((b) =>
+      b.is_current
+        ? {
+            ...b,
+            last_requested_check: {
+              id: "chk-2",
+              kind: "machine",
+              status: "running",
+              step: "ssh",
+              checked_at: "2026-01-01T00:00:00.000Z",
+              failed_steps: [],
+            },
+          }
+        : b,
+    ),
+  };
+  const hold = Promise.withResolvers<void>();
+  const c = client({
+    machine: vi.fn(async () => ({ machine: started ? running : local })),
+    checkMachine: vi.fn(async () => {
+      started = true;
+      throw new ApiError(503, "unavailable", "lost");
+    }),
+    machineCheck: vi.fn(async () => {
+      await hold.promise;
+      return { check: job({ id: "chk-2", status: "passed" }) };
+    }),
+  });
+  const dialog = await openDetail(c);
+  fireEvent.click(dialog.getByRole("button", { name: "立即检查" }));
+  await dialog.findByText(/未能开始检查/);
+  await dialog.findByRole("button", { name: "检查中…" });
+  await waitFor(() =>
+    expect(c.machineCheck).toHaveBeenCalledWith("p-1", "local", "chk-2"),
+  );
+  expect(c.checkMachine).toHaveBeenCalledOnce();
+  await act(async () => hold.resolve());
+  await dialog.findByText("检查通过");
+});
+
+test("V-2530: draining while a check's progress read failed keeps that retry, which resumes the check", async () => {
+  let reads = 0;
+  const c = client({
+    machineCheck: vi.fn(async () => {
+      reads += 1;
+      if (reads === 1) throw new TypeError("network");
+      return { check: job({ status: "passed", step: "finished" }) };
+    }),
+  });
+  const dialog = await openDetail(c);
+  fireEvent.click(dialog.getByRole("button", { name: "立即检查" }));
+  await dialog.findByText(/未能读取检查进度/);
+  fireEvent.click(dialog.getByRole("button", { name: "排空" }));
+  await dialog.findByText("已排空，不再接收新任务");
+  await dialog.findByRole("button", { name: "恢复" });
+  // The check's error and its retry are still there.
+  expect(dialog.getByText(/未能读取检查进度/)).toBeTruthy();
+  expect(
+    dialog
+      .getByRole("button", { name: "检查中…" })
+      .getAttribute("aria-disabled"),
+  ).toBe("true");
+  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  await dialog.findByText("检查通过");
+  expect(reads).toBe(2);
+  expect(dialog.getByRole("button", { name: "立即检查" })).toBeTruthy();
+});
+
+test("V-2530: merge check counts follow the shared stale state", async () => {
+  let fail = false;
+  const hold: { gate?: Promise<void> } = {};
+  const withTarget = (running: number, queued: number) => ({
+    ...capacity,
+    merge_checks: [{ machine_id: "ci", running, limit: 3, queued }],
+  });
+  const c = client({
+    executionCapacity: vi.fn(async () => {
+      if (hold.gate) await hold.gate;
+      if (fail) throw new Error("合成容量读取失败");
+      return withTarget(fail ? 0 : 11, 12);
+    }),
+  });
+  const view = render(<Page c={c} />);
+  const group = () =>
+    screen.getByRole("heading", { name: "合并检查" }).closest("section");
+  await waitFor(() =>
+    expect(group()?.textContent).toContain("运行中 11 / 排队 12"),
+  );
+  fail = true;
+  view.rerender(<Page c={c} revision={1} />);
+  await screen.findByText(/并发读数未能更新/);
+  expect(group()?.textContent).toContain("运行中 — / 排队 —");
+  expect(group()?.textContent).toContain("上限 —");
+  // A slow retry does not bring the old figures back; a success does.
+  fail = false;
+  const slow = Promise.withResolvers<void>();
+  hold.gate = slow.promise;
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  expect(group()?.textContent).toContain("运行中 — / 排队 —");
+  hold.gate = undefined;
+  await act(async () => slow.resolve());
+  await waitFor(() =>
+    expect(group()?.textContent).toContain("运行中 11 / 排队 12"),
+  );
+  expect(group()?.textContent).toContain("上限 3");
 });

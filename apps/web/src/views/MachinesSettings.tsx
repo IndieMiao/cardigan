@@ -410,14 +410,8 @@ function MachineDrawer({
             pendingMessage="正在加载机器…"
           />
           <CapacityFeedback capacity={capacity} />
-          <RequestFeedback
-            interactive
-            pending={actions.pending !== undefined}
-            pendingMessage={actions.pending ?? ""}
-            error={actions.error}
-            retry={actions.retry}
-            message={actions.message}
-          />
+          <RequestFeedback interactive {...actions.checkFeedback} />
+          <RequestFeedback interactive {...actions.drainFeedback} />
         </SettingsDrawerFeedback>
         {machine && (
           <MachineFacts
@@ -706,7 +700,10 @@ function BindingRow({ binding }: { binding: MachineBindingView }) {
  * C-511: 立即检查 and 排空/恢复 for one machine. A check runs on the host;
  * it is read again until it ends, and one already running (also started
  * elsewhere or before the page was opened) is followed instead of started
- * again. Every action ends with the list, detail and capacity read again.
+ * again. The check and the drain keep separate feedback, so one never
+ * removes the other's retry. Requests are not resent: after a failure the
+ * machine is read again and shows what actually happened. Every action ends
+ * with the list, detail and capacity read again.
  */
 function useMachineActions({
   client,
@@ -725,11 +722,14 @@ function useMachineActions({
   const current = machine?.bindings.find((b) => b.is_current);
   const recorded = current?.last_requested_check;
   const [check, setCheck] = useState<{ id: string; step: string }>();
-  const [busy, setBusy] = useState<"check" | "drain" | "resume">();
+  const [starting, setStarting] = useState(false);
+  const [draining, setDraining] = useState<"drain" | "resume">();
   const sending = useRef(false);
-  const [error, setError] = useState("");
-  const [retry, setRetry] = useState<(() => void) | undefined>();
-  const [message, setMessage] = useNotice();
+  const [checkError, setCheckError] = useState("");
+  const [checkRetry, setCheckRetry] = useState<(() => void) | undefined>();
+  const [checkMessage, setCheckMessage] = useNotice();
+  const [drainError, setDrainError] = useState("");
+  const [drainMessage, setDrainMessage] = useNotice();
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -737,26 +737,29 @@ function useMachineActions({
       alive.current = false;
     };
   }, []);
-  // A check this project's binding records as running is followed.
+  // A check this project's binding records as running is followed, unless
+  // this view already saw it end (a read older than its end).
+  const ended = useRef(new Set<string>());
   useEffect(() => {
-    if (recorded?.status === "running")
+    if (recorded?.status === "running" && !ended.current.has(recorded.id))
       setCheck((known) => known ?? { id: recorded.id, step: recorded.step });
   }, [recorded?.status, recorded?.id, recorded?.step]);
   const changed = useRef(onChanged);
   changed.current = onChanged;
   const finished = useCallback(
     (job: MachineCheckJob) => {
+      ended.current.add(job.id);
       setCheck(undefined);
-      if (job.status === "passed") setMessage("检查通过");
+      if (job.status === "passed") setCheckMessage("检查通过");
       else
-        setError(
+        setCheckError(
           `检查未通过：${
             job.failed_steps.map(checkStepLabel).join("、") || "原因未记录"
           }`,
         );
       changed.current();
     },
-    [setMessage],
+    [setCheckMessage],
   );
   const [tick, setTick] = useState(0);
   const checkId = check?.id;
@@ -773,17 +776,18 @@ function useMachineActions({
           checkId,
         );
         if (!alive.current) return;
-        setRetry(undefined);
+        setCheckError("");
+        setCheckRetry(undefined);
         if (job.status === "running") {
           setCheck({ id: job.id, step: job.step });
           setTick((n) => n + 1);
         } else finished(job);
       } catch (cause) {
         if (!alive.current) return;
-        setError(`未能读取检查进度：${describeError(cause)}`);
-        setRetry(() => () => {
-          setError("");
-          setRetry(undefined);
+        setCheckError(`未能读取检查进度：${describeError(cause)}`);
+        setCheckRetry(() => () => {
+          setCheckError("");
+          setCheckRetry(undefined);
           setTick((n) => n + 1);
         });
       }
@@ -795,45 +799,43 @@ function useMachineActions({
     const post = client.checkMachine;
     if (!post || !machineId || sending.current || check) return;
     sending.current = true;
-    setBusy("check");
-    setError("");
-    setRetry(undefined);
+    setStarting(true);
+    setCheckError("");
+    setCheckRetry(undefined);
     try {
-      const { check: job } = await post.call(
-        client,
-        projectId,
-        machineId,
-        crypto.randomUUID(),
-      );
+      const { check: job } = await post.call(client, projectId, machineId);
       if (!alive.current) return;
       if (job.status === "running") setCheck({ id: job.id, step: job.step });
       else finished(job);
     } catch (cause) {
-      if (alive.current) setError(`未能开始检查：${describeWriteError(cause)}`);
+      if (!alive.current) return;
+      setCheckError(`未能开始检查：${describeWriteError(cause)}`);
+      // It may have started anyway: the reread machine records it, and a
+      // running record is followed.
+      changed.current();
     } finally {
       sending.current = false;
-      if (alive.current) setBusy(undefined);
+      if (alive.current) setStarting(false);
     }
   };
   const drain = async (on: boolean) => {
     const post = client.setMachineDrain;
     if (!post || !machineId || sending.current) return;
     sending.current = true;
-    setBusy(on ? "drain" : "resume");
-    setError("");
-    setRetry(undefined);
+    setDraining(on ? "drain" : "resume");
+    setDrainError("");
     try {
-      await post.call(client, projectId, machineId, on, crypto.randomUUID());
+      await post.call(client, projectId, machineId, on);
       if (alive.current)
-        setMessage(on ? "已排空，不再接收新任务" : "已恢复接收新任务");
+        setDrainMessage(on ? "已排空，不再接收新任务" : "已恢复接收新任务");
     } catch (cause) {
       if (alive.current)
-        setError(
+        setDrainError(
           `${on ? "未能排空" : "未能恢复"}：${describeWriteError(cause)}`,
         );
     } finally {
       sending.current = false;
-      if (alive.current) setBusy(undefined);
+      if (alive.current) setDraining(undefined);
       // Read again either way: the request may have taken effect.
       changed.current();
     }
@@ -844,21 +846,24 @@ function useMachineActions({
     checkable: !!current && !!client.checkMachine,
     drainable: !!client.setMachineDrain,
     check,
-    busy,
+    busy: starting || draining !== undefined,
     start,
     drain,
-    error,
-    retry,
-    message,
-    pending: check
-      ? `正在检查：${checkStepLabel(check.step)}…`
-      : busy === "drain"
-        ? "正在排空…"
-        : busy === "resume"
-          ? "正在恢复…"
-          : busy === "check"
-            ? "正在开始检查…"
-            : undefined,
+    checkFeedback: {
+      pending: check !== undefined || starting,
+      pendingMessage: check
+        ? `正在检查：${checkStepLabel(check.step)}…`
+        : "正在开始检查…",
+      error: checkError,
+      retry: checkRetry,
+      message: checkMessage,
+    },
+    drainFeedback: {
+      pending: draining !== undefined,
+      pendingMessage: draining === "resume" ? "正在恢复…" : "正在排空…",
+      error: drainError,
+      message: drainMessage,
+    },
   };
 }
 
@@ -871,7 +876,7 @@ function MachineButtons({
   start,
   drain,
 }: ReturnType<typeof useMachineActions>) {
-  const waiting = busy !== undefined || undefined;
+  const waiting = busy || undefined;
   return (
     <>
       {drainable && status === "online" && (

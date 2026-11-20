@@ -219,7 +219,16 @@ export function WorkerWizardDrawer({
   pollMs?: number;
 }) {
   const [wizard, setWizard] = useState<WorkerWizardView>();
-  const [loading, setLoading] = useState(() => !!storedWizard(projectId));
+  /** The session this browser holds for the project (also before it loads). */
+  const [held, setHeld] = useState(() => storedWizard(projectId));
+  /**
+   * How the last read of `held` went. `failed` keeps the last good content
+   * (a passing outage); `refused` (401/403) takes it down until a read is
+   * allowed again. Neither offers a new form in place of the held session.
+   */
+  const [readState, setReadState] = useState<
+    "ok" | "loading" | "failed" | "refused"
+  >(() => (storedWizard(projectId) ? "loading" : "ok"));
   const [busy, setBusy] = useState<string>();
   const sending = useRef(false);
   const [error, setError] = useState("");
@@ -227,7 +236,8 @@ export function WorkerWizardDrawer({
   const [message, setMessage] = useNotice();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Form>(EMPTY_FORM);
-  const [launch, setLaunch] = useState(false);
+  /** The launch preview the reader ticked; another preview needs its own. */
+  const [launchConfirmed, setLaunchConfirmed] = useState<string>();
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -238,8 +248,8 @@ export function WorkerWizardDrawer({
   const changed = useRef(onChanged);
   changed.current = onChanged;
 
-  /** A reply for the current session; a gone session starts over. */
   const shownPhase = useRef<WorkerWizardView["phase"]>(undefined);
+  /** A reply for the current session; a gone session starts over. */
   const show = useCallback(
     (next: WorkerWizardView | undefined) => {
       if (!alive.current) return;
@@ -248,35 +258,57 @@ export function WorkerWizardDrawer({
         changed.current();
       shownPhase.current = next?.phase;
       setWizard(next);
-      if (!next) rememberWizard(projectId, undefined);
+      if (next) setHeld(next.id);
+      else {
+        rememberWizard(projectId, undefined);
+        setHeld(undefined);
+      }
     },
     [projectId],
   );
+  // Every successful read re-arms polling (also after a manual retry).
+  const [tick, setTick] = useState(0);
   const read = useCallback(
-    async (id: string) => {
+    /** `keep` leaves an action's error in place (the reread explains it). */
+    async (id: string, keep = false): Promise<void> => {
       const get = client.workerWizard;
       if (!get) return;
       try {
         const { wizard: next } = await get.call(client, projectId, id);
-        show(next);
+        if (!alive.current) return;
+        setReadState("ok");
+        if (!keep) setError("");
         setRetry(undefined);
-        return true;
+        show(next);
+        setTick((n) => n + 1);
       } catch (cause) {
-        if (!alive.current) return false;
+        if (!alive.current) return;
+        const again = () => () => {
+          setError("");
+          setRetry(undefined);
+          void read(id);
+        };
         if (cause instanceof ApiError && cause.status === 404) {
+          setReadState("ok");
           show(undefined);
           setError(wizardError(cause));
           setRetry(undefined);
+        } else if (
+          cause instanceof ApiError &&
+          (cause.status === 401 || cause.status === 403)
+        ) {
+          // Owner-only content the server no longer allows comes down.
+          setReadState("refused");
+          shownPhase.current = undefined;
+          setWizard(undefined);
+          setEditing(false);
+          setError(`没有权限查看这个向导：${describeError(cause)}`);
+          setRetry(again);
         } else {
+          setReadState((state) => (state === "refused" ? state : "failed"));
           setError(`未能读取向导进度：${describeError(cause)}`);
-          setRetry(() => () => {
-            setError("");
-            void read(id);
-          });
+          setRetry(again);
         }
-        return false;
-      } finally {
-        if (alive.current) setLoading(false);
       }
     },
     [client, projectId, show],
@@ -287,14 +319,12 @@ export function WorkerWizardDrawer({
     if (id) void read(id);
   }, [projectId, read]);
   // A running check is polled until it ends; leaving stops the polling only.
-  const runningId = wizard?.phase === "running" ? wizard.id : undefined;
-  const [tick, setTick] = useState(0);
+  const runningId =
+    wizard?.phase === "running" && readState === "ok" ? wizard.id : undefined;
   // biome-ignore lint/correctness/useExhaustiveDependencies: tick schedules the next read.
   useEffect(() => {
     if (!runningId) return;
-    const timer = window.setTimeout(async () => {
-      if (await read(runningId)) setTick((n) => n + 1);
-    }, pollMs);
+    const timer = window.setTimeout(() => void read(runningId), pollMs);
     return () => window.clearTimeout(timer);
   }, [runningId, read, pollMs, tick]);
 
@@ -317,7 +347,7 @@ export function WorkerWizardDrawer({
       if (!alive.current) return;
       setError(wizardError(cause));
       // The server is the record: show where the session really is.
-      if (wizard) await read(wizard.id);
+      if (wizard) await read(wizard.id, true);
     } finally {
       sending.current = false;
       if (alive.current) setBusy(undefined);
@@ -327,6 +357,8 @@ export function WorkerWizardDrawer({
     const run = client.workerWizardAction;
     if (!run || !wizard) return undefined;
     const reply = await run.call(client, projectId, wizard.id, action);
+    // Recorded whether or not this view is still open.
+    if (action.kind === "cancel") rememberWizard(projectId, undefined);
     return "wizard" in reply ? reply.wizard : undefined;
   };
 
@@ -342,21 +374,27 @@ export function WorkerWizardDrawer({
     if (!create) return;
     void act(
       "preview",
-      async () => (await create.call(client, projectId, input)).wizard,
-      (next) => {
-        if (!next) return;
-        rememberWizard(projectId, next.id);
-        setEditing(false);
+      async () => {
+        const { wizard: created } = await create.call(client, projectId, input);
+        // Kept even if the reader left meanwhile: the session exists now.
+        rememberWizard(projectId, created.id);
+        return created;
       },
+      () => setEditing(false),
     );
   };
   const cancel = () => {
     if (!wizard) return onClose("empty");
     if (wizard.phase === "running") return;
-    void act("cancel", step({ kind: "cancel" }), () => {
-      rememberWizard(projectId, undefined);
-      onClose("cancelled");
-    });
+    void act("cancel", step({ kind: "cancel" }), () => onClose("cancelled"));
+  };
+  /** Give up a held session this browser cannot read now; start afresh. */
+  const forget = () => {
+    rememberWizard(projectId, undefined);
+    setHeld(undefined);
+    setReadState("ok");
+    setError("");
+    setRetry(undefined);
   };
   const finish = () => {
     if (sending.current) return;
@@ -365,7 +403,7 @@ export function WorkerWizardDrawer({
   };
   const close = () => {
     if (sending.current) return;
-    onClose(wizard && wizard.phase !== "enabled" ? "kept" : "empty");
+    onClose(held && wizard?.phase !== "enabled" ? "kept" : "empty");
   };
   const copy = async (key: WorkerWizardCommandKey) => {
     const text = wizard?.commands[key];
@@ -380,7 +418,11 @@ export function WorkerWizardDrawer({
   };
 
   const phase = wizard?.phase;
-  const showForm = !loading && (!wizard || editing);
+  const loading = readState === "loading";
+  const refused = readState === "refused";
+  // A held session that cannot be read is not replaced by a blank form.
+  const showForm = !refused && (editing || (!wizard && !held));
+  const content = !refused && !showForm ? wizard : undefined;
   const waiting = busy !== undefined || undefined;
   const run = (label: string, variant?: "primary") => (
     <Button
@@ -403,7 +445,11 @@ export function WorkerWizardDrawer({
   );
   // Header actions by phase; the primary one is last, next to close.
   const actions =
-    !wizard || showForm ? undefined : phase === "preview" ? (
+    !wizard && held && readState === "failed" ? (
+      <Button aria-disabled={waiting} onClick={forget}>
+        放弃并重新填写
+      </Button>
+    ) : !content ? undefined : phase === "preview" ? (
       giveUp
     ) : phase === "ready" ? (
       <>
@@ -434,7 +480,7 @@ export function WorkerWizardDrawer({
       onOpenChange={(next) => {
         if (!next) close();
       }}
-      title={wizard ? `添加 worker：${wizard.label}` : "添加 worker"}
+      title={content ? `添加 worker：${content.label}` : "添加 worker"}
       description="新建 worker 向导"
       initialFocus="close"
       actions={actions}
@@ -457,12 +503,12 @@ export function WorkerWizardDrawer({
             retry={retry}
             message={message}
           />
-          {wizard?.phase === "running" && (
+          {content?.phase === "running" && readState === "ok" && (
             <RequestFeedback
               interactive
               pending
               pendingMessage={`正在检查：${checkStepLabel(
-                wizard.steps.find((s) => s.state === "running")?.step ??
+                content.steps.find((s) => s.state === "running")?.step ??
                   "queued",
               )}…`}
             />
@@ -481,42 +527,42 @@ export function WorkerWizardDrawer({
             back={!!wizard}
           />
         )}
-        {wizard && !showForm && (
+        {content && (
           <>
             <SettingsSection title="概况">
               <SettingsFacts>
                 <SettingsFact label="机器编号">
-                  <code>{wizard.machine_id}</code>
+                  <code>{content.machine_id}</code>
                 </SettingsFact>
                 <SettingsFact label="系统与架构">
-                  {[wizard.os, wizard.arch].join(" / ")}
+                  {[content.os, content.arch].join(" / ")}
                 </SettingsFact>
                 <SettingsFact label="进度">
                   <StatusTag
-                    status={PHASES[wizard.phase].status}
-                    label={PHASES[wizard.phase].label}
+                    status={PHASES[content.phase].status}
+                    label={PHASES[content.phase].label}
                   />
                 </SettingsFact>
-                {wizard.error && (
+                {content.error && (
                   <SettingsFact label="中断原因">
-                    <code>{wizard.error}</code>
+                    <code>{content.error}</code>
                   </SettingsFact>
                 )}
               </SettingsFacts>
             </SettingsSection>
-            {wizard.phase === "preview" && wizard.preview ? (
+            {content.phase === "preview" && content.preview ? (
               <PreviewConfirm
-                wizard={wizard}
-                preview={wizard.preview}
+                wizard={content}
+                preview={content.preview}
                 busy={busy !== undefined}
                 onBack={() => {
                   if (!form.machine_id)
                     setForm({
                       ...EMPTY_FORM,
-                      machine_id: wizard.machine_id,
-                      label: wizard.label,
-                      os: wizard.os === "linux" ? "linux" : "macos",
-                      arch: wizard.arch === "x64" ? "x64" : "arm64",
+                      machine_id: content.machine_id,
+                      label: content.label,
+                      os: content.os === "linux" ? "linux" : "macos",
+                      arch: content.arch === "x64" ? "x64" : "arm64",
                     });
                   setEditing(true);
                 }}
@@ -526,18 +572,17 @@ export function WorkerWizardDrawer({
               />
             ) : (
               <>
-                <Steps wizard={wizard} onCopy={(key) => void copy(key)} />
-                <Commands wizard={wizard} onCopy={(key) => void copy(key)} />
-                {(wizard.phase === "passed" || wizard.phase === "enabled") && (
+                <Steps wizard={content} onCopy={(key) => void copy(key)} />
+                <Commands wizard={content} onCopy={(key) => void copy(key)} />
+                {(content.phase === "passed" ||
+                  content.phase === "enabled") && (
                   <RemoteLaunch
-                    wizard={wizard}
+                    wizard={content}
                     busy={busy !== undefined}
-                    confirmed={launch}
-                    onConfirmed={setLaunch}
+                    confirmed={launchConfirmed}
+                    onConfirmed={setLaunchConfirmed}
                     onPreview={() =>
-                      void act("launch", step({ kind: "launch-preview" }), () =>
-                        setLaunch(false),
-                      )
+                      void act("launch", step({ kind: "launch-preview" }))
                     }
                     onEnable={(preview_id) =>
                       void act(
@@ -907,7 +952,9 @@ function Commands({
 
 /**
  * Remote launch stays off unless the reader previews the change and confirms
- * it separately; the server repeats every check before turning it on.
+ * that preview; the tick belongs to one preview id, so a replaced preview
+ * needs a new one. An expired preview is fetched again rather than sent.
+ * The server repeats every check before turning it on.
  */
 function RemoteLaunch({
   wizard,
@@ -919,20 +966,36 @@ function RemoteLaunch({
 }: {
   wizard: WorkerWizardView;
   busy: boolean;
-  confirmed: boolean;
-  onConfirmed: (value: boolean) => void;
+  /** The preview id the reader ticked, if any. */
+  confirmed: string | undefined;
+  onConfirmed: (previewId: string | undefined) => void;
   onPreview: () => void;
   onEnable: (previewId: string) => void;
 }) {
   const id = useId();
   const enabled = wizard.phase === "enabled";
   const preview = enabled ? undefined : wizard.preview;
+  const expires = preview ? Date.parse(preview.expires_at) : Number.NaN;
+  const [now, setNow] = useState(() => Date.now());
+  // Re-render when the preview expires, so it cannot be sent afterwards.
+  useEffect(() => {
+    if (!Number.isFinite(expires)) return;
+    const wait = expires - Date.now();
+    if (wait <= 0) return setNow(Date.now());
+    const timer = window.setTimeout(() => setNow(Date.now()), wait + 50);
+    return () => window.clearTimeout(timer);
+  }, [expires]);
+  const live = preview && !(expires <= now) ? preview : undefined;
+  const ticked = live !== undefined && confirmed === live.preview_id;
   return (
     <>
       <SettingsGroup title="需谨慎" tone="caution">
         <SettingsRow
           label="远程派发"
           help="开启后，这台机器可以接收本项目派发的任务。只有当前所有者可以开启。"
+          warning={
+            preview && !live ? "派发预览已过期，请重新预览。" : undefined
+          }
           status={
             <StatusTag
               status={enabled ? "passed" : "not_run"}
@@ -941,41 +1004,43 @@ function RemoteLaunch({
             />
           }
         >
-          {!enabled && !preview && (
+          {!enabled && !live && (
             <Button disabled={busy} onClick={onPreview}>
-              预览开启
+              {preview ? "重新预览" : "预览开启"}
             </Button>
           )}
         </SettingsRow>
-        {preview && (
+        {live && (
           <SettingsRow label="我确认开启远程派发" htmlFor={id}>
             <Checkbox
               id={id}
-              checked={confirmed}
+              checked={ticked}
               disabled={busy}
-              onCheckedChange={(checked) => onConfirmed(checked === true)}
+              onCheckedChange={(checked) =>
+                onConfirmed(checked === true ? live.preview_id : undefined)
+              }
             />
             <Button
               variant="primary"
-              disabled={busy || !confirmed}
-              onClick={() => onEnable(preview.preview_id)}
+              disabled={busy || !ticked}
+              onClick={() => onEnable(live.preview_id)}
             >
               开启远程派发
             </Button>
           </SettingsRow>
         )}
       </SettingsGroup>
-      {preview && (
+      {live && (
         <SettingsSection title="派发配置差异">
           <SettingsFacts>
             <SettingsFact label="文件">
-              <code>{preview.file}</code>
+              <code>{live.file}</code>
             </SettingsFact>
             <SettingsFact label="预览有效至">
-              <Time value={preview.expires_at} />
+              <Time value={live.expires_at} />
             </SettingsFact>
           </SettingsFacts>
-          <DiffTable label="派发配置差异" diff={preview.diff} />
+          <DiffTable label="派发配置差异" diff={live.diff} />
         </SettingsSection>
       )}
     </>
