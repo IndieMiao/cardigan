@@ -626,6 +626,7 @@ const schemas = {
   },
   release_assignment: {
     assignment_id: id("assignment"),
+    cancel_queued_run_id: id("run").optional(),
   },
 };
 
@@ -686,7 +687,7 @@ export function managementTools(clock?: Clock) {
   return [
     wire(
       "release_assignment",
-      "Release a work-item Assignment as PM Ops. Unfinished Runs must first be stopped with cardigan assignment stop <A-n>. Standing Assignments can only be released by the human.",
+      "Release a work-item Assignment as PM Ops. To cancel a never-dispatched, unreserved queue (including a confirmed clean preparation retry) without a session and reselect its machine, supply cancel_queued_run_id; then assign the same work item without machine_id. Other unfinished Runs must first be stopped with cardigan assignment stop <A-n>. Standing Assignments can only be released by the human.",
       releaseAssignment,
     ),
     wire("post_comment", "Post a comment and references.", postComment),

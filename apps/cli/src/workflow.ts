@@ -962,7 +962,15 @@ async function machineCommand(
         const machine = selected[0] as Machine;
         const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
         const observations = await checkRegisteredMachine(
-          { store, project: project_id, machine: machine.id, env: io.env },
+          {
+            store,
+            project: project_id,
+            machine: machine.id,
+            env: io.env,
+            browsersPath: () =>
+              loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+                ?.browsers_path,
+          },
           async () => {
             const connection = await terminalExecution(
               io,

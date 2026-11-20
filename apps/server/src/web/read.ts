@@ -72,6 +72,7 @@ import {
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
+import { runQueuedAt } from "../run-queued-at.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
@@ -1708,23 +1709,6 @@ export function projectSnapshotView(state: CommandState, now: string) {
   };
 }
 
-/** When each Run was queued: its run_queued event, else its trigger event. */
-function runQueuedAt(state: CommandState) {
-  const queuedAt = new Map<string, string>();
-  const eventAt = new Map<string, string>();
-  for (const event of state.events) {
-    eventAt.set(event.id, event.created_at);
-    if (event.type !== "run_queued") continue;
-    const runId = (event.payload as { readonly run_id?: unknown }).run_id;
-    if (typeof runId === "string" && !queuedAt.has(runId))
-      queuedAt.set(runId, event.created_at);
-  }
-  return (run: Run) => {
-    const at = queuedAt.get(run.id) ?? eventAt.get(run.trigger_event_id);
-    return at === undefined ? {} : { queued_at: at };
-  };
-}
-
 /** C-232: the host patrol's latest fresh context sample per Assignment. */
 export type ExecutionContexts = ReadonlyMap<string, ContextObservation>;
 
@@ -1791,8 +1775,7 @@ export function executionView<M extends Machine = Machine>(
       .sort((left, right) => (left.id === right.id ? 0 : byId(right, left)))[0];
   // §8.5: a queued Run has neither started_at nor finished_at; its queue time
   // is its activity time for the default sort. launchRun records it as a
-  // run_queued event. Resumption after a decision/unblock (queueResumedRun)
-  // and dispatch recovery create the queued Run in the same command that
+  // run_queued event. Legacy resumption and dispatch recovery create the queued Run in the same command that
   // emits its trigger event, without a run_queued event, so that trigger's
   // time is when the Run was queued.
   const withQueuedAt = runQueuedAt(state);

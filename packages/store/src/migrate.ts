@@ -39,7 +39,9 @@ export interface MigrationFile {
   readonly sql: string;
 }
 
-const MIGRATION_FILE = /^(\d{4})_([a-z0-9_]+)\.sql$/;
+// New files use Date.now() instead of reserving the next four-digit slot.
+// Four-digit filenames and their schema_version rows remain unchanged.
+const MIGRATION_FILE = /^(\d{4}|[1-9]\d{12})_([a-z0-9_]+)\.sql$/;
 
 /**
  * Apply every migration that `schema_version` does not list yet, in version
@@ -50,6 +52,7 @@ export function migrate(
   migrationsDir: string = defaultMigrationsDir,
   now: () => string = () => new Date().toISOString(),
 ): AppliedMigration[] {
+  const migrations = listMigrations(migrationsDir);
   db.exec(
     "CREATE TABLE IF NOT EXISTS schema_version (" +
       "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
@@ -62,7 +65,7 @@ export function migrate(
   );
 
   const newlyApplied: AppliedMigration[] = [];
-  for (const migration of listMigrations(migrationsDir)) {
+  for (const migration of migrations) {
     if (applied.has(migration.version)) {
       continue;
     }
@@ -146,16 +149,25 @@ export function migrate(
 /** Migration files on disk, sorted by version; anything else is ignored. */
 export function listMigrations(migrationsDir: string): MigrationFile[] {
   const migrations: MigrationFile[] = [];
-  for (const entry of readdirSync(migrationsDir).sort()) {
+  const filesByVersion = new Map<number, string>();
+  for (const entry of readdirSync(migrationsDir)) {
     const match = MIGRATION_FILE.exec(entry);
     if (match === null) {
       continue;
     }
+    const version = Number(match[1]);
+    const previous = filesByVersion.get(version);
+    if (previous !== undefined) {
+      throw new Error(
+        `Duplicate migration version ${match[1]}: ${previous} and ${entry}. Choose a fresh version for the unpublished migration.`,
+      );
+    }
+    filesByVersion.set(version, entry);
     migrations.push({
-      version: Number(match[1]),
+      version,
       name: match[2] ?? entry,
       sql: readFileSync(join(migrationsDir, entry), "utf8"),
     });
   }
-  return migrations;
+  return migrations.sort((a, b) => a.version - b.version);
 }

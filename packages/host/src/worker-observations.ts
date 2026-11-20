@@ -16,7 +16,10 @@ export async function refreshWorkerObservations(
   worker: RuntimeWorker,
   passed: boolean,
   env: NodeJS.ProcessEnv,
-  options: Pick<MachineObservationOptions, "signal" | "probe"> = {},
+  options: Pick<
+    MachineObservationOptions,
+    "signal" | "probe" | "browsersPath"
+  > = {},
 ) {
   const { project_id: project, machine_id: machine } = worker;
   const checkedRegistration = () => {

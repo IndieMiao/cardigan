@@ -385,6 +385,7 @@ test.each([false, true])(
       });
       expect(f.state.runs.filter((r) => r.status === "queued")).toEqual([]);
     }
+    const start = f.state.events.length;
     const result = f.commit(resolve("raise_limit"));
     const proxy_authority = `project:${f.state.project_id}/default-decision-delegation/general`;
     expect(result).toMatchObject({
@@ -400,7 +401,12 @@ test.each([false, true])(
       status: "ready",
       max_review_rounds: 2,
     });
-    expect(f.state.events.at(-1)).toMatchObject({
+    const queuedRuns = f.state.runs.filter((r) => r.status === "queued");
+    expect(queuedRuns).toHaveLength(1);
+    const [resumed] = queuedRuns;
+    const events = f.state.events.slice(start);
+    const resolution = events.find((e) => e.id === resumed?.trigger_event_id);
+    expect(resolution).toMatchObject({
       type: "decision_resolved",
       payload: {
         decision_id: decision.id,
@@ -420,7 +426,16 @@ test.each([false, true])(
       decision_id: decision.id,
       work_item_id: work.id,
     });
-    expect(f.state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "run_queued")).toMatchObject([
+      {
+        payload: {
+          run_id: resumed?.id,
+          assignment_id: work.assignment_id,
+          kind: "decision_resumed",
+          trigger_event_id: resolution?.id,
+        },
+      },
+    ]);
     expect(f.state.runs.flatMap((r) => r.review_limit_changes ?? [])).toEqual([
       expect.objectContaining({
         max_review_rounds: 2,
