@@ -36,6 +36,8 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  /** Integration fixtures with independent processes must share the real write lock. */
+  readonly diskStore?: boolean;
   readonly launchSettings?: WebServerOptions["launchSettings"];
   readonly roleLaunchConfig?: WebServerOptions["roleLaunchConfig"];
   readonly executionDiagnostics?: WebServerOptions["executionDiagnostics"];
@@ -70,7 +72,9 @@ export async function webHarness(
     writeFileSync(file, content);
   }
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-web-data-"));
-  const store = Store.open({ dbPath: ":memory:" });
+  const store = Store.open(
+    options.diskStore ? { dataDir } : { dbPath: ":memory:" },
+  );
   if (options.password !== undefined) {
     store.setWebPassword(options.password);
   }

@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
+  launchRevision,
   parseCachedLaunchConfig,
   publishModelFile,
-  readSettledModelFile,
   stageModelLaunchConfig,
+  withLaunchSnapshot,
 } from "@cardigan/host";
 import {
   type LaunchConfig,
@@ -79,10 +80,16 @@ export class LaunchSettings {
     readonly effective: () => LaunchConfig,
     private readonly adopt: (generation: LaunchGeneration) => void,
   ) {
-    this.checks = new ProfileChecks(store, () => snapshot(dir));
+    this.checks = new ProfileChecks(store, () => this.snapshot());
+  }
+  private snapshot() {
+    return snapshot(this.dir, launchRevision(this.store));
   }
   private file() {
-    return readLaunchSettings(this.dir, this.dataDir);
+    return withLaunchSnapshot(this.store, this.dir, this.dataDir, (fence) => ({
+      ...readLaunchSettings(this.dir, this.dataDir, fence.revision),
+      fence,
+    }));
   }
   private async read() {
     const f = this.file();
@@ -223,7 +230,6 @@ export class LaunchSettings {
     if (replay(true)) return success;
     const f = this.file();
     const path = realpathSync(f.path);
-    readSettledModelFile(this.store, path); // also repairs a committed rename after an interrupted response
     if (replay(false)) return success;
     const pending = this.previews.get(id);
     if (
@@ -241,67 +247,62 @@ export class LaunchSettings {
       throw invalid();
     });
     try {
-      try {
-        validateLaunchSecrets(staged.config, f.secrets);
-      } catch {
-        throw invalid();
-      }
-      const actor = authorize().member_id ?? "human";
-      if (replay(false)) return success; // a concurrent identical request finished during preflight
-      if (digest(text) !== pending.after || snapshot(this.dir) !== version)
-        throw stale();
-      // A reference can be added while awaiting the catalog. Reject before even backing up,
-      // then check once more under the SQLite publication lock.
-      this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-      const suffix = randomUUID(),
-        temp = `${path}.${suffix}.tmp`,
-        opts = { flag: "wx", mode: 0o600 };
-      writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
-      try {
-        writeFileSync(temp, text, opts);
-        publishModelFile(
-          this.store,
-          path,
-          temp,
-          id,
-          f.original,
-          text,
-          () => snapshot(this.dir) === version,
-          "人员已确认修改启动配置，新运行将使用更新后的配置。",
-          {
-            reserve: () =>
-              this.store.database
-                .prepare(
-                  "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
-                )
-                .run(
-                  id,
-                  requestKey,
-                  version,
-                  change.op,
-                  change.name,
-                  actor,
-                  new Date().toISOString(),
-                ),
-            checkReferences: (tx) => this.guardDelete(f, change, tx),
-            didInstall: () => {
-              this.adopt({ config: staged.config, secrets: f.secrets });
-              staged.cache?.publish();
-            },
-          },
-        );
-      } catch (error) {
-        if (error instanceof HttpRejection) throw error;
-        if (snapshot(this.dir) !== version) throw stale();
-        throw error;
-      } finally {
-        rmSync(temp, { force: true });
-      }
-      this.previews.delete(id);
-      return success;
-    } finally {
-      staged.cache?.discard();
+      validateLaunchSecrets(staged.config, f.secrets);
+    } catch {
+      throw invalid();
     }
+    const actor = authorize().member_id ?? "human";
+    if (replay(false)) return success; // a concurrent identical request finished during preflight
+    if (digest(text) !== pending.after || this.snapshot() !== version)
+      throw stale();
+    // A reference can be added while awaiting the catalog. Reject before even backing up,
+    // then check once more under the SQLite publication lock.
+    this.store.uow.read((tx) => this.guardDelete(f, change, tx));
+    const suffix = randomUUID(),
+      temp = `${path}.${suffix}.tmp`,
+      opts = { flag: "wx", mode: 0o600 };
+    writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+    try {
+      writeFileSync(temp, text, opts);
+      const revision = publishModelFile(
+        this.store,
+        path,
+        temp,
+        id,
+        f.original,
+        text,
+        this.dataDir,
+        f.fence,
+        staged.catalog,
+        "人员已确认修改启动配置，新运行将使用更新后的配置。",
+        {
+          reserve: () =>
+            this.store.database
+              .prepare(
+                "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
+              )
+              .run(
+                id,
+                requestKey,
+                version,
+                change.op,
+                change.name,
+                actor,
+                new Date().toISOString(),
+              ),
+          checkReferences: (tx) => this.guardDelete(f, change, tx),
+        },
+      );
+      this.adopt({ config: staged.config, secrets: f.secrets, revision });
+    } catch (error) {
+      if (error instanceof HttpRejection) throw error;
+      if (this.snapshot() !== version) throw stale();
+      throw error;
+    } finally {
+      rmSync(temp, { force: true });
+    }
+    this.previews.delete(id);
+    return success;
   }
   async serve(
     rest: string,

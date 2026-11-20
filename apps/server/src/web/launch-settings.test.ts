@@ -1,3 +1,5 @@
+import { execFileSync, fork } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   mkdtempSync,
@@ -9,7 +11,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createEmployee } from "@cardigan/domain";
+import { isAcceptedLaunchRevision } from "@cardigan/host";
 import { defaultRoleDefinition, resolveProfile } from "@cardigan/roles";
 import { persistEmployeeEffect, roleDocument } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -88,9 +92,13 @@ beforeEach(async () => {
   vi.stubEnv("PATH", dir);
   h = await webHarness({
     password: "launch-password",
+    diskStore: true,
     launchSettings: {
       dir,
-      effective: () => selectableLaunchConfig(live.current()),
+      effective: () =>
+        isAcceptedLaunchRevision(h.store, dir, live.current().revision)
+          ? selectableLaunchConfig(live.current())
+          : { ...live.current().config, profiles: {} },
       adopt: (generation) => live.adopt(generation),
     },
   });
@@ -101,7 +109,7 @@ beforeEach(async () => {
   );
   live = await liveLaunch(
     dir,
-    () => loadLaunchFiles(dir, () => {}, h.dataDir),
+    () => loadLaunchFiles(dir, () => {}, h.dataDir, h.store),
     () => {},
   );
   cookie = await h.login("launch-password");
@@ -759,4 +767,216 @@ test("a settled confirmation replays after unrelated invalid edits but never for
   ).not.toBe(200);
   expect(readFileSync(file, "utf8")).toBe("profiles: [");
   expect(readdirSync(dir).filter((n) => n.endsWith(".bak"))).toHaveLength(1);
+});
+
+// No sleeps: the IPC gate is before the old download returns, or *inside* the
+// old publisher's final rename. The latter cannot be tested by an in-process mutex.
+function racingProcess(mode: string) {
+  const child = fork(
+    fileURLToPath(
+      new URL("../../test-support/launch-settings-race.mjs", import.meta.url),
+    ),
+    [dir, h.dataDir, mode],
+    {
+      execArgv: [],
+      env: { HOME: dir, PATH: dir },
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    },
+  );
+  const exited = once(child, "exit").then(([code]) => code as number);
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const ready = () =>
+    Promise.race([
+      once(child, "message", { signal: AbortSignal.timeout(10000) }).then(
+        ([msg]) => msg,
+      ),
+      exited.then(() => {
+        throw Error(`fixture exited before barrier: ${stderr}`);
+      }),
+    ]);
+  return { child, ready, exited };
+}
+async function prepareCatalogRace() {
+  writeFileSync(file, config.replace("context_window: 32000, ", ""));
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({
+      fetched_at: new Date(0).toISOString(),
+      entries: ["first", "new", "cli"].map((id) => ({
+        id,
+        provider: "gateway",
+        context_window: 64000,
+      })),
+    }),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json({
+        gateway: { models: { new: { limit: { context: 64000 } } } },
+      }),
+    ),
+  );
+  version = JSON.parse((await get()).body).version;
+  return confirmation({ op: "set_model", name: "primary", id: "new" });
+}
+function expectPaired(id: string) {
+  expect(readFileSync(file, "utf8")).toContain(`id: ${id}`);
+  expect(
+    JSON.parse(
+      readFileSync(join(h.dataDir, "models-dev.json"), "utf8"),
+    ).entries.map((entry: { id: string }) => entry.id),
+  ).toEqual([id]);
+}
+test.each(["poll", "reload", "set-model", "read"])(
+  "a late %s in another process cannot replace the confirmed catalog",
+  async (mode) => {
+    const data = await prepareCatalogRace();
+    const { child, ready, exited } = racingProcess(mode);
+    try {
+      expect(await ready()).toBe("fetching");
+      expect((await post("confirm", data)).status).toBe(200);
+      child.send("resume");
+      expect(await exited).toBe(mode === "read" ? 0 : 42);
+      expectPaired("new");
+      expect(JSON.parse((await get()).body).profiles[0].model_id).toBe("new");
+      expect(JSON.parse((await get("/profiles")).body).profiles).toContain("a");
+      expect((await post("confirm", data)).status).toBe(200);
+      expect(
+        h.store.database
+          .prepare("SELECT installed FROM launch_web_changes")
+          .all(),
+      ).toEqual([{ installed: 1 }]);
+    } finally {
+      child.kill();
+      await exited;
+    }
+  },
+);
+test("after the poll passes its final check no other process can publish ahead of its cache rename", async () => {
+  const data = await prepareCatalogRace();
+  const fifo = join(dir, "release.fifo");
+  execFileSync("mkfifo", [fifo], { env: { PATH: "/usr/bin:/bin" } });
+  const { child, ready, exited } = racingProcess("locked");
+  try {
+    expect(await ready()).toBe("locked");
+    h.store.database.exec("PRAGMA busy_timeout=0");
+    expect((await post("confirm", data)).status).not.toBe(200);
+    expect(
+      h.store.database
+        .prepare("SELECT installed FROM launch_web_changes")
+        .all(),
+    ).toEqual([]);
+    writeFileSync(fifo, "release");
+    expect(await exited).toBe(0);
+    // The successful poll advanced only the catalog revision, not the YAML stamp.
+    expect((await post("confirm", data)).status).toBe(409);
+    version = JSON.parse((await get()).body).version;
+    const retry = await confirmation({
+      op: "set_model",
+      name: "primary",
+      id: "new",
+    });
+    expect((await post("confirm", retry)).status).toBe(200);
+    expect(JSON.parse((await get()).body).profiles[0].model_id).toBe("new");
+  } finally {
+    child.kill();
+    await exited;
+  }
+});
+test("after process death between YAML and cache rename the next read recovers the pair and one receipt", async () => {
+  h.store.createProject({ id: "p" });
+  await prepareCatalogRace();
+  const { exited } = racingProcess("crash");
+  expect(await exited).toBe(73);
+  expect(readFileSync(file, "utf8")).toContain("id: new");
+  expect(
+    h.store.database.prepare("SELECT installed FROM launch_web_changes").all(),
+  ).toEqual([{ installed: 0 }]);
+  expect(
+    JSON.parse(readFileSync(join(h.dataDir, "models-dev.json"), "utf8"))
+      .entries,
+  ).toHaveLength(3);
+  for (let i = 0; i < 2; i++) {
+    expect(JSON.parse((await get()).body).profiles[0].model_id).toBe("new");
+    expectPaired("new");
+    expect(
+      h.store.database
+        .prepare("SELECT installed FROM launch_web_changes")
+        .all(),
+    ).toEqual([{ installed: 1 }]);
+    expect(
+      h.store.database.prepare("SELECT path FROM launch_model_intents").all(),
+    ).toEqual([]);
+  }
+  expect(
+    h.store.database
+      .prepare("SELECT type FROM events WHERE type='launch_model_changed'")
+      .all(),
+  ).toHaveLength(1);
+});
+
+const saveEmployeeB = () =>
+  writeProject(
+    "employees",
+    {
+      name: "Writer",
+      title: "Dev",
+      avatar: "library:guan-yu",
+      role_id: "coder",
+      launch_profile_ref: "b",
+    },
+    "save-b",
+  );
+test("a different server deletes first: stale role and employee writers cannot use their local accepted names", async () => {
+  projectWithRoleUsingA();
+  const markdown = `---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: b\n---\nDraft.`;
+  const role = await writeProject(
+    "role-document/preview",
+    { markdown },
+    "role-preview",
+  );
+  expect(role.status).toBe(200);
+  expect(await racingProcess("delete").exited).toBe(0);
+  expect(live.current().config.profiles.b).toBeDefined(); // no polling yet in this process
+  expect((await saveEmployeeB()).status).toBe(400);
+  expect([400, 409]).toContain(
+    (
+      await writeProject(
+        "role-document/apply",
+        { markdown, snapshot: JSON.parse(role.body).snapshot },
+        "role-apply",
+      )
+    ).status,
+  );
+  expect(h.store.uow.read((tx) => tx.employees.list())).toEqual([]);
+  await live.refresh();
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a"] });
+});
+test("an employee reference wins while a different server stages deletion: no YAML, catalog or receipt change", async () => {
+  projectWithRoleUsingA();
+  await prepareCatalogRace();
+  const previous = readFileSync(file, "utf8"),
+    cache = join(h.dataDir, "models-dev.json"),
+    oldCache = readFileSync(cache, "utf8");
+  const { child, ready, exited } = racingProcess("late-delete");
+  try {
+    expect(await ready()).toBe("fetching");
+    expect((await saveEmployeeB()).status).toBe(200);
+    child.send("resume");
+    expect(await exited).toBe(43);
+    expect(readFileSync(file, "utf8")).toBe(previous);
+    expect(readFileSync(cache, "utf8")).toBe(oldCache);
+    expect(
+      h.store.database
+        .prepare("SELECT operation FROM launch_web_changes")
+        .all(),
+    ).toEqual([]);
+  } finally {
+    child.kill();
+    await exited;
+  }
 });

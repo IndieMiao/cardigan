@@ -3,6 +3,7 @@ import { launchFilesStamp as stamp } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 
 export interface LaunchGeneration {
+  revision?: number;
   config: LaunchConfig;
   secrets: Readonly<Record<string, string>>;
 }
@@ -30,6 +31,7 @@ export async function liveLaunch<T>(
   dir: string,
   load: () => Promise<T>,
   warn: () => void,
+  isCurrent: (generation: T) => boolean = () => true,
 ) {
   let seen = stamp(dir);
   let current: T = await load();
@@ -38,11 +40,11 @@ export async function liveLaunch<T>(
   const refresh = async () => {
     if (pending) return pending;
     const key = stamp(dir);
-    if (key === seen) return current;
+    if (key === seen && isCurrent(current)) return current;
     pending = (async () => {
       try {
         const next = await load();
-        if (stamp(dir) === key) {
+        if (stamp(dir) === key && isCurrent(next)) {
           current = next;
           seen = key;
         }

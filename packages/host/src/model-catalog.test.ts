@@ -1,10 +1,15 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
-  loadModelLaunchConfig,
+  publishLaunchRefresh,
+  withLaunchSnapshot,
+} from "./launch-model-intent.js";
+import {
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "./model-catalog.js";
 
 const fixture = {
@@ -33,10 +38,22 @@ const config = {
 const now = () => new Date("2026-01-01T00:00:00Z");
 const stale = () => new Date("2026-01-03T00:00:00Z");
 let dir: string;
+let store: Store;
+// Exercise the actual publisher; projection/validation by itself is read-only.
+async function loadModelLaunchConfig(
+  ...args: Parameters<typeof stageModelLaunchConfig>
+) {
+  const fence = withLaunchSnapshot(store, dir, dir, (f) => f);
+  const staged = await stageModelLaunchConfig(...args);
+  publishLaunchRefresh(store, dir, dir, fence, staged.catalog);
+  return staged.config;
+}
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "model-catalog-"));
+  store = Store.open({ dataDir: dir });
 });
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
 

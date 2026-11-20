@@ -20,3 +20,11 @@ CREATE TABLE launch_profile_checks (
   result TEXT
 );
 CREATE INDEX launch_checks_by_profile ON launch_profile_checks(profile, started_at DESC);
+
+-- Only the bounded public catalog projection is journaled, never YAML or secrets.
+ALTER TABLE launch_model_intents ADD COLUMN catalog TEXT;
+CREATE TABLE launch_catalog_generation (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision INTEGER NOT NULL,
+  files TEXT NOT NULL
+);

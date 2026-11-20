@@ -7,15 +7,18 @@ import type { Assignment, Clock, ProjectId } from "@cardigan/domain";
 import {
   agentCliVersion,
   harnessBinary,
+  isAcceptedLaunchRevision,
   launchFilesStamp,
   launchFingerprint,
   type PreparationRetryOptions,
   prepareRoleWorktree,
+  publishLaunchRefresh,
   RuntimeTargets,
   recordLaunchNotice,
   recoverLaunchPublications,
   resolveMcpUrl,
   stageModelLaunchConfig,
+  withLaunchSnapshot,
   withPreparationQueue,
   withPreparationRetry,
   worktreeBaselinePrompt,
@@ -85,10 +88,14 @@ export async function loadLaunchFiles(
   dir: string,
   report: (message: string) => void = console.warn,
   dataDir = resolveDataDirectory(),
+  store?: Store,
 ): Promise<LaunchGeneration> {
-  const generation = launchFilesStamp(dir);
   const launchFile = join(dir, "launch.yaml"),
     secretsFile = join(dir, "secrets.env");
+  // Isolated callers may validate without publishing; runtime wiring supplies the shared store.
+  const fence = store
+    ? withLaunchSnapshot(store, dir, dataDir, (f) => f)
+    : { files: launchFilesStamp(dir), revision: 0, catalogFile: "" };
   let text: string;
   try {
     text = await readFile(launchFile, "utf8");
@@ -113,17 +120,21 @@ export async function loadLaunchFiles(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const staged = await stageModelLaunchConfig(raw, dataDir);
-  try {
-    validateLaunchSecrets(staged.config, secrets);
-    // A slow background refresh must not overwrite the cache of a newer web install.
-    if (generation !== launchFilesStamp(dir))
-      throw new Error("加载期间配置已变化");
-    reportLaunchWarnings(staged.config, report);
-    staged.cache?.publish();
-    return { config: staged.config, secrets };
-  } finally {
-    staged.cache?.discard();
+  validateLaunchSecrets(staged.config, secrets);
+  reportLaunchWarnings(staged.config, report); // no callbacks inside the publication critical section
+  if (store) {
+    const revision = publishLaunchRefresh(
+      store,
+      dir,
+      dataDir,
+      fence,
+      staged.catalog,
+    );
+    return { config: staged.config, secrets, revision };
   }
+  if (fence.files !== launchFilesStamp(dir))
+    throw new Error("加载期间配置已变化");
+  return { config: staged.config, secrets };
 }
 
 /** Ask the harness binary for its version (local mode only); the Run records it. */
@@ -188,7 +199,7 @@ export async function createHostWiring(options: {
   const dir = configDir(env);
   const live = await liveLaunch(
     dir,
-    () => loadLaunchFiles(dir, undefined, options.dataDir),
+    () => loadLaunchFiles(dir, undefined, options.dataDir, options.store),
     () => {
       const message =
         "主机启动配置重载失败，继续使用上一版。请检查 launch.yaml、secrets.env 及其权限。";
@@ -197,6 +208,7 @@ export async function createHostWiring(options: {
         recordLaunchNotice(options.store, tx, "launch_reload_failed", message),
       );
     },
+    (next) => isAcceptedLaunchRevision(options.store, dir, next.revision),
   );
   const generations = new WeakMap<
     LaunchSnapshot,
@@ -212,7 +224,14 @@ export async function createHostWiring(options: {
     },
     refreshLaunch: live.refresh,
     adoptLaunch: live.adopt,
-    selectableLaunchConfig: () => selectableLaunchConfig(live.current()),
+    selectableLaunchConfig: () => {
+      const current = live.current();
+      // Reference saves call this inside their SQLite write transaction. Another host
+      // can install first; never authorize an old name while this process catches up.
+      return isAcceptedLaunchRevision(options.store, dir, current.revision)
+        ? selectableLaunchConfig(current)
+        : { ...current.config, profiles: {} };
+    },
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

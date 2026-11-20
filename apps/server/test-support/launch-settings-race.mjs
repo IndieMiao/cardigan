@@ -1,0 +1,90 @@
+// Independent process: same private YAML, catalog and SQLite writer as the HTTP fixture.
+
+import { once } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
+import { Store } from "@cardigan/store";
+import { loadConfig } from "../../cli/dist/config.js";
+import { reload, setModel } from "../../cli/dist/launch-manage.js";
+import { resolveLaunchPaths } from "../../cli/dist/paths.js";
+import { loadLaunchFiles } from "../dist/host.js";
+import { LaunchSettings } from "../dist/web/launch-settings.js";
+
+const [dir, dataDir, mode] = process.argv.slice(2);
+const paths = resolveLaunchPaths({
+  CARDIGAN_CONFIG_DIR: dir,
+  CARDIGAN_DATA_DIR: dataDir,
+});
+const io = { env: {}, platform: process.platform, stdout() {} };
+const store = Store.open({ dataDir });
+const rename = fs.renameSync;
+fs.renameSync = (src, dest) => {
+  if (mode === "locked" && dest === join(dataDir, "models-dev.json")) {
+    process.send("locked");
+    fs.readFileSync(join(dir, "release.fifo")); // synchronous barrier while holding the actual SQLite write lock
+  }
+  rename(src, dest);
+  if (mode === "crash" && dest === paths.launchFile) process.exit(73);
+};
+syncBuiltinESMExports();
+globalThis.fetch = async (url) => {
+  if (url !== "https://models.dev/api.json")
+    throw new Error("unexpected fixture request");
+  if (!["locked", "crash", "delete"].includes(mode)) {
+    const resume = once(process, "message");
+    process.send("fetching");
+    await resume;
+  }
+  const id = mode === "set-model" ? "cli" : mode === "crash" ? "new" : "first";
+  const models = Object.fromEntries(
+    (mode === "locked" ? ["first", "new"] : [id]).map((key) => [
+      key,
+      { limit: { context: 12800 } },
+    ]),
+  );
+  return Response.json({ gateway: { models } });
+};
+try {
+  if (mode === "set-model") await setModel(paths, io, "primary", "cli");
+  else if (mode === "reload") await reload(paths, io);
+  else if (mode === "read") await loadConfig(paths);
+  else if (["crash", "delete", "late-delete"].includes(mode)) {
+    const manager = new LaunchSettings(
+      store,
+      dir,
+      dataDir,
+      () => {},
+      () => {},
+    );
+    const { version } = await manager.read();
+    const preview = manager.preview(
+      {
+        version,
+        change:
+          mode === "crash"
+            ? { op: "set_model", name: "primary", id: "new" }
+            : { op: "delete_profile", name: "b" },
+      },
+      "test-session",
+    );
+    await manager.confirm(
+      { version, preview_id: preview.preview_id },
+      "fixture",
+      "test-session",
+      () => ({}),
+    );
+  } else await loadLaunchFiles(dir, () => {}, dataDir, store);
+} catch (e) {
+  if (mode === "late-delete" && e.code === "profile_in_use")
+    process.exitCode = 43;
+  else if (
+    !["poll", "reload", "set-model"].includes(mode) ||
+    !e.message.includes("重新预检")
+  )
+    throw e;
+  else process.exitCode = 42;
+} finally {
+  store.close();
+  process.disconnect();
+}

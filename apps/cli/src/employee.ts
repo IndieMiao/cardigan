@@ -14,7 +14,7 @@ import {
 } from "@cardigan/domain";
 import { persistEmployeeEffect, Store } from "@cardigan/store";
 import { uploadAvatarFile, validateLibraryAvatar } from "./avatar.js";
-import { loadConfig } from "./config.js";
+import { validLaunchConfig } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveGlobalActor, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -121,18 +121,7 @@ export async function runEmployeeCommand(
   }
   const actor = resolveGlobalActor(io);
   const { command, flags, id } = parse(args);
-  // Configuration IO happens before the transaction; no secrets are needed.
   const profile = flags["launch-profile"];
-  const profiles =
-    profile === undefined || profile === ""
-      ? undefined
-      : Object.keys(
-          (
-            await loadConfig(cliLaunchPaths(io, flags["data-dir"]), (message) =>
-              io.stderr(message),
-            )
-          ).profiles,
-        );
   const dataDir = announceDataDir(io, flags["data-dir"]);
   const avatar =
     flags["avatar-file"] === undefined
@@ -161,6 +150,15 @@ export async function runEmployeeCommand(
       return EXIT.ok;
     }
     const employee = store.uow.run((tx) => {
+      // Validate inside the same write transaction that serializes a profile deletion.
+      let profiles: string[] | undefined;
+      if (profile) {
+        const config = validLaunchConfig(cliLaunchPaths(io, dataDir));
+        if (!config) throw new CliError("找不到启动配置", EXIT.usage);
+        profiles = Object.keys(config.profiles).filter((name) =>
+          config.profiles[name]?.model?.trim(),
+        );
+      }
       const employees = tx.employees.list();
       const ports: EmployeeCommandPorts = {
         clock: systemClock,

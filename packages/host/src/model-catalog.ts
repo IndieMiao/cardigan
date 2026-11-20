@@ -1,14 +1,4 @@
-import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readSync,
-  renameSync,
-  rmSync,
-} from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import {
   type CatalogEntry,
@@ -108,7 +98,8 @@ interface CatalogOptions {
 }
 interface StagedConfig {
   config: LaunchConfig;
-  cache?: { publish(): void; discard(): void };
+  /** Bounded public projection. Staging confers no filesystem write capability. */
+  catalog?: string;
 }
 
 /** Validation may fetch fresh public metadata, but cannot replace the shared cache.
@@ -163,37 +154,5 @@ export async function stageModelLaunchConfig(
 
   // A real removal or an unsupported effort is a configuration error, not a network failure.
   const resolved = parsed.resolve(projection.entries);
-  const tmp = join(dir, `.${CACHE}.${randomUUID()}`);
-  try {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeFile(tmp, projection.text, { flag: "wx", mode: 0o600 });
-  } catch {
-    // A read-only disk need not prevent using a successful public lookup.
-    await rm(tmp, { force: true }).catch(() => {});
-    return { config: resolved };
-  }
-  const discard = () => rmSync(tmp, { force: true });
-  return {
-    config: resolved,
-    cache: {
-      publish() {
-        try {
-          renameSync(tmp, join(dir, CACHE));
-        } catch {
-          discard();
-        } // caching a validated public lookup is best effort
-      },
-      discard,
-    },
-  };
-}
-
-export async function loadModelLaunchConfig(
-  config: unknown,
-  dir: string,
-  options: CatalogOptions = {},
-) {
-  const staged = await stageModelLaunchConfig(config, dir, options);
-  staged.cache?.publish();
-  return staged.config;
+  return { config: resolved, catalog: projection.text };
 }

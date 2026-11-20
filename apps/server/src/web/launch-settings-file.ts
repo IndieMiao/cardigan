@@ -33,7 +33,8 @@ export const invalid = (field?: string) =>
     "启动配置或密钥引用未通过校验",
     field ? { field } : undefined,
   );
-export const snapshot = (dir: string) => digest(launchFilesStamp(dir));
+export const snapshot = (dir: string, revision: number) =>
+  digest(`${launchFilesStamp(dir)}:${revision}`);
 
 function readFile(path: string, privateFile: boolean) {
   const fd = openSync(
@@ -49,8 +50,12 @@ function readFile(path: string, privateFile: boolean) {
     closeSync(fd);
   }
 }
-export function readLaunchSettings(dir: string, dataDir: string) {
-  const version = snapshot(dir);
+export function readLaunchSettings(
+  dir: string,
+  dataDir: string,
+  revision: number,
+) {
+  const version = snapshot(dir, revision);
   try {
     const path = join(dir, "launch.yaml");
     const original = readFile(path, false);
@@ -59,7 +64,7 @@ export function readLaunchSettings(dir: string, dataDir: string) {
     const raw = doc.toJS();
     const config = parseCachedLaunchConfig(raw, dataDir);
     const secrets = readSettingsSecrets(dir);
-    if (version !== snapshot(dir)) throw stale();
+    if (version !== snapshot(dir, revision)) throw stale();
     return { path, original, doc, raw, config, secrets, version };
   } catch (error) {
     if (error instanceof HttpRejection) throw error;
