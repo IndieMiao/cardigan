@@ -259,7 +259,7 @@ export function CommentBox({
     );
     if (edit !== undefined)
       setMemory((current) =>
-        value === "" ? NO_MEMORY : followChosen(current, edit),
+        value === "" ? NO_MEMORY : followChosen(current, edit, value),
       );
     if (
       start !== occurrence ||
@@ -279,12 +279,16 @@ export function CommentBox({
     setMemory((current) => ({
       ...current,
       chosen: [
-        ...followChosen(current, {
-          start: mention.start,
-          end: mention.end,
-          inserted:
-            next.body.length - body.length + mention.end - mention.start,
-        }).chosen,
+        ...followChosen(
+          current,
+          {
+            start: mention.start,
+            end: mention.end,
+            inserted:
+              next.body.length - body.length + mention.end - mention.start,
+          },
+          next.body,
+        ).chosen,
         { start: at, end: at + 1 + candidate.name.length, valid: true },
       ],
     }));
@@ -683,14 +687,22 @@ export const NO_MEMORY: MentionMemory = { chosen: [], lost: false };
 
 /**
  * Follow chosen names through one change (`null` when its range is not
- * known): an edit before a name moves it, one after it leaves it, one that
- * touches the name (or types right after it) leaves only its `@` known, and
- * one that removes the `@` drops it. Without a known range nothing can be
- * followed, so every `@` counts as edited from then on.
+ * known; `text` is the text after it), with the `@` at `a` and the name up to
+ * `b`, the edit replacing `[s, e)`:
+ * - `e <= a`, before the `@`: the name moves;
+ * - `s > b`, after the name: it stays;
+ * - `s = b`, at the name's end: it stays when the edit only deletes there or
+ *   puts in a space or punctuation first, and only its `@` is known when it
+ *   puts in a letter, digit or Han character that runs on the name;
+ * - `a < s < b`, inside the name: only its `@` is known;
+ * - `s <= a < e`, the `@` removed: it is dropped.
+ * Without a known range nothing can be followed, so every `@` counts as
+ * edited from then on. A name once marked edited never becomes trusted again.
  */
 export function followChosen(
   memory: MentionMemory,
   edit: TextEdit | null,
+  text = "",
 ): MentionMemory {
   if (edit === null)
     return memory.chosen.length > 0 ? { chosen: [], lost: true } : memory;
@@ -704,6 +716,12 @@ export function followChosen(
         end: name.end + grown,
       });
     else if (edit.start > name.end) chosen.push(name);
+    else if (edit.start === name.end)
+      chosen.push(
+        edit.inserted > 0 && WORD.test(text.slice(edit.start))
+          ? { ...name, valid: false }
+          : name,
+      );
     else if (edit.start > name.start) chosen.push({ ...name, valid: false });
   }
   return { ...memory, chosen };

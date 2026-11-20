@@ -426,6 +426,45 @@ for (const how of ["keyboard", "click"] as const) {
       expect(input.value).toBe(`附件 @Bobby ${file}`);
     });
 
+  test(`Q-1049 deleting only the space after a chosen name keeps it whole (${how})`, async () => {
+    const { input, typeKeys, backspace, left, pick, names } = sequence(SMITH);
+    typeKeys("@B");
+    await pick("Bob");
+    expect(input.value).toBe("@Bob ");
+    backspace();
+    expect(input.value).toBe("@Bob");
+    left(2);
+    await waitFor(() => expect(names()).toContain("Bobby"));
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby ");
+  });
+
+  test(`Q-1049 a separator typed back after the name keeps it whole (${how})`, async () => {
+    const { input, typeKeys, backspace, left, pick, names } = sequence(SMITH);
+    typeKeys("@B");
+    await pick("Bob");
+    backspace();
+    typeKeys(" ");
+    expect(input.value).toBe("@Bob ");
+    left(3);
+    await waitFor(() => expect(names()).toContain("Bobby"));
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby ");
+  });
+
+  test(`Q-1049 a letter typed onto the name's end only gives way up to the caret (${how})`, async () => {
+    const { input, typeKeys, backspace, left, pick, names } = sequence(SMITH);
+    typeKeys("@B");
+    await pick("Bob");
+    backspace();
+    typeKeys("x");
+    expect(input.value).toBe("@Bobx");
+    left(3);
+    await waitFor(() => expect(names()).toContain("Bobby"));
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby obx");
+  });
+
   test(`Q-1047 an edited chosen name only gives way up to the caret (${how})`, async () => {
     const { input, type, typeKeys, backspace, moveTo, left, pick } =
       sequence(SMITH);
@@ -744,13 +783,39 @@ test("followChosen moves, keeps, marks or drops chosen names by the real edit", 
   ]);
   // Typed after the space that follows the name: kept.
   expect(followChosen(memory, edit(8, 8, 1)).chosen).toEqual([bob]);
-  // Inside the name, or right after it: only the `@` is still known.
-  expect(followChosen(memory, edit(6, 7, 0)).chosen).toEqual([
-    { ...bob, valid: false },
-  ]);
-  expect(followChosen(memory, edit(7, 7, 1)).chosen).toEqual([
-    { ...bob, valid: false },
-  ]);
+  // Text `附件 @Bob Smith.txt`: `@` at 3, Bob up to 7.
+  // At the name's end, only deleting (the space): kept.
+  expect(
+    followChosen(memory, edit(7, 8, 0), "附件 @BobSmith.txt").chosen,
+  ).toEqual([bob]);
+  // At the name's end, a separator first: kept; a letter first: edited.
+  expect(
+    followChosen(memory, edit(7, 7, 1), "附件 @Bob, Smith.txt").chosen,
+  ).toEqual([bob]);
+  expect(
+    followChosen(memory, edit(7, 8, 1), "附件 @Bob,Smith.txt").chosen,
+  ).toEqual([bob]);
+  expect(
+    followChosen(memory, edit(7, 7, 1), "附件 @Bobx Smith.txt").chosen,
+  ).toEqual([{ ...bob, valid: false }]);
+  expect(
+    followChosen(memory, edit(7, 7, 1), "附件 @Bob宝 Smith.txt").chosen,
+  ).toEqual([{ ...bob, valid: false }]);
+  // Inside the name: only the `@` is still known.
+  expect(
+    followChosen(memory, edit(6, 7, 0), "附件 @Bo Smith.txt").chosen,
+  ).toEqual([{ ...bob, valid: false }]);
+  expect(
+    followChosen(memory, edit(5, 5, 1), "附件 @Bxob Smith.txt").chosen,
+  ).toEqual([{ ...bob, valid: false }]);
+  // Once edited, deleting the space later does not make it trusted again.
+  expect(
+    followChosen(
+      { chosen: [{ ...bob, valid: false }], lost: false },
+      edit(7, 8, 0),
+      "附件 @BobSmith.txt",
+    ).chosen,
+  ).toEqual([{ ...bob, valid: false }]);
   // The `@` removed: dropped.
   expect(followChosen(memory, edit(2, 4, 0)).chosen).toEqual([]);
   // Unknown range: nothing can be followed any more.

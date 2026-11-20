@@ -5,7 +5,8 @@
 // spaces keeps filtering, choosing inside an existing mention replaces it, a
 // new `@` before a word keeps the word (V-2490 cases by keyboard and click),
 // a completed name can be swapped (Q-1043 S1-S3) without taking in the text
-// after it (Q-1047) and a pending read offers no old names.
+// after it (Q-1047) or failing after only the space is deleted (Q-1049), and
+// a pending read offers no old names.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c514-rework.mjs <new output dir>
 // C514_BASELINE_REF=<git ref> serves that ref's list for before shots (no
 // behaviour checks).
@@ -480,6 +481,32 @@ try {
         };
       }
     }
+    // 11. Q-1049: after the chosen Bob, delete only the space (and then type
+    // a space back, or a letter onto the name), move back in and swap.
+    checks.space = {};
+    for (const how of ["keyboard", "click"]) {
+      for (const [label, after] of [
+        ["deleted", ""],
+        ["separator", " "],
+        ["letter", "x"],
+      ]) {
+        await focusBox();
+        await type("@");
+        await type("B");
+        await until("document.querySelectorAll('[role=option]').length > 0");
+        await choose(how, "Bob");
+        await key("Backspace", "Backspace", 8);
+        if (after) await type(after);
+        const changed = await value();
+        for (let i = 0; i < 2 + after.length; i++)
+          await key("ArrowLeft", "ArrowLeft", 37);
+        await until("document.querySelectorAll('[role=option]').length > 0");
+        if (how === "keyboard" && label === "deleted")
+          await shot("check-space-1440-light.png");
+        await choose(how, "Bobby");
+        checks.space[`${label}-${how}`] = { changed, value: await value() };
+      }
+    }
     await run(() => {
       delete window.__c514Roster;
     });
@@ -588,6 +615,14 @@ try {
       assert.equal(smith("readme").value, "附件 @Bobby README.md", how);
       assert.equal(smith("edited").changed, "附件 @Bo Smith.txt", how);
       assert.equal(smith("edited").value, "附件 @Bobby Smith.txt", how);
+    }
+    for (const how of ["keyboard", "click"]) {
+      const space = (label) => checks.space[`${label}-${how}`];
+      assert.equal(space("deleted").changed, "@Bob", how);
+      assert.equal(space("deleted").value, "@Bobby ", `deleted ${how}`);
+      assert.equal(space("separator").value, "@Bobby ", `separator ${how}`);
+      assert.equal(space("letter").changed, "@Bobx", how);
+      assert.equal(space("letter").value, "@Bobby obx", `letter ${how}`);
     }
     assert.deepEqual(checks.pending.options, []);
     assert.equal(checks.pending.status, "正在加载员工…");
