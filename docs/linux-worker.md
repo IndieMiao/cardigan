@@ -320,6 +320,12 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 草案位于上述路径；向导**不修改**正式 `runtime-workers.yaml`。人核对后将草案中的机器/项目条目合入正式私有配置，保留其它机器和项目，文件权限 0600。草案包含 RW-2 的项目级 `mcp_url` 和显式发布限额；向导与 RW-2 作为同一版本部署，共用正式配置校验。已有远程条目缺少 MCP 地址时先由人迁移配置；向导不会忽略缺失或非法字段。生成的草案就是完整 `runtime-workers.yaml` 示例，顶层仅为 `version`、`machines`，不要把向导的 `uid/home/timeout_ms` 外层字段复制进去。机器启用、hc 注册及真实远程启动按远程启动功能的门禁执行，接入检查通过不会自动放行派发。
 
+### 检查浏览器能力
+
+运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到 `--version` 即可，不需要向缓存建链接。再查 Run 的 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，最后查该账号的 `$HOME/.cache/ms-playwright`。
+
+本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 列出这次探测的查找范围（配置键、命令名和账号缓存）；不会回显私有目录或命令报错。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
+
 ## 6. 常见阻塞
 
 | 原因码 | 处理 |

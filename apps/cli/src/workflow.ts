@@ -927,6 +927,9 @@ async function machineCommand(
           project: project_id,
           machine: machine.id,
           env: io.env,
+          browsersPath: () =>
+            loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+              ?.browsers_path,
           target: async () => (await ready()).resolve(project_id, machine.id),
           check: async () => {
             const checked = await (await ready()).check(project_id, machine.id);

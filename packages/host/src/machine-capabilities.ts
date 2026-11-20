@@ -43,6 +43,11 @@ export interface MachineObservationOptions {
   readonly check: () => Promise<
     Pick<MachineHealth, "blockers" | "launch_enabled">
   >;
+  /** Same launch configuration that supplies the browser MCP on this host. */
+  readonly browsersPath?: () =>
+    | string
+    | undefined
+    | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
   readonly env?: NodeJS.ProcessEnv;
@@ -82,9 +87,12 @@ export async function refreshMachineObservations(
     };
     const catalog = checked.blockers.length
       ? []
-      : (
-          options.catalog ?? (() => loadMachineCapabilityCatalog(options.env))
-        )();
+      : (options.catalog?.() ??
+        loadMachineCapabilityCatalog(
+          options.env,
+          await options.browsersPath?.(),
+          target.machine.os,
+        ));
     const probe = options.probe ?? probeMachineCapability;
     for (const entry of catalog) {
       options.signal?.throwIfAborted();
@@ -123,6 +131,16 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
+    // Persist only the host-defined scopes, not a worker's stdout, account or
+    // absolute private configuration. A missing tool is not a machine blocker.
+    const failures = catalog.flatMap((entry) =>
+      entry.searchLocations &&
+      entry.os.some((os) => os === target.machine.os) &&
+      !capabilities.some((capability) => capability.key === entry.key)
+        ? [{ key: entry.key, search_locations: entry.searchLocations }]
+        : [],
+    );
+    if (failures.length) health = { ...health, capability_failures: failures };
     const current = await options.target();
     options.signal?.throwIfAborted();
     if (

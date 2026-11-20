@@ -17,7 +17,8 @@ import {
   requestHumanAction,
   resolveDelegatedDecision,
 } from "@cardigan/domain";
-import { RuntimeTargets } from "@cardigan/host";
+import { type CapabilityProbe, RuntimeTargets } from "@cardigan/host";
+import { writeRegisteredRuntime } from "@cardigan/runtime-herdr";
 import {
   beginMachineObservation,
   completeMachineObservation,
@@ -30,13 +31,15 @@ import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
+const capabilityProbe = vi.hoisted(() => vi.fn<CapabilityProbe>());
 vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
     refreshMachineObservations: (
       options: Parameters<typeof host.refreshMachineObservations>[0],
-    ) => host.refreshMachineObservations({ ...options, catalog: () => [] }),
+    ) =>
+      host.refreshMachineObservations({ ...options, probe: capabilityProbe }),
   };
 });
 
@@ -52,6 +55,7 @@ let errors: string[];
 let io: CliIo;
 
 beforeEach(() => {
+  capabilityProbe.mockReset().mockResolvedValue({ ok: false, output: "" });
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-workflow-"));
   mkdirSync(join(dataDir, "config"), { mode: 0o700 });
   output = [];
@@ -255,6 +259,75 @@ test("machine check reports actual remote results without a blanket field-verifi
   } finally {
     check.mockRestore();
     resolve.mockRestore();
+  }
+});
+
+test("machine check uses the configured browser on the Run target; show retains only failure scopes", async () => {
+  await bootstrap();
+  const registry = "/fixture/worker-only/registry";
+  const file = join(dataDir, "config", "launch.yaml");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      browser: { command: "/fixture/mcp", browsers_path: registry },
+    }),
+  );
+  const check = vi.spyOn(RuntimeTargets.prototype, "check").mockResolvedValue({
+    ok: true,
+    value: { machine_id: "local", blockers: [], launch_enabled: true },
+  });
+  // The human CLI shell is local, but local Runs belong to the registered SSH account.
+  await writeRegisteredRuntime(dataDir, {
+    mode: "agent-ssh",
+    dataDir,
+    agentRoot: "/fixture/agent",
+    gid: 901,
+    user: "agent",
+    machine: "fixture-local",
+    identityFile: "/fixture/id",
+    knownHostsFile: "/fixture/known",
+  });
+  try {
+    capabilityProbe.mockImplementation(async (target, _os, argv) =>
+      target.mode === "agent-ssh" &&
+      target.user === "agent" &&
+      argv.at(-1) === registry
+        ? { ok: true, output: "Chromium 152.0.1.2" }
+        : { ok: false, output: "" },
+    );
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    expect(printed()).toContain('"version": "152.0.1.2"');
+    expect(printed()).not.toContain("capability_failures");
+    capabilityProbe.mockResolvedValue({
+      ok: false,
+      output: "private-worker-error",
+    });
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    const health = JSON.parse(output.at(-1) ?? "").health;
+    expect(health).toMatchObject({
+      available: true,
+      capability_failures: [
+        {
+          key: "browser.chromium",
+          search_locations: [
+            "launch.yaml:browser.browsers_path",
+            "PATH:chromium",
+            "PATH:chromium-browser",
+            "PATH:google-chrome",
+            "$HOME/.cache/ms-playwright",
+          ],
+        },
+      ],
+    });
+    rmSync(file);
+    expect(await run(["machine", "show", "local"])).toBe(0);
+    expect(JSON.parse(printed())[0].health).toEqual(health);
+    expect(printed()).not.toContain(registry);
+    expect(printed()).not.toContain("private-worker-error");
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    expect(printed()).not.toContain("launch.yaml:browser.browsers_path");
+  } finally {
+    check.mockRestore();
   }
 });
 

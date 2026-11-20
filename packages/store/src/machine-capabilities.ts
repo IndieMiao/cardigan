@@ -13,6 +13,10 @@ export interface MachineHealth {
   readonly checked_at: string;
   readonly blockers: readonly string[];
   readonly launch_enabled: boolean;
+  readonly capability_failures?: readonly {
+    readonly key: string;
+    readonly search_locations: readonly string[];
+  }[];
 }
 function systemOnly(actor: Actor, project: string): void {
   if (actor.kind !== "system" || actor.project_id !== project)

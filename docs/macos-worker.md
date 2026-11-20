@@ -263,6 +263,12 @@ cardigan worker check --project example --machine worker-a
 
 journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录 0700、文件 0600，沿用 [Linux 向导的恢复合同](linux-worker.md#5-控制主机add续跑check-和-status)。管理员核对草案后才合入 `runtime-workers.yaml`，保留其它机器/项目；`allow_remote_launch` 仍须按远程启动门禁显式启用。检查通过不会自动启用机器或改变 Assignment。
 
+### 检查浏览器能力
+
+运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到 `--version` 即可，不需要向缓存建链接。再查项目账号 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，然后查 `/Applications/Google Chrome.app` 和该账号的 `$HOME/Library/Caches/ms-playwright`。
+
+本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 列出这次探测的查找范围（配置键、命令名和账号缓存）；不会回显私有目录或命令报错。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
+
 ### 从 Data 卷旧路径原地迁移（现有 Mac）
 
 1. **控制主机停派发。** `cardigan machine drain worker-a --project example`，等旧 Assignment、Run、终端、清理和 Git 操作全部结束；不能确认退出就停在这里。关闭此绑定的远程启动，备份私有向导 YAML 和正式配置。用旧 HOME/session 正常停止空闲的 hc 核心（见第 4 节）；不删除锁、仓库、工作树或上次失败的 `.clone-*`。如仍有旧路径绑定的工作树，先按原流程收尾，不手改 Git 注册记录。

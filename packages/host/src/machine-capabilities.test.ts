@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -101,6 +102,58 @@ test("private custom catalog cannot replace builtins or load unsafe files", () =
       parseMachineCapabilityCatalog({ version: 1, capabilities: custom }),
     ).toThrow();
 });
+
+test.each([
+  ["linux", "chromium-8/chrome-linux64/chrome"],
+  ["linux", "chromium_headless_shell-8/chrome-linux/headless_shell"],
+  ["darwin", "chromium-8/chrome-mac/Chromium.app/Contents/MacOS/Chromium"],
+  [
+    "darwin",
+    "chromium-8/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+  ],
+])(
+  "%s Chromium probe prefers the literal configured registry (%s) over the Run PATH",
+  (os, layout) => {
+    const home = temp(),
+      path = join(home, "bin"),
+      registry = join(home, "registry $(false) [abc] '");
+    const install = (file: string, version: string, code = 0) => {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        `#!/bin/sh\n[ "$1" = --version ] || exit 1\necho 'Chromium ${version}'\nexit ${code}\n`,
+        { mode: 0o700 },
+      );
+    };
+    install(join(path, "chromium"), "2.0");
+    const browser = join(registry, layout);
+    install(browser, "152.1.2.3");
+    const entry = parseMachineCapabilityCatalog(undefined, registry, os).find(
+      (c) => c.key === "browser.chromium",
+    );
+    if (!entry) throw new Error("Missing browser probe");
+    const [command, ...args] = entry.check;
+    if (!command) throw new Error("Missing probe command");
+    const run = () => {
+      const result = spawnSync(command, args, {
+        env: { HOME: home, PATH: path },
+        encoding: "utf8",
+      });
+      return result.status === 0 ? entry.parseVersion(result.stdout) : null;
+    };
+    expect(run()).toBe("152.1.2.3");
+    install(browser, "99.9", 1);
+    expect(run()).toBe("2.0"); // Ignore the failed binary's banner.
+    chmodSync(browser, 0o600);
+    expect(run()).toBe("2.0");
+    if (os === "linux") {
+      rmSync(join(path, "chromium"));
+      expect(run()).toBeNull();
+      install(join(home, ".cache/ms-playwright", layout), "3.0");
+      expect(run()).toBe("3.0");
+    }
+  },
+);
 
 test.each(["linux", "darwin"])(
   "refresh probes %s as the configured project worker, persists only safe proof, and revokes failures",

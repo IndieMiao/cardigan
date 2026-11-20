@@ -176,6 +176,8 @@ export async function createHostWiring(options: {
   const created = await RuntimeTargets.create({
     store: options.store,
     env: { ...env },
+    browsersPath: async () =>
+      (await live.refresh()).config.browser?.browsers_path,
     execution,
     session: env.CARDIGAN_HC_SESSION ?? "cardigan",
     ...(options.client === undefined ? {} : { client: options.client }),

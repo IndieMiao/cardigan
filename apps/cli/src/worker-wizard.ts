@@ -15,9 +15,11 @@ import {
   workerOnboardingStatus,
 } from "@cardigan/host";
 import { openStore } from "@cardigan/store";
+import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { hasToken, resolveDataDir } from "./host.js";
 import type { CliIo } from "./io.js";
+import { cliLaunchPaths } from "./paths.js";
 import { runWorkflowCommand } from "./workflow.js";
 
 const USAGE = `用法：cardigan worker add|resume|check|status --project <项目> --machine <机器>
@@ -199,6 +201,9 @@ export async function runWorkerCommand(
           project,
           machine,
           env: io.env,
+          browsersPath: () =>
+            loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+              ?.browsers_path,
           // The wizard probes its input configuration, not an arbitrary later registration.
           // Resolve both sides of the observation fence against that same worker.
           target: () => {

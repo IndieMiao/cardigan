@@ -64,6 +64,9 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly execution: ExecutionConfig;
   readonly store: Store;
   readonly project?: ProjectId;
+  readonly browsersPath?: NonNullable<
+    MachineObservationOptions["browsersPath"]
+  >;
   readonly workers?: () => readonly RuntimeWorker[];
   /** Host adapter injection for contract tests; never loaded from configuration. */
   readonly factory?: (options: HerdrOptions) => Promise<RuntimeResult<Adapter>>;
@@ -488,6 +491,9 @@ export class RuntimeTargets implements Runtime {
       project,
       machine,
       ...(this.options.env ? { env: this.options.env } : {}),
+      ...(this.options.browsersPath
+        ? { browsersPath: this.options.browsersPath }
+        : {}),
       target: () => this.resolve(project, machine),
       check: async () => {
         const checked = await this.check(project, machine);
