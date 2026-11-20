@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.mocked(captureTranscript).mockReset();
 });
 const at = "2026-01-01T01:00:00Z";
-function scenario() {
+function scenario({ currentMissing = false } = {}) {
   const target = {
     project_id: "fixture",
     machine_id: "worker",
@@ -80,18 +80,49 @@ function scenario() {
     employees: [],
     events: [],
   } as unknown as CommandState;
-  const sessionRoot = workerSessionPath(worker, {
-    project: "fixture",
-    assignment: a.id,
-    run: "R-1",
-    generation,
-    target: target.fingerprint,
+  const sessionRoot = (launchGeneration: string) =>
+    workerSessionPath(worker, {
+      project: "fixture",
+      assignment: a.id,
+      run: "R-1",
+      generation: launchGeneration,
+      target: target.fingerprint,
+    });
+  const currentRoot = sessionRoot(generation);
+  const oldRoot = sessionRoot("c".repeat(32));
+  const controllerRoot = `${worker.dataDir}/runs/fixture/${a.id}`;
+  const metadata = (root: string) =>
+    JSON.stringify({
+      path: `${root}/claude/projects/-worktree/one.jsonl`,
+      activity: { session_id: "one", cwd: "/worktree/src", updated_at: at },
+    });
+  // The controller and previous generation still have attributable records.
+  vi.mocked(captureTranscript).mockImplementation(async (file, args) => {
+    if (file === process.execPath && args.includes(controllerRoot))
+      return metadata(controllerRoot);
+    if (file === "python3" && args.includes(oldRoot)) return metadata(oldRoot);
+    if (file === "python3" && args.includes(currentRoot))
+      return currentMissing ? "null" : metadata(currentRoot);
+    throw new Error("Unexpected transcript source");
   });
-  const metadata = JSON.stringify({
-    path: `${sessionRoot}/claude/projects/-worktree/one.jsonl`,
-    activity: { session_id: "one", cwd: "/worktree/src", updated_at: at },
-  });
-  vi.mocked(captureTranscript).mockResolvedValue(metadata);
+  const argv = [
+    "python3",
+    "-I",
+    "-B",
+    "-c",
+    WORKER_CLAUDE_OPENER,
+    currentRoot,
+    "",
+    CLAUDE_CONTEXT_READER,
+  ];
+  function expectBoundRead() {
+    expect(agentProcessCommand).toHaveBeenCalledExactlyOnceWith(worker, argv);
+    expect(captureTranscript).toHaveBeenCalledExactlyOnceWith(
+      "python3",
+      argv.slice(1),
+      undefined,
+    );
+  }
   const resolve = vi.fn(() => worker);
   const read = async (when = at) =>
     (
@@ -103,29 +134,14 @@ function scenario() {
         resolve,
       )
     )[0];
-  return { worker, ref, sessionRoot, read, resolve };
+  return { worker, ref, read, resolve, expectBoundRead };
 }
 
 test("worker Claude progress comes from the bound session generation and original record time", async () => {
   const t = scenario();
   const sample = await t.read();
   expect(t.resolve).toHaveBeenCalledWith(t.ref, "fixture");
-  const argv = [
-    "python3",
-    "-I",
-    "-B",
-    "-c",
-    WORKER_CLAUDE_OPENER,
-    t.sessionRoot,
-    "",
-    CLAUDE_CONTEXT_READER,
-  ];
-  expect(agentProcessCommand).toHaveBeenCalledWith(t.worker, argv);
-  expect(captureTranscript).toHaveBeenCalledWith(
-    "python3",
-    argv.slice(1),
-    undefined,
-  );
+  t.expectBoundRead();
   expect(sample).toMatchObject({
     activity_status: "fresh",
     activity: {
@@ -139,12 +155,14 @@ test("worker Claude progress comes from the bound session generation and origina
   expect((await t.read("2026-01-01T01:16:00Z"))?.activity_status).toBe("stale");
 });
 
-test("missing or conflicting worker metadata proves neither progress nor a stall", async () => {
-  const t = scenario();
-  vi.mocked(captureTranscript).mockResolvedValue("null");
+test("a missing current generation never borrows controller or old-generation activity", async () => {
+  const t = scenario({ currentMissing: true });
   for (const when of [at, "2026-01-01T02:00:00Z"]) {
+    vi.clearAllMocks();
     const sample = await t.read(when);
+    t.expectBoundRead();
     expect(sample?.activity).toBeUndefined();
+    expect(sample?.activity_status).toBe("missing");
     expect(sample?.activity_diagnostic).toContain("远程活动来源缺失");
   }
 });

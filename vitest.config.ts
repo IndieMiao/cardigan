@@ -43,7 +43,8 @@ export default defineConfig({
         test: {
           name: "process-contract",
           include: processContracts,
-          maxWorkers: 1,
+          // A per-project maxWorkers would be overridden by the CI CLI flag.
+          fileParallelism: false,
           sequence: { groupOrder: 2 },
         },
       },
