@@ -386,3 +386,119 @@ test("focus goes to 新建员工 after creating from 选用 even when the refres
   expect(screen.queryByRole("button", { name: "选用孙悟空" })).toBeNull();
   expect(document.activeElement).toBe(fallback);
 });
+
+const staffed: EmployeeOptions = {
+  ...options,
+  roles: [
+    { role_id: "coder", display_name: "开发" },
+    { role_id: "reviewer", display_name: "审核" },
+  ],
+  employees: [
+    {
+      id: "E-1",
+      name: "云长",
+      title: "开发工程师",
+      status: "active",
+      avatar: "/avatars/v1/guan-yu/head-64.webp",
+      role_id: "coder",
+      projects: ["p-1"],
+      role_change_blocked: null,
+    },
+    {
+      id: "E-2",
+      name: "孔明",
+      title: "审核员",
+      status: "active",
+      avatar: null,
+      role_id: "reviewer",
+      projects: [],
+      role_change_blocked: "run",
+    },
+    {
+      id: "E-3",
+      name: "别处的人",
+      title: "开发",
+      status: "active",
+      avatar: null,
+      role_id: "coder",
+      projects: ["p-2"],
+      role_change_blocked: null,
+    },
+  ],
+};
+
+test("C-494: this project's employees are listed, and a role change is a keyed transfer", async () => {
+  const updateEmployee = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockResolvedValue({ id: "E-1", name: "云长", role_id: "reviewer" });
+  const employeeOptions = vi.fn(async () => staffed);
+  await open({ employeeOptions, updateEmployee });
+  const table = await screen.findByRole("table", { name: "员工列表" });
+  expect(
+    within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.textContent),
+  ).toEqual(["云长开发工程师开发在职", "孔明审核员审核在职"]);
+  fireEvent.click(within(table).getByRole("button", { name: "云长" }));
+  const drawer = await screen.findByRole("dialog", { name: "云长" });
+  expect(
+    (
+      within(drawer).getByRole("button", {
+        name: "保存角色",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  changeControl(within(drawer).getByLabelText("角色"), {
+    target: { value: "reviewer" },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "保存角色" }));
+  expect((await within(drawer).findByRole("alert")).textContent).toBeTruthy();
+  fireEvent.click(within(drawer).getByRole("button", { name: "保存角色" }));
+  expect(await screen.findByText("已将 云长 的角色改为 审核")).toBeTruthy();
+  expect(updateEmployee).toHaveBeenCalledTimes(2);
+  expect(updateEmployee.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "E-1",
+    { role_id: "reviewer" },
+  ]);
+  expect(updateEmployee.mock.calls[1]?.[3]).toBe(
+    updateEmployee.mock.calls[0]?.[3],
+  );
+  expect(screen.queryByRole("dialog", { name: "云长" })).toBeNull();
+});
+
+test("C-494: an employee with work in progress cannot change role and the drawer says why", async () => {
+  const updateEmployee = vi.fn();
+  await open({ employeeOptions: async () => staffed, updateEmployee });
+  fireEvent.click(await screen.findByRole("button", { name: "孔明" }));
+  const drawer = await screen.findByRole("dialog", { name: "孔明" });
+  expect(
+    within(drawer).getByText("这名员工还有未结束的运行，结束后才能换角色。"),
+  ).toBeTruthy();
+  expect(
+    (within(drawer).getByLabelText("角色") as HTMLButtonElement).disabled,
+  ).toBe(true);
+  expect(
+    (
+      within(drawer).getByRole("button", {
+        name: "保存角色",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  expect(updateEmployee).not.toHaveBeenCalled();
+});
+
+test("C-494: closing an employee drawer with an unsaved role asks before discarding", async () => {
+  await open({ employeeOptions: async () => staffed });
+  fireEvent.click(await screen.findByRole("button", { name: "云长" }));
+  const drawer = await screen.findByRole("dialog", { name: "云长" });
+  changeControl(within(drawer).getByLabelText("角色"), {
+    target: { value: "reviewer" },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "取消" }));
+  const ask = await screen.findByRole("dialog", { name: "放弃未应用的修改？" });
+  fireEvent.click(within(ask).getByRole("button", { name: "放弃修改" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});

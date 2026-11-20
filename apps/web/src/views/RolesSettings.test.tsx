@@ -88,6 +88,10 @@ const list: RoleListView = {
   default_roles: ["coder", "designer"],
   harnesses: ["claude-code", "codex", "pi"],
   allowlists,
+  launch_profiles: [
+    { name: "fixture", harness: "pi", model: null },
+    { name: "codex-agent", harness: "codex", model: "gpt-fixture" },
+  ],
 };
 const detail: RoleDetailView = {
   project_id: "p-1",
@@ -130,6 +134,7 @@ function client(overrides: Parameters<typeof fakeClient>[0] = {}) {
     roles: async () => list,
     role: async () => detail,
     roleHistory: async () => history,
+    launchProfileNames: async () => ["fixture", "codex-agent"],
     ...overrides,
   });
 }
@@ -137,6 +142,9 @@ function client(overrides: Parameters<typeof fakeClient>[0] = {}) {
 async function openRoles(c = client()) {
   render(<SettingsPage projectId="p-1" client={c} />);
   fireEvent.click(await screen.findByRole("button", { name: "角色" }));
+  // The tab focuses its panel on the next frame; let that land first so it
+  // cannot take focus from a control the test focuses afterwards.
+  await waitFor(() => expect(document.activeElement?.id).toBe("roles"));
   return c;
 }
 

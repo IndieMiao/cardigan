@@ -77,4 +77,55 @@
       grid-row: 1;
     }
   }
+  /* `recordsAlways`: the record layout at every width, for tables whose
+     columns cannot all fit (a drawer's confirmation list). */
+  .always {
+    display: block;
+    min-width: 0;
+  }
+  .always thead {
+    position: absolute;
+    width: var(--ui-stroke);
+    height: var(--ui-stroke);
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .always tbody {
+    display: block;
+  }
+  .always tbody[hidden],
+  .always tr[hidden] {
+    display: none;
+  }
+  .always tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding: var(--ui-space-2) calc(var(--ui-space-2) + var(--ui-space-1) / 2);
+    border-bottom: var(--ui-stroke) solid var(--border);
+  }
+  .always .nowrap,
+  .always .nowrap :where(*) {
+    white-space: revert-layer;
+    overflow-wrap: revert-layer;
+  }
+  .always td {
+    grid-column: 1 / -1;
+    min-width: 0;
+    border: 0;
+    padding: calc(var(--ui-space-1) / 2) 0;
+    overflow-wrap: break-word;
+  }
+  .always td[data-label]::before {
+    content: attr(data-label) "：";
+    color: var(--text-muted);
+  }
+  .always td[data-record="aside"] {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .always td[data-record="lead"] {
+    grid-column: 1;
+    grid-row: 1;
+  }
 }

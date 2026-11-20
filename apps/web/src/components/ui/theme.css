@@ -48,6 +48,8 @@
     --ui-content-width: 1088px;
     --ui-settings-nav: 160px;
     --ui-settings-width: 720px;
+    /* C-494: a confirmation raised from inside a drawer sits above it. */
+    --ui-layer-confirm: 110;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
     --ui-graph-node: 176px;

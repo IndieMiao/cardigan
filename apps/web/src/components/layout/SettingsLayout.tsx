@@ -6,10 +6,18 @@ import {
   useEffect,
   useId,
   useRef,
+  useState,
 } from "react";
 import { cn } from "../../lib/utils.js";
+import { renderMarkdown } from "../../markdown.js";
 import { Tooltip } from "../Tooltip.js";
-import { IconButton } from "../ui/button.js";
+import { Button, IconButton } from "../ui/button.js";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "../ui/dialog.js";
 import { Input } from "../ui/input.js";
 import { cardDetailDrawerClassName } from "./CardDetailLayout.js";
 import { DataTableLayout } from "./DataTableLayout.js";
@@ -304,6 +312,139 @@ export function SettingsSection({
 export function SettingsText(props: Omit<ComponentProps<"pre">, "className">) {
   return <pre {...props} className={styles.longText} />;
 }
+/** Rendered Markdown (a role description preview): bounded, scrolls inside. */
+export function SettingsMarkdown({
+  source,
+  label,
+}: {
+  source: string;
+  label: string;
+}) {
+  return (
+    <section
+      aria-label={label}
+      className={cn("markdown", styles.markdown)}
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: long previews scroll by keyboard.
+      tabIndex={0}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: `renderMarkdown` escapes raw HTML and filters links.
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(source) }}
+    />
+  );
+}
+
+/**
+ * C-494: closing a drawer form with unapplied edits asks first. Keeping the
+ * edits is the default action; the dialog and its overlay sit above the
+ * drawer (`--ui-layer-confirm`).
+ */
+export function SettingsDiscardDialog({
+  open,
+  onKeep,
+  onDiscard,
+}: {
+  open: boolean;
+  onKeep: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onKeep();
+      }}
+    >
+      <DialogContent
+        className={cn(styles.dialog, styles.confirm)}
+        overlayClassName={styles.confirm}
+      >
+        <DialogTitle>放弃未应用的修改？</DialogTitle>
+        <DialogDescription className="visually-hidden">
+          关闭后这次填写的内容不会保留。
+        </DialogDescription>
+        <SettingsDialogActions>
+          <Button onClick={onKeep}>继续编辑</Button>
+          <Button variant="destructive" onClick={onDiscard}>
+            放弃修改
+          </Button>
+        </SettingsDialogActions>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Unapplied drawer edits: closing the tab or reloading asks through the
+ * browser; `ask(leave)` routes every in-app way out (closing the drawer,
+ * cancelling an edit) through the dialog and only leaves on "放弃修改".
+ */
+export function useDiscardGuard(dirty: boolean, close: () => void) {
+  const [pending, setPending] = useState<() => void>();
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+  const ask = useCallback(
+    (leave: () => void) => {
+      if (dirty) setPending(() => leave);
+      else leave();
+    },
+    [dirty],
+  );
+  const confirmClose = useCallback(() => ask(close), [ask, close]);
+  const dialog = (
+    <SettingsDiscardDialog
+      open={pending !== undefined}
+      onKeep={() => setPending(undefined)}
+      onDiscard={() => {
+        const leave = pending;
+        setPending(undefined);
+        leave?.();
+      }}
+    />
+  );
+  return { ask, confirmClose, dialog };
+}
+
+/**
+ * A file picker that looks like the other 28px buttons: the native input
+ * stays hidden and the button opens it. The value is reset after each
+ * choice so choosing the same file again still reports it.
+ */
+export function SettingsFileButton({
+  label,
+  accept,
+  disabled,
+  onFile,
+}: {
+  label: string;
+  accept: string;
+  disabled?: boolean;
+  onFile: (file: File | undefined) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <span className={styles.fileButton}>
+      <Button disabled={disabled} onClick={() => input.current?.click()}>
+        {label}
+      </Button>
+      <input
+        ref={input}
+        type="file"
+        hidden
+        tabIndex={-1}
+        aria-hidden="true"
+        accept={accept}
+        onChange={(event) => {
+          onFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+    </span>
+  );
+}
+
 /** One diff line or value; additions and removals use the status colours. */
 export function SettingsDiff({
   op,

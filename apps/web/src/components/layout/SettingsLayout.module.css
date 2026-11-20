@@ -322,6 +322,11 @@
     max-height: none;
     margin-top: var(--ui-space-3);
   }
+  /* Preview results come before the actions that apply them. */
+  .section ~ .dialogActions,
+  .section ~ .notice {
+    margin-block-start: var(--ui-space-4);
+  }
   .dialogActions {
     display: flex;
     flex-wrap: wrap;
@@ -400,6 +405,32 @@
     font-family: var(--font-code);
     font-size: var(--ui-text-xs);
     line-height: var(--ui-leading-xs);
+  }
+  /* Above the settings drawer (z 101): overlay first, then the dialog. */
+  [data-ui="overlay"].confirm {
+    z-index: var(--ui-layer-confirm);
+  }
+  [data-ui="dialog"].confirm {
+    z-index: calc(var(--ui-layer-confirm) + 1);
+  }
+  .fileButton {
+    justify-self: start;
+  }
+  /* Panels already space their children: no second gap between tables. */
+  .panel > :global(.card-table-scroll) + :global(.card-table-scroll) {
+    margin-block-start: 0;
+  }
+  .markdown {
+    max-width: none;
+    max-block-size: 50vh;
+    overflow: auto;
+    padding: var(--ui-space-2) var(--ui-space-3);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+    overflow-wrap: anywhere;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
   }
   .diff[data-op="add"] {
     color: var(--status-done);
