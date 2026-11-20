@@ -52,8 +52,12 @@ import {
   uploadAttachment,
 } from "@cardigan/domain";
 import {
+  applyRoleDocument,
   effectiveRunLimit,
   type ProjectMergeGate,
+  previewPorts,
+  previewRoleDocument,
+  RoleDocumentError,
   runCapacityMachines,
 } from "@cardigan/host";
 import {
@@ -66,27 +70,29 @@ import {
 } from "@cardigan/mcp-server";
 import {
   defaultRoleDefinition,
+  exportRoleMarkdown,
   HARNESSES,
   isDefaultRoleId,
+  RoleMarkdownError,
 } from "@cardigan/roles";
 import {
   getRoleVersion,
   listRoleVersions,
   persistRoleEffect,
   persistRunLimitEffect,
+  type ReadRepositories,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { z } from "zod";
-import { serveEmployees } from "./employees.js";
+import { requireEmployeeOwner, serveEmployees } from "./employees.js";
 import {
   HttpRejection,
+  MAX_JSON_BODY_BYTES,
   methodNotAllowed,
   readJsonBody,
   sendJson,
 } from "./http.js";
-
-import { previewPorts } from "./read.js";
 
 const text = z
   .string()
@@ -279,6 +285,9 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly roleLaunchConfig?:
+    | (() => import("@cardigan/roles").LaunchConfig | undefined)
+    | undefined;
   readonly launchProfiles?: (() => readonly string[]) | undefined;
   readonly runLimit?: ((machine: string) => number) | undefined;
   readonly runLimitMaximum?: ((machine: string) => number) | undefined;
@@ -606,6 +615,87 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  const exportId = /^\/roles\/([a-z0-9][a-z0-9._-]*)\/export$/u.exec(rest)?.[1];
+  if (exportId) {
+    if (c.req.method !== "GET") methodNotAllowed(["GET"]);
+    c.authorize();
+    const role = c.store.uow.read((tx) =>
+      getRoleVersion(tx, c.project_id, exportId),
+    );
+    if (!role) throw new HttpRejection(404, "not_found", "角色不存在");
+    sendJson(c.res, 200, { markdown: exportRoleMarkdown(role) });
+    return true;
+  }
+  if (rest === "/role-document/preview" || rest === "/role-document/apply") {
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    if (c.req.headers.authorization !== undefined)
+      throw new HttpRejection(403, "unauthorized", "仅支持人类会话");
+    // The document ceiling is measured after JSON decoding. An escaped byte can take
+    // six wire bytes; reserve the snapshot envelope separately so preview remains applicable.
+    const apply = rest.endsWith("/apply");
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify(
+        apply ? { markdown: "", snapshot: "0".repeat(64) } : { markdown: "" },
+      ),
+    );
+    const body = await readJsonBody(
+      c.req,
+      6 * MAX_JSON_BODY_BYTES + envelopeBytes,
+    );
+    if (
+      typeof body.markdown === "string" &&
+      Buffer.byteLength(body.markdown) > MAX_JSON_BODY_BYTES
+    )
+      throw new HttpRejection(
+        413,
+        "payload_too_large",
+        "Markdown 文件不能超过 64 KiB",
+      );
+    const context = {
+      ...c,
+      actor: { kind: "human" as const, project_id: c.project_id },
+      launchConfig: c.roleLaunchConfig ?? (() => undefined),
+      authorize: (
+        tx: Pick<ReadRepositories, "members">,
+        employees: boolean,
+      ) => {
+        if (employees) requireEmployeeOwner(c, tx);
+        else c.authorize();
+      },
+    };
+    const schema = z.strictObject({ markdown: z.string() });
+    try {
+      if (!apply)
+        sendJson(
+          c.res,
+          200,
+          previewRoleDocument(context, parsed(schema, body).markdown),
+        );
+      else {
+        const { markdown, snapshot } = parsed(
+          schema.extend({ snapshot: z.string() }),
+          body,
+        );
+        const key = parsed(
+          requiredKey,
+          c.req.headers["idempotency-key"],
+          "应用需要 Idempotency-Key",
+        );
+        sendJson(
+          c.res,
+          200,
+          applyRoleDocument(context, markdown, snapshot, key),
+        );
+      }
+    } catch (e) {
+      if (e instanceof RoleDocumentError) rejected(e);
+      if (e instanceof RoleMarkdownError)
+        throw new HttpRejection(400, "validation_failed", e.message);
+      throw e;
+    }
+    return true;
+  }
   if (await serveEmployees(c, rest)) return true;
   if (rest === "/cards" && c.req.method === "POST") {
     c.authorize();
