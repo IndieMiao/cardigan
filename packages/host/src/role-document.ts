@@ -8,7 +8,12 @@ import {
   latestCardTemplate,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import { parseRoleMarkdown, type RoleMarkdown } from "@cardigan/roles";
+import {
+  type LaunchConfig,
+  parseRoleMarkdown,
+  type RoleMarkdown,
+  resolveProfile,
+} from "@cardigan/roles";
 import {
   hashRequest,
   listRoleVersions,
@@ -22,7 +27,6 @@ import { previewPorts } from "./preview-ports.js";
 import {
   employeePlans,
   must,
-  type Profiles,
   profile,
   RoleDocumentError,
   rolePlan,
@@ -37,7 +41,7 @@ interface Context {
   project_id: string;
   actor: Actor;
   clock: Clock;
-  profiles: () => Profiles;
+  launchConfig: () => LaunchConfig | undefined;
   /** Transport credential/owner check, including before serving an idempotent replay. */
   authorize: (
     tx: Pick<ReadRepositories, "members">,
@@ -65,7 +69,8 @@ function evaluate(
   const roles = new Map(
     listRoleVersions(tx, project_id).map((r) => [r.role_id, r]),
   );
-  const profiles = c.profiles();
+  const config = c.launchConfig();
+  const profiles = config?.profiles ?? {};
   // Load template command state only for documents with a template section.
   const state = doc.template ? loadCommandState(tx, project_id) : undefined;
   const flow = state?.project_preferences?.find(
@@ -104,7 +109,16 @@ function evaluate(
     flow,
     profiles: [...profileRefs]
       .filter((ref): ref is string => ref !== undefined)
-      .map((ref) => [ref, profile(profiles, ref)?.harness]),
+      .map((ref) => {
+        if (!config || !profile(profiles, ref)) return [ref, null];
+        // Bind the effective profile and its provider, never the secrets file. Keep the
+        // order of Codex config overrides: the adapter emits them in insertion order.
+        const resolved = resolveProfile(config, ref);
+        return {
+          ...resolved,
+          overrides: Object.entries(resolved.profile.config ?? {}),
+        };
+      }),
     employees: employees.filter((e) =>
       doc.employees?.some(
         (input) =>

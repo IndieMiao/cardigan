@@ -71,13 +71,15 @@ export async function loadSecrets(
 
 /** Fail closed on a partial candidate. Read only local cache and check permissions on the opened secret file. */
 export function validProfileNames(paths: LaunchPaths): ReadonlySet<string> {
-  return new Set(Object.keys(validProfiles(paths)));
+  return new Set(Object.keys(validLaunchConfig(paths)?.profiles ?? {}));
 }
 
-export function validProfiles(paths: LaunchPaths): LaunchConfig["profiles"] {
+export function validLaunchConfig(
+  paths: LaunchPaths,
+): LaunchConfig | undefined {
   const before = launchFilesStamp(paths.configDir);
   const config = loadOptionalConfigSync(paths);
-  if (!config) return {};
+  if (!config) return undefined;
   let secrets: Record<string, string> = {};
   let fd: number | undefined;
   try {
@@ -97,5 +99,5 @@ export function validProfiles(paths: LaunchPaths): LaunchConfig["profiles"] {
   validateLaunchSecrets(config, secrets);
   if (before !== launchFilesStamp(paths.configDir))
     throw new CliError("启动配置已变化，请重试", EXIT.usage);
-  return config.profiles;
+  return config;
 }

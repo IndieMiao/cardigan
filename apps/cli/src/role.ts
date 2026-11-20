@@ -39,7 +39,7 @@ import {
   persistRoleEffect,
   Store,
 } from "@cardigan/store";
-import { validProfileNames, validProfiles } from "./config.js";
+import { validLaunchConfig, validProfileNames } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
@@ -238,7 +238,8 @@ export async function runRoleCommand(
         project_id: project,
         actor: resolveActor(io, project, store),
         clock: systemClock,
-        profiles: () => validProfiles(cliLaunchPaths(io, flags["data-dir"])),
+        launchConfig: () =>
+          validLaunchConfig(cliLaunchPaths(io, flags["data-dir"])),
         authorize: () => {},
       }; // CLI human-only policy; no web session
       try {

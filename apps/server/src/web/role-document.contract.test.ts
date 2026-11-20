@@ -1,8 +1,10 @@
 import type { Actor, Role } from "@cardigan/domain";
 import { applyRoleDocument, previewRoleDocument } from "@cardigan/host";
+import type { LaunchConfig } from "@cardigan/roles";
 import { getRoleVersion, roleDocument } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
+import { MAX_JSON_BODY_BYTES } from "./http.js";
 
 const markdown = `---
 role_id: author
@@ -21,8 +23,16 @@ Draft and revise.
 let h: Awaited<ReturnType<typeof webHarness>>, cookie: string;
 const project = "doc-project";
 const route = (path: string) => `/api/projects/${project}/${path}`;
+let launchConfig: LaunchConfig;
 beforeEach(async () => {
-  h = await webHarness({ password: "fixture-pass" });
+  launchConfig = {
+    profiles: { fixture: { harness: "codex", model: "first-model" } },
+    providers: {},
+  };
+  h = await webHarness({
+    password: "fixture-pass",
+    roleLaunchConfig: () => launchConfig,
+  });
   h.store.createProject({ id: project });
   cookie = await h.login("fixture-pass");
 });
@@ -184,7 +194,7 @@ test("owner and actor are checked on preview, apply and cached replay", async ()
       store: h.store,
       project_id: project,
       actor,
-      profiles: () => ({ fixture: { harness: "codex" as const } }),
+      launchConfig: () => undefined,
       clock: { now: () => new Date().toISOString() },
       authorize: () => {},
     };
@@ -316,4 +326,97 @@ test("editing a role previews and commits the exact changes, including loosened 
       relaxations: [],
     },
   });
+});
+
+test("only changes to effective role and employee profiles invalidate the preview", async () => {
+  const text = markdown.replace(
+    "name: First",
+    "launch_profile: staff, name: First",
+  );
+  launchConfig.profiles.staff = {
+    harness: "codex",
+    model: "staff-model",
+    provider: "staff-route",
+  };
+  launchConfig.providers["staff-route"] = { env: {}, secret_env: {} };
+  const before = rows();
+  const original = await preview(text);
+  launchConfig.profiles.fixture = { harness: "codex", model: "second-model" };
+  const apply = (snapshot: string, key: string) =>
+    post("apply", { markdown: text, snapshot }, key);
+  expect((await apply(original.snapshot, "role-model")).status).toBe(409);
+  const second = await preview(text);
+  launchConfig.profiles.staff.args = ["--verbose"];
+  expect((await apply(second.snapshot, "employee-args")).status).toBe(409);
+  const third = await preview(text);
+  launchConfig.providers["staff-route"].base_url = "https://fixture.example";
+  expect((await apply(third.snapshot, "employee-provider")).status).toBe(409);
+  expect(rows()).toEqual(before);
+  const final = await preview(text);
+  launchConfig.profiles.other = { harness: "pi", model: "unrelated-model" };
+  expect((await preview(text)).snapshot).toBe(final.snapshot);
+  expect((await apply(final.snapshot, "unrelated")).status).toBe(200);
+});
+
+test("preview and apply accept the same UTF-8 Markdown limit independently of JSON escaping and the snapshot envelope", async () => {
+  const header = "---\nrole_id: author\nlaunch_profile: fixture\n---\n";
+  const bytes = MAX_JSON_BODY_BYTES - Buffer.byteLength(header);
+  const unit = "字\\\n"; // five bytes in UTF-8, seven in the JSON string
+  const text =
+    header +
+    unit.repeat(Math.floor(bytes / Buffer.byteLength(unit))) +
+    "x".repeat(bytes % Buffer.byteLength(unit));
+  expect(Buffer.byteLength(text)).toBe(MAX_JSON_BODY_BYTES);
+  const p = await preview(text);
+  expect(
+    (await post("apply", { markdown: text, snapshot: p.snapshot }, "max"))
+      .status,
+  ).toBe(200);
+  const tooLarge = `${text}x`;
+  expect((await post("preview", { markdown: tooLarge })).status).toBe(413);
+  expect(
+    (
+      await post(
+        "apply",
+        { markdown: tooLarge, snapshot: p.snapshot },
+        "excess",
+      )
+    ).status,
+  ).toBe(413);
+});
+
+test("employee preview, applied and unchanged results agree with the normalized stored profile", async () => {
+  const text = markdown.replace(
+    "name: First, title: Writer",
+    `name: '  First　', title: '  Writer ', bio: '  Example bio  '`,
+  );
+  const p = await preview(text);
+  const result = await post(
+    "apply",
+    { markdown: text, snapshot: p.snapshot },
+    "normalize",
+  );
+  expect(result.status).toBe(200);
+  const saved = h.store.uow.read((tx) => tx.employees.list()[0]);
+  if (!saved) throw new Error("missing employee");
+  const { name, title, bio, avatar, role_id, launch_profile_ref } = saved;
+  expect({ name, title, bio }).toEqual({
+    name: "First",
+    title: "Writer",
+    bio: "Example bio",
+  });
+  const fields = { name, title, bio, avatar, role_id, launch_profile_ref };
+  const staff = (id: string | null, action: string) => ({
+    employees: expect.arrayContaining([
+      expect.objectContaining({ ...fields, id, action }),
+    ]),
+  });
+  expect(p).toMatchObject(staff(null, "create"));
+  expect(result.json).toMatchObject(staff(saved.id, "create"));
+  const again = await preview(text);
+  expect(again).toMatchObject(staff(saved.id, "unchanged"));
+  expect(
+    (await post("apply", { markdown: text, snapshot: again.snapshot }, "same"))
+      .json,
+  ).toMatchObject(staff(saved.id, "unchanged"));
 });

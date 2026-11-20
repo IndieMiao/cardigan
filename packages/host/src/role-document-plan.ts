@@ -301,7 +301,12 @@ export function employeePlans(
       command,
       changed: !current,
       preview: {
-        ...input,
+        name: next.name,
+        title: next.title,
+        bio: next.bio,
+        avatar: next.avatar,
+        role_id: next.role_id,
+        launch_profile_ref: next.launch_profile_ref,
         action: current ? "unchanged" : "create",
         id: current?.id ?? null,
       },

@@ -85,6 +85,7 @@ import { z } from "zod";
 import { requireEmployeeOwner, serveEmployees } from "./employees.js";
 import {
   HttpRejection,
+  MAX_JSON_BODY_BYTES,
   methodNotAllowed,
   readJsonBody,
   sendJson,
@@ -270,8 +271,8 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
-  readonly roleProfiles?:
-    | (() => import("@cardigan/roles").LaunchConfig["profiles"])
+  readonly roleLaunchConfig?:
+    | (() => import("@cardigan/roles").LaunchConfig | undefined)
     | undefined;
   readonly launchProfiles?: (() => readonly string[]) | undefined;
   readonly runLimit?: ((machine: string) => number) | undefined;
@@ -612,11 +613,31 @@ export async function serveWrite(
     c.authorize();
     if (c.req.headers.authorization !== undefined)
       throw new HttpRejection(403, "unauthorized", "仅支持人类会话");
-    const body = await readJsonBody(c.req);
+    // The document ceiling is measured after JSON decoding. An escaped byte can take
+    // six wire bytes; reserve the snapshot envelope separately so preview remains applicable.
+    const apply = rest.endsWith("/apply");
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify(
+        apply ? { markdown: "", snapshot: "0".repeat(64) } : { markdown: "" },
+      ),
+    );
+    const body = await readJsonBody(
+      c.req,
+      6 * MAX_JSON_BODY_BYTES + envelopeBytes,
+    );
+    if (
+      typeof body.markdown === "string" &&
+      Buffer.byteLength(body.markdown) > MAX_JSON_BODY_BYTES
+    )
+      throw new HttpRejection(
+        413,
+        "payload_too_large",
+        "Markdown 文件不能超过 64 KiB",
+      );
     const context = {
       ...c,
       actor: { kind: "human" as const, project_id: c.project_id },
-      profiles: c.roleProfiles ?? (() => ({})),
+      launchConfig: c.roleLaunchConfig ?? (() => undefined),
       authorize: (
         tx: Pick<ReadRepositories, "members">,
         employees: boolean,
@@ -627,7 +648,7 @@ export async function serveWrite(
     };
     const schema = z.strictObject({ markdown: z.string() });
     try {
-      if (rest.endsWith("/preview"))
+      if (!apply)
         sendJson(
           c.res,
           200,
