@@ -158,15 +158,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     return state.result.then((result) => {
       if (state.terminal && result.status === "passed")
         this.pending.delete(run.run_id);
-      return result.status === "passed"
-        ? result
-        : {
-            ...result,
-            logSource: {
-              url: state.external.html_url,
-              ...(state.failedJob ? { jobId: state.failedJob } : {}),
-            },
-          };
+      return result;
     });
   }
   async cancel(run: ExternalGithubRun): Promise<void> {
@@ -426,17 +418,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     const jobs = await this.options.client.jobs(run.id, signal);
     if (signal.aborted || state.revision !== revision) return;
     const result = mapGithubCheckResult(state.request, run, jobs);
-    const failedJob = jobs.find(
-      (job) =>
-        job &&
-        Number.isSafeInteger(job.id) &&
-        job.id > 0 &&
-        job.run_id === run.id &&
-        job.run_attempt === 1 &&
-        job.head_sha === run.head_sha &&
-        job.conclusion !== "success",
-    );
-    state.failedJob = failedJob?.id;
+    state.failedJob = result.logSource?.jobId;
     state.onTerminal?.();
     this.close(state, result);
   }
@@ -463,6 +445,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       this.progress(state, reason);
       state.settledUnconfirmed = true;
       state.resolve({
+        logSource: { url: state.external.html_url },
         status: "timed_out",
         checks: [],
         cleanup_errors: ["GitHub 远端结束尚未确认，保留检查占位"],
@@ -491,7 +474,10 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
   private unconfirmed(state: Pending) {
     state.cancelRequested = true;
     state.settledUnconfirmed = true;
-    state.resolve(unavailable());
+    state.resolve({
+      ...unavailable(),
+      logSource: { url: state.external.html_url },
+    });
   }
   private close(state: Pending, result: CheckoutResult) {
     state.terminal = true;
@@ -537,20 +523,37 @@ function mapGithubCheckResult(
 ): CheckoutResult {
   if (run.conclusion === "cancelled")
     return { status: "interrupted", checks: [], cleanup_errors: [] };
-  const job = jobs[0];
+  // Both callers verified this run before requesting jobs. Only the bound
+  // completed job can supply a locator or be used to download diagnostics.
+  const job = jobs.length === 1 ? jobs[0] : undefined;
   if (
-    jobs.length !== 1 ||
     !job ||
     job.name !== "check" ||
+    job.status !== "completed" ||
     job.run_id !== run.id ||
     job.run_attempt !== 1 ||
     job.head_sha !== run.head_sha ||
     !Number.isSafeInteger(job.id) ||
-    job.id < 1 ||
-    job.status !== "completed" ||
-    !Array.isArray(job.steps)
+    job.id < 1
   )
-    return rejected();
+    return { ...rejected(), logSource: { url: run.html_url } };
+  const result = mapGithubCheckSteps(request, run, job);
+  return result.status === "passed"
+    ? result
+    : {
+        ...result,
+        logSource: {
+          url: run.html_url,
+          ...(job.conclusion !== "success" ? { jobId: job.id } : {}),
+        },
+      };
+}
+function mapGithubCheckSteps(
+  request: CheckRequest,
+  run: GithubRun,
+  job: GithubJob,
+): CheckoutResult {
+  if (!Array.isArray(job.steps)) return rejected();
   const mainStepCount =
     GITHUB_WORKFLOW_STEPS.length +
     (job.steps[0]?.name === "Set up job" ? 1 : 0);
