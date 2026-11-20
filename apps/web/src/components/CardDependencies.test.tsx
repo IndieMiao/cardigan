@@ -1,10 +1,28 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
+import { routeHash } from "../route.js";
 import { card } from "../testing/fixtures.js";
 import { CardDependencies } from "./CardDependencies.js";
 
-afterEach(cleanup);
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+
+afterEach(() => {
+  cleanup();
+  window.location.hash = "";
+});
 test("dependency links retain full titles, textual terminal states and distinguish early completion waits", () => {
   render(
     <CardDependencies
@@ -40,6 +58,7 @@ test("dependency links retain full titles, textual terminal states and distingui
   expect(
     within(region).getByText("提前开工 · 完成仍等 C-3333333333"),
   ).toBeDefined();
+  expect(within(region).getByText("最长未完成链：2 张")).toBeDefined();
   expect(within(region).getByText("已取代")).toBeDefined();
   expect(within(region).getByText("已完成")).toBeDefined();
   const links = within(region).getAllByRole("link");
@@ -48,8 +67,130 @@ test("dependency links retain full titles, textual terminal states and distingui
   expect(links[1]?.textContent).toContain("长标题".repeat(50));
   links[2]?.focus();
   expect(document.activeElement).toBe(links[2]);
+  // The open card is the highlighted node, not a link to itself.
+  const current = region.querySelector('[aria-current="page"]');
+  expect(current?.textContent).toContain(card.id);
+  expect(current?.closest("a")).toBeNull();
+  expect(region.querySelectorAll("[data-edge]")).toHaveLength(3);
 });
+
 test("no dependency has no new empty section", () => {
   render(<CardDependencies projectId="p-1" card={card} />);
   expect(screen.queryByRole("region", { name: "卡片依赖" })).toBeNull();
+});
+
+test("the detail graph shows the whole chain, marks 待核 and jumps on click", async () => {
+  render(
+    <CardDependencies
+      projectId="p-1"
+      card={{
+        ...card,
+        dependency: {
+          predecessors: [
+            { id: "C-2", title: "直接前置", status: "done", satisfied: false },
+          ],
+          successors: [
+            { id: "C-4", title: "直接后续", status: "todo", satisfied: false },
+          ],
+          waiting_on: ["C-2"],
+          critical_path_length: 3,
+          graph: {
+            nodes: [
+              { id: "C-0", title: "源头", status: "done", satisfied: true },
+              {
+                id: "C-2",
+                title: "直接前置",
+                status: "done",
+                satisfied: false,
+              },
+              { ...card, satisfied: false },
+              {
+                id: "C-4",
+                title: "直接后续",
+                status: "todo",
+                satisfied: false,
+              },
+              { id: "C-5", title: "末端", status: "backlog", satisfied: false },
+            ],
+            edges: [
+              { from: "C-0", to: "C-2" },
+              { from: "C-2", to: card.id },
+              { from: card.id, to: "C-4" },
+              { from: "C-4", to: "C-5" },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  const region = screen.getByRole("region", { name: "卡片依赖" });
+  expect(within(region).getByText("等 C-2")).toBeDefined();
+  expect(within(region).getByText("最长未完成链：3 张")).toBeDefined();
+  const graph = within(region).getByRole("list", { name: "依赖关系图" });
+  expect(within(graph).getAllByRole("listitem")).toHaveLength(5);
+  expect(within(graph).getByText("已完成（待核）")).toBeDefined();
+  expect(
+    [...region.querySelectorAll("[data-edge]")].map((edge) =>
+      edge.getAttribute("data-edge"),
+    ),
+  ).toEqual(["C-0>C-2", "C-2>C-1", "C-1>C-4", "C-4>C-5"]);
+  const far = within(graph).getByRole("link", { name: /C-5.*末端/ });
+  fireEvent.click(far);
+  await waitFor(() =>
+    expect(window.location.hash).toBe(
+      routeHash({ kind: "card", projectId: "p-1", cardId: "C-5" }),
+    ),
+  );
+});
+
+test("a shortcut edge runs through its own waypoint and every node reads out its direct links", () => {
+  render(
+    <CardDependencies
+      projectId="p-1"
+      card={{
+        ...card,
+        dependency: {
+          predecessors: [
+            { id: "C-2", title: "中间", status: "todo", satisfied: false },
+          ],
+          successors: [],
+          waiting_on: ["C-2"],
+          critical_path_length: 2,
+          graph: {
+            nodes: [
+              { id: "C-0", title: "源头", status: "todo", satisfied: false },
+              { id: "C-2", title: "中间", status: "todo", satisfied: false },
+              { ...card, satisfied: false },
+            ],
+            edges: [
+              { from: "C-0", to: "C-2" },
+              { from: "C-2", to: card.id },
+              { from: "C-0", to: card.id },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  const region = screen.getByRole("region", { name: "卡片依赖" });
+  const graph = within(region).getByRole("list", { name: "依赖关系图" });
+  // The waypoint is an empty, hidden cell: not a node a reader meets.
+  expect(within(graph).getAllByRole("listitem")).toHaveLength(3);
+  const waypoints = region.querySelectorAll("[data-waypoint]");
+  expect(waypoints).toHaveLength(1);
+  expect(waypoints[0]?.getAttribute("aria-hidden")).toBe("true");
+  expect(waypoints[0]?.textContent).toBe("");
+  expect(region.querySelectorAll("[data-edge]")).toHaveLength(3);
+  const description = (element: Element | null | undefined) =>
+    document.getElementById(element?.getAttribute("aria-describedby") ?? "")
+      ?.textContent;
+  expect(description(within(graph).getByRole("link", { name: /C-0/ }))).toBe(
+    `后续 C-2、${card.id}`,
+  );
+  expect(description(within(graph).getByRole("link", { name: /C-2/ }))).toBe(
+    `前置 C-0；后续 ${card.id}`,
+  );
+  expect(description(region.querySelector('[aria-current="page"]'))).toBe(
+    "前置 C-2、C-0",
+  );
 });

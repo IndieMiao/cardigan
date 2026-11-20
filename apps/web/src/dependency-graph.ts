@@ -1,0 +1,263 @@
+import type { CardView, DependencyCard, DependencyGraph } from "./api.js";
+import { STATUS_LABELS } from "./status.js";
+
+export interface PlacedDependency {
+  readonly card: DependencyCard;
+  /** Left-to-right layer: every prerequisite sits in an earlier column. */
+  readonly column: number;
+  /** First of the two half-rows the node spans, aligned to its neighbours. */
+  readonly row: number;
+  readonly current: boolean;
+  /** Finished normally, cancelled, duplicate or not doing: no longer blocks. */
+  readonly muted: boolean;
+}
+
+/** An empty cell a long edge passes through, spanning two half-rows. */
+export interface DependencyWaypoint {
+  readonly column: number;
+  readonly row: number;
+}
+
+export interface PlacedDependencyEdge {
+  readonly from: string;
+  readonly to: string;
+  /** One waypoint per column between the ends, left to right. */
+  readonly via: readonly DependencyWaypoint[];
+}
+
+export interface DependencyLayout {
+  readonly columns: number;
+  /** Half-row count; every node and waypoint spans two. */
+  readonly rows: number;
+  readonly nodes: readonly PlacedDependency[];
+  readonly edges: readonly PlacedDependencyEdge[];
+}
+
+/** Older reads (and list rows) only carry direct links; draw those. */
+export function dependencyGraphOf(card: CardView): DependencyGraph | undefined {
+  const dependency = card.dependency;
+  if (
+    !dependency ||
+    (!dependency.predecessors.length && !dependency.successors.length)
+  )
+    return undefined;
+  if (dependency.graph) return dependency.graph;
+  const self: DependencyCard = {
+    id: card.id,
+    title: card.title,
+    status: card.status,
+    ...(card.resolution ? { resolution: card.resolution } : {}),
+    satisfied: false,
+  };
+  return {
+    nodes: [...dependency.predecessors, self, ...dependency.successors],
+    edges: [
+      ...dependency.predecessors.map((p) => ({ from: p.id, to: card.id })),
+      ...dependency.successors.map((s) => ({ from: card.id, to: s.id })),
+    ],
+  };
+}
+
+export function dependencyStatusLabel(card: DependencyCard): string {
+  if (card.resolution === "duplicate") return "重复";
+  if (card.resolution === "wontdo") return "不做";
+  const label =
+    STATUS_LABELS[
+      (card.resolution && card.resolution !== "done"
+        ? card.resolution
+        : card.status) as keyof typeof STATUS_LABELS
+    ] ?? "状态未知";
+  // A done label without completion evidence still blocks: 待核.
+  return card.status === "done" &&
+    !card.satisfied &&
+    (!card.resolution || card.resolution === "done")
+    ? `${label}（待核）`
+    : label;
+}
+
+function finished(card: DependencyCard): boolean {
+  return (
+    card.status === "cancelled" ||
+    (!!card.resolution && card.resolution !== "done") ||
+    (card.status === "done" && card.satisfied)
+  );
+}
+
+const SWEEPS = 4;
+
+/**
+ * Longest-path layers with barycentric ordering; no graph library. Edges that
+ * skip columns get a waypoint in each column they cross, so no line runs
+ * under a node it does not connect.
+ */
+export function layoutDependencyGraph(
+  graph: DependencyGraph,
+  currentId: string,
+): DependencyLayout {
+  const cards = new Map<string, DependencyCard>();
+  for (const node of graph.nodes)
+    if (!cards.has(node.id)) cards.set(node.id, node);
+  if (!cards.size) return { columns: 0, rows: 0, nodes: [], edges: [] };
+  const preds = new Map<string, string[]>(),
+    succs = new Map<string, string[]>(),
+    edges: { from: string; to: string }[] = [],
+    seenEdges = new Set<string>();
+  for (const { from, to } of graph.edges) {
+    const key = `${from}\u0000${to}`;
+    if (from === to || !cards.has(from) || !cards.has(to) || seenEdges.has(key))
+      continue;
+    seenEdges.add(key);
+    edges.push({ from, to });
+    preds.set(to, [...(preds.get(to) ?? []), from]);
+    succs.set(from, [...(succs.get(from) ?? []), to]);
+  }
+  const layer = new Map<string, number>(),
+    visiting = new Set<string>();
+  // Corrupt legacy cycles: the closing edge is ignored for layering only.
+  const place = (id: string): number => {
+    const known = layer.get(id);
+    if (known !== undefined) return known;
+    if (visiting.has(id)) return -1;
+    visiting.add(id);
+    let value = 0;
+    for (const p of preds.get(id) ?? []) value = Math.max(value, place(p) + 1);
+    visiting.delete(id);
+    layer.set(id, value);
+    return value;
+  };
+  for (const id of cards.keys()) place(id);
+  // Pull pure prerequisites next to their first dependent, not to column 0.
+  for (const id of cards.keys())
+    if (!preds.get(id)?.length && succs.get(id)?.length)
+      layer.set(
+        id,
+        Math.max(
+          0,
+          Math.min(...(succs.get(id) ?? []).map((s) => layer.get(s) ?? 1)) - 1,
+        ),
+      );
+  // Pulling can empty a layer; close the gap.
+  const used = [...new Set(layer.values())].sort((a, b) => a - b);
+  const columnOf = new Map<string, number>();
+  const columns: string[][] = used.map(() => []);
+  for (const id of cards.keys()) {
+    const column = used.indexOf(layer.get(id) ?? 0);
+    columnOf.set(id, column);
+    columns[column]?.push(id);
+  }
+  // Ordering and alignment run on adjacent-column links: real edges, or the
+  // hops of a long edge through its waypoints. Waypoint keys are not card ids.
+  const up = new Map<string, string[]>(),
+    down = new Map<string, string[]>();
+  const routes = edges.map(({ from, to }, index) => {
+    const via: string[] = [];
+    for (
+      let column = (columnOf.get(from) ?? 0) + 1;
+      column < (columnOf.get(to) ?? 0);
+      column++
+    ) {
+      const id = `\u0000${index}:${column}`;
+      via.push(id);
+      columnOf.set(id, column);
+      columns[column]?.push(id);
+    }
+    const hops = [from, ...via, to];
+    for (let i = 1; i < hops.length; i++) {
+      const a = hops[i - 1] ?? "",
+        b = hops[i] ?? "";
+      down.set(a, [...(down.get(a) ?? []), b]);
+      up.set(b, [...(up.get(b) ?? []), a]);
+    }
+    return { from, to, via };
+  });
+  const tallest = Math.max(1, ...columns.map((c) => c.length));
+  const position = new Map<string, number>();
+  const measure = () => {
+    for (const column of columns)
+      for (const [index, id] of column.entries())
+        position.set(id, tallest - column.length + index * 2);
+  };
+  measure();
+  for (let sweep = 0; sweep < SWEEPS; sweep++) {
+    const downward = sweep % 2 === 0,
+      neighbours = downward ? up : down,
+      order = downward ? columns : [...columns].reverse();
+    for (const column of order) {
+      const keyed = column.map((id, index) => {
+        const ys = (neighbours.get(id) ?? []).flatMap((n) => {
+          const y = position.get(n);
+          return y === undefined ? [] : [y];
+        });
+        return {
+          id,
+          index,
+          key: ys.length
+            ? ys.reduce((a, b) => a + b, 0) / ys.length
+            : (position.get(id) ?? 0),
+        };
+      });
+      keyed.sort((a, b) => a.key - b.key || a.index - b.index);
+      column.splice(0, column.length, ...keyed.map((k) => k.id));
+      measure();
+    }
+  }
+  // Straighten: move each node toward its neighbours' mean, keeping order
+  // and two half-rows apart; first by prerequisites, then pure prerequisites
+  // toward their dependents.
+  const mean = (ids: readonly string[]) =>
+    ids.reduce((sum, n) => sum + (position.get(n) ?? 0), 0) / ids.length;
+  const align = (
+    column: readonly string[],
+    desired: (id: string) => number,
+  ) => {
+    const want = column.map((id) => Math.round(desired(id)));
+    const placed: number[] = [];
+    for (const [i, y] of want.entries())
+      placed.push(i ? Math.max(y, (placed[i - 1] ?? 0) + 2) : y);
+    const shift = Math.round(
+      want.reduce((sum, y, i) => sum + y - (placed[i] ?? 0), 0) / want.length,
+    );
+    for (const [i, id] of column.entries())
+      position.set(id, (placed[i] ?? 0) + shift);
+  };
+  for (const column of columns.slice(1))
+    align(column, (id) =>
+      up.get(id)?.length ? mean(up.get(id) ?? []) : (position.get(id) ?? 0),
+    );
+  for (const column of [...columns].reverse())
+    align(column, (id) =>
+      !up.get(id)?.length && down.get(id)?.length
+        ? mean(down.get(id) ?? [])
+        : (position.get(id) ?? 0),
+    );
+  const top = Math.min(...position.values());
+  for (const [id, y] of position) position.set(id, y - top);
+  return {
+    columns: columns.length,
+    rows: Math.max(...position.values()) + 2,
+    nodes: columns.flatMap((column, index) =>
+      column.flatMap((id) => {
+        const card = cards.get(id);
+        return card
+          ? [
+              {
+                card,
+                column: index,
+                row: position.get(id) ?? 0,
+                current: id === currentId,
+                muted: id !== currentId && finished(card),
+              },
+            ]
+          : [];
+      }),
+    ),
+    edges: routes.map(({ from, to, via }) => ({
+      from,
+      to,
+      via: via.map((id) => ({
+        column: columnOf.get(id) ?? 0,
+        row: position.get(id) ?? 0,
+      })),
+    })),
+  };
+}

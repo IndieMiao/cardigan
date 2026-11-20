@@ -532,7 +532,7 @@ test("an Agent body with HTML or javascript: links stays inert", async () => {
   expect(entry?.textContent).toContain("<script>");
 });
 
-test("C-370 detail subscribes to prerequisite and successor revisions", async () => {
+test("C-370 detail subscribes to prerequisite and successor revisions, C-487 across the whole graph", async () => {
   const detail = cardDetail();
   const observed: string[][] = [];
   render(
@@ -563,6 +563,39 @@ test("C-370 detail subscribes to prerequisite and successor revisions", async ()
               ],
               waiting_on: ["C-2"],
               critical_path_length: 2,
+              graph: {
+                nodes: [
+                  {
+                    id: "C-0",
+                    title: "Root",
+                    status: "todo",
+                    satisfied: false,
+                  },
+                  {
+                    id: "C-2",
+                    title: "Before",
+                    status: "todo",
+                    satisfied: false,
+                  },
+                  {
+                    id: "C-1",
+                    title: "Self",
+                    status: "todo",
+                    satisfied: false,
+                  },
+                  {
+                    id: "C-3",
+                    title: "After",
+                    status: "backlog",
+                    satisfied: false,
+                  },
+                ],
+                edges: [
+                  { from: "C-0", to: "C-2" },
+                  { from: "C-2", to: "C-1" },
+                  { from: "C-1", to: "C-3" },
+                ],
+              },
             },
           },
         }),
@@ -574,7 +607,11 @@ test("C-370 detail subscribes to prerequisite and successor revisions", async ()
     />,
   );
   await screen.findByRole("region", { name: "卡片依赖" });
+  // C-487: an upstream change two links away still refreshes the graph.
   expect(
-    observed.some((ids) => ids.includes("C-2") && ids.includes("C-3")),
+    observed.some(
+      (ids) =>
+        ids.includes("C-2") && ids.includes("C-3") && ids.includes("C-0"),
+    ),
   ).toBe(true);
 });
