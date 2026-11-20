@@ -136,6 +136,8 @@ export interface CardView {
     readonly successors: readonly DependencyCard[];
     readonly waiting_on: readonly string[];
     readonly critical_path_length: number;
+    /** C-487: detail reads only; every transitive prerequisite and dependent. */
+    readonly graph?: DependencyGraph;
   };
   readonly template?: string;
   readonly template_version?: number;
@@ -173,6 +175,11 @@ export interface DependencyCard {
   readonly status: string;
   readonly resolution?: string;
   readonly satisfied: boolean;
+}
+export interface DependencyGraph {
+  readonly nodes: readonly DependencyCard[];
+  /** `from` must finish before `to`. */
+  readonly edges: readonly { readonly from: string; readonly to: string }[];
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */

@@ -50,6 +50,8 @@
     --ui-settings-width: 720px;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
+    --ui-graph-node: 176px;
+    --ui-graph-node-compact: 144px;
     --ui-avatar-size: 32px;
     --ui-avatar-compact: 24px;
     --ui-pill-radius: 999px;
