@@ -5,6 +5,7 @@
  */
 export type RunPresenceState =
   | "running"
+  | "starting"
   | "queued"
   | "unknown"
   | "waiting"
@@ -18,6 +19,7 @@ export interface RunPresence {
 const UNKNOWN: RunPresence = { state: "unknown" };
 const states = new Set<string>([
   "running",
+  "starting",
   "queued",
   "unknown",
   "waiting",
@@ -41,6 +43,9 @@ export function runPresenceText(presence: RunPresence): string {
   switch (presence.state) {
     case "running":
       return "正在为这张卡运行";
+    // Dispatched to a machine, session not confirmed running yet: no ring.
+    case "starting":
+      return "正在启动";
     case "queued":
       return "已排队，等待机器";
     case "waiting":

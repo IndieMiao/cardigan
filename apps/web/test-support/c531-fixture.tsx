@@ -47,6 +47,7 @@ const queued: RunPresence = { state: "queued" };
 const precheck: RunPresence = { state: "waiting", waiting: "precheck" };
 const decision: RunPresence = { state: "waiting", waiting: "decision" };
 const idle: RunPresence = { state: "idle" };
+const starting: RunPresence = { state: "starting" };
 function participant(key: Person, n: number, presence?: RunPresence) {
   return presence ? { ...who(key, n), run_presence: presence } : who(key, n);
 }
@@ -66,7 +67,7 @@ const participants: Record<number, ReturnType<typeof participant>[]> = {
   ],
   // Overflow: two hidden people, one of them running.
   3: [
-    participant("miaoyu", 7, idle),
+    participant("miaoyu", 7, starting),
     participant("linchong", 8, decision),
     participant("zhangliang", 9, idle),
     participant("zhaoyun", 10, running),

@@ -13,6 +13,7 @@ import {
  */
 export type RunPresenceState =
   | "running"
+  | "starting"
   | "queued"
   | "unknown"
   | "waiting"
@@ -23,11 +24,13 @@ export interface RunPresence {
   readonly waiting?: RunPresenceWaiting;
 }
 
-// Merge order for several assignments of the same person: running > queued >
-// waiting > idle. A lost Run ("unknown") ranks above waiting and idle so it is
-// never reported as idle.
+// Merge order for several assignments of the same person: running > starting
+// > queued > waiting > idle. A dispatched Run is starting, not waiting for a
+// machine. A lost Run ("unknown") ranks above waiting and idle so it is never
+// reported as idle.
 const rank: Record<RunPresenceState, number> = {
-  running: 4,
+  running: 5,
+  starting: 4,
   queued: 3,
   unknown: 2,
   waiting: 1,
@@ -45,9 +48,11 @@ function runState(run: Run): RunPresenceState | undefined {
     case "running":
       return "running";
     case "queued":
+      return "queued";
+    // The host already placed it on a machine; only the session start is left.
     case "dispatched":
     case "acked":
-      return "queued";
+      return "starting";
     case "unknown":
       return "unknown";
     default:

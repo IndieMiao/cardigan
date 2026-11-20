@@ -33,6 +33,8 @@ describe("state copy and ring", () => {
   test.each([
     [{ state: "running" }, "赵云，正在为这张卡运行", "running"],
     [{ state: "queued" }, "晴雯，已排队，等待机器", "queued"],
+    // Dispatched or acked: placed on a machine, not waiting for one; no ring.
+    [{ state: "starting" }, "妙玉，正在启动", null],
     [{ state: "waiting", waiting: "precheck" }, "林黛玉，等待预检", null],
     [{ state: "waiting", waiting: "decision" }, "林黛玉，等待拍板", null],
     [{ state: "waiting", waiting: "blocked" }, "林黛玉，已阻塞", null],

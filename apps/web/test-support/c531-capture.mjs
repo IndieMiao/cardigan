@@ -178,6 +178,27 @@ try {
       const meta = [...document.querySelectorAll(".board-card-meta")].map(
         (e) => box(e).h,
       );
+      // C-531: expanded work items — item tops and each paragraph's height.
+      const workItems = [...document.querySelectorAll(".work-item")]
+        .filter((e) => e.getClientRects().length)
+        .map((e) => ({
+          id: e.id,
+          top: box(e).y,
+          h: box(e).h,
+          lines: [...e.querySelectorAll("details > p")].map((p) => box(p).h),
+          // Same paragraphs with the owner box hidden: the row without it.
+          bare: [...e.querySelectorAll("details > p")].map((p) => {
+            const owner = p.firstElementChild?.querySelector(
+              ".employee-identity",
+            )
+              ? p.firstElementChild
+              : null;
+            if (owner) owner.style.display = "none";
+            const h = box(p).h;
+            if (owner) owner.style.display = "";
+            return h;
+          }),
+        }));
       const badge = document.querySelector(".board-card-badge");
       return {
         overflow: document.documentElement.scrollWidth > innerWidth,
@@ -191,6 +212,7 @@ try {
         },
         owners,
         rings,
+        workItems,
         names,
         animations: document
           .getAnimations()

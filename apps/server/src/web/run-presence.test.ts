@@ -82,8 +82,8 @@ describe("assignment presence", () => {
   test.each([
     ["running", { state: "running" }],
     ["queued", { state: "queued" }],
-    ["dispatched", { state: "queued" }],
-    ["acked", { state: "queued" }],
+    ["dispatched", { state: "starting" }],
+    ["acked", { state: "starting" }],
     ["unknown", { state: "unknown" }],
     ["completed", { state: "idle" }],
     ["failed", { state: "idle" }],
@@ -92,6 +92,24 @@ describe("assignment presence", () => {
     expect(presenceOf(single([{ ...run(1), status } as Run]))).toStrictEqual(
       expected,
     );
+  });
+
+  test("queued → dispatched → running: only queued waits for a machine, only running rings", () => {
+    const states = (["queued", "dispatched", "acked", "running"] as const).map(
+      (status) => presenceOf(single([{ ...run(1), status } as Run])).state,
+    );
+    expect(states).toStrictEqual(["queued", "starting", "starting", "running"]);
+    // A starting Run outranks a queued one of the same person, below running.
+    expect(
+      strongestPresence([
+        { state: "queued" },
+        { state: "starting" },
+        { state: "waiting", waiting: "precheck" },
+      ]),
+    ).toStrictEqual({ state: "starting" });
+    expect(
+      strongestPresence([{ state: "starting" }, { state: "running" }]),
+    ).toStrictEqual({ state: "running" });
   });
 
   test("waiting for a precheck is never running, even while the precheck runs", () => {

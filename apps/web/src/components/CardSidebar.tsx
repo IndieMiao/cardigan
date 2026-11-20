@@ -20,6 +20,7 @@ import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionRouting } from "./DecisionRouting.js";
 import { EmployeeIdentity, NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
+import { CardDetailInlineOwner } from "./layout/CardDetailLayout.js";
 import { PlainSummary } from "./PlainSummary.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { Prose } from "./ui/prose.js";
@@ -242,12 +243,14 @@ export function CardWorkItems({
                   <p>
                     {item.assignee && (
                       <>
-                        <EmployeeIdentity
-                          {...item.assignee}
-                          showTitle={false}
-                          avatarSize={24}
-                          presence={runPresence(item.run_presence)}
-                        />{" "}
+                        <CardDetailInlineOwner>
+                          <EmployeeIdentity
+                            {...item.assignee}
+                            showTitle={false}
+                            avatarSize={24}
+                            presence={runPresence(item.run_presence)}
+                          />
+                        </CardDetailInlineOwner>{" "}
                       </>
                     )}
                     {item.assignment_id ? (

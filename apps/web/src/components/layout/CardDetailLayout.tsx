@@ -18,6 +18,14 @@ CardDetailLayout.displayName = "CardDetailLayout";
 export function CardDetailHeading(props: ComponentProps<"div">) {
   return <div {...props} className={styles.heading} />;
 }
+/**
+ * C-531: an inline owner avatar (24px slot) inside a 20px text line. The box
+ * keeps the line's own height; the avatar overflows it evenly, so adding an
+ * owner never pushes the following rows down.
+ */
+export function CardDetailInlineOwner(props: ComponentProps<"span">) {
+  return <span {...props} className={styles.inlineOwner} />;
+}
 export function CardDetailTabs(props: ComponentProps<"div">) {
   return <div {...props} className={cn(styles.tabs, "card-section-nav")} />;
 }
