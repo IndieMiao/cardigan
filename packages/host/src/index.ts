@@ -23,6 +23,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export {
+  CandidateRepositoryBusy,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckExecutorUnavailable,

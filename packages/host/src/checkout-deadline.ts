@@ -7,6 +7,9 @@ export class CheckExecutorSuspended extends Error {
     super("Check supervision suspended");
   }
 }
+/** The trusted Git adapter did not enter transport; the publisher fence has settled. */
+export class CandidateRepositoryBusy extends CheckExecutorSuspended {}
+
 /** A controller must recover even when an executor ignores cancellation or never settles. */
 export async function withCheckoutDeadline<
   T extends Omit<CheckoutInput, "execution"> & {

@@ -7,7 +7,10 @@ import {
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 
-export { CheckExecutorSuspended } from "./checkout-deadline.js";
+export {
+  CandidateRepositoryBusy,
+  CheckExecutorSuspended,
+} from "./checkout-deadline.js";
 
 /** Fixed provider categories only; raw transport errors must not cross this boundary. */
 export class CheckExecutorUnavailable extends Error {
@@ -30,7 +33,7 @@ export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly mergeTier?: "card" | "batch";
   readonly kind: "merge_check" | "precheck";
   /** Recheck scheduling after asynchronous preparation, immediately before execution. */
-  readonly beforeDispatch?: () => void;
+  readonly beforeDispatch?: () => void | Promise<void>;
   /** Host shutdown detaches supervision; business cancellation continues to use signal. */
   readonly hostSignal?: AbortSignal;
   /** Trusted provider progress; never candidate output. */
@@ -197,7 +200,7 @@ export class SshCheckExecutor implements CheckExecutor {
   async dispatch(request: CheckRequest): Promise<CheckHandle> {
     await this.options.distribute();
     const { kind: _kind, ...input } = request;
-    request.beforeDispatch?.();
+    await request.beforeDispatch?.();
     const abort = new AbortController();
     const handle = { id: randomUUID() };
     const result = (this.options.run ?? runInTemporaryCheckout)({

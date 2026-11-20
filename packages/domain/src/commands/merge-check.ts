@@ -243,6 +243,7 @@ export type CheckUpdate = Pick<
         readonly log_ref: string;
         /** C-116: supervisor classification; see `MergeCheckView.timeout_only`. */
         readonly timeout_only?: boolean;
+        readonly startup_failure?: "repository_busy";
         /** A1b: trusted host classification, never derived from domain text. */
         readonly infra_flaky?: boolean;
       }
@@ -396,6 +397,9 @@ export function recordMergeCheck(
       checks: "checks" in p ? p.checks : [],
       updated_at: d.now,
       ...("checks" in p ? { summary: p.summary, log_ref: p.log_ref } : {}),
+      ...("checks" in p && p.startup_failure
+        ? { startup_failure: p.startup_failure }
+        : {}),
       ...("checks" in p && p.timeout_only ? { timeout_only: true } : {}),
       ...("checks" in p && p.infra_flaky ? { infra_flaky: true } : {}),
     };
@@ -518,6 +522,7 @@ export function requeueMergeCheck(
   );
   // Classification belongs to the failed attempt, not to the requeue.
   const {
+    startup_failure: _startup,
     timeout_only: _classified,
     infra_flaky: _infra,
     failure_excerpt: _excerpt,
@@ -639,12 +644,27 @@ export function validateMergeCheckUpdate(
       "stale_target",
       "Check executor cannot change within an attempt",
     );
+  const repositoryBusy =
+    "startup_failure" in p && p.startup_failure === "repository_busy";
+  if (repositoryBusy)
+    ensure(
+      same &&
+        (latest.status === "queued" || latest.status === "failed") &&
+        p.status === "failed" &&
+        !p.external_run &&
+        !latest.external_run &&
+        p.checks.length === 0,
+      "validation_failed",
+      "Repository lock exhaustion is a pre-dispatch failure only",
+    );
   if (p.executor?.type === "github") {
     const unboundExit =
       same &&
       (latest.status === "queued" || latest.status === p.status) &&
       !latest.external_run &&
-      (p.status === "executor_unreachable" || p.status === "interrupted") &&
+      (p.status === "executor_unreachable" ||
+        p.status === "interrupted" ||
+        repositoryBusy) &&
       "checks" in p &&
       p.checks.length === 0;
     ensure(
@@ -672,7 +692,9 @@ export function validateMergeCheckUpdate(
     );
   if (same && latest.status === p.status && !latest.recheck_requested) {
     ensure(
-      latest.failure_excerpt === p.failure_excerpt &&
+      latest.startup_failure ===
+        ("startup_failure" in p ? p.startup_failure : undefined) &&
+        latest.failure_excerpt === p.failure_excerpt &&
         sameExternalRun(latest.external_run, p.external_run),
       "stale_target",
       "Check evidence cannot be overwritten",

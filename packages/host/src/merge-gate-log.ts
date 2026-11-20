@@ -308,6 +308,24 @@ export async function createMergeCheckLog(input: {
   } finally {
     await file.close();
   }
+  async function writeContents(contents: string) {
+    const handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    try {
+      const entry = await handle.stat();
+      if (
+        !entry.isFile() ||
+        entry.uid !== process.getuid?.() ||
+        entry.nlink !== 1 ||
+        (entry.mode & 0o777) !== 0o600
+      )
+        throw new Error("Unsafe merge check log file");
+      await handle.truncate(0);
+      await handle.writeFile(contents);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
   let finished = false;
   const workerContext = input.workerContext;
   const workerRules = input.infraFlakyRules
@@ -318,6 +336,8 @@ export async function createMergeCheckLog(input: {
     : undefined;
   return {
     log_ref,
+    waiting: (reason: string) =>
+      writeContents(`${header}\n${filter.redact(reason)}\n`),
     verifiedCheckout(context: VerifiedCheckoutContext) {
       return !finished && workerContext
         ? bindWorkerCheckout(workerContext, context)
@@ -430,25 +450,7 @@ export async function createMergeCheckLog(input: {
           ? `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`
           : "");
       output.clear();
-      const handle = await open(
-        path,
-        constants.O_WRONLY | constants.O_NOFOLLOW,
-      );
-      try {
-        const entry = await handle.stat();
-        if (
-          !entry.isFile() ||
-          entry.uid !== process.getuid?.() ||
-          entry.nlink !== 1 ||
-          (entry.mode & 0o777) !== 0o600
-        )
-          throw new Error("Unsafe merge check log file");
-        await handle.truncate(0);
-        await handle.writeFile(contents);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await writeContents(contents);
       const logs = [];
       for (const name of await readdir(directory)) {
         if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.log$/u.test(name)) continue;

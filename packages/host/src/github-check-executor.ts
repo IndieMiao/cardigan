@@ -5,7 +5,10 @@ import type {
   CheckHandle,
   CheckRequest,
 } from "./check-executor.js";
-import { CheckExecutorSuspended } from "./checkout-deadline.js";
+import {
+  CandidateRepositoryBusy,
+  CheckExecutorSuspended,
+} from "./checkout-deadline.js";
 import { githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
@@ -234,10 +237,13 @@ export class GithubCheckExecutor implements CheckExecutor {
               });
               if (result.status === "not_started") {
                 outcome = "not_started";
-                throw new CheckExecutorSuspended();
+                throw new CandidateRepositoryBusy();
               }
-              if (result.status === "pushed" && !request.signal?.aborted)
-                outcome = "pushed";
+              if (result.status === "pushed" && !request.signal?.aborted) {
+                if (request.kind === "merge_check")
+                  await request.beforeDispatch?.();
+                if (!request.signal?.aborted) outcome = "pushed";
+              }
             } finally {
               // Settle every push outcome before releasing its writer fence.
               // Only a successful, still-current publication may cross POST.

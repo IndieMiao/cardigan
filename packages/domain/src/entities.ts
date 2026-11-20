@@ -372,6 +372,7 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  readonly startup_failure?: "repository_busy";
   /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
   readonly failure_excerpt?: string;
   /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */

@@ -42,6 +42,7 @@ import type {
 import {
   abandonedGithubRequest,
   acquireMergeCheckCapacity,
+  CandidateRepositoryBusy,
   type CandidateTestSnapshot,
   CHECKOUT_LIMITS,
   type CheckExecutor,
@@ -97,7 +98,11 @@ import {
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
-import { CandidatePushNotStarted, type MergeGit } from "./git.js";
+import {
+  CandidatePushNotStarted,
+  type MergeGit,
+  pushCheckCandidateOrWait,
+} from "./git.js";
 import { MergeBatches } from "./merge-batches.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -107,7 +112,13 @@ import {
   MergeMutex,
   tryPublication,
 } from "./publication-lock.js";
+import {
+  repositoryCheckWait,
+  repositoryRetryDelays,
+} from "./repository-check-wait.js";
 import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
+
+class StaleCheckTarget extends CheckExecutorSuspended {}
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
@@ -161,6 +172,7 @@ export interface MergeCheckOptions {
   readonly sweep?: typeof sweepCheckoutOrphans;
   readonly recover?: typeof recoverCheckDirectory;
   readonly recoveryInspectionIntervalMs?: number;
+  readonly repositoryRetryDelaysMs?: readonly number[];
 }
 interface Task {
   project: CentralProject;
@@ -169,6 +181,7 @@ interface Task {
   entered: string;
   priority: number;
   batch?: MergeBatch;
+  repositoryCooling?: boolean;
   /** Admission hint from the task scan, revalidated under the writer lock. */
   publishable?: boolean;
 }
@@ -244,6 +257,7 @@ export class MergeChecks {
     ProjectId,
     Promise<{ done: Promise<void> }>
   >();
+  private readonly lockBackoff: readonly number[];
   private readonly gitPasses = new Map<string, Promise<void>>();
   private readonly prepared = new Map<
     string,
@@ -259,6 +273,7 @@ export class MergeChecks {
       report?: (message: string) => void;
     },
   ) {
+    this.lockBackoff = repositoryRetryDelays(options.repositoryRetryDelaysMs);
     if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
       throw new Error(
         "Confirmed-exit assembly requires a trusted local runner",
@@ -313,17 +328,10 @@ export class MergeChecks {
             baselineBranch: project.base_branch,
             onExternalRun: bind,
           }),
-          push: async (input) => {
-            try {
-              return await push.call(options.git, project, input);
-            } catch (error) {
-              // Only this pre-transport lock timeout proves there was no push.
-              // The provider settles its publisher fence before propagating suspension.
-              if (error instanceof CandidatePushNotStarted)
-                return { status: "not_started" };
-              throw error;
-            }
-          },
+          push: (input) =>
+            pushCheckCandidateOrWait(() =>
+              push.call(options.git, project, input),
+            ),
           isBaselineAncestor: (sha, branch) =>
             ancestor.call(options.git, project, sha, branch),
         });
@@ -739,11 +747,14 @@ export class MergeChecks {
           (event.payload as { attempt?: unknown } | null)?.attempt ===
             latest.attempt_id,
       );
+    const repositoryWait = repositoryCheckWait(events, latest);
     const sameCandidate =
       latest &&
       (latest.level ?? "single") ===
         (task.settings.queue ? (task.batch ? "batch" : "card") : "single") &&
       latest.tree_sha === candidate.tree_sha &&
+      (!repositoryWait.unstarted ||
+        latest.candidate_sha === candidate.candidate_sha) &&
       (latest.base_sha === undefined ||
         latest.base_sha === candidate.previous_sha) &&
       (binding
@@ -772,11 +783,18 @@ export class MergeChecks {
       !latest.recheck_requested
     ) {
       if (
-        this.seen.has(latest.attempt_id) &&
+        (this.seen.has(latest.attempt_id) || repositoryWait.unstarted) &&
+        latest.executor?.name === task.settings.executor?.name &&
+        latest.executor?.type ===
+          (task.settings.executor
+            ? (task.settings.executor.type ?? "ssh")
+            : undefined) &&
         latest.status === "queued" &&
         sameCandidate
-      )
+      ) {
+        this.seen.add(latest.attempt_id);
         return latest;
+      }
       if (
         task.settings.executor?.type === "github" &&
         latest.executor?.type === "github" &&
@@ -998,12 +1016,20 @@ export class MergeChecks {
     return this.slot({ settings }, () => undefined);
   }
   /** Persist only actual waits; observations never acquire or release capacity. */
-  private waiting(task: Task, reason: string): false {
+  private waiting(
+    task: Task,
+    reason: string,
+    check?: MergeCheckView,
+    retryAt?: string,
+  ): false {
     return this.waitingFor(
       task.project.project_id,
       task.plan.card_id,
       task.plan.completion_id,
       reason,
+      check ?? (task.batch ? this.latest(task) : undefined),
+      task.batch?.id,
+      retryAt,
     );
   }
   private waitingFor(
@@ -1011,24 +1037,34 @@ export class MergeChecks {
     card: CardId,
     completion: DeliveryId,
     reason: string,
+    target?: MergeCheckView,
+    batch?: MergeBatch["id"],
+    retryAt?: string,
   ): false {
-    this.command(project, (s, a, p) => {
-      const check = latestMergeCheck(s.events, card, completion);
-      return recordMergeCheckWait(
+    this.command(project, (s, a, p) =>
+      recordMergeCheckWait(
         s,
         a,
         {
           card_id: card,
           completion_id: completion,
-          attempt_id: check?.attempt_id ?? "",
+          attempt_id:
+            target?.attempt_id ??
+            (batch
+              ? undefined
+              : latestMergeCheck(s.events, card, completion)?.attempt_id) ??
+            "",
           reason,
+          ...(batch ? { batch_id: batch } : {}),
+          ...(retryAt ? { repository_retry_at: retryAt } : {}),
         },
         p,
-      );
-    });
+      ),
+    );
     return false;
   }
   private capacity(task: Task): boolean {
+    if (task.repositoryCooling) return false;
     if (this.fenced(task.project.project_id))
       return this.waiting(task, "等待检查移交恢复准入");
     const executor = task.settings.executor;
@@ -1187,7 +1223,9 @@ export class MergeChecks {
         },
       }),
       push: (input) =>
-        pushCheckCandidate.call(this.options.git, task.project, input),
+        pushCheckCandidateOrWait(() =>
+          pushCheckCandidate.call(this.options.git, task.project, input),
+        ),
       isBaselineAncestor: (sha, branch) =>
         isBaselineAncestor.call(this.options.git, task.project, sha, branch),
     });
@@ -1323,6 +1361,7 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    let repositoryBusy = false;
     let bound = check.external_run;
     const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
@@ -1417,7 +1456,13 @@ export class MergeChecks {
           execution,
           distribute: () =>
             this.serial(task.project.project_id, async () => {
-              await this.git().distribute(task.project, execution);
+              try {
+                await this.git().distribute(task.project, execution);
+              } catch (error) {
+                if (error instanceof CandidatePushNotStarted)
+                  throw new CandidateRepositoryBusy();
+                throw error;
+              }
               connected = true;
               if (!this.valid(task)) throw new Error("Merge target changed");
             }),
@@ -1439,7 +1484,19 @@ export class MergeChecks {
       result = await execute(
         executor,
         {
-          beforeDispatch: () => {
+          beforeDispatch: async () => {
+            // A lock retry can finish distribution after main moved or the completion was replaced.
+            if (
+              repositoryCheckWait(
+                this.state(task.project.project_id).events,
+                check,
+              ).timeouts > 0 &&
+              ((check.base_sha &&
+                (await this.git().baseline(task.project)) !== check.base_sha) ||
+                !this.valid(task) ||
+                this.latest(task)?.attempt_id !== check.attempt_id)
+            )
+              throw new StaleCheckTarget();
             if (this.held(task, check)) throw new CheckExecutorSuspended();
           },
           kind: "merge_check",
@@ -1517,46 +1574,75 @@ export class MergeChecks {
       // No worker started when the SSH distributor could not acquire the Git
       // lock. Leave this attempt queued; contention is not an executor failure.
       if (error instanceof MergeLockBusy) throw error;
-      if (error instanceof CheckExecutorSuspended) {
-        this.waiting(task, "卡片已暂停，等待恢复检查");
-        return;
-      }
-      if (executedOn?.type === "github") {
-        if (error instanceof GithubRetryLater) {
-          if (error.scope === "attempt") {
-            this.waiting(task, "等待核对本次 GitHub 派发");
-            return;
-          }
-          this.waiting(task, "等待 GitHub API 限额恢复");
-          const provider = this.github.get(executedOn.name);
-          if (provider)
-            provider.retryAt = Math.max(provider.retryAt, error.retryAt);
+      if (error instanceof StaleCheckTarget) return;
+      if (error instanceof CandidateRepositoryBusy) {
+        if (
+          !this.valid(task) ||
+          this.latest(task)?.attempt_id !== check.attempt_id
+        )
+          return;
+        const { timeouts } = repositoryCheckWait(
+          this.state(task.project.project_id).events,
+          check,
+        );
+        const delay = this.lockBackoff[timeouts];
+        if (delay !== undefined) {
+          const retryAt = new Date(
+            Date.parse(this.options.clock.now()) + delay,
+          ).toISOString();
+          const reason = `仓库忙，候选尚未分发；第 ${timeouts + 1} 次等待锁超时，${retryAt} 后重试`;
+          this.waiting(task, reason, check, retryAt);
+          await log?.waiting(reason);
           return;
         }
+        repositoryBusy = true;
+        result = {
+          status: "failed",
+          checks: [],
+          cleanup_errors: [],
+          reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts + 1} 次，检查未启动，已停止自动重试`,
+        };
+      } else if (error instanceof CheckExecutorSuspended) {
+        this.waiting(task, "卡片已暂停，等待恢复检查");
+        return;
+      } else {
+        if (executedOn?.type === "github") {
+          if (error instanceof GithubRetryLater) {
+            if (error.scope === "attempt") {
+              this.waiting(task, "等待核对本次 GitHub 派发");
+              return;
+            }
+            this.waiting(task, "等待 GitHub API 限额恢复");
+            const provider = this.github.get(executedOn.name);
+            if (provider)
+              provider.retryAt = Math.max(provider.retryAt, error.retryAt);
+            return;
+          }
+        }
+        const failure =
+          task.settings.executor && !(error instanceof ExecutorPreparationError)
+            ? classifyExecutorFailure(error)
+            : undefined;
+        if (failure === "repository_missing") connected = true;
+        // Never expose raw Git/SSH diagnostics or configured environment values.
+        result = {
+          status: this.abort.signal.aborted
+            ? "interrupted"
+            : failure === "executor_unreachable"
+              ? "executor_unreachable"
+              : "failed",
+          checks: [],
+          cleanup_errors: [],
+          reason:
+            failure === "executor_unreachable"
+              ? "远程检查机 SSH 连接失败，合并检查排队等待重试"
+              : failure === "repository_missing"
+                ? "远程检查机的基础仓库缺失或无效，请先初始化基础 clone，再重新检查"
+                : error instanceof ExecutorPreparationError
+                  ? error.summary
+                  : "候选同步或检查执行入口失败，请检查执行环境",
+        };
       }
-      const failure =
-        task.settings.executor && !(error instanceof ExecutorPreparationError)
-          ? classifyExecutorFailure(error)
-          : undefined;
-      if (failure === "repository_missing") connected = true;
-      // Never expose raw Git/SSH diagnostics or configured environment values.
-      result = {
-        status: this.abort.signal.aborted
-          ? "interrupted"
-          : failure === "executor_unreachable"
-            ? "executor_unreachable"
-            : "failed",
-        checks: [],
-        cleanup_errors: [],
-        reason:
-          failure === "executor_unreachable"
-            ? "远程检查机 SSH 连接失败，合并检查排队等待重试"
-            : failure === "repository_missing"
-              ? "远程检查机的基础仓库缺失或无效，请先初始化基础 clone，再重新检查"
-              : error instanceof ExecutorPreparationError
-                ? error.summary
-                : "候选同步或检查执行入口失败，请检查执行环境",
-      };
     } finally {
       // Always release runtime occupancy, even if a returned/cancelled target
       // makes the subsequent business result command reject.
@@ -1656,6 +1742,9 @@ export class MergeChecks {
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
       infra_flaky: finished.infra_flaky === true,
+      ...(repositoryBusy
+        ? { startup_failure: "repository_busy" as const }
+        : {}),
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
@@ -1959,7 +2048,12 @@ export class MergeChecks {
     }
     const fresh: Task[] = [];
     for (const task of tasks) {
-      if (this.lanes.has(this.key(task)) || !this.valid(task)) continue;
+      if (
+        task.repositoryCooling ||
+        this.lanes.has(this.key(task)) ||
+        !this.valid(task)
+      )
+        continue;
       fresh.push(task);
     }
     const live = new Set(tasks.map((t) => this.key(t)));
@@ -2204,6 +2298,13 @@ export class MergeChecks {
       )
         continue;
       const state = this.state(id);
+      const cooling = (check: MergeCheckView | undefined) => {
+        const { retryAt } = repositoryCheckWait(state.events, check);
+        return (
+          retryAt !== undefined &&
+          Date.parse(this.options.clock.now()) < Date.parse(retryAt)
+        );
+      };
       if (settings.queue) {
         for (const batch of mergeBatches(state.events).filter(
           (b) => b.status === "checking",
@@ -2216,6 +2317,7 @@ export class MergeChecks {
               plan: plan.value,
               settings,
               batch,
+              repositoryCooling: cooling(batch.check),
               entered: batch.formed_at,
               priority: batch.priority,
             });
@@ -2312,6 +2414,7 @@ export class MergeChecks {
           plan: plan.value,
           settings,
           entered,
+          repositoryCooling: cooling(check),
           publishable: !settings.queue && check?.status === "passed",
           priority: card.priority,
         });

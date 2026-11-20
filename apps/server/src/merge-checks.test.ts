@@ -50,6 +50,7 @@ import {
   workerReport,
 } from "../../../packages/host/test-support/worker-failure.js";
 import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
+import { CandidatePushNotStarted } from "./git.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -3825,6 +3826,7 @@ async function reworkGithubFixture(
   });
   if (options.scoped) c.git.changedPaths.mockResolvedValue(["docs/fixture.md"]);
   let inputs: Readonly<Record<string, string>> = {};
+  let createdAt = new Date(now).toISOString();
   const run = () => ({
     id: 123,
     run_attempt: 1,
@@ -3835,7 +3837,7 @@ async function reworkGithubFixture(
     actor: { login: config.botLogin },
     display_title: githubCheckRunName(inputs),
     html_url: "https://github.com/fixture/project/actions/runs/123",
-    created_at: "2030-01-01T00:00:00.000Z",
+    created_at: createdAt,
     status: conclusion ? "completed" : "in_progress",
     conclusion: conclusion ?? null,
   });
@@ -3844,6 +3846,7 @@ async function reworkGithubFixture(
     dispatch: vi.fn(
       async (_ref: string, value: Readonly<Record<string, string>>) => {
         inputs = value;
+        createdAt = new Date(now).toISOString();
         return options.noRunId ? undefined : 123;
       },
     ),
@@ -5842,5 +5845,190 @@ test("expired abandoned GitHub dispatch is settled after a complete empty scan w
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+test.each(["release", "exhaust", "base", "during_push", "cancel"] as const)(
+  "C-533: queued GitHub lock wait survives restart (%s)",
+  async (mode) => {
+    const h = await reworkGithubFixture();
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    h.git.pushCheckCandidate.mockRejectedValueOnce(
+      new CandidatePushNotStarted(30_000),
+    );
+    const project = [h.f.project_id];
+    const first = h.create();
+    await first.tick(project);
+    const original = required(h.check());
+    expect(original).toMatchObject({
+      status: "queued",
+      queue_wait: { reason: expect.stringContaining("仓库忙") },
+    });
+    const log = () =>
+      readFile(
+        join(
+          h.f.dataDir,
+          "merge-gate/logs",
+          h.f.project_id,
+          `${original.attempt_id}.log`,
+        ),
+        "utf8",
+      );
+    expect(await log()).toContain("等待锁超时");
+    expect(journal.admitted()).toEqual([]);
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    first.stop();
+    await first.idle();
+    const next = h.create();
+    try {
+      h.advance(29_999);
+      await Promise.all([next.tick(project), next.tick(project)]);
+      expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(1);
+      h.advance(1);
+      if (mode === "cancel") {
+        h.f.apply((s, a, p) =>
+          updateCard(
+            s,
+            a,
+            { card_id: h.scenario.card.id, status: "cancelled" },
+            p,
+          ),
+        );
+        await next.tick(project);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        expect(journal.unfinished()).toEqual([]);
+      } else if (mode === "exhaust") {
+        h.git.pushCheckCandidate.mockRejectedValue(
+          new CandidatePushNotStarted(30_000),
+        );
+        await next.tick(project);
+        h.advance(59_999);
+        await next.tick(project);
+        expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
+        h.advance(1);
+        await next.tick(project);
+        expect(h.check()).toMatchObject({
+          status: "failed",
+          attempt_id: original.attempt_id,
+          startup_failure: "repository_busy",
+          checks: [],
+          summary: expect.stringContaining("仓库忙"),
+        });
+        expect(await log()).toContain("已停止自动重试");
+        h.advance(24 * 60 * 60_000);
+        await next.tick(project);
+        expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(3);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        expect(journal.unfinished()).toEqual([]);
+      } else {
+        if (mode === "during_push") {
+          h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+            h.c.advance(true, 1);
+            return { status: "pushed" };
+          });
+          await next.tick(project);
+          expect(h.client.dispatch).not.toHaveBeenCalled();
+        }
+        if (mode === "base") h.c.advance(true, 1);
+        h.complete("success");
+        const pending = next.schedule(project);
+        await vi.waitFor(() =>
+          expect(h.client.dispatch).toHaveBeenCalledTimes(1),
+        );
+        h.advance();
+        await next.schedule(project);
+        await (await pending).done;
+        expect(h.check()?.status).toBe("passed");
+        if (mode === "base" || mode === "during_push") {
+          expect(h.check()?.attempt_id).not.toBe(original.attempt_id);
+          expect(h.check()?.base_sha).not.toBe(original.base_sha);
+          expect(
+            journal.all().find((i) => i.attempt === original.attempt_id),
+          ).toMatchObject({ finished: true, abandoned: expect.any(String) });
+        } else expect(h.check()?.attempt_id).toBe(original.attempt_id);
+        expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+      }
+      expect(
+        h.f
+          .state()
+          .events.filter((e) => e.type === "merge_executor_unreachable"),
+      ).toEqual([]);
+      expect(h.git.publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      next.stop();
+      await next.idle();
+    }
+  },
+);
+
+test("C-533: SSH candidate distribution resumes after lock timeout, never invokes the worker while waiting", async () => {
+  let time = Date.parse("2030-01-01T00:00:00Z");
+  const { f, check } = await fixture("confirm", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.git.distribute.mockRejectedValueOnce(new CandidatePushNotStarted(30_000));
+  await c.gate.tick([f.project_id]);
+  const id = check()?.attempt_id;
+  expect(check()?.queue_wait?.reason).toContain("仓库忙");
+  expect(c.run).not.toHaveBeenCalled();
+  c.gate.stop();
+  const next = new MergeChecks(c.options);
+  try {
+    time += 30_000;
+    await Promise.all([next.tick([f.project_id]), next.tick([f.project_id])]);
+    expect(check()).toMatchObject({ status: "passed", attempt_id: id });
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.git.publish).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-533: a rebuilt candidate does not inherit dispatch identity or reset the completion's retry budget", async () => {
+  const h = await reworkGithubFixture();
+  const project = [h.f.project_id];
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  const gate = () =>
+    new MergeChecks({
+      ...h.c.options,
+      git: h.git,
+      githubClient: () => h.client as never,
+      repositoryRetryDelaysMs: [500],
+    });
+  const first = gate();
+  await first.tick(project);
+  const old = required(h.check());
+  first.stop();
+  await first.idle();
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "9".repeat(40),
+    tree_sha: old.tree_sha,
+    previous_sha: required(old.base_sha),
+  });
+  const second = gate();
+  try {
+    h.advance(499);
+    await second.tick(project);
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(1);
+    h.advance(1);
+    await second.tick(project);
+    expect(h.check()).toMatchObject({
+      status: "failed",
+      startup_failure: "repository_busy",
+      candidate_sha: "9".repeat(40),
+    });
+    expect(h.check()?.attempt_id).not.toBe(old.attempt_id);
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    second.stop();
+    await second.idle();
   }
 });
