@@ -1,9 +1,11 @@
 import { useCallback, useState } from "react";
 import type {
   CardiganClient,
+  ExecutionCapacity,
   MachineBindingView,
   MachineView,
 } from "../api.js";
+import { useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
 import { IdTag } from "../components/IdTag.js";
@@ -34,14 +36,25 @@ import {
   capabilityState,
   latestMachineCheck,
   type MachineCheckRow,
-  machineRunning,
-  primaryBinding,
+  machineActiveRuns,
 } from "../machine-labels.js";
 import { useResource } from "../useResource.js";
 
 const platform = (m: MachineView) =>
   [m.os, m.arch].filter(Boolean).join(" / ") || "—";
-const running = (m: MachineView) => `${machineRunning(m)} / ${m.run_limit}`;
+type AgentCapacity = ExecutionCapacity["agents"][number];
+/**
+ * The limited count beside its limit, from the shared capacity read (the
+ * same figures as 并发与容量): standing sessions are exempt from the limit.
+ */
+const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
+  capacity
+    ? `${capacity.running} / ${capacity.limit || "不可用"}`
+    : `— / ${m.run_limit}`;
+function useMachineCapacity() {
+  const agents = useCapacity()?.data?.agents;
+  return (id: string) => agents?.find((a) => a.machine_id === id);
+}
 
 function MachineStatus({ status }: { status: string | undefined }) {
   return status ? (
@@ -52,7 +65,11 @@ function MachineStatus({ status }: { status: string | undefined }) {
 }
 function CheckTag({ check }: { check: MachineCheckRow | undefined }) {
   return check ? (
-    <StatusTag status={check.status} label={check.label} />
+    <StatusTag
+      status={check.status === "unreadable" ? "unknown" : check.status}
+      label={check.label}
+      subdued={check.status === "unreadable"}
+    />
   ) : (
     <StatusTag status="not_run" label="未检查" subdued />
   );
@@ -80,6 +97,7 @@ export function MachinesSettings({
   const [open, setOpen] = useState<MachineView>();
   const { remember } = useDrawerReturnFocus(open !== undefined);
   const machines = list.data?.machines;
+  const capacityOf = useMachineCapacity();
   return (
     <SettingsPanel
       id="machines"
@@ -100,43 +118,49 @@ export function MachinesSettings({
               <TableHead>名称</TableHead>
               <TableHead>系统</TableHead>
               <TableHead>最近心跳</TableHead>
-              <TableHead>在跑 / 上限</TableHead>
+              <TableHead>非常驻 / 上限</TableHead>
               <TableHead>最近检查</TableHead>
               <TableHead>状态</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {machines.map((machine) => (
-              <TableRow key={machine.id}>
-                <DataTableCell data-record="lead">
-                  <Button
-                    variant="link"
-                    aria-haspopup="dialog"
-                    onClick={() => {
-                      remember();
-                      setOpen(machine);
-                    }}
-                  >
-                    {machine.label}
-                  </Button>
-                </DataTableCell>
-                <DataTableCell nowrap data-label="系统">
-                  {platform(machine)}
-                </DataTableCell>
-                <DataTableCell nowrap data-label="最近心跳">
-                  <Time value={machine.last_seen} />
-                </DataTableCell>
-                <DataTableCell nowrap data-label="在跑 / 上限">
-                  {running(machine)}
-                </DataTableCell>
-                <DataTableCell nowrap data-label="最近检查">
-                  <CheckTag check={latestMachineCheck(machine)} />
-                </DataTableCell>
-                <DataTableCell nowrap data-record="aside">
-                  <MachineStatus status={machine.status} />
-                </DataTableCell>
-              </TableRow>
-            ))}
+            {machines.map((machine) => {
+              const latest = latestMachineCheck(machine);
+              return (
+                <TableRow key={machine.id}>
+                  <DataTableCell data-record="lead">
+                    <Button
+                      variant="link"
+                      aria-haspopup="dialog"
+                      onClick={() => {
+                        remember();
+                        setOpen(machine);
+                      }}
+                    >
+                      {machine.label}
+                    </Button>
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="系统">
+                    {platform(machine)}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="最近心跳">
+                    <Time value={machine.last_seen} />
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="非常驻 / 上限">
+                    {limited(machine, capacityOf(machine.id))}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="最近检查">
+                    <CheckTag check={latest?.check} />
+                    {latest && !latest.binding.is_current && (
+                      <> {latest.binding.project_name}</>
+                    )}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-record="aside">
+                    <MachineStatus status={machine.status} />
+                  </DataTableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </SettingsTable>
       )}
@@ -201,17 +225,21 @@ function MachineDrawer({
 }
 
 function MachineFacts({ machine }: { machine: MachineView }) {
+  const capacity = useMachineCapacity()(machine.id);
   const bindings = [...machine.bindings].sort(
     (a, b) => Number(b.is_current) - Number(a.is_current),
   );
-  const primary = primaryBinding(machine);
-  const capabilities = [...(primary?.capabilities ?? [])]
-    .map((c) => ({ ...c, state: capabilityState(c) }))
-    .sort(
-      (a, b) =>
-        CAPABILITY_TAGS[a.state].order - CAPABILITY_TAGS[b.state].order ||
-        a.key.localeCompare(b.key),
-    );
+  // Capability evidence belongs to the project that observed it.
+  const capabilities = bindings.flatMap((binding) =>
+    [...binding.capabilities]
+      .map((c) => ({ ...c, state: capabilityState(c) }))
+      .sort(
+        (a, b) =>
+          CAPABILITY_TAGS[a.state].order - CAPABILITY_TAGS[b.state].order ||
+          a.key.localeCompare(b.key),
+      )
+      .map((capability) => ({ binding, capability })),
+  );
   const runs = bindings.flatMap((b) =>
     b.assignments.flatMap((a) =>
       a.runs.map((run) => ({
@@ -223,7 +251,7 @@ function MachineFacts({ machine }: { machine: MachineView }) {
     ),
   );
   const checks = bindings.flatMap((b) =>
-    bindingChecks(b).map((check) => ({ binding: b, check })),
+    bindingChecks(b, machine.id).map((check) => ({ binding: b, check })),
   );
   return (
     <>
@@ -239,7 +267,13 @@ function MachineFacts({ machine }: { machine: MachineView }) {
           <SettingsFact label="最近心跳">
             <Time value={machine.last_seen} />
           </SettingsFact>
-          <SettingsFact label="在跑 / 上限">{running(machine)}</SettingsFact>
+          <SettingsFact label="全部在跑">
+            {machineActiveRuns(machine)}
+          </SettingsFact>
+          <SettingsFact label="非常驻 / 上限">
+            {limited(machine, capacity)}
+          </SettingsFact>
+          <SettingsFact label="排队">{capacity?.queued ?? "—"}</SettingsFact>
         </SettingsFacts>
       </SettingsSection>
       <SettingsSection title="资源上限">
@@ -254,13 +288,7 @@ function MachineFacts({ machine }: { machine: MachineView }) {
           ))}
         </SettingsFacts>
       </SettingsSection>
-      <SettingsSection
-        title={
-          primary && !primary.is_current
-            ? `已验证能力（${primary.project_name}）`
-            : "已验证能力"
-        }
-      >
+      <SettingsSection title="已验证能力">
         {capabilities.length === 0 ? (
           <p>没有能力记录</p>
         ) : (
@@ -268,18 +296,22 @@ function MachineFacts({ machine }: { machine: MachineView }) {
             <TableHeader>
               <TableRow>
                 <TableHead>能力</TableHead>
+                <TableHead>项目</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>验证时间</TableHead>
                 <TableHead>状态</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {capabilities.map((c) => {
+              {capabilities.map(({ binding, capability: c }) => {
                 const tag = CAPABILITY_TAGS[c.state];
                 return (
-                  <TableRow key={c.key}>
+                  <TableRow key={`${binding.project_id}:${c.key}`}>
                     <DataTableCell nowrap data-record="lead">
                       <code>{c.key}</code>
+                    </DataTableCell>
+                    <DataTableCell data-label="项目">
+                      {binding.project_name}
                     </DataTableCell>
                     <DataTableCell nowrap data-label="版本">
                       {c.version ?? "—"}
@@ -337,7 +369,8 @@ function MachineFacts({ machine }: { machine: MachineView }) {
             </TableHeader>
             <TableBody>
               {runs.map(({ binding, card, run, assignment }) => (
-                <TableRow key={run.id}>
+                // Run ids are numbered per project.
+                <TableRow key={`${binding.project_id}:${run.id}`}>
                   <DataTableCell nowrap data-record="lead">
                     <IdTag id={run.id} />
                   </DataTableCell>
@@ -390,7 +423,7 @@ function MachineFacts({ machine }: { machine: MachineView }) {
                     {binding.project_name}
                   </DataTableCell>
                   <DataTableCell nowrap data-label="时间">
-                    <Time value={check.checked_at} />
+                    {check.checked_at ? <Time value={check.checked_at} /> : "—"}
                   </DataTableCell>
                   <DataTableCell data-label="失败步骤">
                     {check.steps.length ? check.steps.join("、") : "—"}

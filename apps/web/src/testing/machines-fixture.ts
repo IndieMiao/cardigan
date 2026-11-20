@@ -4,7 +4,8 @@ import type { MachineBindingView, MachineView } from "../api.js";
  * C-512: synthetic machine read (no host, no live data). Three machines: the
  * control host bound to two projects with work in flight, a Linux worker bound
  * only to this project whose worker check failed, and a draining macOS worker
- * bound only to another project and never checked.
+ * bound only to another project whose configuration and worker record the
+ * host could not read.
  */
 const binding = (
   patch: Partial<MachineBindingView> & Pick<MachineBindingView, "project_id">,
@@ -121,6 +122,16 @@ export const fixtureMachines: readonly MachineView[] = [
           session: "example",
           path_entries: 0,
         },
+        // Evidence observed by the other project only.
+        capabilities: [
+          {
+            key: "node",
+            version: "24",
+            verified_at: "2025-12-31T20:00:00.000Z",
+            available: true,
+            state: "verified",
+          },
+        ],
         machine_check: {
           status: "passed",
           checked_at: "2025-12-31T20:00:00.000Z",
@@ -134,7 +145,8 @@ export const fixtureMachines: readonly MachineView[] = [
             employee_id: "E-6",
             employee_name: "王熙凤",
             card_id: null,
-            runs: [{ id: "R-90", status: "acked", card_id: "C-40" }],
+            // Run ids are per project: this R-31 is not Cardigan's R-31.
+            runs: [{ id: "R-31", status: "acked", card_id: "C-40" }],
           },
         ],
       }),

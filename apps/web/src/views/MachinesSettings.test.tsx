@@ -40,11 +40,54 @@ function client(overrides: Partial<CardiganClient> = {}) {
     ...overrides,
   });
 }
-async function openMachines(c: CardiganClient) {
-  render(<SettingsPage projectId="p-1" client={c} />);
-  fireEvent.click(screen.getByRole("button", { name: "机器" }));
-  return screen.findByRole("table", { name: "机器列表" });
+/** The shared capacity read (same figures as 并发与容量); Mac mini has none. */
+const capacity: ExecutionCapacity = {
+  agents: [
+    {
+      machine_id: "local",
+      label: "本机",
+      running: 2,
+      total_running: 3,
+      limit: 6,
+      max_limit: 16,
+      queued: 1,
+      merge_check_slots: 0,
+    },
+    {
+      machine_id: "builder",
+      label: "构建机",
+      running: 0,
+      total_running: 0,
+      limit: 4,
+      max_limit: 8,
+      queued: 0,
+      merge_check_slots: 0,
+    },
+  ],
+  merge_checks: [],
+  merge_config_invalid: false,
+};
+function Page({ c, revision = 0 }: { c: CardiganClient; revision?: number }) {
+  return (
+    <CapacityProvider client={c} projectId="p-1" revision={0} canEdit>
+      <SettingsPage projectId="p-1" client={c} revision={revision} />
+    </CapacityProvider>
+  );
 }
+async function openMachines(c: CardiganClient) {
+  const view = render(<Page c={c} />);
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  return view;
+}
+const table = () => screen.getByRole("table", { name: "机器列表" });
+const capacityClient = (overrides: Partial<CardiganClient> = {}) =>
+  client({ executionCapacity: async () => capacity, ...overrides });
+/** One machine with the given bindings, everything else from 本机. */
+const withBindings = (
+  bindings: MachineView["bindings"],
+  id = "local",
+): MachineView => ({ ...byId(id), bindings });
 
 test("settings navigation lists 机器 right after 员工 and keeps 并发与容量 in place", () => {
   render(<SettingsPage projectId="p-1" client={client()} />);
@@ -57,16 +100,17 @@ test("settings navigation lists 机器 right after 员工 and keeps 并发与容
 });
 
 test("the list shows name, platform, status, heartbeat, running/limit and the latest check, read only", async () => {
-  const c = client();
-  const table = await openMachines(c);
+  const c = capacityClient();
+  await openMachines(c);
   expect(c.machines).toHaveBeenCalledWith("p-1");
-  const rows = within(table).getAllByRole("row").slice(1);
+  const rows = within(table()).getAllByRole("row").slice(1);
   expect(rows).toHaveLength(3);
   const text = rows.map((r) => r.textContent);
-  // 本机: two runs here plus one in the peer project, against a limit of 6.
+  // 本机: the limited count pairs with its limit as in 并发与容量 (the
+  // standing PM's Run in the peer project is exempt).
   expect(text[0]).toContain("本机");
   expect(text[0]).toContain("linux / x64");
-  expect(text[0]).toContain("3 / 6");
+  await waitFor(() => expect(rows[0]?.textContent).toContain("2 / 6"));
   expect(text[0]).toContain("通过");
   expect(text[0]).toContain("在线");
   // 构建机: the newest of its checks is the failed worker check.
@@ -74,12 +118,15 @@ test("the list shows name, platform, status, heartbeat, running/limit and the la
   expect(text[1]).toContain("0 / 4");
   expect(text[1]).toContain("失败");
   expect(text[1]).toContain("运行异常");
-  // Mac mini: bound to another project only and never checked.
-  expect(text[2]).toContain("未检查");
+  // Mac mini: its worker record could not be read, which is not "never
+  // checked"; no capacity row, so only the limit is known.
+  expect(text[2]).toContain("无法读取");
+  expect(text[2]).not.toContain("未检查");
+  expect(text[2]).toContain("— / 1");
   expect(text[2]).toContain("停止接收新任务");
   // Only the name opens a detail; nothing on the page writes.
   expect(
-    within(table)
+    within(table())
       .getAllByRole("button")
       .map((b) => b.textContent),
   ).toEqual(["本机", "构建机", "Mac mini"]);
@@ -89,7 +136,7 @@ test("the list shows name, platform, status, heartbeat, running/limit and the la
 });
 
 test("the detail shows capabilities, limits, bindings with the current project, runs and checks, and no actions", async () => {
-  const c = client();
+  const c = capacityClient();
   await openMachines(c);
   const opener = screen.getByRole("button", { name: "本机" });
   opener.focus();
@@ -100,15 +147,34 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   const view = within(dialog);
   expect(view.getByText("local")).toBeTruthy();
   expect(view.getByText("6（最多可设 16）")).toBeTruthy();
+  // All active Runs (with the exempt standing one) apart from the limited pair.
+  const facts = (label: string) =>
+    view.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
+  expect(facts("全部在跑")).toBe("3");
+  expect(facts("非常驻 / 上限")).toBe("2 / 6");
+  expect(facts("排队")).toBe("1");
   expect(view.getByText("browser.chromium", { selector: "dt" })).toBeTruthy();
-  // Capabilities: verified first, then expired and never verified.
+  // Capabilities per project, this one first: verified, expired, never
+  // verified; the peer project's own evidence stays labelled as its own.
   const capabilities = view.getByRole("table", { name: "已验证能力" });
   expect(
     within(capabilities)
       .getAllByRole("row")
       .slice(1)
-      .map((r) => within(r).getAllByRole("cell")[3]?.textContent),
-  ).toEqual(["已验证", "已验证", "已过期", "未验证"]);
+      .map((r) =>
+        within(r)
+          .getAllByRole("cell")
+          .map((cell) => cell.textContent)
+          .filter((_, i) => i !== 2 && i !== 3)
+          .join(" "),
+      ),
+  ).toEqual([
+    "browser.chromium Cardigan 已验证",
+    "harness.codex Cardigan 已验证",
+    "harness.claude-code Cardigan 已过期",
+    "harness.pi Cardigan 未验证",
+    "node 示例项目 已验证",
+  ]);
   // Bindings: this project first and marked; the peer project as served.
   const bindings = within(
     view.getByRole("table", { name: "项目绑定" }),
@@ -119,15 +185,19 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   expect(bindings[2]?.textContent).not.toContain("当前项目");
   // Runs across projects, linked to their own project's card.
   const runs = view.getByRole("table", { name: "在跑任务" });
+  // Both projects have an R-31; they are different Runs.
   expect(within(runs).getAllByRole("row")).toHaveLength(4);
+  expect(within(runs).getAllByText("R-31")).toHaveLength(2);
   expect(
     within(runs)
       .getAllByRole("link")
       .map((a) => a.getAttribute("href")),
   ).toEqual(["#/p/p-1/cards/C-1", "#/p/p-1/cards/C-2", "#/p/peer/cards/C-40"]);
-  // The requested check equals the health record, so it is not repeated.
+  // The requested check equals the health record, so it is not repeated;
+  // `local` has no worker record, so none is reported unreadable.
   const checks = within(view.getByRole("table", { name: "最近检查" }));
   expect(checks.getAllByRole("row")).toHaveLength(3);
+  expect(checks.queryByText("无法读取")).toBeNull();
   // Read only: the drawer header has the close button and nothing else.
   expect(
     view
@@ -175,9 +245,167 @@ test("a failed worker binding shows its steps; an unreadable configuration says 
   fireEvent.click(screen.getByRole("button", { name: "Mac mini" }));
   const other = within(await screen.findByRole("dialog"));
   expect(await other.findByText("配置不可读")).toBeTruthy();
-  expect(other.getByText("已验证能力（示例项目）")).toBeTruthy();
   expect(other.getByText("没有能力记录")).toBeTruthy();
-  expect(other.getByText("没有检查记录")).toBeTruthy();
+  // An unreadable worker record is shown as such, not as "no checks".
+  expect(other.queryByText("没有检查记录")).toBeNull();
+  const unreadable = within(
+    other.getByRole("table", { name: "最近检查" }),
+  ).getAllByRole("row");
+  expect(unreadable).toHaveLength(2);
+  expect(unreadable[1]?.textContent).toContain("接入检查");
+  expect(unreadable[1]?.textContent).toContain("无法读取");
+});
+
+test("a machine whose records are readable and empty is 未检查; one unreadable record keeps the readable results", async () => {
+  const [current] = byId("builder").bindings;
+  if (!current) throw new Error("fixture");
+  const none = withBindings(
+    [
+      {
+        ...current,
+        machine_check: null,
+        worker_check: null,
+        last_requested_check: null,
+      },
+    ],
+    "builder",
+  );
+  const partial = withBindings(
+    [{ ...current, worker_check: null, worker_record_readable: false }],
+    "builder",
+  );
+  const machines = vi
+    .fn<CardiganClient["machines"]>()
+    .mockResolvedValueOnce({ machines: [none] })
+    .mockResolvedValue({ machines: [partial] });
+  const c = client({
+    machines,
+    machine: vi.fn(async () => ({ machine: partial })),
+  });
+  const { rerender } = await openMachines(c);
+  expect(within(table()).getAllByRole("row")[1]?.textContent).toContain(
+    "未检查",
+  );
+  rerender(<Page c={c} revision={1} />);
+  // The readable worker check request (23:20, failed) stays the result.
+  await waitFor(() =>
+    expect(within(table()).getAllByRole("row")[1]?.textContent).toContain(
+      "失败",
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "构建机" }));
+  const checks = within(
+    await within(await screen.findByRole("dialog")).findByRole("table", {
+      name: "最近检查",
+    }),
+  ).getAllByRole("row");
+  expect(checks.map((r) => r.textContent?.includes("无法读取"))).toEqual([
+    false,
+    false,
+    false,
+    true,
+  ]);
+});
+
+test("the list's latest check is the newest across all bindings, with its project", async () => {
+  const [mine, peer] = byId("local").bindings;
+  if (!mine || !peer) throw new Error("fixture");
+  const newerElsewhere = withBindings([
+    mine,
+    {
+      ...peer,
+      machine_check: {
+        status: "failed",
+        checked_at: "2025-12-31T23:00:00.000Z",
+        blockers: ["machine_not_ready"],
+        available: false,
+      },
+    },
+  ]);
+  // Without a binding for this project, the order the server lists them in
+  // does not decide the result either.
+  const notMine = withBindings([
+    { ...peer, project_id: "q", project_name: "乙项目" },
+    {
+      ...peer,
+      machine_check: {
+        status: "failed",
+        checked_at: "2025-12-31T23:30:00.000Z",
+        blockers: [],
+        available: false,
+      },
+    },
+  ]);
+  await openMachines(
+    client({
+      machines: async () => ({
+        machines: [newerElsewhere, { ...notMine, id: "other", label: "他机" }],
+      }),
+    }),
+  );
+  const rows = within(table()).getAllByRole("row");
+  expect(rows[1]?.textContent).toContain("失败 示例项目");
+  expect(rows[1]?.textContent).not.toContain("通过");
+  expect(rows[2]?.textContent).toContain("失败 示例项目");
+});
+
+test("a refreshed detail drops finished Runs even when another project reuses the number", async () => {
+  const [mine, peer] = byId("local").bindings;
+  if (!mine || !peer) throw new Error("fixture");
+  const run = (id: string, card: string) => ({
+    assignment_id: `A-${id}`,
+    role_id: "coder",
+    employee_id: null,
+    employee_name: null,
+    card_id: card,
+    runs: [{ id, status: "running", card_id: card }],
+  });
+  const before = withBindings([
+    { ...mine, assignments: [run("R-31", "C-1"), run("R-32", "C-2")] },
+    { ...peer, assignments: [run("R-31", "C-9")] },
+  ]);
+  const after = withBindings([
+    { ...mine, assignments: [run("R-100", "C-3")] },
+    { ...peer, assignments: [run("R-31", "C-9")] },
+  ]);
+  const machine = vi
+    .fn<CardiganClient["machine"]>()
+    .mockResolvedValueOnce({ machine: before })
+    .mockResolvedValue({ machine: after });
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const c = client({
+      machines: async () => ({ machines: [before] }),
+      machine,
+    });
+    const { rerender } = await openMachines(c);
+    fireEvent.click(screen.getByRole("button", { name: "本机" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    const rows = async () =>
+      within(await dialog.findByRole("table", { name: "在跑任务" }))
+        .getAllByRole("row")
+        .slice(1)
+        .map((r) =>
+          within(r)
+            .getAllByRole("link")
+            .map((a) => a.getAttribute("href"))
+            .concat(r.querySelector("[data-ui='id-badge']")?.textContent ?? ""),
+        );
+    expect(await rows()).toHaveLength(3);
+    rerender(<Page c={c} revision={1} />);
+    await waitFor(() => expect(machine).toHaveBeenCalledTimes(2));
+    await waitFor(async () =>
+      expect((await rows()).map((r) => r[0])).toEqual([
+        "#/p/p-1/cards/C-3",
+        "#/p/peer/cards/C-9",
+      ]),
+    );
+    expect(
+      errors.mock.calls.some((call) => String(call[0]).includes("same key")),
+    ).toBe(false);
+  } finally {
+    errors.mockRestore();
+  }
 });
 
 test("loading, an empty list and a failed read that can be retried", async () => {

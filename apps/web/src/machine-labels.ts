@@ -140,9 +140,10 @@ export function selectionSummary(
 export interface MachineCheckRow {
   readonly key: string;
   readonly kind: string;
-  readonly status: "passed" | "failed" | "running" | "unknown";
+  readonly status: "passed" | "failed" | "running" | "unknown" | "unreadable";
   readonly label: string;
-  readonly checked_at: string;
+  /** Null only for a record the host could not read. */
+  readonly checked_at: string | null;
   readonly steps: readonly string[];
 }
 const CHECK_LABELS: Readonly<Record<MachineCheckRow["status"], string>> = {
@@ -150,6 +151,7 @@ const CHECK_LABELS: Readonly<Record<MachineCheckRow["status"], string>> = {
   failed: "失败",
   running: "检查中",
   unknown: "未知",
+  unreadable: "无法读取",
 };
 const checkRow = (
   key: string,
@@ -173,8 +175,8 @@ const checkRow = (
     steps,
   };
 };
-const time = (value: string) => {
-  const t = Date.parse(value);
+const time = (value: string | null) => {
+  const t = value === null ? Number.NaN : Date.parse(value);
   return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
 };
 
@@ -182,9 +184,13 @@ const time = (value: string) => {
  * The check records of one project binding, newest first: the machine health
  * check, the worker onboarding check and the latest explicitly requested one.
  * A requested check already shown as the health or worker record is not
- * repeated.
+ * repeated. A worker record the host could not read is listed as such, never
+ * as "no check"; `local` has no worker record to read.
  */
-export function bindingChecks(binding: MachineBindingView): MachineCheckRow[] {
+export function bindingChecks(
+  binding: MachineBindingView,
+  machineId: string,
+): MachineCheckRow[] {
   const rows: MachineCheckRow[] = [];
   const health = binding.machine_check;
   if (health)
@@ -224,26 +230,46 @@ export function bindingChecks(binding: MachineBindingView): MachineCheckRow[] {
     )
       rows.push(row);
   }
-  return rows.sort((a, b) => time(b.checked_at) - time(a.checked_at));
+  rows.sort((a, b) => time(b.checked_at) - time(a.checked_at));
+  if (!binding.worker_record_readable && machineId !== "local")
+    rows.push({
+      key: "worker-unreadable",
+      kind: "接入检查",
+      status: "unreadable",
+      label: CHECK_LABELS.unreadable,
+      checked_at: null,
+      steps: [],
+    });
+  return rows;
 }
 
-/** The binding the summary follows: this project's, else the first one. */
-export function primaryBinding(
-  machine: MachineView,
-): MachineBindingView | undefined {
-  return machine.bindings.find((b) => b.is_current) ?? machine.bindings[0];
-}
-
-/** The newest check of the primary binding, if any was ever recorded. */
+/**
+ * The machine's newest check across every binding the server returned, with
+ * the project it belongs to (this project wins a tie). Without any dated
+ * record, an unreadable one is reported rather than "never checked".
+ */
 export function latestMachineCheck(
   machine: MachineView,
-): MachineCheckRow | undefined {
-  const binding = primaryBinding(machine);
-  return binding ? bindingChecks(binding)[0] : undefined;
+): { check: MachineCheckRow; binding: MachineBindingView } | undefined {
+  const rows = machine.bindings.flatMap((binding) =>
+    bindingChecks(binding, machine.id).map((check) => ({ check, binding })),
+  );
+  const dated = rows
+    .filter((r) => r.check.checked_at !== null)
+    .sort(
+      (a, b) =>
+        time(b.check.checked_at) - time(a.check.checked_at) ||
+        Number(b.binding.is_current) - Number(a.binding.is_current),
+    );
+  return dated[0] ?? rows[0];
 }
 
-/** Runs in flight on the machine across every project it serves. */
-export function machineRunning(machine: MachineView): number {
+/**
+ * Every active Run on the machine across the projects it serves, including
+ * the standing sessions the Agent limit exempts; it matches the running-task
+ * list, not the limited count.
+ */
+export function machineActiveRuns(machine: MachineView): number {
   return machine.bindings.reduce(
     (sum, b) => sum + b.assignments.reduce((n, a) => n + a.runs.length, 0),
     0,
