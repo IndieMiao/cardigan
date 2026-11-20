@@ -1,4 +1,4 @@
-import type { HumanAction, TimelineEntry } from "../entities.js";
+import type { Actor, Event, HumanAction, TimelineEntry } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
 import type { TimelineEntryId } from "../ids.js";
 import { extractReferences } from "../references.js";
@@ -30,6 +30,14 @@ function explanation(value: string, field: string) {
   );
 }
 
+function matchesAuthor(actor: Actor, entry: TimelineEntry) {
+  return (
+    (actor.kind === "assignment"
+      ? `assignment:${actor.assignment_id}`
+      : actor.kind) === entry.author
+  );
+}
+
 function originalRequest(
   d: CommandDraft,
   action: HumanAction,
@@ -46,6 +54,8 @@ function originalRequest(
       const p = e.payload as { human_action_id?: string; disposition?: string };
       return (
         e.card_id === entry.card_id &&
+        e.actor.project_id === d.state.project_id &&
+        matchesAuthor(e.actor, entry) &&
         e.seq === entry.event_seq &&
         p.human_action_id === action.id &&
         !p.disposition
@@ -112,9 +122,8 @@ function postedResult(
   if (
     !event ||
     event.actor.project_id !== d.state.project_id ||
-    (event.actor.kind === "assignment"
-      ? `assignment:${event.actor.assignment_id}`
-      : event.actor.kind) !== entry.author
+    event.created_at !== entry.created_at ||
+    !matchesAuthor(event.actor, entry)
   )
     return;
   const payload = event.payload as {
@@ -123,6 +132,117 @@ function postedResult(
   };
   if (payload.body !== entry.body) return;
   return { entry, actor: event.actor, payload };
+}
+
+type Transfer = {
+  human_action_id?: string;
+  disposition?: string;
+  released?: boolean;
+  host_assignment_id?: string | null;
+  host_operator?: string;
+  host_diagnostic?: boolean;
+  handoff?: object;
+};
+
+function hostTransferEntry(event: Event, entry: TimelineEntry | undefined) {
+  const p = event.payload as Transfer;
+  return (
+    p.disposition === "host" &&
+    !!p.handoff &&
+    (event.actor.kind === "human" ||
+      (event.actor.kind === "assignment" && event.actor.role_id === "pm")) &&
+    entry?.type === "human_action" &&
+    !entry.retracted &&
+    entry.card_id === event.card_id &&
+    entry.event_seq === event.seq &&
+    entry.human_action_id === p.human_action_id &&
+    matchesAuthor(event.actor, entry)
+  );
+}
+
+/** Association and ownership are distinct. The reply may name an earlier formal
+ * handoff of this action, but only the last disposition before posting controls its owner. */
+function historicalBinding(
+  d: CommandDraft,
+  action: HumanAction,
+  request: TimelineEntry,
+  report: TimelineEntry,
+) {
+  const parent =
+    report.reply_to && d.state.timeline.find((t) => t.id === report.reply_to);
+  const named = report.refs.filter((r) => r.kind === "human_action");
+  if (named.some((r) => r.id !== action.id)) return;
+  let linked = named.length > 0 || report.reply_to === request.id;
+  let latest: Event | undefined;
+  for (const e of eventsOfType(d.state.events, "human_action_requested")) {
+    const p = e.payload as Transfer;
+    if (
+      e.card_id !== action.card_id ||
+      e.actor.project_id !== d.state.project_id ||
+      e.seq <= request.event_seq ||
+      e.seq >= report.event_seq ||
+      p.human_action_id !== action.id ||
+      !p.disposition ||
+      p.released
+    )
+      continue; // a release changes visibility, not ownership
+    if (parent && hostTransferEntry(e, parent)) linked = true;
+    if (!latest || e.seq > latest.seq) latest = e;
+  }
+  if (!latest || !linked) return;
+  const entry = d.state.timeline.find(
+    (t) => t.card_id === action.card_id && t.event_seq === latest.seq,
+  );
+  if (!entry || !hostTransferEntry(latest, entry)) return;
+  return { event: latest, transfer: latest.payload as Transfer, entry };
+}
+
+function executorBinding(
+  d: CommandDraft,
+  actor: Actor,
+  binding: NonNullable<ReturnType<typeof historicalBinding>>,
+  report: TimelineEntry,
+) {
+  if (actor.kind !== "assignment") return;
+  const a = d.state.assignments.find((a) => a.id === actor.assignment_id);
+  if (a?.scope !== "standing" || a.role_id !== actor.role_id) return;
+  const { transfer, event } = binding;
+  if (
+    transfer.host_assignment_id != null &&
+    transfer.host_assignment_id !== a.id
+  )
+    return;
+  if (transfer.host_operator === "external")
+    return transfer.host_assignment_id === a.id &&
+      a.external &&
+      a.role_id === "pm" &&
+      a.standing_mode === "office"
+      ? {}
+      : undefined;
+  if (transfer.host_operator !== "host_ops" || a.external) return;
+  if (transfer.host_assignment_id === a.id) {
+    if (
+      a.role_id === "host_ops" ||
+      (a.role_id === "pm" &&
+        a.standing_mode === "ops" &&
+        transfer.host_diagnostic === true)
+    )
+      return {};
+    return;
+  }
+  // Older non-diagnostic handoffs selected a particular host_ops in the dispatcher,
+  // not in the triage payload. A run started for this exact handoff before the post
+  // is positive evidence; a role, later assignment or wake for some other card isn't.
+  if (a.role_id !== "host_ops" || transfer.host_diagnostic) return;
+  const run = d.state.runs.find(
+    (r) =>
+      r.assignment_id === a.id &&
+      r.trigger_event_id === event.id &&
+      r.started_at &&
+      Date.parse(r.started_at) >= Date.parse(event.created_at) &&
+      Date.parse(r.started_at) < Date.parse(report.created_at),
+  );
+  return run ? { executor_run_id: run.id } : undefined;
 }
 
 /** The caller has verified PM Ops authority. Only the original event authenticates a historical author. */
@@ -148,33 +268,12 @@ export function verifyHostResult(
   // Before rollout even a genuine final comment had no protocol field. After rollout ordinary comments explicitly record null.
   if (!result || Object.hasOwn(result.payload, "host_report_for")) return false;
   const { entry, actor } = result;
-  const author =
-    actor.kind === "assignment"
-      ? d.state.assignments.find((a) => a.id === actor.assignment_id)
-      : undefined;
-  if (
-    !(
-      actor.kind === "human" ||
-      (actor.kind === "assignment" &&
-        author?.scope === "standing" &&
-        author.role_id === actor.role_id &&
-        ((author.role_id === "host_ops" && !author.external) ||
-          (author.role_id === "pm" &&
-            author.external &&
-            author.standing_mode === "office")))
-    )
-  )
-    return false;
   const request = d.state.timeline.find((e) => originalRequest(d, action, e));
-  if (
-    !request ||
-    request.event_seq >= entry.event_seq ||
-    !(
-      entry.reply_to === request.id ||
-      entry.refs.some((r) => r.kind === "human_action" && r.id === action.id)
-    )
-  )
-    return false;
+  if (!request) return false;
+  const binding = historicalBinding(d, action, request, entry);
+  if (!binding) return false;
+  const proof = executorBinding(d, actor, binding, entry);
+  if (!proof) return false;
   explanation(legacy.result_quote, "legacy_host_result.result_quote");
   explanation(legacy.verification, "legacy_host_result.verification");
   if (
@@ -189,7 +288,9 @@ export function verifyHostResult(
     {
       human_action_id: action.id,
       request: request.id,
+      handoff: binding.entry.id,
       executor: entry.author,
+      ...proof,
       entry: legacy.entry,
       result_quote: legacy.result_quote,
       verification: legacy.verification,
@@ -199,9 +300,10 @@ export function verifyHostResult(
       human_action_id: action.id,
       refs: [
         { kind: "timeline_entry", id: request.id },
+        { kind: "timeline_entry", id: binding.entry.id },
         { kind: "timeline_entry", id: entry.id },
       ],
-      body: `核验旧回填 ${entry.id}（原请求 ${request.id}）：${legacy.result_quote}\n核验依据：${legacy.verification}`,
+      body: `核验旧回填 ${entry.id}（原请求 ${request.id}，执行交接 ${binding.entry.id}）：${legacy.result_quote}\n核验依据：${legacy.verification}`,
     },
   );
   return true;

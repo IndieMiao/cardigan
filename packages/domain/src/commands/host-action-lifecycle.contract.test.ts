@@ -979,8 +979,26 @@ test("system evidence-wait request can be completed by its human-designated exte
   });
 });
 
-test("PM can verify a pre-protocol operator's original result after release, but cannot use the legacy path for current ordinary comments", () => {
-  const { state } = diagnosticOwners();
+function historicalReport(
+  executor: "host_ops" | "fallback" | "external" | "team" = "host_ops",
+  link: "action" | "request" | "handoff" | "comment" = "action",
+  options: { moveToOffice?: "before" | "after"; poster?: Actor } = {},
+) {
+  const f = diagnosticOwners();
+  const state = {
+    ...f.state,
+    assignments: [
+      ...f.state.assignments.filter(
+        (a) => executor !== "fallback" || a.id !== f.host.id,
+      ),
+      {
+        ...f.pm,
+        id: id("assignment", 7),
+        external: true,
+        standing_mode: "office" as const,
+      },
+    ],
+  };
   const io = ports();
   const source = value(
     requestHumanAction(
@@ -998,29 +1016,108 @@ test("PM can verify a pre-protocol operator's original result after release, but
   );
   const request = required(source.timeline[0]);
   const action = source.data;
-  const open = {
-    ...apply(state, source),
-    human_actions: [{ ...action, triage: "host" as const }],
-  };
-  const operator = actor(5, "host_ops");
+  const requested = apply(state, source);
+  const hand = value(
+    triageHumanAction(
+      requested,
+      human,
+      {
+        ...f.params,
+        human_action_id: action.id,
+        ...(executor === "external"
+          ? {
+              host_operator: "external" as const,
+              host_assignment_id: id("assignment", 7),
+            }
+          : {
+              host_operator: "host_ops" as const,
+              ...(executor === "team"
+                ? {}
+                : { host_diagnostic: true as const }),
+            }),
+      },
+      io,
+    ),
+  );
+  const assigned = required(hand.timeline[0]);
+  const routed = apply(requested, hand);
+  const other = value(
+    postComment(
+      routed,
+      human,
+      { card_id: request.card_id, body: `Following ${action.id}` },
+      io,
+    ),
+  );
+  const toOffice = (from: CommandState) =>
+    apply(
+      from,
+      value(
+        triageHumanAction(
+          from,
+          human,
+          {
+            ...handoff,
+            human_action_id: action.id,
+            host_assignment_id: id("assignment", 7),
+          },
+          io,
+        ),
+      ),
+    );
+  const before = apply(routed, other);
+  const open = options.moveToOffice === "before" ? toOffice(before) : before;
+  const operator =
+    executor === "fallback"
+      ? owner
+      : executor === "external"
+        ? actor(7, "pm")
+        : actor(5, "host_ops");
   const quote = "I verified that the running version is 7.2.";
-  const body = `${action.id}: ${quote}`;
+  const body = link === "action" ? `${action.id}: ${quote}` : quote;
   const posted = value(
-    postComment(open, operator, { card_id: request.card_id, body }, io),
+    postComment(
+      open,
+      options.poster ?? operator,
+      {
+        card_id: request.card_id,
+        body,
+        ...(link === "action"
+          ? {}
+          : {
+              reply_to:
+                link === "request"
+                  ? request.id
+                  : link === "handoff"
+                    ? assigned.id
+                    : required(other.data).id,
+            }),
+      },
+      io,
+    ),
   );
   const entry = required(posted.data);
-  const postedState = apply(open, posted);
+  const reported = apply(open, posted);
+  const postedState =
+    options.moveToOffice === "after" ? toOffice(reported) : reported;
   const released = {
     ...postedState,
-    assignments: postedState.assignments.map((a) =>
-      a.id === id("assignment", 5) ? { ...a, status: "released" as const } : a,
-    ),
+    assignments: [
+      ...postedState.assignments.map((a) =>
+        a.id === hand.data.host_assignment_id || a.id === f.pm.id
+          ? { ...a, status: "released" as const }
+          : a,
+      ),
+      { ...f.pm, id: id("assignment", 6) },
+    ],
   };
   // Historical storage shape: no server protocol discriminator, no dedicated action field on the comment.
   const old = {
     ...released,
     events: released.events.map((e) =>
-      e.type === "comment_posted" ? { ...e, payload: { body } } : e,
+      e.seq === entry.event_seq && e.type === "comment_posted"
+        ? { ...e, payload: { body } }
+        : e,
     ),
   };
   const params = {
@@ -1040,9 +1137,76 @@ test("PM can verify a pre-protocol operator's original result after release, but
       "Matched the reported version to the read-only supervisor status",
   };
   const finish = (s: CommandState, legacy = attestation) =>
-    triageHumanAction(s, owner, { ...params, legacy_host_result: legacy }, io);
+    triageHumanAction(
+      s,
+      actor(6, "pm"),
+      { ...params, legacy_host_result: legacy },
+      io,
+    );
+  return {
+    request,
+    action,
+    hand,
+    assigned,
+    entry,
+    old,
+    released,
+    params,
+    attestation,
+    finish,
+    io,
+    quote,
+  };
+}
+
+test.each([
+  ["host_ops", "action"],
+  ["host_ops", "request"],
+  ["host_ops", "handoff"],
+  ["fallback", "action"],
+  ["fallback", "handoff"],
+  ["external", "handoff"],
+] as const)(
+  "historical report: %s linked by %s survives executor rotation",
+  (executor, link) => {
+    const { old, finish, assigned, request, attestation, entry } =
+      historicalReport(executor, link);
+    const effect = value(finish(old));
+    expect(effect.data.status).toBe("done");
+    expect(effect.events).toContainEqual(
+      expect.objectContaining({
+        type: "legacy_host_result_verified",
+        actor: actor(6, "pm"),
+        payload: expect.objectContaining({
+          request: request.id,
+          handoff: assigned.id,
+          executor: entry.author,
+          ...attestation,
+        }),
+      }),
+    );
+    expect(apply(old, effect).timeline.find((e) => e.id === entry.id)).toEqual(
+      entry,
+    );
+    expect(finish(apply(old, effect)).ok).toBe(false);
+  },
+);
+
+test("PM cannot repurpose ordinary, obsolete or unverified comments", () => {
+  const {
+    request,
+    action,
+    entry,
+    old,
+    released,
+    params,
+    attestation,
+    finish,
+    io,
+    quote,
+  } = historicalReport();
   expect(finish(released).ok).toBe(false); // new-protocol progress intentionally has no report
-  expect(triageHumanAction(old, owner, params, io).ok).toBe(false); // citing the old comment alone is not verification
+  expect(triageHumanAction(old, actor(6, "pm"), params, io).ok).toBe(false); // citing the old comment alone is not verification
   for (const patch of [
     { entry: request.id },
     { result_quote: "Not in the original report" },
@@ -1076,22 +1240,135 @@ test("PM can verify a pre-protocol operator's original result after release, but
         ),
       }).ok,
     ).toBe(false);
-  const effect = value(finish(old));
-  expect(effect.data.status).toBe("done");
-  expect(effect.events).toContainEqual(
-    expect.objectContaining({
-      type: "legacy_host_result_verified",
-      actor: owner,
-      payload: {
-        human_action_id: action.id,
-        request: request.id,
-        executor: entry.author,
-        ...attestation,
-      },
-    }),
+  const unrelated = historicalReport("host_ops", "comment");
+  expect(unrelated.finish(unrelated.old).ok).toBe(false);
+});
+
+test("use the effective owner when the comment was posted, not today's owner or a matching role", () => {
+  const office = actor(7, "pm");
+  for (const [poster, moveToOffice, valid] of [
+    [actor(5, "host_ops"), "after", true], // Released since; current owner differs.
+    [office, "before", true], // Replies to an earlier formal handoff of this same action.
+    [actor(5, "host_ops"), "before", false], // Former owner.
+    [office, "after", false], // Future owner.
+    [owner, "after", false], // PM but never appointed to this diagnosis.
+  ] as const) {
+    const { old, finish } = historicalReport("host_ops", "handoff", {
+      poster,
+      moveToOffice,
+    });
+    expect(finish(old).ok).toBe(valid);
+  }
+});
+
+test("a team handoff needs a contemporaneous per-executor dispatch, not just a host_ops role", () => {
+  const { old, finish, hand, entry } = historicalReport("team", "handoff");
+  expect(finish(old).ok).toBe(false);
+  const event = required(
+    hand.events.find((e) => e.type === "human_action_requested"),
   );
-  expect(apply(old, effect).timeline.find((e) => e.id === entry.id)).toEqual(
-    entry,
+  const run = {
+    ...required(old.runs[0]),
+    assignment_id: id("assignment", 5),
+    trigger_event_id: event.id,
+    started_at: now,
+  };
+  const state = {
+    ...old,
+    timeline: old.timeline.map((t) =>
+      t.id === entry.id ? { ...t, created_at: "2026-01-01T00:00:02.000Z" } : t,
+    ),
+    events: old.events.map((e) =>
+      e.seq === entry.event_seq && e.card_id === entry.card_id
+        ? { ...e, created_at: "2026-01-01T00:00:02.000Z" }
+        : e,
+    ),
+    runs: [run],
+  };
+  expect(
+    value(finish(state)).events.find(
+      (e) => e.type === "legacy_host_result_verified",
+    )?.payload,
+  ).toMatchObject({ executor_run_id: run.id });
+  for (const patch of [
+    { started_at: "2026-01-01T00:00:03.000Z" },
+    { assignment_id: id("assignment", 4) },
+    { trigger_event_id: required(old.events[0]).id },
+  ])
+    expect(finish({ ...state, runs: [{ ...run, ...patch }] }).ok).toBe(false);
+});
+
+test("a valid historical report cannot lift a human-only or blocking fence", () => {
+  const { old, action, finish } = historicalReport("fallback", "handoff");
+  expect(finish(old).ok).toBe(true);
+  for (const fence of [
+    { blocks_merge: true },
+    { blocked_work_items: [id("work_item", 1)] },
+    { prerequisite: "credential" },
+    { prerequisite: "external_account" },
+    ...(
+      ["spending", "credential", "account", "data_deletion", "publish"] as const
+    ).map((category) => ({ category })),
+  ] as const) {
+    expect(
+      finish({
+        ...old,
+        human_actions: old.human_actions.map((a) =>
+          a.id === action.id ? { ...a, ...fence } : a,
+        ),
+      }).ok,
+    ).toBe(false);
+  }
+  expect(
+    finish({ ...old, cards: old.cards.map((c) => ({ ...c, sensitive: true })) })
+      .ok,
+  ).toBe(false);
+});
+
+test("a same-card release does not replace the handoff and a timeline link is not itself proof", () => {
+  const { old, finish, hand, entry, action, assigned } = historicalReport(
+    "fallback",
+    "handoff",
   );
-  expect(finish(apply(old, effect)).ok).toBe(false);
+  const transfer = required(
+    hand.events.find((e) => e.type === "human_action_requested"),
+  );
+  // The entry in the gap is just a notification that a deferred item became visible.
+  const release = {
+    ...transfer,
+    seq: assigned.event_seq + 1,
+    payload: {
+      human_action_id: action.id,
+      disposition: "host",
+      released: true,
+      reason: "Ready",
+    },
+  };
+  const withoutGap = old.events.filter(
+    (e) => e.card_id !== entry.card_id || e.seq !== release.seq,
+  );
+  expect(finish({ ...old, events: [...withoutGap, release] }).ok).toBe(true);
+  for (const patch of [
+    { human_action_id: id("human_action", 9) },
+    { disposition: "human" },
+    { host_diagnostic: false },
+    { host_assignment_id: null },
+  ]) {
+    expect(
+      finish({
+        ...old,
+        events: old.events.map((e) =>
+          e.id === transfer.id
+            ? { ...e, payload: { ...(e.payload as object), ...patch } }
+            : e,
+        ),
+      }).ok,
+    ).toBe(false);
+  }
+  expect(
+    finish({
+      ...old,
+      timeline: old.timeline.filter((t) => t.id !== assigned.id),
+    }).ok,
+  ).toBe(false);
 });

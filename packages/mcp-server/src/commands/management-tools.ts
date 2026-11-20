@@ -306,7 +306,7 @@ const schemas = {
       .strictObject({ entry: entryId, result_quote: text, verification: text })
       .optional()
       .describe(
-        "For pre-protocol executor reports only: cite entry in rationale, quote the actual final outcome verbatim, and explain how you independently checked it. Never confirm progress or a second-hand report.",
+        "For pre-protocol reports by the executor assigned at posting time: cite their original comment linked to the action or replying directly to its request or formal handoff. Quote the actual final outcome verbatim and explain how you independently checked it; progress or a second-hand report is not a result.",
       ),
     ordinary_host_basis: z
       .strictObject({ request: entryId, explanation: text })
