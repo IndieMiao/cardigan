@@ -49,6 +49,7 @@ import {
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { Markdown } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
@@ -58,7 +59,6 @@ import {
   TimelinePager,
 } from "../components/TimelineControls.js";
 import { Button } from "../components/ui/button.js";
-import { Prose } from "../components/ui/prose.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
@@ -768,11 +768,7 @@ function CardContent({
           )}
           <section className="card-purpose" aria-label="目标和验收标准">
             <h2>目标和验收标准</h2>
-            <LongContent>
-              <Prose text={card.goal}>
-                <p>{card.goal}</p>
-              </Prose>
-            </LongContent>
+            <Markdown body={card.goal} />
             <section className="acceptance-criteria">
               <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
               <LongContent>

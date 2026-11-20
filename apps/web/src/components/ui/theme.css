@@ -58,6 +58,10 @@
     --ui-run-ring: 2px;
     --ui-run-keyline: 1px;
     --ui-run-cycle: 2.8s;
+    /* C-534: a wrapping Markdown table column never gets narrower than this. */
+    --ui-markdown-column: 5em;
+    /* C-534: label gutter of a help table record on narrow screens. */
+    --ui-markdown-label: 5em;
     /* C-504: a thin meter track under its value text. */
     --ui-meter: 3px;
     --ui-pill-radius: 999px;
@@ -857,5 +861,87 @@
     color: var(--text-muted);
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
+  }
+}
+
+/* C-534: one table look for every Markdown body (timeline, card goal, Needs
+   You, help). The renderers wrap each table in .ui-markdown-table, which
+   scrolls on its own instead of widening the body or the drawer. */
+@layer components {
+  .ui-markdown-table {
+    /* Never lends the table's width to an auto-sized ancestor. */
+    contain: inline-size;
+    overflow-x: auto;
+    margin-block: 0 var(--ui-space-2);
+  }
+  .ui-markdown-table:last-child {
+    margin-block-end: 0;
+  }
+  .ui-markdown-table > table {
+    width: auto;
+    border-collapse: collapse;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .ui-markdown-table :is(th, td) {
+    min-width: 0;
+    padding: var(--ui-space-1) var(--ui-space-2);
+    border-bottom: var(--ui-stroke) solid var(--border);
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  .ui-markdown-table th {
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .ui-markdown-table td[data-wide] {
+    min-width: var(--ui-markdown-column);
+    white-space: normal;
+  }
+  .ui-markdown-table [data-align="center"] {
+    text-align: center;
+  }
+  .ui-markdown-table [data-align="right"] {
+    text-align: right;
+  }
+  /* A tag keeps its 28px target but sits on the 20px text line, so the
+     first lines of neighbouring cells stay level. */
+  .ui-markdown-table .id-tag {
+    min-height: var(--ui-control);
+    margin-block: calc((var(--ui-leading) - var(--ui-control)) / 2);
+    align-items: baseline;
+    vertical-align: baseline;
+  }
+  .ui-markdown-table td:not([data-wide]) .id-description {
+    white-space: nowrap;
+  }
+  /* Help keeps its narrow-screen records from the legacy help styles. */
+  @media (max-width: 760px) {
+    .ui-markdown-table[data-layout="stacked"] {
+      contain: none;
+      overflow-x: visible;
+    }
+    .ui-markdown-table[data-layout="stacked"] :is(table, th, td) {
+      width: revert-layer;
+      min-width: revert-layer;
+      padding: revert-layer;
+      border-bottom: revert-layer;
+      text-align: revert-layer;
+      white-space: revert-layer;
+    }
+    /* Label in a hanging gutter, so tags, code and links in the value keep
+       flowing as one line of text instead of becoming separate grid items. */
+    .ui-markdown-table[data-layout="stacked"] td:not(:first-child) {
+      display: block;
+      padding-inline-start: calc(var(--ui-markdown-label) + var(--ui-space-2));
+    }
+    .ui-markdown-table[data-layout="stacked"] td:not(:first-child)::before {
+      display: inline-block;
+      width: var(--ui-markdown-label);
+      margin-inline: calc(-1 * (var(--ui-markdown-label) + var(--ui-space-2)))
+        var(--ui-space-2);
+    }
   }
 }

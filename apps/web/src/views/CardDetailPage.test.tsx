@@ -532,6 +532,27 @@ test("an Agent body with HTML or javascript: links stays inert", async () => {
   expect(entry?.textContent).toContain("<script>");
 });
 
+test("C-534: the card goal uses the shared Markdown renderer, tables included", async () => {
+  const detail = cardDetail();
+  renderCard({
+    card: async () => ({
+      ...detail,
+      card: {
+        ...detail.card,
+        goal: "目标\n\n| 列 | 数 |\n|---|---:|\n| <img src=x onerror=alert(1)> | 1 |\n\n[点我](javascript:alert(1))",
+      },
+    }),
+  });
+  const purpose = (
+    await screen.findByRole("region", { name: "目标和验收标准" })
+  ).querySelector(".markdown");
+  const table = purpose?.querySelector(".ui-markdown-table > table");
+  expect(table?.querySelector('td[data-align="right"]')?.textContent).toBe("1");
+  expect(purpose?.querySelector("img, script, [style]")).toBeNull();
+  expect(purpose?.querySelector("a")).toBeNull();
+  expect(purpose?.textContent).toContain("<img src=x onerror=alert(1)>");
+});
+
 test("C-370 detail subscribes to prerequisite and successor revisions, C-487 across the whole graph", async () => {
   const detail = cardDetail();
   const observed: string[][] = [];

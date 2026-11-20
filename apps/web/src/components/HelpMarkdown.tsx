@@ -1,12 +1,14 @@
 import MarkdownIt from "markdown-it";
 import { createElement, Fragment, type ReactNode } from "react";
 import { idType } from "../id-types.js";
-import { isAllowedLink } from "../markdown.js";
+import { isAllowedLink, markdownTables } from "../markdown.js";
 import { STATUS_LABELS } from "../status.js";
 import { StatusTag } from "./Foundation.js";
 import { IdBadge, IdTag } from "./IdTag.js";
 
-const markdown = new MarkdownIt({ html: false, linkify: false });
+const markdown = new MarkdownIt({ html: false, linkify: false }).use(
+  markdownTables,
+);
 type Token = ReturnType<typeof markdown.parse>[number];
 markdown.validateLink = (url) => isAllowedLink(url) && !/\\|%5c/iu.test(url);
 
@@ -76,11 +78,24 @@ function renderTokens(tokens: readonly Token[], inLink = false): ReactNode[] {
                 }
               : token.tag === "ol"
                 ? { start: token.attrGet("start") ?? undefined }
-                : token.tag === "td"
-                  ? { "data-label": cellLabel }
+                : token.tag === "td" || token.tag === "th"
+                  ? {
+                      "data-label": cellLabel,
+                      "data-align": token.attrGet("data-align") ?? undefined,
+                      "data-wide":
+                        token.attrGet("data-wide") === null ? undefined : "",
+                    }
                   : {},
             nested,
           );
+          // Same table look as every other Markdown body; help keeps its
+          // narrow-screen record layout.
+          if (tag === "table")
+            child = (
+              <div className="ui-markdown-table" data-layout="stacked">
+                {child}
+              </div>
+            );
         }
       } else if (token.type === "inline") {
         child = renderTokens(token.children ?? [], linked);
