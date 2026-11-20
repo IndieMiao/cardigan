@@ -33,7 +33,7 @@ test("C-499: repeated silent 503s do not start work; only one real launch probes
           owner.id,
           {
             status: "fresh" as const,
-            activity: {
+            startupFailure: {
               assignment_id: owner.id,
               run_id: run.id,
               session_id: owner.session_ref ?? "session",

@@ -312,3 +312,18 @@ test.each([
       expect(within(panel).queryByText("PM 代拍")).toBeNull();
   },
 );
+
+test("C-499: a paused profile appears in actions and disappears after a successful probe", async () => {
+  let page: NeedsPage = {
+    ...empty,
+    provider_incidents: [{ profile: "relay", paused: true }],
+  };
+  const client = fakeClient({ needsYou: async () => page });
+  const view = render(<NeedsYouPage client={client} projectId="p-1" />);
+  await screen.findByText("模型服务不可用：relay（已暂停派发）");
+  expect(tab("待你执行").textContent).toContain("1");
+  page = empty;
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  await screen.findByText("没有需要你处理的事");
+  expect(screen.queryByText(/模型服务不可用/)).toBeNull();
+});

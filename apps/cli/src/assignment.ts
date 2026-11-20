@@ -25,6 +25,7 @@ import {
   loadRunCapacityConfig,
   messageOf,
   type PreparedWorktree,
+  RunProviderDeferred,
   RuntimeTargets,
   readonlyWorktreeTarget,
   resolveMcpUrl,
@@ -443,6 +444,9 @@ async function startUnlocked(
       token_id: launched.token_id,
     };
   } catch (error) {
+    // Admission has already committed this resumed Run to the queue.
+    if (error instanceof RunProviderDeferred)
+      throw new CliError(error.message, EXIT.failure);
     if (resuming) pauseStanding(store, project_id, assignment.id, actor);
     const message = formatLaunchError(assignment.id, error);
     if (message) throw new CliError(message, EXIT.failure);

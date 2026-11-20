@@ -147,6 +147,11 @@ export class RunCapacityDeferred extends Error {
     super(`排队中（前面还有 ${ahead} 个）`);
   }
 }
+export class RunProviderDeferred extends Error {
+  constructor() {
+    super("模型服务不可用，保留执行排队等待");
+  }
+}
 export class RunPreparationDeferred extends Error {
   constructor() {
     super("工作目录准备或启动尚未结束，保留执行排队等待");
@@ -459,8 +464,7 @@ async function launchWithClaim(
           : undefined,
     };
   });
-  if (attempt === "provider_unavailable")
-    throw new HostLaunchError("dispatch", "模型服务不可用，保留执行排队等待");
+  if (attempt === "provider_unavailable") throw new RunProviderDeferred();
   if (!attempt) {
     const waiting = host.store.uow.read((tx) =>
       runCapacitySnapshot(host.store, tx).queue.find(

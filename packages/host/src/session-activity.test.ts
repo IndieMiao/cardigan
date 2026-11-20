@@ -468,9 +468,9 @@ test.each(["no_output", "assistant", "agent_message", "incomplete"])(
           }),
       ),
     );
-    const sample = (await read())?.activity;
-    expect(sample?.error).toBe("server_error");
-    expect(sample?.model_silent_since).toBe(
+    const sample = await read();
+    expect(sample?.activity?.error).toBe("server_error");
+    expect(sample?.startupFailure?.model_silent_since).toBe(
       mode === "incomplete"
         ? undefined
         : mode === "no_output"
@@ -479,3 +479,110 @@ test.each(["no_output", "assistant", "agent_message", "incomplete"])(
     );
   },
 );
+
+const faultAt = "2026-01-01T00:59:00.000Z";
+const codexFault = line({
+  timestamp: faultAt,
+  type: "event_msg",
+  payload: {
+    type: "error",
+    codex_error_info: { http_connection_failed: { http_status_code: 503 } },
+  },
+});
+test.each([
+  { type: "token_count", info: null },
+  { type: "task_complete", last_agent_message: null },
+])(
+  "C-499: $type without output is latest activity but cannot redate or erase a startup fault",
+  async (payload) => {
+    await write(
+      rollout(),
+      codex(codexFault + line({ type: "event_msg", timestamp: now, payload })),
+    );
+    const row = await read();
+    expect(row?.activity?.updated_at).toBe(now);
+    expect(row?.activity?.error).toBeUndefined();
+    expect(row?.activity?.turn_ended).toBe(
+      payload.type === "task_complete" ? true : undefined,
+    );
+    expect(row?.startupFailure).toMatchObject({
+      error: "server_error",
+      updated_at: faultAt,
+      model_silent_since: 0,
+    });
+  },
+);
+test.each([
+  line({
+    type: "response_item",
+    timestamp: now,
+    payload: { type: "message", role: "assistant" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: { type: "agent_reasoning" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: { type: "task_complete", last_agent_message: "done" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: {
+      type: "token_count",
+      info: { last_token_usage: { total_tokens: 1 } },
+    },
+  }),
+  '{"type":',
+])(
+  "C-499: output or a partial record after a Codex error withdraws startup evidence",
+  async (suffix) => {
+    await write(rollout(), codex(codexFault + suffix));
+    expect((await read())?.startupFailure).toBeUndefined();
+  },
+);
+test("C-499: an unfinished Claude line after a 503 invalidates silence on every read", async () => {
+  const path = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const fault = line({
+    type: "system",
+    subtype: "api_error",
+    sessionId: "session-1",
+    cwd,
+    timestamp: faultAt,
+    error: { status: 503 },
+  });
+  await write(path, fault);
+  const inspect = () => read(state("claude-code"));
+  expect((await inspect())?.startupFailure).toMatchObject({
+    error: "server_error",
+    updated_at: faultAt,
+    model_silent_since: 0,
+  });
+  await appendFile(path, '{"type":"assistant",');
+  for (let i = 0; i < 2; i++) {
+    const row = await inspect();
+    expect(row?.startupFailure).toBeUndefined();
+    expect(row?.activity?.error).toBe("server_error");
+  }
+  await appendFile(
+    path,
+    JSON.stringify({
+      sessionId: "session-1",
+      cwd,
+      timestamp: now,
+      message: { model: "fixture" },
+    }).slice(1) + "\n",
+  );
+  const row = await inspect();
+  expect(row?.activity).toMatchObject({ updated_at: now });
+  expect(row?.startupFailure).toBeUndefined();
+});

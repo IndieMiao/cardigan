@@ -160,4 +160,6 @@ export interface ContextReading {
   usage?: ContextSample | undefined;
   activity?: ActivityMetadata | undefined;
   progress?: ActivityMetadata | undefined;
+  /** Original fault record, separate from the latest activity used for idle detection. */
+  startupFailure?: ActivityMetadata | undefined;
 }

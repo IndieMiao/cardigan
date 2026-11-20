@@ -90,7 +90,7 @@ async function providerSample(
   try {
     const row = (await options.inspectHarnessActivity?.(project, id))?.get(id);
     return row && (row.status === "fresh" || row.status === "stale")
-      ? row.activity
+      ? row.startupFailure
       : undefined;
   } catch {
     return undefined;

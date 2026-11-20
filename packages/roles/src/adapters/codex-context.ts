@@ -77,7 +77,7 @@ export async function readCodexContext({
             latest,
             parts.tailStart,
           ),
-          activity: parseCodexActivity(parts.head, parts.tail, parts.tailStart),
+          ...parseCodexActivity(parts.head, parts.tail, parts.tailStart),
         }
       : undefined;
   } catch {
@@ -111,7 +111,7 @@ export function parseCodexActivity(
   head: string,
   tail: string,
   start = 0,
-): ActivityMetadata | undefined {
+): Pick<ContextReading, "activity" | "startupFailure"> {
   const meta = object(
     head
       .split("\n")
@@ -119,13 +119,18 @@ export function parseCodexActivity(
       .find((v) => v?.type === "session_meta")?.payload,
   );
   let last: ActivityMetadata | undefined;
+  let fault: ActivityMetadata | undefined;
   // Never infer silence from a truncated prefix or an unreadable record.
-  const lines = tail.trimEnd().split("\n");
+  const events = records(tail, start);
   let silentSince =
-    !start && lines.length < 256 && lines.every((line) => json(line))
+    !start &&
+    tail.split("\n").length <= 256 &&
+    events.every(
+      (v, i) => !!v || (i === events.length - 1 && tail.endsWith("\n")),
+    )
       ? 0
       : undefined;
-  for (const event of records(tail, start)) {
+  for (const event of events) {
     const payload = object(event?.payload);
     const error = event?.type === "event_msg" && payload?.type === "error";
     const agentMessage =
@@ -135,7 +140,15 @@ export function parseCodexActivity(
         "agent_reasoning",
         "agent_reasoning_raw_content",
       ].includes(String(payload?.type));
-    if (agentMessage) {
+    const modelOutput =
+      agentMessage ||
+      (event?.type === "response_item" &&
+        !["user", "developer", "system"].includes(String(payload?.role))) ||
+      (event?.type === "event_msg" &&
+        ((payload?.type === "task_complete" && !!payload.last_agent_message) ||
+          (payload?.type === "token_count" && payload.info != null)));
+    if (modelOutput) {
+      fault = undefined;
       const timestamp = Date.parse(String(event?.timestamp));
       silentSince =
         silentSince !== undefined && Number.isFinite(timestamp)
@@ -167,19 +180,17 @@ export function parseCodexActivity(
       !sample ||
       (last && Date.parse(sample.updated_at) < Date.parse(last.updated_at))
     )
-      return;
-    if (
-      silentSince !== undefined &&
-      !error &&
-      ((event?.type === "response_item" &&
-        !["user", "developer", "system"].includes(String(payload?.role))) ||
-        payload?.type === "task_complete" ||
-        (payload?.type === "token_count" && payload.info != null))
-    )
-      silentSince = Date.parse(sample.updated_at);
+      return {};
+    if (error) fault = sample;
     last = sample;
   }
-  return last?.error && silentSince !== undefined
-    ? { ...last, model_silent_since: silentSince }
-    : last;
+  return {
+    activity: last,
+    startupFailure:
+      fault?.error &&
+      fault.error !== "unclassified" &&
+      silentSince !== undefined
+        ? { ...fault, model_silent_since: silentSince }
+        : undefined,
+  };
 }

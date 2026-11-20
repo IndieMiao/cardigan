@@ -128,6 +128,7 @@ export {
   RunCapacityDeferred,
   RunPreflightDeferred,
   RunPreparationDeferred,
+  RunProviderDeferred,
   scrubRunCredentials,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,

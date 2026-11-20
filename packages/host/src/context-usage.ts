@@ -157,6 +157,7 @@ export type HarnessActivityStatus =
   | "read_failed";
 export interface HarnessActivityInspection {
   activity?: HarnessActivity;
+  startupFailure?: HarnessActivity;
   status: HarnessActivityStatus;
 }
 
@@ -181,6 +182,7 @@ export interface SessionContextDiagnostic {
   level: "handoff" | "restart" | null;
   observation?: ContextObservation;
   activity?: HarnessActivity;
+  startupFailure?: HarnessActivity;
   activity_status?: HarnessActivityStatus;
   activity_diagnostic?: string;
   activity_updated_at?: string | null;
@@ -267,6 +269,7 @@ export async function readSessionContexts(
       ).length === 1;
     let usage: ContextSample | undefined;
     let progress: ActivityMetadata | undefined;
+    let startupMetadata: ActivityMetadata | undefined;
     let activityMetadata: ActivityMetadata | undefined;
     let activityReadFailed = false;
     const readFailed = () => {
@@ -299,6 +302,7 @@ export async function readSessionContexts(
         usage = reading.usage;
         activityMetadata = reading.activity;
         progress = reading.progress;
+        startupMetadata = reading.startupFailure;
       }
       source = adapter.contextSource;
     }
@@ -326,33 +330,34 @@ export async function readSessionContexts(
         (adapter?.allowWorktreeDescendant &&
           worktree &&
           resolve(dir).startsWith(resolve(worktree) + sep)));
-    const activity: HarnessActivity | undefined =
-      activityMetadata && run && source && matchesCwd(activityMetadata.cwd)
+    const bindActivity = (
+      metadata: ActivityMetadata | undefined,
+      progress?: ActivityMetadata,
+    ): HarnessActivity | undefined =>
+      metadata && run && source && matchesCwd(metadata.cwd)
         ? {
             assignment_id: a.id,
             runtime_key: JSON.stringify(a.runtime_ref),
             run_id: run.id,
-            session_id: activityMetadata.session_id,
-            updated_at: activityMetadata.updated_at,
-            ...(activityMetadata.error &&
+            session_id: metadata.session_id,
+            updated_at: metadata.updated_at,
+            ...(metadata.error &&
             progress &&
-            progress.session_id === activityMetadata.session_id &&
+            progress.session_id === metadata.session_id &&
             matchesCwd(progress.cwd)
               ? { last_progress_at: progress.updated_at }
               : {}),
-            ...(activityMetadata.model_silent_since !== undefined
-              ? { model_silent_since: activityMetadata.model_silent_since }
+            ...(metadata.model_silent_since !== undefined
+              ? { model_silent_since: metadata.model_silent_since }
               : {}),
-            ...(activityMetadata.turn_ended
-              ? { turn_ended: true as const }
-              : {}),
+            ...(metadata.turn_ended ? { turn_ended: true as const } : {}),
             stale_after_ms: staleMs,
             source: `${harness}:session_metadata`,
-            ...(activityMetadata.error
-              ? { error: activityMetadata.error }
-              : {}),
+            ...(metadata.error ? { error: metadata.error } : {}),
           }
         : undefined;
+    const activity = bindActivity(activityMetadata, progress);
+    const startupFailure = bindActivity(startupMetadata);
     const activityFresh = !!currentHarnessActivity(state, a, now, activity);
     const activityStatus: HarnessActivityStatus = activityReadFailed
       ? "read_failed"
@@ -406,6 +411,7 @@ export async function readSessionContexts(
           : null,
       ...(observation ? { observation } : {}),
       ...(activity ? { activity } : {}),
+      ...(startupFailure ? { startupFailure } : {}),
       activity_updated_at: activity?.updated_at ?? null,
       activity_source: activity?.source ?? null,
       ...(activity?.error ? { activity_error: activity.error } : {}),
