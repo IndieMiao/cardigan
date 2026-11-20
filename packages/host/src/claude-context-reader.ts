@@ -40,6 +40,7 @@ function text(value, max) {
   return typeof value === 'string' && value.length <= max ? value : null;
 }
 function summarize(lines, path, attributable, activityOnly) {
+  const workerSession = activityOnly ? basename(path, '.jsonl') : undefined;
   let activity, progress;
   if (attributable) {
     for (const line of lines.slice(-256)) {
@@ -50,6 +51,8 @@ function summarize(lines, path, attributable, activityOnly) {
         (event.type === 'system' && event.subtype === 'api_error');
       if (!apiError && !['assistant', 'user'].includes(event.type)) continue;
       if (!apiError && object(event.message)?.model === '<synthetic>') continue;
+      // Even a unique worker file is not evidence for another CLI session.
+      if (activityOnly && event.sessionId !== workerSession) return;
       const timestamp = text(event.timestamp, 64);
       if (!timestamp || !Number.isFinite(Date.parse(timestamp)) ||
         (activity && Date.parse(timestamp) < Date.parse(activity.updated_at))) {

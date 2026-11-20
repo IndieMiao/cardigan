@@ -187,3 +187,89 @@ test("a pending worker inspection does not delay the local inactivity alert", as
     pending.resolve(new Map());
   }
 });
+
+test.each(["progress", "missing", "silent", "closing"] as const)(
+  "a pending stop recheck does not delay local alerts; stop still requires evidence (%s)",
+  async (outcome) => {
+    const remote = session("claude-code");
+    const latest: HarnessActivity = {
+      assignment_id: remote.a.id,
+      run_id: remote.run.id,
+      runtime_key: JSON.stringify(remote.ref),
+      session_id: "fixture",
+      source: "claude-code:session_metadata",
+      updated_at: f.clock.now(),
+      stale_after_ms: 600_000,
+    };
+    const stale = new Map([
+      [remote.a.id, { status: "stale" as const, activity: latest }],
+    ]);
+    const pending =
+      Promise.withResolvers<
+        Map<typeof remote.a.id, HarnessActivityInspection>
+      >();
+    let reads = 0;
+    const d = new Dispatcher({
+      ...f.options,
+      harnessActivity: (_project, id) =>
+        id === remote.a.id ? latest : undefined,
+      inspectHarnessActivity: async (_project, id) => {
+        if (id !== remote.a.id) return new Map();
+        // Initial inactivity check, stop claim read, then final pre-release read.
+        return ++reads <= 2 ? stale : pending.promise;
+      },
+    });
+    const alerts = () =>
+      f
+        .state()
+        .events.filter((e) => e.type === "run_inactive")
+        .map((e) => e.payload);
+    try {
+      f.skipEvents();
+      f.advance(45 * 60_000 + 1000);
+      const local = f.session(f.create("local").assignment, false);
+      f.skipEvents();
+      await d.tick();
+      expect(alerts()).toMatchObject([{ run_id: remote.run.id }]);
+      f.advance(15 * 60_000 - 1000);
+      await d.tick();
+      expect(reads).toBe(3);
+      expect(f.latest().inactivity_stop?.stopping).toBe(false);
+      f.advance(1000);
+      await d.tick();
+      expect(alerts()).toMatchObject([
+        { run_id: remote.run.id },
+        { run_id: local.id },
+      ]);
+      expect(reads).toBe(3);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      if (outcome === "closing") void d.close();
+      pending.resolve(
+        outcome === "progress"
+          ? new Map([
+              [
+                remote.a.id,
+                {
+                  status: "fresh",
+                  activity: { ...latest, updated_at: f.clock.now() },
+                },
+              ],
+            ])
+          : outcome === "missing"
+            ? new Map()
+            : stale,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(f.runtime.release).toHaveBeenCalledTimes(
+        outcome === "silent" ? 1 : 0,
+      );
+      expect(f.latest().status).toBe(
+        outcome === "silent" ? "cancelled" : "running",
+      );
+      expect(f.latest().inactivity_stop).toBeUndefined();
+    } finally {
+      pending.resolve(new Map());
+      await d.close();
+    }
+  },
+);

@@ -234,11 +234,11 @@ export async function readSessionContexts(
     if (options?.signal?.aborted) break;
     const remote = !!a.machine_id && a.machine_id !== "local";
     const run = state.runs.findLast((r) => r.assignment_id === a.id);
+    const boundPaths = () =>
+      workerPaths(a, state.project_id, resolveWorker).catch(() => undefined);
     const worker =
       remote && options && !a.external && run?.harness === "claude-code"
-        ? await workerPaths(a, state.project_id, resolveWorker).catch(
-            () => undefined,
-          )
+        ? await boundPaths()
         : undefined;
     const execution = remote ? worker?.execution : options?.execution;
     const root =
@@ -294,9 +294,12 @@ export async function readSessionContexts(
             options.signal,
           ),
       });
-      usage = reading?.usage;
-      activityMetadata = reading?.activity;
-      progress = reading?.progress;
+      // A target may have been replaced while its SSH read was in flight.
+      if (reading && (!worker || (await boundPaths())?.root === worker.root)) {
+        usage = reading.usage;
+        activityMetadata = reading.activity;
+        progress = reading.progress;
+      }
       source = adapter.contextSource;
     }
     if (

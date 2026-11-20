@@ -3,7 +3,7 @@ import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
 import { profileSpan, profileTick } from "./tick-profile.js";
 
 export interface DispatchLoopOptions {
-  dispatcher: Pick<Dispatcher, "tick"> & Partial<Pick<Dispatcher, "close">>;
+  dispatcher: Pick<Dispatcher, "tick"> & { close?(): void | Promise<void> };
   /** RuntimeMonitor implements this lifecycle; assembly remains in M3.5. */
   monitor?: { reconcile(): void; stop(): Promise<void> };
   intervalMs?: number;
@@ -35,10 +35,13 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
     throw new Error("Invalid dispatcher slow tick threshold");
   let stopping = options.signal?.aborted ?? false,
     wake = () => {};
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= Promise.resolve(options.dispatcher.close?.()));
   const requestStop = () => {
     stopping = true;
     // C-247: the tick in flight stops claiming before its next delivery.
-    options.dispatcher.close?.();
+    void close().catch(() => {}); // done propagates drain errors.
     wake();
   };
   options.signal?.addEventListener("abort", requestStop, { once: true });
@@ -75,7 +78,12 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
       }
     } finally {
       options.signal?.removeEventListener("abort", requestStop);
-      await options.monitor?.stop();
+      // Drain independent worker stops before the caller closes the Store.
+      try {
+        await close();
+      } finally {
+        await options.monitor?.stop();
+      }
     }
   })();
   // stop()/done still expose the original error, even if shutdown attaches its handler later.

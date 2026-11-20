@@ -181,3 +181,27 @@ test("an already-aborted signal starts no delivery; invalid intervals fail befor
       startDispatchLoop({ dispatcher: { tick }, onError, intervalMs }),
     ).toThrow("Invalid dispatcher interval");
 });
+
+test("shutdown drains independent worker stops before releasing host resources", async () => {
+  const pending = deferred();
+  const close = vi.fn(() => pending.promise);
+  const stop = vi.fn(async () => {});
+  loop = startDispatchLoop({
+    dispatcher: { tick: async () => {}, close },
+    monitor: { reconcile() {}, stop },
+    onError: (err) => {
+      throw err;
+    },
+  });
+  const done = loop.stop();
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(close).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+  } finally {
+    pending.resolve();
+  }
+  await done;
+  expect(stop).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});

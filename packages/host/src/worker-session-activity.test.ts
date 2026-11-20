@@ -175,3 +175,34 @@ test("worker missing, symlink and changed target never borrow a local or old-gen
   expect((await t.read())?.activity).toBeUndefined();
   expect(agentProcessCommand).not.toHaveBeenCalled();
 });
+
+test("a unique worker file with conflicting session metadata proves neither progress nor a stall", async () => {
+  const t = scenario();
+  await mkdir(dirname(t.path), { recursive: true });
+  await writeFile(t.path, t.record.replace('"one"', '"other"'));
+  for (const when of [at, "2026-01-01T02:00:00Z"]) {
+    const sample = await t.read(when);
+    expect(sample?.activity).toBeUndefined();
+    expect(sample?.activity_diagnostic).toContain("远程活动来源缺失");
+  }
+});
+
+test("a worker target replaced during the read cannot supply activity", async () => {
+  const t = scenario();
+  await mkdir(dirname(t.path), { recursive: true });
+  await writeFile(t.path, t.record);
+  vi.mocked(agentProcessCommand).mockImplementationOnce(
+    async (_config, args) => {
+      t.resolve.mockReturnValue({
+        ...t.worker,
+        target: { ...t.worker.target, generation: "two" },
+      });
+      if (!args[0]) throw new Error("Missing worker command");
+      return { file: args[0], args: args.slice(1) };
+    },
+  );
+  const sample = await t.read();
+  expect(sample?.activity).toBeUndefined();
+  expect(sample?.activity_diagnostic).toContain("远程活动来源缺失");
+  expect(t.resolve).toHaveBeenCalledTimes(2);
+});
