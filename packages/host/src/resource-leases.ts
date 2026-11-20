@@ -11,7 +11,7 @@ import { BindingClearances } from "./resource-clearance.js";
 import { bindingIdentity, endpoints, fingerprint } from "./resource-policy.js";
 import type { ResourceProbe } from "./resource-probe.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
-import { assignmentResourceKeys } from "./run-resources.js";
+import { assignmentResourceKeys, legacyResourceKeys } from "./run-resources.js";
 
 interface Lease {
   generation: string;
@@ -87,7 +87,8 @@ export class MachineLeases {
   constructor(
     readonly store: Store,
     readonly config: RunCapacityConfiguration,
-    private probe: ResourceProbe,
+    private readonly probe: ResourceProbe,
+    private readonly publicationProbe: ResourceProbe = probe,
   ) {
     this.clearances = new BindingClearances(store, probe);
   }
@@ -289,6 +290,7 @@ export class MachineLeases {
     keys: readonly string[],
     publication?: { target: string | undefined },
   ) {
+    const probe = publication ? this.publicationProbe : this.probe;
     const result: ResourceAdmission = {
       signature: fingerprint(keys),
       ...(publication?.target ? { target: publication.target } : {}),
@@ -308,14 +310,14 @@ export class MachineLeases {
         ...(b?.device ? { device: b.device } : {}),
       };
       for (const [name, cmd] of policy.checks) {
-        const target = await this.probe(cmd, context, result.target);
+        const target = await probe(cmd, context, result.target);
         if (!target || (result.target && result.target !== target))
           return { ...result, failure: `${key}：前置检查 ${name} 未通过` };
         result.target = target;
       }
       if (b) {
         if (!b.release) return { ...result, failure: `${key}：缺少释放核验` };
-        const target = await this.probe(
+        const target = await probe(
           b.release,
           { ...context, action: "available" },
           result.target,
@@ -404,6 +406,74 @@ export class MachineLeases {
       )
       .get(project, run.id);
   }
+  private publicationKeys(
+    project: string,
+    a: Assignment,
+    run: Run,
+    tx?: ReadRepositories,
+  ): readonly string[] {
+    if (run.resource_keys) return run.resource_keys;
+    // Pre-MC-4: use the same conservative claim interval as capacity. A later
+    // edit removing a capability must never clear an old dispatch for retry.
+    const historical = (read: ReadRepositories) => {
+      const card =
+        a.work_item_id && read.work_items.get(project, a.work_item_id)?.card_id;
+      const keys = new Set(this.config.policies(a.machine_id)?.keys());
+      for (const l of this.rows(
+        "machine=? AND verified_at IS NULL",
+        a.machine_id,
+      ))
+        keys.add(l.resource);
+      if (!keys.size) return [];
+      return [
+        ...legacyResourceKeys(
+          read,
+          project,
+          a,
+          run,
+          read.events.listAfter(project, card, 0),
+          keys,
+        ),
+      ];
+    };
+    return tx ? historical(tx) : this.store.uow.read(historical);
+  }
+  private publicationGrant(
+    project: string,
+    a: Assignment,
+    run: Run,
+    tx?: ReadRepositories,
+  ) {
+    const keys = this.publicationKeys(project, a, run, tx);
+    const pin = this.probeTarget(project, run);
+    if (
+      pin &&
+      run.resource_keys &&
+      pin.policy === this.policySignature(a.machine_id, project, keys)
+    )
+      return { keys, target: String(pin.target) };
+    const policies = this.config.policies(a.machine_id);
+    if (
+      pin ||
+      keys.some(
+        (key) =>
+          policies?.get(key)?.checks.size || policies?.get(key)?.bindings.size,
+      )
+    )
+      return {
+        keys,
+        readmit: "原资源领取记录不足或配置已变，等待确认退出后重新排队",
+      };
+    return { keys };
+  }
+  readmissionReason(
+    project: string,
+    a: Assignment,
+    run: Run,
+    tx?: ReadRepositories,
+  ) {
+    return this.publicationGrant(project, a, run, tx).readmit;
+  }
   /** Only new starts call this. Probe the durable Run snapshot (not mutable
    * work-item requirements) and keep the reason visible while delivery waits. */
   async canPublish(
@@ -415,36 +485,25 @@ export class MachineLeases {
   ) {
     const current = this.store.uow.read((tx) => tx.runs.get(project, run.id));
     if (!current || !awaitsStartPublication(current)) return false;
-    const keys =
-      current.resource_keys ??
-      this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a));
-    const policy = this.config.policies(a.machine_id);
-    const pin = this.probeTarget(project, run);
-    if (
-      !pin &&
-      !keys.some(
-        (k) => policy?.get(k)?.checks.size || policy?.get(k)?.bindings.size,
-      )
-    )
+    const grant = this.publicationGrant(project, a, current);
+    if (!grant.readmit && !grant.target)
       return !this.startBlocked(project, a, current, now(), access);
-    const pinned = pin?.target as string | undefined;
-    const matches =
-      pinned &&
-      (!access?.target || access.target === pinned) &&
-      pin?.policy === this.policySignature(a.machine_id, project, keys);
-    const result = matches
-      ? await this.inspectKeys(project, a.machine_id, keys, { target: pinned })
-      : undefined;
+    const result =
+      grant.target && (!access?.target || access.target === grant.target)
+        ? await this.inspectKeys(project, a.machine_id, grant.keys, {
+            target: grant.target,
+          })
+        : undefined;
     return this.store.uow.run((tx) => {
       const fresh = tx.runs.get(project, run.id);
       if (!fresh || !awaitsStartPublication(fresh)) return false;
       const at = now();
       const reason = !result
-        ? "原执行目标或前置检查配置已变化"
+        ? (grant.readmit ?? "原执行目标或前置检查配置已变化")
         : (result.failure ??
           this.startBlocked(project, a, fresh, at, access, tx));
       if (reason) {
-        this.wait(tx, project, a, fresh, reason, at, true, true);
+        this.wait(tx, project, a, fresh, reason, at, true, !!result);
         if (fresh.status === "queued")
           tx.runs.put(project, { ...fresh, queue_reason: "concurrency_limit" });
         return false;
@@ -466,13 +525,8 @@ export class MachineLeases {
     expected?: ResourceAccess,
     tx?: ReadRepositories,
   ) {
-    const keys =
-      run.resource_keys ??
-      (tx
-        ? assignmentResourceKeys(tx, project, a)
-        : this.store.uow.read((read) =>
-            assignmentResourceKeys(read, project, a),
-          ));
+    const { keys, readmit } = this.publicationGrant(project, a, run, tx);
+    if (readmit) return readmit;
     if (!keys.length) return;
     const held = this.rows(
       "project=? AND assignment_id=? AND run_id=? AND verified_at IS NULL",

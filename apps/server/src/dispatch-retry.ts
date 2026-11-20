@@ -535,11 +535,19 @@ export async function retryDispatchedRuns(
           shared &&
           last?.outcome === "failed" &&
           !binding.sending_at);
-      const resourceWait =
+      const retryablePublication =
         !unconfirmed &&
         run.status === "dispatched" &&
         !run.started_at &&
-        (!last || last.outcome === "failed") &&
+        (!last || last.outcome === "failed");
+      const readmit =
+        retryablePublication &&
+        !disposition &&
+        (!binding || sameTarget) &&
+        options.leases?.readmissionReason(project, a, run, tx);
+      const resourceWait =
+        retryablePublication &&
+        !readmit &&
         options.leases?.publicationWait(project, run);
       const ackSince = reconcile
         ? last?.finished_at
@@ -559,7 +567,7 @@ export async function retryDispatchedRuns(
       const recover =
         !resourceWait &&
         ((timedOut &&
-          !noSendYet &&
+          (!noSendYet || readmit) &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
           (!unconfirmed && failures >= policy.maxRetries + 1));
@@ -582,6 +590,7 @@ export async function retryDispatchedRuns(
         failures,
         recover,
         reconcile,
+        readmit,
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
@@ -640,6 +649,23 @@ export async function retryDispatchedRuns(
             ? "delivery_retry_exhausted"
             : "dispatch_timeout",
         );
+      continue;
+    }
+    if (observed.readmit) {
+      // A missing original grant cannot become healthy by polling a mount.
+      // Keep the reason visible but leave the bounded stop/exit recovery armed.
+      store.uow.run((tx) => {
+        const fresh = inspect(loadState(tx, project), tx);
+        if (fresh?.readmit)
+          options.leases?.wait(
+            tx,
+            project,
+            fresh.a,
+            fresh.run,
+            fresh.readmit,
+            fresh.at,
+          );
+      });
       continue;
     }
     if (

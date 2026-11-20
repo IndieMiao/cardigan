@@ -296,19 +296,23 @@ async function assembleServer(
   const runCapacity = await loadRunCapacityConfig({
     env: { ...(options.env ?? process.env) },
   });
+  const targets = options.dispatcher?.runtime;
   const leases = new MachineLeases(
     store,
     runCapacity,
     targetProbe(async (project, machine_id) =>
-      options.dispatcher?.runtime instanceof RuntimeTargets
+      targets instanceof RuntimeTargets
         ? (
-            await options.dispatcher.runtime.forLaunch(project, {
+            await targets.forLaunch(project, {
               machine_id,
               runtime_ref: null,
             })
           ).execution
         : execution,
     ),
+    targets instanceof RuntimeTargets
+      ? targets.publicationResourceProbe
+      : undefined,
   );
   configureMachinePlacement(
     store,

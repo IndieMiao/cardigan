@@ -37,11 +37,16 @@ export function targetProbe(
   resolve: (
     project: string,
     machine: string,
+    expectedTarget?: string,
   ) => Promise<ExecutionConfig> | ExecutionConfig,
 ): ResourceProbe {
   return async (argv, context, expectedTarget) => {
     try {
-      const config = await resolve(context.project, context.machine);
+      const config = await resolve(
+        context.project,
+        context.machine,
+        expectedTarget,
+      );
       if (
         config.target &&
         (config.target.machine_id !== context.machine ||
