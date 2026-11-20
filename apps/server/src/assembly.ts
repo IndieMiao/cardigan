@@ -66,6 +66,7 @@ export interface ControlPlaneOptions {
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly frameworkWaitReminderMs?: number;
   readonly baselineConflictMaxResumes?: number;
+  readonly authorPrecheckFailureLimit?: number;
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
   readonly intervalMs?: number;
@@ -182,6 +183,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     mergeShadowTick: (project) => shadow.tick(project),
     ...(options.frameworkWaitReminderMs !== undefined
       ? { frameworkWaitReminderMs: options.frameworkWaitReminderMs }
+      : {}),
+    ...(options.authorPrecheckFailureLimit !== undefined
+      ? { authorPrecheckFailureLimit: options.authorPrecheckFailureLimit }
       : {}),
     ...(options.baselineConflictMaxResumes !== undefined
       ? { baselineConflictMaxResumes: options.baselineConflictMaxResumes }
