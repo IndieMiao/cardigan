@@ -286,6 +286,12 @@
   .page :global(.work-item) {
     border-inline-start: var(--ui-stroke) solid var(--border);
   }
+  .inlineOwner {
+    display: inline-flex;
+    align-items: center;
+    height: var(--ui-leading);
+    vertical-align: middle;
+  }
   .page :global(.card-primary-panels),
   .page :global(.card-primary-panels :is(form, fieldset)) {
     min-width: 0;

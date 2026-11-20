@@ -545,12 +545,13 @@ test("board shows three owner avatars plus overflow; profile click does not open
     />,
   );
   const group = screen.getByRole("group", { name: "参与员工" });
+  // C-531: owners without run facts read as unknown on the board.
   expect(
-    within(group).getAllByRole("button", { name: /的员工卡片$/ }),
+    within(group).getAllByRole("button", { name: /，运行状态未知$/ }),
   ).toHaveLength(3);
   expect(within(group).getByText("+2")).toBeTruthy();
   const trigger = within(group).getByRole("button", {
-    name: "员工1的员工卡片",
+    name: "员工1，运行状态未知",
   });
   expect(trigger.closest("a")).toBeNull();
   fireEvent.click(trigger);
@@ -642,6 +643,7 @@ test("execution assignment identity opens the profile without expanding its row"
     runtime_ref: { terminal_ref: "fixture", runtime_machine: "local" },
     last_mcp_activity_at: null,
     cursors: [],
+    run_presence: { state: "running" },
   };
   render(
     <ExecutionPage
@@ -655,7 +657,11 @@ test("execution assignment identity opens the profile without expanding its row"
       projectId="p-1"
     />,
   );
-  const trigger = await screen.findByRole("button", { name: "林舟的员工卡片" });
+  // C-531: the row's own state names the avatar and rings it.
+  const trigger = await screen.findByRole("button", {
+    name: "林舟，正在为这张卡运行",
+  });
+  expect(trigger.querySelector("[data-run=running]")).toBeTruthy();
   fireEvent.click(trigger);
   expect(await screen.findByRole("dialog")).toBeTruthy();
   // C-75: the profile opens on its own; the execution detail drawer does not.

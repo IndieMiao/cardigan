@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+import { ciReporters } from "../test-support/ci-reporters.js";
+
 /**
  * The Appendix A end-to-end run lives outside `pnpm test` (M5 plan §2, §4 M5.5):
  * it needs the pinned `hc` runtime, real Git and real Agent processes, takes
@@ -11,6 +13,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   root: import.meta.dirname,
   test: {
+    reporters: ciReporters,
     include: ["**/*.test.ts"],
     environment: "node",
     setupFiles: ["../test-support/setup.ts"],
