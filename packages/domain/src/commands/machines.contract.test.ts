@@ -820,3 +820,66 @@ test("only a released pre-Run snapshot failure can reselect a different machine 
   ).toBe(params.work_item_id);
   expect(value(reassign(next)).events).toEqual([]);
 });
+
+test("C-527: explicitly cancelling a never-launched queue allows checked placement elsewhere, not an in-place machine edit", () => {
+  const io = ports(),
+    base = preferRemote();
+  const s: CommandState = {
+    ...base,
+    work_items: base.work_items.map((w) =>
+      w.kind === "produce" ? { ...w, status: "todo" } : w,
+    ),
+  };
+  const work = { role_id: "coder", work_item_id: id("work_item", 1) };
+  const first = value(assign(s, human, work, io));
+  const placed = apply(s, first);
+  const pending = value(
+    queueRun(
+      placed,
+      human,
+      { assignment_id: first.data.id, model: "m", agent_cli_version: "v" },
+      io,
+    ),
+  );
+  const before = apply(placed, pending);
+  const params = {
+    assignment_id: first.data.id,
+    cancel_queued_run_id: pending.data.id,
+  };
+  const permit = { ...io, unreservedAssignment: () => true };
+  expect(first.data.machine_id).toBe(remote.id);
+  expect(releaseAssignment(before, human, params, io).ok).toBe(false);
+  expect(
+    releaseAssignment(
+      { ...before, runs: [{ ...pending.data, status: "dispatched" }] },
+      human,
+      params,
+      permit,
+    ).ok,
+  ).toBe(false);
+  expect(
+    releaseAssignment(
+      {
+        ...before,
+        assignments: before.assignments.map((a) =>
+          a.id === first.data.id ? { ...a, session_ref: "existing" } : a,
+        ),
+      },
+      human,
+      params,
+      permit,
+    ).ok,
+  ).toBe(false);
+  const release = value(releaseAssignment(before, human, params, permit));
+  const after = apply(before, release);
+  expect(release.events.map((e) => e.type)).toEqual([
+    "run_dispatch_aborted",
+    "assignment_released",
+  ]);
+  expect(after.runs[0]?.status).toBe("cancelled");
+  expect(value(assign(after, human, work, io)).data).toMatchObject({
+    machine_id: "local",
+    work_item_id: work.work_item_id,
+    role_version: first.data.role_version,
+  });
+});

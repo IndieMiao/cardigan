@@ -41,6 +41,7 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   beginBellAttempt,
+  beginLaunchAttempt,
   listBellAttempts,
   PROJECT_EVENT_STREAM,
   persistRunLimitEffect,
@@ -1089,6 +1090,124 @@ function secondProject() {
     );
   return { project, card, item, owner, apply, comment };
 }
+
+/** Legacy queueResumedRun persisted only the business trigger, not an event naming the Run. */
+function legacyQueued() {
+  const trigger = f
+    .state()
+    .events.find(
+      (e) => e.card_id === target.card.id && e.type === "work_item_assigned",
+    );
+  if (!trigger) throw new Error("Missing fixture trigger");
+  return f.store.uow.run((tx) => {
+    const run: Run = {
+      id: tx.ids.next(f.project, "run"),
+      assignment_id: target.assignment.id,
+      trigger_event_id: trigger.id,
+      status: "queued",
+      kind: "followup",
+      role_version: target.assignment.role_version,
+      model: "session-model",
+      agent_cli_version: "session-cli",
+      outcome: null,
+      summary: "",
+    };
+    tx.runs.put(f.project, run);
+    return run;
+  });
+}
+const pmQueueNotices = (run: Run) => {
+  const events = new Set(
+    f
+      .state()
+      .events.filter(
+        (e) =>
+          ["queued_run_rechecked", "queued_run_spare_capacity"].includes(
+            e.type,
+          ) && (e.payload as { run_id?: unknown }).run_id === run.id,
+      )
+      .map((e) => e.id),
+  );
+  return f.store
+    .listNotifications({ project_id: f.project })
+    .filter((n) => n.recipient.kind === "pm_ops" && events.has(n.event_id));
+};
+
+test("C-527: a warm idle dispatcher recovers the same unmarked Run at five minutes without a new bell", async () => {
+  const run = legacyQueued();
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  f.advance(300_000 - 1);
+  await dispatcher.tick();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(pmQueueNotices(run)).toHaveLength(0);
+  f.advance(1);
+  await dispatcher.tick();
+  expect(ownNotes()).toEqual([]);
+  expect(f.state().runs.find((r) => r.id === run.id)).toMatchObject({
+    status: "dispatched",
+    trigger_event_id: run.trigger_event_id,
+  });
+  const event = f.state().events.find((e) => e.type === "queued_run_rechecked");
+  expect(event?.payload).toMatchObject({
+    run_id: run.id,
+    queue_reason: null,
+    notified_pm_ops: true,
+  });
+  expect(pmQueueNotices(run).map((n) => n.event_id)).toEqual([event?.id]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test("C-527: full capacity defers the orphan; spare capacity alerts once even across restart and further runtime waits", async () => {
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  const run = legacyQueued();
+  const opts = { ...options, queuedRecheckAfterMs: 60_000, runLimit: () => 1 };
+  let dispatcher = new Dispatcher(opts);
+  f.advance(60_000);
+  await dispatcher.tick();
+  const current = () => f.state().runs.find((r) => r.id === run.id);
+  expect(current()?.queue_reason).toBe("concurrency_limit");
+  expect(pmQueueNotices(run)).toHaveLength(0);
+  finish(busy.assignment);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "unknown", agent: "idle", observed_seq: 1 },
+  });
+  await dispatcher.tick();
+  expect(current()?.queue_reason).toBe("runtime_unavailable");
+  expect(pmQueueNotices(run)).toHaveLength(1);
+  f.advance(60_000);
+  dispatcher = new Dispatcher(opts);
+  await dispatcher.tick();
+  expect(pmQueueNotices(run)).toHaveLength(1);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "idle", observed_seq: 2 },
+  });
+  await dispatcher.tick();
+  expect(current()?.status).toBe("dispatched");
+  expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test("C-527: the patrol does not compete with a reserved startup", async () => {
+  const run = legacyQueued();
+  f.store.uow.run(() =>
+    beginLaunchAttempt(f.store.database, {
+      id: "reservation",
+      project_id: f.project,
+      run_id: run.id,
+      assignment_id: run.assignment_id,
+      started_at: f.clock.now(),
+      lease_until: new Date(Date.parse(f.clock.now()) + 3600_000).toISOString(),
+    }),
+  );
+  f.advance(300_000);
+  await new Dispatcher(options).tick();
+  expect(f.state().runs.find((r) => r.id === run.id)).toEqual(run);
+  expect(pmQueueNotices(run)).toHaveLength(0);
+  expect(runtime.wake).not.toHaveBeenCalled();
+});
 
 test("capacity preserves queued Run identity and notifications, then dispatches after a slot frees", async () => {
   const busy = f.create();

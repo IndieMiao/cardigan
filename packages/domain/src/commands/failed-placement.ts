@@ -14,13 +14,11 @@ export function releasedBeforeFirstLaunch(
     a.scope !== "work_item" ||
     a.status !== "released" ||
     a.runtime_state !== "released" ||
-    a.machine_id === "local" ||
     a.runtime_ref ||
     a.session_ref ||
     a.worktree_path ||
     a.branch ||
     a.base_sha ||
-    d.list("runs").some((r) => r.assignment_id === a.id) ||
     remoteWorkerLosses(d.state.events).some(
       (loss) => loss.assignment_id === a.id,
     )
@@ -40,8 +38,19 @@ export function releasedBeforeFirstLaunch(
       );
     },
   );
+  if (!release) return false;
+  const runs = d.list("runs").filter((r) => r.assignment_id === a.id);
+  if (runs.length) {
+    const cancelled = (release.payload as Record<string, unknown>)
+      .cancelled_queued_run_id;
+    return (
+      runs.length === 1 &&
+      runs[0]?.id === cancelled &&
+      runs[0]?.status === "cancelled"
+    );
+  }
   return (
-    !!release &&
+    a.machine_id !== "local" &&
     eventsOfType(d.state.events, "bell_delivery_failed").some((e) => {
       const p = e.payload as Record<string, unknown>;
       return (

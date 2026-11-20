@@ -197,6 +197,7 @@ test("C-88: confirmed pre-start withdrawal preserves the original Run and releas
     status: "queued",
     outcome: null,
   });
+  expect(returned.queue_reason).toBe("awaiting_dispatch");
   expect(runOccupiesSlot(returned)).toBe(false);
   expect(f.state.runs).toHaveLength(1);
 });

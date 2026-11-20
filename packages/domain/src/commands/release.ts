@@ -1,7 +1,7 @@
 import type { Actor, Decision, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
-import type { AssignmentId } from "../ids.js";
+import type { AssignmentId, RunId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
   type CommandEffect,
@@ -12,13 +12,14 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { cancelRunDispatch } from "./launch.js";
 import { handoffWithoutOps } from "./ops-handoff.js";
 import { WORKTREE_CLEANUP_PLAIN_SUMMARY } from "./plain-summary.js";
 
 export function releaseAssignment(
   state: CommandState,
   actor: Actor,
-  p: { assignment_id: AssignmentId },
+  p: { assignment_id: AssignmentId; cancel_queued_run_id?: RunId },
   ports: CommandPorts,
 ) {
   return command(state, actor, "release_assignment", ports, (d) => {
@@ -52,6 +53,40 @@ export function releaseAssignment(
       "illegal_transition",
       "Automatic release requires a closed work-item card",
     );
+    if (p.cancel_queued_run_id !== undefined) {
+      const run = d.get("runs", p.cancel_queued_run_id);
+      ensure(
+        actor.kind !== "system" &&
+          a.scope === "work_item" &&
+          !a.external &&
+          a.status === "active" &&
+          ["not_provisioned", "idle"].includes(a.runtime_state) &&
+          !a.runtime_ref &&
+          !a.session_ref &&
+          !a.worktree_path &&
+          !a.branch &&
+          !a.base_sha &&
+          run.assignment_id === a.id &&
+          run.status === "queued" &&
+          !run.started_at &&
+          !run.launch_publication &&
+          !run.recovery_runtime &&
+          !run.dispatch_stop &&
+          !run.inactivity_stop &&
+          !d
+            .list("runs")
+            .some((r) => r.assignment_id === a.id && r.id !== run.id) &&
+          !state.events.some(
+            (e) =>
+              e.type === "run_dispatched" &&
+              (e.payload as { run_id?: unknown })?.run_id === run.id,
+          ) &&
+          ports.unreservedAssignment?.(state.project_id, a.id) === true,
+        "illegal_transition",
+        "只能取消未派发、没有会话或启动占用的首个排队 Run；已有执行请走原停止流程。",
+      );
+      cancelRunDispatch(d, run, "取消首次排队，释放指派以重新选机");
+    }
     if (a.status === "released") {
       handoffWithoutOps(d, a);
       return a;
@@ -81,6 +116,9 @@ export function releaseAssignment(
       card?.id,
       {
         assignment_id: a.id,
+        ...(p.cancel_queued_run_id
+          ? { cancelled_queued_run_id: p.cancel_queued_run_id }
+          : {}),
         worktree_path: a.worktree_path ?? null,
         branch: a.branch ?? null,
         token_id: a.mcp_token_id,

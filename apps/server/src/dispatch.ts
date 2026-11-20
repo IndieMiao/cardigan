@@ -144,6 +144,7 @@ import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { orderPmCandidates } from "./pm-notification-order.js";
 import { recoverPmSession } from "./pm-recovery.js";
+import { QueuedRunPatrol } from "./queued-run-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
@@ -201,6 +202,7 @@ export interface DispatcherOptions {
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
+  readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   /** Snapshot for a NEW terminal; an existing session keeps its previous Run's snapshot. */
@@ -292,6 +294,7 @@ export class Dispatcher {
   private readonly dispatchTimeoutMs: number;
   private readonly deliveryRetryBaseMs: number;
   private readonly inactive: InactiveRunReaper;
+  private readonly queuedRunPatrol: QueuedRunPatrol;
   private readonly inactivityAlerts: InactivityAlerts;
   /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
   private closing = false;
@@ -303,6 +306,7 @@ export class Dispatcher {
    */
   private startup: Map<ProjectId, Set<RunId>> | undefined;
   constructor(readonly options: DispatcherOptions) {
+    this.queuedRunPatrol = new QueuedRunPatrol(options);
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
@@ -793,6 +797,8 @@ export class Dispatcher {
     const state = profileSpanSync("deliver.state", () => this.state(project));
     const a = state.assignments.find((a) => a.id === expected.id);
     if (!a) return;
+    const queued = this.queued(state, a);
+    if (queued) this.queuedRunPatrol.evaluated(queued, this.clock.now());
     if (a.status === "released") {
       this.reject(project, notes, a, "assignment_released");
       return;
@@ -818,7 +824,6 @@ export class Dispatcher {
       return;
     if (a.snapshot_retry && a.snapshot_retry.ready_at > this.clock.now())
       return;
-    const queued = this.queued(state, a);
     // A previously enqueued Run already has its snapshot. Skip remote IO while
     // it cannot compete; the authoritative check remains inside claim().
     if (
@@ -1454,6 +1459,9 @@ export class Dispatcher {
           waiting?.queue_reason === undefined &&
           !waiting?.dispatch_target_wait &&
           !waiting?.preparation_retry) ||
+        (!ready.length &&
+          waiting &&
+          notificationBlocked(state, waiting.trigger_event_id, a.id)) ||
         (continuing && !ready.length) ||
         this.busy(state, a, continuing?.id)
       )
@@ -2293,6 +2301,9 @@ export class Dispatcher {
       // C-244: this loop writes notifications and alert events only; tokens
       // and Assignments stay as read, so one standing resolution per kind.
       const standingOnce = memoStanding(standing);
+      step("queued_patrol", () =>
+        this.queuedRunPatrol.sweep(tx, state, at, attempts),
+      );
       step("belled", () => {
         for (const n of store.listNotifications({
           project_id: project,

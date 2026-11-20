@@ -76,6 +76,7 @@ export interface ControlPlaneOptions {
   readonly inactivityGraceMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
+  readonly queuedRecheckAfterMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   readonly lossGraceMs?: number;
@@ -219,6 +220,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     standing,
     snapshot: options.snapshot,
     ...(options.toolCatalog ? { toolCatalog: options.toolCatalog } : {}),
+    ...(options.queuedRecheckAfterMs !== undefined
+      ? { queuedRecheckAfterMs: options.queuedRecheckAfterMs }
+      : {}),
     ...(options.inboxStallAfterMs !== undefined
       ? { inboxStallAfterMs: options.inboxStallAfterMs }
       : {}),

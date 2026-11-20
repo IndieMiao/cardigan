@@ -2,6 +2,7 @@ import type {
   Actor,
   Assignment,
   ProjectId,
+  RunId,
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
@@ -65,6 +66,7 @@ import {
 import {
   announceDataDir,
   resolveActor,
+  resolveCommandIdentity,
   resolveDataDir,
   resolveProject,
   runCommand,
@@ -613,7 +615,7 @@ export async function stopAssignment(input: {
   }
   if (ref === null) {
     throw new CliError(
-      `Assignment ${assignment.id} 没有在运行的终端`,
+      `Assignment ${assignment.id} 没有在运行的终端；若需取消首个排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
       EXIT.usage,
     );
   }
@@ -816,7 +818,7 @@ const USAGE = [
   "用法：",
   "  cardigan assignment start <A-n> [--project <p>] [--mcp-url <url>] [--hc-session <s>] [--data-dir <目录>]",
   "  cardigan assignment stop <A-n> [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
-  "  cardigan assignment release <A-n> [--project <p>] [--data-dir <目录>]",
+  "  cardigan assignment release <A-n> [--cancel-queued-run <R-n>] [--project <p>] [--data-dir <目录>]",
   "  cardigan assignment attach <A-n> [--print] [--interactive] [--project <p>] [--hc-session <s>] [--data-dir <目录>]",
   "  stop：释放终端并取消未结束和排队的 Run；之后不会自动起新会话，门铃排队，用 assignment start 恢复。主机运维操作待处理时拒绝 stop；终端释放失败可直接重试。",
   "  attach：输入和输出均为终端（TTY）时直接只读观察；--interactive 允许输入，--print 或非 TTY 只打印命令（默认带 --observe）。",
@@ -878,17 +880,22 @@ export async function runAssignmentCommand(
     const store = Store.open({ dataDir });
     try {
       const project_id = resolveProject(store, io, flags.project);
-      const actor = resolveActor(io, project_id, store);
+      const identity = resolveCommandIdentity(io, project_id, store);
       runCommand(store, {
         project_id,
-        actor,
+        ...identity,
         operation: "释放 Assignment",
         target: assignmentId,
         reduce: (state, caller, ports) =>
           releaseAssignment(
             state,
             caller,
-            { assignment_id: assignmentId },
+            {
+              assignment_id: assignmentId,
+              ...(flags["cancel-queued-run"] !== undefined
+                ? { cancel_queued_run_id: flags["cancel-queued-run"] as RunId }
+                : {}),
+            },
             ports,
           ),
       });
