@@ -209,7 +209,9 @@ export function CardWorkItems({
         {!work_items.length && <EmptyState>这张卡还没有工作项。</EmptyState>}
         <ul className="work-item-list">
           {work_items.map((item) => {
-            const delivery = [...detail.deliveries]
+            const delivery = [
+              ...(detail.work_delivery_links ?? detail.deliveries),
+            ]
               .reverse()
               .find(
                 (d) => d.work_item_id === item.id && d.status !== "superseded",

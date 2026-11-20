@@ -40,11 +40,12 @@ export function CardStatusLine({
     ...new Set(
       waiting.map((item) =>
         item.kind === "review" &&
-        detail.work_items.some(
-          (w) =>
-            w.id === item.ref &&
-            w.verification_activity?.status === "waiting_delivery",
-        )
+        (detail.overview?.waiting_delivery.includes(item.ref) ||
+          detail.work_items.some(
+            (w) =>
+              w.id === item.ref &&
+              w.verification_activity?.status === "waiting_delivery",
+          ))
           ? "提交新交付"
           : nextStep[item.kind],
       ),

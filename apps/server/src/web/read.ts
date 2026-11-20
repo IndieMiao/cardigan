@@ -65,7 +65,11 @@ import {
   verificationActivity,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
-import { loadCommandState } from "@cardigan/mcp-server";
+import {
+  loadCommandState,
+  type RecordReadTiming,
+  timeRead,
+} from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
@@ -727,6 +731,8 @@ export function cardDetail(
     readonly mergeGateStatus?: ProjectMergeGate["status"];
     readonly timelineLimit?: number;
     readonly timelineAnchor?: string;
+    readonly recordTiming?: RecordReadTiming;
+    readonly overviewOnly?: boolean;
     readonly timelineEntries?: readonly TimelineEntry[];
     readonly timelineTotal?: number;
     readonly conclusionEntries?: readonly TimelineEntry[];
@@ -917,7 +923,11 @@ export function cardDetail(
   const roles = new Map<string, string>(
     state.assignments.map((a) => [a.id, a.role_id]),
   );
-  const review_matrix = deriveReviewMatrix(deliveries, work_items, reviews);
+  const review_matrix = options.overviewOnly
+    ? []
+    : timeRead(options.recordTiming, "review_matrix", () =>
+        deriveReviewMatrix(deliveries, work_items, reviews),
+      );
   const updated_at =
     [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
     card.created_at;
@@ -1044,7 +1054,9 @@ export function cardDetail(
         ? {
             dependency: {
               ...card.dependency,
-              graph: cardDependencyGraph(dependencySource, graphSource),
+              graph: timeRead(options.recordTiming, "dependency_graph", () =>
+                cardDependencyGraph(dependencySource, graphSource),
+              ),
             },
           }
         : {}),
@@ -1055,14 +1067,18 @@ export function cardDetail(
       references: references(description),
     },
     work_items: work_items.map((item) => {
-      const selection = machineSelection(state.events, item.id);
+      const selection = options.overviewOnly
+        ? undefined
+        : machineSelection(state.events, item.id);
       return {
         ...item,
         verification_activity: verificationActivity(item, state),
         ...(selection ? { machine_selection: selection } : {}),
       };
     }),
-    timeline: timeline.map(timelineView),
+    timeline: timeRead(options.recordTiming, "timeline_view", () =>
+      timeline.map(timelineView),
+    ),
     recent_conclusions: conclusionEntries
       .map(timelineView)
       .filter(
@@ -1095,7 +1111,9 @@ export function cardDetail(
       ...action,
       ...webAuthorView(state, action.requested_by),
     })),
-    attachments: attachmentViews(state, card_id, options.attachmentEntryCards),
+    attachments: timeRead(options.recordTiming, "attachment_views", () =>
+      attachmentViews(state, card_id, options.attachmentEntryCards),
+    ),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
       decisions: decisions.map((decision) => ({

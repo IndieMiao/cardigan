@@ -47,6 +47,7 @@ export {
   memoryLogger,
   stdoutLogger,
 } from "./log.js";
+export { type RecordReadTiming, timeRead } from "./read-timing.js";
 export {
   defaultToolCatalog,
   type McpServerOptions,
@@ -70,5 +71,4 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
-
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

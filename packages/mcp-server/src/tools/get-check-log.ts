@@ -74,10 +74,9 @@ export function authorizeCheckLog(
       throw new CheckLogAccessError(error.code as "not_found" | "unauthorized");
     throw error;
   }
-  const streams = tx.events.listStreams?.(project);
-  const batchEvents = streams
-    ? (streams.get("") ?? [])
-    : tx.events.listAfter(project, undefined, 0);
+  const batchEvents =
+    tx.projectMergeEvents?.(project) ??
+    tx.events.listAfter(project, undefined, 0);
   const events = [...tx.events.listAfter(project, card, 0), ...batchEvents];
   const scope = mergeBatchReadScope(
     {
