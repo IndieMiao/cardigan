@@ -1,7 +1,9 @@
 // C-518: settings "模型" panel (read-only launch profiles): list, detail
 // drawer, empty / failed / loading reads and the role link, at 1440/390 in
 // light/dark, plus the existing roles panel and the card list at the same
-// width/theme for side-by-side comparison.
+// width/theme for side-by-side comparison. V-2439 rework: masked duplicate
+// names, the referenced role version, browser back and the employee link
+// (execution view filtered by employee id).
 // CHROMIUM_PATH=<chromium> node apps/web/test-support/c518-capture.mjs <new output dir>
 // C518_BASELINE_REF=<git ref> renders that ref's settings page (before; no 模型).
 // C518_BEFORE=<before output dir> counts differing pixels against it.
@@ -29,6 +31,10 @@ const historical = new Map(
         "testing/fixtures.ts",
         "views/SettingsPage.tsx",
         "views/RolesSettings.tsx",
+        "views/ExecutionPage.tsx",
+        "components/ExecutionToolbar.tsx",
+        "components/ui/table.tsx",
+        "components/ui/theme.css",
       ].map((path) => [
         resolve(root, "src", path),
         git("show", `${baseline}:apps/web/src/${path}`),
@@ -290,6 +296,29 @@ try {
       await settle();
       const rolesShot = await shot(`roles-${suffix}`);
       results.roles = await measurePage();
+      // Execution view: unfiltered, and with an employee id (before: ignored).
+      const rowIds = () =>
+        run(() =>
+          [...document.querySelectorAll("button[aria-label^='查看 A-']")].map(
+            (b) => /A-\d+/.exec(b.getAttribute("aria-label"))[0],
+          ),
+        );
+      const executionReady =
+        "!!document.querySelector(\"button[aria-label^='查看 A-']\") || document.body.textContent.includes('没有匹配的执行记录')";
+      for (const [name, query] of [
+        ["execution", "view=all"],
+        ["execution-employee", "view=all&employee=E-3"],
+      ]) {
+        await open(`/#/p/p-1/execution?${query}`, executionReady, theme);
+        await shot(`${name}-${suffix}`);
+        results[name] = {
+          rows: await rowIds(),
+          employeeControl: await evaluate(
+            "[...document.querySelectorAll('[role=combobox]')].map((c) => c.textContent.trim()).find((t) => t.startsWith('员工：')) ?? null",
+          ),
+          scrollWidth: await evaluate("document.documentElement.scrollWidth"),
+        };
+      }
       if (!baseline) {
         // Models list.
         await tab("模型");
@@ -390,11 +419,141 @@ try {
             "document.querySelector(\"nav[aria-label='设置分栏'] [aria-current='page']\").textContent.trim()",
           ),
         };
+        // The referenced version (v1, current is v2) is marked in the history.
+        await until(
+          "!!document.querySelector('[role=dialog] table[aria-label=版本历史] tbody tr')",
+        );
+        await run(() =>
+          document
+            .querySelector("[role=dialog] table[aria-label=版本历史]")
+            .scrollIntoView({ block: "end" }),
+        );
+        await settle();
+        await shot(`role-link-history-${suffix}`);
+        results.roleLink.history = await run(() =>
+          [
+            ...document.querySelectorAll(
+              "[role=dialog] table[aria-label=版本历史] tbody tr",
+            ),
+          ].map((tr) => {
+            const td = tr.querySelector("td");
+            const s = getComputedStyle(td);
+            return {
+              version: td.textContent.trim(),
+              current: tr.getAttribute("aria-current"),
+              background: s.backgroundColor,
+              color: s.color,
+              h: Math.round(tr.getBoundingClientRect().height),
+            };
+          }),
+        );
+        assert.equal(
+          results.roleLink.hash,
+          "#/p/p-1/settings?tab=roles&role=coder&version=1",
+        );
+        assert.deepEqual(
+          results.roleLink.history.map((r) => [r.version, r.current]),
+          [
+            ["v2", null],
+            ["v1", "true"],
+          ],
+        );
         await key("Escape", 27);
         await until("!document.querySelector('[role=dialog]')");
         results.roleLink.afterClose = await evaluate("location.hash");
         assert.equal(results.roleLink.current, "角色");
-        assert.equal(results.roleLink.afterClose, "#/p/p-1/settings");
+        assert.equal(results.roleLink.afterClose, "#/p/p-1/settings?tab=roles");
+        // Browser back from a followed role link returns to 模型.
+        await open("/#/p/p-1/settings", settings, theme);
+        await tab("模型");
+        await until(
+          "!!document.querySelector('table[aria-label=启动配置] tbody tr')",
+        );
+        await run(() =>
+          [...document.querySelectorAll("[data-settings-content] td button")]
+            .find((x) => x.textContent.trim() === "codex-sol")
+            .click(),
+        );
+        await until("!!document.querySelector('[role=dialog] a')");
+        await run(() =>
+          [...document.querySelectorAll("[role=dialog] a")]
+            .find((a) => a.textContent.trim() === "开发工程师")
+            .click(),
+        );
+        await until(
+          "document.querySelector('[role=dialog] h2')?.textContent.includes('开发工程师') && !!document.querySelector('[role=dialog] dl')",
+        );
+        await run(() => history.back());
+        await until(
+          "!document.querySelector('[role=dialog]') && !!document.querySelector('table[aria-label=启动配置] tbody tr')",
+        );
+        await settle();
+        await shot(`models-after-back-${suffix}`);
+        results.back = {
+          hash: await evaluate("location.hash"),
+          current: await evaluate(
+            "document.querySelector(\"nav[aria-label='设置分栏'] [aria-current='page']\").textContent.trim()",
+          ),
+        };
+        assert.deepEqual(results.back, {
+          hash: "#/p/p-1/settings?tab=models",
+          current: "模型",
+        });
+        // Employee link: that employee's records only, in any status.
+        await run(() =>
+          [...document.querySelectorAll("[data-settings-content] td button")]
+            .find((x) => x.textContent.trim() === "claude-opus")
+            .click(),
+        );
+        await until("!!document.querySelector('[role=dialog] a')");
+        await run(() =>
+          [...document.querySelectorAll("[role=dialog] a")]
+            .find((a) => a.textContent.trim() === "悟空")
+            .click(),
+        );
+        await until(executionReady);
+        await settle();
+        await shot(`employee-link-${suffix}`);
+        results.employeeLink = {
+          hash: await evaluate("location.hash"),
+          rows: await rowIds(),
+          employeeControl: await evaluate(
+            "[...document.querySelectorAll('[role=combobox]')].map((c) => c.textContent.trim()).find((t) => t.startsWith('员工：')) ?? null",
+          ),
+          scrollWidth: await evaluate("document.documentElement.scrollWidth"),
+        };
+        assert.deepEqual(results.employeeLink, {
+          hash: "#/p/p-1/execution?view=all&employee=E-3",
+          rows: ["A-1"],
+          employeeControl: "员工：悟空",
+          scrollWidth: width,
+        });
+        // Names redacted to the same mask: each row opens its own profile.
+        await open(
+          "/?models=masked#/p/p-1/settings?tab=models",
+          settings,
+          theme,
+        );
+        await until(
+          "document.querySelectorAll('[data-settings-content] td button').length >= 4",
+        );
+        await run(() =>
+          [...document.querySelectorAll("[data-settings-content] td button")]
+            .filter((x) => x.textContent.trim() === "***")[1]
+            .click(),
+        );
+        await until("!!document.querySelector('[role=dialog] dl')");
+        await delay(300);
+        await settle();
+        await shot(`models-masked-detail-${suffix}`);
+        results.masked = await run(() => {
+          const d = document.querySelector("[role=dialog]").textContent;
+          return {
+            second: d.includes("gpt-fixture-sol"),
+            first: d.includes("claude-opus-fixture-1"),
+          };
+        });
+        assert.deepEqual(results.masked, { second: true, first: false });
         // Read states.
         for (const state of ["empty", "error", "pending"]) {
           await open(`/?models=${state}#/p/p-1/settings`, settings, theme);
@@ -509,7 +668,7 @@ try {
     fonts:
       "Inter Variable, Noto Sans SC Variable, JetBrains Mono Variable (lockfile @fontsource)",
     fixture:
-      "test-support/c518-fixture.tsx + src/testing/launch-settings-fixture.ts: 4 synthetic launch profiles, 3 providers, 3 role and 2 employee references, fake key names only; settings-panels-data.ts for roles; fixed clock 2026-01-01T00:00Z; no backend, not production scale",
+      "test-support/c518-fixture.tsx + src/testing/launch-settings-fixture.ts: 4 synthetic launch profiles (2 names masked to *** in the masked scene), 3 providers, 3 role and 2 employee references, fake key names only; settings-panels-data.ts for roles (coder v2 current, v1 history); 2 synthetic execution records (E-3 悟空, E-4 八戒 whose card title names 悟空); fixed clock 2026-01-01T00:00Z; no backend, not production scale",
     cases,
     pixelDiffAgainstBefore: before ? diffs : null,
   };

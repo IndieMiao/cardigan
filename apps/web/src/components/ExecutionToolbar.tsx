@@ -23,6 +23,7 @@ export function ExecutionToolbar({
   filters,
   onFilterChange,
   machineOptions,
+  employeeOptions = [],
   display,
   onDisplayChange,
   sort,
@@ -35,6 +36,8 @@ export function ExecutionToolbar({
   filters: Record<string, string>;
   onFilterChange: (filters: Record<string, string>) => void;
   machineOptions: readonly { value: string; label: string }[];
+  /** Only offered while a link has narrowed the view to one employee. */
+  employeeOptions?: readonly { value: string; label: string }[];
   display: ExecutionDisplay;
   onDisplayChange: (display: ExecutionDisplay) => void;
   sort: ExecutionSort;
@@ -74,6 +77,23 @@ export function ExecutionToolbar({
             />
           ),
         },
+        ...(filters.employee
+          ? [
+              {
+                key: "employee",
+                label: "员工",
+                options: employeeOptions,
+                render: (value: string, setValue: (next: string) => void) => (
+                  <FilterSelect
+                    label="员工"
+                    value={value}
+                    options={employeeOptions}
+                    onChange={setValue}
+                  />
+                ),
+              },
+            ]
+          : []),
         {
           key: "sort",
           label: "排序",

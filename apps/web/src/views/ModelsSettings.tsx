@@ -44,10 +44,11 @@ export function ModelsSettings({
 }) {
   const load = useCallback(() => client.launchSettings(), [client]);
   const settings = useResource(load);
-  const [open, setOpen] = useState<string>();
+  // The clicked row of this response: names may be redacted to the same mask.
+  const [open, setOpen] = useState<number>();
   const { remember } = useDrawerReturnFocus(open !== undefined);
   const data = settings.data;
-  const profile = data?.profiles.find((p) => p.name === open);
+  const profile = open === undefined ? undefined : data?.profiles[open];
   return (
     <SettingsPanel
       id="models"
@@ -77,15 +78,16 @@ export function ModelsSettings({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data.profiles.map((p) => (
-              <TableRow key={p.name}>
+            {data.profiles.map((p, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: names are not unique once redacted; the response order is the identity.
+              <TableRow key={index}>
                 <DataTableCell data-record="lead">
                   <Button
                     variant="link"
                     aria-haspopup="dialog"
                     onClick={() => {
                       remember();
-                      setOpen(p.name);
+                      setOpen(index);
                     }}
                   >
                     {p.name}
@@ -308,7 +310,7 @@ function LastCheck({ check }: { check: LaunchProfileCheck }) {
   );
 }
 
-/** Roles open their detail in that project's settings; employees their work on the execution page. */
+/** Roles open the referenced version in that project's settings; employees their work on the execution page. */
 function References({
   refs,
   projectId,
@@ -329,14 +331,20 @@ function References({
       <TableBody>
         {refs.map((ref) =>
           "role_id" in ref ? (
-            <TableRow key={`role:${ref.project_id}:${ref.role_id}`}>
+            <TableRow
+              key={`role:${ref.project_id}:${ref.role_id}:${ref.version}`}
+            >
               <DataTableCell data-record="lead">
                 <Button asChild variant="link">
                   <a
                     href={routeHash({
                       kind: "settings",
                       projectId: ref.project_id,
-                      filters: { tab: "roles", role: ref.role_id },
+                      filters: {
+                        tab: "roles",
+                        role: ref.role_id,
+                        version: String(ref.version),
+                      },
                     })}
                   >
                     {ref.name}
@@ -361,7 +369,8 @@ function References({
                     href={routeHash({
                       kind: "execution",
                       projectId,
-                      filters: { q: ref.name },
+                      // Exact employee, any status: idle employees still land on their records.
+                      filters: { view: "all", employee: ref.employee_id },
                     })}
                   >
                     {ref.name}

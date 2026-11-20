@@ -93,7 +93,8 @@ export const launchSettingsFixture: LaunchSettingsView = {
         {
           project_id: "p-1",
           role_id: "coder",
-          version: 5,
+          // An older version than the current coder v2 in the settings fixture.
+          version: 1,
           name: "开发工程师",
         },
       ],

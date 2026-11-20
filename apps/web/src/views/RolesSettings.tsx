@@ -111,6 +111,7 @@ export function RolesSettings({
   revision = 0,
   onNewEmployee,
   linkedRole,
+  linkedVersion,
   onLinkedRoleClosed,
 }: {
   client: CardiganClient;
@@ -119,13 +120,23 @@ export function RolesSettings({
   onNewEmployee?: (roleId: string) => void;
   /** A role opened from a link (the models page lists who uses a profile). */
   linkedRole?: string | undefined;
+  /** The referenced version, marked in the linked role's version history. */
+  linkedVersion?: number | undefined;
   onLinkedRoleClosed?: () => void;
 }) {
   const [view, setView] = useState<View | undefined>(
     linkedRole ? { kind: "detail", roleId: linkedRole } : undefined,
   );
+  // Whether the open drawer came from the link, so history can take it away again.
+  const linkedOpen = useRef(false);
   useEffect(() => {
-    if (linkedRole) setView({ kind: "detail", roleId: linkedRole });
+    if (linkedRole) {
+      linkedOpen.current = true;
+      setView({ kind: "detail", roleId: linkedRole });
+    } else if (linkedOpen.current) {
+      linkedOpen.current = false;
+      setView(undefined);
+    }
   }, [linkedRole]);
   const [createdRole, setCreatedRole] = useState<string>();
   const [message, setMessage] = useState("");
@@ -141,6 +152,7 @@ export function RolesSettings({
     setView(next);
     if (next === undefined) {
       list.reload();
+      linkedOpen.current = false;
       if (linkedRole) onLinkedRoleClosed?.();
     }
   };
@@ -194,6 +206,7 @@ export function RolesSettings({
           projectId={projectId}
           roleId={roleId}
           editing={view?.kind === "edit"}
+          linkedVersion={roleId === linkedRole ? linkedVersion : undefined}
           revision={revision}
           message={message}
           afterCreate={
@@ -519,6 +532,7 @@ function RoleDetail({
   projectId,
   roleId,
   editing,
+  linkedVersion,
   revision,
   message,
   afterCreate,
@@ -530,6 +544,7 @@ function RoleDetail({
   projectId: string;
   roleId: string;
   editing: boolean;
+  linkedVersion?: number | undefined;
   revision: number;
   message: string;
   /** Offered once, right after the role was created here. */
@@ -549,6 +564,11 @@ function RoleDetail({
   const [saves, setSaves] = useState(0);
   const detail = useResource(loadDetail, revision + saves);
   const history = useResource(loadHistory, revision + saves);
+  const linkedEntry = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    if (history.data && linkedVersion !== undefined)
+      linkedEntry.current?.scrollIntoView?.({ block: "nearest" });
+  }, [history.data, linkedVersion]);
   const write = useRoleWrite();
   const saved = (role: RoleDefinitionView | undefined, note: string) => {
     if (!role) return;
@@ -669,7 +689,15 @@ function RoleDetail({
                   </TableHeader>
                   <TableBody>
                     {history.data.versions.map((entry) => (
-                      <TableRow key={entry.version}>
+                      <TableRow
+                        key={entry.version}
+                        current={entry.version === linkedVersion}
+                        ref={
+                          entry.version === linkedVersion
+                            ? linkedEntry
+                            : undefined
+                        }
+                      >
                         <DataTableCell nowrap data-record="lead">
                           v{entry.version}
                         </DataTableCell>
