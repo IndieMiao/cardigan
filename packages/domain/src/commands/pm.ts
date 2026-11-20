@@ -24,6 +24,7 @@ import { parseCardPriority } from "../priority.js";
 import { storyProgress, storyTerminal } from "../story.js";
 import {
   builtinCardTemplatesForFlow,
+  isStoryTemplate,
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
@@ -173,7 +174,8 @@ export function createCard(
       "validation_failed",
       "停用模板不能建卡",
     );
-    validateCardTemplate(template, state.roles);
+    const story = isStoryTemplate(template);
+    validateCardTemplate(template, state.roles, { story });
     ensure(
       p.work_item_requirements === undefined ||
         (p.work_item_requirements !== null &&
@@ -230,7 +232,6 @@ export function createCard(
       p.state_and_save,
       requiresUiStateAndSave(template),
     );
-    const story = template.builtin && template.id === "story";
     if (p.parent_card_id !== undefined) {
       const parent = d.card(p.parent_card_id);
       ensure(

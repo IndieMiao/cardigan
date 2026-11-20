@@ -64,7 +64,7 @@ export function DialogContent({
         {...props}
         className={cn(
           inlineFeedback &&
-            "[&>.request-feedback-region]:static [&>.request-feedback-region]:max-w-none [&>.request-feedback-region]:items-stretch",
+            "[&>form]:border-0 [&>form]:p-0 [&>.request-feedback-region:has([role=alert])]:mt-3 [&>.request-feedback-region]:static [&>.request-feedback-region]:max-w-none [&>.request-feedback-region]:items-stretch",
           className,
         )}
       >

@@ -16,6 +16,7 @@ import {
 import { routeHash } from "../route.js";
 import { CreateCardDialog } from "./CreateCardButton.js";
 import { Menu } from "./Menu.js";
+import { CardLink } from "./Operations.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
@@ -256,24 +257,23 @@ export function CardActions({
         />
         {navigation}
       </div>
-      {creating && (
-        <CreateCardDialog
-          open={creating}
-          setOpen={setCreating}
-          parentId={card.story && !closed ? card.id : undefined}
-          projectId={projectId}
-          client={client}
-          restoreFocus={() => moreButton.current?.focus()}
-          onCreated={(cardId) => {
-            onSaved();
-            window.location.hash = routeHash({
-              kind: "card",
-              projectId,
-              cardId,
-            });
-          }}
-        />
-      )}
+      <CreateCardDialog
+        key={JSON.stringify([projectId, card.id])}
+        open={creating}
+        setOpen={setCreating}
+        parentId={card.story && !closed ? card.id : undefined}
+        projectId={projectId}
+        client={client}
+        restoreFocus={() => moreButton.current?.focus()}
+        onCreated={(cardId) => {
+          onSaved();
+          window.location.hash = routeHash({
+            kind: "card",
+            projectId,
+            cardId,
+          });
+        }}
+      />
       {card.sensitive && (
         <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
       )}
@@ -288,6 +288,7 @@ export function CardActions({
         <CardActionForm
           key={mode}
           form={actionForm}
+          projectId={projectId}
           mode={mode}
           card={card}
           perform={perform}
@@ -299,12 +300,14 @@ export function CardActions({
 }
 
 function CardActionForm({
+  projectId,
   form,
   mode,
   card,
   perform,
   dismiss,
 }: {
+  projectId: string;
   form: RefObject<HTMLFormElement | null>;
   mode: Mode;
   card: CardView;
@@ -489,7 +492,11 @@ function CardActionForm({
                 <ul>
                   {activeChildren.map((c) => (
                     <li key={c.id}>
-                      {c.id} · {c.title}
+                      <CardLink
+                        projectId={projectId}
+                        id={c.id}
+                        label={c.title}
+                      />
                     </li>
                   ))}
                 </ul>

@@ -748,6 +748,9 @@ test("story cancellation requires choosing what happens to the listed active chi
     name: "确认取消卡片",
   }) as HTMLButtonElement;
   expect(submit.disabled).toBe(true);
+  expect(
+    screen.getByRole("link", { name: /C-2.*Child/ }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-2");
   fireEvent.click(screen.getByRole("radio", { name: "保留并脱离需求卡" }));
   fireEvent.click(submit);
   await waitFor(() =>
@@ -761,9 +764,10 @@ test("story cancellation requires choosing what happens to the listed active chi
   );
 });
 
-test("story detail creates a child from the contextual menu with the parent prefilled", async () => {
+test("a lost create response reuses its key after reopening the child form and releases it after success", async () => {
   const createCard = vi
     .fn<CardiganClient["createCard"]>()
+    .mockRejectedValueOnce(new TypeError("lost response"))
     .mockResolvedValue({ id: "C-9" });
   const client = fakeClient({
     createCard,
@@ -794,30 +798,33 @@ test("story detail creates a child from the contextual menu with the parent pref
       onSaved={() => {}}
     />,
   );
-  await selectMenu(/^更多$/, "新建子卡");
-  const firstDialog = await screen.findByRole("dialog", { name: "新建子卡" });
-  fireEvent.click(within(firstDialog).getByRole("button", { name: "取消" }));
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(createCard).not.toHaveBeenCalled();
-  await selectMenu(/^更多$/, "新建子卡");
-  const dialog = within(
-    await screen.findByRole("dialog", { name: "新建子卡" }),
-  );
-  expect(
-    (dialog.getByLabelText("父需求卡（可选）") as HTMLInputElement).value,
-  ).toBe("C-1");
-  for (const [label, value] of [
-    ["标题", "Part"],
-    ["目标", "Outcome"],
-    ["验收标准", "Reviewed"],
-  ] as const)
-    fireEvent.change(dialog.getByLabelText(label), { target: { value } });
-  fireEvent.click(dialog.getByRole("button", { name: "创建" }));
-  await waitFor(() =>
-    expect(createCard).toHaveBeenCalledWith(
-      "p-1",
-      expect.objectContaining({ parent_card_id: "C-1", template_id: "dev" }),
-      expect.any(String),
-    ),
-  );
+  async function submit() {
+    await selectMenu(/^更多$/, "新建子卡");
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "新建子卡" }),
+    );
+    expect(
+      (dialog.getByLabelText("父需求卡（可选）") as HTMLInputElement).value,
+    ).toBe("C-1");
+    for (const [label, value] of [
+      ["标题", "Part"],
+      ["目标", "Outcome"],
+      ["验收标准", "Reviewed"],
+    ] as const)
+      fireEvent.change(dialog.getByLabelText(label), { target: { value } });
+    fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+  }
+  await submit();
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await submit();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(createCard.mock.calls[1]).toEqual(createCard.mock.calls[0]);
+  await submit();
+  await waitFor(() => expect(createCard).toHaveBeenCalledTimes(3));
+  expect(createCard.mock.calls[2]?.[2]).not.toBe(createCard.mock.calls[1]?.[2]);
+  expect(createCard.mock.calls[2]?.[1]).toMatchObject({
+    parent_card_id: "C-1",
+    template_id: "dev",
+  });
 });

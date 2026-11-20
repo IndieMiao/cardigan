@@ -55,6 +55,7 @@ export function resolveCardTemplate(
 export function validateCardTemplate(
   definition: CardTemplateDefinition,
   roles: CommandState["roles"],
+  { story = false }: { story?: boolean } = {},
 ): void {
   ensure(
     definition &&
@@ -112,12 +113,16 @@ export function validateCardTemplate(
     ensure(role, "validation_failed", `角色 ${w.role_id} 未登记或已停用`);
     // Legacy roles did not declare work-item capabilities; this grants no tools.
     ensure(
-      role.capabilities.length === 0 ||
-        role.allowed_tools.includes(
-          w.kind === "produce" ? "submit_delivery" : "submit_review",
-        ),
+      story && w.key === "decomposition"
+        ? role.allowed_tools.includes("post_comment")
+        : role.capabilities.length === 0 ||
+            role.allowed_tools.includes(
+              w.kind === "produce" ? "submit_delivery" : "submit_review",
+            ),
       "validation_failed",
-      `角色 ${w.role_id} 不能承担${w.kind === "produce" ? "产出" : "验证"}`,
+      story
+        ? "拆解角色不能发表评论"
+        : `角色 ${w.role_id} 不能承担${w.kind === "produce" ? "产出" : "验证"}`,
     );
     if (w.target_work_item_key !== undefined)
       ensure(
@@ -225,7 +230,8 @@ export function manageCardTemplate(
     );
     ensure(
       !current?.builtin &&
-        !builtinCardTemplateVersions.some((t) => t.id === id),
+        (!builtinCardTemplateVersions.some((t) => t.id === id) ||
+          (id === "story" && current?.builtin === false)),
       "validation_failed",
       "内置模板不能修改，请先复制成新编号",
     );

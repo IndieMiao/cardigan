@@ -1,10 +1,11 @@
 import { expect, test } from "vitest";
 import type { Card } from "../entities.js";
 import { storyProgress } from "../story.js";
+import { generalCardTemplate, storyCardTemplate } from "../templates.js";
 import { postComment } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { assign, createCard, updateCard } from "./pm.js";
-import { markCardDone } from "./templates.js";
+import { manageCardTemplate, markCardDone } from "./templates.js";
 import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
 
 function setup() {
@@ -238,4 +239,65 @@ test("early human completion preserves active children without manufacturing an 
   expect(
     f.state.work_items.find((w) => w.card_id === f.parent.id)?.status,
   ).toBe("cancelled");
+});
+
+test("a migrated builtin uses the Office comment tool, never loosening ordinary produce items", () => {
+  const state = fixture();
+  const p = ports();
+  const custom = {
+    ...generalCardTemplate,
+    id: "story",
+    title: "Legacy",
+    builtin: false,
+  };
+  const migrated = { ...storyCardTemplate, id: "builtin-story" };
+  const ordinary = { ...storyCardTemplate, id: "custom-work", builtin: false };
+  const narrowed: CommandState = {
+    ...state,
+    roles: state.roles.map((r) =>
+      r.role_id === "pm"
+        ? { ...r, capabilities: ["verify"], allowed_tools: ["post_comment"] }
+        : r,
+    ),
+    card_templates: [custom, migrated, ordinary],
+  };
+  const input = {
+    title: "Need",
+    goal: "Goal",
+    source: { kind: "quote", text: "Original" },
+  } as const;
+  const request = (template_id: string) =>
+    createCard(narrowed, human, { ...input, template_id }, p);
+  expect(value(request(custom.id)).data.story).toBeUndefined();
+  expect(value(request(migrated.id)).data.story).toEqual({});
+  expect(request(ordinary.id).ok).toBe(false);
+  expect(
+    createCard(
+      {
+        ...narrowed,
+        roles: narrowed.roles.map((r) => ({ ...r, allowed_tools: [] })),
+      },
+      human,
+      { ...input, template_id: migrated.id },
+      p,
+    ).ok,
+  ).toBe(false);
+  expect(
+    value(
+      manageCardTemplate(
+        narrowed,
+        human,
+        { action: "update", definition: { ...custom, title: "Edited" } },
+        p,
+      ),
+    ).data,
+  ).toMatchObject({ version: 2, builtin: false });
+  expect(
+    manageCardTemplate(
+      narrowed,
+      human,
+      { action: "deactivate", template_id: migrated.id },
+      p,
+    ).ok,
+  ).toBe(false);
 });

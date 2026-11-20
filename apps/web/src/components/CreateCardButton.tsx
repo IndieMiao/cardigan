@@ -1,8 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import {
+  ApiError,
   type CardiganClient,
   type CreateCardInput,
   describeWriteError,
+  type TemplateView,
 } from "../api.js";
 import { useResource } from "../useResource.js";
 import { RequestFeedback } from "./RequestFeedback.js";
@@ -23,6 +25,8 @@ interface CreateCardProps {
   projectId: string;
   onCreated: (id: string) => void;
 }
+
+const isStory = (t: TemplateView) => t.builtin && (t.story || t.id === "story");
 
 export function CreateCardButton(props: CreateCardProps) {
   const [open, setOpen] = useState(false);
@@ -47,7 +51,7 @@ export function CreateCardDialog({
   parentId?: string | undefined;
   restoreFocus?: () => void;
 }) {
-  const [template, setTemplate] = useState(parentId ? "dev" : "story"),
+  const [choice, setTemplate] = useState<string>(),
     [pending, setPending] = useState(false),
     [error, setError] = useState("");
   const {
@@ -62,9 +66,10 @@ export function CreateCardDialog({
   );
   const templates =
     data?.templates.filter(
-      (t) =>
-        t.status === "active" && !(parentId && t.builtin && t.id === "story"),
+      (t) => t.status === "active" && !(parentId && isStory(t)),
     ) ?? [];
+  const template =
+    choice ?? (parentId ? "dev" : (templates.find(isStory)?.id ?? "story"));
   const selected = templates.find((t) => t.id === template);
   const [readOnly, setReadOnly] = useState(false);
   const keys = useRef(new Map<string, string>());
@@ -74,6 +79,10 @@ export function CreateCardDialog({
       onOpenChange={(next) => {
         if (!pending) {
           setOpen(next);
+          if (!next) {
+            setTemplate(undefined);
+            setReadOnly(false);
+          }
           setError("");
         }
       }}
@@ -133,9 +142,17 @@ export function CreateCardDialog({
               const card = await client.createCard(projectId, input, key);
               keys.current.delete(fingerprint);
               setOpen(false);
+              setTemplate(undefined);
+              setReadOnly(false);
               onCreated(card.id);
             } catch (cause) {
-              setError(describeWriteError(cause));
+              setError(
+                cause instanceof ApiError &&
+                  cause.code === "validation_failed" &&
+                  cause.message === "repo is required"
+                  ? "该模板需要仓库。请先登记项目仓库，或选择不需要仓库的模板。"
+                  : describeWriteError(cause),
+              );
             } finally {
               setPending(false);
             }
@@ -165,7 +182,7 @@ export function CreateCardDialog({
               目标
               <Textarea name="goal" required />
             </label>
-            {!(selected?.builtin && template === "story") && (
+            {!(selected && isStory(selected)) && (
               <label>
                 父需求卡（可选）
                 <Input

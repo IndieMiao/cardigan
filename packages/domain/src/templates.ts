@@ -28,6 +28,7 @@ export interface CardTemplateDefinition {
 export interface CardTemplate extends CardTemplateDefinition {
   readonly version: number;
   readonly builtin: boolean;
+  readonly story?: true;
   readonly status: "active" | "inactive";
 }
 export const PM_ACCEPTANCE_WORK_ITEM_KEY = "pm_acceptance";
@@ -165,6 +166,7 @@ export const generalCardTemplate = {
 export const storyCardTemplate = {
   ...generalCardTemplate,
   id: "story",
+  story: true,
   title: "需求卡",
   description: "由 Office 拆解需求，人确认完成",
   work_items: [
@@ -177,6 +179,12 @@ export const storyCardTemplate = {
     },
   ],
 } as const satisfies CardTemplate;
+/** Only immutable, store-registered templates carry story behavior. */
+export function isStoryTemplate(template: CardTemplate): boolean {
+  return (
+    template.builtin && (template.story === true || template.id === "story")
+  );
+}
 export const artifactCardTemplate = {
   id: "artifact",
   title: "产出物",

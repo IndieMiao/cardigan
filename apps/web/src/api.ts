@@ -1246,6 +1246,7 @@ export interface TemplateDefinition {
     | { mode: "review"; reviewer: string };
 }
 export interface TemplateView extends TemplateDefinition {
+  story?: true;
   requires_state_and_save?: boolean;
   version: number;
   builtin: boolean;
