@@ -6,7 +6,13 @@
  * only checks that an assignment has exactly one running Run, so the test
  * provisions that Run before each agent turn, exactly like M2 will.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main as cli } from "@cardigan/cli";
@@ -14,6 +20,7 @@ import { newUlid, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
@@ -68,6 +75,7 @@ const REVIEWER_TOOLS = [
 
 const sha = (letter: string): string => letter.repeat(40);
 
+let root: string;
 let dataDir: string;
 let server: CardiganServer;
 let output: string[];
@@ -76,7 +84,11 @@ let errors: string[];
 /** Run a CLI command as the human would, capturing what it prints. */
 async function host(argv: readonly string[]): Promise<string> {
   const code = await cli([...argv], {
-    env: { ...process.env, CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      ...process.env,
+      CARDIGAN_CONFIG_DIR: join(root, "config"),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: dataDir,
     platform: process.platform,
     signals: { on: () => undefined, off: () => undefined },
@@ -183,7 +195,10 @@ function provisionRun(assignmentId: string): string {
 }
 
 beforeEach(async () => {
-  dataDir = mkdtempSync(join(tmpdir(), "cardigan-e2e-"));
+  root = mkdtempSync(join(tmpdir(), "cardigan-e2e-"));
+  dataDir = join(root, "data");
+  mkdirSync(dataDir);
+  roleConfig(root, "codex-agent");
   output = [];
   errors = [];
   await host(["init"]);
@@ -210,7 +225,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await server.close();
-  rmSync(dataDir, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("pm, coder and reviewer walk a dev card from creation to merge readiness", async () => {

@@ -1327,6 +1327,7 @@ export interface EmployeeOptions {
   }[];
 }
 export interface CreateEmployeeInput {
+  readonly launch_profile_ref?: string | null;
   readonly name: string;
   readonly title: string;
   readonly role_id: string;

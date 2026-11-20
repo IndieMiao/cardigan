@@ -12,6 +12,7 @@ import { newUlid, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { stubGit } from "./git-test-support.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
@@ -81,7 +82,11 @@ async function host(argv: readonly string[]): Promise<string> {
   output = [];
   errors = [];
   const code = await cli([...argv], {
-    env: { ...process.env, CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      ...process.env,
+      CARDIGAN_CONFIG_DIR: join(dataDir, "config"),
+      CARDIGAN_DATA_DIR: dataDir,
+    },
     cwd: dataDir,
     platform: process.platform,
     signals: { on: () => undefined, off: () => undefined },
@@ -251,6 +256,7 @@ async function world(): Promise<World> {
 
 beforeEach(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-write-"));
+  roleConfig(dataDir, "codex-agent");
   output = [];
   errors = [];
   await host(["init"]);

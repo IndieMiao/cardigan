@@ -522,6 +522,29 @@ test("post-deploy starts the replacement Ops as host automation only when it has
       ).toBe(1);
       expect(start).not.toHaveBeenCalled();
     }
+    // A matching default-pack baseline is not permission to publish a broken profile reference.
+    await writeFile(
+      join(root, "launch.yaml"),
+      JSON.stringify({ profiles: { other: { harness: "codex", model: "m" } } }),
+    );
+    expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
+    expect(start).not.toHaveBeenCalled();
+    store.uow.read((tx) => {
+      expect(getRoleVersion(tx, "cardigan", "pm")?.version).toBe(1);
+      const events = tx.events.listAfter("cardigan", undefined, 0);
+      expect(
+        events.some(
+          (e) => e.type === "host_role_upgraded" || e.type === "role_updated",
+        ),
+      ).toBe(false);
+      expect(JSON.stringify(events)).toContain("启动配置 fixture");
+    });
+    await writeFile(
+      join(root, "launch.yaml"),
+      JSON.stringify({
+        profiles: { fixture: { harness: "codex", model: "m" } },
+      }),
+    );
     expect(await runSelfDeployCommand(["roles"], io)).toBe(0);
     expect(start).toHaveBeenCalledOnce();
     expect(start.mock.calls[0]?.[0]).toMatchObject({

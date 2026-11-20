@@ -12,9 +12,11 @@ import {
 } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { startAssignmentById } from "./assignment.js";
+import { validProfileNames } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { hasToken, resolveDataDir } from "./host.js";
 import type { CliIo } from "./io.js";
+import { cliLaunchPaths } from "./paths.js";
 
 /** Host service entry, never an Agent tool or a caller-selected commit. */
 export async function runSelfDeployCommand(
@@ -83,11 +85,20 @@ export async function runSelfDeployCommand(
         )
       )
         throw invalid();
+      let profiles: ReadonlySet<string> = new Set();
+      if (changed.length) {
+        try {
+          profiles = validProfileNames(cliLaunchPaths(io));
+        } catch {
+          io.stderr("启动配置未通过校验，不发布依赖该配置的新角色版本");
+        }
+      }
       const assignment = upgradeDeployedRoles(
         store,
         "cardigan",
         changed,
         previous as Record<string, string>,
+        profiles,
       );
       if (
         assignment &&

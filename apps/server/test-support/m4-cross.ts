@@ -60,6 +60,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, vi } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { ServerGit } from "../src/git.js";
 import { type CardiganServer, startCardiganServer } from "../src/index.js";
@@ -267,6 +268,7 @@ export async function m4Cross(
     cwd: root,
     env: {
       CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_CONFIG_DIR: roleConfig(root, "fixture"),
       CARDIGAN_PROJECT: project_id,
       ...(execution.mode === "agent-ssh"
         ? {

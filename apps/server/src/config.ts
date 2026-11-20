@@ -35,6 +35,7 @@ export interface ServerConfig {
   /** `0` asks the OS for a free port (tests). */
   readonly port: number;
   /** EADDRINUSE retry cadence and shared startup wait budget, in milliseconds. */
+  readonly launchReloadIntervalMs?: number;
   readonly listenRetryIntervalMs?: number;
   readonly listenRetryTimeoutMs?: number;
   /** M4.4 phase loops; every value has a default and is overridable. */
@@ -77,6 +78,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CHECK_LOG_ATTEMPT_BYTES?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
+  readonly CARDIGAN_LAUNCH_RELOAD_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_LISTEN_RETRY_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_LISTEN_RETRY_TIMEOUT_MS?: string | undefined;
   /**
@@ -187,6 +189,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),
     port,
+    launchReloadIntervalMs: interval(
+      env.CARDIGAN_LAUNCH_RELOAD_INTERVAL_MS,
+      "CARDIGAN_LAUNCH_RELOAD_INTERVAL_MS",
+      1000,
+    ),
     listenRetryIntervalMs: interval(
       env.CARDIGAN_LISTEN_RETRY_INTERVAL_MS,
       "CARDIGAN_LISTEN_RETRY_INTERVAL_MS",

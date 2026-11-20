@@ -385,6 +385,7 @@ export interface DispatchRunParams {
     | "model"
     | "agent_cli_version"
     | "launch_profile_ref"
+    | "launch_fingerprint"
     | "tool_catalog"
     | "harness"
     | "effort"
@@ -427,7 +428,12 @@ export function dispatchRun(
     );
     // C-106: a launch snapshot replaces the stored settings as a whole, so a
     // fresh session never keeps a previous session's harness or effort.
-    const { harness: _harness, effort: _effort, ...unset } = stored;
+    const {
+      harness: _harness,
+      effort: _effort,
+      launch_fingerprint: _generation,
+      ...unset
+    } = stored;
     const launched: Run = p.launch_snapshot
       ? {
           ...unset,
@@ -436,6 +442,9 @@ export function dispatchRun(
           agent_cli_version: p.launch_snapshot.agent_cli_version,
           ...(p.launch_snapshot.launch_profile_ref
             ? { launch_profile_ref: p.launch_snapshot.launch_profile_ref }
+            : {}),
+          ...(p.launch_snapshot.launch_fingerprint
+            ? { launch_fingerprint: p.launch_snapshot.launch_fingerprint }
             : {}),
           ...(p.launch_snapshot.tool_catalog
             ? { tool_catalog: p.launch_snapshot.tool_catalog }
@@ -470,9 +479,26 @@ export function dispatchRun(
     const run: Run = (() => {
       if (previous === undefined || p.launch_snapshot !== undefined)
         return catalogued;
-      const { harness: _h, effort: _e, ...rest } = catalogued;
-      return { ...rest, ...launchSettings(previous) };
+      const {
+        harness: _h,
+        effort: _e,
+        launch_fingerprint: _generation,
+        ...rest
+      } = catalogued;
+      return {
+        ...rest,
+        ...launchSettings(previous),
+        ...(previous.launch_fingerprint
+          ? { launch_fingerprint: previous.launch_fingerprint }
+          : {}),
+      };
     })();
+    if (p.launch_snapshot?.launch_fingerprint !== undefined)
+      ensure(
+        /^[0-9a-f]{64}$/u.test(p.launch_snapshot.launch_fingerprint),
+        "validation_failed",
+        "Invalid launch fingerprint",
+      );
     if (p.launch_snapshot?.tool_catalog !== undefined)
       text(p.launch_snapshot.tool_catalog, "tool_catalog");
     if (p.launch_snapshot?.launch_profile_ref !== undefined)

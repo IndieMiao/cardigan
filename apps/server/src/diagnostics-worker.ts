@@ -111,6 +111,10 @@ async function read(message: {
 }
 
 port.on("message", (message) => {
+  if (message.kind === "upstream") {
+    options.upstream = message.upstream;
+    return;
+  }
   if (message.kind === "status" || message.kind === "interaction") {
     pending.get(message.id)?.(message.result);
     pending.delete(message.id);

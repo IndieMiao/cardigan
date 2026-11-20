@@ -265,6 +265,7 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly launchProfiles?: (() => readonly string[]) | undefined;
   readonly runLimit?: ((machine: string) => number) | undefined;
   readonly runLimitMaximum?: ((machine: string) => number) | undefined;
   readonly req: IncomingMessage;
@@ -567,6 +568,13 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
         role_id,
       ),
     );
+    const ref = effect.data.launch_profile_ref;
+    if (operation !== "deactivate" && !c.launchProfiles?.().includes(ref))
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        `角色 ${role_id} 引用的启动配置 ${ref} 不存在于 launch.yaml`,
+      );
     persistRoleEffect(tx, c.project_id, effect);
     return effect.data;
   });

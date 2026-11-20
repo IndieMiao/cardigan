@@ -74,6 +74,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { launchFingerprint } from "./launch-fingerprint.js";
 import { LaunchPublication, launchFailureReason } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
@@ -1075,6 +1076,12 @@ async function launch(
               model,
               agent_cli_version: current.agent_cli_version,
               launch_profile_ref: compiled.profile,
+              launch_fingerprint: launchFingerprint(
+                host.store,
+                host.launch,
+                compiled.profile,
+                role.capabilities.includes("browser"),
+              ),
               // C-106: what this session was actually started with.
               ...compiledLaunchSettings(compiled.harness, compiled.args),
               // P2a-10 A: the new session lists exactly this token's tools.

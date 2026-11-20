@@ -164,6 +164,7 @@ export function upgradeDeployedRoles(
   project: ProjectId,
   changedRoles: readonly string[],
   previousDefaults: Readonly<Record<string, string>>,
+  profiles: ReadonlySet<string> = new Set(),
 ) {
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
@@ -220,6 +221,16 @@ export function upgradeDeployedRoles(
         pending(
           `deployment-role-manual:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
           `角色 ${id} 未自动升级：${baseline ? "当前版本有手工改动，与上一次已部署默认版本不一致" : "缺少上一次已部署默认版本，无法确认当前版本是否有手工改动"}。已保留当前版本 v${latest.version}；请人核对 role upgrade ${id} --from-default --dry-run 的差异，确认如何保留项目规则。\n${JSON.stringify(diff)}`,
+        );
+        continue;
+      }
+      if (!profiles.has(source.launch_profile_ref)) {
+        recordRoleDeferral(
+          tx,
+          project,
+          `missing-profile:${id}:${latest.version}:${source.launch_profile_ref}`,
+          `默认角色 ${id} 引用的启动配置 ${source.launch_profile_ref} 不存在或配置未通过校验；保留原版本 v${latest.version}，请 PM 排查。`,
+          clock.now(),
         );
         continue;
       }

@@ -48,6 +48,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { roleConfig } from "../../../test-support/launch-fixture.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
 const TEST_PLAIN_SUMMARY = {
@@ -208,6 +209,7 @@ async function harness(): Promise<Harness> {
     let out: string[] = [];
     const io = {
       env: {
+        CARDIGAN_CONFIG_DIR: roleConfig(root, "fixture"),
         CARDIGAN_DATA_DIR: dataDir,
         CARDIGAN_PROJECT: project,
         CARDIGAN_RUNTIME_MODE: "local",

@@ -29,6 +29,7 @@ import {
   persistRoleEffect,
   Store,
 } from "@cardigan/store";
+import { validProfileNames } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
@@ -37,6 +38,7 @@ import {
   systemClock,
 } from "./host.js";
 import type { CliIo } from "./io.js";
+import { cliLaunchPaths } from "./paths.js";
 import { readRoleFile } from "./role-file.js";
 
 const USAGE = [
@@ -230,8 +232,22 @@ export async function runRoleCommand(
       }
       return EXIT.ok;
     }
+    const checkProfile = (role: RoleDefinition) => {
+      const config = validProfileNames(cliLaunchPaths(io, flags["data-dir"]));
+      if (!config.has(role.launch_profile_ref))
+        fail(
+          `角色 ${role.role_id} 引用的启动配置 ${role.launch_profile_ref} 不存在于 launch.yaml；请添加配置或选用已有配置`,
+        );
+    };
     if (command === "upgrade")
-      return upgradeFromDefault(store, io, project, id, !!flags["dry-run"]);
+      return upgradeFromDefault(
+        store,
+        io,
+        project,
+        id,
+        !!flags["dry-run"],
+        checkProfile,
+      );
     const actor = resolveActor(io, project, store);
     const role = store.uow.run((tx) => {
       const state = {
@@ -386,6 +402,7 @@ export async function runRoleCommand(
           ),
           EXIT.usage,
         );
+      if (command !== "deactivate") checkProfile(result.value.data);
       persistRoleEffect(tx, project, result.value);
       return result.value.data;
     });
@@ -458,6 +475,7 @@ function upgradeFromDefault(
   project: string,
   id: string,
   dryRun: boolean,
+  checkProfile: (role: RoleDefinition) => void,
 ): number {
   if (!isDefaultRoleId(id))
     fail(
@@ -508,6 +526,7 @@ function upgradeFromDefault(
       return EXIT.ok;
     }
     printUpgrade(io, result.value);
+    checkProfile(result.value.effect.data);
     persistRoleEffect(tx, project, result.value.effect);
     io.stdout(
       `已按默认角色包升级 ${id} 到 v${result.value.effect.data.version}（项目 ${project}）`,

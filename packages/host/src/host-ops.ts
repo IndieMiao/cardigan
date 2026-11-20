@@ -68,7 +68,7 @@ import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
 
 interface Options {
-  upstream?: LaunchConfig;
+  upstream?: LaunchConfig | undefined;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
   runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">>;
@@ -104,7 +104,9 @@ interface Options {
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
 export class HostOpsService {
   private readonly clock: Clock;
-  private readonly upstream: UpstreamHealthMonitor | undefined;
+  private generation: LaunchConfig | undefined;
+  private monitor: UpstreamHealthMonitor | undefined;
+  private readonly retiring = new Set<Promise<void>>();
   private readonly upstreamPolls = new Map<ProjectId, Promise<void>>();
   private readonly sessionPolls = new Map<
     ProjectId,
@@ -125,19 +127,34 @@ export class HostOpsService {
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
-    this.upstream =
-      options.upstreamMonitor ??
-      (options.upstream
+  }
+  /** Each monitor (including its in-flight probes) belongs to one immutable launch generation. */
+  private get upstream(): UpstreamHealthMonitor | undefined {
+    if (this.options.upstreamMonitor) return this.options.upstreamMonitor;
+    const config = this.options.upstream;
+    if (!this.closing && this.generation !== config) {
+      if (this.monitor) {
+        const retiring = this.monitor
+          .close()
+          .finally(() => this.retiring.delete(retiring));
+        this.retiring.add(retiring);
+      }
+      this.generation = config;
+      this.monitor = config
         ? new UpstreamHealthMonitor(
-            options.upstream,
-            options.runtime,
+            config,
+            this.options.runtime,
             this.clock,
             undefined,
-            options.store,
+            this.options.store,
             () =>
-              options.onError?.(new Error("upstream probe publication failed")),
+              this.options.onError?.(
+                new Error("upstream probe publication failed"),
+              ),
           )
-        : undefined);
+        : undefined;
+    }
+    return this.monitor;
   }
   readonly tools: NonNullable<HostOpsToolOptions["hostOps"]> = {
     read: (context, project) => this.read(context, project),
@@ -448,14 +465,20 @@ export class HostOpsService {
     only?: AssignmentId,
     samples?: SessionContextDiagnostic[] | Promise<SessionContextDiagnostic[]>,
   ) {
-    if (!this.upstream) return {};
+    const upstream = this.upstream;
+    if (!upstream) return {};
     const state = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
     const [activity, sessions] = await Promise.all([
-      this.upstream.observe(state, only),
+      upstream.observe(state, only),
       samples ?? this.sessions(project),
     ]);
+    if (this.closing || this.upstream !== upstream)
+      throw new ToolError(
+        "stale_target",
+        "线路采样期间配置已更换，请重新读取诊断",
+      );
     const current = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
@@ -549,6 +572,7 @@ export class HostOpsService {
     this.contextAbort.abort();
     await this.upstream?.close();
     await Promise.allSettled([
+      ...this.retiring,
       ...this.upstreamPolls.values(),
       ...this.sessionPolls.values(),
       ...this.actionWorkers.values(),
@@ -565,10 +589,13 @@ export class HostOpsService {
       this.sessions(project, true),
     )
       .then((activity) => {
-        if (!this.closing)
+        if (!this.closing && this.upstream === upstream)
           upstream.reconcile(this.options.store, project, activity);
       })
-      .catch(() => upstream.observationFailed(project))
+      .catch(() => {
+        if (!this.closing && this.upstream === upstream)
+          upstream.observationFailed(project);
+      })
       .finally(() => this.upstreamPolls.delete(project));
     this.upstreamPolls.set(project, poll);
   }
@@ -993,6 +1020,7 @@ export class HostOpsService {
       if (!current()) return;
       let activity: SessionActivity | undefined;
       let freshUsage = action.context_usage;
+      const observationMonitor = this.upstream;
       if (action.tool !== "host_ops_cancel_run") {
         try {
           const samples = action.automatic_context_restart
@@ -1016,7 +1044,8 @@ export class HostOpsService {
             samples,
           );
         } catch {
-          this.upstream?.observationFailed(project);
+          if (this.upstream === observationMonitor)
+            observationMonitor?.observationFailed(project);
           fail("upstream_observation_failed");
           return;
         }
@@ -1024,6 +1053,10 @@ export class HostOpsService {
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (action.tool === "host_ops_cancel_run") return true;
+        if (this.upstream !== observationMonitor) {
+          fail("upstream_configuration_changed");
+          return false;
+        }
         if (
           action.automatic_context_restart &&
           (!freshUsage ||

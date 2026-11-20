@@ -2,8 +2,9 @@ import { resolveProfile } from "@cardigan/roles";
 import { loadConfig } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
-import { checkProfile } from "./launch-check.js";
+import { type CheckOptions, checkProfiles } from "./launch-check.js";
 import { importSettings } from "./launch-import.js";
+import { reload, setModel } from "./launch-manage.js";
 import { runProfile } from "./launch-run.js";
 import { cliLaunchPaths, type LaunchPaths } from "./paths.js";
 
@@ -11,7 +12,9 @@ const LAUNCH_USAGE = [
   "用法：",
   "  cardigan launch --list",
   "  cardigan launch <启动配置> [--cwd <目录>] [--print] [-- <传给 CLI 的参数>...]",
-  "  cardigan launch check <启动配置>",
+  "  cardigan launch check [启动配置] [--metadata] [--online] [--smoke]",
+  "  cardigan launch reload",
+  "  cardigan launch set-model <别名> <模型id>",
   "  cardigan launch import-claude-settings <settings.json> --provider <名字>",
 ].join("\n");
 
@@ -25,7 +28,9 @@ export type LaunchArgs =
       readonly printOnly: boolean;
       readonly extra: readonly string[];
     }
-  | { readonly kind: "check"; readonly profile: string }
+  | ({ readonly kind: "check" } & CheckOptions)
+  | { readonly kind: "reload" }
+  | { readonly kind: "set-model"; readonly alias: string; readonly id: string }
   | {
       readonly kind: "import";
       readonly settingsPath: string;
@@ -34,6 +39,32 @@ export type LaunchArgs =
 
 /** Parse the arguments that follow `cardigan launch`. */
 export function parseLaunchArgs(args: readonly string[]): LaunchArgs {
+  const [cmd, ...params] = args;
+  if (cmd === "check") {
+    const positional = params.filter((p) => !p.startsWith("-"));
+    if (
+      positional.length > 1 ||
+      params.some(
+        (p) =>
+          p.startsWith("-") &&
+          !["--metadata", "--online", "--smoke"].includes(p),
+      )
+    )
+      throw new CliError(LAUNCH_USAGE, EXIT.usage);
+    return {
+      kind: "check",
+      ...(positional[0] ? { profile: positional[0] } : {}),
+      online: params.includes("--online") || params.includes("--smoke"),
+      smoke: params.includes("--smoke"),
+      metadata: params.includes("--metadata"),
+    };
+  }
+  if (cmd === "reload" || cmd === "set-model") {
+    if (cmd === "reload" && params.length === 0) return { kind: "reload" };
+    if (cmd === "set-model" && params.length === 2 && params[0] && params[1])
+      return { kind: "set-model", alias: params[0], id: params[1] };
+    throw new CliError(LAUNCH_USAGE, EXIT.usage);
+  }
   const rest = [...args];
   let printOnly = false;
   let cwd: string | undefined;
@@ -96,13 +127,6 @@ export function parseLaunchArgs(args: readonly string[]): LaunchArgs {
     }
     return { kind: "list" };
   }
-  if (first === "check") {
-    const profile = others[0];
-    if (profile === undefined || others.length > 1) {
-      throw new CliError("用法：cardigan launch check <启动配置>", EXIT.usage);
-    }
-    return { kind: "check", profile };
-  }
   if (first === "import-claude-settings") {
     const settingsPath = others[0];
     const providerIndex = others.indexOf("--provider");
@@ -145,7 +169,11 @@ export async function runLaunchCommand(
     case "list":
       return listProfiles(paths, io);
     case "check":
-      return checkProfile(paths, io, parsed.profile);
+      return checkProfiles(paths, io, parsed);
+    case "reload":
+      return reload(paths, io);
+    case "set-model":
+      return setModel(paths, io, parsed.alias, parsed.id);
     case "import":
       return importSettings(paths, io, parsed.settingsPath, parsed.provider);
     case "run":
