@@ -808,3 +808,71 @@ test("a single GitHub PEM block stays redacted across step and ANSI chunk bounda
     "synthetic-private-fragment",
   );
 });
+
+test.each(["passed-link", "failed-link", "unknown", "assertion"])(
+  "timeout evidence is scoped to the failing check: %s",
+  async (mode) => {
+    const log = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "timeout",
+    });
+    log.append("install", "Manual: https://docs.invalid/intro\n");
+    log.append(
+      "test",
+      "FAIL src/wait.test.ts > waits\nError: Test timed out in 5000ms\n",
+    );
+    if (mode === "failed-link")
+      log.append("test", "Manual: https://docs.invalid/intro\n");
+    if (mode === "assertion")
+      log.append("test", "AssertionError: unexpected value\n");
+    const saved = await log.finish({
+      status: "failed",
+      checks: [
+        { name: "install", status: "passed" },
+        { name: "test", status: "failed" },
+      ],
+      cleanup_errors: [],
+      logAttributionIncomplete: mode === "unknown",
+    });
+    expect(saved.timeout_only).toBe(mode === "passed-link");
+  },
+);
+
+test.each(["'", '"'])(
+  "unclosed runner assignments stay private across steps and oversized lines (%s)",
+  async (quote) => {
+    const dataDir = await fixture();
+    const w = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "quoted",
+      failureExcerptBytes: 4096,
+    });
+    w.append("install", ".".repeat(132000) + " pass");
+    w.append("install", `word : ${quote}synthetic-first\n`);
+    w.append("test", `FAIL synthetic-hidden \\`);
+    w.append(
+      "test",
+      `${quote} escaped delimiter\nAssertionError: synthetic-hidden\n`,
+    );
+    w.append(
+      "test",
+      "x".repeat(132000) + quote + "\nFAIL visible after close\n",
+    );
+    w.append("test", `password=${quote}never closed\nError: synthetic-hidden`);
+    const saved = await w.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    const body = await readFile(
+      join(dataDir, "merge-gate/logs/p", saved.log_ref),
+      "utf8",
+    );
+    expect(body + JSON.stringify(saved)).not.toMatch(
+      /synthetic-(first|hidden)/u,
+    );
+    expect(saved.summary).toContain("visible after close");
+  },
+);

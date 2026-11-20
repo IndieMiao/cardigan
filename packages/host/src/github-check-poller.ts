@@ -636,7 +636,13 @@ function mapGithubCheckSteps(
     checks.every(
       (step) => step.status === "passed" || step.status === "skipped",
     );
+  const failedGithubStep = job.steps.find(
+    (s) =>
+      !checks.some((c) => c.name === s.name) &&
+      (s.conclusion === "failure" || s.conclusion === "timed_out"),
+  )?.name;
   return {
+    ...(failedGithubStep ? { failedGithubStep } : {}),
     status: passed
       ? "passed"
       : run.conclusion === "timed_out" ||

@@ -3792,7 +3792,7 @@ async function reworkGithubFixture(
     excerptBytes?: number;
     noRunId?: boolean;
     scoped?: boolean;
-    failedStep?: "lint" | "e2e";
+    failedStep?: "lint" | "e2e" | "Setup Node";
   } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
@@ -3879,7 +3879,11 @@ async function reworkGithubFixture(
           conclusion:
             conclusion === "failure" && name === (options.failedStep ?? "test")
               ? "failure"
-              : "success",
+              : conclusion === "failure" &&
+                  options.failedStep === "Setup Node" &&
+                  index > GITHUB_WORKFLOW_STEPS.indexOf("Setup Node")
+                ? "skipped"
+                : "success",
           ...(options.failedStep
             ? {
                 started_at: new Date(
@@ -6008,3 +6012,44 @@ test.each(["success", "failure"] as const)(
     }
   },
 );
+
+test("verified setup failure reaches the result, first page and timeline without unrelated annotations", async () => {
+  const h = await reworkGithubFixture({
+    failedStep: "Setup Node",
+    log:
+      "2030-01-01T00:00:02.1234567Z ##[error]wrong passed step\n" +
+      "2030-01-01T00:03:02Z ##[error]Unable to install Node\n" +
+      "##[group]Run Setup Node\n##[error]wrong unverified step\n",
+  });
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.checks.map((c) => c.status)).toEqual(Array(6).fill("not_run"));
+    const body = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    const timeline = h.f
+      .state()
+      .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+    for (const text of [check.summary, timeline, body.split("===")[0]]) {
+      expect(text).toContain("Setup Node");
+      expect(text).toContain("Unable to install Node");
+      expect(text).not.toContain("wrong");
+    }
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});

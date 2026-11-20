@@ -19,21 +19,25 @@ const storageCodes = new Set([
 /** An exclusive private sibling keeps incomplete writes out of the ranged reader. */
 export async function saveCheckLog(
   path: string,
+  verifyDirectory: () => Promise<void>,
   write: (file: FileHandle) => Promise<void>,
 ): Promise<string | undefined> {
   for (let attempt = 0; ; attempt++) {
-    // Identity/permission failures are not evidence of a transient write fault.
-    const existing = await fs.lstat(path);
-    if (
-      !existing.isFile() ||
-      existing.nlink !== 1 ||
-      existing.uid !== process.getuid?.() ||
-      (existing.mode & 0o777) !== 0o600
-    )
-      throw new Error("Unsafe merge check log file");
     const temp = `${path}.${randomUUID()}.tmp`;
     let created = false;
+    let verified = false;
     try {
+      // Identity/permission failures are not evidence of a transient write fault.
+      await verifyDirectory();
+      const existing = await fs.lstat(path);
+      if (
+        !existing.isFile() ||
+        existing.nlink !== 1 ||
+        existing.uid !== process.getuid?.() ||
+        (existing.mode & 0o777) !== 0o600
+      )
+        throw new Error("Unsafe merge check log file");
+      verified = true;
       const file = await fs.open(
         temp,
         constants.O_WRONLY |
@@ -55,7 +59,10 @@ export async function saveCheckLog(
     } catch (e) {
       const code = errno(e);
       if (!code || !storageCodes.has(code)) throw e;
-      if (attempt === 2) return code;
+      if (attempt === 2) {
+        if (!verified) throw e;
+        return code;
+      }
     } finally {
       if (created)
         await fs.unlink(temp).catch((e) => {

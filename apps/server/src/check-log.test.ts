@@ -100,9 +100,10 @@ test("server reader port returns only host-redacted synthetic credentials throug
     },
     failureExcerptBytes: 4096,
   });
+  const runnerOnly = `\npassword = "fake first line\nFAIL private-continuation\n##[error] private-continuation"\n`;
   writer.append(
     "unit",
-    `FAIL example\nAuthorization: Basic synthetic-basic\nsecond-config-line\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
+    `FAIL example\nAuthorization: Basic synthetic-basic${runnerOnly}after runner field\nsecond-config-line\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
   );
   writer.append(
     "unit",
@@ -114,7 +115,7 @@ test("server reader port returns only host-redacted synthetic credentials throug
   writer.append("unit", diagnostic.slice(27));
   const filler = `${".".repeat(4095)}\n`.repeat(16);
   for (let i = 0; i < 34; i++) writer.append("unit", filler);
-  writer.append("unit", diagnostic + "tail sentinel\n");
+  writer.append("unit", runnerOnly + diagnostic + "tail sentinel\n");
   const saved = await writer.finish({
     status: "failed",
     checks: [{ name: "unit", status: "failed", exit_code: 1 }],
@@ -197,6 +198,7 @@ test("server reader port returns only host-redacted synthetic credentials throug
     expect(tail.text).toContain("tail sentinel");
     expect(result.text).toContain("=== unit ===");
     expect(saved.failure_excerpt).toContain("Basic [REDACTED]");
+    expect(saved.failure_excerpt).toContain("after runner field");
     const surfaces = [
       result.text,
       tail.text,
@@ -209,6 +211,8 @@ test("server reader port returns only host-redacted synthetic credentials throug
       "second-config-line",
       "synthetic phrase",
       "synthetic-uri",
+      "private-continuation",
+      "fake first line",
       "fictional-bearer",
       "fictional-key",
       "/ignored",

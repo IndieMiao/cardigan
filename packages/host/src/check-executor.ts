@@ -178,6 +178,7 @@ export async function runCheckExecutor(
                         steps,
                         terminal.checks.map((s) => s.name),
                         emit,
+                        terminal.failedGithubStep,
                       )
                     : undefined;
                   return router?.write ?? ((text) => emit(name, text));

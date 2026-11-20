@@ -73,3 +73,48 @@ test("cleanup faults are diagnostic but unsafe destination permissions remain fa
   await fs.chmod(join(directory, b.log_ref), 0o644);
   await expect(b.finish(passed)).rejects.toThrow("Unsafe");
 });
+
+test.each(["recovers", "unsafe", "link", "persistent"])(
+  "revalidates the attempt file after a transient lstat failure: %s",
+  async (mode) => {
+    const { writer, directory } = await setup();
+    const w = await writer("stat");
+    const path = join(directory, w.log_ref);
+    const lstat = fs.lstat.bind(fs);
+    let faults = 0;
+    vi.spyOn(fs, "lstat").mockImplementation(
+      async (...args: Parameters<typeof fs.lstat>) => {
+        if (args[0] === path && (faults === 0 || mode === "persistent")) {
+          faults++;
+          if (mode === "unsafe") await fs.chmod(path, 0o644);
+          if (mode === "link") {
+            await fs.rename(path, path + ".source");
+            await fs.symlink(path + ".source", path);
+          }
+          throw Object.assign(new Error("test I/O"), { code: "EIO" });
+        }
+        return lstat(...args);
+      },
+    );
+    const original = await fs.readFile(path, "utf8");
+    const six = {
+      ...passed,
+      checks: ["install", "build", "test", "lint", "deps", "e2e"].map(
+        (name) => ({ name, status: "passed" as const }),
+      ),
+    };
+    const save = w.finish(six, {
+      html_url: "https://github.com/test/project/actions/runs/42",
+      run_id: 42,
+    });
+    if (mode === "unsafe" || mode === "link")
+      await expect(save).rejects.toThrow("Unsafe");
+    else if (mode === "persistent") {
+      await expect(save).rejects.toMatchObject({ code: "EIO" });
+      expect(faults).toBe(3);
+    } else
+      expect(await save).toMatchObject({ ...six, summary: "检查全部通过" });
+    if (mode !== "recovers")
+      expect(await fs.readFile(path, "utf8")).toBe(original);
+  },
+);

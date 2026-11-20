@@ -1,6 +1,7 @@
 import { CheckFailureSummary } from "./check-failure-summary.js";
 import { lineFragments } from "./check-log-lines.js";
 import { TRUNCATED_OUTPUT } from "./merge-check-timeout.js";
+import { QuotedLogField } from "./quoted-log-field.js";
 
 const MAX_BODY_LINE = 128 * 1024;
 interface Page {
@@ -23,13 +24,14 @@ export class BoundedOutput {
   private oversized = false;
   private keyCarry = "";
   private keyLine = false;
+  private continuedValue = false;
   incomplete = false;
   constructor(
     private readonly limit: number,
     private readonly normalize: (s: string) => string,
     private readonly redact: (s: string) => string,
     summaryRedact: (s: string) => string,
-    private readonly key = { open: false },
+    private readonly key = { open: false, field: new QuotedLogField() },
   ) {
     this.failure = new CheckFailureSummary(summaryRedact);
   }
@@ -51,11 +53,31 @@ export class BoundedOutput {
         this.scanKey(scan);
         this.keyCarry = scan.slice(-96);
       }
-      if (this.pending.length + part.length > MAX_BODY_LINE)
-        this.oversized = true;
-      this.pending += part.slice(0, MAX_BODY_LINE - this.pending.length);
+      const take = Math.min(part.length, MAX_BODY_LINE - this.pending.length);
+      this.pending += part.slice(0, take);
+      if (take < part.length) {
+        if (!this.oversized) {
+          this.oversized = true;
+          this.continuedValue = this.key.field.open;
+          this.scanOversized(this.pending);
+        }
+        for (let i = take; i < part.length; i += MAX_BODY_LINE)
+          this.scanOversized(part.slice(i, i + MAX_BODY_LINE));
+      }
       if (newline) this.flush(true);
     });
+  }
+  private scanOversized(piece: string) {
+    if (piece.includes("\x1b") || piece.includes("\x9b")) {
+      // Complete color controls are common even on very long CI lines.
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal SGR delimiters
+      piece = piece.replace(/(?:\x1b\[|\x9b)[0-9;:]*m/gu, "");
+      if (piece.includes("\x1b") || piece.includes("\x9b")) {
+        this.key.field.obscure();
+        return;
+      }
+    }
+    this.key.field.scan(this.normalize(piece));
   }
   private flush(newline: boolean) {
     const normalized = this.normalize(this.pending);
@@ -63,7 +85,17 @@ export class BoundedOutput {
     // be split across two callbacks. Do not replay an incomplete prefix.
     if (!this.oversized && normalized.includes("-----"))
       this.scanKey(normalized);
-    const hidden = this.keyLine || this.key.open;
+    if (!this.oversized) {
+      this.continuedValue = this.key.field.open;
+      if (this.continuedValue || /[:=]/u.test(normalized))
+        this.key.field.scan(normalized);
+    }
+    const hidden =
+      this.keyLine ||
+      this.key.open ||
+      this.continuedValue ||
+      this.key.field.open;
+    this.key.field.endLine();
     const safe = hidden
       ? "[REDACTED]"
       : this.oversized

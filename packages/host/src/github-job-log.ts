@@ -20,6 +20,7 @@ export function githubJobLog(
   steps: readonly StepTime[],
   checks: readonly string[],
   emit: (name: string, text: string) => void,
+  failedGithubStep?: string,
 ) {
   const windows = steps
     .filter((s) => s.conclusion !== "skipped")
@@ -55,7 +56,14 @@ export function githubJobLog(
         matches.some((w) => w.name === group))
         ? group
         : undefined);
-    owner = name && checks.includes(name) ? name : "github-job";
+    // The auxiliary name came from the validated job contract. Never use
+    // a log-provided group, incomplete windows, or an overlap to select it.
+    owner =
+      completeWindows && unique && unique === failedGithubStep
+        ? unique
+        : name && checks.includes(name)
+          ? name
+          : "github-job";
     emit(owner, prefix);
     prefix = "";
   };

@@ -6,6 +6,7 @@ import { BoundedOutput } from "./bounded-check-output.js";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
 import { pruneCheckLogs, saveCheckLog } from "./check-log-storage.js";
 import { checkInfraFlaky, checkTimedOutOnly } from "./merge-check-timeout.js";
+import { QuotedLogField } from "./quoted-log-field.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 import {
   bindWorkerCheckout,
@@ -27,7 +28,7 @@ function normalizeOutput(value: string, github = false): string {
   );
   return github
     ? normalized.replace(
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z /gmu,
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z /gmu,
         "",
       )
     : normalized;
@@ -261,7 +262,9 @@ export async function createMergeCheckLog(input: {
   // intentionally never retains the surrounding raw block. Mask unconfigured
   // assignment values too (including quoted values containing whitespace).
   const jobKey =
-    input.failureExcerptBytes !== undefined ? { open: false } : undefined;
+    input.failureExcerptBytes !== undefined
+      ? { open: false, field: new QuotedLogField() }
+      : undefined;
   const fragments = Object.values(input.env ?? {})
     .flatMap((v) => normalizeOutput(v).split(/[\r\n]+/u))
     .filter(Boolean)
@@ -302,7 +305,10 @@ export async function createMergeCheckLog(input: {
     resetOutput(name: string) {
       if (!finished) {
         output.delete(name);
-        if (jobKey) jobKey.open = false;
+        if (jobKey) {
+          jobKey.open = false;
+          jobKey.field = new QuotedLogField();
+        }
       }
     },
     append(name: string, text: string) {
@@ -342,8 +348,10 @@ export async function createMergeCheckLog(input: {
       // A partial download cannot provide redaction boundaries or retry evidence.
       if (result.logFailure) output.clear();
       for (const buffer of output.values()) buffer.seal();
-      const failures =
-        output.get(failed?.name ?? "executor")?.failure.lines() ?? [];
+      const failureBuffer = output.get(
+        failed?.name ?? result.failedGithubStep ?? "executor",
+      );
+      const failures = failureBuffer?.failure.lines() ?? [];
       const baseSummary =
         result.status === "passed"
           ? result.checks.some((c) => c.status === "skipped")
@@ -354,7 +362,9 @@ export async function createMergeCheckLog(input: {
                 [
                   failed
                     ? `检查 ${failed.name} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
-                    : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${result.reason ?? result.status}`,
+                    : result.failedGithubStep
+                      ? `检查 ${result.failedGithubStep} 未通过`
+                      : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${result.reason ?? result.status}`,
                   ...failures,
                 ]
                   .join("\n")
@@ -378,9 +388,8 @@ export async function createMergeCheckLog(input: {
           ? undefined
           : namesForExcerpt();
       function namesForExcerpt() {
-        const buffer = output.get(failed?.name ?? "executor");
-        if (buffer) {
-          const text = buffer.text();
+        if (failureBuffer) {
+          const text = failureBuffer.text();
           const match = /(?:^|\n)[^\n]*?\bFAIL\b/u.exec(text);
           if (match?.index !== undefined)
             return clip(
@@ -391,20 +400,26 @@ export async function createMergeCheckLog(input: {
         return undefined;
       }
       // C-116: classified from the full retained output, before it is cleared.
-      const completeEvidence =
+      const canClassify =
         !result.logFailure &&
         !result.logAttributionIncomplete &&
         !result.manual_attention &&
-        ![...output.values()].some((b) => b.incomplete);
+        !result.failedGithubStep;
       const timeout_only =
-        completeEvidence &&
+        canClassify &&
+        [...output].every(
+          ([name, buffer]) =>
+            !buffer.incomplete ||
+            result.checks.some((c) => c.name === name && c.status === "passed"),
+        ) &&
         checkTimedOutOnly(
           result.status,
           result.checks,
           (name) => output.get(name)?.text() ?? "",
         );
       const infra_flaky =
-        completeEvidence &&
+        canClassify &&
+        ![...output.values()].some((b) => b.incomplete) &&
         [...output.keys()].every((name) =>
           result.checks.some((check) => check.name === name),
         ) &&
@@ -421,23 +436,26 @@ export async function createMergeCheckLog(input: {
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];
-      await privateDirectory(directory, false);
-      const writeError = await saveCheckLog(path, async (handle) => {
-        await handle.writeFile(
-          header + (result.status === "passed" ? "" : `\n${summary}\n`),
-        );
-        for (const name of names) {
+      const writeError = await saveCheckLog(
+        path,
+        () => privateDirectory(directory, false),
+        async (handle) => {
           await handle.writeFile(
-            `\n=== ${filter.redact(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
+            header + (result.status === "passed" ? "" : `\n${summary}\n`),
           );
-        }
-        if (result.status === "passed")
-          await handle.writeFile(`\n${summary}\n`);
-        if (safe.cleanup_errors.length)
-          await handle.writeFile(
-            `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`,
-          );
-      });
+          for (const name of names) {
+            await handle.writeFile(
+              `\n=== ${filter.redact(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
+            );
+          }
+          if (result.status === "passed")
+            await handle.writeFile(`\n${summary}\n`);
+          if (safe.cleanup_errors.length)
+            await handle.writeFile(
+              `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`,
+            );
+        },
+      );
       output.clear();
       let note = "";
       if (writeError) {
