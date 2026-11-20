@@ -91,6 +91,7 @@ import { LoginLimiter } from "./login-limiter.js";
 import { MachineChecks } from "./machine-checks.js";
 import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
+import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -872,6 +873,17 @@ async function serveProjectRoute(
         throw new HttpRejection(400, "validation_failed", error.message);
       throw error;
     }
+    return;
+  }
+
+  const mentions = /^\/cards\/([^/]+)\/mentions$/.exec(rest);
+  if (mentions !== null) {
+    const card_id = decodeURIComponent(mentions[1] ?? "") as CardId;
+    const candidates = readMentionCandidates(store, project_id, card_id);
+    if (candidates === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, candidates);
     return;
   }
 
