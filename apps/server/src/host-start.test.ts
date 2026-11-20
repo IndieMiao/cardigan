@@ -473,3 +473,31 @@ test("C-211 a new session on a non-default CARDIGAN_MCP_PORT gets that port in i
   expect(urls).toContain("http://127.0.0.1:4610/mcp");
   expect(JSON.stringify(config)).not.toContain(":3004");
 });
+
+test("C-497 cold start checks after provisioning, withholds the sentinel and keeps the same Run queued", async () => {
+  const { assignment, run } = queuedRun();
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "exited", agent: "idle", observed_seq: 1 },
+  });
+  const probe = vi.fn(async () => provisioned.length === 0);
+  const input = {
+    project: f.project,
+    assignment,
+    run,
+    bell: "cold start",
+    resourcePreflight: probe,
+  };
+  await expect(startQueuedRun(host(f.dataDir), input)).rejects.toThrow();
+  expect(provisioned).toHaveLength(1);
+  expect(probe).toHaveBeenCalled();
+  const sentinel = join(f.dataDir, "runs", f.project, assignment.id, "start");
+  expect(existsSync(sentinel)).toBe(false);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("queued");
+  probe.mockResolvedValue(true);
+  await startQueuedRun(host(f.dataDir), input);
+  expect(existsSync(sentinel)).toBe(true);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
+});

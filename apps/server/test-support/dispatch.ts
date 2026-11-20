@@ -24,12 +24,17 @@ export function dispatchFixture(
   machine_id = "local",
   worktree: "write" | "none" = "none",
   os: "linux" | "darwin" = "linux",
+  migrationsDir?: string,
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
   let time = Date.parse("2030-01-01T00:00:00.000Z");
   const clock = { now: () => new Date(time).toISOString() },
     project = "p-dispatch" as never;
-  const store = Store.open({ dataDir, clock });
+  const store = Store.open({
+    dataDir,
+    clock,
+    ...(migrationsDir ? { migrationsDir } : {}),
+  });
   store.createProject({ id: project, name: "Dispatcher" });
   if (machine_id !== "local")
     store.uow.run((tx) =>

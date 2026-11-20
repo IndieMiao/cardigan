@@ -49,6 +49,8 @@ export interface RuntimeWakeOptions {
   /** Synchronous fresh authority check after all waits, immediately before IO.
    * The adapter must not await between this check and starting the send.
    */
+  /** Target preflight inside the acquired send slot, before synchronous authority. */
+  readonly resource_preflight?: () => Promise<boolean>;
   readonly before_send?: () => boolean;
 }
 export type RuntimeWakeResult =
