@@ -26,13 +26,13 @@ def scope(s):
     return canonical({k: s[k] for k in SCOPE})
 
 
-def manifest(s):
+def manifest(s, *, live=True):
     scope(s)
     require(set(s) == set(FIELDS))
     for k, pattern in [('id', '[0-9a-f]{32}'), ('commit', '[0-9a-f]{40}'), ('sha256', '[0-9a-f]{64}'),
-                       ('app', r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+'), ('build', r'[\w.-]{1,128}'), ('version', r'[\w.-]{1,128}')]:
+                       ('app', r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+' if s['platform']=='android' else r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+'), ('build', r'[\w.-]{1,128}'), ('version', r'[\w.-]{1,128}')]:
         require(re.fullmatch(pattern, s[k], re.ASCII))
-    require(type(s['expires']) is int and time.time() < s['expires'])
+    require(type(s['expires']) is int and (not live or time.time() < s['expires']))
 
 
 def canonical(x):

@@ -21,6 +21,7 @@ from archives import inspect_zip
 from common import SCOPE, canonical, digest, directory, scope
 import host
 import platforms
+import worker
 
 
 def save(path, data):
@@ -47,17 +48,22 @@ class Signing(unittest.TestCase):
         save(self.host/'routes.json',canonical([{**route,'peer':'fixture'}]))
         def program(name,body):
             p=save(self.worker/name,'#!/usr/bin/python3\n'+body); p.chmod(0o700); return str(p)
-        config={**route,'cert_sha256':'a'*64,'alias':'fixture',
+        fingerprint=hashlib.sha256(b'fixture-public').hexdigest()
+        config={**route,'cert_sha256':fingerprint,'alias':'fixture',
+                'keytool':program('fixture-keytool', '''import sys, pathlib
+assert sys.argv[1]=='-exportcert' and sys.argv[2]=='-keystore' and sys.argv[4:7]==['-alias','fixture','-storepass:file']
+assert pathlib.Path(sys.argv[3]).read_text()=='private-fixture-marker'
+sys.stdout.buffer.write(b'fixture-public')'''),
                 'aapt2':program('fixture-aapt','print("test.fixture")'),
                 'apksigner':program('fixture-signer','''import sys, pathlib, shutil
 p=pathlib.Path(__file__).with_name('uses')
 if sys.argv[1]=='sign':
     with p.open('a') as f: f.write('used\\n')
-    assert sys.argv[3].endswith('keystore') and '--out' in sys.argv
+    assert pathlib.Path(sys.argv[3]).read_text()=='private-fixture-marker' and '--out' in sys.argv
     shutil.copyfile(sys.argv[-1],sys.argv[sys.argv.index('--out')+1])
     with open(sys.argv[sys.argv.index('--out')+1],'ab') as f: f.write(b'fixture-signed')
-else: print('Signer #1 certificate SHA-256 digest: '+'a'*64)
-''')}
+else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
+'''.replace('FINGERPRINT',fingerprint))}
         for field in ('keystore','store_password_file','key_password_file'):
             config[field]=str(save(self.worker/field,'private-fixture-marker'))
         self.policy=save(self.worker/'identity.json',canonical(config))
@@ -140,7 +146,85 @@ else: print('Signer #1 certificate SHA-256 digest: '+'a'*64)
         with self.assertRaises(ValueError): self.call()
         self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(),('failed',None))
         with self.assertRaises(ValueError): self.call()
+        self.assertFalse((self.worker/'uses').exists())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_public_cert_pass_still_checks_signed_output(self):
+        cfg=json.loads(self.policy.read_bytes()); tool=Path(cfg['apksigner'])
+        tool.write_text(tool.read_text().replace(cfg['cert_sha256'],'0'*64))
+        with self.assertRaises(ValueError): self.call()
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
+        self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(),('failed',None))
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_failed_first_audit_preserves_one_dispatch(self):
+        self.db.execute("CREATE TRIGGER deny BEFORE INSERT ON events WHEN NEW.action='request' BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        with self.assertRaises(sqlite3.DatabaseError): self.call()
+        self.assertEqual(self.calls,0)
+        self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(),('approved',))
+        self.db.execute('DROP TRIGGER deny'); self.call(); self.call()
+        self.assertEqual(self.calls,1); self.assertEqual((self.worker/'uses').read_text(),'used\n')
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_expired_or_revoked_receipt_only(self):
+        rid=self.spec['id']
+        self.db.execute("CREATE TRIGGER interrupt BEFORE UPDATE OF output ON grants BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        with self.assertRaises(sqlite3.DatabaseError): self.call()
+        self.db.execute('DROP TRIGGER interrupt')
+        with patch('common.time.time',return_value=self.spec['expires']+1):
+            with self.assertRaises(ValueError): self.call()
+            receipt=host.reconcile(self.db,self.host,rid,self.dial)
+            self.assertEqual(receipt,{'state':'signed','sha256':digest(self.worker/'outputs'/rid)})
+            self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(),('peer_signed',None))
+            with self.assertRaises(ValueError): host.release_authority(self.host,self.db,rid,self.ctx)
+        self.db.execute('UPDATE grants SET revoked=1'); self.policy.unlink()
+        # Historical journal does not need live signing material or an enabled route.
+        save(self.host/'routes.json','[]')
+        self.assertEqual(receipt,host.reconcile(self.db,self.host,rid,self.dial))
+        with self.assertRaises(ValueError): self.call()
+        self.assertEqual((self.worker/'uses').read_text(),'used\n')
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_worker_historical_receipt_is_metadata_only(self):
+        # Seed an already expired historical worker record; do not rely on the host's clock.
+        expired = {**self.spec, 'expires': 1}
+        sha = '8' * 64
+        with sqlite3.connect(self.worker/'audit.sqlite') as db:
+            db.execute('CREATE TABLE receipts(id TEXT PRIMARY KEY, spec TEXT, state TEXT, sha TEXT)')
+            db.execute('INSERT INTO receipts VALUES(?,?,?,?)',(expired['id'],canonical(expired),'signed',sha))
+        for mode in ('receipt','sign','lookup'):
+            src=io.BytesIO(canonical({'mode':mode,'size':0,'grant':expired}).encode()+b'\n')
+            dst=io.BytesIO()
+            if mode == 'receipt':
+                worker.serve(self.worker,src,dst)
+                self.assertEqual(json.loads(dst.getvalue()),{'state':'signed','sha256':sha})
+            else:
+                with self.assertRaises(ValueError): worker.serve(self.worker,src,dst)
+                self.assertEqual(dst.getvalue(),b'')
+        self.assertFalse((self.worker/'uses').exists())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_ios_pre_adapter_exits_all_lock_once(self):
+        self.spec.update(platform='ios'); cfg={**json.loads(self.policy.read_bytes()),'platform':'ios'}
+        data=self.candidate.read_bytes()
+        for n,case in enumerate(('digest','disconnect','expiry','rotation','lock_failure')):
+            with self.subTest(case=case):
+                self.spec['id']=format(n+10,'032x'); save(self.policy,canonical(cfg))
+                msg=canonical({'grant':self.spec,'mode':'sign','size':len(data)}).encode()+b'\n'
+                src=io.BytesIO(msg+(b'X'*len(data) if case=='digest' else data)+(b'' if case=='disconnect' else b'commit\n'))
+                class Reply(io.BytesIO):
+                    def flush(inner):
+                        if case=='rotation': save(self.policy,canonical({**cfg,'version':'changed'}))
+                response=Reply()
+                def fake_sign(_policy,_candidate,signed,_tmp): save(signed,'synthetic')
+                clock=[self.spec['expires']-1,self.spec['expires']+1] if case=='expiry' else None
+                from contextlib import nullcontext
+                with patch('worker.lock_keychain',side_effect=ValueError if case=='lock_failure' else None) as lock, \
+                     (patch('common.time.time',side_effect=clock) if clock else nullcontext()), self.assertRaises(ValueError):
+                    worker.serve(self.worker,src,response,{'ios':fake_sign})
+                lock.assert_called_once_with(cfg,self.worker)
+                self.assertNotIn(b'sha256',response.getvalue())
+                self.assertNotEqual(worker.receipt(self.worker,self.spec)['state'],'signed')
 
     def test_unsafe_archive_members_are_refused(self):
         for name,mode in [('../other',0),('/other',0),('ok/link',0o120777),('a\\b',0),('x/Foo',0)]:
@@ -152,7 +236,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'a'*64)
 
 
 class DeviceArchive(unittest.TestCase):
-    def test_nested_signatures_and_lock_even_on_denial(self):
+    def test_nested_signatures_and_entitlement_denial(self):
         import datetime
         cert=b'synthetic-cert'; ident='test.fixture'; team='FIXTURE'; ent={'application-identifier':team+'.'+ident,'com.apple.developer.team-identifier':team}
         profile={'DeveloperCertificates':[cert],'TeamIdentifier':[team],'Platform':['iOS'],
@@ -178,14 +262,13 @@ class DeviceArchive(unittest.TestCase):
                 return b''
             with patch('platforms.tool',tools):
                 scratch=directory(tmp,'work'); out=tmp/'out.zip'; platforms.ios(c,src,out,scratch)
-                self.assertEqual([Path(a[-1]).name for a in calls if '--sign' in a],['Game.framework','Game.app']); self.assertIn('lock-keychain',calls[-1]); self.assertIn('--deep',sum(calls,[]))
+                self.assertEqual([Path(a[-1]).name for a in calls if '--sign' in a],['Game.framework','Game.app']); self.assertIn('--deep',sum(calls,[]))
                 with zipfile.ZipFile(out) as z:self.assertIn(app+'embedded.mobileprovision',z.namelist())
                 profile['Entitlements']={}
                 with self.assertRaises(KeyError):platforms.ios(c,src,tmp/'refused',directory(tmp,'refused-work'))
-                self.assertIn('lock-keychain',calls[-1]); self.assertFalse((tmp/'refused').exists())
+                self.assertFalse((tmp/'refused').exists())
                 with zipfile.ZipFile(src,'a') as z:z.writestr(app+'unknown',binary(6,2))
                 with self.assertRaises(ValueError):platforms.ios(c,src,tmp/'refused',directory(tmp,'bad-target'))
-                self.assertIn('lock-keychain',calls[-1])
 
 
 if __name__=='__main__':

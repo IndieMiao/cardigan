@@ -1,8 +1,11 @@
+import { Readable } from "node:stream";
 import type { Run } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { authenticate } from "./auth.js";
+import { startMcpServer } from "./server.js";
 import {
+  acceptingVerifierFor,
   project_id,
   seedProject,
   serverCard,
@@ -112,6 +115,57 @@ test("request has no selector beyond platform; host release needs the same runni
       platform: "ios",
       worker_uid: 42,
     });
+    const bytes = Buffer.from([0, 0xf1, 2]);
+    const openArtifact = vi.fn(async () => ({
+      size: bytes.length,
+      sha256: "a".repeat(64),
+      stream: Readable.from([bytes]),
+    }));
+    const server = await startMcpServer({
+      store,
+      openMobileArtifact: openArtifact,
+      deliveryVerifier: acceptingVerifierFor,
+      acknowledgeRuns: false,
+      log: () => {},
+    });
+    try {
+      const url = `${server.url}?mobile_artifact=${"1".repeat(32)}&platform=ios`;
+      const headers = { Authorization: `Bearer ${issued.token}` };
+      const ok = await fetch(url, { headers });
+      expect(ok.status).toBe(200);
+      expect(Buffer.from(await ok.arrayBuffer())).toEqual(bytes);
+      expect(ok.headers.get("cache-control")).toContain("no-store");
+      expect((await fetch(url)).status).toBe(401);
+      expect((await fetch(`${url}&path=other`, { headers })).status).toBe(404);
+      expect((await fetch(url, { headers, method: "POST" })).status).toBe(404);
+      expect(
+        (
+          await fetch(url, {
+            headers: { ...headers, Origin: "https://invalid.example" },
+          })
+        ).status,
+      ).toBe(404);
+      const restricted = store.issueToken({
+        project_id,
+        assignment_id: a.id,
+        role: { role_version: 1, allowed_tools: ["whoami"] },
+      });
+      expect(
+        (
+          await fetch(url, {
+            headers: { Authorization: `Bearer ${restricted.token}` },
+          })
+        ).status,
+      ).toBe(404);
+      store.uow.run((tx) =>
+        tx.runs.put(project_id, { ...r, status: "completed" }),
+      );
+      expect((await fetch(url, { headers })).status).toBe(404);
+      expect(openArtifact).toHaveBeenCalledOnce();
+      store.uow.run((tx) => tx.runs.put(project_id, r));
+    } finally {
+      await server.close();
+    }
     const publication = r.launch_publication;
     if (!publication) throw new Error("missing fixture");
     for (const patch of [

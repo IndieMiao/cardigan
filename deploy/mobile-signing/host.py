@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 import subprocess
+import stat
+from contextlib import contextmanager
 import sys
 import tempfile
 
@@ -15,7 +17,20 @@ def ledger(root):
       (id TEXT PRIMARY KEY, scope TEXT UNIQUE NOT NULL, spec TEXT NOT NULL,
        state TEXT NOT NULL, output TEXT, revoked INTEGER NOT NULL DEFAULT 0)''')
     db.execute('CREATE TABLE IF NOT EXISTS events (at INTEGER, scope TEXT, request TEXT, action TEXT)')
+    db.execute('CREATE TABLE IF NOT EXISTS dispatch_peer (id TEXT PRIMARY KEY, peer TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS observed (id TEXT PRIMARY KEY, state TEXT NOT NULL, sha TEXT)')
     return db
+
+
+@contextmanager
+def transaction(db):
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        yield
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def event(db, ctx, rid, action):
@@ -81,7 +96,7 @@ def request(root, db, identity, fence, dial=connect):
         require(row)
         s, state = json.loads(row[0]), row[1]
         rid = s['id']
-        require(state in ('approved','pending','signed'))
+        require(state in ('approved','pending','peer_signed','signed'))
         manifest(s)
         peer = route(root,s)
 
@@ -91,8 +106,11 @@ def request(root, db, identity, fence, dial=connect):
             manifest(s)
 
         # A durable claim before contacting the peer. A lost reply permits lookup only.
-        fresh = db.execute("UPDATE grants SET state='pending' WHERE id=? AND NOT revoked AND state='approved'", (rid,)).rowcount == 1
-        event(db, ctx, rid, 'request' if fresh else 'lookup')
+        with transaction(db):
+            fresh = db.execute("UPDATE grants SET state='pending' WHERE id=? AND NOT revoked AND state='approved'", (rid,)).rowcount == 1
+            if fresh:
+                db.execute('INSERT INTO dispatch_peer VALUES(?,?)', (rid,peer))
+            event(db, ctx, rid, 'request' if fresh else 'lookup')
         output = directory(root,'outputs') / rid
         if state == 'signed':
             fence()
@@ -131,7 +149,7 @@ def request(root, db, identity, fence, dial=connect):
                 persist(received,output)
                 db.execute('BEGIN IMMEDIATE')
                 try:
-                    require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','signed')",(sha,rid)).rowcount == 1)
+                    require(db.execute("UPDATE grants SET state='signed',output=? WHERE id=? AND NOT revoked AND state IN ('pending','peer_signed','signed')",(sha,rid)).rowcount == 1)
                     event(db,ctx,rid,'signed')
                     db.commit()
                 except BaseException:
@@ -158,6 +176,53 @@ def checked_output(db,rid,output):
     return sha
 
 
+def reconcile(db, root, rid, dial=connect):
+    # Operator-only, exact dispatched peer and grant. No live Run, key use or bytes.
+    row = db.execute('SELECT spec,peer FROM grants JOIN dispatch_peer USING(id) WHERE id=?',(rid,)).fetchone()
+    require(row)
+    spec, peer = json.loads(row[0]), row[1]
+    manifest(spec, live=False)
+    event(db, scope(spec), rid, 'check_receipt')
+    with dial(root, peer) as p:
+        send(p.stdin, canonical({'mode':'receipt','grant':spec,'size':0}).encode())
+        p.stdin.close()
+        response = json.loads(line(p.stdout))
+        require(not p.stdout.read(1) and p.wait(timeout=10)==0)
+    state, sha = response['state'], response['sha256']
+    require((state == 'signed' and re.fullmatch('[0-9a-f]{64}',sha)) or
+            (state in ('pending','failed') and sha is None))
+    with transaction(db):
+        if state != 'pending':
+            db.execute("UPDATE grants SET state=? WHERE id=? AND state='pending'",
+                       ('peer_signed' if state=='signed' else 'failed', rid))
+        db.execute('INSERT OR REPLACE INTO observed VALUES(?,?,?)',(rid,state,sha))
+        event(db,scope(spec),rid,'receipt_'+state)
+    return response
+
+
+def release_authority(root, db, rid, identity=None):
+    row = db.execute("SELECT spec,output FROM grants WHERE id=? AND state='signed' AND NOT revoked",(rid,)).fetchone()
+    require(row)
+    spec = json.loads(row[0]); manifest(spec); route(root,spec)
+    if identity is not None:
+        require(set(identity)==set(SCOPE) and scope(identity)==scope(spec))
+    return row[1]
+
+
+def permit(root, db, identity, rid, file, fence):
+    # The web host passes its open fd, then serves that very inode from offset zero.
+    # Only the web host authenticates the Run; a receipt handle alone authorizes nothing.
+    sha = release_authority(root,db,rid,identity)
+    st = os.fstat(file.fileno())
+    require(stat.S_ISREG(st.st_mode) and st.st_uid==os.getuid() and not st.st_mode & 0o077)
+    require(transfer(file,None,st.st_size)==sha)
+    fence()
+    with transaction(db):
+        require(release_authority(root,db,rid,identity)==sha)
+        event(db,scope(identity),rid,'read_output')
+    return sha
+
+
 def staged(root, name):
     require(re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}',name))
     return private_file(private_dir(root/'incoming')/name)
@@ -168,12 +233,19 @@ def main():
     root = private_dir(Path(sys.argv[1]).resolve(strict=True))
     cmd = sys.argv[2]
     db = ledger(root)
+    def fence():
+        send(sys.stdout.buffer,b'ready')
+        require(line(sys.stdin.buffer)==b'commit')
     if cmd == 'request':
-        def fence():
-            send(sys.stdout.buffer,b'ready')
-            require(line(sys.stdin.buffer)==b'commit')
         rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence)
         print(rid,sha)
+    elif cmd == 'permit':
+        rid=sys.argv[3]
+        with os.fdopen(3,'rb') as f:
+            sha=permit(root,db,json.loads(line(sys.stdin.buffer)),rid,f,fence)
+        print(rid,sha)
+    elif cmd == 'reconcile':
+        print(canonical(reconcile(db,root,sys.argv[3])))
     elif cmd == 'register':
         register(root,db,config(staged(root,sys.argv[3])),staged(root,sys.argv[4]))
     elif cmd == 'approve':
@@ -181,7 +253,9 @@ def main():
     elif cmd == 'show':
         row=db.execute('SELECT spec,state,output,revoked FROM grants WHERE id=?',(sys.argv[3],)).fetchone()
         require(row)
-        print(canonical({'candidate':json.loads(row[0]),'state':row[1],'output':row[2],'revoked':bool(row[3])}))
+        obs=db.execute('SELECT state,sha FROM observed WHERE id=?',(sys.argv[3],)).fetchone()
+        print(canonical({'candidate':json.loads(row[0]),'state':row[1],'output':row[2],'revoked':bool(row[3]),
+                         'worker_receipt':{'state':obs[0],'sha256':obs[1]} if obs else None}))
     elif cmd == 'revoke':
         rid=sys.argv[3]
         require(db.execute('UPDATE grants SET revoked=1 WHERE id=?',(rid,)).rowcount == 1)
@@ -190,7 +264,7 @@ def main():
         rid=sys.argv[3]
         require(re.fullmatch('[0-9a-f]{32}',rid))
         path=root/'outputs'/rid
-        checked_output(db,rid,path)
+        require(checked_output(db,rid,path)==release_authority(root,db,rid))
         with path.open('rb') as src:
             transfer(src, sys.stdout.buffer, path.stat().st_size)
     else:

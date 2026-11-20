@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import { z } from "zod";
 import { ToolError } from "../errors.js";
 import { defineTool, type ToolContext } from "./types.js";
@@ -12,6 +13,11 @@ export interface SigningScope {
   platform: "android" | "ios";
 }
 export interface MobileSigningOptions {
+  openMobileArtifact?: (
+    scope: SigningScope,
+    id: string,
+    current: () => void,
+  ) => Promise<{ size: number; sha256: string; stream: Readable }>;
   signMobile?: (scope: SigningScope, current: () => void) => Promise<unknown>;
 }
 const denied = () => new ToolError("unauthorized", "当前任务未获移动签名授权");
@@ -77,26 +83,33 @@ function signingScope(
     };
   });
 }
+export function mobileAccess(
+  ctx: ToolContext,
+  platform: SigningScope["platform"],
+) {
+  const scope = signingScope(ctx, platform);
+  const current = () => {
+    const fresh = signingScope(ctx, platform);
+    if (
+      fresh.run !== scope.run ||
+      fresh.worker_uid !== scope.worker_uid ||
+      fresh.machine !== scope.machine ||
+      fresh.card !== scope.card
+    )
+      throw denied();
+  };
+  return { scope, current };
+}
 export function mobileSigningTool(options: MobileSigningOptions) {
   return defineTool({
     name: "request_mobile_signature",
     description:
-      "Request the one human-approved APK or iOS archive for the current Run. Returns a local receipt only; never publishes.",
+      "Request the one human-approved APK or iOS archive for the current Run. Returns a verified receipt and a read-only download for this Run; never publishes.",
     input: z.object({ platform: z.enum(["android", "ios"]) }).strict(),
     handler: async ({ platform }, ctx) => {
       if (!options.signMobile)
         throw new ToolError("illegal_transition", "移动签名未启用");
-      const scope = signingScope(ctx, platform);
-      const current = () => {
-        const fresh = signingScope(ctx, platform);
-        if (
-          fresh.run !== scope.run ||
-          fresh.worker_uid !== scope.worker_uid ||
-          fresh.machine !== scope.machine ||
-          fresh.card !== scope.card
-        )
-          throw denied();
-      };
+      const { scope, current } = mobileAccess(ctx, platform);
       try {
         const result = await options.signMobile(scope, current);
         current();
