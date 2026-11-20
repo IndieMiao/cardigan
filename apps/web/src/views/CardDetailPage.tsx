@@ -442,6 +442,7 @@ function CardContent({
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
   const [selectedSection, setSelectedSection] = useState<string>();
+  const [workRevision, setWorkRevision] = useState(0);
   const timelineRoot = useCallback(
     () =>
       inDrawer
@@ -462,7 +463,7 @@ function CardContent({
   );
   const panelData = useResource(
     panelLoad,
-    revision,
+    revision + (section === "work" ? workRevision : 0),
     !!head.overview && section !== "overview",
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
@@ -816,7 +817,8 @@ function CardContent({
                 client={client}
                 changed={() => {
                   reload();
-                  if (head.overview) panelData.reload();
+                  // The write may finish after a switch to a different panel.
+                  if (head.overview) setWorkRevision((value) => value + 1);
                 }}
                 detail={detail}
                 projectId={projectId}
@@ -880,7 +882,7 @@ function CardContent({
             ref={scroll}
             aria-label="时间线记录"
           >
-            {(!head.overview || (section === "timeline" && panelReady)) && (
+            {(!head.overview || section === "timeline") && (
               <Timeline
                 projectId={projectId}
                 cardId={cardId}
@@ -900,10 +902,7 @@ function CardContent({
                   : detail.timeline_next_cursor !== null
               }
               status={pager}
-              ready={
-                pagerReady &&
-                (!head.overview || (section === "timeline" && panelReady))
-              }
+              ready={pagerReady && (!head.overview || section === "timeline")}
               scrollRoot={timelineRoot}
               onLoad={loadOlder}
             />

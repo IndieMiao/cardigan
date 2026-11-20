@@ -702,6 +702,12 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
   // thumbnail which now appears before it in the newest-first timeline.
   const commentRow = page.container.querySelector(`[id="entry-${comment.id}"]`);
   if (!commentRow) throw new Error("Missing attachment comment");
+  // The comment is readable before the timeline attachment lookup finishes.
+  await waitFor(() =>
+    expect(
+      commentRow.querySelector(`img[src$="/${current.id}"]`),
+    ).not.toBeNull(),
+  );
   const images = [...commentRow.querySelectorAll("img")];
   expect(
     images.some((i) => i.getAttribute("src")?.endsWith(`/${current.id}`)),

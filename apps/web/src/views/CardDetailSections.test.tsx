@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { selectCardTab } from "../testing/card-tabs.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
@@ -7,9 +15,8 @@ import { CardDetailPage } from "./CardDetailPage.js";
 
 afterEach(cleanup);
 
-test("renders the head without waiting on panels, then requests just the selected panel", async () => {
-  const full = cardDetail();
-  const head = {
+function overview(full = cardDetail()) {
+  return {
     ...full,
     work_items: [],
     reviews: [],
@@ -32,7 +39,11 @@ test("renders the head without waiting on panels, then requests just the selecte
       conclusion_reviews: [],
     },
   };
-  const card = vi.fn(async () => head);
+}
+
+test("renders the head without waiting on panels, then requests just the selected panel", async () => {
+  const full = cardDetail();
+  const card = vi.fn(async () => overview(full));
   const cardPanel = vi.fn(
     async (_project: string, _id: string, panel: string) =>
       panel === "attachments"
@@ -65,4 +76,83 @@ test("renders the head without waiting on panels, then requests just the selecte
     "work",
     "attachments",
   ]);
+});
+
+test("finishing a work update after switching tabs leaves the attachments visible", async () => {
+  const full = cardDetail();
+  const pending = Promise.withResolvers<void>();
+  const setManualAssign = vi.fn(() => pending.promise);
+  const cardPanel = vi.fn(async (_p: string, _id: string, section: string) =>
+    section === "work"
+      ? { work_items: full.work_items }
+      : { attachments: full.attachments },
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => overview(full),
+        cardPanel,
+        setManualAssign,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  await selectCardTab(/^工作项/);
+  const summary = (await screen.findByText("W-1")).closest("summary");
+  const row = summary?.closest("details");
+  if (!row || !summary) throw new Error("Missing work item");
+  fireEvent.click(summary);
+  fireEvent.click(within(row).getByRole("checkbox"));
+  expect(setManualAssign).toHaveBeenCalledOnce();
+  await selectCardTab(/^附件/);
+  await waitFor(() =>
+    expect(document.getElementById("attachment-F-1")).not.toBeNull(),
+  );
+  await act(async () => pending.resolve());
+  expect(
+    screen.getByRole("tab", { name: /^附件/, selected: true }),
+  ).toBeTruthy();
+  expect(document.getElementById("attachment-F-1")).not.toBeNull();
+  expect(cardPanel.mock.calls.map((call) => call[2])).toEqual([
+    "work",
+    "attachments",
+  ]);
+  await selectCardTab(/^工作项/);
+  await screen.findByText("已完成 0/2");
+  expect(cardPanel.mock.calls.map((call) => call[2])).toEqual([
+    "work",
+    "attachments",
+    "work",
+  ]);
+});
+
+test("a delayed or failed timeline lookup leaves the first page readable and retry fills in attachments", async () => {
+  const full = cardDetail();
+  const pending = Promise.withResolvers<{
+    attachments: typeof full.attachments;
+  }>();
+  const cardPanel = vi
+    .fn()
+    .mockReturnValueOnce(pending.promise)
+    .mockResolvedValue({ attachments: full.attachments });
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => overview(full), cardPanel })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  await selectCardTab(/^时间线/);
+  const comment = () => document.getElementById("entry-C-1#2");
+  expect(comment()?.textContent).toContain(full.timeline[0]?.body);
+  expect(comment()?.querySelector("img")).toBeNull();
+  await act(async () => pending.reject(new Error("附件暂时不可用")));
+  const retry = await screen.findByRole("button", { name: "重试" });
+  expect(comment()?.textContent).toContain(full.timeline[0]?.body);
+  fireEvent.click(retry);
+  await waitFor(() =>
+    expect(comment()?.querySelector('img[src$="/F-1"]')).not.toBeNull(),
+  );
+  expect(cardPanel).toHaveBeenCalledTimes(2);
 });
