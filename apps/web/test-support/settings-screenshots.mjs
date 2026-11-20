@@ -218,7 +218,7 @@ try {
         "!!document.querySelector('[role=switch], .settings-layout input[type=checkbox]')",
       );
       if (panels) {
-        const drawer = async (name, trigger) => {
+        const drawer = async (name, trigger, end = false) => {
           await run((text) => {
             const target = [
               ...document.querySelectorAll("main button, main a"),
@@ -302,6 +302,22 @@ try {
             resolve(output, `${name}-${width}-${theme}.png`),
             Buffer.from(shot.data, "base64"),
           );
+          if (end) {
+            // C-512: a long read-only drawer; its last section, scrolled in.
+            await run(() => {
+              const d = document.querySelector("[role=dialog]");
+              const sections = d.querySelectorAll("section");
+              sections[sections.length - 1]?.scrollIntoView({ block: "end" });
+            });
+            await settle();
+            const bottom = await send("Page.captureScreenshot", {
+              format: "png",
+            });
+            await writeFile(
+              resolve(output, `${name}-end-${width}-${theme}.png`),
+              Buffer.from(bottom.data, "base64"),
+            );
+          }
           for (const hit of report.scenes[`${name}-${width}-${theme}`].hits)
             assert(
               hit.hit,
@@ -359,6 +375,20 @@ try {
         await until("document.body.textContent.includes('孙悟空')");
         await capture("employees", width, theme);
         if (isNew) await drawer("employee-drawer", "选用孙悟空");
+        // C-512: the read-only machine panel (absent before C-512).
+        const machines = await evaluate(
+          "[...document.querySelectorAll(\"nav[aria-label='设置分栏'] button\")].some((b) => b.textContent.trim() === '机器')",
+        );
+        if (machines) {
+          await click("机器");
+          await until(
+            "!!document.querySelector('table[aria-label=\"机器列表\"]') && document.body.textContent.includes('Mac mini')",
+          );
+          await blur();
+          await capture("machines", width, theme);
+          await drawer("machine-drawer", "本机", true);
+          await drawer("machine-failed-drawer", "构建机", true);
+        }
         continue;
       }
       await capture("preferences", width, theme);

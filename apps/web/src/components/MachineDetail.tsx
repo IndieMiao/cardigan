@@ -11,7 +11,7 @@ import { CardDetailLayout } from "./layout/CardDetailLayout.js";
 
 type AgentCapacity = ExecutionCapacity["agents"][number];
 
-const CAPABILITY_TAGS: Readonly<
+export const CAPABILITY_TAGS: Readonly<
   Record<
     CapabilityState,
     { readonly status: string; readonly label: string; readonly order: number }

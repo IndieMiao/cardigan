@@ -28,6 +28,7 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { MachinesSettings } from "./MachinesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -45,10 +46,13 @@ type SettingsTab =
   | "roles"
   | "templates"
   | "employees"
+  | "machines"
   | "capacity";
 /** Panels a link may open (Needs You and the save-failure notice link here). */
 const routeTab = (tab: string | undefined): SettingsTab | undefined =>
-  tab === "authorization" || tab === "capacity" ? tab : undefined;
+  tab === "authorization" || tab === "capacity" || tab === "machines"
+    ? tab
+    : undefined;
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -161,6 +165,12 @@ export function SettingsPage({
           >
             {employeeCopy.tab}
           </SettingsNavItem>
+          <SettingsNavItem
+            current={tab === "machines"}
+            onClick={() => setTab("machines")}
+          >
+            机器
+          </SettingsNavItem>
         </>
       }
     >
@@ -191,6 +201,14 @@ export function SettingsPage({
           client={client}
           projectId={projectId}
           initialRole={employeeRole}
+          revision={revision}
+        />
+      )}
+      {tab === "machines" && (
+        <MachinesSettings
+          key={projectId}
+          client={client}
+          projectId={projectId}
           revision={revision}
         />
       )}

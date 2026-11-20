@@ -6,6 +6,7 @@ import type {
   RoleListView,
   TemplateVersion,
 } from "../src/api.js";
+import { fixtureMachines } from "../src/testing/machines-fixture.js";
 
 // C-479: synthetic data for the capacity, roles, templates and employee
 // panels — two Agent machines, one merge-check target, three roles, three
@@ -165,6 +166,13 @@ const templates: TemplateVersion[] = [
 
 export const settingsPanels: Partial<CardiganClient> = {
   executionCapacity: async () => capacity,
+  // C-512: three synthetic machines (see machines-fixture.ts).
+  machines: async () => ({ machines: fixtureMachines }),
+  machine: async (_p, id) => {
+    const machine = fixtureMachines.find((m) => m.id === id);
+    if (!machine) throw new Error(`合成数据中没有机器 ${id}`);
+    return { machine };
+  },
   roles: async () => roles,
   role: async (_p, roleId) => {
     const role = roleId === "coder" ? coder : { ...coder, role_id: roleId };

@@ -1,9 +1,11 @@
 import type {
   ExecutionMachine,
+  MachineBindingView,
   MachineCapabilityView,
   MachineRequirements,
   MachineSelection,
   MachineSelectionCandidate,
+  MachineView,
 } from "./api.js";
 import { STATUS_LABELS } from "./status.js";
 
@@ -132,4 +134,118 @@ export function selectionSummary(
   );
   const reasons = chosen ? candidateReasons(chosen) : [];
   return `${machine}（自动选择${reasons.length ? `：${reasons.join("，")}` : ""}）`;
+}
+
+/** C-512: one check record of a machine binding, as the settings page shows it. */
+export interface MachineCheckRow {
+  readonly key: string;
+  readonly kind: string;
+  readonly status: "passed" | "failed" | "running" | "unknown";
+  readonly label: string;
+  readonly checked_at: string;
+  readonly steps: readonly string[];
+}
+const CHECK_LABELS: Readonly<Record<MachineCheckRow["status"], string>> = {
+  passed: "通过",
+  failed: "失败",
+  running: "检查中",
+  unknown: "未知",
+};
+const checkRow = (
+  key: string,
+  kind: string,
+  status: string,
+  checked_at: string,
+  steps: readonly string[],
+): MachineCheckRow => {
+  const normal =
+    status === "checking" || status === "running"
+      ? "running"
+      : status === "passed" || status === "failed"
+        ? status
+        : "unknown";
+  return {
+    key,
+    kind,
+    status: normal,
+    label: CHECK_LABELS[normal],
+    checked_at,
+    steps,
+  };
+};
+const time = (value: string) => {
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+};
+
+/**
+ * The check records of one project binding, newest first: the machine health
+ * check, the worker onboarding check and the latest explicitly requested one.
+ * A requested check already shown as the health or worker record is not
+ * repeated.
+ */
+export function bindingChecks(binding: MachineBindingView): MachineCheckRow[] {
+  const rows: MachineCheckRow[] = [];
+  const health = binding.machine_check;
+  if (health)
+    rows.push(
+      checkRow(
+        "machine",
+        "机器检查",
+        health.status,
+        health.checked_at,
+        health.blockers.map(healthBlockerLabel),
+      ),
+    );
+  const worker = binding.worker_check;
+  if (worker)
+    rows.push(
+      checkRow(
+        "worker",
+        "接入检查",
+        worker.status,
+        worker.checked_at,
+        worker.failed_steps,
+      ),
+    );
+  const requested = binding.last_requested_check;
+  if (requested) {
+    const row = checkRow(
+      "requested",
+      requested.kind === "worker" ? "手动接入检查" : "手动机器检查",
+      requested.status,
+      requested.checked_at,
+      requested.failed_steps,
+    );
+    if (
+      !rows.some(
+        (r) => r.checked_at === row.checked_at && r.status === row.status,
+      )
+    )
+      rows.push(row);
+  }
+  return rows.sort((a, b) => time(b.checked_at) - time(a.checked_at));
+}
+
+/** The binding the summary follows: this project's, else the first one. */
+export function primaryBinding(
+  machine: MachineView,
+): MachineBindingView | undefined {
+  return machine.bindings.find((b) => b.is_current) ?? machine.bindings[0];
+}
+
+/** The newest check of the primary binding, if any was ever recorded. */
+export function latestMachineCheck(
+  machine: MachineView,
+): MachineCheckRow | undefined {
+  const binding = primaryBinding(machine);
+  return binding ? bindingChecks(binding)[0] : undefined;
+}
+
+/** Runs in flight on the machine across every project it serves. */
+export function machineRunning(machine: MachineView): number {
+  return machine.bindings.reduce(
+    (sum, b) => sum + b.assignments.reduce((n, a) => n + a.runs.length, 0),
+    0,
+  );
 }
