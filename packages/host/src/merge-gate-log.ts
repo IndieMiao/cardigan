@@ -2,11 +2,10 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { BoundedOutput } from "./bounded-check-output.js";
+import { BoundedOutput, outputScanState } from "./bounded-check-output.js";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
 import { pruneCheckLogs, saveCheckLog } from "./check-log-storage.js";
 import { checkInfraFlaky, checkTimedOutOnly } from "./merge-check-timeout.js";
-import { QuotedLogField } from "./quoted-log-field.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 import {
   bindWorkerCheckout,
@@ -26,12 +25,13 @@ function normalizeOutput(value: string, github = false): string {
     /[\p{Cc}\p{Cf}]/gu,
     (character) => ("\n\r\t".includes(character) ? character : ""),
   );
-  return github
-    ? normalized.replace(
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z /gmu,
-        "",
-      )
-    : normalized;
+  return github ? stripGithubTimestamp(normalized) : normalized;
+}
+function stripGithubTimestamp(line: string) {
+  return line.replace(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z /gmu,
+    "",
+  );
 }
 function redactor(
   env: Readonly<Record<string, string>>,
@@ -79,11 +79,11 @@ function redactor(
         .replace(/(\b(?:bearer|basic)[ \t]+)\S+/giu, `$1${MASK}`)
         // An unquoted value with spaces has no trustworthy end delimiter.
         .replace(
-          /((?:["'](?:[A-Z_][A-Z0-9_]*|password|secret|token|api_key)["'][ \t]*[:=]|\b[A-Z_][A-Z0-9_]*[ \t]*=|\b[A-Z_][A-Z0-9_]+[ \t]*:)[ \t]*)[^\n]*/gu,
+          /((?:["'](?:[A-Z_][A-Z0-9_]*|password|secret|token|api_key)["'][ \t]*[:=]|\b[A-Z_][A-Z0-9_]*[ \t]*=|\b[A-Z_][A-Z0-9_]+[ \t]*:)[^\S\n]*)[^\s][^\n]*/gu,
           `$1${MASK}`,
         )
         .replace(
-          /(\b(?:api[_-]?key|token|password|secret)[ \t]*[:=][ \t]*)[^\n]*/giu,
+          /(\b(?:api[_-]?key|token|password|secret)[ \t]*[:=][^\S\n]*)[^\s][^\n]*/giu,
           `$1${MASK}`,
         )
         .replace(/\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/gu, MASK);
@@ -261,10 +261,8 @@ export async function createMergeCheckLog(input: {
   // Include individual lines of multiline configured values; the summary parser
   // intentionally never retains the surrounding raw block. Mask unconfigured
   // assignment values too (including quoted values containing whitespace).
-  const jobKey =
-    input.failureExcerptBytes !== undefined
-      ? { open: false, field: new QuotedLogField() }
-      : undefined;
+  const jobState =
+    input.failureExcerptBytes !== undefined ? outputScanState() : undefined;
   const fragments = Object.values(input.env ?? {})
     .flatMap((v) => normalizeOutput(v).split(/[\r\n]+/u))
     .filter(Boolean)
@@ -275,9 +273,24 @@ export async function createMergeCheckLog(input: {
   const redactLine = (line: string) =>
     filter
       .redact(line)
-      .replace(/(\b[A-Za-z_]\w*[ \t]*=[ \t]*)[^\n]*/gu, `$1${MASK}`);
+      .replace(/(\b[A-Za-z_]\w*[ \t]*=[^\S\n]*)[^\s][^\n]*/gu, `$1${MASK}`);
   const summarizeLine = (safe: string) =>
     fragmentPattern ? safe.replace(fragmentPattern, MASK) : safe;
+  const stripPrefix = jobState ? stripGithubTimestamp : (line: string) => line;
+  const redactMetadata = (value: string) => {
+    if (!value.includes("\n")) return filter.redact(value);
+    // Execution metadata is not part of a downloaded step stream. Use the
+    // same bounded projector, without inheriting or modifying job state.
+    const buffer = new BoundedOutput(
+      CHECK_OUTPUT_LIMIT,
+      stripPrefix,
+      redactLine,
+      summarizeLine,
+    );
+    buffer.append(value);
+    buffer.seal();
+    return buffer.text();
+  };
   const header = filter.redact(
     `合并检查 ${input.project} / ${input.attempt}\n`,
   );
@@ -305,10 +318,7 @@ export async function createMergeCheckLog(input: {
     resetOutput(name: string) {
       if (!finished) {
         output.delete(name);
-        if (jobKey) {
-          jobKey.open = false;
-          jobKey.field = new QuotedLogField();
-        }
+        if (jobState) Object.assign(jobState, outputScanState());
       }
     },
     append(name: string, text: string) {
@@ -317,11 +327,10 @@ export async function createMergeCheckLog(input: {
       if (!buffer) {
         buffer = new BoundedOutput(
           CHECK_OUTPUT_LIMIT,
-          (line) =>
-            normalizeOutput(line, input.failureExcerptBytes !== undefined),
+          stripPrefix,
           redactLine,
           summarizeLine,
-          jobKey,
+          jobState,
         );
         output.set(name, buffer);
       }
@@ -337,10 +346,10 @@ export async function createMergeCheckLog(input: {
         ...result,
         checks: result.checks.map((c) => ({
           ...c,
-          name: filter.redact(c.name),
+          name: redactMetadata(c.name),
         })),
-        cleanup_errors: result.cleanup_errors.map(filter.redact),
-        ...(result.reason ? { reason: filter.redact(result.reason) } : {}),
+        cleanup_errors: result.cleanup_errors.map(redactMetadata),
+        ...(result.reason ? { reason: redactMetadata(result.reason) } : {}),
       };
       const failed = result.checks.find(
         (c) => !["passed", "not_run", "skipped"].includes(c.status),
@@ -361,10 +370,10 @@ export async function createMergeCheckLog(input: {
               filter.redact(
                 [
                   failed
-                    ? `检查 ${failed.name} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
+                    ? `检查 ${redactMetadata(failed.name)} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
                     : result.failedGithubStep
                       ? `检查 ${result.failedGithubStep} 未通过`
-                      : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${result.reason ?? result.status}`,
+                      : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${safe.reason ?? result.status}`,
                   ...failures,
                 ]
                   .join("\n")
@@ -445,7 +454,7 @@ export async function createMergeCheckLog(input: {
           );
           for (const name of names) {
             await handle.writeFile(
-              `\n=== ${filter.redact(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
+              `\n=== ${redactMetadata(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
             );
           }
           if (result.status === "passed")

@@ -86,7 +86,11 @@ test.each(["file_link", "directory_link", "hardlink", "mode", "missing"])(
   },
 );
 
-test("server reader port returns only host-redacted synthetic credentials through the registered MCP tool", async () => {
+test.each([false, true])(
+  "server reader port returns only host-redacted synthetic credentials through the registered MCP tool (reformatted: %s)",
+  verifyPublishedLog,
+);
+async function verifyPublishedLog(reformatted: boolean) {
   const dir = await mkdtemp(join(tmpdir(), "cg-redacted-port-"));
   roots.push(dir);
   const secret = "fictional-env-value-942874";
@@ -100,7 +104,11 @@ test("server reader port returns only host-redacted synthetic credentials throug
     },
     failureExcerptBytes: 4096,
   });
-  const runnerOnly = `\npassword = "fake first line\nFAIL private-continuation\n##[error] private-continuation"\n`;
+  const runnerOnly = `\npassword =${reformatted ? "\r\n  " : " "}"fake first line\nFAIL private-continuation\n##[error] private-continuation"\n`;
+  if (reformatted) {
+    writer.append("unit", ".".repeat(132000) + "\x1b[");
+    writer.append("unit", "2K\n");
+  } else writer.append("unit", ".".repeat(132000) + "\x1b[2K\n");
   writer.append(
     "unit",
     `FAIL example\nAuthorization: Basic synthetic-basic${runnerOnly}after runner field\nsecond-config-line\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
@@ -228,4 +236,4 @@ test("server reader port returns only host-redacted synthetic credentials throug
   } finally {
     store.close();
   }
-});
+}

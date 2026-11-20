@@ -1,9 +1,18 @@
 import { CheckFailureSummary } from "./check-failure-summary.js";
+import { CheckLogDisplay } from "./check-log-display.js";
 import { lineFragments } from "./check-log-lines.js";
 import { TRUNCATED_OUTPUT } from "./merge-check-timeout.js";
 import { QuotedLogField } from "./quoted-log-field.js";
 
 const MAX_BODY_LINE = 128 * 1024;
+const BLOCK = 8192;
+export function outputScanState() {
+  return {
+    pem: false,
+    field: new QuotedLogField(),
+    display: new CheckLogDisplay(),
+  };
+}
 interface Page {
   text: string;
   weight: number;
@@ -21,92 +30,95 @@ export class BoundedOutput {
   private totalWeight = 0;
   private pending = "";
   private bytes = 0;
-  private oversized = false;
-  private keyCarry = "";
+  private block = "";
+  private firstBlock = true;
+  private masked = false;
   private keyLine = false;
-  private continuedValue = false;
+  private keyCarry = "";
+  private lastHighSurrogate = false;
   incomplete = false;
   constructor(
     private readonly limit: number,
-    private readonly normalize: (s: string) => string,
+    private readonly stripPrefix: (s: string) => string,
     private readonly redact: (s: string) => string,
     summaryRedact: (s: string) => string,
-    private readonly key = { open: false, field: new QuotedLogField() },
+    private readonly stream = outputScanState(),
   ) {
     this.failure = new CheckFailureSummary(summaryRedact);
   }
-  private scanKey(s: string) {
-    for (const m of s.matchAll(
-      /-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----/gu,
-    )) {
-      this.keyLine ||= this.key.open || m[1] === "BEGIN";
-      this.key.open = m[1] === "BEGIN";
+  // Scan *all* visible text in fixed blocks, retaining only a bounded prefix.
+  // A long line and a short line go through exactly the same redaction path.
+  private scan(last: boolean) {
+    const s = this.firstBlock ? this.stripPrefix(this.block) : this.block;
+    this.block = "";
+    const { field } = this.stream;
+    const keep =
+      this.firstBlock && last && !field.active && !/[:=]/u.test(s)
+        ? s.length
+        : field.scan(s);
+    if (!this.masked)
+      this.pending += s.slice(
+        0,
+        Math.min(keep, MAX_BODY_LINE - this.pending.length),
+      );
+    this.masked ||= keep < s.length;
+    this.keyLine ||= this.stream.pem;
+    const joined = this.keyCarry + s;
+    if (joined.includes("-----")) {
+      for (const match of joined.matchAll(
+        /-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----/gu,
+      )) {
+        if (match.index + match[0].length <= this.keyCarry.length) continue;
+        this.stream.pem = match[1] === "BEGIN";
+        this.keyLine ||= this.stream.pem;
+      }
     }
+    this.keyCarry = last ? "" : joined.slice(-96);
+    this.firstBlock = false;
   }
   append(text: string) {
     lineFragments(text, (part, newline) => {
-      this.bytes += Buffer.byteLength(part);
-      // A small overlap catches delimiters split across callbacks even after
-      // the line exceeds the retained prefix.
-      if (part.includes("-") || this.keyCarry) {
-        const scan = this.keyCarry + this.normalize(part);
-        this.scanKey(scan);
-        this.keyCarry = scan.slice(-96);
+      if (part.length) {
+        this.bytes += Buffer.byteLength(part);
+        // A JS producer can split a decoded surrogate pair between callbacks.
+        const first = part.charCodeAt(0),
+          last = part.charCodeAt(part.length - 1);
+        if (this.lastHighSurrogate && first >= 0xdc00 && first <= 0xdfff)
+          this.bytes -= 2;
+        this.lastHighSurrogate = last >= 0xd800 && last <= 0xdbff;
       }
-      const take = Math.min(part.length, MAX_BODY_LINE - this.pending.length);
-      this.pending += part.slice(0, take);
-      if (take < part.length) {
-        if (!this.oversized) {
-          this.oversized = true;
-          this.continuedValue = this.key.field.open;
-          this.scanOversized(this.pending);
+      for (let i = 0; i < part.length; i += BLOCK) {
+        this.block += this.stream.display.clean(part.slice(i, i + BLOCK));
+        if (this.block.length >= BLOCK) {
+          const rest = this.block.slice(BLOCK);
+          this.block = this.block.slice(0, BLOCK);
+          this.scan(false);
+          this.block = rest;
         }
-        for (let i = take; i < part.length; i += MAX_BODY_LINE)
-          this.scanOversized(part.slice(i, i + MAX_BODY_LINE));
       }
       if (newline) this.flush(true);
     });
   }
-  private scanOversized(piece: string) {
-    if (piece.includes("\x1b") || piece.includes("\x9b")) {
-      // Complete color controls are common even on very long CI lines.
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal SGR delimiters
-      piece = piece.replace(/(?:\x1b\[|\x9b)[0-9;:]*m/gu, "");
-      if (piece.includes("\x1b") || piece.includes("\x9b")) {
-        this.key.field.obscure();
-        return;
-      }
-    }
-    this.key.field.scan(this.normalize(piece));
-  }
   private flush(newline: boolean) {
-    const normalized = this.normalize(this.pending);
-    // Strip controls on the reassembled line too: an ANSI escape can itself
-    // be split across two callbacks. Do not replay an incomplete prefix.
-    if (!this.oversized && normalized.includes("-----"))
-      this.scanKey(normalized);
-    if (!this.oversized) {
-      this.continuedValue = this.key.field.open;
-      if (this.continuedValue || /[:=]/u.test(normalized))
-        this.key.field.scan(normalized);
-    }
-    const hidden =
-      this.keyLine ||
-      this.key.open ||
-      this.continuedValue ||
-      this.key.field.open;
-    this.key.field.endLine();
-    const safe = hidden
-      ? "[REDACTED]"
-      : this.oversized
-        ? `[REDACTED] ${TRUNCATED_OUTPUT}`
-        : this.redact(normalized);
-    if (!hidden)
+    this.scan(true);
+    this.stream.field.endLine();
+    const opaqueDisplay = this.stream.display.endLine();
+    const oversized = this.bytes > MAX_BODY_LINE;
+    const prefix = this.keyLine ? "" : this.pending;
+    const safe = oversized
+      ? `[REDACTED] ${TRUNCATED_OUTPUT}`
+      : this.redact(prefix + (this.masked || this.keyLine ? "[REDACTED]" : ""));
+    if (!this.keyLine)
       this.failure.inspect(
-        this.oversized ? normalized : safe,
-        this.oversized || normalized.length > 16384,
+        oversized ? prefix : safe,
+        oversized || this.bytes > 16384,
       );
-    this.incomplete ||= this.oversized || hidden || safe !== normalized;
+    this.incomplete ||=
+      opaqueDisplay ||
+      oversized ||
+      this.masked ||
+      this.keyLine ||
+      safe !== prefix;
     const text = safe + (newline ? "\n" : "");
     const weight = Math.max(
       this.bytes + Number(newline),
@@ -117,8 +129,8 @@ export class BoundedOutput {
     this.page.weight += weight;
     this.pending = this.keyCarry = "";
     this.bytes = 0;
-    this.oversized = false;
-    this.keyLine = false;
+    this.firstBlock = true;
+    this.masked = this.keyLine = this.lastHighSurrogate = false;
   }
   private finishPage() {
     if (!this.page.weight) return;

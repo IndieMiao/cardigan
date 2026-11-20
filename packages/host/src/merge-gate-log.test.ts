@@ -876,3 +876,180 @@ test.each(["'", '"'])(
     expect(saved.summary).toContain("visible after close");
   },
 );
+
+// Cut at syntax boundaries, then compare with a reproducible network partition.
+function partition(text: string, mode: "whole" | "syntax" | "seeded") {
+  if (mode === "whole") return [text];
+  const cuts = new Set<number>([0, text.length]);
+  if (mode === "syntax") {
+    for (const token of [
+      "password",
+      "\r\n",
+      "=",
+      "'",
+      '"',
+      "\\",
+      "\x1b[2K",
+      "\x1b[31m",
+      "\x1b[",
+      "\x07",
+      "\u{e0001}",
+    ]) {
+      for (
+        let i = text.indexOf(token);
+        i >= 0;
+        i = text.indexOf(token, i + token.length)
+      )
+        for (let j = i; j <= i + token.length; j++) cuts.add(j);
+    }
+    for (const n of [131071, 131072, 131073]) if (n < text.length) cuts.add(n);
+  } else {
+    let seed = 1;
+    for (let i = 0; i < text.length; ) {
+      seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+      i += 1 + (seed % 4096);
+      if (i < text.length) cuts.add(i);
+    }
+  }
+  const sorted = [...cuts].sort((a, b) => a - b);
+  return sorted.slice(1).map((n, i) => text.slice(sorted[i], n));
+}
+
+test.each([
+  "inline",
+  "indented",
+  "unquoted",
+  "color",
+  "erase",
+  "malformed",
+] as const)(
+  "Q-1024: visible diagnostics and private fields do not depend on chunking (%s)",
+  async (kind) => {
+    const dataDir = await fixture();
+    const prefix = ".".repeat(131071);
+    const progress =
+      prefix +
+      (kind === "color" ? "\x1b[31m" : kind === "erase" ? "\x1b[2K" : "") +
+      ".".repeat(1024) +
+      "\n";
+    const inline = kind === "inline",
+      unquoted = kind === "unquoted";
+    const quote = inline ? '"' : "'";
+    const label = kind === "indented" ? "pass\u{e0001}word" : "password";
+    const open = inline ? ` ${quote}private-sample\\${quote}\n` : "\r\n";
+    const install = progress + label + " =" + open;
+    const continuation = unquoted
+      ? "   private-sample on next line\n"
+      : (inline ? "" : `\t ${quote}private-sample\\${quote}\n`) +
+        "FAIL private-sample\n" +
+        (kind === "malformed" ? "\x1b[\n" : "") +
+        `private-sample${quote}\n`;
+    const proof =
+      "FAIL src/visible.test.ts > real case\nAssertionError: real assertion\nTest Files 1 failed\nTests 1 failed\n";
+    let reference: string[] | undefined;
+    for (const mode of ["whole", "syntax", "seeded"] as const) {
+      const w = await createMergeCheckLog({
+        dataDir,
+        project: "p",
+        attempt: mode,
+        failureExcerptBytes: 4096,
+      });
+      for (const part of partition(install, mode)) w.append("install", part);
+      for (const part of partition(
+        continuation +
+          proof +
+          '"X":\n  "private-sample never closed\nFAIL private-sample\n',
+        mode,
+      ))
+        w.append("test", part);
+      const saved = await w.finish({
+        status: "failed",
+        checks: [
+          { name: "install", status: "passed" },
+          { name: "test", status: "failed" },
+        ],
+        cleanup_errors: [],
+      });
+      const body =
+        (
+          await readFile(
+            join(dataDir, "merge-gate/logs/p", saved.log_ref),
+            "utf8",
+          )
+        ).split("=== install ===")[1] ?? "";
+      const surfaces = [body, saved.summary, saved.failure_excerpt ?? ""];
+      for (const surface of surfaces) {
+        expect(surface.includes("private-sample")).toBe(false);
+        for (const line of proof.trim().split("\n"))
+          expect(surface).toContain(line);
+      }
+      expect(saved.status).toBe("failed");
+      if (reference) expect(surfaces).toEqual(reference);
+      reference = surfaces;
+    }
+  },
+);
+
+test("Q-1024: retry discards unfinished control and field state with the partial download", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "retry-scan",
+    failureExcerptBytes: 4096,
+  });
+  log.append("test", 'password="partial\n\x1b]ignored\n');
+  log.resetOutput("test");
+  log.append("test", "FAIL after retry\n");
+  const saved = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed" }],
+    cleanup_errors: [],
+  });
+  expect(saved.summary).toContain("FAIL after retry");
+  expect(saved.failure_excerpt).toContain("FAIL after retry");
+});
+
+test("Q-1024: moving the opening delimiter changes only whitespace in the saved body", async () => {
+  const dataDir = await fixture();
+  let reference: string | undefined;
+  for (const [i, gap] of [
+    " ",
+    "\n   ",
+    "\r\n\t\n\x1b[2K",
+    "\n\u00a0",
+  ].entries()) {
+    const w = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: `layout-${i}`,
+      failureExcerptBytes: 4096,
+    });
+    const meta = `password:${gap}'private-metadata\nprivate-metadata'`;
+    for (const part of partition(
+      `start\npassword:${gap}'private-mark\nprivate-mark'\nFAIL real case\n`,
+      "syntax",
+    ))
+      w.append("test", part);
+    const saved = await w.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [meta],
+      reason: meta,
+    });
+    const body =
+      (
+        await readFile(
+          join(dataDir, "merge-gate/logs/p", saved.log_ref),
+          "utf8",
+        )
+      ).split("=== test ===")[1] ?? "";
+    const canonical = body.replace(/\s+/gu, " ").trim();
+    expect(body + JSON.stringify(saved)).not.toMatch(
+      /private-(?:mark|metadata)/u,
+    );
+    expect(canonical).toContain("FAIL real case");
+    if (reference) expect(canonical).toBe(reference);
+    reference = canonical;
+  }
+});

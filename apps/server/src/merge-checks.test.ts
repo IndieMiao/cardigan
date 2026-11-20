@@ -3788,7 +3788,7 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
 
 async function reworkGithubFixture(
   options: {
-    log?: string;
+    log?: string | string[];
     excerptBytes?: number;
     noRunId?: boolean;
     scoped?: boolean;
@@ -3898,12 +3898,12 @@ async function reworkGithubFixture(
       },
     ]),
     cancel: vi.fn(async () => {}),
-    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
-      open()(
-        '##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n' +
-          (options.log ?? "FAIL synthetic\n"),
-      ),
-    ),
+    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) => {
+      const write = open();
+      write('##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n');
+      const log = options.log ?? "FAIL synthetic\n";
+      for (const part of typeof log === "string" ? [log] : log) write(part);
+    }),
   };
   const git = {
     ...c.git,
@@ -5921,19 +5921,26 @@ test.each(["lint", "e2e"] as const)(
       `2030-01-01T00:${String(GITHUB_WORKFLOW_STEPS.indexOf(step)).padStart(2, "0")}:02.1234567Z ${text}\n`;
     const h = await reworkGithubFixture({
       failedStep,
-      log:
+      log: [
+        line("test", ".".repeat(132000)).trimEnd() + "\x1b[",
+        "2K\n",
         line("test", "Error: recovered sample") +
-        line("test", "FAIL recovered sample") +
-        line("test", "Tests 99 passed") +
-        line(failedStep, "FAIL src/check.spec.ts > required check") +
-        line(
-          failedStep,
-          "Error: required diagnostic CI_COLOR = 'private synthetic phrase'",
-        ) +
-        line(
-          failedStep,
-          "##[error] connect postgresql://demo:private-uri@db.invalid/path",
-        ),
+          line("test", "FAIL recovered sample") +
+          line("test", "Tests 99 passed") +
+          line("test", "password =") +
+          line(failedStep, "  'private-continuation") +
+          line(failedStep, "FAIL private-continuation'") +
+          line(failedStep, "FAIL src/check.spec.ts > required check") +
+          line(
+            failedStep,
+            "Error: required diagnostic CI_COLOR = 'private synthetic phrase'",
+          ) +
+          line(
+            failedStep,
+            "##[error] connect postgresql://demo:private-uri@db.invalid/path",
+          ) +
+          line(failedStep, "Tests 1 failed"),
+      ],
     });
     const gate = h.create();
     try {
@@ -5959,13 +5966,18 @@ test.each(["lint", "e2e"] as const)(
       for (const text of [check.summary, timeline, body.split("===")[0]]) {
         expect(text).toContain("required check");
         expect(text).toContain("required diagnostic");
+        expect(text).toContain("Tests 1 failed");
         expect(text).not.toContain("recovered sample");
         expect(text).not.toContain("Tests 99 passed");
       }
       expect(check.failure_excerpt).toContain("required check");
       expect(check.failure_excerpt).not.toContain("recovered sample");
       expect(check.timeout_only).not.toBe(true);
-      for (const secret of ["private-uri", "private synthetic phrase"])
+      for (const secret of [
+        "private-uri",
+        "private synthetic phrase",
+        "private-continuation",
+      ])
         expect(body + JSON.stringify(check) + timeline).not.toContain(secret);
     } finally {
       gate.stop();
