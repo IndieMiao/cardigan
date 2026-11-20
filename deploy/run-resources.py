@@ -242,21 +242,77 @@ class Confirmation:
 SETTLED = b'cardigan-private-settled-v1\n'
 
 
-def supervise(key, argv, confirmation, exited, env, cancellation, project_vite=False):
+def activate_vite(key, argv, env, port, ended):
+    # Only this trusted worker owns this listener. No project/Node code runs
+    # in the cold phase. Never release the port and ask a child to rebind it.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        try:
+            listener.bind(('127.0.0.1', port))
+            listener.listen()
+        except OSError:
+            audit(key, 'vite_listener_unavailable')
+            raise
+        listener.setblocking(False)
+        print(f'cardigan: waiting for first connection on 127.0.0.1:{port}', flush=True)
+        while True:
+            # Check the queue *after* the potentially slow authenticated read.
+            # Successful accept commits this invocation to activation forever,
+            # even for a probe that disconnects before Node has started.
+            settled = ended()
+            try:
+                first, _ = listener.accept()
+            except BlockingIOError:
+                if settled:
+                    listener.close()
+                    audit(key, 'unused_vite_listener_released')
+                    return None
+                select.select([listener], [], [], 0.12)
+                continue
+            except ConnectionAbortedError:
+                # A reset during accept is evidence of a client, not of an
+                # unused listener. There is no first stream left to hand off.
+                first = None
+            try:
+                fds = (listener.fileno(),) if first is None else (listener.fileno(), first.fileno())
+                audit(key, 'vite_listener_activated')
+                return subprocess.Popen([*argv, *map(str, fds)], env=env,
+                                        start_new_session=True, pass_fds=fds)
+            finally:
+                if first is not None: first.close()
+
+
+def supervise_vite(key, argv, confirmation, exited, env, cancellation, port):
+    # Neither launch mode entrusts project code with a settlement capability.
+    # The inherited sockets, if any, are just this invocation's HTTP ingress.
+    env.pop('CARDIGAN_PRIVATE_LIFETIME_FD', None)
+    def ended():
+        return exited() or confirmation.state() == 'ended'
+    if port is None:
+        task = subprocess.Popen(argv, env=env, start_new_session=True)
+    else:
+        task = activate_vite(key, argv, env, port, ended)
+        if task is None:
+            return 0  # listener released; no project process was started
+    env.clear()
+    disown_stdio()
+    os.environ.clear()
+    while True:
+        code = task.poll()
+        if code is not None:
+            return (128-code if code < 0 else code) % 256
+        if select.select([cancellation], [], [], 0)[0] or ended():
+            audit(key, 'vite_ingress_unproven_retained')
+            return 125
+        time.sleep(0.12)
+
+
+def supervise(key, argv, confirmation, exited, env, cancellation):
     publisher, participant = socket.socketpair()
     with publisher, participant:
         participant.shutdown(socket.SHUT_WR)
-        # The signed entry identifies the adapter, not the Node selected by
-        # PATH, its startup hooks or code imported from the project. Do not
-        # entrust this eager project launch with a settlement capability.
-        if project_vite:
-            env.pop('CARDIGAN_PRIVATE_LIFETIME_FD', None)
-            task_fds = ()
-        else:
-            channel = participant.fileno()
-            env['CARDIGAN_PRIVATE_LIFETIME_FD'] = str(channel)
-            task_fds = (channel,)
-        task = subprocess.Popen(argv, env=env, start_new_session=True, pass_fds=task_fds)
+        channel = participant.fileno()
+        env['CARDIGAN_PRIVATE_LIFETIME_FD'] = str(channel)
+        task = subprocess.Popen(argv, env=env, start_new_session=True, pass_fds=(channel,))
         participant.close()
         env.clear()
         disown_stdio()
@@ -276,9 +332,6 @@ def supervise(key, argv, confirmation, exited, env, cancellation, project_vite=F
                 return 0
             cancelled = foreground and select.select([cancellation], [], [], 0)[0]
             if cancelled or exited() or confirmation.state() == 'ended':
-                if project_vite:
-                    audit(key, 'vite_ingress_unproven_retained')
-                    return 125
                 try:
                     publisher.sendall(SETTLED)
                     # Keep our write half open. With the participant's write
@@ -314,7 +367,7 @@ def emit_status(code):
         status_pipe = None
 
 
-def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False):
+def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False, on_demand_port=None):
     global status_pipe
     require(KEY.fullmatch(key) and argv)
     expected = expected or birth(pid)
@@ -344,8 +397,9 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
         status_pipe = writer
         try:
             os.setsid()
-            code = supervise(key, argv, confirmation, session_watch(pid, expected),
-                             dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read, project_vite)
+            args = (key, argv, confirmation, session_watch(pid, expected),
+                    dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
+            code = supervise_vite(*args, on_demand_port) if project_vite else supervise(*args)
             emit_status(code)
         finally:
             os._exit(0)
@@ -421,7 +475,8 @@ def main():
     elif len(sys.argv) == 4 and sys.argv[1] == 'observe-session':
         print(install_observer(int(sys.argv[2]), sys.argv[3]))
     else:
-        if len(sys.argv) == 4 and sys.argv[2] == '--private-vite':
+        project_vite = len(sys.argv) == 4 and sys.argv[2] in ('--private-vite', '--private-vite-on-demand')
+        if project_vite:
             require(VITE_OWNER and re.fullmatch(r'[1-9][0-9]{0,4}', sys.argv[3]) and int(sys.argv[3]) <= 65535)
             if 'CARDIGAN_RESOURCE_BINDINGS' in os.environ:
                 require(any(row.get('port') == int(sys.argv[3]) for row in json.loads(os.environ['CARDIGAN_RESOURCE_BINDINGS'])))
@@ -432,7 +487,8 @@ def main():
         key = os.environ['CARDIGAN_RESOURCE_SESSION'] + '.' + sys.argv[1]
         sys.exit(command(os.environ['CARDIGAN_RESOURCE_TARGET'], key,
                          int(os.environ['CARDIGAN_SESSION_PID']), argv, expected=os.environ['CARDIGAN_SESSION_BIRTH'],
-                         project_vite=sys.argv[2] == '--private-vite'))
+                         project_vite=project_vite,
+                         on_demand_port=int(sys.argv[3]) if sys.argv[2] == '--private-vite-on-demand' else None))
 
 
 if __name__ == '__main__':

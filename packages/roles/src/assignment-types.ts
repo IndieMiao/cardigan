@@ -2,7 +2,7 @@ import type { Employee, Harness } from "@cardigan/domain";
 import type { CompiledFile } from "./launch-types.js";
 import type { LaunchConfig } from "./schema-definition.js";
 export const RUN_RESOURCE_RULE =
-  '开发服务、浏览器及临时命令中的任务私用进程必须经 /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" R-n --private -- 命令 参数 启动（R-n 取当前门铃，不沿用上次编号）。Vite 项目可用同一入口 R-n --private-vite 已分配端口。其它长驻服务或浏览器由实际持有私用控制连接的启动器监听 CARDIGAN_PRIVATE_LIFETIME_FD 收尾。临时文件写入该命令的 $TMPDIR。不要把共享服务当作私用任务登记；未登记或不能证明独占的进程只审计，不自动停止。';
+  '开发服务、浏览器及临时命令中的任务私用进程必须经 /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" R-n --private -- 命令 参数 启动（R-n 取当前门铃，不沿用上次编号）。Vite 项目可用同一入口 R-n --private-vite 已分配端口立即启动，或显式改用 --private-vite-on-demand 已分配端口，首次连接才启动。后者仅在从未接入时可自动释放监听，不自动停止已启动的 Vite。其它长驻服务或浏览器由实际持有私用控制连接的启动器监听 CARDIGAN_PRIVATE_LIFETIME_FD 收尾。临时文件写入该命令的 $TMPDIR。不要把共享服务当作私用任务登记；未登记或不能证明独占的进程只审计，不自动停止。';
 export const MCP_SERVER_NAME = "card";
 export const TOKEN_ENV_VAR = "MCP_TOKEN";
 /** The token file the wrapper reads and removes before starting the CLI. */
