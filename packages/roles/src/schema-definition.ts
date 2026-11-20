@@ -48,6 +48,7 @@ const endpoint = z.url({ protocol: /^https?$/ }).refine((value) => {
   );
 }, "base_url must not contain credentials, query or fragment");
 const providerSchema = z.strictObject({
+  name: z.string().min(1).max(128).optional(),
   harness: harnessSchema.optional(),
   api: z
     .enum(["openai-responses", "anthropic-messages", "openai-completions"])

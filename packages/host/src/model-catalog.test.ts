@@ -1,10 +1,23 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
-  loadModelLaunchConfig,
+  adoptInstalledCatalog,
+  publishLaunchRefresh,
+  withLaunchSnapshot,
+} from "./launch-model-intent.js";
+import {
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "./model-catalog.js";
 
 const fixture = {
@@ -13,6 +26,7 @@ const fixture = {
     models: {
       v1: {
         limit: { context: 8000, output: 500 },
+        cost: { input: 0.5, output: 1.5 },
         reasoning_options: [{ type: "effort", values: ["low", "high"] }],
         extra: "not-metadata",
       },
@@ -32,12 +46,54 @@ const config = {
 const now = () => new Date("2026-01-01T00:00:00Z");
 const stale = () => new Date("2026-01-03T00:00:00Z");
 let dir: string;
+let store: Store;
+// Exercise the actual publisher; projection/validation by itself is read-only.
+async function loadModelLaunchConfig(
+  ...args: Parameters<typeof stageModelLaunchConfig>
+) {
+  const fence = withLaunchSnapshot(store, dir, dir, (f) => f);
+  const staged = await stageModelLaunchConfig(...args);
+  publishLaunchRefresh(store, dir, dir, fence, { catalog: staged.catalog });
+  return staged.config;
+}
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "model-catalog-"));
+  store = Store.open({ dataDir: dir });
 });
 afterEach(async () => {
+  store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+test.each(["launch.yaml", "secrets.env", "models-dev.json"])(
+  "replacing %s invalidates both the stored adoption proof and an in-flight adoption",
+  async (filename) => {
+    await writeFile(join(dir, "launch.yaml"), JSON.stringify(config));
+    await writeFile(join(dir, "secrets.env"), "private-ref=fixture", {
+      mode: 0o600,
+    });
+    await loadModelLaunchConfig(config, dir, {
+      now,
+      fetch: async () => Response.json(fixture),
+    });
+    const snapshot = () => withLaunchSnapshot(store, dir, dir, (f) => f);
+    const installed = snapshot();
+    expect(installed.canAdoptCatalog).toBe(true);
+    const path = join(dir, filename);
+    await writeFile(`${path}.new`, await readFile(path), { mode: 0o600 });
+    await rename(`${path}.new`, path);
+    expect(snapshot()).toMatchObject({
+      revision: installed.revision,
+      canAdoptCatalog: false,
+    });
+    expect(() =>
+      adoptInstalledCatalog(store, dir, dir, installed, ["coder"]),
+    ).toThrow();
+    expect(
+      store.database.prepare("SELECT revision FROM launch_host_profiles").all(),
+    ).toEqual([]);
+  },
+);
 
 test("fetches only the public catalog, caches a dated projection, and reuses it offline", async () => {
   const fetch = vi.fn(async () => Response.json(fixture));
@@ -48,6 +104,7 @@ test("fetches only the public catalog, caches a dated projection, and reuses it 
     credentials: "omit",
   });
   expect(online.models?.active).toMatchObject({
+    cost: { input: 0.5, output: 1.5 },
     context_window: 8000,
     max_output_tokens: 500,
     reasoning_efforts: ["low", "high"],

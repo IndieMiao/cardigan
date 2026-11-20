@@ -1,6 +1,6 @@
+import { probeModel } from "@cardigan/host";
 import { parseLaunchConfig, resolveProfile } from "@cardigan/roles";
 import { afterEach, expect, test, vi } from "vitest";
-import { probeModel } from "./launch-online.js";
 
 afterEach(() => vi.unstubAllGlobals());
 const target = resolveProfile(
