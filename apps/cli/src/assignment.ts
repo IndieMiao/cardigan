@@ -615,7 +615,7 @@ export async function stopAssignment(input: {
   }
   if (ref === null) {
     throw new CliError(
-      `Assignment ${assignment.id} 没有在运行的终端；若需取消首个排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
+      `Assignment ${assignment.id} 没有在运行的终端；若需取消未派发的排队 Run 并改派，请执行 cardigan assignment release ${assignment.id} --cancel-queued-run <R-n>。`,
       EXIT.usage,
     );
   }

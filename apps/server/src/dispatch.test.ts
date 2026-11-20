@@ -21,6 +21,7 @@ import {
   postComment,
   queueRun,
   recordLaunchPublication,
+  releaseAssignment,
   requestDecision,
   setRunLimit,
   stopWorkItemAssignment,
@@ -803,6 +804,140 @@ test("§3.1 released Assignment is not started or woken and the failure reaches 
     }).length,
   ).toBeGreaterThan(0);
 });
+test.each([false, true])(
+  "C-527: prelaunch handoff preserves old bells and only re-routes outstanding work (tick between commands: %s)",
+  async (tickBetween) => {
+    const worker = dispatchFixture("worker");
+    try {
+      worker.session(worker.create().assignment, false);
+      const { assignment, card, item } = worker.create();
+      const post = (body: string, direct = false) =>
+        worker.apply((s, a, p) =>
+          postComment(
+            s,
+            a,
+            {
+              card_id: card.id,
+              body,
+              ...(direct
+                ? { mentions: [`@${assignment.id}`] }
+                : { work_item_id: item.id }),
+            },
+            p,
+          ),
+        );
+      const work = post("Handle the outstanding work");
+      const direct = post("Only the old assignment", true);
+      const dispatcher = () =>
+        new Dispatcher({
+          ...options,
+          store: worker.store,
+          clock: worker.clock,
+          runLimit: () => 1,
+          startRun: async ({ run, assignment: owner }) => {
+            worker.apply((s, a, p) =>
+              dispatchRun(
+                s,
+                a,
+                { run_id: run.id, runtime_ref: worker.refFor(owner) },
+                p,
+              ),
+            );
+          },
+        });
+      const notes = (owner: Assignment) =>
+        worker.store.listNotifications({
+          project_id: worker.project,
+          assignment_id: owner.id,
+        });
+      await dispatcher().tick();
+      const run = worker
+        .state()
+        .runs.find((r) => r.assignment_id === assignment.id);
+      expect(run?.queue_reason).toBe("concurrency_limit");
+      if (!run) throw new Error("Missing queued Run");
+      const before = notes(assignment);
+      expect(before.map((n) => n.status)).toEqual(["pending", "pending"]);
+      worker.store.uow.run((tx) =>
+        persistEffect(
+          tx,
+          worker.project,
+          unwrap(
+            releaseAssignment(
+              loadCommandState(tx, worker.project),
+              { kind: "human", project_id: worker.project },
+              { assignment_id: assignment.id, cancel_queued_run_id: run.id },
+              {
+                ids: tx.ids,
+                clock: worker.clock,
+                unreservedAssignment: tx.unreservedAssignment,
+              },
+            ),
+          ),
+        ),
+      );
+      if (tickBetween) await dispatcher().tick();
+      const to = worker.apply((s, a, p) =>
+        assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+      );
+      expect(to.machine_id).toBe("local");
+      await dispatcher().tick();
+      await dispatcher().tick();
+      const release = worker
+        .state()
+        .events.find((e) => e.type === "assignment_released");
+      expect(notes(assignment)).toMatchObject(
+        before.map((n) => ({
+          id: n.id,
+          event_id: n.event_id,
+          status: "resolved",
+          cancelled_queue_release_id: release?.id,
+        })),
+      );
+      expect(notes(to)).toMatchObject([
+        { seq: work.event_seq, kind: "comment", status: "belled" },
+      ]);
+      expect(notes(to).some((n) => n.seq === direct.event_seq)).toBe(false);
+      expect(
+        worker.state().runs.filter((r) => r.assignment_id === to.id),
+      ).toMatchObject([{ status: "dispatched" }]);
+      expect(
+        worker.state().events.filter((e) => e.type === "bell_delivery_failed"),
+      ).toEqual([]);
+      // A later, genuinely undeliverable bell to the retired identity still fails.
+      const assigned = worker
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "work_item_assigned" &&
+            (e.payload as { assignment_id?: string }).assignment_id === to.id,
+        );
+      if (!assigned) throw new Error("Missing reassignment event");
+      worker.store.recordNotification({
+        project_id: worker.project,
+        card_id: card.id,
+        event_id: assigned.id,
+        seq: assigned.seq,
+        kind: "assignment",
+        recipient: { kind: "assignment", assignment_id: assignment.id },
+      });
+      await dispatcher().tick();
+      expect(notes(assignment).at(-1)?.status).toBe("delivery_failed");
+      expect(
+        worker.state().events.filter((e) => e.type === "bell_delivery_failed"),
+      ).toMatchObject([
+        {
+          payload: {
+            assignment_id: assignment.id,
+            reason: "assignment_released",
+          },
+        },
+      ]);
+    } finally {
+      worker.close();
+    }
+  },
+);
 test("C-211 a stopped Assignment gets no new session from queued Runs or later bells until the human starts it", async () => {
   // A follow-up Run was already queued when the human stopped the Assignment.
   const trigger = f.state().events.at(-1)?.id;

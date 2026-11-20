@@ -133,6 +133,7 @@ import {
   notificationOwner,
   resolveObsoletePmNotifications,
   resolveUnreadableNotifications,
+  retireCancelledQueueNotes,
   routeProjectEvents,
   type StandingResolver,
   UNSETTLED_NOTIFICATION_STATUSES,
@@ -2136,11 +2137,19 @@ export class Dispatcher {
   ) {
     const { store } = this.options;
     return store.uow.run((tx) => {
-      const current = store.listNotifications({
+      let current = store.listNotifications({
         project_id: project,
         ids: notes.map((n) => n.id),
         status: "pending",
       });
+      if (reason === "assignment_released" && current.length)
+        current = retireCancelledQueueNotes(
+          store,
+          this.loadState(tx, project),
+          a.id,
+          current,
+          this.clock.now(),
+        );
       const queued = queuedId ? tx.runs.get(project, queuedId) : undefined;
       if (
         queuedId &&

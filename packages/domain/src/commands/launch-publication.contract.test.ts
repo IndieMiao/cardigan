@@ -3,6 +3,7 @@ import {
   acknowledgeRun,
   type Run,
   recordLaunchPublication,
+  releaseAssignment,
   runOccupiesSlot,
 } from "../index.js";
 import {
@@ -14,6 +15,8 @@ import {
   setup,
   system,
 } from "./launch/test-fixtures.js";
+
+import { human } from "./test-fixtures.js";
 
 beforeEach(setup);
 function provision(
@@ -202,6 +205,33 @@ test("C-88: confirmed pre-start withdrawal preserves the original Run and releas
   expect(f.state.runs).toHaveLength(1);
 });
 
+test("pre-provision withdrawal permits queue cancellation only after confirmed cleanup", () => {
+  const { run, publication } = preparing();
+  const release = () =>
+    releaseAssignment(
+      f.state,
+      human,
+      { assignment_id: run.assignment_id, cancel_queued_run_id: run.id },
+      { ...f.io, unreservedAssignment: () => true },
+    );
+  for (const phase of ["preparing", "stopping", "exited"] as const) {
+    commit(
+      recordLaunchPublication(
+        f.state,
+        system,
+        {
+          run_id: run.id,
+          ...(phase !== "preparing"
+            ? { expected_generation: publication.generation }
+            : {}),
+          publication: { ...publication, phase, wait: true },
+        },
+        f.io,
+      ),
+    );
+    expect(release().ok).toBe(phase === "exited");
+  }
+});
 test("confirmed remote withdrawal reports the recorded cause; stopping alone does not abort the Run", () => {
   const { run, publication } = preparing();
   const record = (value: typeof publication) =>

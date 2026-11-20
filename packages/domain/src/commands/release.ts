@@ -12,6 +12,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { neverDispatchedQueue } from "./failed-placement.js";
 import { cancelRunDispatch } from "./launch.js";
 import { handoffWithoutOps } from "./ops-handoff.js";
 import { WORKTREE_CLEANUP_PLAIN_SUMMARY } from "./plain-summary.js";
@@ -68,24 +69,13 @@ export function releaseAssignment(
           !a.base_sha &&
           run.assignment_id === a.id &&
           run.status === "queued" &&
-          !run.started_at &&
-          !run.launch_publication &&
-          !run.recovery_runtime &&
-          !run.dispatch_stop &&
-          !run.inactivity_stop &&
-          !d
-            .list("runs")
-            .some((r) => r.assignment_id === a.id && r.id !== run.id) &&
-          !state.events.some(
-            (e) =>
-              e.type === "run_dispatched" &&
-              (e.payload as { run_id?: unknown })?.run_id === run.id,
-          ) &&
+          card !== undefined &&
+          neverDispatchedQueue(d, run, card.id) &&
           ports.unreservedAssignment?.(state.project_id, a.id) === true,
         "illegal_transition",
-        "只能取消未派发、没有会话或启动占用的首个排队 Run；已有执行请走原停止流程。",
+        "只能取消从未派发、没有会话或启动占用的排队 Run；准备重试还须有清理记录。已有执行请走原停止流程。",
       );
-      cancelRunDispatch(d, run, "取消首次排队，释放指派以重新选机");
+      cancelRunDispatch(d, run, "取消未派发的排队 Run，释放指派以重新选机");
     }
     if (a.status === "released") {
       handoffWithoutOps(d, a);
