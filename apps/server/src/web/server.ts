@@ -81,6 +81,9 @@ import {
 } from "./http.js";
 import { LaunchSettings } from "./launch-settings.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { MachineChecks } from "./machine-checks.js";
+import type { MachineHost } from "./machine-host.js";
+import { serveMachines } from "./machines.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -121,6 +124,7 @@ export interface WebServerOptions {
     effective: () => import("@cardigan/roles").LaunchConfig;
     adopt: (generation: import("../live-launch.js").LaunchGeneration) => void;
   };
+  readonly machineHost?: MachineHost;
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
     | undefined;
@@ -188,6 +192,8 @@ const API_PREFIX = "/api/";
 
 interface RequestContext {
   readonly launchSettings: LaunchSettings | undefined;
+  readonly checks: MachineChecks;
+  readonly host: MachineHost | undefined;
   readonly recordTiming: (stage: string, ms: number) => void;
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
@@ -265,6 +271,12 @@ export async function startWebServer(
   let boundPort = 0;
   // Aborted by close(): SSE streams end, and responses stop keeping sockets.
   const shutdown = new AbortController();
+  const checks = new MachineChecks(
+    store,
+    clock,
+    shutdown.signal,
+    options.machineHost,
+  );
 
   const http = createServer((req, res) => {
     if (shutdown.signal.aborted) res.setHeader("Connection", "close");
@@ -359,6 +371,8 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        checks,
+        host: options.machineHost,
         recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
@@ -429,9 +443,11 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           if (error) reject(error);
-          else if (launchSettings)
-            launchSettings.checks.drain().then(resolve, reject);
-          else resolve();
+          else
+            void Promise.all([
+              checks.settled(),
+              launchSettings?.checks.drain(),
+            ]).then(() => resolve(), reject);
         });
         shutdown.abort();
         http.closeIdleConnections();
@@ -562,6 +578,14 @@ async function serveProjectRoute(
 ): Promise<void> {
   const { req, res, url, clock, store } = context;
   const now = clock.now();
+
+  if (rest === "/machines" || rest.startsWith("/machines/")) {
+    return serveMachines(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
+      rest,
+    );
+  }
 
   if (rest === "/stream") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
