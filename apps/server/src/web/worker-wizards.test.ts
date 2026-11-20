@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as tick } from "node:timers/promises";
 import {
   loadRuntimeWorkers,
   WORKER_STEPS,
@@ -22,6 +23,8 @@ import {
   TEST_PASSWORD,
 } from "../../test-support/m5-cross.js";
 
+import { ProfileChecks } from "./launch-settings-check.js";
+
 const form = {
   machine_id: "worker-a",
   label: "新机器",
@@ -33,11 +36,23 @@ const form = {
   gid: 2600,
   mcp_url: "https://private.example.ts.net/mcp",
 };
-async function fixture(probe: WorkerProbeRunner = async () => true) {
+async function fixture(
+  probe: WorkerProbeRunner = async () => true,
+  withLaunchSettings = false,
+) {
   const root = mkdtempSync(join(tmpdir(), "wizard-")),
     dataDir = "/private/controller",
     refresh = vi.fn(async () => {});
   const f = await m5Cross({
+    ...(withLaunchSettings
+      ? {
+          launchSettings: {
+            dir: root,
+            effective: () => ({ profiles: {}, providers: {} }),
+            adopt() {},
+          },
+        }
+      : {}),
     machineHost: {
       bindings: () => () => null,
       workerRecord: () => null,
@@ -403,6 +418,145 @@ test.runIf(process.platform === "linux").each(["linux", "macos"])(
       });
     } finally {
       await f.close();
+    }
+  },
+);
+
+test
+  .runIf(process.platform === "linux")
+  .each(["wizard", "profile", "HTTP read"])(
+  "an audit write failure does not release the store before the last %s finishes",
+  async (last) => {
+    const worker = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<void>();
+    const second = Promise.withResolvers<void>();
+    const read = Promise.withResolvers<void>();
+    const f = await fixture(async (step) => {
+      if (step === "account") {
+        started.resolve();
+        await worker.promise;
+      }
+      return true;
+    }, true);
+    const cli = vi
+      .spyOn(ProfileChecks.prototype, "cli")
+      .mockResolvedValue({ path: null, version: null });
+    const drain = vi.spyOn(ProfileChecks.prototype, "drain");
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const s = wizard(await f.post("", form), 201);
+      wizard(
+        await f.post(`/${s.id}/confirm`, { preview_id: s.preview.preview_id }),
+      );
+      expect((await f.post(`/${s.id}/run`)).status).toBe(202);
+      await started.promise;
+      writeFileSync(
+        join(f.root, "launch.yaml"),
+        "profiles:\n  first: {harness: pi, model: fixture}\n  second: {harness: pi, model: fixture}\n",
+        { mode: 0o600 },
+      );
+      const detail = await f.call("/api/launch-settings");
+      expect(detail.status).toBe(200);
+      const { version } = detail.json as { version: string };
+      for (const [profile, gate] of [
+        ["first", first],
+        ["second", second],
+      ] as const) {
+        cli.mockImplementationOnce(async () => {
+          await gate.promise;
+          return { path: null, version: null };
+        });
+        expect(
+          (
+            await f.call("/api/launch-settings/checks", {
+              method: "POST",
+              body: { version, profile, mode: "metadata" },
+            })
+          ).status,
+        ).toBe(202);
+      }
+      let reading: Promise<ResponseBody> | undefined;
+      if (last === "HTTP read") {
+        const entered = Promise.withResolvers<void>();
+        cli.mockImplementationOnce(async () => {
+          entered.resolve();
+          await read.promise;
+          return { path: null, version: null };
+        });
+        reading = f.call("/api/launch-settings");
+        await entered.promise;
+      }
+      // Fail only the first audit; no sleeps, production timeout changes or repeated probes.
+      const db = f.store().database;
+      let attempts = 0;
+      db.function("count_attempt", () => ++attempts);
+      db.exec(`CREATE TRIGGER fail_first BEFORE UPDATE ON launch_profile_checks WHEN OLD.profile='first'
+        BEGIN SELECT count_attempt(); SELECT RAISE(ABORT, 'fixture audit failed'); END;`);
+      let settled = false;
+      const outcome = f.web
+        .close()
+        .then(
+          () => null,
+          (reason: unknown) => reason,
+        )
+        .finally(() => {
+          settled = true;
+        });
+      if (!reading)
+        await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce());
+      first.resolve();
+      if (last !== "profile") second.resolve();
+      if (last !== "wizard") worker.resolve();
+      await tick();
+      expect(attempts).toBe(1);
+      expect(settled).toBe(false);
+      if (reading) {
+        expect(drain).not.toHaveBeenCalled();
+        read.resolve();
+        expect((await reading).status).toBe(200);
+      }
+      worker.resolve();
+      second.resolve();
+      expect(await outcome).toMatchObject({ message: "fixture audit failed" });
+      expect(attempts).toBe(1);
+      expect(
+        db
+          .prepare(
+            "SELECT profile, finished_at IS NOT NULL AS done FROM launch_profile_checks ORDER BY profile",
+          )
+          .all(),
+      ).toEqual([
+        { profile: "first", done: 0 },
+        { profile: "second", done: 1 },
+      ]);
+      expect(
+        db
+          .prepare("SELECT status FROM machine_check_jobs WHERE machine_id=?")
+          .get(form.machine_id),
+      ).toMatchObject({ status: "failed" });
+      expect(
+        f
+          .store()
+          .uow.read((tx) => tx.global_events.listAfter(0))
+          .filter((e) => e.type === "worker_wizard_check_finished"),
+      ).toHaveLength(1);
+    } finally {
+      read.resolve();
+      first.resolve();
+      second.resolve();
+      worker.resolve();
+      try {
+        await f.close();
+      } catch (err) {
+        // close() keeps the original rejection on subsequent calls.
+        f.store().close();
+        expect(err).toMatchObject({ message: "fixture audit failed" });
+      } finally {
+        cli.mockRestore();
+        drain.mockRestore();
+      }
     }
   },
 );
