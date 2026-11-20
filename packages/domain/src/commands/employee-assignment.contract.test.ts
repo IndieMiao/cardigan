@@ -441,7 +441,7 @@ test("an explicit empty project list is current all-project staffing, not an unn
   const other = employee(2, { projects: ["other"], role_id: "coder" });
   for (const employees of [[pm], [pm, other]]) {
     expect(
-      value(selectStandingEmployee(employees, base.project_id, "pm"))?.id,
+      value(selectStandingEmployee({ ...base, employees }, "pm"))?.id,
     ).toBe(pm.id);
     expect(value(assignItem({ ...base, employees })).data.employee_id).toBe(
       pm.id,
@@ -449,7 +449,7 @@ test("an explicit empty project list is current all-project staffing, not an unn
   }
   const employees = [employee(3, { role_id: "coder", projects: [] })];
   for (const result of [
-    selectStandingEmployee(employees, base.project_id, "pm"),
+    selectStandingEmployee({ ...base, employees }, "pm"),
     assignItem({ ...base, employees }),
   ])
     expect(result).toMatchObject({
@@ -458,6 +458,6 @@ test("an explicit empty project list is current all-project staffing, not an unn
     });
   // An old PM snapshot without the projects field still supports legacy bootstrap.
   expect(
-    value(selectStandingEmployee([employee(1)], base.project_id, "pm")),
+    value(selectStandingEmployee({ ...base, employees: [employee(1)] }, "pm")),
   ).toBeUndefined();
 });

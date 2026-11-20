@@ -59,31 +59,50 @@ function allowLegacyUnnamed(employees: readonly Employee[], roleId: string) {
   );
 }
 
+type StaffingState = Pick<
+  CommandState,
+  "project_id" | "employees" | "assignments" | "employee_activity"
+>;
+
 export function selectStandingEmployee(
-  employees: readonly Employee[],
-  projectId: string,
+  state: StaffingState,
   roleId: "pm" | "host_ops",
   reference?: string,
+  destination: "internal" | "external" = "internal",
 ) {
   return attempt(() => {
+    const employees = state.employees ?? [];
+    const eligible = (e: Employee) =>
+      destination === "external" || !isExternalEmployee(state, e.id);
     if (reference !== undefined) {
       const employee = findEmployee(employees, reference);
-      checkEmployeeProject(employee, projectId);
+      checkEmployeeProject(employee, state.project_id);
       ensure(
         employee.status === "active" && employee.role_id === roleId,
         "validation_failed",
         `员工须为在职的 ${roleId} 角色`,
       );
+      ensure(
+        eligible(employee),
+        "invariant_violation",
+        "这是外接员工，不能指派给内部常驻身份",
+      );
       return employee;
     }
-    // Unnamed PM bootstrap predates employee membership.
-    if (roleId === "pm" && !hasScopedRoster(employees)) return;
-    const candidates = employees.filter(
+    const active = employees.filter(
       (e) =>
-        employeeInProject(e, projectId) &&
+        employeeInProject(e, state.project_id) &&
         e.status === "active" &&
         e.role_id === roleId,
     );
+    const candidates = active.filter(eligible);
+    ensure(
+      !active.length || candidates.length,
+      "invariant_violation",
+      `${noProjectEmployee(roleId)}：该角色的在职员工均为外接员工`,
+    );
+    // Unnamed PM bootstrap predates employee membership.
+    if (roleId === "pm" && !hasScopedRoster(employees)) return;
     ensure(
       candidates.length <= 1,
       "validation_failed",
@@ -95,7 +114,7 @@ export function selectStandingEmployee(
 }
 
 function isExternalEmployee(
-  state: CommandState,
+  state: StaffingState,
   employee_id: EmployeeId,
 ): boolean {
   return (

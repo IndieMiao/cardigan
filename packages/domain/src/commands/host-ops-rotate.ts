@@ -53,8 +53,7 @@ function target(d: CommandDraft, reference?: string) {
       ? previous.employee_id
       : unwrap(
           selectStandingEmployee(
-            d.state.employees ?? [],
-            d.state.project_id,
+            d.state,
             "host_ops",
             reference ?? previous.employee_id,
           ),

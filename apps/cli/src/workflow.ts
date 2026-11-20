@@ -2031,8 +2031,12 @@ function pmCreate(args: readonly string[], io: CliIo): number {
       let employeeId = existing?.employee_id;
       if (!existing || reference !== undefined) {
         const selected = selectStandingEmployee(
-          tx.employees.list(),
-          project_id,
+          {
+            project_id,
+            assignments,
+            employees: tx.employees.list(),
+            employee_activity: tx.employees.assignmentActivity?.() ?? [],
+          },
           "pm",
           reference,
         );

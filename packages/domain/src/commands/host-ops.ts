@@ -55,12 +55,7 @@ export function createHostOpsAssignment(
       .sort((a, b) => b.role_version - a.role_version)[0];
     ensure(role, "not_found", "host_ops 角色不存在");
     const employee = unwrap(
-      selectStandingEmployee(
-        state.employees ?? [],
-        state.project_id,
-        "host_ops",
-        p.employee_id,
-      ),
+      selectStandingEmployee(state, "host_ops", p.employee_id),
     );
     const id = d.ids.next(state.project_id, "assignment");
     const assignment: Assignment = {

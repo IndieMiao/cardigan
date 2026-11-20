@@ -67,12 +67,7 @@ export function rotateStandingAfterDeployment(
     const employeeId =
       previous.role_id === "host_ops"
         ? unwrap(
-            selectStandingEmployee(
-              state.employees ?? [],
-              state.project_id,
-              "host_ops",
-              previous.employee_id,
-            ),
+            selectStandingEmployee(state, "host_ops", previous.employee_id),
           )?.id
         : previous.employee_id;
     const { session_ref: _oldSession, ...identity } = previous;

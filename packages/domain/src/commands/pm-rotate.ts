@@ -215,10 +215,10 @@ function rotate(
       };
     const employee_id = unwrap(
       selectStandingEmployee(
-        state.employees ?? [],
-        state.project_id,
+        state,
         "pm",
         requestedId,
+        p.external ? "external" : "internal",
       ),
     )?.id;
     ensure(

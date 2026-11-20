@@ -1789,3 +1789,78 @@ test("assign excludes external Office employees while external rotation and ordi
   expect(await run(["assign", "W-3", "--role", "pm"])).toBe(0);
   expect(printed()).toContain("员工 E-2");
 });
+
+test("creating internal PM Ops excludes an unreleased external Office employee in another project", async () => {
+  expect(await run(["init"])).toBe(0);
+  for (const p of ["office", "ops"]) {
+    expect(await run(["project", "create", p])).toBe(0);
+    expect(
+      await run([
+        "role",
+        "add",
+        p,
+        "pm",
+        "--allowed-tools",
+        "create_card,record_decision",
+      ]),
+    ).toBe(0);
+  }
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Shared",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+      "--projects",
+      "office,ops",
+    ]),
+  ).toBe(0);
+  expect(await run(["pm", "create", "--office", "--project", "office"])).toBe(
+    0,
+  );
+  expect(
+    await run([
+      "pm",
+      "rotate",
+      "--office",
+      "--external",
+      "--employee",
+      "Shared",
+      "--project",
+      "office",
+    ]),
+  ).toBe(0);
+  for (const flags of [[], ["--employee", "Shared"]]) {
+    expect(
+      await run(["pm", "create", "--ops", "--project", "ops", ...flags]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain("外接员工");
+  }
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Internal",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+      "--projects",
+      "ops",
+    ]),
+  ).toBe(0);
+  expect(await run(["pm", "create", "--ops", "--project", "ops"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => tx.assignments.list("ops"))).toMatchObject([
+      { employee_id: "E-2", standing_mode: "ops" },
+    ]);
+  } finally {
+    store.close();
+  }
+});
