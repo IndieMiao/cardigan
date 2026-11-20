@@ -39,14 +39,15 @@ function object(value) {
 function text(value, max) {
   return typeof value === 'string' && value.length <= max ? value : null;
 }
-function summarize(lines, path, attributable, activityOnly) {
+function summarize(lines, path, attributable, activityOnly, complete) {
   const workerSession = activityOnly ? basename(path, '.jsonl') : undefined;
-  let activity, progress;
+  let activity, progress, fault, silentSince = complete ? 0 : undefined;
   if (attributable) {
     for (const line of lines.slice(-256)) {
       let event;
-      try { event = object(JSON.parse(line)); } catch { continue; }
-      if (!event || event.isSidechain === true) continue;
+      try { event = object(JSON.parse(line)); } catch { if (line.trim()) silentSince = undefined; continue; }
+      if (!event) { silentSince = undefined; continue; }
+      if (event.isSidechain === true) continue;
       const apiError = event.isApiErrorMessage === true ||
         (event.type === 'system' && event.subtype === 'api_error');
       if (!apiError && !['assistant', 'user'].includes(event.type)) continue;
@@ -64,9 +65,19 @@ function summarize(lines, path, attributable, activityOnly) {
         Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
       activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
         updated_at: timestamp, ...(event.type === 'assistant' && object(event.message)?.stop_reason === 'end_turn' && !apiError ? { turn_ended: true } : {}), ...(apiError ? { error } : {}) };
+      if (silentSince !== undefined) {
+        if (apiError) fault = error !== 'unclassified' ? activity : undefined;
+        else if (event.type === 'assistant') { silentSince = Date.parse(timestamp); fault = undefined; }
+      }
       if (!apiError) progress = activity;
       else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
     }
+  }
+  // Only attach proof after the entire bounded read, including the suffix, was validated.
+  if (activity && fault && silentSince !== undefined &&
+      activity.session_id === fault.session_id && activity.cwd === fault.cwd) {
+    activity = { ...activity, startup_failure: { session_id: fault.session_id, cwd: fault.cwd,
+      updated_at: fault.updated_at, error: fault.error, model_silent_since: silentSince } };
   }
   if (activityOnly) return activity ? { path, activity } : undefined;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -100,7 +111,7 @@ function readTail(fd, path, attributable, activityOnly = false) {
   const size = readSync(fd, buffer, 0, buffer.length, start);
   const lines = buffer.subarray(0, size).toString('utf8').split('\n');
   if (start) lines.shift();
-  return summarize(lines, path, attributable, activityOnly);
+  return summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
 }
 async function read() {
   // The worker opener passed a no-follow regular file as stdin. This is

@@ -10,6 +10,8 @@ SelectControl 使用 `value` + `onValueChange(string)`；已有 `<option>` 仅�
 
 表头排序使用 `TableHead sort="ascending|descending|none" onSort={...}`，整个文字和箭头可键盘激活；不要传排序按钮 CSS。静态表头直接放文字。
 
+链接指向表格中的某一行（例如角色版本历史里被引用的版本）时，用 `TableRow current` 标记：输出 `aria-current="true"`，整行（含窄屏纵向记录）使用 `--ui-selected` 选中底色；不要在页面另写高亮样式。
+
 旧样式集中放在 `legacy` cascade layer，关闭 Tailwind preflight；全站生产入口加载 `theme.css`，旧截图夹具若仍直接加载 styles.css，只用于历史证据。阶段二迁移页面时，删除对应 `test-support/ui-legacy.json` 的精确存量豁免，不能新增。`pnpm lint` 同时检查原生控件、直接 Radix 导入、页面内联尺寸、额外 CSS 和任意值 utility。
 
 

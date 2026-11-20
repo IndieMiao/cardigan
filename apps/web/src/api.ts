@@ -925,6 +925,10 @@ export interface NeedsPage {
   readonly notices_next_cursor?: string | null;
   /** C-153: who looks after lost runtimes; older servers omit it. */
   readonly incident_handling?: IncidentHandling;
+  readonly provider_incidents?: readonly {
+    readonly profile: string;
+    readonly paused: boolean;
+  }[];
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -1024,10 +1028,12 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
+  readonly failure_reason?: "provider_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
-    | "awaiting_dispatch";
+    | "awaiting_dispatch"
+    | "provider_unavailable";
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
@@ -1429,6 +1435,65 @@ export interface RoleListView {
   readonly allowlists: RoleAllowlists;
 }
 
+/** C-515 `GET /api/launch-settings`: global, read-only; secret values never leave the host. */
+export interface LaunchModelMetadata {
+  readonly cost?: { readonly input: number; readonly output: number };
+  readonly context_window?: number;
+  readonly max_output_tokens?: number;
+  readonly reasoning_efforts?: readonly string[];
+}
+export type LaunchProfileReference =
+  | {
+      readonly project_id: string;
+      readonly role_id: string;
+      readonly version: number;
+      readonly name: string;
+    }
+  | { readonly employee_id: string; readonly name: string };
+export interface LaunchProfileCheck {
+  readonly id: string;
+  readonly version: string;
+  readonly mode: "metadata" | "online";
+  readonly started_at: string;
+  readonly finished_at: string | null;
+  readonly status: "passed" | "failed" | "running" | "interrupted";
+  readonly problems: readonly string[];
+  readonly cli_version: string | null;
+}
+export interface LaunchProfileView {
+  readonly name: string;
+  readonly harness: string;
+  readonly provider: string | null;
+  readonly model_alias: string | null;
+  readonly model_id: string | null;
+  readonly metadata: LaunchModelMetadata | null;
+  readonly parameters: {
+    readonly effort: string | null;
+    readonly permission_mode: string | null;
+    readonly auto_update: boolean | null;
+    readonly provider_flag: string | null;
+    readonly custom_args_count: number;
+    readonly custom_config_count: number;
+  };
+  readonly cli: {
+    readonly path: string | null;
+    readonly version: string | null;
+  };
+  readonly secrets: readonly { readonly key: string; readonly set: boolean }[];
+  readonly references: readonly LaunchProfileReference[];
+  readonly last_check: LaunchProfileCheck | null;
+}
+export interface LaunchProviderView {
+  readonly id: string;
+  readonly name: string;
+  readonly base_url: string | null;
+}
+export interface LaunchSettingsView {
+  readonly version: string;
+  readonly profiles: readonly LaunchProfileView[];
+  readonly providers: readonly LaunchProviderView[];
+}
+
 export interface EmployeeOptions {
   readonly employees?: readonly CreatedEmployee[];
   readonly library: readonly {
@@ -1564,6 +1629,8 @@ export interface CardiganClient {
   ): CardPage | undefined;
   cardPreferenceScope?(): string | undefined;
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
+  /** Global launch profiles (not project scoped). */
+  launchSettings(): Promise<LaunchSettingsView>;
   createEmployee(
     projectId: string,
     input: CreateEmployeeInput,
@@ -2441,6 +2508,9 @@ export class HttpCardiganClient implements CardiganClient {
   }
   roles(projectId: string): Promise<RoleListView> {
     return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
+  }
+  launchSettings(): Promise<LaunchSettingsView> {
+    return this.request("/api/launch-settings");
   }
   employeeOptions(projectId: string): Promise<EmployeeOptions> {
     return this.request(

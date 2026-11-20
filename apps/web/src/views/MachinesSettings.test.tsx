@@ -23,7 +23,11 @@ import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { SettingsPage } from "./SettingsPage.js";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // Settings tabs live in the URL (C-518), so one test's panel must not open the next one's.
+  window.location.hash = "";
+});
 
 const byId = (id: string) => {
   const machine = fixtureMachines.find((m) => m.id === id);
@@ -108,6 +112,7 @@ test("settings navigation lists 机器 right after 员工 and keeps 并发与容
     "卡片模板",
     "员工",
     "机器",
+    "模型",
   ]);
 });
 

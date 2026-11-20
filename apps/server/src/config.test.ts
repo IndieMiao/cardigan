@@ -45,6 +45,8 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
+    providerFailureThreshold: 2,
+    providerCooldownMs: 300_000,
     hostOpsPatrolIntervalMs: 1_800_000,
     contextUsageStaleAfterMs: 600_000,
     shutdownGraceMs: 10_000,
@@ -103,6 +105,8 @@ test("reads data dir and port from the environment", () => {
     resolveServerConfig({
       CARDIGAN_DATA_DIR: "/srv/cardigan/data",
       CARDIGAN_MCP_PORT: "0",
+      CARDIGAN_PROVIDER_FAILURE_THRESHOLD: "3",
+      CARDIGAN_PROVIDER_COOLDOWN_MS: "1000",
     }),
   ).toEqual({
     dataDir: "/srv/cardigan/data",
@@ -122,6 +126,8 @@ test("reads data dir and port from the environment", () => {
     backupIntervalMs: DEFAULT_INTERVALS.backup,
     attachmentIntervalMs: DEFAULT_INTERVALS.attachment,
     dispatchTimeoutMs: 600_000,
+    providerFailureThreshold: 3,
+    providerCooldownMs: 1000,
     hostOpsPatrolIntervalMs: 1_800_000,
     contextUsageStaleAfterMs: 600_000,
     shutdownGraceMs: 10_000,
