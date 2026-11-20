@@ -52,10 +52,7 @@ export function fixtureNeedsCounts(page: NeedsPage): NeedsCounts {
   const decisions = fixtureNeedsSection(page, "decisions").decisions.length;
   const merges = fixtureNeedsSection(page, "merges").decisions.length;
   const actions = page.human_actions.filter((a) => a.triage !== "host").length;
-  const attention =
-    page.incidents.length +
-    (page.attention?.length ?? 0) +
-    (page.provider_incidents?.length ?? 0);
+  const attention = page.incidents.length + (page.attention?.length ?? 0);
   const system = page.system_rule_attention?.length ?? 0;
   return {
     total_pending: decisions + merges + actions + attention,

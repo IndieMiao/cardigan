@@ -313,17 +313,31 @@ test.each([
   },
 );
 
-test("C-499: a paused profile appears in actions and disappears after a successful probe", async () => {
+test("C-499: provider notices never create work and disappear after a successful probe", async () => {
   let page: NeedsPage = {
     ...empty,
-    provider_incidents: [{ profile: "relay", paused: true }],
+    provider_incidents: [{ profile: "relay", paused: false }],
   };
   const client = fakeClient({ needsYou: async () => page });
   const view = render(<NeedsYouPage client={client} projectId="p-1" />);
-  await screen.findByText("模型服务不可用：relay（已暂停派发）");
-  expect(tab("待你执行").textContent).toContain("1");
-  page = empty;
-  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
   await screen.findByText("没有需要你处理的事");
-  expect(screen.queryByText(/模型服务不可用/)).toBeNull();
+  fireEvent.click(tab("待你执行"));
+  const panel = screen.getByRole("tabpanel", { name: /^待你执行/ });
+  await within(panel).findByText("模型服务不可用：relay（等待重试）");
+  const noWork = () => {
+    expect(tab("待你执行").textContent).toBe("待你执行0");
+    expect(screen.queryByText(/件事等你处理/)).toBeNull();
+    expect(within(panel).getByText("没有需要你处理的事")).toBeTruthy();
+  };
+  noWork();
+  page = { ...empty, provider_incidents: [{ profile: "relay", paused: true }] };
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  await within(panel).findByText("模型服务不可用：relay（已暂停派发）");
+  noWork();
+  page = empty;
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={2} />);
+  await waitFor(() =>
+    expect(within(panel).queryByText(/模型服务不可用/)).toBeNull(),
+  );
+  noWork();
 });

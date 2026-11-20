@@ -105,6 +105,12 @@ function useRunDetails(run: RunView | undefined): string[] {
   if (!run) return [];
   return [
     run.queue_reason === "runtime_unavailable" ? "等待运行环境恢复" : "",
+    run.queue_reason === "provider_unavailable"
+      ? "等待模型服务恢复后自动重派"
+      : "",
+    runStatus(run) === "provider_unavailable" && run.launch_profile_ref
+      ? `启动配置：${run.launch_profile_ref}`
+      : "",
     run.queue_ahead !== undefined
       ? `排队中（前面还有 ${run.queue_ahead} 个）`
       : "",
@@ -115,7 +121,7 @@ function useRunDetails(run: RunView | undefined): string[] {
       run.queue_warning.after_minutes * 60_000
       ? `已长时间排队（超过 ${run.queue_warning.after_minutes} 分钟）`
       : "",
-    abnormalRun(run) ? `最近执行${statusLabel(runStatus(run))}` : "",
+    abnormalRun(run) ? `最近执行：${statusLabel(runStatus(run))}` : "",
   ];
 }
 export function RunLine({ run }: { readonly run: RunView }) {

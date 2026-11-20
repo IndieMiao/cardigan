@@ -709,10 +709,7 @@ export function listNeedsYouCounts(
     const humanActions = data.human_actions.filter(
       (h) => h.triage !== "host",
     ).length;
-    const attention =
-      data.incidents.length +
-      data.attention.length +
-      data.provider_incidents.length;
+    const attention = data.incidents.length + data.attention.length;
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
     return {
@@ -754,7 +751,7 @@ function selectNeedsYou<T>(
   now: string | undefined,
   options: NeedsYouOptions,
   view: (q: Decision) => T,
-  decisionDetails = true,
+  includeDetails = true,
 ) {
   const state = d.state,
     actor = d.actor;
@@ -892,12 +889,13 @@ function selectNeedsYou<T>(
           },
         }
       : {}),
-    provider_incidents: includes("actions")
-      ? [...providerIncidents(state.events)].map(([profile, incident]) => ({
-          profile,
-          paused: !!incident.retry_at,
-        }))
-      : [],
+    provider_incidents:
+      includeDetails && includes("actions")
+        ? [...providerIncidents(state.events)].map(([profile, incident]) => ({
+            profile,
+            paused: !!incident.retry_at,
+          }))
+        : [],
     incidents: !includes("actions")
       ? []
       : d
@@ -978,7 +976,7 @@ function selectNeedsYou<T>(
               !mergeConfirmationWaitingForCheck(state, q) ||
               !!mergeCheckEndedWithoutPass(state, q),
         ),
-      { details: decisionDetails },
+      { details: includeDetails },
     ).map(view),
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.

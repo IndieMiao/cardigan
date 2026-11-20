@@ -47,9 +47,10 @@ test("queue warning appears at the configured threshold without a new server eve
   expect(screen.getByRole("tooltip").textContent).not.toContain("超过 10 分钟");
 });
 
-test("C-499: the execution badge distinguishes a failed startup and a paused profile from inactivity", () => {
+test("C-499: the execution badge distinguishes a failed startup and a paused profile from inactivity", async () => {
   const run = {
     id: "R-8",
+    launch_profile_ref: "relay",
     assignment_id: "A-2",
     status: "cancelled",
     kind: "initial",
@@ -63,6 +64,11 @@ test("C-499: the execution badge distinguishes a failed startup and a paused pro
     <RunLine run={{ ...run, failure_reason: "provider_unavailable" }} />,
   );
   expect(screen.getByRole("button").textContent).toContain("模型服务不可用");
+  fireEvent.focus(screen.getByRole("button"));
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.textContent).toContain("最近执行：模型服务不可用");
+  expect(tip.textContent).toContain("启动配置：relay");
+  expect(tip.textContent).not.toContain("自动重派");
   view.rerender(
     <RunLine
       run={{
@@ -74,4 +80,6 @@ test("C-499: the execution badge distinguishes a failed startup and a paused pro
     />,
   );
   expect(screen.getByRole("button").textContent).toContain("模型服务不可用");
+  expect(tip.textContent).toContain("等待模型服务恢复后自动重派");
+  expect(tip.textContent).not.toContain("最近执行：");
 });

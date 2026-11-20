@@ -1945,7 +1945,6 @@ function NeedsContent({
     ? data.decisions.length +
       mine.length +
       data.incidents.length +
-      (data.provider_incidents?.length ?? 0) +
       (data.attention?.length ?? 0)
     : 0;
   const blocking = (data?.decisions ?? []).filter(
