@@ -582,3 +582,168 @@ test("V-2540: a lost drain reply is confirmed by the read-back; a failed read-ba
   await d.findByRole("button", { name: "恢复" });
   expect(c.setMachineDrain).toHaveBeenCalledOnce();
 });
+
+/** 本机 with one binding's records replaced (peer project by default). */
+const withBinding = (
+  patch: Partial<MachineView["bindings"][number]>,
+  project = "peer",
+): MachineView => {
+  const local = byId("local");
+  return {
+    ...local,
+    bindings: local.bindings.map((b) =>
+      b.project_id === project ? { ...b, ...patch } : b,
+    ),
+  };
+};
+
+test.each([401, 403, 404])(
+  "V-2549: a read-back refused with %s takes the facts and the limit field down until a read succeeds",
+  async (status) => {
+    let refuse = false;
+    const c = client({
+      machine: vi.fn(async () => {
+        if (refuse) throw new ApiError(status, "refused", "拒绝");
+        return { machine: byId("local") };
+      }),
+      checkMachine: vi.fn(async () => {
+        refuse = true;
+        throw new TypeError("reply lost");
+      }),
+    });
+    const d = await openDetail(c);
+    expect(d.getByRole("table", { name: "项目绑定" })).toBeTruthy();
+    const listReads = vi.mocked(c.machines).mock.calls.length;
+    fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+    await d.findByText(/未能读回机器状态/);
+    // Down at once: no bindings, no editable limit, no actions.
+    expect(d.queryByRole("table", { name: "项目绑定" })).toBeNull();
+    expect(d.queryByRole("spinbutton")).toBeNull();
+    expect(d.queryByRole("button", { name: "立即检查" })).toBeNull();
+    await waitFor(() =>
+      expect(vi.mocked(c.machines).mock.calls.length).toBeGreaterThan(
+        listReads,
+      ),
+    );
+    // Allowed again: a detail read restores it; the write is not resent.
+    refuse = false;
+    const retry = d.getAllByRole("button", { name: "重试" });
+    for (const button of retry) fireEvent.click(button);
+    await d.findByRole("table", { name: "项目绑定" });
+    expect(c.checkMachine).toHaveBeenCalledOnce();
+  },
+);
+
+test("V-2549: a lost reply that joined another project's running check is followed, not sent again", async () => {
+  let sent = false;
+  const joined = withBinding({
+    last_requested_check: {
+      id: "chk-peer",
+      kind: "machine",
+      status: "running",
+      step: "ssh",
+      checked_at: "2026-01-01T00:00:01.000Z",
+      failed_steps: [],
+    },
+  });
+  const hold = Promise.withResolvers<void>();
+  const c = client({
+    machine: vi.fn(async () => ({ machine: sent ? joined : byId("local") })),
+    checkMachine: vi.fn(async () => {
+      sent = true;
+      throw new TypeError("reply lost");
+    }),
+    machineCheck: vi.fn(async () => {
+      await hold.promise;
+      return { check: job({ id: "chk-peer", status: "passed" }) };
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  const running = await d.findByRole("button", { name: "检查中…" });
+  await waitFor(() =>
+    expect(c.machineCheck).toHaveBeenCalledWith("p-1", "local", "chk-peer"),
+  );
+  expect(d.queryByText(/检查没有开始/)).toBeNull();
+  fireEvent.click(running);
+  expect(c.checkMachine).toHaveBeenCalledOnce();
+  await act(async () => hold.resolve());
+  await d.findByText("检查通过");
+});
+
+test("V-2549: a joined check that already ended elsewhere shows its result; one never accepted allows another try", async () => {
+  let sent = false;
+  const ended = withBinding({
+    last_requested_check: {
+      id: "chk-peer-2",
+      kind: "machine",
+      status: "failed",
+      step: "finished",
+      checked_at: "2026-01-01T00:00:09.000Z",
+      failed_steps: ["mcp"],
+    },
+  });
+  const c = client({
+    machine: vi.fn(async () => ({ machine: sent ? ended : byId("local") })),
+    checkMachine: vi.fn(async () => {
+      sent = true;
+      throw new TypeError("reply lost");
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("检查未通过：MCP");
+  expect(d.queryByText(/检查没有开始/)).toBeNull();
+  cleanup();
+  // Nothing of this machine moved anywhere: not accepted.
+  const c2 = client({
+    checkMachine: vi.fn(async () => {
+      throw new TypeError("reply lost");
+    }),
+  });
+  const d2 = await openDetail(c2);
+  fireEvent.click(d2.getByRole("button", { name: "立即检查" }));
+  await d2.findByText(/检查没有开始/);
+});
+
+test("V-2549: a health check running without an id keeps the action locked and is read again until it ends", async () => {
+  let reads = 0;
+  let sent = false;
+  const checking = withBinding({
+    machine_check: {
+      status: "checking",
+      checked_at: "2026-01-01T00:00:02.000Z",
+      blockers: [],
+      available: true,
+    },
+  });
+  const done = withBinding({
+    machine_check: {
+      status: "passed",
+      checked_at: "2026-01-01T00:00:12.000Z",
+      blockers: [],
+      available: true,
+    },
+  });
+  const c = client({
+    machine: vi.fn(async () => {
+      if (!sent) return { machine: byId("local") };
+      reads += 1;
+      return { machine: reads < 3 ? checking : done };
+    }),
+    checkMachine: vi.fn(async () => {
+      sent = true;
+      throw new TypeError("reply lost");
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("检查进行中，正在等待结果…");
+  expect(
+    d.getByRole("button", { name: "立即检查" }).getAttribute("aria-disabled"),
+  ).toBe("true");
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("检查已完成，结果见“最近检查”");
+  expect(reads).toBeGreaterThanOrEqual(3);
+  expect(c.checkMachine).toHaveBeenCalledOnce();
+});
