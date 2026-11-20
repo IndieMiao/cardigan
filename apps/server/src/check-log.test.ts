@@ -111,7 +111,7 @@ async function verifyPublishedLog(reformatted: boolean) {
   } else writer.append("unit", ".".repeat(132000) + "\x1b[2K\n");
   writer.append(
     "unit",
-    `FAIL example\nAuthorization: Basic synthetic-basic${runnerOnly}after runner field\nsecond-config-line\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
+    `display_label=cmFpbnk=\nFAIL example.test.ts > maps progress label\nAuthorization: Basic synthetic-basic${runnerOnly}after runner field\nsecond-config-line\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
   );
   writer.append(
     "unit",
@@ -123,7 +123,12 @@ async function verifyPublishedLog(reformatted: boolean) {
   writer.append("unit", diagnostic.slice(27));
   const filler = `${".".repeat(4095)}\n`.repeat(16);
   for (let i = 0; i < 34; i++) writer.append("unit", filler);
-  writer.append("unit", runnerOnly + diagnostic + "tail sentinel\n");
+  writer.append(
+    "unit",
+    runnerOnly +
+      diagnostic +
+      "display_label=YQ==\nFAIL tail label case\ntail sentinel\n",
+  );
   const saved = await writer.finish({
     status: "failed",
     checks: [{ name: "unit", status: "failed", exit_code: 1 }],
@@ -204,6 +209,13 @@ async function verifyPublishedLog(reformatted: boolean) {
       { store, identity: identity.value },
     )) as { text: string };
     expect(tail.text).toContain("tail sentinel");
+    expect(tail.text).toContain("FAIL tail label case");
+    for (const text of [
+      saved.summary,
+      saved.failure_excerpt,
+      result.text.split("=== unit ===")[1],
+    ])
+      expect(text).toContain("maps progress label");
     expect(result.text).toContain("=== unit ===");
     expect(saved.failure_excerpt).toContain("Basic [REDACTED]");
     expect(saved.failure_excerpt).toContain("after runner field");
@@ -223,6 +235,8 @@ async function verifyPublishedLog(reformatted: boolean) {
       "fake first line",
       "fictional-bearer",
       "fictional-key",
+      "cmFpbnk",
+      "YQ==",
       "/ignored",
     ])
       expect(surfaces).not.toContain(value);

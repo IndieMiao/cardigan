@@ -5919,6 +5919,8 @@ test.each(["lint", "e2e"] as const)(
     const { GITHUB_WORKFLOW_STEPS } = await import("@cardigan/host");
     const line = (step: "test" | "lint" | "e2e", text: string) =>
       `2030-01-01T00:${String(GITHUB_WORKFLOW_STEPS.indexOf(step)).padStart(2, "0")}:02.1234567Z ${text}\n`;
+    // Exercise both a label in the failing step and one in the previous step.
+    const labelStep = failedStep === "lint" ? failedStep : "test";
     const h = await reworkGithubFixture({
       failedStep,
       log: [
@@ -5927,9 +5929,10 @@ test.each(["lint", "e2e"] as const)(
         line("test", "Error: recovered sample") +
           line("test", "FAIL recovered sample") +
           line("test", "Tests 99 passed") +
-          line("test", "password =") +
-          line(failedStep, "  'private-continuation") +
-          line(failedStep, "FAIL private-continuation'") +
+          line("test", "display_label=YQ==; password =") +
+          line(labelStep, "  'private-continuation") +
+          line(labelStep, "FAIL private-continuation'") +
+          line(labelStep, "display_label=cmFpbnk=") +
           line(failedStep, "FAIL src/check.spec.ts > required check") +
           line(
             failedStep,
@@ -5970,6 +5973,9 @@ test.each(["lint", "e2e"] as const)(
         expect(text).not.toContain("recovered sample");
         expect(text).not.toContain("Tests 99 passed");
       }
+      expect(body.split(`=== ${failedStep} ===`)[1]).toContain(
+        "required check",
+      );
       expect(check.failure_excerpt).toContain("required check");
       expect(check.failure_excerpt).not.toContain("recovered sample");
       expect(check.timeout_only).not.toBe(true);
@@ -5977,6 +5983,8 @@ test.each(["lint", "e2e"] as const)(
         "private-uri",
         "private synthetic phrase",
         "private-continuation",
+        "cmFpbnk",
+        "YQ==",
       ])
         expect(body + JSON.stringify(check) + timeline).not.toContain(secret);
     } finally {

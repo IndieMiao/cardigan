@@ -1053,3 +1053,61 @@ test("Q-1024: moving the opening delimiter changes only whitespace in the saved 
     reference = canonical;
   }
 });
+
+// The bytes after a completed field must not change the next step's evidence.
+test.each(["install", "test"])(
+  "completed labels in %s do not mask the following failed test",
+  async (step) => {
+    const dataDir = await fixture();
+    const proof = [
+      "FAIL src/labels.test.ts > reports the failed label",
+      "AssertionError: expected a neutral label",
+      "Tests 1 failed",
+    ];
+    for (const [i, label] of [
+      "rainy",
+      "cmFpbnk=",
+      "YQ==",
+      '"cmFpbnk="',
+      `mixed+atom/sub:word=inside'quote=`,
+    ].entries()) {
+      const w = await createMergeCheckLog({
+        dataDir,
+        project: "p",
+        attempt: `label-${step}-${i}`,
+        failureExcerptBytes: 4096,
+      });
+      // Put the last value byte at the start of the second scanner block.
+      const row = ` display_label=${label}`;
+      for (const part of partition(
+        ".".repeat(8193 - row.length) + row + "\r\n",
+        "syntax",
+      ))
+        w.append(step, part);
+      w.append("test", proof.join("\n") + "\n");
+      const saved = await w.finish({
+        status: "failed",
+        checks: [
+          { name: "install", status: "passed" },
+          { name: "test", status: "failed" },
+        ],
+        cleanup_errors: [],
+      });
+      const body = await readFile(
+        join(dataDir, "merge-gate/logs/p", saved.log_ref),
+        "utf8",
+      );
+      for (const surface of [
+        saved.summary,
+        saved.failure_excerpt ?? "",
+        body.split("=== test ===")[1] ?? "",
+      ]) {
+        for (const line of proof) expect(surface).toContain(line);
+      }
+      expect(body + JSON.stringify(saved)).not.toContain(
+        label.replaceAll('"', ""),
+      );
+      expect(saved.status).toBe("failed");
+    }
+  },
+);
