@@ -1,6 +1,8 @@
 import {
   type ReactNode,
+  type RefObject,
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useRef,
@@ -8,6 +10,7 @@ import {
 } from "react";
 import { cn } from "../../lib/utils.js";
 import { Tooltip } from "../Tooltip.js";
+import { Popover, PopoverTrigger } from "../ui/popover.js";
 import styles from "./DependencyGraphLayout.module.css";
 
 /** One line of dependency facts above the graph. */
@@ -37,6 +40,10 @@ interface Box {
 }
 
 const ARROW = 6;
+/** A press that moves farther than this pans instead of clicking. */
+const PAN_SLOP = 4;
+/** Arrow-key pan step, a browser's usual line scroll. */
+const KEY_STEP = 40;
 
 const boxOf = (element: HTMLElement): Box => ({
   left: element.offsetLeft,
@@ -95,7 +102,12 @@ export function DependencyGraph({
     height: number;
     paths: readonly Path[];
   }>({ width: 0, height: 0, paths: [] });
-  const [clipped, setClipped] = useState({ start: false, end: false });
+  const [clipped, setClipped] = useState({
+    start: false,
+    end: false,
+    pannable: false,
+  });
+  const panning = useDragPan(scroll);
   const edgeKey = edges
     .map(
       (e) =>
@@ -156,9 +168,14 @@ export function DependencyGraph({
     if (!scroller) return;
     const start = scroller.scrollLeft > 1,
       end =
-        scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 1;
+        scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 1,
+      pannable =
+        scroller.scrollWidth > scroller.clientWidth ||
+        scroller.scrollHeight > scroller.clientHeight;
     setClipped((was) =>
-      was.start === start && was.end === end ? was : { start, end },
+      was.start === start && was.end === end && was.pannable === pannable
+        ? was
+        : { start, end, pannable },
     );
   }, []);
   useLayoutEffect(() => {
@@ -186,7 +203,15 @@ export function DependencyGraph({
         clipped.end && styles.clipEnd,
       )}
     >
-      <div className={styles.scroll} ref={scroll} onScroll={measureClip}>
+      <div
+        className={cn(
+          styles.scroll,
+          clipped.pannable && styles.pannable,
+          panning && styles.panning,
+        )}
+        ref={scroll}
+        onScroll={measureClip}
+      >
         <div className={styles.canvas}>
           <svg
             className={styles.edges}
@@ -303,12 +328,154 @@ function openingScroll(root: HTMLElement, scroller: HTMLElement): number {
   return Math.max(0, Math.min(left, max));
 }
 
+/**
+ * Mouse and pen press-and-drag pans the graph, from a node or the empty space
+ * between them. A press that stays within PAN_SLOP is still a click; a drag
+ * swallows its click so it never opens a node. Touch keeps native scrolling,
+ * and the scrollbar keeps its own drag. Arrow keys pan too.
+ */
+function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
+  const [panning, setPanning] = useState(false);
+  useEffect(() => {
+    const view = scroller.current;
+    if (!view) return;
+    let pan: {
+      pointerId: number;
+      x: number;
+      y: number;
+      left: number;
+      top: number;
+      dragging: boolean;
+    } | null = null;
+    let suppressClick = false;
+    const stop = () => {
+      const previous = pan;
+      pan = null;
+      setPanning(false);
+      if (previous && view.hasPointerCapture?.(previous.pointerId))
+        view.releasePointerCapture(previous.pointerId);
+    };
+    const down = (event: PointerEvent) => {
+      suppressClick = false;
+      if (
+        pan ||
+        event.pointerType === "touch" ||
+        !event.isPrimary ||
+        event.button !== 0 ||
+        (view.scrollWidth <= view.clientWidth &&
+          view.scrollHeight <= view.clientHeight)
+      )
+        return;
+      const rect = view.getBoundingClientRect();
+      if (
+        event.clientY >= rect.top + view.clientTop + view.clientHeight ||
+        event.clientX >= rect.left + view.clientLeft + view.clientWidth
+      )
+        return;
+      pan = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        left: view.scrollLeft,
+        top: view.scrollTop,
+        dragging: false,
+      };
+    };
+    const move = (event: PointerEvent) => {
+      if (!pan || event.pointerId !== pan.pointerId) return;
+      if ((event.buttons & 1) === 0) {
+        stop();
+        return;
+      }
+      const dx = event.clientX - pan.x,
+        dy = event.clientY - pan.y;
+      if (!pan.dragging) {
+        if (Math.hypot(dx, dy) <= PAN_SLOP) return;
+        pan.dragging = true;
+        suppressClick = true;
+        setPanning(true);
+        view.setPointerCapture?.(event.pointerId);
+        window.getSelection()?.removeAllRanges();
+      }
+      event.preventDefault();
+      view.scrollLeft = Math.max(
+        0,
+        Math.min(view.scrollWidth - view.clientWidth, pan.left - dx),
+      );
+      view.scrollTop = Math.max(
+        0,
+        Math.min(view.scrollHeight - view.clientHeight, pan.top - dy),
+      );
+    };
+    const end = (event: PointerEvent) => {
+      if (event.pointerId === pan?.pointerId) stop();
+    };
+    const click = (event: MouseEvent) => {
+      // Only the pointer click that ends this drag; keyboard activation
+      // (detail 0) and the next press behave normally.
+      if (!suppressClick || event.detail === 0) return;
+      suppressClick = false;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    const key = (event: KeyboardEvent) => panByKey(view, event);
+    view.addEventListener("pointerdown", down);
+    view.addEventListener("click", click, true);
+    view.addEventListener("keydown", key);
+    view.addEventListener("lostpointercapture", end);
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", stop);
+    return () => {
+      stop();
+      view.removeEventListener("pointerdown", down);
+      view.removeEventListener("click", click, true);
+      view.removeEventListener("keydown", key);
+      view.removeEventListener("lostpointercapture", end);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", stop);
+    };
+  }, [scroller]);
+  return panning;
+}
+
+/** Arrow keys pan while focus is on the graph; at an edge they fall through. */
+function panByKey(view: HTMLElement, event: KeyboardEvent) {
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey)
+    return;
+  const [dx, dy] =
+    {
+      ArrowLeft: [-KEY_STEP, 0],
+      ArrowRight: [KEY_STEP, 0],
+      ArrowUp: [0, -KEY_STEP],
+      ArrowDown: [0, KEY_STEP],
+    }[event.key] ?? [];
+  if (dx === undefined || dy === undefined) return;
+  const left = Math.max(
+      0,
+      Math.min(view.scrollWidth - view.clientWidth, view.scrollLeft + dx),
+    ),
+    top = Math.max(
+      0,
+      Math.min(view.scrollHeight - view.clientHeight, view.scrollTop + dy),
+    );
+  if (left === view.scrollLeft && top === view.scrollTop) return;
+  view.scrollLeft = left;
+  view.scrollTop = top;
+  event.preventDefault();
+}
+
 /** A node on 1-based grid lines: `row` is the first of two half-rows. */
 export function DependencyGraphNode({
   id,
   column,
   row,
-  href,
+  peek,
+  open = false,
+  onOpenChange,
   current = false,
   muted = false,
   tooltip,
@@ -319,7 +486,10 @@ export function DependencyGraphNode({
   id: string;
   column: number;
   row: number;
-  href?: string | undefined;
+  /** A `CardPeek` the node opens in place; without one it is plain text. */
+  peek?: ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   current?: boolean;
   muted?: boolean;
   tooltip?: string;
@@ -348,7 +518,7 @@ export function DependencyGraphNode({
       data-before={before.join(" ")}
       style={{ gridColumn: column + 1, gridRow: `${row + 1} / span 2` }}
     >
-      {current || !href ? (
+      {current || !peek ? (
         <div
           className={className}
           aria-current={current ? "page" : undefined}
@@ -357,11 +527,20 @@ export function DependencyGraphNode({
           {children}
         </div>
       ) : (
-        <Tooltip content={tooltip}>
-          <a className={className} href={href} aria-describedby={describedBy}>
-            {children}
-          </a>
-        </Tooltip>
+        <Popover open={open} onOpenChange={onOpenChange}>
+          <Tooltip content={tooltip}>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className={className}
+                aria-describedby={describedBy}
+              >
+                {children}
+              </button>
+            </PopoverTrigger>
+          </Tooltip>
+          {peek}
+        </Popover>
       )}
       {relations && (
         <span id={descriptionId} className="visually-hidden">
