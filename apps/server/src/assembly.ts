@@ -57,6 +57,7 @@ export interface ControlPlaneOptions {
   readonly snapshot: DispatcherOptions["snapshot"];
   readonly toolCatalog?: DispatcherOptions["toolCatalog"];
   readonly runLimit?: DispatcherOptions["runLimit"];
+  readonly projectQuota?: DispatcherOptions["projectQuota"];
   readonly resourceLimits?: DispatcherOptions["resourceLimits"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
@@ -220,6 +221,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? {}
       : { inactiveCancelAfterMs: options.inactiveCancelAfterMs }),
     ...(options.runLimit ? { runLimit: options.runLimit } : {}),
+    ...(options.projectQuota ? { projectQuota: options.projectQuota } : {}),
     ...(options.resourceLimits
       ? { resourceLimits: options.resourceLimits }
       : {}),

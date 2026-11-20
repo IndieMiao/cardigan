@@ -82,6 +82,7 @@ import {
   preparationPolicy,
   withPreparationQueue,
 } from "./preparation-queue.js";
+import type { ReadProjectQuota } from "./project-quotas.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
@@ -154,6 +155,7 @@ export class RunPreparationDeferred extends Error {
 export interface LaunchHost {
   readonly configDir?: string;
   readonly runLimit?: (machine: string) => number;
+  readonly projectQuota?: ReadProjectQuota;
   readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
@@ -359,7 +361,12 @@ async function launchWithClaim(
     if (!assignment)
       throw new HostLaunchError("dispatch", "Assignment is missing");
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
-    const capacity = runCapacitySnapshot(host.store, tx, host.resourceLimits);
+    const capacity = runCapacitySnapshot(
+      host.store,
+      tx,
+      host.resourceLimits,
+      host.projectQuota,
+    );
     const slots = capacity.resourcesForMachine(assignment.machine_id);
     const keys = assignmentResourceKeys(tx, input.project, assignment);
     const manual =
@@ -379,6 +386,7 @@ async function launchWithClaim(
     // Resource limits are hard even for a manual launch. A zero total denotes
     // invalid private configuration, so resource-bearing Runs cannot infer that they're unlimited.
     if (
+      !capacity.withinProjectQuota(input.project, assignment, keys) ||
       remainingResourceRatio(keys, slots) <= 0 ||
       (limit === 0 && keys.length > 0) ||
       (!manual &&
@@ -392,6 +400,7 @@ async function launchWithClaim(
               assignment.machine_id,
               slots,
               clock.now(),
+              capacity.withinProjectQuota,
             ))))
     ) {
       return undefined;

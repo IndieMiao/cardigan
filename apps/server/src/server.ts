@@ -739,6 +739,7 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,

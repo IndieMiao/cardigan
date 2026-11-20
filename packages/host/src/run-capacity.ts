@@ -28,6 +28,7 @@ import {
 } from "@cardigan/store";
 import { runningMergeChecks } from "./merge-check-capacity.js";
 import { LOCAL_EXECUTOR } from "./merge-gate-executors.js";
+import type { ReadProjectQuota } from "./project-quotas.js";
 import {
   assignmentResourceKeys,
   legacyResourceKeys,
@@ -252,6 +253,7 @@ export function runCapacitySnapshot(
   store: Store,
   tx: ReadRepositories,
   limits?: ReadResourceLimits,
+  quotas?: ReadProjectQuota,
 ) {
   const machines = new Map<
     string,
@@ -269,6 +271,8 @@ export function runCapacitySnapshot(
   };
   // Both views share the exact same effective Run/reservation set. Only the
   // trusted Assignment scope and role determine exemption, never Run labels.
+  type Usage = { occupied: number; resources: Map<string, number> };
+  const projectUsage = new Map<string, Map<string, Usage>>();
   const agentOccupied = new Map<string, number>();
   const allAgentOccupied = new Map<string, number>();
   const reservedRuns = new Map<string, ReadonlySet<string>>();
@@ -320,6 +324,8 @@ export function runCapacitySnapshot(
         streams?.get(card ?? "") ?? tx.events.listAfter(project.id, card, 0)
       );
     };
+    const usageByMachine = new Map<string, Usage>();
+    projectUsage.set(project.id, usageByMachine);
     const count = (assignmentId: AssignmentId, run?: Run, stopOnly = false) => {
       const owner = owners.get(assignmentId);
       if (!owner) return;
@@ -327,6 +333,12 @@ export function runCapacitySnapshot(
       allAgentOccupied.set(machine, (allAgentOccupied.get(machine) ?? 0) + 1);
       if (!isRunCapacityExempt(owner))
         agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
+      let usage = usageByMachine.get(machine);
+      if (!usage && quotas?.(machine, project.id)) {
+        usage = { occupied: 0, resources: new Map() };
+        usageByMachine.set(machine, usage);
+      }
+      if (usage && !isRunCapacityExempt(owner)) usage.occupied++;
       const slots = resourceSlots(machine);
       // Stop intents keep their existing machine slot. An idle terminal is not
       // proof that its queued follow-up acquired any resources. Active Runs and
@@ -347,7 +359,10 @@ export function runCapacitySnapshot(
             slots.keys(),
           )) {
           const slot = slots.get(key);
-          if (slot) slot.occupied++;
+          if (slot) {
+            slot.occupied++;
+            usage?.resources.set(key, (usage.resources.get(key) ?? 0) + 1);
+          }
         }
       }
       countedOwners.add(owner.id);
@@ -381,7 +396,29 @@ export function runCapacitySnapshot(
     (occupied.get(LOCAL_EXECUTOR) ?? 0) +
       (mergeChecks.get(LOCAL_EXECUTOR) ?? 0) * MERGE_CHECK_RUN_SLOTS,
   );
+  function withinProjectQuota(
+    project: string,
+    owner: Assignment,
+    keys?: readonly string[],
+  ): boolean {
+    const quota = quotas?.(owner.machine_id, project);
+    if (!quota) return true;
+    const usage = projectUsage.get(project)?.get(owner.machine_id);
+    if (
+      quota.limit !== undefined &&
+      !isRunCapacityExempt(owner) &&
+      (usage?.occupied ?? 0) >= quota.limit
+    )
+      return false;
+    for (const key of keys ?? assignmentResourceKeys(tx, project, owner)) {
+      const ceiling = quota.resources.get(key);
+      if (ceiling !== undefined && (usage?.resources.get(key) ?? 0) >= ceiling)
+        return false;
+    }
+    return true;
+  }
   return {
+    withinProjectQuota,
     occupied,
     agentOccupied,
     allAgentOccupied,

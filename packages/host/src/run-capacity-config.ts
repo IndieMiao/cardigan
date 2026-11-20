@@ -11,10 +11,17 @@ import {
 } from "@cardigan/domain";
 import { parseDocument } from "yaml";
 
+import {
+  type ProjectQuota,
+  parseProjectQuotas,
+  type ReadProjectQuota,
+} from "./project-quotas.js";
+
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
   resourcesForMachine(machine: string): ReadonlyMap<string, number>;
+  readonly projectQuota: ReadProjectQuota;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
   readonly inboxStallAfterMs: number;
@@ -40,6 +47,7 @@ export async function loadRunCapacityConfig(
   const limits = new Map<string, number>();
   const maximums = new Map<string, number>();
   const resources = new Map<string, ReadonlyMap<string, number>>();
+  const projects = new Map<string, ReadonlyMap<string, ProjectQuota>>();
   const unlimited: ReadonlyMap<string, number> = new Map();
   const names = new Map<string, string>();
   const errors: string[] = [];
@@ -56,6 +64,8 @@ export async function loadRunCapacityConfig(
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
     resourcesForMachine: (machine) =>
       errors.length ? unlimited : (resources.get(machine) ?? unlimited),
+    projectQuota: (machine, project) =>
+      errors.length ? undefined : projects.get(machine)?.get(project),
     maxForMachine: (machine) =>
       errors.length ? 0 : (maximums.get(machine) ?? DEFAULT_MAX_RUN_LIMIT),
     displayNameForMachine: (machine) =>
@@ -139,7 +149,13 @@ export async function loadRunCapacityConfig(
       if (
         Object.keys(settings).some(
           (key) =>
-            !["limit", "max_limit", "display_name", "resources"].includes(key),
+            ![
+              "limit",
+              "max_limit",
+              "display_name",
+              "resources",
+              "projects",
+            ].includes(key),
         )
       )
         throw new Error("Invalid machine fields");
@@ -179,6 +195,15 @@ export async function loadRunCapacityConfig(
         }
         resources.set(machine, slots);
       }
+      if (settings.projects !== undefined)
+        projects.set(
+          machine,
+          parseProjectQuotas(
+            settings.projects,
+            maximum,
+            resources.get(machine) ?? unlimited,
+          ),
+        );
       if (settings.display_name !== undefined) {
         const name = settings.display_name;
         if (

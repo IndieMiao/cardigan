@@ -2875,3 +2875,79 @@ test("C-297: current harness activity prevents both inactivity alerts and automa
     }),
   );
 });
+
+test.each(["total", "resource"])(
+  "C-497 project %s ceilings constrain automatic and explicit starts without charging other projects",
+  async (kind) => {
+    const busy = f.create();
+    for (const item of [busy.item, target.item])
+      requireCapabilities(item, ["godot"]);
+    f.session(busy.assignment, false);
+    const limits = {
+      runLimit: () => 4,
+      resourceLimits: () => new Map([["godot", 3]]),
+      projectQuota: () =>
+        kind === "total"
+          ? { limit: 1, resources: new Map<string, number>() }
+          : { resources: new Map([["godot", 1]]) },
+    };
+    const other = "other-project";
+    f.store.createProject({ id: other });
+    f.store.uow.read((tx) => {
+      const capacity = runCapacitySnapshot(
+        f.store,
+        tx,
+        limits.resourceLimits,
+        limits.projectQuota,
+      );
+      expect(
+        capacity.withinProjectQuota(f.project, target.assignment, ["godot"]),
+      ).toBe(false);
+      expect(
+        capacity.withinProjectQuota(other, target.assignment, ["godot"]),
+      ).toBe(true);
+      expect(
+        capacity.withinProjectQuota(
+          f.project,
+          { ...target.assignment, machine_id: "other-worker" },
+          ["godot"],
+        ),
+      ).toBe(true);
+    });
+    comment();
+    const dispatcher = new Dispatcher({ ...options, ...limits });
+    await dispatcher.tick();
+    const run = f
+      .state()
+      .runs.find(
+        (r) =>
+          r.assignment_id === target.assignment.id && r.status === "queued",
+      );
+    if (!run) throw new Error("Expected quota wait");
+    expect(runtime.wake).not.toHaveBeenCalled();
+    await expect(
+      launchRun(
+        {
+          store: f.store,
+          runtime,
+          launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
+          mcpUrl: "http://localhost/mcp",
+          dataDir: f.dataDir,
+          ...limits,
+        },
+        {
+          project: f.project,
+          assignment_id: target.assignment.id,
+          run,
+          actor: { kind: "human", project_id: f.project },
+          reuse_session: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(RunCapacityDeferred);
+    finish(busy.assignment);
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);

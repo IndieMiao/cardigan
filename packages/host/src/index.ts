@@ -205,6 +205,7 @@ export {
 } from "./preparation-queue.js";
 export * from "./probe-config.js";
 export * from "./probe-service.js";
+export type { ReadProjectQuota } from "./project-quotas.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,

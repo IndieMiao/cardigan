@@ -62,6 +62,7 @@ import {
   HostLaunchError,
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  type ReadProjectQuota,
   type ReadResourceLimits,
   RunPreflightDeferred,
   RunPreparationDeferred,
@@ -189,6 +190,7 @@ export interface DispatcherOptions {
   readonly maxRetries?: number;
   /** Loaded once by the host; the decision reads the supplied limit on every claim. */
   readonly runLimit?: (machine: string) => number;
+  readonly projectQuota?: ReadProjectQuota;
   readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly inactivityGraceMs?: number;
@@ -1203,9 +1205,11 @@ export class Dispatcher {
       this.options.store,
       tx,
       this.options.resourceLimits,
+      this.options.projectQuota,
     );
     const slots = capacity.resourcesForMachine(a.machine_id);
     const keys = assignmentResourceKeys(tx, project, a);
+    if (!capacity.withinProjectQuota(project, a, keys)) return undefined;
     const trigger = state.events.find((e) => e.id === run.trigger_event_id);
     const order = {
       ...dispatchTier(state, a, run, trigger),
@@ -1224,6 +1228,7 @@ export class Dispatcher {
       slots,
       this.clock.now(),
       (p, owner) =>
+        capacity.withinProjectQuota(p, owner) &&
         hasRunTarget(owner, {
           work_items: tx.work_items.list(p),
           deliveries: tx.deliveries.list(p),
