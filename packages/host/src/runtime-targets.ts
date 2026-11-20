@@ -33,6 +33,7 @@ import {
   refreshMachineObservations,
 } from "./machine-capabilities.js";
 import { MachineCheckJournal } from "./machine-check-journal.js";
+import { targetProbe } from "./resource-probe.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
@@ -305,6 +306,40 @@ export class RuntimeTargets implements Runtime {
       return rejected("target_changed");
     return current;
   }
+  // A reused terminal runs this inside its hc send slot. Revalidate the
+  // pinned SSH target directly; forLaunch's hc health call would requeue on
+  // that same slot. Admission and terminal liveness keep their normal checks.
+  readonly publicationResourceProbe = targetProbe(
+    async (project, machine_id, pin) => {
+      const assignment = { machine_id, runtime_ref: null };
+      const target = this.launchTarget(project, assignment);
+      if (!pin || target.execution.target?.fingerprint !== pin)
+        return rejected("target_changed");
+      if (machine_id !== "local") {
+        const blockers = await this.workerBlockers(target);
+        if (blockers.length) return rejected(blockers[0]);
+      }
+      return this.checkedTarget(target, project, assignment).execution;
+    },
+  );
+  private async workerBlockers(target: Target): Promise<readonly string[]> {
+    const { execution } = target;
+    if (execution.mode !== "agent-ssh") return rejected();
+    const blockers = await (this.options.workerReadiness ?? workerReadiness)(
+      execution,
+    );
+    if (blockers.length) return blockers;
+    try {
+      await (this.options.workerMcpReachability ?? checkWorkerMcpReachability)(
+        execution,
+      );
+      return [];
+    } catch (error) {
+      return [
+        error instanceof WorkerMcpError ? error.code : "mcp_worker_failed",
+      ];
+    }
+  }
   private launchAllowed(project: ProjectId, machine: string): boolean {
     return (
       machine === "local" ||
@@ -441,26 +476,8 @@ export class RuntimeTargets implements Runtime {
           (target.machine.os !== platform() || target.machine.arch !== arch())
         )
           blockers = ["machine_platform_mismatch"];
-        if (machine_id !== "local") {
-          if (target.execution.mode !== "agent-ssh")
-            return failure<MachineCheck>();
-          blockers = await (this.options.workerReadiness ?? workerReadiness)(
-            target.execution,
-          );
-          if (!blockers.length) {
-            try {
-              await (
-                this.options.workerMcpReachability ?? checkWorkerMcpReachability
-              )(target.execution);
-            } catch (error) {
-              blockers = [
-                error instanceof WorkerMcpError
-                  ? error.code
-                  : "mcp_worker_failed",
-              ];
-            }
-          }
-        }
+        if (machine_id !== "local")
+          blockers = await this.workerBlockers(target);
         const current = this.resolve(project, machine_id);
         if (
           target.execution.target?.fingerprint !==

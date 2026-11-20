@@ -47,6 +47,13 @@ export const isRunCapacityExempt = (assignment: Assignment): boolean =>
   assignment.scope === "standing" &&
   (assignment.role_id === "pm" || assignment.role_id === "host_ops");
 
+/** Publication is for a new start, never a continuation or a fenced stop. */
+export const awaitsStartPublication = (run: Run): boolean =>
+  (run.status === "queued" || run.status === "dispatched") &&
+  !run.started_at &&
+  !run.inactivity_stop &&
+  !run.dispatch_stop;
+
 /** Physical occupancy, including stop reservations until exit is confirmed. */
 export const runOccupiesSlot = (run: Run): boolean =>
   Boolean(

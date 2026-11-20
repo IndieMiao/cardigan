@@ -47,7 +47,9 @@ import {
   effectiveRunLimit,
   loadMergeGateConfig,
   loadRunCapacityConfig,
+  MachineLeases,
   RuntimeTargets,
+  targetProbe,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
@@ -102,6 +104,7 @@ const USAGE = [
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--recovery-source main|backup] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
+  "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
@@ -838,9 +841,15 @@ async function machineCommand(
     throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
   const [sub, ...rest] = args;
   if (
-    !["register", "update", "list", "show", "drain", "check"].includes(
-      sub ?? "",
-    )
+    ![
+      "register",
+      "update",
+      "list",
+      "show",
+      "drain",
+      "check",
+      "reserve",
+    ].includes(sub ?? "")
   )
     throw new CliError(
       "用法：cardigan machine register|update|list|show|drain|check",
@@ -852,7 +861,9 @@ async function machineCommand(
       !(
         sub === "register" || sub === "update"
           ? ["project", "data-dir", "label", "os", "arch", "tags", "status"]
-          : ["project", "data-dir"]
+          : sub === "reserve"
+            ? ["project", "data-dir", "resource", "start", "end"]
+            : ["project", "data-dir"]
       ).includes(key)
     )
       throw new CliError(`机器登记不接受 --${key}`, EXIT.usage);
@@ -880,6 +891,47 @@ async function machineCommand(
         config.forMachine,
         config.maxForMachine,
       );
+    if (sub === "reserve") {
+      const leases = new MachineLeases(
+        store,
+        config,
+        targetProbe(async (project, machine_id) => {
+          const dataDir = resolveDataDir(
+            io,
+            optional(parsed.flags, "data-dir"),
+          );
+          const connection = await terminalExecution(
+            io,
+            dataDir,
+            null,
+            machine_id,
+          );
+          const result = await RuntimeTargets.create({
+            ...connection,
+            env: io.env,
+            store,
+            project,
+          });
+          if (!result.ok) throw new Error("目标不可用");
+          return (
+            await result.value.forLaunch(project, {
+              machine_id,
+              runtime_ref: null,
+            })
+          ).execution;
+        }),
+      );
+      const generation = await leases.reserve(
+        actor,
+        id ?? "",
+        optional(parsed.flags, "resource") ?? "",
+        optional(parsed.flags, "start") ?? "",
+        optional(parsed.flags, "end") ?? "",
+        () => new Date().toISOString(),
+      );
+      io.stdout(JSON.stringify({ generation }));
+      return EXIT.ok;
+    }
     if (sub === "list" || sub === "show" || sub === "check") {
       const machines = store.uow.read((tx) => tx.machines.list(project_id));
       const selected =

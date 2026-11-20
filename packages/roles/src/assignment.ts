@@ -54,10 +54,13 @@ export function compileAssignmentLaunch(
   if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
     throw new Error("Agent niceness must be an integer from 0 to 19");
   const identity = employeeIdentityPrompt(input.employee?.identity);
+  const policyRule = input.resource_bindings
+    ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
+    : "";
   const rolePrompt =
-    input.role.instructions === undefined
+    (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
-      : composeRolePrompt(input.role.instructions);
+      : composeRolePrompt(input.role.instructions)) + policyRule;
   const corePrompt =
     identity === undefined
       ? rolePrompt
@@ -217,6 +220,21 @@ export function compileAssignmentLaunch(
     }
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
+  if (input.resource_bindings) {
+    env.CARDIGAN_RESOURCE_BINDINGS = JSON.stringify(input.resource_bindings);
+    const ports = input.resource_bindings.flatMap((b) =>
+      b.port ? [b.port] : [],
+    );
+    env.ADB_SERVER_SOCKET =
+      ports.length === 1
+        ? `tcp:localhost:${ports[0]}`
+        : "localfilesystem:/dev/null";
+    const devices = input.resource_bindings.flatMap((b) =>
+      b.device ? [b.device] : [],
+    );
+    env.ANDROID_SERIAL =
+      (devices.length === 1 ? devices[0] : undefined) ?? "cardigan-unassigned";
+  }
   if (input.agent_local_tests) env.CARDIGAN_AGENT_LOCAL_TESTS = "1";
   const testLimit =
     input.test_max_workers === undefined
