@@ -525,6 +525,7 @@ test("C-383 Token human-action done checks the exact host owner and result", asy
       key: id,
       card_id: "C-1" as never,
       requested_by: "human" as const,
+      category: "general" as const,
       instructions: "Read evidence",
       why_human: "Host access",
       expected_return: "Evidence",
@@ -579,6 +580,7 @@ function externalHostAction(protectedSetup = false) {
       key: id,
       card_id: item.card_id,
       requested_by: "human" as const,
+      category: protectedSetup ? ("account" as const) : ("general" as const),
       instructions: protectedSetup
         ? "Synthetic host prerequisite"
         : "Read evidence",

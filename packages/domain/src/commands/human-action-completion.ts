@@ -1,4 +1,5 @@
 import type { HumanAction, WorkItem } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import type { HumanActionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
@@ -15,6 +16,20 @@ export function humanOnlyAction(d: CommandDraft, action: HumanAction) {
     action.prerequisite ||
     action.blocked_work_items.length ||
     (action.category && highRiskCategories.includes(action.category)) ||
+    (action.requested_by === "system" &&
+      eventsOfType(d.state.events, "human_action_requested").some((e) => {
+        const p = e.payload as {
+          human_action_id?: string;
+          host_ops_action_id?: string;
+          preparation_run_id?: string;
+        };
+        return (
+          e.actor.kind === "system" &&
+          e.actor.project_id === d.state.project_id &&
+          p.human_action_id === action.id &&
+          (p.host_ops_action_id || p.preparation_run_id)
+        );
+      })) ||
     card?.sensitive ||
     (card &&
       mergeContentDecisions(d.state.decisions, card, d.state.events).some(
@@ -23,46 +38,115 @@ export function humanOnlyAction(d: CommandDraft, action: HumanAction) {
   );
 }
 
-/** PM verifies the report's substance. The domain verifies its provenance and target. */
+/** Only postComment's authenticated final-report path sets human_action_id on a comment. */
 export function hasHostResult(
   d: CommandDraft,
   action: HumanAction,
   reason: string,
 ) {
-  const entries = d.state.timeline;
   return extractReferences(reason).some((ref) => {
     if (ref.kind !== "timeline_entry") return false;
-    const entry = entries.find((e) => e.id === ref.id);
-    if (
-      !entry ||
-      entry.card_id !== action.card_id ||
-      entry.type !== "comment" ||
-      entry.retracted ||
-      entries.some((e) => e.supersedes === entry.id) ||
-      !entry.body.trim()
-    )
-      return false;
-    const author = d.state.assignments.find(
-      (a) => `assignment:${a.id}` === entry.author,
-    );
-    if (
-      entry.author !== "human" &&
-      !(
-        author?.scope === "standing" &&
-        ["host_ops", "pm"].includes(author.role_id)
-      )
-    )
-      return false;
+    const entry = d.state.timeline.find((e) => e.id === ref.id);
     return (
-      entry.refs.some((r) => r.kind === "human_action" && r.id === action.id) ||
-      entries.some(
+      entry?.type === "comment" &&
+      entry.card_id === action.card_id &&
+      entry.human_action_id === action.id &&
+      !entry.retracted &&
+      !!entry.body.trim() &&
+      !d.state.timeline.some((e) => e.supersedes === entry.id) &&
+      eventsOfType(d.state.events, "comment_posted").some(
         (e) =>
-          e.id === entry.reply_to &&
           e.card_id === entry.card_id &&
-          e.human_action_id === action.id,
+          e.seq === entry.event_seq &&
+          (e.payload as { host_report_for?: string }).host_report_for ===
+            action.id &&
+          (e.actor.kind === "assignment"
+            ? `assignment:${e.actor.assignment_id}`
+            : e.actor.kind) === entry.author,
       )
     );
   });
+}
+
+/** Classifying a legacy request is distinct from attesting that someone executed it. */
+export function classifyOrdinaryHost(
+  d: CommandDraft,
+  action: HumanAction,
+  basis: string,
+) {
+  text(basis, "ordinary_host_basis");
+  ensure(
+    !action.category &&
+      !humanOnlyAction(d, action) &&
+      !remoteExitAction(d.state, action.id),
+    "unauthorized",
+    "不能用普通主机事项的说明覆盖已有分类、阻塞或交人事项",
+  );
+  // Cite the original request, not a rewritten handoff or the result itself.
+  const original = extractReferences(basis).some((ref) => {
+    if (ref.kind !== "timeline_entry" || !basis.replace(ref.id, "").trim())
+      return false;
+    const e = d.state.timeline.find((e) => e.id === ref.id);
+    return (
+      e?.type === "human_action" &&
+      e.card_id === action.card_id &&
+      e.human_action_id === action.id &&
+      e.author === action.requested_by &&
+      !e.retracted &&
+      e.body === action.instructions &&
+      eventsOfType(d.state.events, "human_action_requested").some((request) => {
+        const p = request.payload as {
+          human_action_id?: string;
+          disposition?: string;
+        };
+        return (
+          request.card_id === e.card_id &&
+          request.seq === e.event_seq &&
+          p.human_action_id === action.id &&
+          !p.disposition
+        );
+      })
+    );
+  });
+  ensure(
+    d.actor.kind === "human" || original,
+    "unauthorized",
+    "核定未分类待办须说明非交人依据并引用同卡原始请求；缺少依据请交人",
+  );
+  const classified = { ...action, category: "general" as const };
+  d.put("human_actions", classified);
+  d.emit(
+    "human_action_classified",
+    action.card_id,
+    { human_action_id: action.id, category: "general", basis },
+    {
+      type: "human_action",
+      human_action_id: action.id,
+      body: `核对为普通主机事项：${basis}`,
+      refs: extractReferences(basis),
+    },
+  );
+  return classified;
+}
+
+/** Before category was persisted, deployment evidence waits used a system-only key. */
+function legacyDeploymentEvidence(d: CommandDraft, action: HumanAction) {
+  return (
+    action.requested_by === "system" &&
+    !action.card_id &&
+    eventsOfType(d.state.events, "host_deployment_action_requested").some(
+      (e) => {
+        const p = e.payload as { human_action_id?: string; key?: string };
+        return (
+          e.actor.kind === "system" &&
+          e.actor.project_id === d.state.project_id &&
+          !e.card_id &&
+          p.human_action_id === action.id &&
+          /^deployment-evidence:[a-f0-9]{40}$/u.test(p.key ?? "")
+        );
+      },
+    )
+  );
 }
 
 /** All completion routes share the human-only fences, transition and audit. */
@@ -84,6 +168,14 @@ export function completeActionDraft(
     d.actor.kind === "human" || !humanOnlyAction(d, action),
     "unauthorized",
     "阻塞、凭据或账号前置及五类交人事项只能由人结项",
+  );
+  ensure(
+    d.actor.kind !== "assignment" ||
+      action.triage !== "host" ||
+      !!action.category ||
+      legacyDeploymentEvidence(d, action),
+    "unauthorized",
+    "未分类主机待办须先核对原始请求，不能仅凭完成回帖结项",
   );
   text(p.text, "result");
   if (action.card_id)

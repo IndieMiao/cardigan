@@ -2486,6 +2486,7 @@ test("C-383 external Office completes only its bound host action through MCP and
   );
   const action = await ok<HumanAction>(caller, "request_human_action", {
     card_id: card.id,
+    category: "general",
     instructions: "Read evidence",
     why_human: "Host access",
     expected_return: "Evidence",

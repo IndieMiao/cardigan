@@ -307,6 +307,62 @@ test("external Office gets handoff inbox and one manual clear request without a 
   }
 });
 
+test("a recovered external session opens exactly one new clear action on a fresh crossing without resending notices", () => {
+  const s = base();
+  const office = s.assignments.find(
+    (a) => a.scope === "standing" && a.role_id === "pm",
+  );
+  if (!office) throw new Error("Missing Office");
+  let state: CommandState = {
+    ...s,
+    assignments: s.assignments.map((a) =>
+      a.id === office.id ? { ...a, external: true } : a,
+    ),
+  };
+  const io = ports();
+  for (const [second, pct, expected] of [
+    [1, 85, 0],
+    [2, 86, 1],
+    [3, 84, 0],
+    [2, 86, 0],
+    [3, 86, 0],
+    [4, 86, 1],
+    [5, 86, 1],
+  ] as const) {
+    const updated_at = new Date(Date.parse(now) + second * 1000).toISOString();
+    const effect = value(
+      recordContextUsageNotices(
+        state,
+        system,
+        {
+          ...usage(pct),
+          assignment_id: office.id,
+          runtime_key: JSON.stringify(office.runtime_ref),
+          updated_at,
+        },
+        60_000,
+        {
+          ...io,
+          clock: {
+            now: () => new Date(Date.parse(now) + 10_000).toISOString(),
+          },
+        },
+      ),
+    );
+    state = apply(state, effect);
+    expect(state.human_actions.filter((a) => a.status === "open")).toHaveLength(
+      expected,
+    );
+  }
+  expect(state.human_actions).toHaveLength(2);
+  expect(
+    state.events.filter((e) => e.type === "context_usage_notice"),
+  ).toHaveLength(2);
+  expect(
+    state.events.filter((e) => e.type === "human_action_completed"),
+  ).toHaveLength(1);
+});
+
 test("context restart binds current session, rechecks preferences, clears resume ID, and deduplicates beyond idempotency keys", () => {
   let s = base();
   const u = usage(85);

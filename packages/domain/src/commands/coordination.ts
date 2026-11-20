@@ -111,6 +111,7 @@ import {
 } from "./core.js";
 import { endRun } from "./end-run.js";
 import {
+  classifyOrdinaryHost,
   completeActionDraft,
   hasHostResult,
   humanOnlyAction,
@@ -174,6 +175,7 @@ export function postComment(
   actor: Actor,
   p: Pick<TimelineEntry, "card_id" | "body"> & {
     host_result_for?: HumanActionId;
+    host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
   } & Partial<
       Pick<
@@ -211,12 +213,34 @@ export function postComment(
         checkPlanSupersession(d, entry, p.review_plan);
       }
     }
+    if (p.host_report_for) {
+      const action = d.get("human_actions", p.host_report_for);
+      const a = d.assignment;
+      const operator =
+        a?.scope === "standing" &&
+        isRoleActive(state.roles, a.role_id) &&
+        ((a.role_id === "host_ops" && !a.external) ||
+          (a.role_id === "pm" && a.standing_mode === "office" && a.external) ||
+          (isPmOps(d) &&
+            internalHostFollowup(action) &&
+            action.host_assignment_id === a.id));
+      ensure(
+        !p.host_result_for &&
+          action.card_id === p.card_id &&
+          action.status === "open" &&
+          action.triage === "host" &&
+          (actor.kind === "human" || operator),
+        "unauthorized",
+        "仅实际执行者可回填同卡主机待办的最终结果；进度或代转述请用普通回帖",
+      );
+    }
+    const resultFor = p.host_report_for ?? p.host_result_for;
     const refs = [
       ...new Map(
         [
           ...(p.refs ?? []),
-          ...(p.host_result_for
-            ? [{ kind: "human_action" as const, id: p.host_result_for }]
+          ...(resultFor
+            ? [{ kind: "human_action" as const, id: resultFor }]
             : []),
           ...extractReferences(p.body),
         ].map((ref) => [JSON.stringify(ref), ref]),
@@ -225,9 +249,13 @@ export function postComment(
     d.emit(
       "comment_posted",
       p.card_id,
-      { body: p.body },
+      {
+        body: p.body,
+        ...(p.host_report_for ? { host_report_for: p.host_report_for } : {}),
+      },
       {
         type: "comment",
+        ...(p.host_report_for ? { human_action_id: p.host_report_for } : {}),
         body: p.body,
         refs,
         mentions: commentMentions(
@@ -1573,8 +1601,7 @@ export function completeHumanAction(
           actor.kind === "assignment" &&
             action.triage === "host" &&
             action.host_operator === "external" &&
-            action.host_assignment_id === actor.assignment_id &&
-            action.requested_by !== "system",
+            action.host_assignment_id === actor.assignment_id,
           "unauthorized",
           "只能完成明确指派给当前身份的外接主机待办",
         );
@@ -1591,6 +1618,7 @@ export function triageHumanAction(
     human_action_id: HumanActionId;
     disposition: "done" | "host" | "human" | "release";
     rationale: string;
+    ordinary_host_basis?: string;
     title?: string;
     /** C-212: one plain line saying what the reader has to do. */
     todo?: string;
@@ -1618,7 +1646,7 @@ export function triageHumanAction(
       "forbidden_tool",
       "Only the human or PM Ops can triage human actions",
     );
-    const action = d.get("human_actions", p.human_action_id);
+    let action = d.get("human_actions", p.human_action_id);
     if (action.card_id)
       ensure(
         d.card(action.card_id).status !== "cancelled",
@@ -1637,6 +1665,15 @@ export function triageHumanAction(
       "Remote exit confirmation cannot be delegated",
     );
     text(p.rationale, "rationale");
+    if (p.ordinary_host_basis !== undefined) {
+      ensure(
+        p.disposition === "host" ||
+          (p.disposition === "done" && action.triage === "host"),
+        "validation_failed",
+        "仅在主机交接或结项时核定原始请求",
+      );
+      action = classifyOrdinaryHost(d, action, p.ordinary_host_basis);
+    }
     const external = p.disposition === "host" && p.host_operator === "external";
     ensure(
       external || p.host_assignment_id === undefined,

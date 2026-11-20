@@ -8,6 +8,7 @@ import {
   postComment,
   refreshCancelledHumanActions,
   requestDecision,
+  requestDeploymentAction,
   requestHumanAction,
   standingTools,
   triageHumanAction,
@@ -48,6 +49,7 @@ function setup(): CommandState {
         key: target,
         card_id: id("card", 1),
         requested_by: "human",
+        category: "general",
         instructions: "Read host evidence",
         why_human: "Host access",
         expected_return: "Evidence",
@@ -511,7 +513,7 @@ test("internal non-blocking handoff binds a result author; only their explicit f
     postComment(
       fallbackState,
       owner,
-      { card_id: result.card_id, body: result.body },
+      { card_id: result.card_id, body: result.body, host_report_for: target },
       io,
     ),
   );
@@ -554,7 +556,11 @@ test.each([false, true])(
       postComment(
         legacy,
         actor(5, "host_ops"),
-        { card_id: id("card", 1), body: `${target}: verified host state` },
+        {
+          card_id: id("card", 1),
+          body: `${target}: verified host state`,
+          host_report_for: target,
+        },
         ports(),
       ),
     );
@@ -568,14 +574,33 @@ test.each([false, true])(
         { human_action_id: target, disposition: "done", rationale },
         ports(),
       );
+    const note = {
+      card_id: entry.card_id,
+      body: `${target}: awaiting execution`,
+      refs: [{ kind: "human_action" as const, id: target }],
+    };
+    for (const who of [actor(5, "host_ops"), owner]) {
+      const progress = value(postComment(legacy, who, note, ports()));
+      expect(
+        completePm(apply(legacy, progress), `Completed: ${progress.data?.id}`)
+          .ok,
+      ).toBe(false);
+    }
+    for (const who of [actor(), owner])
+      expect(
+        postComment(legacy, who, { ...note, host_report_for: target }, ports())
+          .ok,
+      ).toBe(false);
+    expect(evidence.changes).toEqual([]);
     expect(completePm(cited, "No reference").ok).toBe(false);
     expect(completePm(cited, "C-1#999").ok).toBe(false);
     for (const patch of [
-      { refs: [] },
+      { human_action_id: id("human_action", 2) },
       { card_id: id("card", 2) },
       { type: "system" as const },
       { retracted: true },
       { author: `assignment:${id("assignment", 1)}` as const },
+      { body: " " },
     ])
       expect(
         completePm({ ...cited, timeline: [{ ...entry, ...patch }] }).ok,
@@ -640,6 +665,46 @@ test.each([false, true])(
       ...cited,
       assignments: [...cited.assignments, external],
     };
+    const extIo = ports();
+    const wrongOwner = {
+      ...legacy,
+      assignments: transferable.assignments,
+      human_actions: legacy.human_actions.map((h) => ({
+        ...h,
+        host_operator: "external" as const,
+        host_assignment_id: id("assignment", 7),
+      })),
+    };
+    const report = value(
+      postComment(
+        wrongOwner,
+        actor(6, "pm"),
+        {
+          card_id: entry.card_id,
+          body: "I verified the new version",
+          host_report_for: target,
+        },
+        extIo,
+      ),
+    );
+    const reported = apply(wrongOwner, report);
+    expect(complete(wrongOwner, actor(6, "pm")).ok).toBe(false);
+    expect(completePm(reported, `Verified ${report.data?.id}`).ok).toBe(true);
+    const superseded = value(
+      postComment(
+        reported,
+        actor(6, "pm"),
+        {
+          card_id: entry.card_id,
+          supersedes: required(report.data).id,
+          body: "Still pending",
+        },
+        extIo,
+      ),
+    );
+    expect(
+      completePm(apply(reported, superseded), `Verified ${report.data?.id}`).ok,
+    ).toBe(false);
     const transfer = value(
       triageHumanAction(
         transferable,
@@ -754,4 +819,154 @@ test("a standalone action's declared category survives handoff; a legacy action 
     ),
   );
   expect(complete(apply(s, risk)).ok).toBe(false);
+});
+
+test("PM can classify an unclassified legacy host request only against the original request, separately from a final report", () => {
+  const { state } = diagnosticOwners();
+  const io = ports();
+  const source = value(
+    requestHumanAction(
+      state,
+      human,
+      {
+        card_id: id("card", 1),
+        instructions: "Check the recorded runtime version",
+        why_human: "Host",
+        expected_return: "Readback",
+        blocked_work_items: [],
+      },
+      io,
+    ),
+  );
+  const original = required(source.timeline[0]);
+  const action = source.data;
+  const s = {
+    ...apply(state, source),
+    human_actions: [{ ...action, triage: "host" as const }],
+  };
+  const report = value(
+    postComment(
+      s,
+      actor(5, "host_ops"),
+      {
+        card_id: original.card_id,
+        host_report_for: action.id,
+        body: "I checked the runtime version: v1",
+      },
+      io,
+    ),
+  );
+  const next = apply(s, report);
+  const params = {
+    human_action_id: action.id,
+    disposition: "done" as const,
+    rationale: `Verified ${report.data?.id}`,
+  };
+  for (const basis of [
+    undefined,
+    "Read-only, no reference",
+    `Read-only ${report.data?.id}`,
+    original.id,
+  ])
+    expect(
+      triageHumanAction(
+        next,
+        owner,
+        { ...params, ...(basis ? { ordinary_host_basis: basis } : {}) },
+        io,
+      ).ok,
+    ).toBe(false);
+  const basis = `Only reading the recorded runtime version as requested in ${original.id}`;
+  const result = value(
+    triageHumanAction(
+      next,
+      owner,
+      { ...params, ordinary_host_basis: basis },
+      io,
+    ),
+  );
+  expect(result.data).toMatchObject({ category: "general", status: "done" });
+  expect(result.events[0]).toMatchObject({
+    type: "human_action_classified",
+    actor: owner,
+    payload: { human_action_id: action.id, basis },
+  });
+  const missingClassification = {
+    ...setup(),
+    human_actions: setup().human_actions.map(
+      ({ category: _unused, ...h }) => h,
+    ),
+  };
+  expect(complete(missingClassification).ok).toBe(false);
+  expect(complete(missingClassification, human).ok).toBe(true);
+  for (const category of ["spending", "data_deletion", "publish"] as const) {
+    const protectedState = {
+      ...next,
+      human_actions: next.human_actions.map((h) => ({ ...h, category })),
+    };
+    expect(
+      triageHumanAction(
+        protectedState,
+        owner,
+        { ...params, ordinary_host_basis: basis },
+        io,
+      ).ok,
+    ).toBe(false);
+  }
+});
+
+test("system evidence-wait request can be completed by its human-designated external owner", () => {
+  const s = setup();
+  const io = ports();
+  const requested = value(
+    requestDeploymentAction(
+      s,
+      { kind: "system", project_id: s.project_id },
+      {
+        key: `deployment-evidence:${"a".repeat(40)}`,
+        instructions: "Read the deployment evidence",
+        reason: "evidence_wait",
+      },
+      io,
+    ),
+  );
+  const before = apply(s, requested);
+  const designated = value(
+    triageHumanAction(
+      before,
+      human,
+      { ...handoff, human_action_id: requested.data.id },
+      io,
+    ),
+  );
+  const end = value(
+    completeHumanAction(
+      apply(before, designated),
+      owner,
+      { human_action_id: requested.data.id, text: "Evidence checked" },
+      io,
+    ),
+  );
+  // A pre-classification evidence wait is identified by its original system request, not its title.
+  const delegated = apply(before, designated);
+  const legacy = {
+    ...delegated,
+    human_actions: delegated.human_actions.map(
+      ({ category: _old, ...item }) => item,
+    ),
+  };
+  const finish = (s: CommandState) =>
+    completeHumanAction(
+      s,
+      owner,
+      { human_action_id: requested.data.id, text: "Evidence verified" },
+      io,
+    );
+  expect(finish(legacy).ok).toBe(true);
+  expect(finish({ ...legacy, events: [] }).ok).toBe(false);
+  expect(end.data.status).toBe("done");
+  expect(end.events[0]?.payload).toMatchObject({
+    completed_by_host_assignment_id: "A-4",
+    resume_work_items: [],
+  });
 });

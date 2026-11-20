@@ -230,6 +230,9 @@ export function requestDeploymentAction(
       key: id,
       requested_by: "system",
       status: "open",
+      ...(input.reason === "evidence_wait"
+        ? { category: "general" as const }
+        : {}),
       triage: input.reason === "evidence_wait" ? "pm_ops" : "human",
       instructions: input.instructions,
       why_human:

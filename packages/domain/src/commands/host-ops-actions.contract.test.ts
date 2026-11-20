@@ -755,6 +755,34 @@ test("C-152: exit confirmation for a foreign terminal is system-requested, human
     human_action_id: asked.data.human_action_id,
   };
   expect(hostOpsExitConfirmation(state, action)).toEqual(open);
+  // Even a reclassified handoff cannot turn an exit fence into an ordinary host check.
+  const delegated: typeof state = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.id === id("assignment", 4) && a.scope === "standing"
+        ? { ...a, standing_mode: "office", external: true }
+        : a,
+    ),
+    human_actions: state.human_actions.map((h) =>
+      h.id === asked.data.human_action_id
+        ? {
+            ...h,
+            triage: "host",
+            host_operator: "external",
+            host_assignment_id: id("assignment", 4),
+            category: "general",
+          }
+        : h,
+    ),
+  };
+  expect(
+    completeHumanAction(
+      delegated,
+      actor(4, "pm"),
+      { human_action_id: asked.data.human_action_id, text: "checked" },
+      io,
+    ).ok,
+  ).toBe(false);
   // Idempotent while open: no second Needs You item.
   const again = value(
     requestHostOpsExitConfirmation(state, system, request, io),

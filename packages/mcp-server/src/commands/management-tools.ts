@@ -130,6 +130,11 @@ const schemas = {
       .describe(
         "换做法：作者提交方案，指定审核员 reply_to 方案并确认方向，不等于审核通过",
       ),
+    host_report_for: id("human_action")
+      .optional()
+      .describe(
+        "Attest to your own completed host work on this card for PM verification. Does not close the action; omit for progress, dispatch or second-hand reports.",
+      ),
     host_result_for: id("human_action")
       .optional()
       .describe(
@@ -296,6 +301,11 @@ const schemas = {
       .enum(["done", "host", "human", "release"])
       .describe(
         "release: show an action already triaged human/host whose ready_when is not met yet (PM manual release); only rationale is needed.",
+      ),
+    ordinary_host_basis: text
+      .optional()
+      .describe(
+        "For an unclassified host action only: cite its original request (C-n#N) and explain why it is not human-only. Omit if uncertain; never infer safety from a result report.",
       ),
     rationale: text.describe(
       "For host → done, cite the executor’s same-card result comment (C-n#N) linked to the action.",
