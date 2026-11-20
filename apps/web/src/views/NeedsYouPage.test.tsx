@@ -2776,38 +2776,44 @@ test("C-383 later action close requires a reason, supports keyboard cancellation
   ).toBeNull();
 });
 
-test("C-383 host execution notices are distinct from delegated decisions", async () => {
-  render(
-    <NeedsYouPage
-      projectId="p-1"
-      client={fakeClient({
-        needsYou: async () => ({
-          ...page([]),
-          human_actions: [],
-          notices: [
-            {
-              id: "host-result",
-              kind: "human_action",
-              decision_id: null,
-              card_id: "C-1",
-              question: "H-9 外接维护者已完成",
-              option: "已完成",
-              body: "只读取证已完成",
-              resolved_by: "assignment:A-9",
-              proxy_authority: null,
-              at: "2026-01-01T00:00:00Z",
-              read: false,
-            },
-          ],
-        }),
-      })}
-    />,
-  );
-  expect(await screen.findByText("外接维护者已完成")).toBeTruthy();
-  // Folded summary and details body carry the same first line.
-  expect(screen.getAllByText("只读取证已完成")).toHaveLength(2);
-  expect(screen.queryByRole("link", { name: "查看拍板记录" })).toBeNull();
-});
+test.each([
+  ["assignment:A-9", "后台已完成"],
+  ["system", "系统已核销"],
+])(
+  "host execution notice identifies %s without a decision link",
+  async (author, label) => {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            ...page([]),
+            human_actions: [],
+            notices: [
+              {
+                id: "host-result",
+                kind: "human_action",
+                decision_id: null,
+                card_id: "C-1",
+                question: `H-9 ${label}`,
+                option: "已完成",
+                body: "只读取证已完成",
+                resolved_by: author,
+                proxy_authority: null,
+                at: "2026-01-01T00:00:00Z",
+                read: false,
+              },
+            ],
+          }),
+        })}
+      />,
+    );
+    expect(await screen.findByText(label)).toBeTruthy();
+    // Folded summary and details body carry the same first line.
+    expect(screen.getAllByText("只读取证已完成")).toHaveLength(2);
+    expect(screen.queryByRole("link", { name: "查看拍板记录" })).toBeNull();
+  },
+);
 
 test("C-383 close failures stay in document flow below the title and clear when the reason changes", async () => {
   const removeStyles = installLayoutStyles();

@@ -525,6 +525,7 @@ test("C-383 Token human-action done checks the exact host owner and result", asy
       key: id,
       card_id: "C-1" as never,
       requested_by: "human" as const,
+      category: "general" as const,
       instructions: "Read evidence",
       why_human: "Host access",
       expected_return: "Evidence",
@@ -567,23 +568,28 @@ test("C-383 Token human-action done checks the exact host owner and result", asy
   expect(await run(done, tokenIo(token))).not.toBe(0);
 });
 
-function heldHostAction() {
+function externalHostAction(protectedSetup = false) {
   return store.uow.run((tx) => {
     const item = tx.work_items.list(project).find((w) => w.kind === "produce");
     if (!item) throw new Error("Missing fixture producer");
-    tx.work_items.put(project, { ...item, status: "blocked" });
+    if (protectedSetup)
+      tx.work_items.put(project, { ...item, status: "blocked" });
     const id = tx.ids.next(project, "human_action");
     const action = {
       id,
       key: id,
       card_id: item.card_id,
       requested_by: "human" as const,
-      instructions: "Synthetic host prerequisite",
-      why_human: "External account setup",
-      expected_return: "Setup result",
-      blocked_work_items: [item.id],
-      blocks_merge: true,
-      prerequisite: "external_account" as const,
+      category: protectedSetup ? ("account" as const) : ("general" as const),
+      instructions: protectedSetup
+        ? "Synthetic host prerequisite"
+        : "Read evidence",
+      why_human: protectedSetup ? "External account setup" : "Host access",
+      expected_return: "Recorded result",
+      blocked_work_items: protectedSetup ? [item.id] : [],
+      ...(protectedSetup
+        ? { blocks_merge: true, prerequisite: "external_account" as const }
+        : {}),
       status: "open" as const,
       triage: "host" as const,
       host_operator: "external" as const,
@@ -606,7 +612,7 @@ const hostActionState = () =>
 test.each(["revoke", "replace_file", "remove_tool", "change_project"] as const)(
   "C-383 completion rechecks the original credential after %s commits before its write lock",
   async (change) => {
-    const action = heldHostAction();
+    const action = externalHostAction();
     const issued = issue(["complete_host_action"]);
     const tokenPath = join(dir, "host-action-token");
     const fileMode = change === "replace_file";
@@ -704,10 +710,24 @@ test.each(["revoke", "replace_file", "remove_tool", "change_project"] as const)(
   },
 );
 
+test("a valid external owner token cannot complete an account prerequisite", async () => {
+  const action = externalHostAction(true);
+  const input = tokenIo(issue(["complete_host_action"]).token);
+  const before = hostActionState();
+  expect(
+    await run(
+      ["human-action", "done", action.id, "--text", "Account ready"],
+      input,
+    ),
+  ).not.toBe(0);
+  expect(hostActionState()).toEqual(before);
+});
+
 test("C-383 completion committed before revocation remains one recorded completion", async () => {
-  const action = heldHostAction();
+  const action = externalHostAction();
   const issued = issue(["complete_host_action"]);
   const input = tokenIo(issued.token);
+  const before = hostActionState();
   expect(
     await run(
       [
@@ -726,9 +746,8 @@ test("C-383 completion committed before revocation remains one recorded completi
   expect(completed.actions.find((a) => a.id === action.id)?.status).toBe(
     "done",
   );
-  expect(
-    completed.work.find((w) => w.id === action.blocked_work_items[0])?.status,
-  ).toBe("in_progress");
+  expect(completed.work).toEqual(before.work);
+  expect(completed.runs).toEqual(before.runs);
   expect(
     completed.events.filter((e) => e.type === "human_action_completed"),
   ).toHaveLength(1);

@@ -130,6 +130,11 @@ const schemas = {
       .describe(
         "换做法：作者提交方案，指定审核员 reply_to 方案并确认方向，不等于审核通过",
       ),
+    host_report_for: id("human_action")
+      .optional()
+      .describe(
+        "Attest to your own completed host work on this card for PM verification. Does not close the action; omit for progress, dispatch or second-hand reports.",
+      ),
     host_result_for: id("human_action")
       .optional()
       .describe(
@@ -297,7 +302,21 @@ const schemas = {
       .describe(
         "release: show an action already triaged human/host whose ready_when is not met yet (PM manual release); only rationale is needed.",
       ),
-    rationale: text,
+    legacy_host_result: z
+      .strictObject({ entry: entryId, result_quote: text, verification: text })
+      .optional()
+      .describe(
+        "For pre-protocol reports by the executor assigned at posting time: cite their original comment linked to the action or replying directly to its request or formal handoff. Quote the actual final outcome verbatim and explain how you independently checked it; progress or a second-hand report is not a result.",
+      ),
+    ordinary_host_basis: z
+      .strictObject({ request: entryId, explanation: text })
+      .optional()
+      .describe(
+        "For an unclassified host action only: cite its original request (C-n#N) and explain why it is not human-only. Omit if uncertain; never infer safety from a result report.",
+      ),
+    rationale: text.describe(
+      "For host → done, cite the executor’s same-card result comment (C-n#N) linked to the action.",
+    ),
     title: text.max(80).optional(),
     todo: text
       .max(80)
@@ -314,7 +333,7 @@ const schemas = {
       .literal(true)
       .optional()
       .describe(
-        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). PM Ops may only set this on its own untriaged inbox items, not on existing handoffs. Omit for ordinary host work.",
+        "Internal read-only diagnostic: bind a result author (host_ops or fallback PM Ops). May reassign eligible legacy or deferred actions. Omit for ordinary host work.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])
@@ -350,6 +369,12 @@ const schemas = {
     batch: text.optional(),
   },
   request_human_action: {
+    category: z
+      .enum(decisionCategories)
+      .optional()
+      .describe(
+        "标记待办本身涉及的事项；花钱、凭据和账号、删除数据、对外发布只能由人结项。",
+      ),
     ready_when: readyWhen(true),
     card_id: id("card"),
     instructions: text,

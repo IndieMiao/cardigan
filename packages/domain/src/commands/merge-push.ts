@@ -1,6 +1,5 @@
 import type { Actor, Event, HumanAction } from "../entities.js";
 import type { CardId, DeliveryId, EventId, HumanActionId } from "../ids.js";
-import { completeActionDraft } from "./coordination.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -8,6 +7,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { completeActionDraft } from "./human-action-completion.js";
 
 export type MergePushFailure = "rejected" | "network" | "auth" | "other";
 export interface MergePushDestination {

@@ -758,7 +758,7 @@ test("activity exposes event payloads so the UI can explain instructions and dec
       expect.objectContaining({
         type: "comment_posted",
         role: "human",
-        payload: { body: "先检查再发布" },
+        payload: { body: "先检查再发布", host_report_for: null },
       }),
     ],
   });

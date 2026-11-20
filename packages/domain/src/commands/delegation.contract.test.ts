@@ -5,6 +5,7 @@ import {
   autoConfirmMerge,
   type CommandEffect,
   type CommandState,
+  completeHumanAction,
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
@@ -646,7 +647,7 @@ test.each(["pause", "release"])(
 );
 
 test.each(["done", "host", "human"] as const)(
-  "Ops triage %s records result or clear handoff steps without escalating first",
+  "Ops triage %s can hand off an account prerequisite but cannot complete it",
   (disposition) => {
     const f = setup();
     const action = f.commit(
@@ -677,14 +678,28 @@ test.each(["done", "host", "human"] as const)(
       expected_return: "回传 SHA",
     };
     expect(triageHumanAction(f.state, f.front, params, f.io).ok).toBe(false);
-    const result = f.commit(triageHumanAction(f.state, f.pm, params, f.io));
-    expect(result.status).toBe(disposition === "done" ? "done" : "open");
+    const triaged = triageHumanAction(f.state, f.pm, params, f.io);
     if (disposition === "done") {
-      expect(result.result?.text).toBe(params.rationale);
+      expect(triaged).toMatchObject({
+        ok: false,
+        error: { code: "unauthorized" },
+      });
+      expect(
+        f.state.work_items.find((w) => w.id === id("work_item", 1))?.status,
+      ).toBe("blocked");
+      f.commit(
+        completeHumanAction(
+          f.state,
+          human,
+          { human_action_id: action.id, text: "Account configured" },
+          f.io,
+        ),
+      );
       expect(
         f.state.work_items.find((w) => w.id === id("work_item", 1))?.status,
       ).toBe("in_progress");
     } else {
+      expect(f.commit(triaged).status).toBe("open");
       expect(
         value(listNeedsYou(f.state, human)).data.human_actions[0],
       ).toMatchObject({

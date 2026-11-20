@@ -7,6 +7,7 @@ import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { expect, test } from "vitest";
 import {
   deploymentRolePolicyHash,
+  rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 
@@ -140,6 +141,38 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
             expect(events).not.toContain(event);
         }
       });
+      if (mode === "manual") {
+        store.uow.run((tx) =>
+          writeRole(
+            tx,
+            project,
+            { ...nextDefault, core_prompt: "", version: 3 },
+            { mode: "update" },
+          ),
+        );
+        rotateIdleDeployedRoles(store, project);
+        rotateIdleDeployedRoles(store, project);
+        store.uow.read((tx) => {
+          const [action] = tx.human_actions.list(project);
+          expect(action).toMatchObject({
+            status: "done",
+            result: { text: expect.stringContaining("host_ops") },
+          });
+          expect(
+            tx.events
+              .listAfter(project, undefined, 0)
+              .filter((e) => e.type === "human_action_completed"),
+          ).toMatchObject([
+            {
+              actor: { kind: "system" },
+              payload: {
+                human_action_id: action?.id,
+                result: action?.result?.text,
+              },
+            },
+          ]);
+        });
+      }
       expect(!!store.verifyToken(token.token)).toBe(mode !== "launch_only");
     } finally {
       store.close();
