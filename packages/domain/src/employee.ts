@@ -69,7 +69,19 @@ export interface EmployeeActivity {
   readonly has_external_standing_assignment?: boolean;
 }
 
+/** Global facts for one proposed transfer, read inside the employee write transaction. */
+export interface EmployeeRoleTransferFacts {
+  readonly role_enabled: boolean;
+  readonly has_unreleased_assignment: boolean;
+  readonly has_unfinished_run: boolean;
+}
+export type ReadEmployeeRoleTransfer = (
+  employee_id: EmployeeId,
+  role_id: RoleId,
+) => EmployeeRoleTransferFacts;
+
 export interface EmployeeRepository {
+  readonly roleTransferFacts: ReadEmployeeRoleTransfer;
   get(id: EmployeeId): Employee | undefined;
   list(): readonly Employee[];
   put(employee: Employee): void;
@@ -86,6 +98,7 @@ export interface GlobalRepositories {
   readonly global_events: GlobalEventRepository;
 }
 export interface EmployeeCommandPorts {
+  readonly roleTransferFacts?: ReadEmployeeRoleTransfer;
   readonly clock: Clock;
   readonly ids: Pick<
     GlobalIdAllocator,

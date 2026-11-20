@@ -8,6 +8,10 @@ import { MAX_AVATAR_BYTES } from "@cardigan/domain";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { roleDocument } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import {
+  assignment,
+  run,
+} from "../../../../packages/domain/src/commands/test-fixtures.js";
 import { type CallOptions, call, webHarness } from "../../test-support/web.js";
 import { serveEmployees } from "./employees.js";
 import { HttpRejection } from "./http.js";
@@ -510,4 +514,129 @@ test("owner can create and update project memberships without changing the launc
   expect(
     (await call(h.port, `${path}/options`, { cookie })).json,
   ).toMatchObject({ employees: [{ id: "E-1", projects: [] }] });
+});
+
+test("owner transfers across projects only after all bindings and runs end; replay does not duplicate the audit", async () => {
+  expect((await post(input)).status).toBe(200);
+  const employee = employees()[0];
+  if (!employee) throw new Error("missing employee");
+  const other = "other";
+  h.store.createProject({ id: other });
+  const owned = { ...assignment(), employee_id: employee.id };
+  h.store.uow.run((tx) => {
+    tx.roles.put(
+      other,
+      roleDocument({
+        ...defaultRoleDefinition("reviewer", {
+          harness: "codex",
+          launch_profile_ref: "fixture",
+        }),
+        version: 1,
+      }),
+    );
+    tx.assignments.put(other, owned);
+  });
+  const update = (
+    body: unknown,
+    key = `transfer-${++sequence}`,
+    session = cookie,
+  ) =>
+    call(h.port, `${path}/${employee.id}/update`, {
+      method: "POST",
+      cookie: session,
+      body: JSON.stringify(body),
+      headers: {
+        origin: `http://${h.hostHeader}`,
+        "content-type": "application/json",
+        "idempotency-key": key,
+      },
+    });
+  const patch = { role_id: "reviewer" };
+  const events = () =>
+    h.store.uow.read((tx) =>
+      tx.global_events
+        .listAfter(0)
+        .filter((e) => e.type === "employee_role_changed"),
+    );
+  expect((await update({})).status).toBe(400);
+  expect((await update({ ...patch, changed_by_member_id: "M-1" })).status).toBe(
+    400,
+  );
+  expect((await update(patch, "no-owner", "")).status).not.toBe(200);
+  expect((await update(patch)).status).toBe(409);
+  h.store.uow.run((tx) =>
+    tx.assignments.put(other, { ...owned, status: "suspended" }),
+  );
+  expect((await update(patch)).status).toBe(409);
+  h.store.uow.run((tx) => {
+    tx.assignments.put(other, { ...owned, status: "released" });
+    tx.runs.put(other, { ...run(1), status: "unknown" });
+  });
+  expect((await update(patch)).status).toBe(409);
+  expect(employees()).toEqual([employee]);
+  expect(events()).toEqual([]);
+  h.store.uow.run((tx) =>
+    tx.runs.put(other, { ...run(1), status: "cancelled" }),
+  );
+  for (let i = 0; i < 2; ++i) {
+    const result = await update(patch, "idle-transfer");
+    expect(result.status).toBe(200);
+    expect(result.json).toMatchObject({ id: employee.id, role_id: "reviewer" });
+  }
+  expect((await update({ ...patch, launch_profile_ref: null })).status).toBe(
+    200,
+  );
+  expect(events()).toHaveLength(1);
+  expect(events()[0]).toMatchObject({
+    actor: { kind: "human" },
+    payload: {
+      changed_by_member_id: "M-1",
+      from_role_id: "coder",
+      to_role_id: "reviewer",
+    },
+  });
+  expect(
+    h.store.uow.read((tx) => tx.assignments.get(other, owned.id)),
+  ).toMatchObject({ employee_id: employee.id, role_id: "coder" });
+});
+
+test("clearing an override on transfer cannot inherit a disabled project's profile", async () => {
+  expect((await post({ ...input, launch_profile_ref: "fixture" })).status).toBe(
+    200,
+  );
+  h.store.createProject({ id: "other" });
+  h.store.uow.run((tx) => {
+    const reviewer = defaultRoleDefinition("reviewer", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    tx.roles.put(
+      "p-test",
+      roleDocument({ ...reviewer, version: 1, status: "inactive" }),
+    );
+    tx.roles.put(
+      "other",
+      roleDocument({
+        ...reviewer,
+        version: 1,
+        status: "active",
+        launch_profile_ref: "removed",
+      }),
+    );
+  });
+  const audit = () => h.store.uow.read((tx) => tx.global_events.listAfter(0));
+  const before = { employees: employees(), audit: audit() };
+  const response = await call(h.port, `${path}/E-1/update`, {
+    method: "POST",
+    cookie,
+    body: JSON.stringify({ role_id: "reviewer", launch_profile_ref: null }),
+    headers: {
+      origin: `http://${h.hostHeader}`,
+      "content-type": "application/json",
+      "idempotency-key": "clear-on-transfer",
+    },
+  });
+  expect(response.status).toBe(400);
+  expect(response.json).toMatchObject({ error: { code: "validation_failed" } });
+  expect({ employees: employees(), audit: audit() }).toEqual(before);
 });

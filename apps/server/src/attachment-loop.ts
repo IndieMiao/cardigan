@@ -4,6 +4,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Clock } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
+import { sweepArtifacts } from "./artifact-retention.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { systemClock } from "./merge-loop.js";
 
@@ -84,7 +85,8 @@ export class AttachmentGc {
       const attachments = this.options.store.uow.read((tx) =>
         tx.attachments.list(project.id),
       );
-      for (const attachment of attachments) digests.add(attachment.sha256);
+      for (const attachment of attachments)
+        if (!attachment.streamed_artifact) digests.add(attachment.sha256);
     }
     return digests;
   }
@@ -117,7 +119,10 @@ export class AttachmentGc {
         if (
           tx.attachments
             .list(project.id)
-            .some((attachment) => attachment.sha256 === digest)
+            .some(
+              (attachment) =>
+                !attachment.streamed_artifact && attachment.sha256 === digest,
+            )
         )
           return false;
       try {
@@ -214,7 +219,14 @@ export function startAttachmentLoop(
   const executor = new AttachmentGc(options);
   const loop = startTimerLoop({
     name: "attachments",
-    tick: () => executor.tick().then(() => undefined),
+    tick: async () => {
+      await executor.tick();
+      await sweepArtifacts(
+        options.store,
+        options.dataDir,
+        (options.clock ?? systemClock).now(),
+      );
+    },
     intervalMs: options.intervalMs ?? DEFAULT_ATTACHMENT_GC_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),

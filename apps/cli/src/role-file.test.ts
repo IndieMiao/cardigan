@@ -590,3 +590,25 @@ test("a role file cannot reference a profile from a rejected config/secrets gene
     store.close();
   }
 });
+
+test("Markdown role apply defaults to preview, --yes writes, role export stdout is reusable (including legacy core_prompt)", async () => {
+  const path = join(root, "profile with spaces.md");
+  writeFileSync(
+    path,
+    "---\nrole_id: new-role\nbased_on: default:coder\nlaunch_profile: fixture\n---\nFirst line\n\nLast line\n",
+  );
+  expect(await run(["role", "apply", path])).toBe(0);
+  expect(JSON.parse(printed())).toMatchObject({ role: { action: "create" } });
+  expect(await run(["role", "export", "new-role"])).not.toBe(0);
+  expect(await run(["role", "apply", path, "--yes"])).toBe(0);
+  expect(await run(["role", "add", "--file", roleFile])).toBe(0);
+  for (const id of ["new-role", "coder"]) {
+    expect(await run(["role", "export", id])).toBe(0);
+    expect(printed()).toMatch(/^---\n/);
+    writeFileSync(path, `${printed()}\n`);
+    expect(await run(["role", "apply", path, "--yes"])).toBe(0);
+    expect(JSON.parse(output[0] ?? "")).toMatchObject({
+      role: { action: "unchanged", role: { version: 1 } },
+    });
+  }
+});

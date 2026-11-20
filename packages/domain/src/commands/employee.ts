@@ -24,7 +24,7 @@ export interface CreateEmployeeInput {
 export type UpdateEmployeeInput = Partial<
   Pick<
     Employee,
-    "name" | "title" | "bio" | "avatar" | "launch_profile_ref" | "projects"
+    "name" | "title" | "role_id" | "bio" | "avatar" | "launch_profile_ref" | "projects"
   >
 >;
 
@@ -111,6 +111,7 @@ function effect(
   employee: Employee,
   type: string,
   ports: EmployeeCommandPorts,
+  audit: Record<string, string> = {},
 ): EmployeeEffect {
   return {
     data: employee,
@@ -121,7 +122,7 @@ function effect(
         seq: ports.ids.nextEventSequence(),
         type,
         actor: { kind: "human" },
-        payload: { employee: { ...employee } },
+        payload: { employee: { ...employee }, ...audit },
         created_at: employee.updated_at,
       },
     ],
@@ -193,6 +194,7 @@ export function updateEmployee(
         [
           "name",
           "title",
+          "role_id",
           "bio",
           "avatar",
           "launch_profile_ref",
@@ -200,7 +202,7 @@ export function updateEmployee(
         ].includes(key),
       ),
       "validation_failed",
-      "不支持修改员工编号、角色、状态或审计字段",
+      "不支持修改员工编号、状态或审计字段",
     );
     const employee = { ...previous, ...input, updated_at: ports.clock.now() };
     validate(
@@ -209,6 +211,20 @@ export function updateEmployee(
       ports,
       Object.hasOwn(input, "launch_profile_ref"),
     );
+    const transfer = employee.role_id !== previous.role_id;
+    if (transfer) {
+      const facts = ports.roleTransferFacts?.(id, employee.role_id);
+      ensure(
+        facts?.role_enabled,
+        "validation_failed",
+        "目标角色须在至少一个项目中登记且启用",
+      );
+      ensure(
+        !facts.has_unreleased_assignment && !facts.has_unfinished_run,
+        "invariant_violation",
+        "员工仍有未释放的指派或未结束的运行，请先完成运行并释放指派后再转岗",
+      );
+    }
     return effect(
       {
         ...employee,
@@ -216,8 +232,17 @@ export function updateEmployee(
         title: employee.title.trim(),
         bio: employee.bio.trim(),
       },
-      "employee_updated",
+      transfer ? "employee_role_changed" : "employee_updated",
       ports,
+      transfer
+        ? {
+            from_role_id: previous.role_id,
+            to_role_id: employee.role_id,
+            ...("member_id" in actor && actor.member_id
+              ? { changed_by_member_id: actor.member_id }
+              : {}),
+          }
+        : {},
     );
   });
 }

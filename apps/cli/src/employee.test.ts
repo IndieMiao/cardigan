@@ -305,7 +305,7 @@ test.each([
   [["list", "--role"], "需要一个值"],
   [["list", "extra"], "位置参数"],
   [["update", "E-1"], "至少指定一个"],
-  [["update", "E-1", "--role", "coder"], "不认识的选项"],
+  [["update", "E-1", "--role", ""], "不能为空"],
   [["update", "E-1", "--title", "新职位"], "不存在"],
   [["activate", "E-1"], "不存在"],
   [["deactivate", "E-1"], "不存在"],
@@ -330,4 +330,37 @@ test("--projects round trips multiple memberships; omitted preserves and empty c
   expect(snapshot().employees[0]?.projects).toEqual(["two"]);
   expect(await run(["update", "E-1", "--projects="])).toBe(0);
   expect(snapshot().employees[0]?.projects).toEqual([]);
+});
+
+test("transfer checks the latest role in every project, not the CLI project or an obsolete version", async () => {
+  expect(await run(add)).toBe(0);
+  const change = ["update", "E-1", "--role", "coder"];
+  const before = snapshot();
+  const role = {
+    role_id: "coder",
+    role_version: 1,
+    allowed_tools: [],
+    capabilities: [],
+  };
+  store.createProject({ id: "one" });
+  store.createProject({ id: "two" });
+  io.env.CARDIGAN_PROJECT = "one";
+  expect(await run(change)).toBe(2);
+  store.uow.run((tx) => {
+    tx.roles.put("one", role);
+    tx.roles.put("one", { ...role, role_version: 2, status: "inactive" });
+  });
+  expect(await run(change)).toBe(2);
+  expect(snapshot()).toEqual(before);
+  store.uow.run((tx) => tx.roles.put("two", role)); // Legacy status omitted = active.
+  expect(await run(change)).toBe(0);
+  expect(output.join("\n")).toContain("角色：coder");
+  expect(snapshot().events.at(-1)).toMatchObject({
+    type: "employee_role_changed",
+    payload: {
+      changed_by_member_id: "M-1",
+      from_role_id: "pm",
+      to_role_id: "coder",
+    },
+  });
 });
