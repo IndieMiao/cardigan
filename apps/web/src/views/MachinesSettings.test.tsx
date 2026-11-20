@@ -152,7 +152,7 @@ test("the list shows name, platform, status, heartbeat, running/limit and the la
   expect(c.setRunLimit).not.toHaveBeenCalled();
 });
 
-test("the detail shows capabilities, limits, bindings with the current project, runs and checks, and no actions", async () => {
+test("the detail shows capabilities, limits, bindings with the current project, runs and checks; no actions without them", async () => {
   const c = capacityClient();
   await openMachines(c);
   const opener = screen.getByRole("button", { name: "本机" });
@@ -163,7 +163,9 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   expect(c.machine).toHaveBeenCalledWith("p-1", "local");
   const view = within(dialog);
   expect(view.getByText("local")).toBeTruthy();
-  expect(view.getByText("6（最多可设 16）")).toBeTruthy();
+  // C-511: the limit is a field here; this client has no machine actions.
+  expect(limitField(view).value).toBe("6");
+  expect(view.getByText("最多可设 16 个")).toBeTruthy();
   // All active Runs (with the exempt standing one) apart from the limited pair.
   const facts = (label: string) =>
     view.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
@@ -215,7 +217,7 @@ test("the detail shows capabilities, limits, bindings with the current project, 
   const checks = within(view.getByRole("table", { name: "最近检查" }));
   expect(checks.getAllByRole("row")).toHaveLength(3);
   expect(checks.queryByText("无法读取")).toBeNull();
-  // Read only: the drawer header has the close button and nothing else.
+  // A client without machine actions: the header has only the close button.
   expect(
     view
       .getAllByRole("button")
@@ -471,7 +473,7 @@ test("a failed detail read keeps the drawer and retries", async () => {
   expect(machine).toHaveBeenCalledTimes(2);
 });
 
-test("并发与容量 keeps its editable limits; the machine page adds no capacity control", async () => {
+test("C-511: 并发与容量 leads to the machine page, where the detail edits the limit", async () => {
   const capacity: ExecutionCapacity = {
     agents: [
       {
@@ -485,7 +487,7 @@ test("并发与容量 keeps its editable limits; the machine page adds no capaci
         merge_check_slots: 0,
       },
     ],
-    merge_checks: [],
+    merge_checks: [{ machine_id: "ci", running: 0, limit: 2, queued: 0 }],
     merge_config_invalid: false,
   };
   const c = client({ executionCapacity: async () => capacity });
@@ -495,17 +497,35 @@ test("并发与容量 keeps its editable limits; the machine page adds no capaci
     </CapacityProvider>,
   );
   fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
-  expect(
-    await screen.findByRole("spinbutton", { name: "本机 Agent 并发上限" }),
-  ).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "机器" }));
   await screen.findByRole("table", { name: "机器列表" });
-  expect(screen.queryByRole("spinbutton")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
+  expect(window.location.hash).toContain("tab=machines");
   expect(
-    await screen.findByRole("spinbutton", { name: "本机 Agent 并发上限" }),
-  ).toBeTruthy();
-  expect(c.machines).toHaveBeenCalledTimes(1);
+    screen.getByRole("button", { name: "机器" }).getAttribute("aria-current"),
+  ).toBe("page");
+  // The panel itself has no limit field; merge check targets stay listed.
+  expect(screen.queryByRole("spinbutton")).toBeNull();
+  expect(screen.getByRole("heading", { name: "合并检查" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await waitFor(() => expect(limitField(dialog).value).toBe("6"));
+  // A machine this project has no binding for shows its limit read only.
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "Mac mini" }));
+  const other = within(await screen.findByRole("dialog"));
+  await other.findByText("概况");
+  expect(other.queryByRole("spinbutton")).toBeNull();
+  expect(
+    other.getByText("Agent 并发", { selector: "dt" }).nextElementSibling
+      ?.textContent,
+  ).toMatch(/最多可设/);
+});
+
+test("C-511: an old ?tab=capacity link lands on the machine page and replaces itself", async () => {
+  window.location.hash = "#/p/p-1/settings?tab=capacity";
+  render(<App client={client()} />);
+  await screen.findByRole("table", { name: "机器列表" });
+  expect(window.location.hash).toBe("#/p/p-1/settings?tab=machines");
 });
 
 test("the machine read is a plain same-origin GET of the human-only routes", async () => {
@@ -652,7 +672,8 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
       <SettingsPage projectId="p-1" client={c} revision={1} />
     </CapacityProvider>,
   );
-  await waitFor(() => expect(facts("Agent 并发")).toBe("3（最多可设 16）"));
+  // C-511: the detail edits the limit its own machine read shows.
+  await waitFor(() => expect(limitField(dialog).value).toBe("3"));
   await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
   expect(facts("排队")).toBe("—");
   const alert = await dialog.findByText(/并发读数未能更新/);
@@ -724,6 +745,11 @@ function capacityCase(machineLimit: () => number) {
     ).getAllByRole("row", { hidden: true })[1]?.textContent ?? "";
   return { state, executionCapacity, page, listCell };
 }
+/** C-511: the Agent limit field in the machine detail. */
+const limitField = (dialog: ReturnType<typeof within>) =>
+  dialog.getByRole<HTMLInputElement>("spinbutton", {
+    name: "本机 Agent 并发上限",
+  });
 const drawerFacts = (dialog: ReturnType<typeof within>) => (label: string) =>
   dialog.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
 
@@ -775,7 +801,7 @@ test("Q-1013: the limit beside the count is the machine read's, even when the ca
   const dialog = within(await screen.findByRole("dialog"));
   const facts = drawerFacts(dialog);
   await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
-  expect(facts("Agent 并发")).toBe("3（最多可设 16）");
+  expect(limitField(dialog).value).toBe("3");
 });
 
 test("Q-1013 guard: an ordinary background refresh keeps the last good reading until it returns", async () => {

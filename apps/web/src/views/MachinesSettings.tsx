@@ -1,13 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ApiError,
   type CardiganClient,
   describeError,
+  describeWriteError,
   type ExecutionCapacity,
   type MachineBindingView,
+  type MachineCheckJob,
   type MachineView,
 } from "../api.js";
-import { useCapacity } from "../components/Capacity.js";
+import { runLimitSetting, useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
 import { IdTag } from "../components/IdTag.js";
@@ -37,11 +46,20 @@ import {
 import {
   bindingChecks,
   capabilityState,
+  checkStepLabel,
   latestMachineCheck,
   type MachineCheckRow,
   machineActiveRuns,
 } from "../machine-labels.js";
+import { settingKey, trackSettingsRead } from "../settings-clock.js";
 import { useResource } from "../useResource.js";
+import { MachineAgentLimit, MergeCheckCapacity } from "./AgentLimit.js";
+import { useNotice } from "./useSettingWrite.js";
+import {
+  storedWizard,
+  type WizardExit,
+  WorkerWizardDrawer,
+} from "./WorkerWizard.js";
 
 /** A read the server refused (401/403) or that is no longer visible (404). */
 type Withdrawn = { readonly withdrawn: string };
@@ -136,18 +154,22 @@ function CheckTag({ check }: { check: MachineCheckRow | undefined }) {
 }
 
 /**
- * C-512: the machines this host manages, read only. Machines are global; the
- * detail lists each project binding the server returns and marks this one.
- * Checking, draining and limits are not changed here (C-511).
+ * C-512: the machines this host manages. Machines are global; the detail
+ * lists each project binding the server returns and marks this one.
+ * C-511: a human session can check, drain/resume and set the Agent limit in
+ * the detail, and add a worker with the wizard. The server decides who may.
  */
 export function MachinesSettings({
   client,
   projectId,
   revision = 0,
+  pollMs = 1000,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /** How often a running check or wizard step is read again. */
+  pollMs?: number;
 }) {
   const load = useMemo(
     () => withdrawable(() => client.machines(projectId)),
@@ -178,12 +200,47 @@ export function MachinesSettings({
     document.getElementById("machines"),
   );
   const capacity = useMachineCapacity();
+  const canEdit = useCapacity()?.canEdit ?? false;
+  // An action changes the registry: the list, the detail and the shared
+  // capacity read all read again.
+  const reloadList = list.reload;
+  const reloadCapacity = capacity.reload;
+  const changed = useCallback(() => {
+    reloadList();
+    reloadCapacity?.();
+  }, [reloadList, reloadCapacity]);
+  const [wizard, setWizard] = useState(false);
+  const [resumable, setResumable] = useState(() => !!storedWizard(projectId));
+  const [notice, setNotice] = useNotice();
+  const wizardFocus = useDrawerReturnFocus(wizard, () =>
+    document.getElementById("machines"),
+  );
+  const closeWizard = (exit: WizardExit) => {
+    setWizard(false);
+    setResumable(!!storedWizard(projectId));
+    if (exit === "kept") setNotice("已保留添加 worker 的进度，可稍后继续");
+    else if (exit === "cancelled") setNotice("已放弃添加 worker");
+  };
   return (
     <SettingsPanel
       id="machines"
       tabIndex={-1}
       title="机器"
       titleId="machines-title"
+      actions={
+        canEdit && client.createWorkerWizard ? (
+          <Button
+            variant="primary"
+            aria-haspopup="dialog"
+            onClick={() => {
+              wizardFocus.remember();
+              setWizard(true);
+            }}
+          >
+            {resumable ? "继续添加 worker" : "添加 worker"}
+          </Button>
+        ) : undefined
+      }
     >
       <RequestFeedback
         {...list}
@@ -191,6 +248,7 @@ export function MachinesSettings({
         retry={list.reload}
         pendingMessage="正在加载机器…"
       />
+      <RequestFeedback message={notice} />
       {/* An open drawer reports it in its own body. */}
       {!open && <CapacityFeedback capacity={capacity} />}
       {machines && machines.length === 0 && <EmptyState>没有机器</EmptyState>}
@@ -247,6 +305,7 @@ export function MachinesSettings({
           </TableBody>
         </SettingsTable>
       )}
+      <MergeCheckCapacity />
       {shown && (
         <MachineDrawer
           key={shown.id}
@@ -255,20 +314,35 @@ export function MachinesSettings({
           summary={shown}
           revision={revision}
           capacity={capacity}
+          canEdit={canEdit}
+          pollMs={pollMs}
+          onChanged={changed}
           onClose={() => setOpen(undefined)}
+        />
+      )}
+      {wizard && (
+        <WorkerWizardDrawer
+          client={client}
+          projectId={projectId}
+          pollMs={pollMs}
+          onChanged={changed}
+          onClose={closeWizard}
         />
       )}
     </SettingsPanel>
   );
 }
 
-/** Read-only detail; it reads the machine again so the facts are current. */
+/** The detail reads the machine again so the facts are current. */
 function MachineDrawer({
   client,
   projectId,
   summary,
   revision,
   capacity,
+  canEdit,
+  pollMs,
+  onChanged,
   onClose,
 }: {
   client: CardiganClient;
@@ -276,10 +350,22 @@ function MachineDrawer({
   summary: MachineView;
   revision: number;
   capacity: MachineCapacity;
+  canEdit: boolean;
+  pollMs: number;
+  onChanged: () => void;
   onClose: () => void;
 }) {
+  // Ordered against the Agent limit's writes, which it confirms (C-511).
   const load = useMemo(
-    () => withdrawable(() => client.machine(projectId, summary.id)),
+    () =>
+      withdrawable(() =>
+        trackSettingsRead(client.machine(projectId, summary.id), (data) => [
+          [
+            settingKey(projectId, runLimitSetting(data.machine.id)),
+            data.machine.run_limit,
+          ],
+        ]),
+      ),
     [client, projectId, summary.id],
   );
   const detail = useResource(load, revision);
@@ -288,6 +374,18 @@ function MachineDrawer({
     detail.data && !withdrawn && "machine" in detail.data
       ? detail.data.machine
       : undefined;
+  const reloadDetail = detail.reload;
+  const changed = useCallback(() => {
+    reloadDetail();
+    onChanged();
+  }, [reloadDetail, onChanged]);
+  const actions = useMachineActions({
+    client,
+    projectId,
+    machine,
+    pollMs,
+    onChanged: changed,
+  });
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -298,6 +396,7 @@ function MachineDrawer({
       title={machine?.label ?? (withdrawn ? "机器" : summary.label)}
       description={withdrawn ? "机器详情" : `机器 ${summary.id} 详情`}
       initialFocus="close"
+      actions={canEdit && machine ? <MachineButtons {...actions} /> : undefined}
     >
       <CardDetailLayout
         className="card-page-drawer"
@@ -311,8 +410,33 @@ function MachineDrawer({
             pendingMessage="正在加载机器…"
           />
           <CapacityFeedback capacity={capacity} />
+          <RequestFeedback
+            interactive
+            pending={actions.pending !== undefined}
+            pendingMessage={actions.pending ?? ""}
+            error={actions.error}
+            retry={actions.retry}
+            message={actions.message}
+          />
         </SettingsDrawerFeedback>
-        {machine && <MachineFacts machine={machine} capacity={capacity} />}
+        {machine && (
+          <MachineFacts
+            machine={machine}
+            capacity={capacity}
+            limit={
+              detail.data && (
+                <MachineAgentLimit
+                  client={client}
+                  projectId={projectId}
+                  machine={machine}
+                  source={detail.data}
+                  saved={changed}
+                  canEdit={canEdit}
+                />
+              )
+            }
+          />
+        )}
       </CardDetailLayout>
     </Drawer>
   );
@@ -321,9 +445,12 @@ function MachineDrawer({
 function MachineFacts({
   machine,
   capacity: shared,
+  limit,
 }: {
   machine: MachineView;
   capacity: MachineCapacity;
+  /** The Agent limit: editable when the shared capacity read has it. */
+  limit: ReactNode;
 }) {
   const capacity = shared.of(machine.id);
   const bindings = [...machine.bindings].sort(
@@ -377,16 +504,16 @@ function MachineFacts({
         </SettingsFacts>
       </SettingsSection>
       <SettingsSection title="资源上限">
-        <SettingsFacts>
-          <SettingsFact label="Agent 并发">
-            {machine.run_limit}（最多可设 {machine.run_limit_maximum}）
-          </SettingsFact>
-          {machine.resources.map((resource) => (
-            <SettingsFact key={resource.key} label={resource.key}>
-              {resource.limit}
-            </SettingsFact>
-          ))}
-        </SettingsFacts>
+        {limit}
+        {machine.resources.length > 0 && (
+          <SettingsFacts>
+            {machine.resources.map((resource) => (
+              <SettingsFact key={resource.key} label={resource.key}>
+                {resource.limit}
+              </SettingsFact>
+            ))}
+          </SettingsFacts>
+        )}
       </SettingsSection>
       <SettingsSection title="已验证能力">
         {capabilities.length === 0 ? (
@@ -572,5 +699,200 @@ function BindingRow({ binding }: { binding: MachineBindingView }) {
         <StatusTag status={binding.status} />
       </DataTableCell>
     </TableRow>
+  );
+}
+
+/**
+ * C-511: 立即检查 and 排空/恢复 for one machine. A check runs on the host;
+ * it is read again until it ends, and one already running (also started
+ * elsewhere or before the page was opened) is followed instead of started
+ * again. Every action ends with the list, detail and capacity read again.
+ */
+function useMachineActions({
+  client,
+  projectId,
+  machine,
+  pollMs,
+  onChanged,
+}: {
+  client: CardiganClient;
+  projectId: string;
+  machine: MachineView | undefined;
+  pollMs: number;
+  onChanged: () => void;
+}) {
+  const machineId = machine?.id;
+  const current = machine?.bindings.find((b) => b.is_current);
+  const recorded = current?.last_requested_check;
+  const [check, setCheck] = useState<{ id: string; step: string }>();
+  const [busy, setBusy] = useState<"check" | "drain" | "resume">();
+  const sending = useRef(false);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState<(() => void) | undefined>();
+  const [message, setMessage] = useNotice();
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  // A check this project's binding records as running is followed.
+  useEffect(() => {
+    if (recorded?.status === "running")
+      setCheck((known) => known ?? { id: recorded.id, step: recorded.step });
+  }, [recorded?.status, recorded?.id, recorded?.step]);
+  const changed = useRef(onChanged);
+  changed.current = onChanged;
+  const finished = useCallback(
+    (job: MachineCheckJob) => {
+      setCheck(undefined);
+      if (job.status === "passed") setMessage("检查通过");
+      else
+        setError(
+          `检查未通过：${
+            job.failed_steps.map(checkStepLabel).join("、") || "原因未记录"
+          }`,
+        );
+      changed.current();
+    },
+    [setMessage],
+  );
+  const [tick, setTick] = useState(0);
+  const checkId = check?.id;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tick schedules the next read.
+  useEffect(() => {
+    const read = client.machineCheck;
+    if (!checkId || !machineId || !read) return;
+    const timer = window.setTimeout(async () => {
+      try {
+        const { check: job } = await read.call(
+          client,
+          projectId,
+          machineId,
+          checkId,
+        );
+        if (!alive.current) return;
+        setRetry(undefined);
+        if (job.status === "running") {
+          setCheck({ id: job.id, step: job.step });
+          setTick((n) => n + 1);
+        } else finished(job);
+      } catch (cause) {
+        if (!alive.current) return;
+        setError(`未能读取检查进度：${describeError(cause)}`);
+        setRetry(() => () => {
+          setError("");
+          setRetry(undefined);
+          setTick((n) => n + 1);
+        });
+      }
+    }, pollMs);
+    return () => window.clearTimeout(timer);
+  }, [client, projectId, machineId, checkId, pollMs, tick, finished]);
+
+  const start = async () => {
+    const post = client.checkMachine;
+    if (!post || !machineId || sending.current || check) return;
+    sending.current = true;
+    setBusy("check");
+    setError("");
+    setRetry(undefined);
+    try {
+      const { check: job } = await post.call(
+        client,
+        projectId,
+        machineId,
+        crypto.randomUUID(),
+      );
+      if (!alive.current) return;
+      if (job.status === "running") setCheck({ id: job.id, step: job.step });
+      else finished(job);
+    } catch (cause) {
+      if (alive.current) setError(`未能开始检查：${describeWriteError(cause)}`);
+    } finally {
+      sending.current = false;
+      if (alive.current) setBusy(undefined);
+    }
+  };
+  const drain = async (on: boolean) => {
+    const post = client.setMachineDrain;
+    if (!post || !machineId || sending.current) return;
+    sending.current = true;
+    setBusy(on ? "drain" : "resume");
+    setError("");
+    setRetry(undefined);
+    try {
+      await post.call(client, projectId, machineId, on, crypto.randomUUID());
+      if (alive.current)
+        setMessage(on ? "已排空，不再接收新任务" : "已恢复接收新任务");
+    } catch (cause) {
+      if (alive.current)
+        setError(
+          `${on ? "未能排空" : "未能恢复"}：${describeWriteError(cause)}`,
+        );
+    } finally {
+      sending.current = false;
+      if (alive.current) setBusy(undefined);
+      // Read again either way: the request may have taken effect.
+      changed.current();
+    }
+  };
+  return {
+    status: machine?.status,
+    // Checks run per project binding; without one there is nothing to check.
+    checkable: !!current && !!client.checkMachine,
+    drainable: !!client.setMachineDrain,
+    check,
+    busy,
+    start,
+    drain,
+    error,
+    retry,
+    message,
+    pending: check
+      ? `正在检查：${checkStepLabel(check.step)}…`
+      : busy === "drain"
+        ? "正在排空…"
+        : busy === "resume"
+          ? "正在恢复…"
+          : busy === "check"
+            ? "正在开始检查…"
+            : undefined,
+  };
+}
+
+function MachineButtons({
+  status,
+  checkable,
+  drainable,
+  check,
+  busy,
+  start,
+  drain,
+}: ReturnType<typeof useMachineActions>) {
+  const waiting = busy !== undefined || undefined;
+  return (
+    <>
+      {drainable && status === "online" && (
+        <Button aria-disabled={waiting} onClick={() => void drain(true)}>
+          排空
+        </Button>
+      )}
+      {drainable && status === "draining" && (
+        <Button aria-disabled={waiting} onClick={() => void drain(false)}>
+          恢复
+        </Button>
+      )}
+      {checkable && (
+        <Button
+          variant="primary"
+          aria-disabled={waiting ?? (check ? true : undefined)}
+          onClick={() => void start()}
+        >
+          {check ? "检查中…" : "立即检查"}
+        </Button>
+      )}
+    </>
   );
 }

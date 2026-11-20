@@ -9,10 +9,56 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
-import { CapacityProvider } from "../components/Capacity.js";
+import { CapacityProvider, useCapacity } from "../components/Capacity.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
 import { fakeClient } from "../testing/fixtures.js";
-import { CapacitySettings } from "./CapacitySettings.js";
+import {
+  AgentLimitReadOnly,
+  AgentLimitRow,
+  MergeCheckCapacity,
+} from "./AgentLimit.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
+
+/**
+ * C-511: the row once on 并发与容量, now in each machine detail. Here it is
+ * fed by the shared capacity read (also a tracked settings read), one row per
+ * machine with the counts the panel showed, so its save rules stay covered.
+ */
+function Limits({
+  client,
+  projectId,
+}: {
+  client: CardiganClient;
+  projectId: string;
+}) {
+  const resource = useCapacity();
+  const data = resource?.error ? undefined : resource?.data;
+  return (
+    <>
+      <RequestFeedback error={resource?.error} retry={resource?.reload} />
+      {data?.agents.map((agent) =>
+        resource?.canEdit ? (
+          <AgentLimitRow
+            key={`${projectId}:${agent.machine_id}`}
+            client={client}
+            projectId={projectId}
+            machineId={agent.machine_id}
+            label={agent.label}
+            limit={agent.limit}
+            max={agent.max_limit}
+            mergeCheckSlots={agent.merge_check_slots}
+            description={`全部 ${agent.total_running} · 非常驻 ${agent.running} / 上限 ${agent.limit || "不可用"} / 排队 ${agent.queued}`}
+            source={data}
+            saved={resource.reload}
+          />
+        ) : (
+          <AgentLimitReadOnly key={agent.machine_id} limit={agent.limit} />
+        ),
+      )}
+      <MergeCheckCapacity />
+    </>
+  );
+}
 
 function Settings({
   client,
@@ -32,7 +78,7 @@ function Settings({
       revision={revision}
       canEdit={canEdit}
     >
-      <CapacitySettings client={client} projectId={projectId} />
+      <Limits client={client} projectId={projectId} />
     </CapacityProvider>
   );
 }

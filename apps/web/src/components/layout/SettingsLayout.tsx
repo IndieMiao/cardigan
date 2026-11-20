@@ -182,6 +182,14 @@ export function SettingsRow({
   );
 }
 
+/**
+ * Rows in the bordered group frame without a group heading, for a settings
+ * drawer section that already has its title (e.g. a machine's Agent limit).
+ */
+export function SettingsRows({ children }: { children: ReactNode }) {
+  return <div className={styles.rows}>{children}</div>;
+}
+
 /** A read-only value in a row's control column (13px/20px, like descriptions). */
 export function SettingsValue({ children }: { children: ReactNode }) {
   return <span className={styles.value}>{children}</span>;

@@ -275,3 +275,46 @@ export function machineActiveRuns(machine: MachineView): number {
     0,
   );
 }
+
+/**
+ * C-511: names of the check and wizard steps the host reports. The nine
+ * onboarding steps of `worker add` are numbered; the configuration check
+ * before them and the capability refresh after them are not.
+ */
+const STEP_LABELS: Readonly<Record<string, string>> = {
+  queued: "排队",
+  runtime: "运行环境",
+  configuration: "配置核对",
+  registration: "登记",
+  draft: "草稿",
+  ssh: "SSH",
+  account: "账号",
+  directories: "目录",
+  tools: "工具",
+  helpers: "helper",
+  resources: "资源",
+  mcp: "MCP",
+  capabilities: "能力刷新",
+  finished: "完成",
+  interrupted: "检查中断",
+  record_result: "记录结果",
+};
+export const WORKER_WIZARD_STEPS = [
+  "registration",
+  "draft",
+  "ssh",
+  "account",
+  "directories",
+  "tools",
+  "helpers",
+  "resources",
+  "mcp",
+] as const;
+export function checkStepLabel(step: string): string {
+  return STEP_LABELS[step] ?? step;
+}
+export function wizardStepLabel(step: string): string {
+  const index = (WORKER_WIZARD_STEPS as readonly string[]).indexOf(step);
+  const label = checkStepLabel(step);
+  return index < 0 ? label : `${index + 1}. ${label}`;
+}
