@@ -199,3 +199,94 @@ test.each(["frontend_engineer", "design_director"] as const)(
     }
   },
 );
+
+test("deploying host_ops defers rotation after a transfer and retains the old identity until eligible", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  const project = "fixture";
+  try {
+    store.createProject({ id: project });
+    const role = {
+      ...defaultRoleDefinition("host_ops", {
+        harness: "codex",
+        launch_profile_ref: "fixture",
+      }),
+      instructions: "Previous default",
+    };
+    const { previous, employee, token } = store.uow.run((tx) => {
+      writeRole(
+        tx,
+        project,
+        { ...role, core_prompt: "", version: 1 },
+        { mode: "add" },
+      );
+      const at = "2026-01-01T00:00:00Z";
+      const employee = {
+        id: tx.global_ids.nextEmployeeId(),
+        name: "Operator",
+        title: "Operations",
+        role_id: "host_ops",
+        projects: [project],
+        status: "active" as const,
+        bio: "",
+        avatar: null,
+        launch_profile_ref: null,
+        created_at: at,
+        updated_at: at,
+      };
+      tx.employees.put(employee);
+      const previous: Assignment = {
+        id: tx.ids.next(project, "assignment"),
+        scope: "standing",
+        role_id: "host_ops",
+        role_version: 1,
+        employee_id: employee.id,
+        status: "active",
+        runtime_state: "idle",
+        machine_id: "local",
+        runtime_ref: null,
+        mcp_token_id: "fixture",
+        created_at: at,
+      };
+      tx.assignments.put(project, previous);
+      const token = tx.issueToken({
+        project_id: project,
+        assignment_id: previous.id,
+        role: { role_version: 1, allowed_tools: role.allowed_tools },
+      });
+      return { previous, employee, token };
+    });
+    store.uow.run((tx) =>
+      tx.employees.put({ ...employee, projects: ["other"] }),
+    );
+    upgradeDeployedRoles(
+      store,
+      project,
+      ["host_ops"],
+      { host_ops: deploymentRolePolicyHash(role) },
+      new Set(["fixture"]),
+    );
+    rotateIdleDeployedRoles(store, project);
+    store.uow.read((tx) => {
+      expect(tx.assignments.list(project)).toEqual([previous]);
+      expect(
+        tx.events
+          .listAfter(project, undefined, 0)
+          .filter((e) => e.type === "host_role_upgrade_deferred"),
+      ).toMatchObject([
+        { payload: { notice: expect.stringContaining("不属于本项目") } },
+      ]);
+    });
+    expect(store.verifyToken(token.token)).toBeTruthy();
+    store.uow.run((tx) => tx.employees.put(employee));
+    rotateIdleDeployedRoles(store, project);
+    store.uow.read((tx) => {
+      expect(tx.assignments.get(project, previous.id)?.status).toBe("released");
+      expect(
+        tx.assignments.list(project).filter((a) => a.status === "active"),
+      ).toMatchObject([{ employee_id: employee.id, role_version: 2 }]);
+    });
+    expect(store.verifyToken(token.token)).toBeUndefined();
+  } finally {
+    store.close();
+  }
+});

@@ -431,6 +431,7 @@ test("external Office rotates at the same version, validates employee, and prese
   for (const invalid of [
     { ...employee, status: "inactive" as const },
     { ...employee, role_id: "coder" },
+    { ...employee, projects: ["other"] },
   ]) {
     expect(
       rotateStandingPm(
@@ -462,9 +463,8 @@ test("external Office rotates at the same version, validates employee, and prese
   });
 });
 
-test("deployment rotation retains the Ops employee and cannot widen pinned permissions", () => {
-  const x = setup();
-  const roles = x.state.roles
+function deployedPmRoles(state: CommandState) {
+  return state.roles
     .filter((r) => r.role_id === "pm")
     .map((r) => ({
       ...r,
@@ -479,6 +479,11 @@ test("deployment rotation retains the Ops employee and cannot widen pinned permi
       abilities: [],
       required_machine_tags: [],
     }));
+}
+
+test("deployment rotation retains the Ops employee and cannot widen pinned permissions", () => {
+  const x = setup();
+  const roles = deployedPmRoles(x.state);
   const system = { kind: "system" as const, project_id: x.state.project_id };
   expect(rotatePmAfterDeployment(x.state, system, roles, ports()).ok).toBe(
     false,
@@ -557,4 +562,71 @@ test("deployment rotation retains the Ops employee and cannot widen pinned permi
   expect(rotatePmAfterDeployment(state, asg, safeRoles, ports()).ok).toBe(
     false,
   );
+});
+
+test("deployment of anonymous Ops defers for an external-only roster, then selects the internal PM without touching Office", () => {
+  const x = setup();
+  const roles = deployedPmRoles(x.state);
+  const external = {
+    id: id("employee", 1),
+    name: "Office",
+    title: "PM",
+    bio: "",
+    avatar: null,
+    role_id: "pm",
+    launch_profile_ref: null,
+    status: "active" as const,
+    created_at: now,
+    updated_at: now,
+    projects: [x.state.project_id],
+  };
+  const office = { ...x.office, external: true, employee_id: external.id };
+  const state = {
+    ...x.state,
+    runs: [],
+    employees: [external],
+    assignments: [x.ops, office],
+  };
+  const deploy = (state: CommandState) =>
+    rotatePmAfterDeployment(
+      state,
+      { kind: "system", project_id: state.project_id },
+      roles,
+      ports(),
+    );
+  expect(deploy(state)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("外接员工") },
+  });
+  expect(
+    rotateStandingPm(
+      state,
+      human,
+      { standing_mode: "ops", employee_id: external.name },
+      ports(),
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("外接员工") },
+  });
+  const internal = { ...external, id: id("employee", 2), name: "Internal" };
+  const staffed = { ...state, employees: [external, internal] };
+  const effect = value(deploy(staffed));
+  expect(effect.data.assignment.employee_id).toBe(internal.id);
+  expect(
+    apply(staffed, effect).assignments.find((a) => a.id === office.id),
+  ).toEqual(office);
+  const offsite = value(
+    rotateStandingPm(
+      state,
+      human,
+      { standing_mode: "office", external: true, employee_id: external.id },
+      ports(),
+    ),
+  );
+  expect(offsite.data.assignment).toMatchObject({
+    employee_id: external.id,
+    external: true,
+    role_version: 3,
+  });
 });

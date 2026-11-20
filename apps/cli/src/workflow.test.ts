@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -17,11 +18,13 @@ import {
   requestHumanAction,
   resolveDelegatedDecision,
 } from "@cardigan/domain";
-import { RuntimeTargets } from "@cardigan/host";
+import { type CapabilityProbe, RuntimeTargets } from "@cardigan/host";
+import { writeRegisteredRuntime } from "@cardigan/runtime-herdr";
 import {
   beginMachineObservation,
   completeMachineObservation,
   readMachineObservations,
+  recordAcceptedBrowserPath,
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -30,6 +33,7 @@ import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
+const capabilityProbe = vi.hoisted(() => vi.fn<CapabilityProbe>());
 vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
@@ -37,13 +41,7 @@ vi.mock("@cardigan/host", async (importOriginal) => {
     // Keep the check journal and observation writes real, but never run host tools.
     checkRegisteredMachine: (options, create, source) =>
       host.checkRegisteredMachine(
-        {
-          ...options,
-          probe: async (_target, _os, command) =>
-            command[0] === "node"
-              ? { ok: true, output: "v0.0.528" }
-              : { ok: false, output: "" },
-        },
+        { ...options, probe: capabilityProbe },
         create,
         source,
       ),
@@ -62,6 +60,13 @@ let errors: string[];
 let io: CliIo;
 
 beforeEach(() => {
+  capabilityProbe
+    .mockReset()
+    .mockImplementation(async (_target, _os, command) =>
+      !("scopes" in command) && command[0] === "node"
+        ? { ok: true, output: "v0.0.528" }
+        : { ok: false, output: "" },
+    );
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-workflow-"));
   mkdirSync(join(dataDir, "config"), { mode: 0o700 });
   output = [];
@@ -266,6 +271,126 @@ test("machine check reports actual remote results without a blanket field-verifi
   } finally {
     check.mockRestore();
     resolve.mockRestore();
+  }
+});
+
+test("machine check uses the configured browser on the Run target; show retains only failure scopes", async () => {
+  await bootstrap();
+  const registry = "/fixture/worker-only/registry";
+  const file = join(dataDir, "config", "launch.yaml");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      browser: { command: "/fixture/mcp", browsers_path: registry },
+    }),
+  );
+  const check = vi.spyOn(RuntimeTargets.prototype, "check").mockResolvedValue({
+    ok: true,
+    value: { machine_id: "local", blockers: [], launch_enabled: true },
+  });
+  // The human CLI shell is local, but local Runs belong to the registered SSH account.
+  await writeRegisteredRuntime(dataDir, {
+    mode: "agent-ssh",
+    dataDir,
+    agentRoot: "/fixture/agent",
+    gid: 901,
+    user: "agent",
+    machine: "fixture-local",
+    identityFile: "/fixture/id",
+    knownHostsFile: "/fixture/known",
+  });
+  try {
+    const store = Store.open({ dataDir });
+    try {
+      recordAcceptedBrowserPath(store, registry);
+    } finally {
+      store.close();
+    }
+    capabilityProbe.mockImplementation(async (target, _os, argv) =>
+      target.mode === "agent-ssh" &&
+      target.user === "agent" &&
+      "scopes" in argv &&
+      argv.scopes.some((s) => s.value === registry)
+        ? { ok: true, output: "Chromium 152.0.1.2" }
+        : { ok: false, output: "" },
+    );
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    expect(printed()).toContain('"version": "152.0.1.2"');
+    expect(printed()).not.toContain("capability_failures");
+    capabilityProbe.mockImplementation(async (_target, _os, cmd) => ({
+      ok: false,
+      output: "private-worker-error",
+      ...("scopes" in cmd
+        ? { attempted: cmd.scopes.length, incomplete: false }
+        : {}),
+    }));
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    const health = JSON.parse(output.at(-1) ?? "").health;
+    expect(health).toMatchObject({
+      available: true,
+      capability_failures: [
+        {
+          key: "browser.chromium",
+          search_locations: [
+            "launch.yaml:browser.browsers_path",
+            "PATH:chromium",
+            "PATH:chromium-browser",
+            "PATH:google-chrome",
+            "$HOME/.cache/ms-playwright",
+          ],
+        },
+      ],
+    });
+    rmSync(file);
+    expect(await run(["machine", "show", "local"])).toBe(0);
+    expect(JSON.parse(printed())[0].health).toEqual(health);
+    expect(printed()).not.toContain(registry);
+    expect(printed()).not.toContain("private-worker-error");
+    expect(await run(["machine", "check", "local"])).toBe(0);
+    expect(printed()).not.toContain("launch.yaml:browser.browsers_path");
+
+    // A candidate edited on disk is not the server's accepted directory. Neither an
+    // invalid pair nor a parse failure may grant Chromium or discard a healthy Node.
+    const rejected = "/fixture/not-accepted";
+    const secrets = join(dataDir, "config", "secrets.env");
+    writeFileSync(secrets, "");
+    chmodSync(secrets, 0o644);
+    capabilityProbe.mockImplementation(async (_target, _os, argv) =>
+      (
+        "scopes" in argv
+          ? argv.scopes.some((s) => s.value === rejected)
+          : argv[0] === "node"
+      )
+        ? { ok: true, output: "Tool 24.0" }
+        : { ok: false, output: "" },
+    );
+    for (const candidate of [
+      JSON.stringify({
+        browser: { command: "/fixture/mcp", browsers_path: rejected },
+      }),
+      "profiles: [",
+    ]) {
+      capabilityProbe.mockClear();
+      writeFileSync(file, candidate);
+      expect(await run(["machine", "check", "local"])).toBe(0);
+      expect(
+        capabilityProbe.mock.calls.some(
+          ([, , argv]) =>
+            "scopes" in argv && argv.scopes.some((s) => s.value === rejected),
+        ),
+      ).toBe(false);
+      const snapshot = JSON.parse(output.at(-1) ?? "");
+      expect(snapshot.health).toMatchObject({
+        status: "passed",
+        available: true,
+      });
+      expect(snapshot.capabilities.map((c: { key: string }) => c.key)).toEqual([
+        "node",
+      ]);
+      expect(printed()).not.toContain("launch.yaml:browser.browsers_path");
+    }
+  } finally {
+    check.mockRestore();
   }
 });
 
@@ -858,6 +983,47 @@ test("office and ops are separate standing assignments with independent tokens",
   // Asking for --ops again reuses the Ops assignment instead of adding a third.
   expect(await run(["pm", "create", "--ops"])).toBe(0);
   expect(printed()).toContain("复用常驻 PM Ops：A-2");
+});
+
+test("pm create only binds active project members, including when selected by name", async () => {
+  await run(["init"]);
+  await run(["project", "create", "p-work"]);
+  await run([
+    "role",
+    "add",
+    "p-work",
+    "pm",
+    "--allowed-tools",
+    "create_card,record_decision",
+  ]);
+  const add = (name: string, projects: string) =>
+    run([
+      "employee",
+      "add",
+      "--name",
+      name,
+      "--title",
+      "经理",
+      "--role",
+      "pm",
+      "--projects",
+      projects,
+    ]);
+  expect(await add("外部", "other")).toBe(0);
+  expect(await run(["pm", "create", "--ops"])).toBe(2);
+  expect(errors.join("\n")).toContain("本项目没有可用员工");
+  expect(await add("本地", "p-work")).toBe(0);
+  expect(await run(["pm", "create", "--ops", "--employee", "外部"])).toBe(2);
+  expect(errors.join("\n")).toContain("不属于本项目");
+  expect(await run(["pm", "create", "--ops"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => tx.assignments.list("p-work"))).toMatchObject(
+      [{ employee_id: "E-2" }],
+    );
+  } finally {
+    store.close();
+  }
 });
 
 test("pm create --ops drops record_decision and needs the role to have it", async () => {
@@ -1758,4 +1924,79 @@ test("assign excludes external Office employees while external rotation and ordi
   ).toBe(0);
   expect(await run(["assign", "W-3", "--role", "pm"])).toBe(0);
   expect(printed()).toContain("员工 E-2");
+});
+
+test("creating internal PM Ops excludes an unreleased external Office employee in another project", async () => {
+  expect(await run(["init"])).toBe(0);
+  for (const p of ["office", "ops"]) {
+    expect(await run(["project", "create", p])).toBe(0);
+    expect(
+      await run([
+        "role",
+        "add",
+        p,
+        "pm",
+        "--allowed-tools",
+        "create_card,record_decision",
+      ]),
+    ).toBe(0);
+  }
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Shared",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+      "--projects",
+      "office,ops",
+    ]),
+  ).toBe(0);
+  expect(await run(["pm", "create", "--office", "--project", "office"])).toBe(
+    0,
+  );
+  expect(
+    await run([
+      "pm",
+      "rotate",
+      "--office",
+      "--external",
+      "--employee",
+      "Shared",
+      "--project",
+      "office",
+    ]),
+  ).toBe(0);
+  for (const flags of [[], ["--employee", "Shared"]]) {
+    expect(
+      await run(["pm", "create", "--ops", "--project", "ops", ...flags]),
+    ).toBe(2);
+    expect(errors.join("\n")).toContain("外接员工");
+  }
+  expect(
+    await run([
+      "employee",
+      "add",
+      "--name",
+      "Internal",
+      "--title",
+      "PM",
+      "--role",
+      "pm",
+      "--projects",
+      "ops",
+    ]),
+  ).toBe(0);
+  expect(await run(["pm", "create", "--ops", "--project", "ops"])).toBe(0);
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => tx.assignments.list("ops"))).toMatchObject([
+      { employee_id: "E-2", standing_mode: "ops" },
+    ]);
+  } finally {
+    store.close();
+  }
 });

@@ -311,3 +311,48 @@ test("Workbench serves a streamed artifact through the authenticated download wi
   expect(r.headers["x-content-type-options"]).toBe("nosniff");
   expect(r.headers["content-security-policy"]).toContain("sandbox");
 });
+
+test("Feishu codes only come from same-origin owner sessions, never a bearer or request-selected member", async () => {
+  const path = "/api/me/feishu",
+    body = { action: "code" };
+  expect(
+    (
+      await f.call(path, {
+        anonymous: true,
+        method: "POST",
+        headers: { authorization: `Bearer ${f.token(f.primary.owner)}` },
+        body,
+      })
+    ).status,
+  ).toBe(401);
+  await success();
+  expect(
+    (
+      await f.call(path, {
+        method: "POST",
+        headers: { origin: "https://foreign.invalid" },
+        body,
+      })
+    ).status,
+  ).toBe(403);
+  expect(
+    (
+      await f.call(path, {
+        method: "POST",
+        body: { ...body, member_id: "other" },
+      })
+    ).status,
+  ).toBe(400);
+  const db = f.store().database;
+  db.prepare(
+    "INSERT OR REPLACE INTO feishu_runtime(id,scope,state,heartbeat) VALUES(1,'fixture','connected',?)",
+  ).run(Date.now());
+  const r = await f.call(path, { method: "POST", body });
+  expect(r.status).toBe(200);
+  const result = JSON.parse(r.text);
+  expect(result.code).toMatch(/^[a-f0-9]{32}$/u);
+  expect((await f.call(path)).text).not.toContain(result.code);
+  expect(
+    JSON.stringify(db.prepare("SELECT * FROM feishu_codes").all()),
+  ).not.toContain(result.code);
+});

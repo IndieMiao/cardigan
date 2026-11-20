@@ -7,8 +7,12 @@ import {
   type CommandState,
   command,
   ensure,
+  unwrap,
 } from "./core.js";
-import { resolveEmployee } from "./employee-assignment.js";
+import {
+  resolveEmployee,
+  selectStandingEmployee,
+} from "./employee-assignment.js";
 
 /** Human bootstrap only; operational tools and their execution are separate commands. */
 export function createHostOpsAssignment(
@@ -50,23 +54,8 @@ export function createHostOpsAssignment(
       .filter((r) => r.role_id === "host_ops")
       .sort((a, b) => b.role_version - a.role_version)[0];
     ensure(role, "not_found", "host_ops 角色不存在");
-    const candidates = (state.employees ?? []).filter(
-      (e) => e.role_id === "host_ops" && e.status === "active",
-    );
-    ensure(
-      p.employee_id !== undefined || candidates.length <= 1,
-      "validation_failed",
-      "有多个在职主机运维员工，请用 --employee 指定",
-    );
-    const employee =
-      p.employee_id === undefined
-        ? candidates[0]
-        : resolveEmployee(d, p.employee_id);
-    ensure(
-      !employee ||
-        (employee.status === "active" && employee.role_id === "host_ops"),
-      "validation_failed",
-      "员工须为在职的 host_ops 角色",
+    const employee = unwrap(
+      selectStandingEmployee(state, "host_ops", p.employee_id),
     );
     const id = d.ids.next(state.project_id, "assignment");
     const assignment: Assignment = {

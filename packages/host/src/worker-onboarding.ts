@@ -129,6 +129,107 @@ export function workerOnboardingStatus(
   }
 }
 
+function machineBinding(config: WorkerOnboardingConfig) {
+  const { projects: _projects, ...identity } = config.runtime.machines[0] ?? {};
+  return {
+    identity: onboardingDigest(identity),
+    endpoint: onboardingDigest(
+      String(config.worker.execution.host).toLowerCase(),
+    ),
+  };
+}
+
+/** Same immutable machine/endpoint fence for the CLI engine and both Web confirmations. */
+function checkReservedBindings(
+  root: CpuProfileDirectory,
+  config: WorkerOnboardingConfig,
+  dataDir: string,
+  confirmed: boolean,
+) {
+  const { project_id: project, machine_id: machine } = config.worker;
+  const binding = machineBinding(config);
+  // Drafts for other projects also bind this physical machine before activation.
+  for (const machineName of root.entries().filter((n) => n !== "owner.lock")) {
+    const peer = root.child(machineName, false);
+    try {
+      const saved = peer.read("machine.binding");
+      if (saved !== undefined) {
+        const known = onboardingObject(saved);
+        if (
+          ![known.identity, known.endpoint].every(
+            (v) => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v),
+          )
+        )
+          onboardingFail("worker_journal_invalid");
+        if (
+          machineName === machine
+            ? known.identity !== binding.identity
+            : known.endpoint === binding.endpoint
+        )
+          onboardingFail("worker_config_conflict");
+      }
+      for (const name of peer
+        .entries()
+        .filter((n) => n.endsWith(".runtime-workers.yaml")))
+        if (
+          !(
+            confirmed &&
+            machineName === machine &&
+            name === `${project}.runtime-workers.yaml`
+          )
+        )
+          checkWorkerDraft(
+            config,
+            readOnboardingYaml(join(peer.path, name)),
+            dataDir,
+          );
+    } finally {
+      peer.close();
+    }
+  }
+  return binding;
+}
+
+/** Previews create nothing. Publication rechecks reservations under the engine's lock,
+ * and holds it through the file and audit transaction, including first-time onboarding. */
+export function withWorkerBindingCheck<T>(
+  configRoot: string,
+  config: WorkerOnboardingConfig,
+  dataDir: string,
+  write: boolean,
+  work: (priorDigest: string | undefined) => T,
+): T {
+  const { project_id: project, machine_id: machine } = config.worker;
+  workerJournalId(project, machine);
+  let root: CpuProfileDirectory;
+  try {
+    root = onboardingDirectory(configRoot, write);
+  } catch (error) {
+    if (!write && (error as NodeJS.ErrnoException).code === "ENOENT")
+      return work(undefined);
+    throw error;
+  }
+  let lock: ReturnType<CpuProfileDirectory["lock"]> | undefined;
+  try {
+    if (write) {
+      lock = root.lock(true);
+      if (!lock.acquire()) return onboardingFail("worker_busy");
+    }
+    const old = workerOnboardingStatus(configRoot, project, machine);
+    checkReservedBindings(
+      root,
+      config,
+      dataDir,
+      !!old && old.digest !== config.digest,
+    );
+    root.verify();
+    return work(old?.digest);
+  } finally {
+    lock?.close();
+    root.close();
+  }
+}
+
 export interface WorkerOnboardingOptions {
   readonly config: WorkerOnboardingConfig;
   readonly configRoot: string;
@@ -136,6 +237,8 @@ export interface WorkerOnboardingOptions {
   readonly mode: "add" | "resume" | "check";
   /** Explicit acknowledgement of the exact newly parsed configuration. */
   readonly confirmConfig?: string;
+  /** Only the interactive session can vouch for a completed prefix. CLI checks stay fresh. */
+  readonly completed?: readonly Step[];
   /** Must query existing facts and only register offline when allowed. */
   readonly registration: (create: boolean) => Promise<boolean>;
   readonly probe?: WorkerProbeRunner;
@@ -175,61 +278,13 @@ export async function onboardWorker(
       return onboardingFail("worker_journal_missing");
     if (old && old.digest !== config.digest && !confirmed)
       return onboardingFail("worker_config_changed");
-    const { projects: _projects, ...identity } =
-      config.runtime.machines[0] ?? {};
-    const binding = {
-      identity: onboardingDigest(identity),
-      endpoint: onboardingDigest(
-        String(config.worker.execution.host).toLowerCase(),
-      ),
-    };
     checkWorkerDraft(
       config,
       readOnboardingYaml(join(configRoot, "runtime-workers.yaml")),
       dataDir,
       "applied",
     );
-    // Drafts for other projects also bind this physical machine before activation.
-    for (const machineName of root
-      .entries()
-      .filter((n) => n !== "owner.lock")) {
-      const peer = root.child(machineName, false);
-      try {
-        const saved = peer.read("machine.binding");
-        if (saved !== undefined) {
-          const known = onboardingObject(saved);
-          if (
-            ![known.identity, known.endpoint].every(
-              (v) => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v),
-            )
-          )
-            onboardingFail("worker_journal_invalid");
-          if (
-            machineName === machine
-              ? known.identity !== binding.identity
-              : known.endpoint === binding.endpoint
-          )
-            onboardingFail("worker_config_conflict");
-        }
-        for (const name of peer
-          .entries()
-          .filter((n) => n.endsWith(".runtime-workers.yaml")))
-          if (
-            !(
-              confirmed &&
-              machineName === machine &&
-              name === `${project}.runtime-workers.yaml`
-            )
-          )
-            checkWorkerDraft(
-              config,
-              readOnboardingYaml(join(peer.path, name)),
-              dataDir,
-            );
-      } finally {
-        peer.close();
-      }
-    }
+    const binding = checkReservedBindings(root, config, dataDir, confirmed);
     // Bind before registration too: a crash before draft publication must not
     // allow a different project/ID to claim the same physical endpoint.
     if (mode !== "check" && dir.read("machine.binding") === undefined)
@@ -256,6 +311,15 @@ export async function onboardWorker(
         WORKER_STEPS.map((s) => [s, "pending"]),
       ) as Record<Step, State>,
     };
+    const prefix = new Set<Step>();
+    if (mode === "resume" && !confirmed && old?.digest === config.digest) {
+      for (const step of WORKER_STEPS) {
+        if (!options.completed?.includes(step) || old.steps[step] !== "passed")
+          break;
+        prefix.add(step);
+        journal.steps[step] = "passed";
+      }
+    }
     const persist = () => {
       lock?.verify();
       journal.updated_at = new Date().toISOString();
@@ -263,6 +327,7 @@ export async function onboardWorker(
     };
     persist();
     for (const step of WORKER_STEPS) {
+      if (prefix.has(step)) continue;
       options.beforeStep?.(step);
       journal.steps[step] = "running";
       persist(); // Durable intent before any effect; retries query facts again.

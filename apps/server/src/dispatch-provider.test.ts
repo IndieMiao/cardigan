@@ -18,6 +18,7 @@ test("C-499: repeated silent 503s do not start work; only one real launch probes
     ...f.options,
     dispatchTimeoutMs: 100,
     providerCooldownMs: 500,
+    queuedRecheckAfterMs: 200,
     snapshot: async () => ({
       model: "session-model",
       agent_cli_version: "session-cli",
@@ -129,10 +130,13 @@ test("C-499: repeated silent 503s do not start work; only one real launch probes
       const other = new Dispatcher({ ...options, store: reopened });
       f.advance(499);
       await other.tick();
-      expect(assignments.map((t) => latest(t.assignment.id)?.status)).toEqual([
-        "queued",
-        "queued",
-      ]);
+      // A long-queue recheck must preserve the provider wait, not wake the Run.
+      for (const t of assignments)
+        expect(latest(t.assignment.id)).toMatchObject({
+          status: "queued",
+          queue_reason: "provider_unavailable",
+          queue_last_recheck_at: f.clock.now(),
+        });
       f.advance(1);
       await Promise.all([d.tick(), other.tick()]);
       const probes = assignments

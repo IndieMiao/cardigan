@@ -104,6 +104,8 @@ export function recordLaunchPublication(
       updated = {
         ...updated,
         status: unwrap(transition("run", run.status, "launch_withdrawn")),
+        queue_reason: "awaiting_dispatch",
+        queue_entered_at: d.now,
       };
     }
     if (

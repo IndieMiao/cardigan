@@ -1267,3 +1267,32 @@ test("card hold suppresses verifier assignment and reminders; release rechecks m
   );
   expect(auto(apply(held, resumed)).data).not.toBeNull();
 });
+
+test.each(["reviewer", "independent_reviewer"])(
+  "system only assigns project members for %s",
+  (roleId) => {
+    const b = base();
+    const foreign = { ...employee(1, roleId), projects: ["other"] };
+    const local = { ...employee(2, roleId), projects: [b.project_id] };
+    const scoped = {
+      ...b,
+      roles: roleId === "reviewer" ? b.roles : [...b.roles, role(roleId)],
+      work_items: b.work_items.map((w) =>
+        w.id === id("work_item", 2) ? { ...w, role_id: roleId } : w,
+      ),
+      employees: [foreign, local],
+    };
+    expect(auto(scoped).data?.employee_id).toBe(local.id);
+    const missing = auto({ ...scoped, employees: [foreign] });
+    expect(missing.data).toBeNull();
+    expect(missing.events).toMatchObject([
+      {
+        type: "system_assignment_deferred",
+        payload: {
+          reason: expect.stringContaining("本项目没有可用员工"),
+          candidates: [],
+        },
+      },
+    ]);
+  },
+);

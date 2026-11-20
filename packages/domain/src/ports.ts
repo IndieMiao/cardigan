@@ -103,7 +103,13 @@ export interface Repositories {
   >;
   readonly events: EventRepository;
 }
+/** Trusted write-transaction proof: neither startup intent nor unreleased physical hold. */
+export type UnreservedAssignment = (
+  project: ProjectId,
+  assignment: AssignmentId,
+) => boolean;
 export interface TransactionContext extends Repositories {
+  readonly unreservedAssignment?: UnreservedAssignment;
   readonly read_machine_placement?: import("./machine-placement.js").ReadMachinePlacement;
   readonly test_review_trust?: import("./test-review.js").TestReviewTrust;
   readonly employees?: EmployeeRepository;

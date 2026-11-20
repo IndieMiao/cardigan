@@ -651,7 +651,13 @@ export interface Run {
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
+    | "awaiting_dispatch"
     | "provider_unavailable";
+  /** Start of the current queue episode; legacy rows use the creation or trigger event. */
+  readonly queue_entered_at?: Timestamp;
+  /** Watchdog checkpoints for this Run, updated with the diagnostic/PM notice in one transaction. */
+  readonly queue_last_recheck_at?: Timestamp;
+  readonly queue_notified_at?: Timestamp;
   /** Host-only target wait; elapsed time is excluded from dispatch recovery. */
   readonly dispatch_target_wait?: {
     readonly since?: Timestamp;
