@@ -273,14 +273,11 @@ test("a stale snapshot is refused; refreshing previews again on the new version"
   );
   const alert = await within(dialog).findByRole("alert");
   expect(alert.textContent).toContain("这次预览已作废，没有写入");
-  expect(
-    within(dialog)
-      .getByRole("button", { name: "确认保存" })
-      .hasAttribute("disabled"),
-  ).toBe(true);
+  // Confirming the old preview is no longer offered.
+  expect(within(dialog).queryByRole("button", { name: "确认保存" })).toBeNull();
   version = V2;
   fireEvent.click(
-    within(alert).getByRole("button", { name: "刷新并重新预览" }),
+    within(dialog).getByRole("button", { name: "刷新并重新预览" }),
   );
   await waitFor(() =>
     expect(api.previewLaunchChange).toHaveBeenLastCalledWith(V2, {

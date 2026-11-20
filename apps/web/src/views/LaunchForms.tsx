@@ -181,9 +181,12 @@ function LaunchEditor({
   submitLabel = "预览修改",
   confirmLabel = "确认保存",
   destructive = false,
+  heading = true,
 }: {
   context: EditorContext;
   label: string;
+  /** False when the drawer title already names the form (a new profile). */
+  heading?: boolean;
   /** `undefined` while the draft is invalid or unchanged. */
   change: LaunchChange | undefined;
   dirty: boolean;
@@ -212,15 +215,17 @@ function LaunchEditor({
         ? ({ kind: "form", message: problem.message } as const)
         : problem
       : undefined;
-  const notice = general && (
-    <ProblemNote
-      problem={general}
-      busy={editor.busy}
-      onRefresh={() => {
-        const pending = editor.preview?.change ?? change;
-        if (pending) void editor.refresh(pending);
-      }}
-    />
+  const notice = general && <ProblemNote problem={general} />;
+  // A stale snapshot: the main action becomes reading it again and previewing anew.
+  const pending = editor.preview?.change ?? change;
+  const refresh = general?.kind === "stale" && pending && (
+    <Button
+      variant="primary"
+      disabled={editor.busy}
+      onClick={() => void editor.refresh(pending)}
+    >
+      刷新并重新预览
+    </Button>
   );
   if (editor.preview) {
     const { change: previewed, result } = editor.preview;
@@ -243,36 +248,38 @@ function LaunchEditor({
             <Button onClick={editor.back} disabled={editor.busy}>
               返回修改
             </Button>
-            <Button
-              type="submit"
-              variant={destructive ? "destructive" : "primary"}
-              disabled={editor.busy || general?.kind === "stale"}
-            >
-              {editor.busy ? "正在保存…" : confirmLabel}
-            </Button>
+            {refresh || (
+              <Button
+                type="submit"
+                variant={destructive ? "destructive" : "primary"}
+                disabled={editor.busy}
+              >
+                {editor.busy ? "正在保存…" : confirmLabel}
+              </Button>
+            )}
           </SettingsDialogActions>
         </form>
       </SettingsSection>
     );
   }
-  return (
-    <SettingsSection title={label}>
-      <form
-        aria-label={label}
-        noValidate
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (change && !editor.busy) void editor.start(change);
-        }}
-      >
-        <SettingsDialogFields>
-          <fieldset disabled={editor.busy}>{fields(fieldProblem)}</fieldset>
-          {notice}
-        </SettingsDialogFields>
-        <SettingsDialogActions>
-          <Button onClick={onCancel} disabled={editor.busy}>
-            取消
-          </Button>
+  const form = (
+    <form
+      aria-label={label}
+      noValidate
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (change && !editor.busy) void editor.start(change);
+      }}
+    >
+      <SettingsDialogFields>
+        <fieldset disabled={editor.busy}>{fields(fieldProblem)}</fieldset>
+        {notice}
+      </SettingsDialogFields>
+      <SettingsDialogActions>
+        <Button onClick={onCancel} disabled={editor.busy}>
+          取消
+        </Button>
+        {refresh || (
           <Button
             type="submit"
             variant="primary"
@@ -280,30 +287,26 @@ function LaunchEditor({
           >
             {editor.busy ? "正在生成预览…" : submitLabel}
           </Button>
-        </SettingsDialogActions>
-      </form>
-    </SettingsSection>
+        )}
+      </SettingsDialogActions>
+    </form>
+  );
+  return heading ? (
+    <SettingsSection title={label}>{form}</SettingsSection>
+  ) : (
+    form
   );
 }
 
 function ProblemNote({
   problem,
-  busy,
-  onRefresh,
 }: {
   problem: Exclude<LaunchProblem, { kind: "field" }>;
-  busy: boolean;
-  onRefresh: () => void;
 }) {
   if (problem.kind === "stale")
     return (
       <SettingsWarning role="alert">
-        <p>启动配置已在别处修改，这次预览已作废，没有写入。</p>
-        <SettingsDialogActions>
-          <Button onClick={onRefresh} disabled={busy}>
-            刷新并重新预览
-          </Button>
-        </SettingsDialogActions>
+        启动配置已在别处修改，这次预览已作废，没有写入。
       </SettingsWarning>
     );
   if (problem.kind === "in_use")
@@ -486,6 +489,7 @@ export function ProfileForm({
     <LaunchEditor
       context={context}
       label={creating ? "新建启动配置" : "编辑启动配置"}
+      heading={!creating}
       change={change}
       dirty={dirty}
       fieldNames={creating ? ["name"] : []}
