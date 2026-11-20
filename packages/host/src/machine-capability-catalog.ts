@@ -13,11 +13,12 @@ export interface CapabilityDefinition {
   readonly searchLocations?: readonly string[];
   readonly acceptsOutput?: (output: string) => boolean;
 }
+// POSIX ERE and JavaScript share this expression; group 2 is the safe version token.
+const versionPattern = String.raw`(^|[^a-zA-Z0-9_.])v?([0-9]{1,6}(\.[0-9]{1,6}){1,3})([^0-9]|$)`;
+const versionRegex = new RegExp(versionPattern, "u");
 /** Never persist a banner, account name, credential, or arbitrary command output. */
 export function parseCapabilityVersion(output: string): string | null {
-  return (
-    /(?:^|[^\w.])v?(\d{1,6}(?:\.\d{1,6}){1,3})(?!\d)/u.exec(output)?.[1] ?? null
-  );
+  return versionRegex.exec(output)?.[2] ?? null;
 }
 function tool(
   key: string,
@@ -60,8 +61,15 @@ function chromiumCapability(
   const check = `
 try_bin() {
   [ -f "$1" ] && [ -x "$1" ] || return 1
-  printf '\\nBEGIN_CHROMIUM_VERSION\\n'
-  "$1" --version && exit 0
+  # Keep the binary's exit status independent of the bounded banner pipeline.
+  # fd 3 carries only our failure marker; the binary cannot write to it.
+  token=$({
+    { "$1" --version 3>&- || printf '!failed!' >&3; } 2>&1 |
+      /usr/bin/head -c 16384 | LC_ALL=C /usr/bin/grep -aEo '${versionPattern}' | /usr/bin/head -n 1
+  } 3>&1)
+  case "$token" in ''|*'!failed!'*) return 1 ;; esac
+  printf '%s\\n' "$token"
+  exit 0
 }
 search_registry() {
   for bin in ${patterns.map((pattern) => `"$1"/${pattern}`).join(" ")}; do try_bin "$bin"; done
@@ -79,11 +87,6 @@ exit 1`;
       "chromium-probe",
       browsersPath ?? "",
     ]),
-    // A broken earlier installation may itself print a version before failing.
-    parseVersion: (output) =>
-      parseCapabilityVersion(
-        output.split("\nBEGIN_CHROMIUM_VERSION\n").at(-1) ?? "",
-      ),
     searchLocations: [
       ...(browsersPath ? ["launch.yaml:browser.browsers_path"] : []),
       ...pathNames.map((name) => `PATH:${name}`),

@@ -15,7 +15,7 @@ import {
   workerOnboardingStatus,
 } from "@cardigan/host";
 import { openStore } from "@cardigan/store";
-import { loadOptionalConfigSync } from "./config.js";
+import { acceptedBrowserPath } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { hasToken, resolveDataDir } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -202,8 +202,7 @@ export async function runWorkerCommand(
           machine,
           env: io.env,
           browsersPath: () =>
-            loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
-              ?.browsers_path,
+            acceptedBrowserPath(cliLaunchPaths(io, dataDir), store),
           // The wizard probes its input configuration, not an arbitrary later registration.
           // Resolve both sides of the observation fence against that same worker.
           target: () => {

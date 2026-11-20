@@ -5,10 +5,12 @@ export async function liveLaunch<T>(
   dir: string,
   load: () => Promise<T>,
   warn: () => void,
+  onAccept?: (value: T) => void,
 ) {
   let seen = stamp(dir);
   let current = await load();
   if (seen !== stamp(dir)) throw new Error("启动时配置文件正在被修改，请重试");
+  onAccept?.(current);
   let pending: Promise<T> | undefined;
   const refresh = async () => {
     if (pending) return pending;
@@ -18,6 +20,7 @@ export async function liveLaunch<T>(
       try {
         const next = await load();
         if (stamp(dir) === key) {
+          onAccept?.(next);
           current = next;
           seen = key;
         }

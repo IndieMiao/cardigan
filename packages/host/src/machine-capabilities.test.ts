@@ -144,6 +144,8 @@ test.each([
     expect(run()).toBe("152.1.2.3");
     install(browser, "99.9", 1);
     expect(run()).toBe("2.0"); // Ignore the failed binary's banner.
+    install(browser, "unknown"); // A successful exit without a version must not mask PATH.
+    expect(run()).toBe("2.0");
     chmodSync(browser, 0o600);
     expect(run()).toBe("2.0");
     if (os === "linux") {

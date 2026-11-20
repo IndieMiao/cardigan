@@ -322,7 +322,7 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 ### 检查浏览器能力
 
-运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到 `--version` 即可，不需要向缓存建链接。再查 Run 的 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，最后查该账号的 `$HOME/.cache/ms-playwright`。
+运行 `cardigan machine check worker-a --project example` 刷新，`cardigan machine show worker-a --project example` 查看上次结果。`browser.chromium` 优先在控制主机 `launch.yaml` 的 `browser.browsers_path` 中查找 Playwright 安装的 Chromium 或无头浏览器。目录名指 **Run 所在机器**的路径；该账号能执行浏览器并读到版本号即可，不需要向缓存建链接。CLI 只查服务已接受的配置目录；配置无法读取、尚未生效，或候选程序没有返回可解析版本时，继续检查后续位置，不影响其它能力。再查 Run 的 `PATH` 中的 `chromium`、`chromium-browser`、`google-chrome`，最后查该账号的 `$HOME/.cache/ms-playwright`。
 
 本机采用 `agent-ssh` 时以本机 Agent 账号检查，远程以项目 worker 账号检查；只有 Run 本身采用 `local` 模式才用当前运行账号。未验证浏览器时，`health.capability_failures` 列出这次探测的查找范围（配置键、命令名和账号缓存）；不会回显私有目录或命令报错。若机器健康检查本身失败，先处理 `health.blockers`，能力探测此时尚未执行。
 

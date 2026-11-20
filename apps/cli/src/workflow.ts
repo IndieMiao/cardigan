@@ -59,7 +59,7 @@ import {
   updateMachineDescription,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
-import { loadOptionalConfigSync } from "./config.js";
+import { acceptedBrowserPath, loadOptionalConfigSync } from "./config.js";
 import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { runFlowUpgrade } from "./flow-version.js";
@@ -928,8 +928,7 @@ async function machineCommand(
           machine: machine.id,
           env: io.env,
           browsersPath: () =>
-            loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
-              ?.browsers_path,
+            acceptedBrowserPath(cliLaunchPaths(io, dataDir), store),
           target: async () => (await ready()).resolve(project_id, machine.id),
           check: async () => {
             const checked = await (await ready()).check(project_id, machine.id);

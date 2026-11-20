@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -23,6 +24,7 @@ import {
   beginMachineObservation,
   completeMachineObservation,
   readMachineObservations,
+  recordAcceptedBrowserPath,
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -288,6 +290,12 @@ test("machine check uses the configured browser on the Run target; show retains 
     knownHostsFile: "/fixture/known",
   });
   try {
+    const store = Store.open({ dataDir });
+    try {
+      recordAcceptedBrowserPath(store, registry);
+    } finally {
+      store.close();
+    }
     capabilityProbe.mockImplementation(async (target, _os, argv) =>
       target.mode === "agent-ssh" &&
       target.user === "agent" &&
@@ -326,6 +334,42 @@ test("machine check uses the configured browser on the Run target; show retains 
     expect(printed()).not.toContain("private-worker-error");
     expect(await run(["machine", "check", "local"])).toBe(0);
     expect(printed()).not.toContain("launch.yaml:browser.browsers_path");
+
+    // A candidate edited on disk is not the server's accepted directory. Neither an
+    // invalid pair nor a parse failure may grant Chromium or discard a healthy Node.
+    const rejected = "/fixture/not-accepted";
+    const secrets = join(dataDir, "config", "secrets.env");
+    writeFileSync(secrets, "");
+    chmodSync(secrets, 0o644);
+    capabilityProbe.mockImplementation(async (_target, _os, argv) =>
+      argv.at(-1) === rejected || argv[0] === "node"
+        ? { ok: true, output: "Tool 24.0" }
+        : { ok: false, output: "" },
+    );
+    for (const candidate of [
+      JSON.stringify({
+        browser: { command: "/fixture/mcp", browsers_path: rejected },
+      }),
+      "profiles: [",
+    ]) {
+      capabilityProbe.mockClear();
+      writeFileSync(file, candidate);
+      expect(await run(["machine", "check", "local"])).toBe(0);
+      expect(
+        capabilityProbe.mock.calls.some(
+          ([, , argv]) => argv.at(-1) === rejected,
+        ),
+      ).toBe(false);
+      const snapshot = JSON.parse(output.at(-1) ?? "");
+      expect(snapshot.health).toMatchObject({
+        status: "passed",
+        available: true,
+      });
+      expect(snapshot.capabilities.map((c: { key: string }) => c.key)).toEqual([
+        "node",
+      ]);
+      expect(printed()).not.toContain("launch.yaml:browser.browsers_path");
+    }
   } finally {
     check.mockRestore();
   }

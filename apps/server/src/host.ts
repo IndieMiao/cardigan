@@ -39,7 +39,11 @@ import {
   resolveDataDirectory,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
-import { getRoleVersion, type Store } from "@cardigan/store";
+import {
+  getRoleVersion,
+  recordAcceptedBrowserPath,
+  type Store,
+} from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { standingResolver } from "./assembly.js";
 import type { ServerEnv } from "./config.js";
@@ -199,6 +203,8 @@ export async function createHostWiring(options: {
         recordLaunchNotice(options.store, tx, "launch_reload_failed", message),
       );
     },
+    ({ config }) =>
+      recordAcceptedBrowserPath(options.store, config.browser?.browsers_path),
   );
   const generations = new WeakMap<
     LaunchSnapshot,

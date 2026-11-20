@@ -1,7 +1,37 @@
+import { createHash } from "node:crypto";
 import type { Actor } from "@cardigan/domain";
 import type { Store } from "./store.js";
 
 export const MACHINE_OBSERVATION_TTL_MS = 24 * 60 * 60 * 1000;
+const browserDigest = (path: string) =>
+  createHash("sha256").update(path).digest("hex");
+
+/** Published only after the server accepts a whole launch generation. */
+export function recordAcceptedBrowserPath(
+  store: Store,
+  path: string | undefined,
+) {
+  if (!path) {
+    store.database
+      .prepare("DELETE FROM accepted_browser_path WHERE singleton=1")
+      .run();
+    return;
+  }
+  store.database
+    .prepare(
+      "INSERT INTO accepted_browser_path VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET digest=excluded.digest",
+    )
+    .run(browserDigest(path));
+}
+
+export function isAcceptedBrowserPath(store: Store, path: string): boolean {
+  return !!store.database
+    .prepare(
+      "SELECT 1 FROM accepted_browser_path WHERE singleton=1 AND digest=?",
+    )
+    .get(browserDigest(path));
+}
+
 export interface MachineCapability {
   readonly key: string;
   readonly version: string | null;
