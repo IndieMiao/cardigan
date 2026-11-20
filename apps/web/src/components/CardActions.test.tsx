@@ -760,3 +760,59 @@ test("story cancellation requires choosing what happens to the listed active chi
     ),
   );
 });
+
+test("story detail creates a child from the contextual menu with the parent prefilled", async () => {
+  const createCard = vi
+    .fn<CardiganClient["createCard"]>()
+    .mockResolvedValue({ id: "C-9" });
+  const client = fakeClient({
+    createCard,
+    templates: async () => ({
+      templates: [
+        {
+          id: "dev",
+          title: "开发卡",
+          description: "",
+          version: 2,
+          builtin: true,
+          status: "active",
+          requires_repo: true,
+          merge: "confirm",
+          require_acceptance_criteria: true,
+          primary_work_item_key: "development",
+          work_items: [],
+          completion: { mode: "review", reviewer: "system" },
+        },
+      ],
+    }),
+  });
+  render(
+    <CardActions
+      card={{ ...cardDetail().card, story: {} }}
+      client={client}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  await selectMenu(/^更多$/, "新建子卡");
+  const dialog = within(
+    await screen.findByRole("dialog", { name: "新建子卡" }),
+  );
+  expect(
+    (dialog.getByLabelText("父需求卡（可选）") as HTMLInputElement).value,
+  ).toBe("C-1");
+  for (const [label, value] of [
+    ["标题", "Part"],
+    ["目标", "Outcome"],
+    ["验收标准", "Reviewed"],
+  ] as const)
+    fireEvent.change(dialog.getByLabelText(label), { target: { value } });
+  fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+  await waitFor(() =>
+    expect(createCard).toHaveBeenCalledWith(
+      "p-1",
+      expect.objectContaining({ parent_card_id: "C-1", template_id: "dev" }),
+      expect.any(String),
+    ),
+  );
+});

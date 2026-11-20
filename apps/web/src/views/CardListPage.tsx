@@ -603,6 +603,13 @@ export function CardListPage({
             }
           }}
         />
+        <CardsViewSwitch
+          value={view}
+          onChange={(next) => setFilters({ ...filters, view: next })}
+        />
+      </PageToolbar>
+
+      {state.kind === "ready" && cards.length === 0 && !activeFilters && (
         <CreateCardButton
           key={projectId}
           projectId={projectId}
@@ -612,12 +619,7 @@ export function CardListPage({
             openCard(id);
           }}
         />
-        <CardsViewSwitch
-          value={view}
-          onChange={(next) => setFilters({ ...filters, view: next })}
-        />
-      </PageToolbar>
-
+      )}
       {state.kind === "ready" && cards.length === 0 && (
         <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>
       )}

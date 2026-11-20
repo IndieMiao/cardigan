@@ -17,17 +17,36 @@ import { Input } from "./ui/input.js";
 import { SelectControl } from "./ui/select-control.js";
 import { Textarea } from "./ui/textarea.js";
 
-export function CreateCardButton({
-  client,
-  projectId,
-  onCreated,
-}: {
+interface CreateCardProps {
   client: CardiganClient;
   projectId: string;
   onCreated: (id: string) => void;
+}
+
+export function CreateCardButton(props: CreateCardProps) {
+  const [open, setOpen] = useState(false);
+  return (
+    <CreateCardDialog {...props} open={open} setOpen={setOpen} showTrigger />
+  );
+}
+
+export function CreateCardDialog({
+  client,
+  projectId,
+  onCreated,
+  open,
+  setOpen,
+  showTrigger = false,
+  parentId,
+  restoreFocus,
+}: CreateCardProps & {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  showTrigger?: boolean;
+  parentId?: string | undefined;
+  restoreFocus?: () => void;
 }) {
-  const [open, setOpen] = useState(false),
-    [template, setTemplate] = useState("story"),
+  const [template, setTemplate] = useState(parentId ? "dev" : "story"),
     [pending, setPending] = useState(false),
     [error, setError] = useState("");
   const {
@@ -40,7 +59,11 @@ export function CreateCardButton({
     0,
     open,
   );
-  const templates = data?.templates.filter((t) => t.status === "active") ?? [];
+  const templates =
+    data?.templates.filter(
+      (t) =>
+        t.status === "active" && !(parentId && t.builtin && t.id === "story"),
+    ) ?? [];
   const selected = templates.find((t) => t.id === template);
   const [readOnly, setReadOnly] = useState(false);
   const keys = useRef(new Map<string, string>());
@@ -54,11 +77,21 @@ export function CreateCardButton({
         }
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="outline">新建卡片</Button>
-      </DialogTrigger>
-      <DialogContent aria-describedby={undefined}>
-        <DialogTitle>新建卡片</DialogTitle>
+      {showTrigger && (
+        <DialogTrigger asChild>
+          <Button variant="outline">新建卡片</Button>
+        </DialogTrigger>
+      )}
+      <DialogContent
+        aria-describedby={undefined}
+        onCloseAutoFocus={(event) => {
+          if (restoreFocus) {
+            event.preventDefault();
+            restoreFocus();
+          }
+        }}
+      >
+        <DialogTitle>{parentId ? "新建子卡" : "新建卡片"}</DialogTitle>
         <form
           className="card-action-form"
           onSubmit={async (e) => {
@@ -135,6 +168,7 @@ export function CreateCardButton({
                 父需求卡（可选）
                 <Input
                   name="parent"
+                  defaultValue={parentId}
                   placeholder="C-123"
                   pattern="C-[1-9][0-9]*"
                 />

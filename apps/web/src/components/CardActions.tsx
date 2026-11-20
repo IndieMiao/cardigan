@@ -13,6 +13,8 @@ import {
   describeWriteError,
   type StoryChildChoice,
 } from "../api.js";
+import { routeHash } from "../route.js";
+import { CreateCardDialog } from "./CreateCardButton.js";
 import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
@@ -79,6 +81,7 @@ export function CardActions({
   disabled?: boolean;
   onEditingChange?: (editing: boolean) => void;
 }) {
+  const [creating, setCreating] = useState(false);
   const [mode, setModeState] = useState<Mode>();
   const setMode = (next: Mode | undefined) => {
     setModeState(next);
@@ -223,6 +226,14 @@ export function CardActions({
               },
             },
             {
+              id: "create",
+              label: card.story && !closed ? "新建子卡" : "新建卡片",
+              onSelect: () => {
+                menuOpensForm.current = true;
+                setCreating(true);
+              },
+            },
+            {
               id: "sensitive",
               label: card.sensitive ? "取消敏感标记" : "标为敏感",
               disabled: flagging,
@@ -245,6 +256,24 @@ export function CardActions({
         />
         {navigation}
       </div>
+      {creating && (
+        <CreateCardDialog
+          open={creating}
+          setOpen={setCreating}
+          parentId={card.story && !closed ? card.id : undefined}
+          projectId={projectId}
+          client={client}
+          restoreFocus={() => moreButton.current?.focus()}
+          onCreated={(cardId) => {
+            onSaved();
+            window.location.hash = routeHash({
+              kind: "card",
+              projectId,
+              cardId,
+            });
+          }}
+        />
+      )}
       {card.sensitive && (
         <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
       )}
