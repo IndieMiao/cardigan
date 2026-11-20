@@ -214,6 +214,51 @@ try {
       }
     }
   }
+  // Screenshot pixels down the middle of each fill, two rows above to two
+  // rows below the track, so the filled height is read from the image.
+  await send("Page.navigate", { url: "about:blank" });
+  for (const width of [1440, 390])
+    for (const theme of ["light", "dark"]) {
+      const name = `execution-list-${width}-${theme}-after`;
+      const meters = report.cases[name].items
+        .filter((i) => i.meter)
+        .map((i) => ({
+          assignment: i.assignment,
+          x: Math.floor(
+            i.meter.track.x + (i.meter.track.width * i.meter.value) / 200,
+          ),
+          emptyX: Math.floor(i.meter.track.x + i.meter.track.width - 3),
+          y: Math.round(i.meter.track.y),
+          height: i.meter.track.height,
+        }));
+      report.cases[name].fillRows = await evaluate(`(async () => {
+        const image = new Image();
+        image.src = 'data:image/png;base64,${shots[name]}';
+        await image.decode();
+        const canvas = new OffscreenCanvas(image.width, image.height);
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0);
+        const hex = (x, y) => '#' + [...context.getImageData(x, y, 1, 1).data.slice(0, 3)].map(v => v.toString(16).padStart(2, '0')).join('');
+        return ${JSON.stringify(meters)}.filter(m => m.y + m.height + 2 < image.height).map(m => ({
+          ...m,
+          rows: Array.from({ length: m.height + 4 }, (_, i) => ({ y: m.y - 2 + i, color: hex(m.x, m.y - 2 + i), empty: hex(m.emptyX, m.y - 2 + i) })),
+        }));
+      })()`);
+      for (const meter of report.cases[name].fillRows) {
+        const fill = meter.rows.slice(2, 2 + meter.height);
+        const outside = [...meter.rows.slice(0, 2), ...meter.rows.slice(-2)];
+        assert(
+          fill.every(
+            (r) => r.color === fill[0].color && r.empty === fill[0].empty,
+          ) &&
+            fill[0].color !== fill[0].empty &&
+            outside.every(
+              (r) => r.color !== fill[0].color && r.color !== fill[0].empty,
+            ),
+          `${name} ${meter.assignment}: fill and track cover all ${meter.height} rows`,
+        );
+      }
+    }
   // Side-by-side sheets: before | after, and execution list | card page list.
   const pair = async (name, left, right, width) => {
     await send("Emulation.setDeviceMetricsOverride", {

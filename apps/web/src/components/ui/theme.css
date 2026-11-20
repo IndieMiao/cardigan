@@ -490,7 +490,7 @@
   }
   .ui-meter-track {
     position: absolute;
-    top: 100%;
+    top: calc(100% + var(--ui-space-1));
     left: 0;
     display: block;
     width: 100%;
@@ -502,22 +502,28 @@
     appearance: none;
     background: var(--border);
   }
-  .ui-meter-track::-webkit-meter-inner-element {
-    display: block;
-  }
-  .ui-meter-track::-webkit-meter-bar {
+  /* The bar and value get the track height explicitly: with percentage
+     heights or a restyled inner element the value fills only its top row. */
+  .ui-meter-track::-webkit-meter-bar,
+  .ui-meter-track::-webkit-meter-optimum-value,
+  .ui-meter-track::-webkit-meter-suboptimum-value,
+  .ui-meter-track::-webkit-meter-even-less-good-value {
+    box-sizing: border-box;
     height: var(--ui-meter);
+    margin: 0;
     border: 0;
     border-radius: var(--ui-pill-radius);
+  }
+  .ui-meter-track::-webkit-meter-bar {
     background: var(--border);
   }
   .ui-meter-track::-webkit-meter-optimum-value,
   .ui-meter-track::-webkit-meter-suboptimum-value,
   .ui-meter-track::-webkit-meter-even-less-good-value {
-    border-radius: var(--ui-pill-radius);
     background: var(--ui-meter-color);
   }
   .ui-meter-track::-moz-meter-bar {
+    height: var(--ui-meter);
     border-radius: var(--ui-pill-radius);
     background: var(--ui-meter-color);
   }
