@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   DeploymentController,
+  DeploymentDiskMonitor,
   DeploymentServerUnavailable,
   loadDeploymentConfig,
   NodeDeploymentDriver,
@@ -132,12 +133,22 @@ export async function runSelfDeployCommand(
     });
     unlock = await driver.initialize();
     const controller = new DeploymentController(driver);
+    const disk = new DeploymentDiskMonitor(
+      store,
+      dataDir,
+      config.disk_low_percent,
+    );
     const stop = new AbortController();
     const signal = () => stop.abort();
     io.signals.on("SIGTERM", signal);
     io.signals.on("SIGINT", signal);
     try {
       while (!stop.signal.aborted) {
+        try {
+          await disk.poll();
+        } catch {
+          io.stderr("本次磁盘空间检查未完成，保留上次观测状态");
+        }
         try {
           await controller.tick();
         } catch (error) {

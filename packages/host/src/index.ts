@@ -74,6 +74,7 @@ export {
   type DeploymentControlRequest,
 } from "./deployment-control.js";
 export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
+export { DeploymentDiskMonitor } from "./deployment-disk.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
 export {
   deploymentRolePolicyHash,

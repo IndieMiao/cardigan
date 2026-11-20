@@ -111,3 +111,14 @@ test("capacity wait reminder has a configurable default and never accepts invali
       parseDeploymentConfig({ ...config, capacity_wait_timeout_ms: value }),
     ).toThrow();
 });
+
+test("disk warning uses a strict private percent, defaulting to 15", () => {
+  expect(parseDeploymentConfig(config).disk_low_percent).toBe(15);
+  expect(
+    parseDeploymentConfig({ ...config, disk_low_percent: 20 }).disk_low_percent,
+  ).toBe(20);
+  for (const disk_low_percent of [0, 101, -1, null, "15", 2.5])
+    expect(() =>
+      parseDeploymentConfig({ ...config, disk_low_percent }),
+    ).toThrow();
+});
