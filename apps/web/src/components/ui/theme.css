@@ -906,15 +906,16 @@
   .ui-markdown-table [data-align="right"] {
     text-align: right;
   }
-  /* A tag keeps its 28px target but sits on the 20px text line, so the
-     first lines of neighbouring cells stay level. */
+  /* In a cell a tag flows as text on the 20px line: the badge stays whole,
+     its description and the words after it wrap like the rest of the cell,
+     so a column is never wider than its badge needs. */
   .ui-markdown-table .id-tag {
-    min-height: var(--ui-control);
-    margin-block: calc((var(--ui-leading) - var(--ui-control)) / 2);
-    align-items: baseline;
+    display: inline;
+  }
+  .ui-markdown-table .id-badge {
     vertical-align: baseline;
   }
-  .ui-markdown-table td:not([data-wide]) .id-description {
+  .ui-markdown-table .id-description {
     white-space: nowrap;
   }
   /* Help keeps its narrow-screen records from the legacy help styles. */
