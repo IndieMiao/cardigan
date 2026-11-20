@@ -302,7 +302,8 @@ process.exit(child.status ?? 98);
         });
         expect(vi.mocked(runtime.provision).mock.calls[0]?.[3]).toMatchObject({
           cwd: path,
-          command: join(runDir, "launch.sh"),
+          command: "/usr/bin/python3",
+          args: expect.arrayContaining([join(runDir, "launch.sh")]),
         });
         expect(io.captureCommand).not.toHaveBeenCalled();
         expect(capture).toHaveBeenCalledWith(harness, ["--version"]);

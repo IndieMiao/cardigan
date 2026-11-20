@@ -256,6 +256,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export { assignmentResourceKeys } from "./run-resources.js";
 export {
   deferIfTargetWait,
