@@ -42,13 +42,13 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import {
+  checkRegisteredMachine,
   configureMachinePlacement,
   effectiveRunLimit,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   MachineLeases,
   RuntimeTargets,
-  refreshMachineObservations,
   targetProbe,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -61,7 +61,7 @@ import {
   updateMachineDescription,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
-import { acceptedBrowserPath, loadOptionalConfigSync } from "./config.js";
+import { loadOptionalConfigSync } from "./config.js";
 import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { runFlowUpgrade } from "./flow-version.js";
@@ -954,41 +954,34 @@ async function machineCommand(
       if (sub === "check") {
         const machine = selected[0] as Machine;
         const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
-        let runtime: RuntimeTargets | undefined;
-        const ready = async () => {
-          if (runtime) return runtime;
-          const connection = await terminalExecution(
-            io,
-            dataDir,
-            null,
-            machine.id,
-          );
-          const created = await RuntimeTargets.create({
-            ...connection,
-            env: io.env,
+        const observations = await checkRegisteredMachine(
+          {
             store,
             project: project_id,
-          });
-          if (!created.ok)
-            throw new CliError(created.error.message, EXIT.failure);
-          runtime = created.value;
-          return runtime;
-        };
-        const observations = await refreshMachineObservations({
-          store,
-          project: project_id,
-          machine: machine.id,
-          env: io.env,
-          browsersPath: () =>
-            acceptedBrowserPath(cliLaunchPaths(io, dataDir), store),
-          target: async () => (await ready()).resolve(project_id, machine.id),
-          check: async () => {
-            const checked = await (await ready()).check(project_id, machine.id);
-            return checked.ok
-              ? checked.value
-              : { blockers: [checked.error.code], launch_enabled: false };
+            machine: machine.id,
+            env: io.env,
+            browsersPath: () =>
+              loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+                ?.browsers_path,
           },
-        });
+          async () => {
+            const connection = await terminalExecution(
+              io,
+              dataDir,
+              null,
+              machine.id,
+            );
+            const created = await RuntimeTargets.create({
+              ...connection,
+              env: io.env,
+              store,
+              project: project_id,
+            });
+            if (!created.ok)
+              throw new CliError(created.error.message, EXIT.failure);
+            return created.value;
+          },
+        );
         io.stdout(JSON.stringify(observations, null, 2));
         if (!observations.health?.available)
           throw new CliError("机器检查未通过", EXIT.failure);

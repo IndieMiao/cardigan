@@ -53,6 +53,11 @@ export function requestRoute(path: string): string {
   const rest = project?.[1];
   if (rest) {
     const prefix = "/api/projects/:project_id";
+    if (rest === "/machines") return prefix + rest;
+    const machine =
+      /^\/machines\/[^/]+(?:\/(check|drain|resume|checks\/[^/]+))?$/.exec(rest);
+    if (machine)
+      return `${prefix}/machines/:id${machine[1] ? `/${machine[1].startsWith("checks/") ? "checks/:check_id" : machine[1]}` : ""}`;
     if (/^\/employees(?:\/options)?$/.test(rest)) return prefix + rest;
     if (
       /^\/(cards|needs-you|notices|snapshot|execution|activity|stream|preferences)$/.test(

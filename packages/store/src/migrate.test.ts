@@ -21,8 +21,7 @@ test.each([24, 25])(
   checkMachineUpgrade,
 );
 
-function checkMachineUpgrade(previousVersion: number) {
-  const dataDir = tempDir("cardigan-machine-upgrade-");
+function migrationsThrough(dataDir: string, previousVersion: number) {
   const migrationsDir = join(dataDir, "old-migrations");
   mkdirSync(migrationsDir);
   for (const migration of listMigrations(defaultMigrationsDir).filter(
@@ -35,6 +34,65 @@ function checkMachineUpgrade(previousVersion: number) {
       ),
       migration.sql,
     );
+  return migrationsDir;
+}
+
+test("upgrading the resource-lease schema adds the check journal without changing reservations", () => {
+  const dataDir = tempDir("cardigan-check-upgrade-");
+  const store = Store.open({
+    dataDir,
+    migrationsDir: migrationsThrough(dataDir, 45),
+  });
+  try {
+    const db = store.database;
+    db.exec(`INSERT INTO machine_resource_leases
+      (generation, machine, resource, project, starts_at, ends_at, endpoints)
+      VALUES ('reservation', 'fixture', 'device', 'p', '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '[]')`);
+    const leases = db.prepare("SELECT * FROM machine_resource_leases");
+    const before = leases.all();
+    expect(migrate(db)).toContainEqual({
+      version: 46,
+      name: "machine_check_jobs",
+    });
+    expect(db.prepare("SELECT id FROM machine_check_jobs").all()).toEqual([]);
+    expect(leases.all()).toEqual(before);
+    expect(migrate(db)).toEqual([]);
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("v46 check jobs survive adding the browser path registry", () => {
+  const dataDir = tempDir("cardigan-browser-upgrade-");
+  const store = Store.open({
+    dataDir,
+    migrationsDir: migrationsThrough(dataDir, 46),
+  });
+  try {
+    const db = store.database;
+    db.exec(
+      `INSERT INTO machine_check_jobs VALUES ('job','local','p','machine',1,'running',1,'fixture','{}')`,
+    );
+    const jobs = db.prepare("SELECT * FROM machine_check_jobs");
+    const before = jobs.all();
+    expect(migrate(db)).toEqual([
+      { version: 47, name: "accepted_browser_path" },
+    ]);
+    expect(
+      db.prepare("SELECT digest FROM accepted_browser_path").all(),
+    ).toEqual([]);
+    expect(jobs.all()).toEqual(before);
+    expect(migrate(db)).toEqual([]);
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+function checkMachineUpgrade(previousVersion: number) {
+  const dataDir = tempDir("cardigan-machine-upgrade-");
+  const migrationsDir = migrationsThrough(dataDir, previousVersion);
   let store = Store.open({ dataDir, migrationsDir });
   try {
     store.createProject({ id: "a" });
@@ -168,7 +226,8 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 43, name: "review_wake_boundary" },
       { version: 44, name: "launch_generations" },
       { version: 45, name: "machine_resource_leases" },
-      { version: 46, name: "accepted_browser_path" },
+      { version: 46, name: "machine_check_jobs" },
+      { version: 47, name: "accepted_browser_path" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

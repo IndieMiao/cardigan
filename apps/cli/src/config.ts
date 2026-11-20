@@ -10,7 +10,6 @@ import {
   reportLaunchWarnings,
   validateLaunchSecrets,
 } from "@cardigan/roles";
-import { isAcceptedBrowserPath, type Store } from "@cardigan/store";
 import { parse as parseYaml } from "yaml";
 import { CliError, EXIT } from "./errors.js";
 import { readSecretsFile, readTextIfExists } from "./fs-io.js";
@@ -47,20 +46,6 @@ export function loadOptionalConfigSync(
     throw error;
   }
   return parseCachedLaunchConfig(decodeConfig(text, paths), paths.dataDir);
-}
-
-/** The server's last accepted browser directory is authoritative, not an edit on disk. */
-export function acceptedBrowserPath(
-  paths: LaunchPaths,
-  store: Store,
-): string | undefined {
-  try {
-    const path = loadOptionalConfigSync(paths)?.browser?.browsers_path;
-    return path && isAcceptedBrowserPath(store, path) ? path : undefined;
-  } catch {
-    // A broken/absent launch file excludes this scope, not the machine or its other tools.
-    return undefined;
-  }
 }
 
 function decodeConfig(text: string, paths: LaunchPaths): unknown {
