@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   buildExtMessage,
   type Decision,
+  EXT_MESSAGE_DEFAULTS,
   extMessageItems,
   type HumanAction,
 } from "@cardigan/domain";
@@ -18,6 +19,7 @@ import {
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { card, project_id } from "../../store/src/test-support.js";
+import { ExtMessageSender } from "./ext-message.js";
 import { FeishuApp } from "./feishu-app.js";
 import { appScope, type FeishuJob, feishuInbox } from "./feishu-inbox.js";
 
@@ -308,5 +310,48 @@ test("a busy writer cannot delay the SDK acknowledgement by 3 seconds", () => {
   } finally {
     db.exec("ROLLBACK");
     intake.close();
+  }
+});
+
+test("outbox sends old notifications independently; each new binding reprojects only current cards and cannot reuse old refs", async () => {
+  const legacy = vi.fn(async () => "sent" as const);
+  const sender = new ExtMessageSender({
+    store,
+    configuration: {
+      status: "loaded",
+      config: {
+        enabled: true,
+        channels: { lark: { enabled: true }, lark_app: { enabled: true } },
+        workbench_url: app.base,
+        policy: EXT_MESSAGE_DEFAULTS,
+      },
+    },
+    startApplication: () => app,
+    adapters: { lark: () => ({ send: legacy }) },
+  });
+  sender.recordStatus();
+  try {
+    await sender.tick();
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(remote.create).not.toHaveBeenCalled();
+    redeem(issue());
+    await sender.tick();
+    expect(remote.create).toHaveBeenCalledTimes(2);
+    await sender.tick();
+    expect(remote.create).toHaveBeenCalledTimes(2);
+    const r = db.prepare("SELECT * FROM feishu_cards WHERE item=?").get(h.id);
+    expect(r).toBeDefined();
+    store.uow.run(() => manageFeishuBinding(db, member, "unbind", now));
+    redeem(issue());
+    receive("action", click(r!));
+    expect(job).toBeUndefined();
+    await sender.tick();
+    expect(remote.create).toHaveBeenCalledTimes(4);
+    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(remote.create.mock.calls)).not.toContain(
+      h.instructions,
+    );
+  } finally {
+    await sender.stop();
   }
 });

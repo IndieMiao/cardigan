@@ -15,6 +15,7 @@ export function parseAppCredential(value: string | undefined): AppCredential {
   try {
     const v = JSON.parse(value ?? "");
     if (
+      /^cli_[a-fA-F0-9]{16}$/u.test(v.app_id) &&
       ["app_id", "app_secret", "tenant_key"].every(
         (k) =>
           typeof v[k] === "string" && v[k].length > 0 && v[k].length <= 512,
@@ -55,6 +56,7 @@ export function feishuInbox(
   c: AppCredential,
   post: (job: FeishuJob) => void,
   clock = Date.now,
+  limits = { bindingAttempts: 30, pending: 32 },
 ) {
   const scope = appScope(c);
   let window = 0,
@@ -95,7 +97,7 @@ export function feishuInbox(
           window = now;
           tries = 0;
         }
-        if (++tries > 30) return reject("limited");
+        if (++tries > limits.bindingAttempts) return reject("limited");
         let code: unknown;
         try {
           code = object(JSON.parse(m.content)).text;
@@ -128,7 +130,7 @@ export function feishuInbox(
           "SELECT * FROM feishu_cards WHERE ref=? AND binding=? AND message=?",
         )
         .get(value.ref, b.generation, context.open_message_id);
-      if (!card || !card.version) return reject("wrong_message", true);
+      if (!card?.version) return reject("wrong_message", true);
       if (
         !(JSON.parse(String(card.choices)) as string[]).includes(
           digestFeishu(value.key),
@@ -155,7 +157,8 @@ export function feishuInbox(
       if (
         typeof text !== "string" ||
         Array.from(text).length > 1000 ||
-        (!text.trim() && value.key !== "merge")
+        (!text.trim() &&
+          !(value.key === "merge" && card.item_kind === "merge_confirmation"))
       )
         return toast("请填写理由或结果（最多 1000 字）");
       if (
@@ -165,7 +168,7 @@ export function feishuInbox(
               "SELECT count(*) AS n FROM feishu_cards WHERE state='claimed'",
             )
             .get()?.n,
-        ) >= 32
+        ) >= limits.pending
       )
         return toast("系统忙，请重试");
       if (

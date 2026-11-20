@@ -89,7 +89,10 @@ export function startFeishu(
     !config.config.enabled ||
     !config.config.channels.lark_app?.enabled
   ) {
-    status("", "disabled");
+    const last = store.database
+      .prepare("SELECT scope FROM feishu_runtime WHERE id=1")
+      .get();
+    status(String(last?.scope ?? ""), "disabled");
     return;
   }
   try {
@@ -116,7 +119,17 @@ export function startFeishu(
     });
     const worker = new Worker(
       new URL("./feishu-ws-worker.js", import.meta.url),
-      { workerData: { credential: c, path: store.database.location() } },
+      {
+        workerData: {
+          credential: c,
+          path: store.database.location(),
+          limits: {
+            bindingAttempts:
+              config.config.channels.lark_app.binding_attempts_per_minute ?? 30,
+            pending: config.config.channels.lark_app.pending_limit ?? 32,
+          },
+        },
+      },
     );
     app.stopWorker = async () => {
       if (worker.threadId !== -1)
@@ -223,13 +236,14 @@ export class FeishuApp {
     );
     this.db
       .prepare(
-        "INSERT OR IGNORE INTO feishu_cards(ref,send_key,binding,project,item,version,expires,choices) VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO feishu_cards(ref,send_key,binding,project,item_kind,item,version,expires,choices) VALUES(?,?,?,?,?,?,?,?,?)",
       )
       .run(
         randomUUID(),
         sendKey,
         b.generation,
         item.project_id,
+        item.kind,
         item.item_id,
         version,
         this.now() + this.actionTtl,
@@ -258,12 +272,12 @@ export class FeishuApp {
           feishuCard(safe, ref, actions),
         );
         if (!id || signal.aborted || this.stopped) return "retryable";
-        this.db
+        const saved = this.db
           .prepare(
             "UPDATE feishu_cards SET message=? WHERE ref=? AND (message IS NULL OR message=?)",
           )
           .run(id, ref, id);
-        return "sent";
+        return saved.changes === 1 ? "sent" : "permanent";
       },
     };
   }
@@ -345,10 +359,14 @@ export class FeishuApp {
       }
       persistEffect(tx, project, {
         ...effect.value,
-        timeline: effect.value.timeline.map((t) => ({
-          ...t,
-          body: `${t.body}（来自飞书 · ${b.member}）`,
-        })),
+        timeline: effect.value.timeline.map((t) =>
+          t.author !== "human"
+            ? t
+            : {
+                ...t,
+                body: `${t.body}（来自飞书 · ${b.member}）`,
+              },
+        ),
       });
       tx.events.append(project, {
         id: tx.ids.nextEventId(),

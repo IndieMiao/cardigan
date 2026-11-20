@@ -16,3 +16,4 @@
 参考：[使用长连接接收回调](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/callback-subscription/configure-callback-request-address)、[处理卡片回调](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/handle-card-callbacks)、[更新已发送的消息卡片](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/patch)。
 
 可在 `channels.lark_app` 中设置 `binding_ttl_ms`（绑定码，默认 300000）和 `action_ttl_ms`（操作按钮，默认 86400000）；仅接受正整数毫秒，变更须重启。已发送按钮的期限不会被延长。
+绑定尝试按应用每分钟默认最多 30 次（`binding_attempts_per_minute`）；最多同时受理 32 次点击（`pending_limit`）。超限不会执行操作。

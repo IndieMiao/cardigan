@@ -72,11 +72,13 @@ export interface ExtMessageOptions {
   readonly store: Store;
   readonly configuration: ExtMessageConfiguration;
   readonly gate?: (project: ProjectId) => CommandState["project_settings"];
+  readonly startApplication?: typeof startFeishu;
   readonly adapters?: ExtMessageAdapters;
   readonly clock?: Clock;
 }
 export class ExtMessageSender {
   private running: Promise<void> | undefined;
+  private receipts: Promise<void> | undefined;
   private stopped = false;
   private readonly projectedVersions = new Map<ProjectId, string>();
   private readonly clock: Clock;
@@ -87,7 +89,11 @@ export class ExtMessageSender {
   /** Persist safe startup metadata for human status; no secrets or URL are written. */
   recordStatus(): void {
     const c = this.options.configuration;
-    this.app = startFeishu(this.options.store, c, this.options.gate);
+    this.app = (this.options.startApplication ?? startFeishu)(
+      this.options.store,
+      c,
+      this.options.gate,
+    );
     this.options.store.uow.run(() =>
       this.options.store.database
         .prepare(
@@ -125,14 +131,21 @@ export class ExtMessageSender {
   async stop(): Promise<void> {
     this.stopped = true;
     await this.app?.stop();
-    await this.running;
+    await Promise.all([this.running, this.receipts]);
   }
   private async run(): Promise<void> {
     const { configuration: c, store } = this.options;
     if (this.stopped || c.status !== "loaded" || !c.config.enabled) return;
     const config = c.config;
     const generation = this.app?.binding?.generation;
-    await this.app?.receipts();
+    // A slow receipt must not hold up the webhook channel or outbox projection.
+    if (this.app && !this.receipts)
+      this.receipts = this.app
+        .receipts()
+        .catch(() => {})
+        .finally(() => {
+          this.receipts = undefined;
+        });
     const channels = Object.keys(config.channels)
       .filter(
         (name) =>

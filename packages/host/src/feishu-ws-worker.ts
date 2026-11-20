@@ -8,9 +8,14 @@ import { privateSdkHttp, privateSdkLogger } from "./feishu-sdk.js";
 // No HTTP listener. Keep ACKs independent of slow reducers on the server's main thread.
 const port = parentPort;
 if (!port) throw new Error("Worker port required");
-const { credential: c, path } = workerData as {
+const {
+  credential: c,
+  path,
+  limits,
+} = workerData as {
   credential: AppCredential;
   path: string;
+  limits: { bindingAttempts: number; pending: number };
 };
 const db = new DatabaseSync(path);
 db.exec("PRAGMA busy_timeout=100");
@@ -18,6 +23,7 @@ const ws = new WSClient({
   appId: c.app_id,
   appSecret: c.app_secret,
   autoReconnect: true,
+  wsConfig: { pingTimeout: 30 },
   handshakeTimeoutMs: 10_000,
   httpInstance: privateSdkHttp(10_000),
   logger: privateSdkLogger,
@@ -34,7 +40,7 @@ port.once("message", () => {
 void ws
   .start({
     eventDispatcher: feishuDispatcher(
-      feishuInbox(db, c, (job) => port.postMessage({ job })),
+      feishuInbox(db, c, (job) => port.postMessage({ job }), Date.now, limits),
     ),
   })
   .then(status, () => port.postMessage({ state: "failed" }));

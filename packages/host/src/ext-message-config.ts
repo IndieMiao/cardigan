@@ -16,6 +16,8 @@ interface ExtChannel {
   credential?: string;
   binding_ttl_ms?: number;
   action_ttl_ms?: number;
+  binding_attempts_per_minute?: number;
+  pending_limit?: number;
 }
 export interface ExtMessageConfig {
   readonly enabled: boolean;
@@ -185,6 +187,11 @@ export function loadExtMessageConfig(
           enabled: active,
           ...(name === "lark_app"
             ? {
+                binding_attempts_per_minute: integer(
+                  channel.binding_attempts_per_minute,
+                  30,
+                ),
+                pending_limit: integer(channel.pending_limit, 32),
                 binding_ttl_ms: integer(channel.binding_ttl_ms, 300_000),
                 action_ttl_ms: integer(channel.action_ttl_ms, 86_400_000),
               }

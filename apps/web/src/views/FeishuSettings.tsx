@@ -15,16 +15,26 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   const revision = useRef(0),
     title = useId();
   useEffect(() => {
-    let active = true;
+    let active = true,
+      reading = false;
     const fetch = async () => {
+      if (reading) return;
+      reading = true;
       const seq = revision.current;
       try {
         const d = await client.feishuBinding?.();
         if (active && d && seq === revision.current) {
-          setData((old) => (!d.bound && old?.code ? { ...old, ...d } : d));
+          setError((old) => (old === "无法读取绑定状态" ? "" : old));
+          setData((old) =>
+            d.state === "connected" && !d.bound && old?.code
+              ? { ...old, ...d }
+              : d,
+          );
         }
       } catch {
         if (active) setError("无法读取绑定状态");
+      } finally {
+        reading = false;
       }
     };
     void fetch();
