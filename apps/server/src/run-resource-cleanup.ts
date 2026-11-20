@@ -26,7 +26,7 @@ export async function reconcileRunResources(
 ) {
   const age = resourceExpiry();
   for (const machine of store.uow.read((tx) => tx.machines.list(project))) {
-    if (!["online", "degraded"].includes(machine.status)) continue;
+    if (!["online", "degraded", "draining"].includes(machine.status)) continue;
     try {
       const { execution } = targets.resolve(project, machine.id);
       const tag = resourceTarget(project, machine.id, execution);
@@ -68,11 +68,9 @@ export async function reconcileRunResources(
           // A 2-day foreground task that just ended is an ordinary close, not
           // a legacy sweep. A missed old close needs *both* age proofs.
           const fallback = now() - finished > age * 1000;
-          if (
-            fallback &&
-            (!item.expired ||
-              process.env.CARDIGAN_RUN_RESOURCE_EXPIRED_EXECUTE !== "1")
-          ) {
+          // Age is not evidence that another Run no longer uses a service.
+          // These workers have no exclusive-use witness for expired services.
+          if (fallback) {
             audit(`run_resource expired_preview ${machine.id} ${item.key}`);
             return [];
           }

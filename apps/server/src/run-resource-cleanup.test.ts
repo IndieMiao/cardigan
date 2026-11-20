@@ -63,7 +63,10 @@ test.each(["completed", "failed", "cancelled"] as const)(
       );
       if (!machine) throw new Error("missing fixture machine");
       f.store.uow.run((tx) =>
-        tx.machines.put(f.project_id, { ...machine, status: "online" }),
+        tx.machines.put(f.project_id, {
+          ...machine,
+          status: outcome === "cancelled" ? "draining" : "online",
+        }),
       );
       const resolve = () => ({
         execution: { mode: "local" as const, dataDir: f.dataDir },
@@ -111,9 +114,7 @@ test.each(["completed", "failed", "cancelled"] as const)(
         worker,
         later,
       );
-      expect(worker.mock.calls[1]?.[3]).toEqual([
-        { ...finished, expired: true },
-      ]);
+      expect(worker).toHaveBeenCalledTimes(1);
       worker.mockClear();
       await reconcileRunResources(
         f.store,

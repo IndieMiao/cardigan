@@ -1,4 +1,5 @@
 """Only processes created by this fixture and its private temp root are used."""
+import fcntl
 import os
 import pathlib
 import runpy
@@ -52,9 +53,9 @@ if sys.platform == 'linux':
             root, parent = m['namespace'](TAG, False, base)
         parent = pathlib.Path(parent)
         keys = ('A-1.R-1.R-1', 'A-1.R-1.R-2', 'A-2.R-3.R-3')
-        until(lambda: all((parent/k/'tmp'/'ready').exists() for k in keys))
+        until(lambda: all((parent/m['scope_name'](k)/'tmp'/'ready').exists() for k in keys))
         if sys.platform == 'linux':
-            detached = int((parent/keys[0]/'tmp/detached').read_text())
+            detached = int((parent/m['scope_name'](keys[0])/'tmp/detached').read_text())
             watch = m['session_watch'](detached)
         # A shell that launches a service and exits returns its own status;
         # the guardian must still clean the service, not recycle the old PGID.
@@ -62,24 +63,24 @@ if sys.platform == 'linux':
         status = subprocess.run([sys.executable, '-I', '-B', '-c', stub, str(source), TAG, keys[0], str(session.pid), base,
                                  sys.executable, '-I', '-c', starter], timeout=4)
         assert status.returncode == 7
-        orphan_exit = m['session_watch'](int((parent/keys[0]/'tmp/orphan').read_text()))
+        orphan_exit = m['session_watch'](int((parent/m['scope_name'](keys[0])/'tmp/orphan').read_text()))
         rows = m['view'](root, 86400, time.time())
         assert all(r['owned'] and not r['closed'] and not r['expired'] for r in rows)
         row = next(row for row in rows if row['key'] == keys[0])
         m['notify'](root, row, 86400, time.time())
         assert jobs[0].wait(timeout=5) == 143
-        until(lambda: not (parent/keys[0]).exists())
+        until(lambda: not (parent/m['scope_name'](keys[0])).exists())
         assert orphan_exit(), 'background service survived Run end'
         if sys.platform == 'linux':
             assert watch(), 'detached descendant not terminated'
         assert session.poll() is None and jobs[1].poll() is None and jobs[2].poll() is None
         session.terminate(); session.wait(timeout=2)
         assert jobs[1].wait(timeout=5) == 143  # same live CLI, second Run closed only now
-        until(lambda: not (parent/keys[1]).exists())
+        until(lambda: not (parent/m['scope_name'](keys[1])).exists())
         assert other.poll() is None and jobs[2].poll() is None
         other.terminate(); other.wait(timeout=2)
         assert jobs[2].wait(timeout=5) == 143
-        until(lambda: not (parent/keys[2]).exists())
+        until(lambda: not (parent/m['scope_name'](keys[2])).exists())
         os.close(root)
     finally:
         for p in [session, other]:
@@ -92,9 +93,9 @@ if sys.platform == 'linux':
 def boundaries(base):
     root, parent = m['namespace'](TAG, True, base)
     key = 'A-9.R-9.R-9'
-    scope = m['directory'](root, key, True)
+    scope = m['directory'](root, m['scope_name'](key), True)
     tmp = m['directory'](scope, 'tmp', True)
-    path = pathlib.Path(parent)/key/'tmp'
+    path = pathlib.Path(parent)/m['scope_name'](key)/'tmp'
     t = os.fstat(scope).st_mtime
     assert not m['view'](root, 86400, t+86400)[0]['expired']
     row = m['view'](root, 86400, t+86400.1)[0]
@@ -130,6 +131,50 @@ def boundaries(base):
     os.close(tmp); os.close(scope); os.close(root)
 
 
+def foreground_contracts(base):
+    # Only fixture children, its own advisory lock and private scratch.
+    key = 'A-1696.R-8660.R-8759'
+    stub = """import runpy,sys
+m=runpy.run_path(sys.argv[1]);m['reclaim'].__defaults__=(lambda _:False,)
+sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5]))"""
+    session = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(40)'])
+    entry = [sys.executable, '-IB', '-c', stub, str(source), TAG, key, str(session.pid), base,
+             sys.executable, '-I', '-c']
+    child = None
+    try:
+        with open(pathlib.Path(base)/'lock', 'wb') as locked:
+            fcntl.flock(locked, fcntl.LOCK_EX)
+            result = subprocess.run([*entry, "import os,socket;s=socket.socket(socket.AF_UNIX);s.bind(os.path.join(os.environ['TMPDIR'],'service.sock'))"],
+                                    pass_fds=(locked.fileno(),), timeout=4)
+            assert result.returncode == 0
+        with open(pathlib.Path(base)/'lock', 'rb') as check:
+            fcntl.flock(check, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        root, parent = m['namespace'](TAG, False, base)
+        os.close(root)
+        scope = pathlib.Path(parent)/m['scope_name'](key)
+        ready = scope/'tmp'/'foreground'
+        child = subprocess.Popen([*entry, "import os,pathlib,time;pathlib.Path(os.environ['TMPDIR'],'foreground').write_text(str(os.getpid()));time.sleep(30)"])
+        until(lambda: ready.exists() and ready.read_text())
+        exited = m['session_watch'](int(ready.read_text()))
+        child.terminate(); child.wait(timeout=3)
+        until(exited)
+        assert session.poll() is None
+    finally:
+        session.terminate(); session.wait(timeout=3)
+        if child is not None:
+            child.wait(timeout=3)
+    until(lambda: not scope.exists())
+
+
+def retry_observation():
+    probe = mock.Mock(side_effect=[subprocess.TimeoutExpired('observer', 1), 'removed'])
+    with mock.patch.dict(m['steward'].__globals__, os=SimpleNamespace(setsid=lambda:None,environ={}),
+                         disown_stdio=lambda:None, ended=lambda _:True, reclaim=probe,
+                         time=SimpleNamespace(sleep=lambda _:None), audit=lambda *_:None):
+        m['steward'](1,'A-1.R-1.R-1',2,3,'fixture',lambda:False)
+    assert probe.call_count == 2 and probe.call_args_list[0] == probe.call_args_list[1]
+
+
 def darwin_watch():
     ns = m['session_watch'].__globals__
     queue = mock.Mock()
@@ -153,6 +198,17 @@ def darwin_watch():
 
 
 darwin_watch()
+retry_observation()
+# Simulate positive and incomplete Darwin group snapshots; not a macOS host run.
+for n, member, expected in [(4,123,True),(4,456,False),(0,123,False),(8,123,False)]:
+    def listing(kind, anchor, pids, size):
+        assert kind == 2 and anchor == 123
+        pids[0] = member
+        return n
+    with mock.patch.object(m['ctypes'], 'CDLL', return_value=SimpleNamespace(proc_listpids=listing)):
+        assert m['darwin_group_empty'](123) == expected
+with tempfile.TemporaryDirectory(dir='/tmp', prefix='cr') as base:
+    foreground_contracts(base)
 with tempfile.TemporaryDirectory() as base:
     test_runs(base)
 with tempfile.TemporaryDirectory() as base:

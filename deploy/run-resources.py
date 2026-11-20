@@ -1,5 +1,8 @@
 """Run-scoped task entry and read/notify reconciliation. Never take PIDs from disk."""
+import base64
 import ctypes
+import hashlib
+import errno
 import fcntl
 import json
 import os
@@ -56,7 +59,9 @@ def namespace(tag, create, base='/tmp'):
     # Darwin /tmp is a system firmlink/symlink. Canonicalize only the OS root.
     base = os.path.realpath(base)
     root = os.open(base, DIR)
-    name = 'cardigan-resources-' + str(os.getuid()) + '-' + tag
+    # Keep the full target/uid binding without spelling out 64 hex digits.
+    digest = hashlib.sha256(f'{os.getuid()}:{tag}'.encode('ascii')).digest()
+    name = 'cr-' + base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
     try:
         return directory(root, name, create), os.path.join(base, name)
     finally:
@@ -75,14 +80,26 @@ def identity(fd):
     return [str(st.st_dev), str(st.st_ino)]
 
 
+def scope_name(key):
+    require(KEY.fullmatch(key))
+    def compact(part):
+        value = int(part[2:])
+        digits = ''
+        while value:
+            value, r = divmod(value, 36)
+            digits = '0123456789abcdefghijklmnopqrstuvwxyz'[r] + digits
+        return digits
+    return '.'.join(compact(part) for part in key.split('.'))
+
+
 def ended(scope):
     # A host notification, never a PID, path to remove, or executable command.
-    return bool({'end', 'end-expired'}.intersection(os.listdir(scope)))
+    return 'end' in os.listdir(scope)
 
 
-def end(scope, expired=False):
+def end(scope):
     try:
-        os.close(os.open('end-expired' if expired else 'end', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scope))
+        os.close(os.open('end', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scope))
     except FileExistsError:
         pass
 
@@ -149,11 +166,14 @@ def session_watch(pid, expected=None):
 
 def view(root, age, now):
     result = []
-    for key in os.listdir(root):
-        if not KEY.fullmatch(key):
+    for name in os.listdir(root):
+        if not re.fullmatch(r'[0-9a-z]{1,11}(?:\.[0-9a-z]{1,11}){2}', name):
+            continue
+        key = 'A-%d.R-%d.R-%d' % tuple(int(x, 36) for x in name.split('.'))
+        if not KEY.fullmatch(key) or scope_name(key) != name:
             continue
         try:
-            fd = directory(root, key)
+            fd = directory(root, scope_name(key))
             try:
                 result.append(dict(key=key, inode=identity(fd), expired=now-os.fstat(fd).st_mtime > age,
                                    closed=ended(fd), owned=owned(fd)))
@@ -167,12 +187,11 @@ def view(root, age, now):
 def notify(root, item, age, now):
     key = item['key']
     require(KEY.fullmatch(key))
-    fd = directory(root, key)
+    fd = directory(root, scope_name(key))
     try:
-        require(identity(fd) == item['inode'] and same(root, key, fd) and owned(fd))
-        if item['expired']:
-            require(now-os.fstat(fd).st_mtime > age)
-        end(fd, item['expired'])
+        require(identity(fd) == item['inode'] and same(root, scope_name(key), fd) and owned(fd))
+        require(not item['expired'])  # no worker-side proof of exclusive service use
+        end(fd)
         audit(key, 'notified')
     finally:
         os.close(fd)
@@ -291,7 +310,7 @@ def walk_tree(fd, volume, current, expected=None):
 
 
 def reclaim(root, key, scope, tmp, path, busy=references):
-    require(same(root, key, scope) and same(scope, 'tmp', tmp) and ended(scope))
+    require(same(root, scope_name(key), scope) and same(scope, 'tmp', tmp) and ended(scope))
     require(os.path.samestat(os.stat(path, follow_symlinks=False), os.fstat(tmp)))
     try:
         fcntl.flock(tmp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -299,20 +318,26 @@ def reclaim(root, key, scope, tmp, path, busy=references):
         return 'in_use'
     try:
         def current():
-            return same(root, key, scope) and same(scope, 'tmp', tmp)
+            return (os.path.samestat(os.stat(os.path.dirname(os.path.dirname(path)), follow_symlinks=False), os.fstat(root))
+                    and same(root, scope_name(key), scope) and same(scope, 'tmp', tmp))
         volume = mount(scope)
         snapshot = walk_tree(tmp, volume, current)
-        if (busy(path, True) if 'end-expired' in os.listdir(scope) else busy(path)):
+        try:
+            in_use = busy(path)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # A partial observation, unlike a known replacement, is retryable.
+            return 'observation_unavailable'
+        require(current())
+        if in_use:
             return 'in_use'
         walk_tree(tmp, volume, current, snapshot)
         require(same(scope, 'tmp', tmp))
         fcntl.flock(root, fcntl.LOCK_EX)
         try:
-            require(same(root, key, scope) and same(scope, 'tmp', tmp))
+            require(current())
             os.rmdir('tmp', dir_fd=scope)
-            for marker in {'end', 'end-expired'}.intersection(os.listdir(scope)):
-                os.unlink(marker, dir_fd=scope)
-            os.rmdir(key, dir_fd=root)
+            os.unlink('end', dir_fd=scope)
+            os.rmdir(scope_name(key), dir_fd=root)
         finally:
             fcntl.flock(root, fcntl.LOCK_UN)
         return 'removed'
@@ -340,9 +365,12 @@ def steward(root, key, scope, tmp, path, exited):
                 audit(key, result)
             if result == 'removed':
                 return
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except ValueError:
             audit(key, 'skipped_unknown')
-            return  # Unknown identity: leave residue for preview, never take it over.
+            return
+        except (OSError, subprocess.SubprocessError):
+            if backoff == 1:
+                audit(key, 'observation_failed_retry')
         time.sleep(backoff)
         backoff = min(3600, backoff * 2)
 
@@ -370,7 +398,28 @@ def disown_stdio():
     os.chdir('/')
 
 
-def supervise(key, argv, scope, exited, env):
+def retain_fds(keep):
+    # Drop even caller descriptors explicitly marked inheritable. Run before
+    # allocating watch descriptors; never enumerate any other process here.
+    for name in os.listdir('/dev/fd'):
+        if name.isdecimal() and int(name) > 2 and int(name) not in keep:
+            try:
+                os.close(int(name))
+            except OSError as exc:
+                if exc.errno != errno.EBADF:  # enumeration can include its own, now closed fd
+                    raise
+
+
+def darwin_group_empty(anchor):
+    # PROC_PGRP_ONLY; the caller is its own live group leader. A full buffer means
+    # multiple members or truncation, never permission to forget the group.
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    pids = (ctypes.c_int * 4)()
+    n = lib.proc_listpids(2, anchor, pids, ctypes.sizeof(pids))
+    return n == ctypes.sizeof(ctypes.c_int) and pids[0] == anchor
+
+
+def supervise(key, argv, scope, exited, env, cancellation):
     linux = sys.platform == 'linux'
     if linux:
         require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0)  # PR_SET_CHILD_SUBREAPER
@@ -380,12 +429,15 @@ def supervise(key, argv, scope, exited, env):
     anchor = os.fork()
     if anchor == 0:
         try:
-            os.close(reader)
+            retain_fds({writer})
             os.setsid()
             task = subprocess.Popen(argv, env=env)
             disown_stdio()
             code = task.wait()
-            os.write(writer, bytes([(128 - code if code < 0 else code) % 256]))
+            # Inspect our own still-live, private group before exiting; some
+            # kernels omit zombies from group listings.
+            empty = not linux and darwin_group_empty(os.getpid())
+            os.write(writer, bytes([(128 - code if code < 0 else code) % 256, int(empty)]))
         finally:
             os._exit(0)
     os.close(writer)
@@ -396,8 +448,16 @@ def supervise(key, argv, scope, exited, env):
     reaped = False
     try:
         while not ended(scope) and not exited():
-            if reader is not None and select.select([reader], [], [], 0.3)[0]:
-                data = os.read(reader, 1)
+            if reader is None:
+                time.sleep(0.3)
+                continue
+            ready = select.select([reader, cancellation], [], [], 0.3)[0]
+            if cancellation in ready:
+                audit(key, 'foreground_cancelled')
+                break
+            if reader in ready:
+                data = os.read(reader, 2)
+                os.close(cancellation)
                 emit_status(data[0] if data else 125)
                 os.close(reader)
                 reader = None
@@ -410,8 +470,10 @@ def supervise(key, argv, scope, exited, env):
                             os.waitpid(anchor, 0)
                             reaped = True
                             return 0
-            elif reader is None:
-                time.sleep(0.3)
+                elif data[1:] == b"\x01":
+                    os.waitpid(anchor, 0)
+                    reaped = True
+                    return 0
         audit(key, 'closing_registered_tree')
         return 143
     finally:
@@ -458,13 +520,13 @@ def command(tag, key, pid, argv, base='/tmp', expected=None):
     fcntl.flock(root, fcntl.LOCK_EX)
     try:
         try:
-            os.mkdir(key, 0o700, dir_fd=root)
+            os.mkdir(scope_name(key), 0o700, dir_fd=root)
             new = True
         except FileExistsError:
             new = False
-        scope = directory(root, key)
+        scope = directory(root, scope_name(key))
         require(not ended(scope))
-        path = os.path.join(parent, key, 'tmp')
+        path = os.path.join(parent, scope_name(key), 'tmp')
         if new:
             fcntl.flock(scope, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.mkdir('tmp', 0o700, dir_fd=scope)
@@ -476,6 +538,7 @@ def command(tag, key, pid, argv, base='/tmp', expected=None):
         require(birth(pid) == expected)
         if new and os.fork() == 0:
             try:
+                retain_fds({root, scope, tmp})
                 # A fresh open-file description is required for independent flocks.
                 independent_root = os.open('.', DIR, dir_fd=root)
                 os.close(root)
@@ -495,21 +558,24 @@ def command(tag, key, pid, argv, base='/tmp', expected=None):
     finally:
         fcntl.flock(root, fcntl.LOCK_UN)
     reader, writer = os.pipe()
+    cancel_read, cancel_write = os.pipe()
     if os.fork() == 0:
-        os.close(reader)
+        retain_fds({writer, tmp, scope, cancel_read})
         status_pipe = writer
         try:
             os.setsid()
-            code = supervise(key, argv, scope, session_watch(pid, expected), dict(os.environ, TMPDIR=path, TEMP=path, TMP=path))
+            code = supervise(key, argv, scope, session_watch(pid, expected), dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
             emit_status(code)
         finally:
             os._exit(0)
+    os.close(cancel_read)
     os.close(writer)
     os.close(tmp)
     os.close(scope)
     os.close(root)
     data = os.read(reader, 1)
     os.close(reader)
+    os.close(cancel_write)
     return data[0] if data else 125
 
 
