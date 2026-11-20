@@ -730,7 +730,13 @@ function EmployeeRoleDrawer({
             <Button onClick={guard.confirmClose} disabled={busy}>
               取消
             </Button>
-            <Button type="submit" variant="primary" disabled={busy || !changed}>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={
+                busy || !changed || (roleChanged && blocked !== undefined)
+              }
+            >
               保存
             </Button>
           </SettingsDialogActions>

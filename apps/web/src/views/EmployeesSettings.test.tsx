@@ -637,3 +637,41 @@ test("C-516: a server refusal of the profile is shown in the drawer without clos
   );
   expect(screen.getByRole("dialog", { name: "云长" })).toBeTruthy();
 });
+
+test("C-516: a role that became blocked after a failed save keeps the save unavailable until the role is put back", async () => {
+  let blocked = false;
+  const updateEmployee = vi.fn(async () => {
+    blocked = true;
+    throw new ApiError(
+      409,
+      "invariant_violation",
+      "员工仍有未释放的指派或未结束的运行",
+    );
+  });
+  await open({
+    employeeOptions: async () => ({
+      ...staffed,
+      employees: staffed.employees?.map((e) =>
+        e.id === "E-1" && blocked
+          ? { ...e, role_change_blocked: "run" as const }
+          : e,
+      ),
+    }),
+    launchProfileNames: profileNames,
+    updateEmployee,
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "云长" }));
+  const drawer = await screen.findByRole("dialog", { name: "云长" });
+  changeControl(within(drawer).getByLabelText("角色"), {
+    target: { value: "reviewer" },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "保存" }));
+  await within(drawer).findByText(
+    "这名员工还有未结束的运行，结束后才能换角色。",
+  );
+  const save = within(drawer).getByRole("button", {
+    name: "保存",
+  }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  expect(updateEmployee).toHaveBeenCalledTimes(1);
+});
