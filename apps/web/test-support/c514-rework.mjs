@@ -3,7 +3,8 @@
 // still shortens the name; then checks in the browser that Escape does not
 // carry over to the next comment, a new `@` re-reads the roster, a name with
 // spaces keeps filtering, choosing inside an existing mention replaces it, a
-// new `@` before a word keeps the word and a pending read offers no old names.
+// new `@` before a word keeps the word (V-2490 cases by keyboard and click)
+// and a pending read offers no old names.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c514-rework.mjs <new output dir>
 // C514_BASELINE_REF=<git ref> serves that ref's list for before shots (no
 // behaviour checks).
@@ -328,6 +329,62 @@ try {
     await key("Enter", "Enter", 13);
     checks.beforeWord = { before, value: await value() };
 
+    // 7/8. V-2490: an `@` typed before 明早开会, and one typed over the selected
+    // colon of 附件：Bob.txt, keep the text after it; keyboard and click.
+    const clickOption = async (name) => {
+      const box = await run((name) => {
+        const option = [...document.querySelectorAll("[role=option]")].find(
+          (o) => o.querySelector(".ui-suggestion-label")?.textContent === name,
+        );
+        option?.scrollIntoView({ block: "nearest" });
+        const r = option?.getBoundingClientRect();
+        return r && { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }, name);
+      assert(box, `no option ${name}`);
+      for (const type of ["mouseMoved", "mousePressed", "mouseReleased"])
+        await send("Input.dispatchMouseEvent", {
+          type,
+          x: box.x,
+          y: box.y,
+          button: "left",
+          clickCount: 1,
+        });
+      await settle();
+    };
+    const choose = async (how, name) => {
+      if (how === "click") return clickOption(name);
+      const list = await options();
+      for (let i = 0; i < list.indexOf(name); i++)
+        await key("ArrowDown", "ArrowDown", 40);
+      await key("Enter", "Enter", 13);
+    };
+    checks.v2490 = {};
+    for (const how of ["keyboard", "click"]) {
+      await focusBox();
+      await type("明早开会");
+      await run(() =>
+        document.querySelector(".comment-input").setSelectionRange(0, 0),
+      );
+      await type("@");
+      await type("明");
+      await until("document.querySelectorAll('[role=option]').length > 0");
+      const ming = await options();
+      if (how === "keyboard") await shot("check-v2490-ming-1440-light.png");
+      await choose(how, "明明");
+      checks.v2490[`ming-${how}`] = { options: ming, value: await value() };
+
+      await focusBox();
+      await type("附件：Bob.txt");
+      await run(() =>
+        document.querySelector(".comment-input").setSelectionRange(2, 3),
+      );
+      await type("@");
+      await until("document.querySelectorAll('[role=option]').length > 0");
+      if (how === "click") await shot("check-v2490-colon-1440-light.png");
+      await choose(how, "薛宝钗");
+      checks.v2490[`colon-${how}`] = { value: await value() };
+    }
+
     // 6. While a new read is under way, the previous names cannot be chosen.
     await key("Escape", "Escape", 27);
     await run(() => {
@@ -408,6 +465,14 @@ try {
     assert.equal(checks.inside.caret, "@Bob ".length);
     assert.equal(checks.beforeWord.before[0], "Bob");
     assert.equal(checks.beforeWord.value, "附件 @Bob README.md");
+    for (const how of ["keyboard", "click"]) {
+      assert.equal(checks.v2490[`ming-${how}`].value, "@明明 明早开会", how);
+      assert.equal(
+        checks.v2490[`colon-${how}`].value,
+        "附件 @薛宝钗 Bob.txt",
+        how,
+      );
+    }
     assert.deepEqual(checks.pending.options, []);
     assert.equal(checks.pending.status, "正在加载员工…");
     // Raw CDP key events type no newline; what matters is that no name went in.

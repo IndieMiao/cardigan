@@ -87,9 +87,12 @@ export function CommentBox({
   const [cursor, setCursor] = useState<number>();
   // Escape closes the list for the `@` it was opened at, until a new `@`.
   const [dismissedAt, setDismissedAt] = useState<number>();
-  // An `@` typed in front of existing text (from `keep` on), as opposed to the
+  // An `@` the user typed (keeping the text from `keep` on), as opposed to the
   // caret moved into an old one: choosing a name never replaces that text.
   const [typed, setTyped] = useState<TypedMention>();
+  // The selection each input began with, read from the native `beforeinput`.
+  const intent = useRef<InputIntent | undefined>(undefined);
+  const compositionStart = useRef<number | undefined>(undefined);
   const [active, setActive] = useState(0);
   const [candidates, setCandidates] = useState<{
     readonly cardId: string;
@@ -188,6 +191,38 @@ export function CommentBox({
     );
   }
 
+  // React's onBeforeInput is synthesized from other events and carries no
+  // selection; the native event fires before the text changes.
+  useEffect(() => {
+    const field = textarea.current;
+    if (!field || tab !== "write") return;
+    const onBeforeInput = (event: Event) => {
+      intent.current = {
+        before: field.value,
+        selectionStart: field.selectionStart,
+        selectionEnd: field.selectionEnd,
+        inputType: (event as InputEvent).inputType ?? "",
+        ...(compositionStart.current === undefined
+          ? {}
+          : { compositionStart: compositionStart.current }),
+      };
+    };
+    const onCompositionStart = () => {
+      compositionStart.current = field.selectionStart;
+    };
+    const onCompositionEnd = () => {
+      compositionStart.current = undefined;
+    };
+    field.addEventListener("beforeinput", onBeforeInput);
+    field.addEventListener("compositionstart", onCompositionStart);
+    field.addEventListener("compositionend", onCompositionEnd);
+    return () => {
+      field.removeEventListener("beforeinput", onBeforeInput);
+      field.removeEventListener("compositionstart", onCompositionStart);
+      field.removeEventListener("compositionend", onCompositionEnd);
+    };
+  }, [tab]);
+
   useLayoutEffect(() => {
     if (caret.current === undefined || !textarea.current) return;
     textarea.current.setSelectionRange(caret.current, caret.current);
@@ -201,30 +236,22 @@ export function CommentBox({
   });
 
   /**
-   * Recompute the `@query` before the caret after typing (`previous` is the
-   * text before the change) or moving it.
+   * Recompute the `@query` before the caret after moving it, or after a change
+   * (`edit`, `null` when its range is not known).
    */
-  function trackMention(field: HTMLTextAreaElement, previous?: string): void {
+  function trackMention(
+    field: HTMLTextAreaElement,
+    edit?: TextEdit | null,
+  ): void {
     const { value, selectionStart } = field;
     const start = mentionAt(value, selectionStart);
     if (start !== occurrence) {
       if (start !== undefined) loadCandidates();
       setDismissedAt(undefined);
-      setTyped(
-        start !== undefined && previous !== undefined
-          ? typedMention(previous, value, start)
-          : undefined,
-      );
-    } else if (typed && previous !== undefined) {
-      // Typing before the kept text moves it; editing the kept text ends it.
-      let same = 0;
-      while (same < previous.length && previous[same] === value[same]) same++;
-      setTyped(
-        same <= typed.keep && value.endsWith(previous.slice(typed.keep))
-          ? { ...typed, keep: typed.keep + value.length - previous.length }
-          : undefined,
-      );
     }
+    setTyped(
+      followTyped(start === occurrence ? typed : undefined, start, edit),
+    );
     if (
       start !== occurrence ||
       value.slice(0, selectionStart) !== body.slice(0, cursor)
@@ -423,7 +450,11 @@ export function CommentBox({
                 setError(undefined);
               } else startDraft();
               setBody(value);
-              trackMention(event.target, body);
+              const began = intent.current;
+              intent.current = undefined;
+              const edit =
+                began?.before === body ? inputEdit(began, value) : undefined;
+              trackMention(event.target, edit ?? null);
             }}
             onSelect={(event) => trackMention(event.currentTarget)}
             onKeyDown={onKeyDown}
@@ -547,26 +578,91 @@ export interface MentionQuery {
   readonly end: number;
 }
 
-export interface TypedMention {
-  /** Index of an `@` the user typed (the insertion began there). */
-  readonly start: number;
-  /** Where the text that followed the insertion point begins now. */
-  readonly keep: number;
+/** The selection and kind of an input, read before the text changed. */
+export interface InputIntent {
+  readonly before: string;
+  readonly selectionStart: number;
+  readonly selectionEnd: number;
+  /** `InputEvent.inputType`, e.g. `insertText` or `deleteContentBackward`. */
+  readonly inputType: string;
+  /** Where the running IME composition began. */
+  readonly compositionStart?: number;
 }
 
-/** The `@` at `start`, if this change inserted it in front of existing text. */
-export function typedMention(
-  previous: string,
-  value: string,
-  start: number,
-): TypedMention | undefined {
-  const grown = value.length - previous.length;
-  return grown > 0 &&
-    value[start] === "@" &&
-    value.slice(0, start) === previous.slice(0, start) &&
-    value.slice(start + grown) === previous.slice(start)
-    ? { start, keep: start + grown }
+/** One change: the old text's `[start, end)` became `inserted` characters. */
+export interface TextEdit {
+  readonly start: number;
+  readonly end: number;
+  readonly inserted: number;
+}
+
+/**
+ * The range an input replaced, from the selection it began with: the
+ * selection itself, the composition so far, or for a collapsed delete the
+ * characters before or after the caret. Undefined when the new text does not
+ * agree with that range, so callers can stay on the safe side.
+ */
+export function inputEdit(
+  intent: InputIntent,
+  after: string,
+): TextEdit | undefined {
+  const { before, selectionStart, selectionEnd, inputType } = intent;
+  let start = selectionStart;
+  let end = selectionEnd;
+  if (
+    inputType === "insertCompositionText" &&
+    intent.compositionStart !== undefined
+  )
+    start = Math.min(start, intent.compositionStart);
+  else if (start === end && inputType.startsWith("delete")) {
+    const removed = before.length - after.length;
+    if (inputType.endsWith("Backward")) start -= removed;
+    else end += removed;
+  }
+  const inserted = after.length - before.length + (end - start);
+  return start >= 0 &&
+    end <= before.length &&
+    inserted >= 0 &&
+    after.slice(0, start) === before.slice(0, start) &&
+    after.slice(start + inserted) === before.slice(end)
+    ? { start, end, inserted }
     : undefined;
+}
+
+export interface TypedMention {
+  /** Index of an `@` the user typed. */
+  readonly start: number;
+  /**
+   * Where the text that already followed the input of the `@` begins now;
+   * undefined when an edit's range was not known.
+   */
+  readonly keep: number | undefined;
+}
+
+/**
+ * Follow a typed `@` through one change (`edit`; `null` when its range is not
+ * known; undefined for a caret move). An `@` counts as typed when the edit
+ * inserted it; the text after the edit's range is kept from then on.
+ */
+export function followTyped(
+  typed: TypedMention | undefined,
+  start: number | undefined,
+  edit: TextEdit | null | undefined,
+): TypedMention | undefined {
+  if (start === undefined) return undefined;
+  if (edit === undefined) return typed?.start === start ? typed : undefined;
+  if (typed?.start !== start) {
+    if (edit === null) return { start, keep: undefined };
+    return start >= edit.start && start < edit.start + edit.inserted
+      ? { start, keep: edit.start + edit.inserted }
+      : undefined;
+  }
+  const { keep } = typed;
+  if (edit === null || keep === undefined) return { start, keep: undefined };
+  const grown = edit.inserted - (edit.end - edit.start);
+  if (edit.end <= keep) return { start, keep: keep + grown };
+  if (edit.start < keep) return { start, keep: edit.start + edit.inserted };
+  return typed;
 }
 
 /**
@@ -587,10 +683,12 @@ export function mentionAt(text: string, caret: number): number | undefined {
  * The `@query` being typed right before the caret; never inside an e-mail.
  * The query may hold spaces while it still matches a candidate's name (as in
  * `Mary Jane`); a full name followed by a space is a finished mention.
- * A chosen name replaces the candidate name the text spells, or the rest of
- * the Latin word, but never the text that was there before a typed `@`. With
- * the caret moved into an old mention whose name the text does not spell,
- * nothing is offered, so no text is cut.
+ * After a typed `@`, a chosen name replaces what was typed: the candidate
+ * name or Latin word it spells, never the text kept from before (nothing is
+ * offered with the caret inside that text, and when the range is not known
+ * only the text before the caret is replaced). With the caret moved into an
+ * old mention, a name the text fully spells up to a space, punctuation or the
+ * end is replaced; inside any other word nothing is offered.
  */
 export function mentionQuery(
   text: string,
@@ -610,37 +708,48 @@ export function mentionQuery(
     )
       return undefined;
   }
-  const spelled = spelledEnd(text, start, caret, candidates);
-  if (typed?.start === start && caret <= typed.keep) {
-    let end = Math.min(spelled, typed.keep);
+  if (typed?.start === start) {
+    const { keep } = typed;
+    if (keep === undefined) return { start, query, end: caret };
+    if (caret > keep) return undefined;
+    let end = Math.min(spelledEnd(text, start, caret, candidates, false), keep);
     if (end === caret && /[A-Za-z0-9_-]$/u.test(query))
       end = Math.min(
-        typed.keep,
+        keep,
         caret + (/^[A-Za-z0-9_-]*/u.exec(text.slice(caret))?.[0].length ?? 0),
       );
     return { start, query, end };
   }
-  if (spelled === caret && /^[\p{L}\p{N}\p{M}_-]/u.test(text.slice(caret)))
-    return undefined;
-  return { start, query, end: spelled };
+  const end = spelledEnd(text, start, caret, candidates, true);
+  if (end === caret && WORD.test(text.slice(caret))) return undefined;
+  return { start, query, end };
 }
 
-/** The end of the longest candidate name spelled after the `@`, if past the caret. */
+const WORD = /^[\p{L}\p{N}\p{M}_-]/u;
+
+/**
+ * The end of the longest candidate name spelled after the `@`, if past the
+ * caret. A Latin name must end its word (`@Bobx` does not spell Bob); `whole`
+ * asks any name to be followed by a space, punctuation or the end.
+ */
 function spelledEnd(
   text: string,
   start: number,
   caret: number,
   candidates: readonly MentionCandidate[],
+  whole: boolean,
 ): number {
-  const word = /^[A-Za-z0-9_-]*/u;
+  const latin = /^[A-Za-z0-9_-]/u;
   let end = caret;
   for (const { name } of candidates) {
     const after = start + 1 + name.length;
-    const spelled = text.slice(start + 1, after);
-    // `@Bobx` does not spell Bob: a Latin word must end with the name.
+    const next = text.slice(after);
+    const runsOn = whole
+      ? WORD.test(next)
+      : /[A-Za-z0-9_-]$/u.test(name) && latin.test(next);
     if (
-      spelled.toLowerCase() === name.toLowerCase() &&
-      !(/[A-Za-z0-9_-]$/u.test(name) && word.exec(text.slice(after))?.[0])
+      !runsOn &&
+      text.slice(start + 1, after).toLowerCase() === name.toLowerCase()
     )
       end = Math.max(end, after);
   }

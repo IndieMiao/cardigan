@@ -18,11 +18,12 @@ import type { CommentInput, MentionCandidate } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import {
   CommentBox,
+  followTyped,
+  inputEdit,
   insertMention,
   matchMentionCandidates,
   mentionQuery,
   orderMentionCandidates,
-  typedMention,
 } from "./CommentBox.js";
 
 afterEach(cleanup);
@@ -73,20 +74,70 @@ function setup(
   act(() => input.focus());
   const type = (value: string) =>
     fireEvent.change(input, { target: { value } });
-  /** Change the text with the caret left at `caret`, as typing there does. */
-  const typeAt = (value: string, caret: number) => {
+  const setValue = (value: string) =>
     Object.getOwnPropertyDescriptor(
       HTMLTextAreaElement.prototype,
       "value",
     )?.set?.call(input, value);
+  /** Change the text with the caret left at `caret`, without `beforeinput`. */
+  const typeAt = (value: string, caret: number) => {
+    setValue(value);
     input.setSelectionRange(caret, caret);
     fireEvent.input(input);
+  };
+  /**
+   * Insert `text` over the selection as a browser does: the native
+   * `beforeinput` first, then the new text and the `input` event.
+   */
+  const insert = (text: string, inputType = "insertText") => {
+    const { selectionStart: start, selectionEnd: end, value } = input;
+    input.dispatchEvent(
+      new InputEvent("beforeinput", {
+        inputType,
+        data: text,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    setValue(value.slice(0, start) + text + value.slice(end));
+    input.setSelectionRange(start + text.length, start + text.length);
+    fireEvent.input(input);
+  };
+  /** Type `text` key by key. */
+  const typeKeys = (text: string) => {
+    for (const key of text) insert(key);
+  };
+  const moveTo = (start: number, end = start) => {
+    act(() => input.setSelectionRange(start, end));
+    fireEvent.select(input);
+  };
+  const click = (name: string) => {
+    const option = screen
+      .getAllByRole("option")
+      .find(
+        (o) => o.querySelector(".ui-suggestion-label")?.textContent === name,
+      );
+    if (!option) throw new Error(`no option ${name}`);
+    fireEvent.mouseDown(option);
+    fireEvent.mouseUp(option);
+    fireEvent.click(option);
   };
   const names = () =>
     screen
       .queryAllByRole("option")
       .map((o) => o.querySelector(".ui-suggestion-label")?.textContent);
-  return { input, type, typeAt, names, reads, posted };
+  return {
+    input,
+    type,
+    typeAt,
+    insert,
+    typeKeys,
+    moveTo,
+    click,
+    names,
+    reads,
+    posted,
+  };
 }
 
 test("the placeholder names employees instead of roles or Assignments", () => {
@@ -267,30 +318,89 @@ test("a name with spaces keeps filtering; a finished mention lets the text go on
   await waitFor(() => expect(names()).toEqual(["Bob Smith"]));
 });
 
-test("a new @ typed before existing text inserts the name and keeps that text", async () => {
-  const { input, type, typeAt, names } = setup();
+const MINGMING = [person("E-8", "明明", "运营"), ...EMPLOYEES];
+
+for (const how of ["keyboard", "click"] as const) {
+  test(`V-2490 a typed @明 before 明早开会 keeps the text (${how})`, async () => {
+    const { input, type, typeKeys, moveTo, click, names } = setup(async () => ({
+      employees: MINGMING,
+    }));
+    type("明早开会");
+    moveTo(0);
+    typeKeys("@明");
+    await waitFor(() => expect(names()).toEqual(["明明"]));
+    if (how === "keyboard") fireEvent.keyDown(input, { key: "Enter" });
+    else click("明明");
+    expect(input.value).toBe("@明明 明早开会");
+    expect(input.selectionStart).toBe("@明明 ".length);
+  });
+
+  test(`V-2490 an @ typed over the selected colon keeps Bob.txt (${how})`, async () => {
+    const { input, type, typeKeys, moveTo, click, names } = setup();
+    type("附件：Bob.txt");
+    moveTo(2, 3);
+    typeKeys("@");
+    await waitFor(() => expect(names()).toHaveLength(5));
+    if (how === "keyboard") {
+      // 森·刘邦, then 薛宝钗.
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+      fireEvent.keyDown(input, { key: "Enter" });
+    } else click("薛宝钗");
+    expect(input.value).toBe("附件 @薛宝钗 Bob.txt");
+    expect(input.selectionStart).toBe("附件 @薛宝钗 ".length);
+  });
+}
+
+test("a new @ typed or pasted before existing text inserts the name and keeps that text", async () => {
+  const { input, type, typeKeys, insert, moveTo, names } = setup();
   type("附件 README.md");
-  act(() => input.setSelectionRange(3, 3));
-  fireEvent.select(input);
-  typeAt("附件 @README.md", 4);
-  typeAt("附件 @BREADME.md", 5);
+  moveTo(3);
+  typeKeys("@B");
   await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
   fireEvent.keyDown(input, { key: "Enter" });
   expect(input.value).toBe("附件 @Bob README.md");
   expect(input.selectionStart).toBe("附件 @Bob ".length);
+  // Pasted in one go over a selection.
+  type("附件 xx README.md");
+  moveTo(3, 5);
+  insert("@B", "insertFromPaste");
+  await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("附件 @Bob README.md");
 });
 
-test("choosing with the caret inside an existing mention replaces the whole name", async () => {
-  const { input, type, names } = setup();
-  type("@Bob 请看");
-  await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
-  act(() => input.setSelectionRange(2, 2));
-  fireEvent.select(input);
+test("without beforeinput the range is not known: a name only replaces up to the caret", async () => {
+  const { input, type, typeAt, moveTo, names } = setup();
+  type("附件 README.md");
+  moveTo(3);
+  typeAt("附件 @BREADME.md", 5);
+  await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("附件 @Bob README.md");
+});
+
+test("choosing with the caret inside a typed or an existing mention replaces the whole name", async () => {
+  const { input, type, typeKeys, moveTo, names } = setup();
+  // Typed just now, then the caret moved back: `@B|ob 请看`.
+  typeKeys("@Bob 请看");
+  moveTo(2);
   await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
   fireEvent.keyDown(input, { key: "ArrowDown" });
   fireEvent.keyDown(input, { key: "Enter" });
   expect(input.value).toBe("@bobby 请看");
   expect(input.selectionStart).toBe("@bobby ".length);
+  // Already in the draft: the caret leaves the line, then moves into it.
+  type("x\n@Bob 请看");
+  moveTo(1);
+  moveTo(4);
+  await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("x\n@Bob 请看");
+  // Inside an old word that spells no name, nothing is offered.
+  type("x\n@Bobx 请看");
+  moveTo(1);
+  moveTo(4);
+  await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
 });
 
 test("a failed read is shown in the list and retried at the next @", async () => {
@@ -344,15 +454,20 @@ test("mentionQuery replaces a spelled name inside an existing mention, and nothi
     person("E-2", "薛宝钗", "前端工程师"),
     person("E-3", "Bob", "测试"),
   ];
-  // The caret moved into an existing mention: the name the text spells.
-  expect(mentionQuery("@薛宝钗请看", 3, roster)?.end).toBe(4);
+  // The caret moved into an existing mention: a name the text spells up to a
+  // space, punctuation or the end.
   expect(mentionQuery("@Bob，你好", 2, roster)?.end).toBe(4);
+  expect(mentionQuery("@薛宝钗 请看", 3, roster)?.end).toBe(4);
   // Inside any other word nothing is offered (`@Bobx` does not spell Bob).
+  expect(mentionQuery("@薛宝钗请看", 3, roster)).toBeUndefined();
   expect(mentionQuery("@Bobx ok", 2, roster)).toBeUndefined();
   expect(mentionQuery("@Bobx ok", 1, roster)).toBeUndefined();
   expect(mentionQuery("请@看", 2, roster)).toBeUndefined();
   // An `@` typed before existing text never replaces it, name or word.
-  const typedAt = (start: number, keep: number) => ({ start, keep });
+  const typedAt = (start: number, keep: number | undefined) => ({
+    start,
+    keep,
+  });
   expect(mentionQuery("@BREADME.md", 2, roster, typedAt(0, 2))?.end).toBe(2);
   expect(mentionQuery("@Bob 请看", 1, roster, typedAt(0, 1))?.end).toBe(1);
   expect(mentionQuery("请@看", 2, roster, typedAt(1, 2))?.end).toBe(2);
@@ -360,17 +475,90 @@ test("mentionQuery replaces a spelled name inside an existing mention, and nothi
   expect(mentionQuery("@Bob 请看", 2, roster, typedAt(0, 7))?.end).toBe(4);
   expect(mentionQuery("@Bobx ok", 2, roster, typedAt(0, 8))?.end).toBe(5);
   expect(mentionQuery("@BobREADME", 2, roster, typedAt(0, 4))?.end).toBe(4);
+  expect(mentionQuery("@薛宝钗请看", 3, roster, typedAt(0, 6))?.end).toBe(4);
+  // The caret inside the kept text: nothing is offered.
+  expect(mentionQuery("@BREADME", 4, roster, typedAt(0, 2))).toBeUndefined();
+  // Range not known: only up to the caret.
+  expect(mentionQuery("@Bob 请看", 2, roster, typedAt(0, undefined))?.end).toBe(
+    2,
+  );
 });
 
-test("typedMention notices an @ inserted in front of existing text", () => {
-  expect(typedMention("附件 README.md", "附件 @README.md", 3)).toEqual({
+test("inputEdit takes the range from the selection an input began with", () => {
+  const intent = (
+    before: string,
+    selectionStart: number,
+    selectionEnd = selectionStart,
+    inputType = "insertText",
+    compositionStart?: number,
+  ) => ({
+    before,
+    selectionStart,
+    selectionEnd,
+    inputType,
+    ...(compositionStart === undefined ? {} : { compositionStart }),
+  });
+  // A same character to the right does not move the range.
+  expect(inputEdit(intent("@明早开会", 1), "@明明早开会")).toEqual({
+    start: 1,
+    end: 1,
+    inserted: 1,
+  });
+  // A selection replaced by as many characters.
+  expect(inputEdit(intent("附件：Bob.txt", 2, 3), "附件@Bob.txt")).toEqual({
+    start: 2,
+    end: 3,
+    inserted: 1,
+  });
+  // Collapsed deletes take the characters before or after the caret.
+  expect(
+    inputEdit(intent("@Bob", 4, 4, "deleteContentBackward"), "@Bo"),
+  ).toEqual({ start: 3, end: 4, inserted: 0 });
+  expect(inputEdit(intent("@Bob", 1, 1, "deleteWordForward"), "@")).toEqual({
+    start: 1,
+    end: 4,
+    inserted: 0,
+  });
+  // An IME composition replaces what it composed so far.
+  expect(
+    inputEdit(intent("@mi", 3, 3, "insertCompositionText", 1), "@米"),
+  ).toEqual({ start: 1, end: 3, inserted: 1 });
+  // A text that does not agree with the range: unknown.
+  expect(inputEdit(intent("abc", 1), "xbcd")).toBeUndefined();
+});
+
+test("followTyped starts a typed @ only when the edit inserted it and moves the kept text exactly", () => {
+  const edit = (start: number, end: number, inserted: number) => ({
+    start,
+    end,
+    inserted,
+  });
+  // `@` typed at 3 before `README.md`: kept from 4.
+  expect(followTyped(undefined, 3, edit(3, 3, 1))).toEqual({
     start: 3,
     keep: 4,
   });
-  expect(typedMention("", "@Bob 请看", 0)).toEqual({ start: 0, keep: 7 });
-  // Deleting, or an `@` that was already there, is not a typed `@`.
-  expect(typedMention("@Bob x", "@Bob ", 0)).toBeUndefined();
-  expect(typedMention("@Bob", "x@Bob", 1)).toBeUndefined();
+  // An `@` the edit did not insert (a delete reached an old one): not typed.
+  expect(followTyped(undefined, 0, edit(5, 6, 0))).toBeUndefined();
+  // A change of unknown range: the boundary is not known.
+  expect(followTyped(undefined, 3, null)).toEqual({
+    start: 3,
+    keep: undefined,
+  });
+  const typed = { start: 3, keep: 5 };
+  // Typing or deleting before the kept text moves it.
+  expect(followTyped(typed, 3, edit(5, 5, 2))).toEqual({ start: 3, keep: 7 });
+  expect(followTyped(typed, 3, edit(4, 5, 0))).toEqual({ start: 3, keep: 4 });
+  // A selection across the boundary: kept after the new text.
+  expect(followTyped(typed, 3, edit(4, 7, 1))).toEqual({ start: 3, keep: 5 });
+  // Editing inside the kept text leaves the boundary.
+  expect(followTyped(typed, 3, edit(8, 9, 1))).toEqual(typed);
+  // A caret move keeps it; another `@` or none ends it.
+  expect(followTyped(typed, 3, undefined)).toEqual(typed);
+  expect(followTyped(typed, 9, undefined)).toBeUndefined();
+  expect(followTyped(typed, undefined, edit(0, 0, 1))).toBeUndefined();
+  // Unknown once, unknown for the rest of this `@`.
+  expect(followTyped(typed, 3, null)).toEqual({ start: 3, keep: undefined });
 });
 
 test("candidates order card people first, then by name; filtering keeps that order", () => {
