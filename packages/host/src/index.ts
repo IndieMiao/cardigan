@@ -23,6 +23,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export {
+  CandidateRepositoryBusy,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckExecutorUnavailable,
@@ -128,6 +129,7 @@ export {
   RunCapacityDeferred,
   RunPreflightDeferred,
   RunPreparationDeferred,
+  RunProviderDeferred,
   scrubRunCredentials,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
@@ -135,7 +137,20 @@ export {
 } from "./launch.js";
 export { launchFilesStamp } from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
+export {
+  acceptedHostProfiles,
+  adoptInstalledCatalog,
+  assertLaunchFence,
+  isAcceptedLaunchRevision,
+  type LaunchFence,
+  launchRevision,
+  publishLaunchRefresh,
+  publishModelFile,
+  withLaunchSnapshot,
+} from "./launch-model-intent.js";
+export { probeModel } from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
+export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
@@ -155,6 +170,7 @@ export {
   type ExecutionOwner,
   executionOwner,
   mergeCheckAttemptRunning,
+  mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
@@ -185,8 +201,8 @@ export {
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {
-  loadModelLaunchConfig,
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "./model-catalog.js";
 export {
   agentNameFor,

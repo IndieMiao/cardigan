@@ -5,16 +5,23 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Clock, ProjectId } from "@cardigan/domain";
 import {
+  adoptInstalledCatalog,
   agentCliVersion,
   harnessBinary,
+  isAcceptedLaunchRevision,
+  launchFilesStamp,
   launchFingerprint,
-  loadModelLaunchConfig,
   type PreparationRetryOptions,
+  parseCachedLaunchConfig,
   prepareRoleWorktree,
+  publishLaunchRefresh,
   RuntimeTargets,
   recordLaunchNotice,
   recoverLaunchPublications,
   resolveMcpUrl,
+  selectableLaunchConfig,
+  stageModelLaunchConfig,
+  withLaunchSnapshot,
   withPreparationQueue,
   withPreparationRetry,
   worktreeBaselinePrompt,
@@ -44,7 +51,7 @@ import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
-import { liveLaunch } from "./live-launch.js";
+import { type LaunchGeneration, liveLaunch } from "./live-launch.js";
 
 const exec = promisify(execFile);
 
@@ -58,6 +65,8 @@ export interface HostWiring {
   readonly publishWhileBackgroundOwner: () => () => void;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
+  readonly adoptLaunch: (generation: LaunchGeneration) => void;
+  readonly selectableLaunchConfig: () => LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
@@ -83,12 +92,19 @@ export async function loadLaunchFiles(
   dir: string,
   report: (message: string) => void = console.warn,
   dataDir = resolveDataDirectory(),
-): Promise<{
-  config: LaunchConfig;
-  secrets: Readonly<Record<string, string>>;
-}> {
+  store?: Store,
+): Promise<LaunchGeneration> {
   const launchFile = join(dir, "launch.yaml"),
     secretsFile = join(dir, "secrets.env");
+  // Isolated callers may validate without publishing; runtime wiring supplies the shared store.
+  const fence = store
+    ? withLaunchSnapshot(store, dir, dataDir, (f) => f)
+    : {
+        files: launchFilesStamp(dir),
+        revision: 0,
+        catalogFile: "",
+        canAdoptCatalog: false,
+      };
   let text: string;
   try {
     text = await readFile(launchFile, "utf8");
@@ -99,8 +115,6 @@ export async function loadLaunchFiles(
   }
   const raw = parseYaml(text, { prettyErrors: false });
   if (raw == null) throw new Error("启动配置为空");
-  const config = await loadModelLaunchConfig(raw, dataDir);
-  reportLaunchWarnings(config, report);
   let secrets: Readonly<Record<string, string>> = {};
   try {
     const file = await open(secretsFile, "r");
@@ -114,8 +128,28 @@ export async function loadLaunchFiles(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  validateLaunchSecrets(config, secrets);
-  return { config, secrets };
+  // A committed projection is already validated. Its TTL governs the *next* refresh,
+  // not whether the host can catch up to this revision (even if a GET recovered it).
+  const staged = fence.canAdoptCatalog
+    ? { config: parseCachedLaunchConfig(raw, dataDir), catalog: undefined }
+    : await stageModelLaunchConfig(raw, dataDir);
+  validateLaunchSecrets(staged.config, secrets);
+  reportLaunchWarnings(staged.config, report); // no callbacks inside the publication critical section
+  if (store) {
+    const profiles = Object.keys(
+      selectableLaunchConfig({ config: staged.config, secrets }).profiles,
+    );
+    const revision = fence.canAdoptCatalog
+      ? adoptInstalledCatalog(store, dir, dataDir, fence, profiles)
+      : publishLaunchRefresh(store, dir, dataDir, fence, {
+          catalog: staged.catalog,
+          hostProfiles: profiles,
+        });
+    return { config: staged.config, secrets, revision };
+  }
+  if (fence.files !== launchFilesStamp(dir))
+    throw new Error("加载期间配置已变化");
+  return { config: staged.config, secrets };
 }
 
 /** Ask the harness binary for its version (local mode only); the Run records it. */
@@ -182,7 +216,7 @@ export async function createHostWiring(options: {
   const dir = configDir(env);
   const live = await liveLaunch(
     dir,
-    () => loadLaunchFiles(dir, undefined, options.dataDir),
+    () => loadLaunchFiles(dir, undefined, options.dataDir, options.store),
     () => {
       const message =
         "主机启动配置重载失败，继续使用上一版。请检查 launch.yaml、secrets.env 及其权限。";
@@ -191,6 +225,7 @@ export async function createHostWiring(options: {
         recordLaunchNotice(options.store, tx, "launch_reload_failed", message),
       );
     },
+    (next) => isAcceptedLaunchRevision(options.store, dir, next.revision),
   );
   const generations = new WeakMap<
     LaunchSnapshot,
@@ -205,6 +240,15 @@ export async function createHostWiring(options: {
       return live.current().config;
     },
     refreshLaunch: live.refresh,
+    adoptLaunch: live.adopt,
+    selectableLaunchConfig: () => {
+      const current = live.current();
+      // Reference saves call this inside their SQLite write transaction. Another host
+      // can install first; never authorize an old name while this process catches up.
+      return isAcceptedLaunchRevision(options.store, dir, current.revision)
+        ? selectableLaunchConfig(current)
+        : { ...current.config, profiles: {} };
+    },
     publishWhileBackgroundOwner: () =>
       live.publishWhileOwned(({ config }) =>
         recordAcceptedBrowserPath(options.store, config.browser?.browsers_path),

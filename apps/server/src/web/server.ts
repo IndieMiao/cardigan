@@ -60,6 +60,7 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
+import { drainTasks } from "./drain-tasks.js";
 import {
   executionCapacity,
   executionCapacityRevision,
@@ -85,6 +86,7 @@ import {
   sessionCookie,
   unauthorized,
 } from "./http.js";
+import { LaunchSettings } from "./launch-settings.js";
 import { LoginLimiter } from "./login-limiter.js";
 import { MachineChecks } from "./machine-checks.js";
 import type { MachineHost } from "./machine-host.js";
@@ -126,6 +128,11 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly launchSettings?: {
+    dir: string;
+    effective: () => import("@cardigan/roles").LaunchConfig;
+    adopt: (generation: import("../live-launch.js").LaunchGeneration) => void;
+  };
   readonly machineHost?: MachineHost;
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
@@ -193,6 +200,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly launchSettings: LaunchSettings | undefined;
   readonly wizards: WorkerWizards;
   readonly checks: MachineChecks;
   readonly host: MachineHost | undefined;
@@ -259,6 +267,15 @@ export async function startWebServer(
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
   });
+  const launchSettings = options.launchSettings
+    ? new LaunchSettings(
+        store,
+        options.launchSettings.dir,
+        dataDir,
+        options.launchSettings.effective,
+        options.launchSettings.adopt,
+      )
+    : undefined;
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;
@@ -393,8 +410,13 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
-        roleLaunchConfig: options.roleLaunchConfig,
-        launchProfiles: options.launchProfiles,
+        launchSettings,
+        roleLaunchConfig: launchSettings
+          ? () => launchSettings.effective()
+          : options.roleLaunchConfig,
+        launchProfiles: launchSettings
+          ? () => Object.keys(launchSettings.effective().profiles)
+          : options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -436,17 +458,20 @@ export async function startWebServer(
     url: `http://${bracket(host)}:${address.port}`,
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
+        launchSettings?.checks.beginShutdown();
         let cancel = (): void => {};
         // Stop listening first, then end the streams; `close` also drops the
         // connections that are already idle.
         http.close((error) => {
           cancel();
-          if (error) reject(error);
-          else
-            void Promise.all([checks.settled(), wizards.settled()]).then(
-              () => resolve(),
-              reject,
-            );
+          void drainTasks([
+            checks.settled(),
+            wizards.settled(),
+            launchSettings?.checks.drain(),
+          ]).then(
+            () => (error ? reject(error) : resolve()),
+            (reason) => reject(error ?? reason),
+          );
         });
         shutdown.abort();
         http.closeIdleConnections();
@@ -470,6 +495,24 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
+
+  if (
+    path === "/api/launch-settings" ||
+    path.startsWith("/api/launch-settings/")
+  ) {
+    if (!context.launchSettings)
+      throw new HttpRejection(503, "unavailable", "未配置启动设置");
+    const owner = createHash("sha256")
+      .update(`launch-settings:${sessionToken(req)}`)
+      .digest("hex");
+    return context.launchSettings.serve(
+      path.slice("/api/launch-settings".length),
+      req,
+      res,
+      () => requireSession(context),
+      owner,
+    );
+  }
 
   if (path === "/api/me/feishu") {
     if (req.method !== "GET" && req.method !== "POST")

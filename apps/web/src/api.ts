@@ -1,5 +1,6 @@
 import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
+import type { RunPresence } from "./run-presence.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
@@ -209,7 +210,10 @@ export interface CardListItem
     readonly ahead: number;
   }[];
   readonly produce_owners?: readonly AuthorView[];
-  readonly participants?: readonly AuthorView[];
+  /** C-531: `run_presence` is this person's state for this card; older servers omit it. */
+  readonly participants?: readonly (AuthorView & {
+    readonly run_presence?: RunPresence;
+  })[];
   readonly work_items?: readonly Pick<
     WorkItemView,
     "id" | "title" | "status"
@@ -272,6 +276,9 @@ export interface WorkItemView {
   readonly depends_on: readonly string[];
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: string;
+  /** C-531: the unreleased owner and their state for this work item only. */
+  readonly assignee?: AuthorView;
+  readonly run_presence?: RunPresence;
   readonly target_work_item_id?: string;
   /** MC-2: scheduling constraints declared on the work item itself. */
   readonly requirements?: MachineRequirements;
@@ -918,6 +925,10 @@ export interface NeedsPage {
   readonly notices_next_cursor?: string | null;
   /** C-153: who looks after lost runtimes; older servers omit it. */
   readonly incident_handling?: IncidentHandling;
+  readonly provider_incidents?: readonly {
+    readonly profile: string;
+    readonly paused: boolean;
+  }[];
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -1017,10 +1028,12 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
+  readonly failure_reason?: "provider_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
-    | "awaiting_dispatch";
+    | "awaiting_dispatch"
+    | "provider_unavailable";
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
@@ -1085,6 +1098,8 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  /** C-531: this row's own state for its card; absent on standing rows. */
+  readonly run_presence?: RunPresence;
   readonly verification_activity?: {
     readonly status: string;
     readonly label: string;
@@ -1164,6 +1179,80 @@ export interface ExecutionMachine {
     readonly blockers: readonly string[];
     readonly available: boolean;
   } | null;
+}
+
+/**
+ * C-512: the human-only machine read (C-509). Machines are global; each
+ * binding is one project's registration of the machine, as far as the server
+ * authorises it. Only these fields are read; credentials never appear here.
+ */
+export interface MachineBindingView {
+  readonly project_id: string;
+  readonly project_name: string;
+  readonly is_current: boolean;
+  readonly status: string;
+  readonly last_seen: string | null;
+  /** Account, directory and session summary; null without a binding. */
+  readonly runtime: {
+    readonly account: string | null;
+    readonly directory: string | null;
+    readonly session: string;
+    readonly path_entries: number;
+  } | null;
+  /** False when the host's private configuration could not be read. */
+  readonly config_available: boolean;
+  readonly capabilities: readonly MachineCapabilityView[];
+  /** The latest machine check (health) for this project. */
+  readonly machine_check: {
+    readonly status: "checking" | "passed" | "failed";
+    readonly checked_at: string;
+    readonly blockers: readonly string[];
+    readonly available: boolean;
+  } | null;
+  /** The latest explicitly requested check (Web or CLI). */
+  readonly last_requested_check: {
+    readonly id: string;
+    readonly kind: "machine" | "worker";
+    readonly status: "running" | "passed" | "failed";
+    readonly step: string;
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  /** The latest worker onboarding check; `local` has none. */
+  readonly worker_check: {
+    readonly status: "failed" | "passed" | "checking" | "unknown";
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  readonly worker_record_readable: boolean;
+  readonly assignments: readonly {
+    readonly assignment_id: string;
+    readonly role_id: string;
+    readonly employee_id: string | null;
+    readonly employee_name: string | null;
+    readonly card_id: string | null;
+    readonly runs: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly card_id: string | null;
+    }[];
+  }[];
+}
+export interface MachineView {
+  readonly id: string;
+  readonly label: string;
+  readonly os: string;
+  readonly arch: string;
+  /** The most restrictive status across bindings; absent if none is known. */
+  readonly status?: string;
+  readonly last_seen: string | null;
+  readonly run_limit: number;
+  readonly run_limit_maximum: number;
+  readonly resources: readonly {
+    readonly key: string;
+    readonly limit: number;
+  }[];
+  readonly bindings: readonly MachineBindingView[];
 }
 
 /** C-75: one server page of an Assignment's Run history, newest first. */
@@ -1346,6 +1435,65 @@ export interface RoleListView {
   readonly allowlists: RoleAllowlists;
 }
 
+/** C-515 `GET /api/launch-settings`: global, read-only; secret values never leave the host. */
+export interface LaunchModelMetadata {
+  readonly cost?: { readonly input: number; readonly output: number };
+  readonly context_window?: number;
+  readonly max_output_tokens?: number;
+  readonly reasoning_efforts?: readonly string[];
+}
+export type LaunchProfileReference =
+  | {
+      readonly project_id: string;
+      readonly role_id: string;
+      readonly version: number;
+      readonly name: string;
+    }
+  | { readonly employee_id: string; readonly name: string };
+export interface LaunchProfileCheck {
+  readonly id: string;
+  readonly version: string;
+  readonly mode: "metadata" | "online";
+  readonly started_at: string;
+  readonly finished_at: string | null;
+  readonly status: "passed" | "failed" | "running" | "interrupted";
+  readonly problems: readonly string[];
+  readonly cli_version: string | null;
+}
+export interface LaunchProfileView {
+  readonly name: string;
+  readonly harness: string;
+  readonly provider: string | null;
+  readonly model_alias: string | null;
+  readonly model_id: string | null;
+  readonly metadata: LaunchModelMetadata | null;
+  readonly parameters: {
+    readonly effort: string | null;
+    readonly permission_mode: string | null;
+    readonly auto_update: boolean | null;
+    readonly provider_flag: string | null;
+    readonly custom_args_count: number;
+    readonly custom_config_count: number;
+  };
+  readonly cli: {
+    readonly path: string | null;
+    readonly version: string | null;
+  };
+  readonly secrets: readonly { readonly key: string; readonly set: boolean }[];
+  readonly references: readonly LaunchProfileReference[];
+  readonly last_check: LaunchProfileCheck | null;
+}
+export interface LaunchProviderView {
+  readonly id: string;
+  readonly name: string;
+  readonly base_url: string | null;
+}
+export interface LaunchSettingsView {
+  readonly version: string;
+  readonly profiles: readonly LaunchProfileView[];
+  readonly providers: readonly LaunchProviderView[];
+}
+
 export interface EmployeeOptions {
   readonly employees?: readonly CreatedEmployee[];
   readonly library: readonly {
@@ -1493,6 +1641,8 @@ export interface CardiganClient {
   ): CardPage | undefined;
   cardPreferenceScope?(): string | undefined;
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
+  /** Global launch profiles (not project scoped). */
+  launchSettings(): Promise<LaunchSettingsView>;
   createEmployee(
     projectId: string,
     input: CreateEmployeeInput,
@@ -1688,6 +1838,12 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
+  /** C-512: read only; the machine actions belong to C-511. */
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }>;
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -2067,6 +2223,19 @@ export class HttpCardiganClient implements CardiganClient {
       `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
     );
   }
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines`,
+    );
+  }
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}`,
+    );
+  }
   execution(projectId: string): Promise<ExecutionData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution`,
@@ -2364,6 +2533,9 @@ export class HttpCardiganClient implements CardiganClient {
   }
   roles(projectId: string): Promise<RoleListView> {
     return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
+  }
+  launchSettings(): Promise<LaunchSettingsView> {
+    return this.request("/api/launch-settings");
   }
   employeeOptions(projectId: string): Promise<EmployeeOptions> {
     return this.request(

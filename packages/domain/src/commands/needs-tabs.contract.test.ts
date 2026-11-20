@@ -1,8 +1,16 @@
 import { expect, test } from "vitest";
-import type { CommandState, Decision, HumanAction } from "../index.js";
+import type { CommandState, Decision, Event, HumanAction } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { listNeedsYou, listNeedsYouCounts } from "./queries.js";
-import { actor, fixture, human, id, now, value } from "./test-fixtures.js";
+import {
+  actor,
+  fixture,
+  human,
+  id,
+  now,
+  ports,
+  value,
+} from "./test-fixtures.js";
 
 const decision = (n: number): Decision => ({
   id: id("decision", n),
@@ -163,4 +171,39 @@ test("group counts and the selected decision section share sources and keep inde
     value(listNeedsYouCounts(answered, human, clock)).data.tabs.decisions.count,
   ).toBe(1);
   expect(state.decisions.every((q) => q.status === "open")).toBe(true);
+});
+
+test("C-499: provider failure, pause and recovery leave human counts unchanged", () => {
+  const state = { ...fixture(), decisions: [decision(901)] };
+  const baseline = value(listNeedsYouCounts(state, human)).data;
+  const events: Event[] = [];
+  const io = ports();
+  for (const [type, payload, incidents] of [
+    [
+      "provider_start_failed",
+      { failures: 1, cooldown_ms: 1000 },
+      [{ profile: "relay", paused: false }],
+    ],
+    [
+      "provider_start_failed",
+      { failures: 2, cooldown_ms: 1000, retry_at: now },
+      [{ profile: "relay", paused: true }],
+    ],
+    ["provider_start_restored", {}, []],
+  ] as const) {
+    events.push({
+      type,
+      seq: events.length + 1,
+      id: io.ids.nextEventId(),
+      actor: { kind: "system", project_id: state.project_id },
+      created_at: now,
+      payload: { profile: "relay", ...payload },
+    });
+    const snapshot = { ...state, events: [...events] };
+    expect(
+      value(listNeedsYou(snapshot, human, undefined, { section: "actions" }))
+        .data.provider_incidents,
+    ).toEqual(incidents);
+    expect(value(listNeedsYouCounts(snapshot, human)).data).toEqual(baseline);
+  }
 });

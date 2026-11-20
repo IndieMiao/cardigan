@@ -110,7 +110,7 @@ test("logs redact configured values across chunks and retained edges before writ
     createMergeCheckLog({ dataDir, project: "p", attempt: "attempt-1" }),
   ).rejects.toMatchObject({ code: "EEXIST" });
 });
-test("failure summaries take error lines from the last 40 lines, stay within 20 lines and redact metadata", async () => {
+test("failure summaries include early findings, stay within 20 lines and redact metadata", async () => {
   const dataDir = await fixture(),
     secret = "example-sensitive-token";
   const log = await createMergeCheckLog({
@@ -136,7 +136,7 @@ test("failure summaries take error lines from the last 40 lines, stay within 20 
   });
   expect(result.summary.split("\n").length).toBeLessThanOrEqual(20);
   expect(result.summary).toContain("退出码 1");
-  expect(result.summary).not.toContain("too old");
+  expect(result.summary).toContain("FAIL too old");
   expect(JSON.stringify(result)).not.toContain(secret);
   const text = await readFile(
     join(dataDir, "merge-gate/logs/p", result.log_ref),
@@ -221,7 +221,7 @@ test("short env values do not corrupt output; the eight-byte boundary and multib
   expect(text).toContain(
     "FAIL a command returned 1\nabcdefg\n[REDACTED]\n[REDACTED]\n",
   );
-  expect(result.summary).toContain("FAIL a command returned 1");
+  expect(result.summary).not.toContain("command returned 1");
   expect(text).not.toContain("abcdefgh");
   expect(text).not.toContain("中文值");
 });
@@ -633,5 +633,481 @@ test.each([
     expect(validPrecheckSummary(diagnostic)).toBe(true);
     expect(diagnostic).toContain("[EACCES]");
     expect(diagnostic).not.toContain(message);
+  },
+);
+
+test("C-529: a failure in the discarded middle of a streamed job is on page one, with bounded redacted findings", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "streamed",
+    failureExcerptBytes: 4096,
+    env: { DEMO: "synthetic-multiline\nsecond-private-value", SHORT: "tiny" },
+  });
+  const noise = ".".repeat(64 * 1024);
+  for (let i = 0; i < 20; i++) log.append("test", noise);
+  log.append("test", "\n");
+  for (let n = 1; n <= 7; n++)
+    log.append(
+      "test",
+      `2026-11-20T12:00:00.000Z \x1b[31mFAIL\x1b[0m src/中文.test.ts > case ${n}\n`,
+    );
+  log.append("test", "AssertionError: tiny second-pri");
+  log.append(
+    "test",
+    'vate-value CUSTOM="private phrase"\nTest Files 1 failed | 10 passed (11)\nTests 7 failed | 42 passed (49)\n##[error]process failed\n',
+  );
+  for (let i = 0; i < 20; i++) log.append("test", noise);
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed" }],
+    cleanup_errors: [],
+  });
+  for (const value of [
+    "src/中文.test.ts > case 5",
+    "另有 2 个失败用例",
+    "AssertionError:",
+    "Test Files 1 failed",
+    "Tests 7 failed",
+    "##[error]process failed",
+  ])
+    expect(result.summary).toContain(value);
+  for (const value of [
+    "case 6",
+    "case 7",
+    "private phrase",
+    "second-private",
+    "tiny",
+  ])
+    expect(result.summary).not.toContain(value);
+  const body = await readFile(
+    join(dataDir, "merge-gate/logs/p", result.log_ref),
+    "utf8",
+  );
+  expect(body.slice(0, 4096)).toContain(result.summary);
+  expect(body.slice(body.indexOf("=== test ==="))).not.toContain("case 1");
+});
+
+test.each([
+  [
+    "tsc",
+    "src/app.ts(4,2): error TS2322: Type 'string' is not assignable",
+    "error TS2322",
+  ],
+  [
+    "biome",
+    "src/app.ts:4:2 lint/correctness/noUnusedVariables  FIXABLE",
+    "lint/correctness/noUnusedVariables",
+  ],
+  [
+    "eslint",
+    "src/app.ts\n  4:2  error  Unexpected any  no-explicit-any",
+    "src/app.ts 4:2  error",
+  ],
+  [
+    "playwright",
+    "1) [chromium] › e2e/login.spec.ts:3:1 › keeps session\nError: expected dashboard",
+    "login.spec.ts:3:1 › keeps session",
+  ],
+])(
+  "C-529: projects %s failures including an unterminated final line",
+  async (attempt, text, expected) => {
+    const log = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt,
+    });
+    log.append(attempt, text);
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: attempt, status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(result.summary).toContain(expected);
+  },
+);
+
+test.each([true, false])(
+  "suite failures and repeated cases stay independent; authoritative total=%s",
+  async (stats) => {
+    const writer = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "mixed",
+    });
+    writer.append(
+      "test",
+      [
+        "FAIL load.test.ts",
+        ...[1, 2, 3, 4, 5, 6, 6].map((i) => `FAIL another.test.ts > case ${i}`),
+        ...(stats ? ["Tests 6 failed"] : []),
+      ].join("\n"),
+    );
+    const { summary } = await writer.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(summary).toContain("FAIL load.test.ts");
+    expect(summary.match(/ > case /gu)).toHaveLength(5);
+    expect(summary).toContain(stats ? "另有 1 个失败用例" : "另有失败用例");
+    expect(summary).not.toContain("另有 2");
+  },
+);
+
+test.each([1, 17000, 30000])(
+  "long assertion retains only its fixed type (split at %i)",
+  async (split) => {
+    const writer = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "long",
+    });
+    const text = `AssertionError: synthetic prefix ${"z".repeat(20000)}`;
+    for (const line of [text.slice(0, split), text.slice(split) + "\n"])
+      writer.append("test", line);
+    const saved = await writer.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(saved.summary.split("\n")).toContain("AssertionError");
+    expect(saved.summary).not.toContain("synthetic prefix");
+  },
+);
+
+test("a single GitHub PEM block stays redacted across step and ANSI chunk boundaries", async () => {
+  const dataDir = await fixture();
+  const writer = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "key-boundary",
+    failureExcerptBytes: 4096,
+  });
+  writer.append("test", "-----BE\x1b[");
+  writer.append("test", "31mGIN PRIVATE KEY-----\n");
+  writer.append(
+    "lint",
+    "FAIL synthetic-private-fragment\n-----END PRIVATE KEY-----\nFAIL visible after key\n",
+  );
+  const saved = await writer.finish({
+    status: "failed",
+    checks: [
+      { name: "test", status: "passed" },
+      { name: "lint", status: "failed" },
+    ],
+    cleanup_errors: [],
+  });
+  const body = await readFile(
+    join(dataDir, "merge-gate/logs/p", saved.log_ref),
+    "utf8",
+  );
+  expect(saved.summary).toContain("visible after key");
+  expect(body + JSON.stringify(saved)).not.toContain(
+    "synthetic-private-fragment",
+  );
+});
+
+test.each(["passed-link", "failed-link", "unknown", "assertion"])(
+  "timeout evidence is scoped to the failing check: %s",
+  async (mode) => {
+    const log = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "timeout",
+    });
+    log.append("install", "Manual: https://docs.invalid/intro\n");
+    log.append(
+      "test",
+      "FAIL src/wait.test.ts > waits\nError: Test timed out in 5000ms\n",
+    );
+    if (mode === "failed-link")
+      log.append("test", "Manual: https://docs.invalid/intro\n");
+    if (mode === "assertion")
+      log.append("test", "AssertionError: unexpected value\n");
+    const saved = await log.finish({
+      status: "failed",
+      checks: [
+        { name: "install", status: "passed" },
+        { name: "test", status: "failed" },
+      ],
+      cleanup_errors: [],
+      logAttributionIncomplete: mode === "unknown",
+    });
+    expect(saved.timeout_only).toBe(mode === "passed-link");
+  },
+);
+
+test.each(["'", '"'])(
+  "unclosed runner assignments stay private across steps and oversized lines (%s)",
+  async (quote) => {
+    const dataDir = await fixture();
+    const w = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "quoted",
+      failureExcerptBytes: 4096,
+    });
+    w.append("install", ".".repeat(132000) + " pass");
+    w.append("install", `word : ${quote}synthetic-first\n`);
+    w.append("test", `FAIL synthetic-hidden \\`);
+    w.append(
+      "test",
+      `${quote} escaped delimiter\nAssertionError: synthetic-hidden\n`,
+    );
+    w.append(
+      "test",
+      "x".repeat(132000) + quote + "\nFAIL visible after close\n",
+    );
+    w.append("test", `password=${quote}never closed\nError: synthetic-hidden`);
+    const saved = await w.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    const body = await readFile(
+      join(dataDir, "merge-gate/logs/p", saved.log_ref),
+      "utf8",
+    );
+    expect(body + JSON.stringify(saved)).not.toMatch(
+      /synthetic-(first|hidden)/u,
+    );
+    expect(saved.summary).toContain("visible after close");
+  },
+);
+
+// Cut at syntax boundaries, then compare with a reproducible network partition.
+function partition(text: string, mode: "whole" | "syntax" | "seeded") {
+  if (mode === "whole") return [text];
+  const cuts = new Set<number>([0, text.length]);
+  if (mode === "syntax") {
+    for (const token of [
+      "password",
+      "\r\n",
+      "=",
+      "'",
+      '"',
+      "\\",
+      "\x1b[2K",
+      "\x1b[31m",
+      "\x1b[",
+      "\x07",
+      "\u{e0001}",
+    ]) {
+      for (
+        let i = text.indexOf(token);
+        i >= 0;
+        i = text.indexOf(token, i + token.length)
+      )
+        for (let j = i; j <= i + token.length; j++) cuts.add(j);
+    }
+    for (const n of [131071, 131072, 131073]) if (n < text.length) cuts.add(n);
+  } else {
+    let seed = 1;
+    for (let i = 0; i < text.length; ) {
+      seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+      i += 1 + (seed % 4096);
+      if (i < text.length) cuts.add(i);
+    }
+  }
+  const sorted = [...cuts].sort((a, b) => a - b);
+  return sorted.slice(1).map((n, i) => text.slice(sorted[i], n));
+}
+
+test.each([
+  "inline",
+  "indented",
+  "unquoted",
+  "color",
+  "erase",
+  "malformed",
+] as const)(
+  "Q-1024: visible diagnostics and private fields do not depend on chunking (%s)",
+  async (kind) => {
+    const dataDir = await fixture();
+    const prefix = ".".repeat(131071);
+    const progress =
+      prefix +
+      (kind === "color" ? "\x1b[31m" : kind === "erase" ? "\x1b[2K" : "") +
+      ".".repeat(1024) +
+      "\n";
+    const inline = kind === "inline",
+      unquoted = kind === "unquoted";
+    const quote = inline ? '"' : "'";
+    const label = kind === "indented" ? "pass\u{e0001}word" : "password";
+    const open = inline ? ` ${quote}private-sample\\${quote}\n` : "\r\n";
+    const install = progress + label + " =" + open;
+    const continuation = unquoted
+      ? "   private-sample on next line\n"
+      : (inline ? "" : `\t ${quote}private-sample\\${quote}\n`) +
+        "FAIL private-sample\n" +
+        (kind === "malformed" ? "\x1b[\n" : "") +
+        `private-sample${quote}\n`;
+    const proof =
+      "FAIL src/visible.test.ts > real case\nAssertionError: real assertion\nTest Files 1 failed\nTests 1 failed\n";
+    let reference: string[] | undefined;
+    for (const mode of ["whole", "syntax", "seeded"] as const) {
+      const w = await createMergeCheckLog({
+        dataDir,
+        project: "p",
+        attempt: mode,
+        failureExcerptBytes: 4096,
+      });
+      for (const part of partition(install, mode)) w.append("install", part);
+      for (const part of partition(
+        continuation +
+          proof +
+          '"X":\n  "private-sample never closed\nFAIL private-sample\n',
+        mode,
+      ))
+        w.append("test", part);
+      const saved = await w.finish({
+        status: "failed",
+        checks: [
+          { name: "install", status: "passed" },
+          { name: "test", status: "failed" },
+        ],
+        cleanup_errors: [],
+      });
+      const body =
+        (
+          await readFile(
+            join(dataDir, "merge-gate/logs/p", saved.log_ref),
+            "utf8",
+          )
+        ).split("=== install ===")[1] ?? "";
+      const surfaces = [body, saved.summary, saved.failure_excerpt ?? ""];
+      for (const surface of surfaces) {
+        expect(surface.includes("private-sample")).toBe(false);
+        for (const line of proof.trim().split("\n"))
+          expect(surface).toContain(line);
+      }
+      expect(saved.status).toBe("failed");
+      if (reference) expect(surfaces).toEqual(reference);
+      reference = surfaces;
+    }
+  },
+);
+
+test("Q-1024: retry discards unfinished control and field state with the partial download", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "retry-scan",
+    failureExcerptBytes: 4096,
+  });
+  log.append("test", 'password="partial\n\x1b]ignored\n');
+  log.resetOutput("test");
+  log.append("test", "FAIL after retry\n");
+  const saved = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed" }],
+    cleanup_errors: [],
+  });
+  expect(saved.summary).toContain("FAIL after retry");
+  expect(saved.failure_excerpt).toContain("FAIL after retry");
+});
+
+test("Q-1024: moving the opening delimiter changes only whitespace in the saved body", async () => {
+  const dataDir = await fixture();
+  let reference: string | undefined;
+  for (const [i, gap] of [
+    " ",
+    "\n   ",
+    "\r\n\t\n\x1b[2K",
+    "\n\u00a0",
+  ].entries()) {
+    const w = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: `layout-${i}`,
+      failureExcerptBytes: 4096,
+    });
+    const meta = `password:${gap}'private-metadata\nprivate-metadata'`;
+    for (const part of partition(
+      `start\npassword:${gap}'private-mark\nprivate-mark'\nFAIL real case\n`,
+      "syntax",
+    ))
+      w.append("test", part);
+    const saved = await w.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [meta],
+      reason: meta,
+    });
+    const body =
+      (
+        await readFile(
+          join(dataDir, "merge-gate/logs/p", saved.log_ref),
+          "utf8",
+        )
+      ).split("=== test ===")[1] ?? "";
+    const canonical = body.replace(/\s+/gu, " ").trim();
+    expect(body + JSON.stringify(saved)).not.toMatch(
+      /private-(?:mark|metadata)/u,
+    );
+    expect(canonical).toContain("FAIL real case");
+    if (reference) expect(canonical).toBe(reference);
+    reference = canonical;
+  }
+});
+
+// The bytes after a completed field must not change the next step's evidence.
+test.each(["install", "test"])(
+  "completed labels in %s do not mask the following failed test",
+  async (step) => {
+    const dataDir = await fixture();
+    const proof = [
+      "FAIL src/labels.test.ts > reports the failed label",
+      "AssertionError: expected a neutral label",
+      "Tests 1 failed",
+    ];
+    for (const [i, label] of [
+      "rainy",
+      "cmFpbnk=",
+      "YQ==",
+      '"cmFpbnk="',
+      `mixed+atom/sub:word=inside'quote=`,
+    ].entries()) {
+      const w = await createMergeCheckLog({
+        dataDir,
+        project: "p",
+        attempt: `label-${step}-${i}`,
+        failureExcerptBytes: 4096,
+      });
+      // Put the last value byte at the start of the second scanner block.
+      const row = ` display_label=${label}`;
+      for (const part of partition(
+        ".".repeat(8193 - row.length) + row + "\r\n",
+        "syntax",
+      ))
+        w.append(step, part);
+      w.append("test", proof.join("\n") + "\n");
+      const saved = await w.finish({
+        status: "failed",
+        checks: [
+          { name: "install", status: "passed" },
+          { name: "test", status: "failed" },
+        ],
+        cleanup_errors: [],
+      });
+      const body = await readFile(
+        join(dataDir, "merge-gate/logs/p", saved.log_ref),
+        "utf8",
+      );
+      for (const surface of [
+        saved.summary,
+        saved.failure_excerpt ?? "",
+        body.split("=== test ===")[1] ?? "",
+      ]) {
+        for (const line of proof) expect(surface).toContain(line);
+      }
+      expect(body + JSON.stringify(saved)).not.toContain(
+        label.replaceAll('"', ""),
+      );
+      expect(saved.status).toBe("failed");
+    }
   },
 );

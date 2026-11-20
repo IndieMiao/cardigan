@@ -54,6 +54,10 @@
     --ui-graph-node-compact: 144px;
     --ui-avatar-size: 32px;
     --ui-avatar-compact: 24px;
+    /* C-531: running ring, isolation line and one clockwise orbit. */
+    --ui-run-ring: 2px;
+    --ui-run-keyline: 1px;
+    --ui-run-cycle: 2.8s;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;
@@ -680,6 +684,11 @@
     text-align: left;
     vertical-align: top;
     border-bottom: var(--ui-stroke) solid var(--border);
+  }
+  .ui-table-row[aria-current="true"],
+  .ui-table-row[aria-current="true"] > .ui-table-cell {
+    background: var(--ui-selected);
+    color: var(--ui-selected-text);
   }
 }
 

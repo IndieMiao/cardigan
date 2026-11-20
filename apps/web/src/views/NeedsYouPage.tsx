@@ -2027,6 +2027,12 @@ function NeedsContent({
               )}
             </NeedsNotice>
           )}
+          {data.provider_incidents?.map(({ profile, paused }) => (
+            <NeedsNotice key={profile} role="status">
+              模型服务不可用：{profile}
+              {paused ? "（已暂停派发）" : "（等待重试）"}
+            </NeedsNotice>
+          ))}
           {total === 0 &&
             !data.pm_held_merges?.length &&
             !later.length &&

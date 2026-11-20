@@ -101,6 +101,7 @@ export function recoveryChainUsed(state: CommandState, run: Run): boolean {
           e.type,
         ) &&
         field(e.payload, "assignment_id") === run.assignment_id &&
+        field(e.payload, "reason") !== "provider_unavailable" &&
         field(e.payload, "recovery_root_run_id") === policy.root_run_id,
     )
   );

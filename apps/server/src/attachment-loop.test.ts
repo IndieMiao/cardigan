@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { Decision, Delivery } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { Store as SqliteStore } from "@cardigan/store";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { sweepArtifacts } from "./artifact-retention.js";
 import {
   ATTACHMENT_GC_GRACE_MS,
@@ -35,6 +35,7 @@ const digest = (seed: string) => seed.repeat(64).slice(0, 64);
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
@@ -186,7 +187,7 @@ test("a reuse upload between selection and deletion refreshes the grace period",
           // Exactly what `put()` does when it reuses an existing blob: refresh
           // the mtime (packages/mcp-server/src/attachments.test.ts covers that)
           // and then record the attachment.
-          const fresh = new Date();
+          const fresh = new Date(NOW);
           utimesSync(path, fresh, fresh);
         }
         return f.store.uow.run(operation);
@@ -228,14 +229,15 @@ test("a missing attachments directory is not an error", async () => {
 test("the loop can be stopped and never sweeps again", async () => {
   const f = fixture();
   const orphan = blob(f.directory, digest("6"), 3 * DAY);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const { loop } = startAttachmentLoop({ ...f, clock, intervalMs: 5 });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  // The loop starts its first tick immediately; stop must drain it.
   await loop.stop();
   await loop.done;
   expect(existsSync(orphan)).toBe(false);
   // A blob created after the stop stays: no tick may run again.
   const late = blob(f.directory, digest("7"), 3 * DAY);
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await vi.advanceTimersByTimeAsync(40);
   expect(existsSync(late)).toBe(true);
   await loop.stop(); // idempotent
 });
