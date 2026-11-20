@@ -17,14 +17,28 @@ assert(process.argv[2], "Pass a new output directory");
 const baseline = process.env.C487_BASELINE_REF;
 const git = (...args) =>
   execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+const shownAt = (ref, path) => {
+  try {
+    return git("show", `${ref}:apps/web/src/${path}`);
+  } catch {
+    return undefined;
+  }
+};
+// Files the graph spans; the ones a baseline lacks stay at the working copy.
 const historical = new Map(
   baseline
-    ? ["components/CardDependencies.tsx", "components/ui/theme.css"].map(
-        (path) => [
-          resolve(root, "src", path),
-          git("show", `${baseline}:apps/web/src/${path}`),
-        ],
-      )
+    ? [
+        "components/CardDependencies.tsx",
+        "components/ui/theme.css",
+        "components/layout/DependencyGraphLayout.tsx",
+        "components/layout/DependencyGraphLayout.module.css",
+        "dependency-graph.ts",
+      ].flatMap((path) => {
+        const source = shownAt(baseline, path);
+        return source === undefined
+          ? []
+          : [[resolve(root, "src", path), source]];
+      })
     : [],
 );
 // theme.css inlines styles.css from disk, so point it at the baseline copy.
@@ -200,6 +214,107 @@ try {
             : null,
         pageScrollWidth: document.documentElement.scrollWidth,
         innerWidth,
+        graph: (() => {
+          const list = section?.querySelector("ul");
+          if (!list || !scroller) return null;
+          const frame = scroller.parentElement;
+          const rects = new Map(
+            nodes.map((n) => [
+              n.dataset.node,
+              {
+                left: n.offsetLeft,
+                right: n.offsetLeft + n.offsetWidth,
+                top: n.offsetTop,
+                bottom: n.offsetTop + n.offsetHeight,
+              },
+            ]),
+          );
+          // Path length (px, sampled every 1px) inside nodes it does not join.
+          const overlaps = [
+            ...(section?.querySelectorAll("[data-edge]") ?? []),
+          ].flatMap((path) => {
+            const [from, to] = path.dataset.edge.split(">");
+            const length = path.getTotalLength();
+            const hits = {};
+            for (let at = 0; at <= length; at++) {
+              const p = path.getPointAtLength(at);
+              for (const [id, r] of rects)
+                if (
+                  id !== from &&
+                  id !== to &&
+                  p.x > r.left &&
+                  p.x < r.right &&
+                  p.y > r.top &&
+                  p.y < r.bottom
+                )
+                  hits[id] = (hits[id] ?? 0) + 1;
+            }
+            return Object.entries(hits).map(([node, px]) => ({
+              edge: path.dataset.edge,
+              node,
+              px,
+            }));
+          });
+          const ends = [
+            ...(section?.querySelectorAll("[data-edge]") ?? []),
+          ].map((path) => {
+            const end = path.getPointAtLength(path.getTotalLength());
+            return `${path.dataset.edge.split(">")[1]}@${Math.round(end.y)}`;
+          });
+          const view = {
+            left: scroller.scrollLeft,
+            right: scroller.scrollLeft + scroller.clientWidth,
+          };
+          const currentLi = current?.closest("[data-node]");
+          const visible = (id) => {
+            const r = rects.get(id);
+            return !!r && r.left >= view.left && r.right <= view.right;
+          };
+          return {
+            scrollLeft: scroller.scrollLeft,
+            clipStart: frame?.className.includes("clipStart") ?? false,
+            clipEnd: frame?.className.includes("clipEnd") ?? false,
+            fade: {
+              before: getComputedStyle(frame, "::before").visibility,
+              after: getComputedStyle(frame, "::after").visibility,
+            },
+            hiddenNodes: [...rects]
+              .filter(([, r]) => r.right <= view.left || r.left >= view.right)
+              .map(([id]) => id),
+            // The node cut by each side of the view: id and hidden px.
+            cut: {
+              start: [...rects]
+                .filter(([, r]) => r.left < view.left && r.right > view.left)
+                .map(([id, r]) => `${id}:${view.left - r.left}`),
+              end: [...rects]
+                .filter(([, r]) => r.left < view.right && r.right > view.right)
+                .map(([id, r]) => `${id}:${r.right - view.right}`),
+            },
+            currentVisible: visible(currentLi?.dataset.node),
+            directBefore: (currentLi?.dataset.before ?? "")
+              .split(" ")
+              .filter(Boolean)
+              .map((id) => ({ id, visible: visible(id) })),
+            nodeHeights: [...new Set(nodes.map((n) => n.offsetHeight))],
+            rowGap: px(list, "rowGap"),
+            waypoints: section?.querySelectorAll("[data-waypoint]").length ?? 0,
+            overlaps,
+            sharedArrowEnds: ends.length - new Set(ends).size,
+            relations: Object.fromEntries(
+              nodes.map((n) => {
+                const target = n.querySelector("[aria-describedby]");
+                return [
+                  n.dataset.node,
+                  target
+                    ? document.getElementById(
+                        target.getAttribute("aria-describedby"),
+                      )?.textContent
+                    : null,
+                ];
+              }),
+            ),
+          };
+        })(),
       };
     });
   const scenarios = [
@@ -208,6 +323,9 @@ try {
     ["drawer-single", "#/p/p-1/cards?view=list&card=C-460", true],
     ["drawer-long", "#/p/p-1/cards?view=list&card=C-470", true],
     ["drawer-early", "#/p/p-1/cards?view=list&card=C-480", true],
+    ["page-cross", "#/p/p-1/cards/C-490", false],
+    ["drawer-cross", "#/p/p-1/cards?view=list&card=C-490", true],
+    ["drawer-shortcut", "#/p/p-1/cards?view=list&card=C-498", true],
   ];
   const pairs = [];
   for (const width of [1440, 390])
@@ -241,7 +359,7 @@ try {
         );
         const data = await shot(`${name}-${width}-${theme}.png`);
         results[name] = await measure();
-        if (name === "drawer-multi" || name === "page-multi")
+        if (["drawer-multi", "page-multi", "drawer-cross"].includes(name))
           pairs.push({ name, width, theme, reference, data });
         // Scroll the long chain to its end to show the far nodes.
         if (name === "drawer-long" && !baseline) {
@@ -306,7 +424,7 @@ try {
     fonts:
       "Inter Variable, Noto Sans SC Variable, JetBrains Mono Variable (lockfile @fontsource)",
     fixture:
-      "test-support/c487-fixture.tsx: 4 synthetic cards; graphs of 9 (fork/merge/待核/重复), 2, 15 and 4 nodes; not production scale",
+      "test-support/c487-fixture.tsx: 6 synthetic cards; graphs of 9 (fork/merge/待核/重复), 2, 15, 9 (long edges), 3 (shortcut) and 4 nodes; not production scale",
     cases,
   };
   await writeFile(
@@ -319,6 +437,15 @@ try {
         const label = `${width}/${theme}/${name}`;
         assert(r.pageScrollWidth <= r.innerWidth, `${label}: page overflows`);
         assert(r.current, `${label}: current node`);
+        assert.deepEqual(r.graph.overlaps, [], `${label}: edge under a node`);
+        assert.equal(r.graph.sharedArrowEnds, 0, `${label}: shared arrow`);
+        assert(r.graph.currentVisible, `${label}: current card cut`);
+        assert(
+          r.graph.directBefore.every((b) => b.visible) ||
+            r.scroller.clientWidth < 600,
+          `${label}: direct prerequisite cut`,
+        );
+        assert.equal(r.graph.clipStart, r.graph.scrollLeft > 1, label);
         if (r.drawer)
           assert(
             r.section.x + r.section.width <= r.drawer.x + r.drawer.width,

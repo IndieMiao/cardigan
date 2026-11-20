@@ -39,6 +39,12 @@ export function CardDependencies({
   const muted = new Set(
     layout.nodes.filter((n) => n.muted).map((n) => n.card.id),
   );
+  const before = new Map<string, string[]>(),
+    after = new Map<string, string[]>();
+  for (const { from, to } of layout.edges) {
+    before.set(to, [...(before.get(to) ?? []), from]);
+    after.set(from, [...(after.get(from) ?? []), to]);
+  }
   const wait = dependencyWaitLabel(card);
   const facts = [
     wait ?? (card.early_start ? "提前开工" : null),
@@ -75,6 +81,8 @@ export function CardDependencies({
               muted={muted}
               href={routeHash({ kind: "card", projectId, cardId: node.id })}
               tooltip={`${node.id} ${node.title} · ${status}`}
+              before={before.get(node.id)}
+              after={after.get(node.id)}
             >
               <DependencyGraphNodeHead>
                 <IdBadge id={node.id} />

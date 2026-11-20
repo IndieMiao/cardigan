@@ -206,3 +206,85 @@ test("older reads without a graph fall back to the direct links", () => {
     { from: card.id, to: "C-3" },
   ]);
 });
+
+/** Every hop spans one column and no waypoint shares a cell with anything. */
+function expectClearRoutes(g: DependencyGraph, current: string) {
+  const layout = layoutDependencyGraph(g, current);
+  const at = new Map(layout.nodes.map((n) => [n.card.id, n]));
+  const cellsByColumn = new Map<number, number[]>();
+  const occupy = (column: number, row: number) =>
+    cellsByColumn.set(column, [...(cellsByColumn.get(column) ?? []), row]);
+  for (const n of layout.nodes) occupy(n.column, n.row);
+  for (const edge of layout.edges) {
+    const from = at.get(edge.from),
+      to = at.get(edge.to);
+    if (!from || !to) throw new Error(`missing end of ${edge.from}>${edge.to}`);
+    const hops = [from, ...edge.via, to].map((p) => p.column);
+    for (let i = 1; i < hops.length; i++)
+      expect(hops[i]).toBe((hops[i - 1] ?? 0) + 1);
+    for (const w of edge.via) occupy(w.column, w.row);
+  }
+  // Cells span two half-rows; any two in one column must not overlap.
+  for (const rows of cellsByColumn.values()) {
+    const sorted = [...rows].sort((a, b) => a - b);
+    for (let i = 1; i < sorted.length; i++)
+      expect((sorted[i] ?? 0) - (sorted[i - 1] ?? 0)).toBeGreaterThanOrEqual(2);
+    for (const row of rows) expect(row + 2).toBeLessThanOrEqual(layout.rows);
+  }
+  return layout;
+}
+
+test("a shortcut beside a chain gets its own lane instead of overlapping it", () => {
+  // A → B → C plus A → C: the direct edge must stay distinguishable.
+  const layout = expectClearRoutes(
+    graph(["C-1", "C-2", "C-3"], ["C-1>C-2", "C-2>C-3", "C-1>C-3"]),
+    "C-3",
+  );
+  const shortcut = layout.edges.find((e) => e.from === "C-1" && e.to === "C-3");
+  const middle = layout.nodes.find((n) => n.card.id === "C-2");
+  expect(shortcut?.via).toHaveLength(1);
+  expect(shortcut?.via[0]?.column).toBe(middle?.column);
+  expect(shortcut?.via[0]?.row).not.toBe(middle?.row);
+  expect(layout.edges.filter((e) => e.via.length === 0)).toHaveLength(2);
+});
+
+test("long edges in a wide multi-level graph never pass under another node", () => {
+  // The design review's C-490 graph, plus a three-column jump.
+  expectClearRoutes(
+    graph(
+      [
+        "C-484",
+        "C-485",
+        "C-486",
+        "C-488",
+        "C-489",
+        "C-490",
+        "C-491",
+        "C-492",
+        "C-493",
+      ],
+      [
+        "C-484>C-485",
+        "C-488>C-485",
+        "C-488>C-489",
+        "C-484>C-490",
+        "C-485>C-490",
+        "C-489>C-490",
+        "C-486>C-491",
+        "C-490>C-491",
+        "C-490>C-492",
+        "C-492>C-493",
+        "C-490>C-493",
+        "C-484>C-493",
+      ],
+    ),
+    "C-490",
+  );
+  expectClearRoutes(
+    graph(
+      ["C-1", "C-2", "C-3", "C-4", "C-5"],
+      ["C-1>C-2", "C-2>C-4", "C-3>C-4", "C-4>C-5", "C-1>C-5"],
+    ),
+    "C-4",
+  );
+});

@@ -6,6 +6,33 @@
     gap: var(--ui-space-1) var(--ui-space-3);
     margin: 0 0 var(--ui-space-2);
   }
+  /* A soft edge on each side that has nodes scrolled out of view. */
+  .frame {
+    position: relative;
+    isolation: isolate;
+  }
+  .frame::before,
+  .frame::after {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    z-index: 2;
+    width: var(--ui-space-3);
+    pointer-events: none;
+    visibility: hidden;
+  }
+  .frame::before {
+    inset-inline-start: 0;
+    background: linear-gradient(to right, var(--border), transparent);
+  }
+  .frame::after {
+    inset-inline-end: 0;
+    background: linear-gradient(to left, var(--border), transparent);
+  }
+  .clipStart::before,
+  .clipEnd::after {
+    visibility: visible;
+  }
   /* Long or wide chains scroll here; the drawer and page never widen. */
   .scroll {
     /* Contribute no min-content width, so flex/grid ancestors stay put. */
@@ -20,8 +47,10 @@
   .graph {
     display: grid;
     grid-auto-columns: var(--ui-graph-node);
+    /* Equal half-rows, so empty waypoint cells match the node rows. */
+    grid-auto-rows: 1fr;
     column-gap: calc(var(--ui-space-6) + var(--ui-space-2));
-    row-gap: var(--ui-space-1);
+    row-gap: var(--ui-space-2);
     margin: 0;
     padding: 0;
     list-style: none;
@@ -35,8 +64,10 @@
     position: relative;
     z-index: 1;
     display: flex;
-    align-items: center;
     min-width: 0;
+  }
+  .waypoint {
+    pointer-events: none;
   }
   .edges {
     position: absolute;

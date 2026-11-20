@@ -4,6 +4,7 @@ import {
   type CardDependencyState,
   type CardId,
   cardDependencyComplete,
+  deriveCardStatus,
   type Event,
   type ProjectId,
 } from "@cardigan/domain";
@@ -40,6 +41,21 @@ export interface CardDependencyGraph {
 
 const cardNumber = (id: string) => Number(id.replace(/^\D+/, "")) || 0;
 
+/** The status the card's own detail shows, not the stored column. */
+function displayStatus(state: CardDependencyState, card: Card) {
+  const items = state.work_items.filter((w) => w.card_id === card.id);
+  const itemIds = new Set(items.map((w) => w.id));
+  const completion = state.deliveries
+    .filter(
+      (d) =>
+        itemIds.has(d.work_item_id) &&
+        d.kind === "card_completion" &&
+        d.status !== "superseded",
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return deriveCardStatus(card.status, items, completion);
+}
+
 /**
  * Every transitive prerequisite and dependent of one card, with the edges
  * among them, so the detail graph needs no per-card reads (C-487).
@@ -75,7 +91,7 @@ export function cardDependencyGraph(
         ? {
             id: c.id,
             title: c.title,
-            status: c.status,
+            status: displayStatus(state, c),
             ...(c.resolution ? { resolution: c.resolution } : {}),
             satisfied: cardDependencyComplete(state, c),
           }

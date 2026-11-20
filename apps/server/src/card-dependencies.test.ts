@@ -235,6 +235,62 @@ test("C-487 detail graph carries the whole upstream and downstream chain without
   }
 });
 
+test("C-487 graph nodes show the derived status the card detail shows", () => {
+  const { f } = setup();
+  try {
+    const after = f.apply((s, a, p) =>
+      createCard(
+        s,
+        a,
+        {
+          title: "After",
+          goal: "After",
+          source: { kind: "quote", text: "After" },
+          template: "general",
+          depends_on_cards: [f.card.id],
+        },
+        p,
+      ),
+    ).data;
+    const stored = f.state().cards.find((c) => c.id === f.card.id);
+    const produce = f
+      .state()
+      .work_items.find(
+        (w) => w.card_id === f.card.id && w.kind === "produce" && w.required,
+      );
+    if (!produce) throw new Error("fixture card has no required produce item");
+    f.store.uow.run((tx) => {
+      tx.cards.put(f.id, { ...stored, status: "todo" } as never);
+      tx.work_items.put(f.id, { ...produce, status: "delivered" } as never);
+    });
+    const read = (id: CardId) =>
+      readPagedCard(
+        f.store,
+        f.id,
+        id,
+        new URL("http://fixture/card?limit=1"),
+        {},
+      )?.card;
+    const detail = read(f.card.id);
+    expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+      "todo",
+    );
+    expect(detail?.status).toBe("review");
+    const graphOf = (card: typeof detail) =>
+      card?.dependency && "graph" in card.dependency
+        ? card.dependency.graph
+        : undefined;
+    expect(
+      graphOf(detail)?.nodes.find((n) => n.id === f.card.id),
+    ).toMatchObject({ status: "review", satisfied: false });
+    expect(
+      graphOf(read(after.id))?.nodes.find((n) => n.id === f.card.id),
+    ).toMatchObject({ status: "review", satisfied: false });
+  } finally {
+    f.close();
+  }
+});
+
 test.each(["full", "summary"])(
   "%s board rows preserve dependency waits and early start outside the requested page",
   (view) => {

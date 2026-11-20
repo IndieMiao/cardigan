@@ -13,7 +13,8 @@ import "../src/components/ui/theme.css";
 
 // C-487: synthetic dependency chains only; no network client or database.
 // C-454 multi-level graph (fork, merge, 待核, muted), C-460 one prerequisite,
-// C-470 a 15-card chain for horizontal scrolling, C-480 early start.
+// C-470 a 15-card chain for horizontal scrolling, C-480 early start, C-490
+// long edges across columns (design review), C-498 A→B→C plus A→C.
 Date.now = () => new Date(NOW).getTime();
 const titles: Record<string, string> = {
   "C-449": "旧版启动配置（重复）",
@@ -33,6 +34,18 @@ const titles: Record<string, string> = {
   "C-480": "提前开工的卡片",
   "C-481": "后续 A",
   "C-482": "后续 B",
+  "C-484": "统一事件格式",
+  "C-485": "事件写入改造",
+  "C-486": "旁路统计",
+  "C-488": "存储迁移脚本",
+  "C-489": "读模型重建",
+  "C-490": "事件回放与校验",
+  "C-491": "回放报表",
+  "C-492": "回放性能",
+  "C-493": "上线切换",
+  "C-496": "直接前置 A",
+  "C-497": "中间 B",
+  "C-498": "汇合 C",
 };
 const status: Record<string, CardStatus> = {
   "C-449": "done",
@@ -48,6 +61,13 @@ const status: Record<string, CardStatus> = {
   "C-460": "backlog",
   "C-479": "review",
   "C-480": "in_progress",
+  "C-484": "done",
+  "C-485": "in_progress",
+  "C-488": "done",
+  "C-489": "review",
+  "C-496": "in_progress",
+  "C-497": "todo",
+  "C-498": "backlog",
 };
 const node = (id: string, extra: Partial<DependencyCard> = {}) => ({
   id,
@@ -114,6 +134,44 @@ const graphs: Record<
     },
     waiting_on: ["C-469"],
     critical_path_length: 6,
+  },
+  "C-490": {
+    graph: {
+      nodes: [
+        "C-484",
+        "C-485",
+        "C-486",
+        "C-488",
+        "C-489",
+        "C-490",
+        "C-491",
+        "C-492",
+        "C-493",
+      ].map((id) => node(id)),
+      edges: edges(
+        "C-484>C-485",
+        "C-488>C-485",
+        "C-488>C-489",
+        "C-484>C-490",
+        "C-485>C-490",
+        "C-489>C-490",
+        "C-486>C-491",
+        "C-490>C-491",
+        "C-490>C-492",
+        "C-492>C-493",
+        "C-490>C-493",
+      ),
+    },
+    waiting_on: ["C-485", "C-489"],
+    critical_path_length: 4,
+  },
+  "C-498": {
+    graph: {
+      nodes: [node("C-496"), node("C-497"), node("C-498")],
+      edges: edges("C-496>C-497", "C-497>C-498", "C-496>C-498"),
+    },
+    waiting_on: ["C-496", "C-497"],
+    critical_path_length: 3,
   },
   "C-480": {
     graph: {

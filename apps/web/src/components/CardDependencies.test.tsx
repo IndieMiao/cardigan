@@ -142,3 +142,55 @@ test("the detail graph shows the whole chain, marks 待核 and jumps on click", 
     ),
   );
 });
+
+test("a shortcut edge runs through its own waypoint and every node reads out its direct links", () => {
+  render(
+    <CardDependencies
+      projectId="p-1"
+      card={{
+        ...card,
+        dependency: {
+          predecessors: [
+            { id: "C-2", title: "中间", status: "todo", satisfied: false },
+          ],
+          successors: [],
+          waiting_on: ["C-2"],
+          critical_path_length: 2,
+          graph: {
+            nodes: [
+              { id: "C-0", title: "源头", status: "todo", satisfied: false },
+              { id: "C-2", title: "中间", status: "todo", satisfied: false },
+              { ...card, satisfied: false },
+            ],
+            edges: [
+              { from: "C-0", to: "C-2" },
+              { from: "C-2", to: card.id },
+              { from: "C-0", to: card.id },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  const region = screen.getByRole("region", { name: "卡片依赖" });
+  const graph = within(region).getByRole("list", { name: "依赖关系图" });
+  // The waypoint is an empty, hidden cell: not a node a reader meets.
+  expect(within(graph).getAllByRole("listitem")).toHaveLength(3);
+  const waypoints = region.querySelectorAll("[data-waypoint]");
+  expect(waypoints).toHaveLength(1);
+  expect(waypoints[0]?.getAttribute("aria-hidden")).toBe("true");
+  expect(waypoints[0]?.textContent).toBe("");
+  expect(region.querySelectorAll("[data-edge]")).toHaveLength(3);
+  const description = (element: Element | null | undefined) =>
+    document.getElementById(element?.getAttribute("aria-describedby") ?? "")
+      ?.textContent;
+  expect(description(within(graph).getByRole("link", { name: /C-0/ }))).toBe(
+    `后续 C-2、${card.id}`,
+  );
+  expect(description(within(graph).getByRole("link", { name: /C-2/ }))).toBe(
+    `前置 C-0；后续 ${card.id}`,
+  );
+  expect(description(region.querySelector('[aria-current="page"]'))).toBe(
+    "前置 C-2、C-0",
+  );
+});
