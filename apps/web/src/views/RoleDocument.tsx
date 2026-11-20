@@ -176,6 +176,7 @@ const TEMPLATE_FIELD_LABELS: Readonly<Record<string, string>> = {
 };
 const IGNORED_TEMPLATE_FIELDS = new Set([
   "id",
+  "completion",
   "work_items",
   "version",
   "builtin",
@@ -186,30 +187,115 @@ const IGNORED_TEMPLATE_FIELDS = new Set([
 const same = (a: unknown, b: unknown) =>
   JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
+type Change = { readonly op?: "add" | "remove"; readonly text: string };
+type Requirements = {
+  readonly os?: string;
+  readonly arch?: string;
+  readonly tags?: readonly string[];
+  readonly capabilities?: readonly string[];
+};
+const REQUIREMENT_LABELS = {
+  os: "系统",
+  arch: "架构",
+  tags: "机器标签",
+  capabilities: "机器能力",
+} as const;
+const WORK_ITEM_FIELD_LABELS: Readonly<Record<string, string>> = {
+  completion_criteria: "完成标准",
+};
+
+function requirementsOf(item: WorkItem | undefined): Requirements {
+  return ((item as { requirements?: Requirements } | undefined)?.requirements ??
+    {}) as Requirements;
+}
+
+/** The machine constraints a work item asks for, in words. */
+export function requirementsText(item: WorkItem | undefined): string {
+  const r = requirementsOf(item);
+  return [
+    ...(["os", "arch"] as const)
+      .filter((k) => r[k])
+      .map((k) => `${REQUIREMENT_LABELS[k]} ${r[k]}`),
+    ...(["tags", "capabilities"] as const)
+      .filter((k) => r[k]?.length)
+      .map((k) => `${REQUIREMENT_LABELS[k]} ${r[k]?.join("、")}`),
+  ].join("；");
+}
+
+/**
+ * Every machine constraint added, changed or removed. Removing one widens
+ * where the work may run, so it is shown as a removal with its old value.
+ */
+function requirementChanges(before: Requirements, after: Requirements) {
+  const out: Change[] = [];
+  for (const k of ["os", "arch"] as const)
+    if ((before[k] ?? "") !== (after[k] ?? ""))
+      out.push(
+        after[k]
+          ? {
+              op: "add",
+              text: `${REQUIREMENT_LABELS[k]} ${before[k] ?? "不限"} → ${after[k]}`,
+            }
+          : {
+              op: "remove",
+              text: `移除${REQUIREMENT_LABELS[k]}限制 ${before[k]}`,
+            },
+      );
+  for (const k of ["tags", "capabilities"] as const) {
+    const a = before[k] ?? [];
+    const b = after[k] ?? [];
+    const added = b.filter((v) => !a.includes(v));
+    const removed = a.filter((v) => !b.includes(v));
+    if (added.length)
+      out.push({
+        op: "add",
+        text: `新增${REQUIREMENT_LABELS[k]} ${added.join("、")}`,
+      });
+    if (removed.length)
+      out.push({
+        op: "remove",
+        text: `移除${REQUIREMENT_LABELS[k]} ${removed.join("、")}`,
+      });
+  }
+  return out;
+}
+
 /** What changes for one work item key: added, removed or each changed part. */
-function workItemChange(
+export function workItemChanges(
   before: WorkItem | undefined,
   after: WorkItem | undefined,
-) {
-  if (!before) return { op: "add" as const, text: "新增" };
-  if (!after) return { op: "remove" as const, text: "删除" };
-  const parts: string[] = [];
+): Change[] {
+  if (!before) return [{ op: "add", text: "新增" }];
+  if (!after) return [{ op: "remove", text: "删除" }];
+  const parts: Change[] = [];
   if (before.title !== after.title)
-    parts.push(`标题 ${before.title} → ${after.title}`);
+    parts.push({ op: "add", text: `标题 ${before.title} → ${after.title}` });
   if (before.role_id !== after.role_id)
-    parts.push(`角色 ${before.role_id} → ${after.role_id}`);
+    parts.push({
+      op: "add",
+      text: `角色 ${before.role_id} → ${after.role_id}`,
+    });
   if (before.kind !== after.kind)
-    parts.push(
-      `类型 ${before.kind === "verify" ? "验证" : "产出"} → ${after.kind === "verify" ? "验证" : "产出"}`,
-    );
+    parts.push({
+      op: "add",
+      text: `类型 ${before.kind === "verify" ? "验证" : "产出"} → ${after.kind === "verify" ? "验证" : "产出"}`,
+    });
   if (before.required !== after.required)
-    parts.push(after.required ? "改为必需" : "改为可选");
+    parts.push(
+      after.required
+        ? { op: "add", text: "改为必需" }
+        : { op: "remove", text: "改为可选" },
+    );
   if (
     (before.target_work_item_key ?? "") !== (after.target_work_item_key ?? "")
   )
-    parts.push(
-      `验证对象 ${before.target_work_item_key ?? "—"} → ${after.target_work_item_key ?? "—"}`,
-    );
+    parts.push({
+      op: "add",
+      text: `验证对象 ${before.target_work_item_key ?? "—"} → ${after.target_work_item_key ?? "—"}`,
+    });
+  parts.push(
+    ...requirementChanges(requirementsOf(before), requirementsOf(after)),
+  );
   const known = [
     "key",
     "title",
@@ -217,18 +303,36 @@ function workItemChange(
     "kind",
     "required",
     "target_work_item_key",
+    "requirements",
   ];
+  const b = before as unknown as Record<string, unknown>;
+  const a = after as unknown as Record<string, unknown>;
   const rest = new Set(
-    [...Object.keys(before), ...Object.keys(after)].filter(
-      (k) => !known.includes(k),
-    ),
+    [...Object.keys(b), ...Object.keys(a)].filter((k) => !known.includes(k)),
   );
   for (const key of rest)
-    if (!same(before[key as keyof WorkItem], after[key as keyof WorkItem]))
-      parts.push(`${key} 已修改`);
-  return parts.length
-    ? { op: "add" as const, text: parts.join("；") }
-    : { op: undefined, text: "—" };
+    if (!same(b[key], a[key]))
+      parts.push({
+        op: "add",
+        text: `${WORK_ITEM_FIELD_LABELS[key] ?? key} ${shown(key, b[key])} → ${shown(key, a[key])}`,
+      });
+  return parts;
+}
+
+/** How a card made from this template is completed, and by whom. */
+export function completionText(
+  completion: TemplateDefinition["completion"] | undefined,
+): string {
+  if (!completion) return "—";
+  if (completion.mode === "human_mark_done") return "人标记完成";
+  const reviewer = completion.reviewer;
+  return `审核完成，完成审核者：${
+    reviewer === "human"
+      ? "所有者"
+      : reviewer.startsWith("role:")
+        ? `角色 ${reviewer.slice(5)}`
+        : reviewer
+  }`;
 }
 
 export function documentChanges(preview: RoleDocumentPreview): boolean {
@@ -334,12 +438,27 @@ export function RoleDocumentPreviewView({
               ))}
             </SettingsFacts>
           )}
+          <SettingsFacts>
+            <SettingsFact label="完成方式">
+              {template.action === "update" &&
+              template.before &&
+              !same(template.before.completion, template.after.completion) ? (
+                <SettingsDiff op="add">
+                  {completionText(template.before.completion)} →{" "}
+                  {completionText(template.after.completion)}
+                </SettingsDiff>
+              ) : (
+                completionText(template.after.completion)
+              )}
+            </SettingsFact>
+          </SettingsFacts>
           <SettingsTable aria-label="模板工作项">
             <TableHeader>
               <TableRow>
                 <TableHead>工作项</TableHead>
                 <TableHead>角色</TableHead>
                 <TableHead>类型</TableHead>
+                <TableHead>机器要求</TableHead>
                 <TableHead>变化</TableHead>
               </TableRow>
             </TableHeader>
@@ -348,10 +467,10 @@ export function RoleDocumentPreviewView({
                 const old = before.get(key);
                 const next = after.get(key);
                 const w = (next ?? old) as WorkItem;
-                const change =
+                const changes: Change[] =
                   template.action === "create"
-                    ? { op: "add" as const, text: "新增" }
-                    : workItemChange(old, next);
+                    ? [{ op: "add", text: "新增" }]
+                    : workItemChanges(old, next);
                 return (
                   <TableRow key={key}>
                     <DataTableCell data-record="lead">
@@ -360,18 +479,28 @@ export function RoleDocumentPreviewView({
                     <DataTableCell nowrap data-label="角色">
                       <code>{w.role_id}</code>
                     </DataTableCell>
-                    <DataTableCell nowrap data-label="类型">
-                      {w.kind === "verify" ? "验证" : "产出"}
+                    <DataTableCell data-label="类型">
+                      {w.kind === "verify"
+                        ? `验证${w.target_work_item_key ? ` ${w.target_work_item_key}` : ""}`
+                        : "产出"}
                       {w.required ? "，必需" : "，可选"}
                     </DataTableCell>
+                    <DataTableCell data-label="机器要求">
+                      {requirementsText(w) || "不限"}
+                    </DataTableCell>
                     <DataTableCell data-record="aside">
-                      {change.op ? (
-                        <SettingsDiff op={change.op}>
-                          {change.text}
-                        </SettingsDiff>
-                      ) : (
-                        change.text
-                      )}
+                      {changes.length
+                        ? changes.map((change, index) => (
+                            <SettingsDiff
+                              // biome-ignore lint/suspicious/noArrayIndexKey: changes are positional.
+                              key={index}
+                              op={change.op}
+                            >
+                              {index > 0 && "；"}
+                              {change.text}
+                            </SettingsDiff>
+                          ))
+                        : "—"}
                     </DataTableCell>
                   </TableRow>
                 );

@@ -631,8 +631,8 @@ test("the preview lists every field the server reports and every template work i
     .slice(1)
     .map((row) => row.textContent);
   expect(rows).toEqual([
-    "写作（writing）writer产出，可选改为可选",
-    "审核（review）reviewer验证，必需删除",
+    "写作（writing）writer产出，可选不限改为可选",
+    "审核（review）reviewer验证 writing，必需不限删除",
   ]);
 });
 
@@ -807,5 +807,117 @@ test("launch profile choices are the launch settings' valid names; the role list
     "请选择启动配置",
     "claude-agent（claude-code · 默认模型）",
     "new-agent",
+  ]);
+});
+
+test("a copied template shows who completes the card and what each check verifies (V-2516)", async () => {
+  const source = {
+    ...docTemplate,
+    id: "source",
+    work_items: [
+      {
+        key: "part-a",
+        title: "部分 A",
+        kind: "produce",
+        role_id: "writer",
+        required: true,
+      },
+      {
+        key: "part-b",
+        title: "部分 B",
+        kind: "produce",
+        role_id: "writer",
+        required: true,
+      },
+      {
+        key: "check-one",
+        title: "核对 B",
+        kind: "verify",
+        role_id: "qa-two",
+        required: true,
+        target_work_item_key: "part-b",
+      },
+      {
+        key: "check-two",
+        title: "完成验收",
+        kind: "verify",
+        role_id: "qa-two",
+        required: true,
+      },
+    ],
+    completion: { mode: "review", reviewer: "role:qa-two" },
+  } as TemplateVersion;
+  await openRoles(
+    client({
+      previewRoleDocument: async () => ({
+        ...created,
+        role: { ...created.role, action: "unchanged", relaxations: [] },
+        employees: [],
+        template: {
+          action: "create",
+          before: null,
+          after: { ...source, id: "copy", version: 1 },
+        },
+      }),
+    }),
+  );
+  const drawer = await openImport();
+  fireEvent.change(within(drawer).getByLabelText("Markdown"), {
+    target: { value: markdown },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  expect(drawer.textContent).toContain("审核完成，完成审核者：角色 qa-two");
+  const rows = within(within(drawer).getByRole("table", { name: "模板工作项" }))
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => row.textContent);
+  expect(rows[2]).toContain("验证 part-b，必需");
+  expect(rows[3]).toContain("验证，必需");
+});
+
+test("removing a work item's machine limits lists each removed value (V-2516)", async () => {
+  const limited = {
+    ...docTemplate,
+    work_items: [
+      {
+        ...docTemplate.work_items[0],
+        requirements: {
+          tags: ["isolated-machine"],
+          capabilities: ["verified-environment"],
+        },
+      },
+    ],
+  } as TemplateVersion;
+  await openRoles(
+    client({
+      previewRoleDocument: async () => ({
+        ...created,
+        role: { ...created.role, action: "unchanged", relaxations: [] },
+        employees: [],
+        template: {
+          action: "update",
+          before: limited,
+          after: { ...docTemplate, version: 3 },
+        },
+      }),
+    }),
+  );
+  const drawer = await openImport();
+  fireEvent.change(within(drawer).getByLabelText("Markdown"), {
+    target: { value: markdown },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  const table = within(drawer).getByRole("table", { name: "模板工作项" });
+  expect(table.textContent).toContain("移除机器标签 isolated-machine");
+  expect(table.textContent).toContain("移除机器能力 verified-environment");
+  expect(table.textContent).not.toContain("requirements");
+  const removed = [...table.querySelectorAll("[data-op=remove]")].map(
+    (e) => e.textContent,
+  );
+  expect(removed).toEqual([
+    "移除机器标签 isolated-machine",
+    "；移除机器能力 verified-environment",
   ]);
 });
