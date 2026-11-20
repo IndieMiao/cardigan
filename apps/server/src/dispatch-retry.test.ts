@@ -492,11 +492,11 @@ test("two dispatchers share a retry lease and a late ACK wins over failure", asy
   fail();
   f.comment();
   await dispatcher().tick();
-  let release!: () => void;
+  const entered = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
   vi.mocked(f.runtime.wake).mockImplementationOnce(async () => {
-    await new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    entered.resolve();
+    await released.promise;
     start();
     const note = f.notes()[0];
     if (!note?.card_id) throw new Error("Missing notice");
@@ -511,13 +511,12 @@ test("two dispatchers share a retry lease and a late ACK wins over failure", asy
   f.advance(30000);
   const sending = dispatcher().tick();
   try {
-    await expect
-      .poll(() => unfinishedBellAttempts(f.store.database, f.project).length)
-      .toBe(1);
+    await entered.promise;
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toHaveLength(1);
     await dispatcher().tick();
     expect(f.runtime.wake).toHaveBeenCalledTimes(2);
   } finally {
-    release();
+    released.resolve();
     await sending;
   }
   expect(f.notes()[0]?.status).toBe("acked");
