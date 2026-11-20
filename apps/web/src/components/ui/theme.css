@@ -699,6 +699,11 @@
     vertical-align: top;
     border-bottom: var(--ui-stroke) solid var(--border);
   }
+  .ui-table-row[aria-current="true"],
+  .ui-table-row[aria-current="true"] > .ui-table-cell {
+    background: var(--ui-selected);
+    color: var(--ui-selected-text);
+  }
 }
 
 @layer components {
