@@ -13,6 +13,7 @@ import {
   refreshWorkerObservations,
   runtimeWorkersPath,
   WORKER_STEPS,
+  type WorkerProbeRunner,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -25,7 +26,15 @@ export interface BindingSummary {
   session: string;
   path_entries: number;
 }
+export interface WizardHost {
+  root: string;
+  dataDir: string;
+  env: NodeJS.ProcessEnv;
+  probe?: WorkerProbeRunner;
+  refresh?: typeof refreshWorkerObservations;
+}
 export interface MachineHost {
+  readonly wizard?: WizardHost;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -56,6 +65,7 @@ export function machineHost(
     root = dirname(file),
     dataDir = execution.dataDir;
   return {
+    wizard: { root, dataDir, env },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);
       return (project, machine) => {

@@ -136,6 +136,8 @@ export interface WorkerOnboardingOptions {
   readonly mode: "add" | "resume" | "check";
   /** Explicit acknowledgement of the exact newly parsed configuration. */
   readonly confirmConfig?: string;
+  /** Only the interactive session can vouch for a completed prefix. CLI checks stay fresh. */
+  readonly completed?: readonly Step[];
   /** Must query existing facts and only register offline when allowed. */
   readonly registration: (create: boolean) => Promise<boolean>;
   readonly probe?: WorkerProbeRunner;
@@ -256,6 +258,15 @@ export async function onboardWorker(
         WORKER_STEPS.map((s) => [s, "pending"]),
       ) as Record<Step, State>,
     };
+    const prefix = new Set<Step>();
+    if (mode === "resume" && !confirmed && old?.digest === config.digest) {
+      for (const step of WORKER_STEPS) {
+        if (!options.completed?.includes(step) || old.steps[step] !== "passed")
+          break;
+        prefix.add(step);
+        journal.steps[step] = "passed";
+      }
+    }
     const persist = () => {
       lock?.verify();
       journal.updated_at = new Date().toISOString();
@@ -263,6 +274,7 @@ export async function onboardWorker(
     };
     persist();
     for (const step of WORKER_STEPS) {
+      if (prefix.has(step)) continue;
       options.beforeStep?.(step);
       journal.steps[step] = "running";
       persist(); // Durable intent before any effect; retries query facts again.

@@ -1,0 +1,249 @@
+import { join } from "node:path";
+import { type Clock, saveMachine } from "@cardigan/domain";
+import {
+  type MachineCheckJournal,
+  matchesWorkerPlatform,
+  onboardWorker,
+  parseWorkerOnboarding,
+  readOnboardingYaml,
+  refreshWorkerObservations,
+  WORKER_STEPS,
+  WorkerOnboardingError,
+  workerOnboardingStatus,
+  type workerWizardForm,
+} from "@cardigan/host";
+import { persistEffect } from "@cardigan/mcp-server";
+import type {
+  ReadRepositories,
+  Store,
+  StoreTransactionContext,
+} from "@cardigan/store";
+import { machineAudit } from "./machine-checks.js";
+import type { WizardHost } from "./machine-host.js";
+import { emptyState } from "./sql-state.js";
+
+type Step = (typeof WORKER_STEPS)[number] | "capabilities";
+export type StepRecord = {
+  step: Step;
+  state: "pending" | "running" | "passed" | "blocked";
+  elapsed_ms: number;
+  reason?: string;
+  next?: string;
+};
+export const initialSteps = (): StepRecord[] =>
+  [...WORKER_STEPS, "capabilities" as const].map((step) => ({
+    step,
+    state: "pending",
+    elapsed_ms: 0,
+  }));
+export type Draft = ReturnType<typeof workerWizardForm>;
+function registry(store: Store, tx: ReadRepositories, draft: Draft) {
+  const w = draft.config.worker,
+    id = w.machine_id;
+  const peers = store
+    .listProjects()
+    .flatMap((p) => tx.machines.get(p.id, id) ?? []);
+  return {
+    compatible: peers.every(
+      (m) => m.herdr_machine === id && matchesWorkerPlatform(m, w),
+    ),
+    label: peers[0]?.label ?? draft.label,
+    registered: !!tx.machines.get(w.project_id, id),
+  };
+}
+export function isRegistered(store: Store, tx: ReadRepositories, draft: Draft) {
+  const r = registry(store, tx, draft);
+  return r.compatible && r.registered;
+}
+function registration(
+  store: Store,
+  tx: StoreTransactionContext,
+  clock: Clock,
+  draft: Draft,
+  create: boolean,
+  limit: number,
+) {
+  const w = draft.config.worker,
+    id = w.machine_id,
+    project = w.project_id;
+  const r = registry(store, tx, draft);
+  if (!r.compatible || r.registered || !create)
+    return r.compatible && r.registered;
+  const result = saveMachine(
+    emptyState(tx, project),
+    { kind: "human", project_id: project },
+    {
+      operation: "register",
+      machine: {
+        id,
+        label: r.label,
+        os: w.os,
+        arch: w.arch,
+        herdr_machine: id,
+        tags: [],
+        status: "offline",
+        last_seen: clock.now(),
+        max_assignments: limit,
+      },
+    },
+    { clock, ids: tx.ids },
+  );
+  if (!result.ok) return false;
+  persistEffect(tx, project, result.value);
+  return true;
+}
+export function checkWizard(options: {
+  store: Store;
+  checks: MachineCheckJournal;
+  clock: Clock;
+  host: WizardHost;
+  signal: AbortSignal;
+  draft: Draft;
+  steps: StepRecord[];
+  priorDigest: string | undefined;
+  authorize: (tx?: ReadRepositories) => string;
+  limit: number;
+  id: string;
+}) {
+  const {
+    store,
+    checks,
+    clock,
+    host,
+    signal,
+    draft,
+    steps,
+    authorize,
+    limit,
+    id,
+  } = options;
+  const config = draft.config,
+    { project_id: project, machine_id: machine } = config.worker;
+  const member = authorize();
+  const { job } = checks.claim(
+    project,
+    machine,
+    "worker",
+    "web",
+    (tx, job, joined) => {
+      authorize(tx);
+      if (joined) throw new WorkerOnboardingError("worker_busy");
+      machineAudit(tx, clock, "worker_wizard_check_requested", {
+        project_id: project,
+        machine_id: machine,
+        member_id: member,
+        wizard_id: id,
+        check_id: job.id,
+      });
+    },
+  );
+  let failed = "configuration";
+  const done = checks.execute(
+    job,
+    async (progress) => {
+      const validate = () => {
+        signal.throwIfAborted();
+        if (authorize() !== member) throw new Error("authorization changed");
+      };
+      validate();
+      const current = parseWorkerOnboarding(
+        readOnboardingYaml(
+          join(host.root, `worker-${machine}-${project}.yaml`),
+        ),
+        host.dataDir,
+      );
+      if (current.digest !== config.digest)
+        throw new WorkerOnboardingError("worker_config_changed");
+      const old = workerOnboardingStatus(host.root, project, machine);
+      const record = (step: Step) => {
+        const found = steps.find((s) => s.step === step);
+        if (!found) throw new Error("missing wizard step");
+        return found;
+      };
+      let start = 0;
+      const begin = (step: Step) => {
+        validate();
+        progress(step);
+        failed = step;
+        start = performance.now();
+        Object.assign(record(step), {
+          state: "running",
+          elapsed_ms: 0,
+          reason: undefined,
+          next: undefined,
+        });
+      };
+      const end = (
+        step: Step,
+        passed: boolean,
+        reason: string,
+        next?: string,
+      ) => {
+        Object.assign(record(step), {
+          state: passed ? "passed" : "blocked",
+          elapsed_ms: Math.round(performance.now() - start),
+          reason,
+          next,
+        });
+      };
+      const passed = await onboardWorker({
+        config,
+        configRoot: host.root,
+        dataDir: host.dataDir,
+        mode: old ? "resume" : "add",
+        ...(old &&
+        old.digest === options.priorDigest &&
+        old.digest !== config.digest
+          ? { confirmConfig: config.digest }
+          : {}),
+        completed: WORKER_STEPS.filter((key) =>
+          steps.some((s) => s.step === key && s.state === "passed"),
+        ),
+        registration: async (create) =>
+          store.uow.run((tx) => {
+            authorize(tx);
+            return registration(store, tx, clock, draft, create, limit);
+          }),
+        ...(host.probe ? { probe: host.probe } : {}),
+        beforeStep: begin,
+        report: (step, state, reason, next) =>
+          end(step, state === "passed", reason, next),
+      });
+      if (passed) begin("capabilities");
+      try {
+        validate();
+        await (host.refresh ?? refreshWorkerObservations)(
+          store,
+          config.worker,
+          passed,
+          host.env,
+          { signal },
+        );
+      } catch (error) {
+        if (passed)
+          end(
+            "capabilities",
+            false,
+            "worker_capability_check_failed",
+            "核对已登记的平台与能力采样后重试。",
+          );
+        throw error;
+      }
+      if (passed) end("capabilities", true, "ok");
+      return passed;
+    },
+    (ok) => ({
+      status: ok ? "passed" : "failed",
+      failed_steps: ok ? [] : [failed],
+    }),
+    (tx, j) =>
+      machineAudit(
+        tx,
+        clock,
+        "worker_wizard_check_finished",
+        { ...j, wizard_id: id, member_id: member },
+        "system",
+      ),
+  );
+  return { id: job.id, done };
+}
