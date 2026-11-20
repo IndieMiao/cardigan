@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandState } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import * as transcript from "./capture-transcript.js";
 import { readSessionContexts } from "./context-usage.js";
 import { readParts } from "./session-files.js";
 
@@ -261,29 +262,29 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
     id: `R-${i + 1}` as typeof run.id,
     assignment_id: a.id,
   }));
-  const record = (id: string, dir: string, timestamp: string) =>
-    write(
-      join(
-        root,
-        "runs",
-        "fixture",
-        id,
-        "claude",
-        "projects",
-        "worktree",
-        `${id}.jsonl`,
-      ),
-      line({
-        type: "user",
-        sessionId: id,
-        cwd: join(dir, "apps/web"),
-        timestamp,
-      }),
-    );
   const [one, ten] = assignments;
   if (!one || !ten) throw new Error("Missing fixture");
-  await record(one.id, one.worktree_path, now);
-  await record(ten.id, ten.worktree_path, "2026-01-01T00:30:00Z");
+  let firstCwd = one.worktree_path;
+  // Scope the stub to this attribution test; reader and no-follow contracts stay real.
+  using capture = vi
+    .spyOn(transcript, "captureTranscript")
+    .mockImplementation(async (_file, args) => {
+      const [dir, session] = args.slice(-2);
+      const first = session === one.id;
+      if (
+        (!first && session !== ten.id) ||
+        dir !== join(root, "runs", "fixture", session)
+      )
+        throw new Error("Unexpected session root");
+      return JSON.stringify({
+        path: `${dir}/claude/projects/worktree/${session}.jsonl`,
+        activity: {
+          session_id: session,
+          cwd: join(first ? firstCwd : ten.worktree_path, "apps/web"),
+          updated_at: first ? now : "2026-01-01T00:30:00Z",
+        },
+      });
+    });
   const inspect = () =>
     readSessionContexts(
       { ...s, assignments, runs },
@@ -300,8 +301,9 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
       activity: { assignment_id: ten.id, session_id: ten.id, run_id: "R-2" },
     },
   ]);
-  await record(one.id, ten.worktree_path, now);
+  firstCwd = ten.worktree_path;
   expect((await inspect())[0]?.activity_status).toBe("unassociated");
+  expect(capture).toHaveBeenCalledTimes(4);
 });
 
 test("regressed record clocks, mismatched session/cwd and old generations fail association", async () => {
