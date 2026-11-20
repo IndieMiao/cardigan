@@ -1,21 +1,11 @@
 import { constants } from "node:fs";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  realpath,
-  unlink,
-} from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { BoundedOutput, outputScanState } from "./bounded-check-output.js";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
-import {
-  checkInfraFlaky,
-  checkTimedOutOnly,
-  TRUNCATED_OUTPUT,
-} from "./merge-check-timeout.js";
+import { pruneCheckLogs, saveCheckLog } from "./check-log-storage.js";
+import { checkInfraFlaky, checkTimedOutOnly } from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 import {
   bindWorkerCheckout,
@@ -27,8 +17,7 @@ import {
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
 export const CHECK_SUMMARY_LIMIT = 12000;
-const MASK = "[REDACTED]",
-  OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
+const MASK = "[REDACTED]";
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 function normalizeOutput(value: string, github = false): string {
@@ -36,12 +25,13 @@ function normalizeOutput(value: string, github = false): string {
     /[\p{Cc}\p{Cf}]/gu,
     (character) => ("\n\r\t".includes(character) ? character : ""),
   );
-  return github
-    ? normalized.replace(
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z /gmu,
-        "",
-      )
-    : normalized;
+  return github ? stripGithubTimestamp(normalized) : normalized;
+}
+function stripGithubTimestamp(line: string) {
+  return line.replace(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z /gmu,
+    "",
+  );
 }
 function redactor(
   env: Readonly<Record<string, string>>,
@@ -52,7 +42,9 @@ function redactor(
     ...new Set(
       Object.values(env)
         .filter(
-          (value) => Buffer.byteLength(value, "utf8") >= MIN_REDACTED_ENV_BYTES,
+          (value) =>
+            /[\r\n]/u.test(value) ||
+            Buffer.byteLength(value, "utf8") >= MIN_REDACTED_ENV_BYTES,
         )
         .flatMap((value) => {
           let uri = value;
@@ -61,6 +53,7 @@ function redactor(
           } catch {}
           return [
             value,
+            ...value.split(/[\r\n]+/u),
             uri,
             JSON.stringify(value).slice(1, -1),
             Buffer.from(value).toString("base64"),
@@ -74,11 +67,6 @@ function redactor(
     ? new RegExp(values.map(escapeRegex).join("|"), "gu")
     : undefined;
   return {
-    // Padding lets a secret crossing either retained edge be redacted before clipping.
-    padding: values.reduce(
-      (size, value) => Math.max(size, Buffer.byteLength(value)),
-      8192,
-    ),
     redact(value: string) {
       let text = normalizeOutput(value, github);
       if (pattern) text = text.replace(pattern, () => MASK);
@@ -88,25 +76,38 @@ function redactor(
           MASK,
         )
         .replace(/-----+(?:BEGIN|END) [A-Z ]*PRIVATE KEY-----+/gu, MASK)
-        .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/giu, `$1${MASK}`)
+        .replace(/(\b(?:bearer|basic)[ \t]+)\S+/giu, `$1${MASK}`)
+        // An unquoted value with spaces has no trustworthy end delimiter.
         .replace(
-          /\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
+          /((?:["'](?:[A-Z_][A-Z0-9_]*|password|secret|token|api_key)["'][ \t]*[:=]|\b[A-Z_][A-Z0-9_]*[ \t]*=|\b[A-Z_][A-Z0-9_]+[ \t]*:)[^\S\n]*)[^\s][^\n]*/gu,
           `$1${MASK}`,
         )
-        .replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/gu, MASK);
+        .replace(
+          /(\b(?:api[_-]?key|token|password|secret)[ \t]*[:=][^\S\n]*)[^\s][^\n]*/giu,
+          `$1${MASK}`,
+        )
+        .replace(/\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/gu, MASK);
+      if (text.includes("://"))
+        text = text.replace(/\S+/gu, (word) =>
+          word.includes("://")
+            ? word.startsWith("##[error]")
+              ? "##[error][URL]"
+              : "[URL]"
+            : word,
+        );
       return redactPaths
         ? text.replace(/(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s]+/gu, "[私有路径]")
         : text;
     },
   };
 }
-function clip(text: string, limit: number, tail = false): string {
+function clip(text: string, limit: number): string {
   const bytes = Buffer.from(text);
   if (bytes.length <= limit) return text;
-  let at = tail ? bytes.length - limit : limit;
+  let at = limit;
   while (at > 0 && at < bytes.length && ((bytes[at] ?? 0) & 0xc0) === 0x80)
-    at += tail ? 1 : -1;
-  return (tail ? bytes.subarray(at) : bytes.subarray(0, at)).toString("utf8");
+    at--;
+  return bytes.subarray(0, at).toString("utf8");
 }
 /** All parts must already be redacted; preserve the existing UTF-8 summary budget. */
 export function boundedCheckSummary(...parts: readonly string[]): string {
@@ -169,48 +170,6 @@ export function safeCheckDiagnostic(
         : line),
     CHECK_SUMMARY_LIMIT,
   );
-}
-class BoundedOutput {
-  private head = Buffer.alloc(0);
-  private tail = Buffer.alloc(0);
-  private bytes = 0;
-  constructor(private readonly filter: ReturnType<typeof redactor>) {}
-  append(text: string) {
-    const chunk = Buffer.from(text),
-      capacity = CHECK_OUTPUT_LIMIT / 2 + this.filter.padding;
-    this.bytes += chunk.length;
-    if (this.head.length < capacity)
-      this.head = Buffer.concat([
-        this.head,
-        chunk.subarray(0, capacity - this.head.length),
-      ]);
-    this.tail = Buffer.from(
-      Buffer.concat([this.tail, chunk]).subarray(-capacity),
-    );
-  }
-  text(): string {
-    if (this.bytes <= CHECK_OUTPUT_LIMIT) {
-      const joined = Buffer.concat([
-        this.head,
-        this.tail.subarray(
-          Math.max(0, this.head.length - (this.bytes - this.tail.length)),
-        ),
-      ]);
-      const text = this.filter.redact(joined.toString("utf8"));
-      if (Buffer.byteLength(text) <= CHECK_OUTPUT_LIMIT) return text;
-      return this.edges(text, text);
-    }
-    return this.edges(
-      this.filter.redact(this.head.toString("utf8")),
-      this.filter.redact(this.tail.toString("utf8")),
-    );
-  }
-  private edges(head: string, tail: string) {
-    const size = Math.floor(
-      (CHECK_OUTPUT_LIMIT - Buffer.byteLength(OMITTED)) / 2,
-    );
-    return clip(head, size) + OMITTED + clip(tail, size, true);
-  }
 }
 async function privateDirectory(path: string, create: boolean) {
   if (create) {
@@ -299,6 +258,39 @@ export async function createMergeCheckLog(input: {
       input.redactPaths,
     ),
     output = new Map<string, BoundedOutput>();
+  // Include individual lines of multiline configured values; the summary parser
+  // intentionally never retains the surrounding raw block. Mask unconfigured
+  // assignment values too (including quoted values containing whitespace).
+  const jobState =
+    input.failureExcerptBytes !== undefined ? outputScanState() : undefined;
+  const fragments = Object.values(input.env ?? {})
+    .flatMap((v) => normalizeOutput(v).split(/[\r\n]+/u))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const fragmentPattern = fragments.length
+    ? new RegExp(fragments.map(escapeRegex).join("|"), "gu")
+    : undefined;
+  const redactLine = (line: string) =>
+    filter
+      .redact(line)
+      .replace(/(\b[A-Za-z_]\w*[ \t]*=[^\S\n]*)[^\s][^\n]*/gu, `$1${MASK}`);
+  const summarizeLine = (safe: string) =>
+    fragmentPattern ? safe.replace(fragmentPattern, MASK) : safe;
+  const stripPrefix = jobState ? stripGithubTimestamp : (line: string) => line;
+  const redactMetadata = (value: string) => {
+    if (!value.includes("\n")) return filter.redact(value);
+    // Execution metadata is not part of a downloaded step stream. Use the
+    // same bounded projector, without inheriting or modifying job state.
+    const buffer = new BoundedOutput(
+      CHECK_OUTPUT_LIMIT,
+      stripPrefix,
+      redactLine,
+      summarizeLine,
+    );
+    buffer.append(value);
+    buffer.seal();
+    return buffer.text();
+  };
   const header = filter.redact(
     `合并检查 ${input.project} / ${input.attempt}\n`,
   );
@@ -323,39 +315,53 @@ export async function createMergeCheckLog(input: {
         ? bindWorkerCheckout(workerContext, context)
         : false;
     },
+    resetOutput(name: string) {
+      if (!finished) {
+        output.delete(name);
+        if (jobState) Object.assign(jobState, outputScanState());
+      }
+    },
     append(name: string, text: string) {
       if (finished) throw new Error("Merge check log is already closed");
       let buffer = output.get(name);
       if (!buffer) {
-        buffer = new BoundedOutput(filter);
+        buffer = new BoundedOutput(
+          CHECK_OUTPUT_LIMIT,
+          stripPrefix,
+          redactLine,
+          summarizeLine,
+          jobState,
+        );
         output.set(name, buffer);
       }
       buffer.append(text);
     },
-    async finish(result: CheckoutResult) {
+    async finish(
+      result: CheckoutResult,
+      bound?: { readonly run_id: number; readonly html_url: string },
+    ) {
       if (finished) throw new Error("Merge check log is already closed");
       finished = true;
       const safe: CheckoutResult = {
         ...result,
         checks: result.checks.map((c) => ({
           ...c,
-          name: filter.redact(c.name),
+          name: redactMetadata(c.name),
         })),
-        cleanup_errors: result.cleanup_errors.map(filter.redact),
-        ...(result.reason ? { reason: filter.redact(result.reason) } : {}),
+        cleanup_errors: result.cleanup_errors.map(redactMetadata),
+        ...(result.reason ? { reason: redactMetadata(result.reason) } : {}),
       };
       const failed = result.checks.find(
         (c) => !["passed", "not_run", "skipped"].includes(c.status),
       );
-      const failures = failed
-        ? (output.get(failed.name)?.text() ?? "")
-            .trimEnd()
-            .split(/\r?\n/u)
-            .slice(-40)
-            .filter((line) => /^\s*(?:FAIL\b|Error\b|×)/u.test(line))
-            .slice(-19)
-        : [];
-      const summary =
+      // A partial download cannot provide redaction boundaries or retry evidence.
+      if (result.logFailure) output.clear();
+      for (const buffer of output.values()) buffer.seal();
+      const failureBuffer = output.get(
+        failed?.name ?? result.failedGithubStep ?? "executor",
+      );
+      const failures = failureBuffer?.failure.lines() ?? [];
+      const baseSummary =
         result.status === "passed"
           ? result.checks.some((c) => c.status === "skipped")
             ? "本次范围内的检查已通过"
@@ -364,8 +370,10 @@ export async function createMergeCheckLog(input: {
               filter.redact(
                 [
                   failed
-                    ? `检查 ${failed.name} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
-                    : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${result.reason ?? result.status}`,
+                    ? `检查 ${redactMetadata(failed.name)} 未通过（${failed.status}，退出码 ${failed.exit_code ?? "无"}）`
+                    : result.failedGithubStep
+                      ? `检查 ${result.failedGithubStep} 未通过`
+                      : `${result.status === "interrupted" ? "合并检查已取消" : "合并检查未通过"}：${safe.reason ?? result.status}`,
                   ...failures,
                 ]
                   .join("\n")
@@ -375,32 +383,52 @@ export async function createMergeCheckLog(input: {
               ),
               CHECK_SUMMARY_LIMIT,
             );
+      // This link is constructed solely from the verified run and numeric job id,
+      // never from log text, a Location header or an exception message.
+      const locator =
+        result.logFailure && result.logSource
+          ? `\n日志获取失败（${result.logFailure}）：${result.logSource.url}${result.logSource.jobId ? `/job/${result.logSource.jobId}` : ""}`
+          : "";
+      const summary =
+        clip(baseSummary, CHECK_SUMMARY_LIMIT - Buffer.byteLength(locator)) +
+        locator;
       const firstFail =
         result.status === "passed" || input.failureExcerptBytes === undefined
           ? undefined
           : namesForExcerpt();
       function namesForExcerpt() {
-        for (const buffer of output.values()) {
-          const text = buffer.text();
+        if (failureBuffer) {
+          const text = failureBuffer.text();
           const match = /(?:^|\n)[^\n]*?\bFAIL\b/u.exec(text);
           if (match?.index !== undefined)
             return clip(
-              text.slice(match.index).trimStart(),
+              summarizeLine(text.slice(match.index).trimStart()),
               input.failureExcerptBytes ?? 4096,
             );
         }
         return undefined;
       }
       // C-116: classified from the full retained output, before it is cleared.
-      const timeout_only =
+      const canClassify =
+        !result.logFailure &&
+        !result.logAttributionIncomplete &&
         !result.manual_attention &&
+        !result.failedGithubStep;
+      const timeout_only =
+        canClassify &&
+        [...output].every(
+          ([name, buffer]) =>
+            !buffer.incomplete ||
+            result.checks.some((c) => c.name === name && c.status === "passed"),
+        ) &&
         checkTimedOutOnly(
           result.status,
           result.checks,
           (name) => output.get(name)?.text() ?? "",
         );
       const infra_flaky =
-        !result.manual_attention &&
+        canClassify &&
+        ![...output.values()].some((b) => b.incomplete) &&
         [...output.keys()].every((name) =>
           result.checks.some((check) => check.name === name),
         ) &&
@@ -417,50 +445,65 @@ export async function createMergeCheckLog(input: {
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];
-      const contents =
-        header +
-        names
-          .map(
-            (name) =>
-              `\n=== ${filter.redact(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
-          )
-          .join("") +
-        `\n${summary}\n` +
-        (safe.cleanup_errors.length
-          ? `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`
-          : "");
-      output.clear();
-      const handle = await open(
+      const writeError = await saveCheckLog(
         path,
-        constants.O_WRONLY | constants.O_NOFOLLOW,
+        () => privateDirectory(directory, false),
+        async (handle) => {
+          await handle.writeFile(
+            header + (result.status === "passed" ? "" : `\n${summary}\n`),
+          );
+          for (const name of names) {
+            await handle.writeFile(
+              `\n=== ${redactMetadata(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
+            );
+          }
+          if (result.status === "passed")
+            await handle.writeFile(`\n${summary}\n`);
+          if (safe.cleanup_errors.length)
+            await handle.writeFile(
+              `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`,
+            );
+        },
       );
-      try {
-        const entry = await handle.stat();
+      output.clear();
+      let note = "";
+      if (writeError) {
+        // Only a known body I/O failure *after* binding/step validation may
+        // degrade diagnostics instead of failing the check. Never accept a URL from output.
+        const url = bound?.html_url;
+        const match =
+          url &&
+          /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/([1-9]\d*)$/u.exec(
+            url,
+          );
         if (
-          !entry.isFile() ||
-          entry.uid !== process.getuid?.() ||
-          entry.nlink !== 1 ||
-          (entry.mode & 0o777) !== 0o600
+          !bound ||
+          !match ||
+          Number(match[1]) !== bound.run_id ||
+          (result.logSource && result.logSource.url !== url) ||
+          result.checks.map((c) => c.name).join(",") !==
+            "install,build,test,lint,deps,e2e"
         )
-          throw new Error("Unsafe merge check log file");
-        await handle.truncate(0);
-        await handle.writeFile(contents);
-        await handle.sync();
-      } finally {
-        await handle.close();
+          throw new Error(`检查日志写入失败 [${writeError}]`);
+        note = `本地日志保存失败（${writeError}，已尝试三次），可从远端重试读取；${result.logFailure ? `日志获取失败（${result.logFailure}）；` : ""}检查结论不变：${url}${result.logSource?.jobId ? `/job/${result.logSource.jobId}` : ""}`;
+      } else {
+        try {
+          await pruneCheckLogs(directory);
+        } catch {
+          note = "旧日志清理未完成，本次日志已保存";
+        }
       }
-      const logs = [];
-      for (const name of await readdir(directory)) {
-        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.log$/u.test(name)) continue;
-        const info = await lstat(join(directory, name));
-        if (info.isFile() && info.uid === process.getuid?.())
-          logs.push({ name, time: info.mtimeMs });
-      }
-      logs.sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
-      for (const old of logs.slice(50)) await unlink(join(directory, old.name));
       return {
         ...safe,
-        summary,
+        summary: note
+          ? clip(
+              baseSummary,
+              CHECK_SUMMARY_LIMIT - Buffer.byteLength(note + locator) - 2,
+            ) +
+            "\n" +
+            note +
+            (writeError ? "" : locator)
+          : summary,
         log_ref,
         timeout_only,
         infra_flaky,
