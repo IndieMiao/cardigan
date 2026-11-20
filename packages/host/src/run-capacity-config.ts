@@ -17,10 +17,16 @@ import {
   type ReadProjectQuota,
 } from "./project-quotas.js";
 
+import {
+  type MachinePolicy,
+  parseResourcePolicies,
+} from "./resource-policy.js";
 export interface RunCapacityConfiguration {
   readonly errors: readonly string[];
   forMachine(machine: string): number;
   resourcesForMachine(machine: string): ReadonlyMap<string, number>;
+  policies(machine: string): MachinePolicy | undefined;
+  preferred(machine: string): string | undefined;
   readonly projectQuota: ReadProjectQuota;
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
@@ -49,6 +55,8 @@ export async function loadRunCapacityConfig(
   const resources = new Map<string, ReadonlyMap<string, number>>();
   const projects = new Map<string, ReadonlyMap<string, ProjectQuota>>();
   const unlimited: ReadonlyMap<string, number> = new Map();
+  const policies = new Map<string, MachinePolicy>(),
+    preferred = new Map<string, string>();
   const names = new Map<string, string>();
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
@@ -64,6 +72,9 @@ export async function loadRunCapacityConfig(
       errors.length ? 0 : (limits.get(machine) ?? DEFAULT_RUN_LIMIT),
     resourcesForMachine: (machine) =>
       errors.length ? unlimited : (resources.get(machine) ?? unlimited),
+    policies: (machine) => (errors.length ? undefined : policies.get(machine)),
+    preferred: (machine) =>
+      errors.length ? undefined : preferred.get(machine),
     projectQuota: (machine, project) =>
       errors.length ? undefined : projects.get(machine)?.get(project),
     maxForMachine: (machine) =>
@@ -155,6 +166,8 @@ export async function loadRunCapacityConfig(
               "display_name",
               "resources",
               "projects",
+              "resource_policies",
+              "preferred_project",
             ].includes(key),
         )
       )
@@ -194,6 +207,22 @@ export async function loadRunCapacityConfig(
           slots.set(key, value);
         }
         resources.set(machine, slots);
+      }
+      if (settings.resource_policies !== undefined)
+        policies.set(
+          machine,
+          parseResourcePolicies(
+            settings.resource_policies,
+            resources.get(machine) ?? unlimited,
+          ),
+        );
+      if (settings.preferred_project !== undefined) {
+        if (
+          typeof settings.preferred_project !== "string" ||
+          !settings.preferred_project.trim()
+        )
+          throw new Error("Invalid preferred project");
+        preferred.set(machine, settings.preferred_project);
       }
       if (settings.projects !== undefined)
         projects.set(

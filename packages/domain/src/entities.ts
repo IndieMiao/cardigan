@@ -69,6 +69,7 @@ export const toolNames = [
   "update_card",
   "set_merge_solo",
   "set_merge_window",
+  "reserve_machine_resource",
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",

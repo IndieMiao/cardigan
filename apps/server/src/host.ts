@@ -3,13 +3,7 @@ import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type {
-  Assignment,
-  Clock,
-  DispatchRunParams,
-  ProjectId,
-  Run,
-} from "@cardigan/domain";
+import type { Assignment, Clock, ProjectId } from "@cardigan/domain";
 import {
   agentCliVersion,
   harnessBinary,
@@ -65,14 +59,7 @@ export interface HostWiring {
     assignment: Assignment,
     project: ProjectId,
   ) => Promise<LaunchSnapshot>;
-  readonly startRun: (input: {
-    project: string;
-    assignment: Assignment;
-    run: Run;
-    bell: string;
-    snapshot?: LaunchSnapshot;
-    replacement?: DispatchRunParams["replacement"];
-  }) => Promise<void>;
+  readonly startRun: DispatcherOptions["startRun"];
   readonly standing: ReturnType<typeof standingResolver>;
 }
 
@@ -322,6 +309,10 @@ export async function createHostWiring(options: {
           assignment: input.assignment,
           run: input.run,
           bell: input.bell,
+          ...(input.resourceAccess
+            ? { resourceAccess: input.resourceAccess }
+            : {}),
+          ...(input.resourceGate ? { resourceGate: input.resourceGate } : {}),
           ...(input.replacement ? { replacement: input.replacement } : {}),
         },
       ),

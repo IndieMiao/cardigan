@@ -1226,3 +1226,35 @@ describe.each([
     ).not.toThrow();
   });
 });
+
+test("C-497 role and environment expose only this admission; no assigned device never selects user USB", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },
+    role: roleFor("codex", "codex-agent", "coder"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "test",
+    secrets,
+  };
+  const bound = compileAssignmentLaunch({
+    ...input,
+    resource_bindings: [
+      { key: "fixture", generation: "g1", port: 17071, device: "synthetic-1" },
+    ],
+  });
+  expect(bound.env.ADB_SERVER_SOCKET).toBe("tcp:localhost:17071");
+  expect(bound.env.ANDROID_SERIAL).toBe("synthetic-1");
+  expect(bound.env.CARDIGAN_RESOURCE_BINDINGS).toContain("g1");
+  expect(surface(bound)).toContain("禁止裸 adb");
+  const unassigned = compileAssignmentLaunch({
+    ...input,
+    resource_bindings: [],
+  });
+  expect(unassigned.env.ANDROID_SERIAL).toBe("cardigan-unassigned");
+  expect(unassigned.env.ADB_SERVER_SOCKET).not.toContain("5037");
+  expect(
+    compileAssignmentLaunch(input).env.CARDIGAN_RESOURCE_BINDINGS,
+  ).toBeUndefined();
+});

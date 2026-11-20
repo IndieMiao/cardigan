@@ -114,6 +114,12 @@ export interface CompileAssignmentInput {
   /** CPU niceness increment for the Agent and its children; defaults to 10. */
   readonly agent_nice?: number;
   /** Host policy for local employee sessions, never a project setting. */
+  readonly resource_bindings?: readonly {
+    key: string;
+    generation: string;
+    port?: number;
+    device?: string;
+  }[];
   readonly test_max_workers?: number;
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;

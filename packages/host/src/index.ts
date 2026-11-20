@@ -212,6 +212,12 @@ export {
   hostRepositoryLock,
   repositoryLockPath,
 } from "./repository-lock.js";
+export {
+  MachineLeases,
+  type ResourceAccess,
+  type ResourceAdmission,
+} from "./resource-leases.js";
+export { targetProbe } from "./resource-probe.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   effectiveRunLimit,

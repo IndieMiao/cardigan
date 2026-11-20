@@ -224,9 +224,16 @@ export function hasEarlierCapacityWait(
   resources: MachineResources,
   now: string,
   eligible?: (project: string, owner: Assignment) => boolean,
+  preferredProject?: string,
 ): boolean {
   return queue.some((entry) => {
-    if (entry.machine_id !== machine || compareDispatchOrder(entry, order) >= 0)
+    const priority =
+      Number(order.project_id === preferredProject) -
+      Number(entry.project_id === preferredProject);
+    if (
+      entry.machine_id !== machine ||
+      (priority || compareDispatchOrder(entry, order)) >= 0
+    )
       return false;
     const owner = tx.assignments
       .list(entry.project_id)

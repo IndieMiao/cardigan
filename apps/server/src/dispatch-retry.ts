@@ -36,6 +36,7 @@ import {
   crossRepairSendBoundary,
   deferIfTargetWait,
   failAutomaticContextRun,
+  type MachineLeases,
   refreshTargetWait,
   testReviewRunPrompt,
   tryHostOpsLock,
@@ -282,6 +283,7 @@ export function dispatchRecovery(
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
 export async function retryDispatchedRuns(
   options: {
+    leases?: MachineLeases;
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
@@ -630,7 +632,17 @@ export async function retryDispatchedRuns(
         );
       continue;
     }
-    if (!observed.retry || !observed.a.runtime_ref) continue;
+    if (
+      !observed.retry ||
+      !observed.a.runtime_ref ||
+      options.leases?.startBlocked(
+        project,
+        observed.a,
+        observed.run,
+        clock.now(),
+      )
+    )
+      continue;
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
     const status = await runtime.status(observed.a.runtime_ref);
@@ -751,6 +763,15 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
+              if (
+                options.leases?.startBlocked(
+                  project,
+                  job.a,
+                  job.run,
+                  clock.now(),
+                )
+              )
+                return false;
               if (job.attempt.review_wake)
                 return (
                   !options.closing?.() &&
