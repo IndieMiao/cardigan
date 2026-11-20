@@ -1,4 +1,5 @@
 import { arch, platform } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   Assignment,
   Machine,
@@ -22,11 +23,17 @@ import {
   runtimeDifferences,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
-import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  type ReadRepositories,
+  readMachineObservations,
+  type Store,
+} from "@cardigan/store";
 import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
+import { MachineCheckJournal } from "./machine-check-journal.js";
+import { targetProbe } from "./resource-probe.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   loadRuntimeWorkers,
@@ -299,6 +306,40 @@ export class RuntimeTargets implements Runtime {
       return rejected("target_changed");
     return current;
   }
+  // A reused terminal runs this inside its hc send slot. Revalidate the
+  // pinned SSH target directly; forLaunch's hc health call would requeue on
+  // that same slot. Admission and terminal liveness keep their normal checks.
+  readonly publicationResourceProbe = targetProbe(
+    async (project, machine_id, pin) => {
+      const assignment = { machine_id, runtime_ref: null };
+      const target = this.launchTarget(project, assignment);
+      if (!pin || target.execution.target?.fingerprint !== pin)
+        return rejected("target_changed");
+      if (machine_id !== "local") {
+        const blockers = await this.workerBlockers(target);
+        if (blockers.length) return rejected(blockers[0]);
+      }
+      return this.checkedTarget(target, project, assignment).execution;
+    },
+  );
+  private async workerBlockers(target: Target): Promise<readonly string[]> {
+    const { execution } = target;
+    if (execution.mode !== "agent-ssh") return rejected();
+    const blockers = await (this.options.workerReadiness ?? workerReadiness)(
+      execution,
+    );
+    if (blockers.length) return blockers;
+    try {
+      await (this.options.workerMcpReachability ?? checkWorkerMcpReachability)(
+        execution,
+      );
+      return [];
+    } catch (error) {
+      return [
+        error instanceof WorkerMcpError ? error.code : "mcp_worker_failed",
+      ];
+    }
+  }
   private launchAllowed(project: ProjectId, machine: string): boolean {
     return (
       machine === "local" ||
@@ -435,26 +476,8 @@ export class RuntimeTargets implements Runtime {
           (target.machine.os !== platform() || target.machine.arch !== arch())
         )
           blockers = ["machine_platform_mismatch"];
-        if (machine_id !== "local") {
-          if (target.execution.mode !== "agent-ssh")
-            return failure<MachineCheck>();
-          blockers = await (this.options.workerReadiness ?? workerReadiness)(
-            target.execution,
-          );
-          if (!blockers.length) {
-            try {
-              await (
-                this.options.workerMcpReachability ?? checkWorkerMcpReachability
-              )(target.execution);
-            } catch (error) {
-              blockers = [
-                error instanceof WorkerMcpError
-                  ? error.code
-                  : "mcp_worker_failed",
-              ];
-            }
-          }
-        }
+        if (machine_id !== "local")
+          blockers = await this.workerBlockers(target);
         const current = this.resolve(project, machine_id);
         if (
           target.execution.target?.fingerprint !==
@@ -480,23 +503,20 @@ export class RuntimeTargets implements Runtime {
     machine: string,
     overrides: Pick<
       MachineObservationOptions,
-      "catalog" | "probe" | "now" | "signal"
+      "catalog" | "probe" | "now" | "signal" | "progress"
     > = {},
   ) {
-    return refreshMachineObservations({
-      store: this.options.store,
-      project,
-      machine,
-      ...(this.options.env ? { env: this.options.env } : {}),
-      target: () => this.resolve(project, machine),
-      check: async () => {
-        const checked = await this.check(project, machine);
-        return checked.ok
-          ? checked.value
-          : { blockers: [checked.error.code], launch_enabled: false };
+    return checkRegisteredMachine(
+      {
+        store: this.options.store,
+        project,
+        machine,
+        ...(this.options.env ? { env: this.options.env } : {}),
+        ...overrides,
       },
-      ...overrides,
-    });
+      () => this,
+      "patrol",
+    );
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
     return this.targetForRef(ref, project).execution;
@@ -788,5 +808,83 @@ export class RuntimeTargets implements Runtime {
       },
       (runtime) => runtime.captureAgent(command, args, timeout),
     );
+  }
+}
+
+/** Construct the target inside the observation fence: invalid private configuration must
+ * revoke stale health/capabilities just like a failed probe. Used by CLI, Web and patrol. */
+export function observeRegisteredMachine(
+  options: Omit<MachineObservationOptions, "target" | "check">,
+  create: () => Promise<RuntimeTargets> | RuntimeTargets,
+) {
+  const { project, machine } = options;
+  let runtime: RuntimeTargets | undefined;
+  const ready = async () => (runtime ??= await create());
+  return refreshMachineObservations({
+    ...options,
+    target: async () => (await ready()).resolve(project, machine),
+    check: async () => {
+      const checked = await (await ready()).check(project, machine);
+      return checked.ok
+        ? checked.value
+        : { blockers: [checked.error.code], launch_enabled: false };
+    },
+  });
+}
+export async function checkRegisteredMachine(
+  options: Parameters<typeof observeRegisteredMachine>[0],
+  create: Parameters<typeof observeRegisteredMachine>[1],
+  source: "cli" | "patrol" = "cli",
+) {
+  const journal = new MachineCheckJournal(options.store);
+  for (;;) {
+    options.signal?.throwIfAborted();
+    const { job, joined } = journal.claim(
+      options.project,
+      options.machine,
+      "machine",
+      source,
+    );
+    if (!joined)
+      return journal.execute(
+        job,
+        (progress) => {
+          progress("runtime");
+          return observeRegisteredMachine(
+            {
+              ...options,
+              observationId: job.id,
+              progress: (step) => {
+                progress(step);
+                options.progress?.(step);
+              },
+            },
+            create,
+          );
+        },
+        (r) => ({
+          status: r.health?.available ? "passed" : "failed",
+          failed_steps: r.health?.blockers ?? ["observation"],
+        }),
+      );
+    // No CLI/patrol caller may use a different project's observations. Wait for
+    // the slot; only reuse evidence when this binding's machine check finished.
+    while (journal.read(options.machine, job.id)?.status === "running") {
+      await delay(100, undefined, { signal: options.signal });
+    }
+    if (job.kind === "machine" && job.project_id === options.project) {
+      const observations = readMachineObservations(
+        options.store,
+        options.project,
+        options.machine,
+        options.now?.(),
+      );
+      // Another check may already have superseded the one we joined.
+      if (
+        observations.health?.evidence_ref === `machine-observation:${job.id}` &&
+        observations.health.status !== "checking"
+      )
+        return observations;
+    }
   }
 }

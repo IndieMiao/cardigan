@@ -1676,3 +1676,52 @@ test("human-confirmed remote worker release asks PM to choose the next machine w
       .notifications,
   ).toEqual([]);
 });
+
+test("an author precheck wait routes only its settlement, not an early or duplicate result bell", () => {
+  const system = { actor: { kind: "system" as const, project_id } };
+  const target = {
+    work_item_id: "W-1",
+    assignment_id: "A-1",
+    attempt_id: "check",
+  };
+  const check = event(
+    "precheck_finished",
+    { ...target, status: "passed" },
+    system,
+  );
+  const waiting = snapshot({
+    work_items: [
+      workItem("W-1", {
+        assignment_id: "A-1",
+        status: "blocked",
+        reported_blocker: {
+          reported_by: "assignment:A-1",
+          needs: "role",
+          resume_when: { kind: "precheck_finished", target_id: "check" },
+        },
+      }),
+    ],
+  });
+  expect(recipients(routeEvent({ event: check, snapshot: waiting }))).toEqual(
+    [],
+  );
+  for (const type of [
+    "work_item_resume_requested",
+    "precheck_wait_escalated",
+  ]) {
+    const settlement = event(
+      type,
+      { ...target, evidence: check.id, role_version: 1 },
+      system,
+    );
+    const state = snapshot({ events: [check, settlement] });
+    expect(recipients(routeEvent({ event: check, snapshot: state }))).toEqual(
+      [],
+    );
+    expect(
+      recipients(routeEvent({ event: settlement, snapshot: state })),
+    ).toEqual([
+      type === "work_item_resume_requested" ? "assignment:A-1" : "pm_ops",
+    ]);
+  }
+});

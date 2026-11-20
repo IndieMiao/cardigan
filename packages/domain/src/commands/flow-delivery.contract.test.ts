@@ -402,3 +402,140 @@ test("recheck composition observes the same delivery gate in both phases", async
     true,
   );
 });
+
+test.each([
+  "matching",
+  "different head",
+  "different attempt",
+  "different owner",
+  "different item",
+  "failed",
+  "unrelated blocker",
+  "hold",
+  "blocking decision",
+])(
+  "direct delivery from blocked rechecks the precise author wait and other gates: %s",
+  async (scenario) => {
+    const io = ports();
+    const check = {
+      card_id: id("card", 1),
+      work_item_id: params.work_item_id,
+      assignment_id: id("assignment", 1),
+      attempt_id: "waiting",
+      status: "passed",
+      head_sha: subject.value,
+    };
+    const result = passed({ payload: check });
+    let s = state([result]);
+    const receipt = value(
+      await prepareDelivery(s, actor(), params, verification()),
+    );
+    s = {
+      ...s,
+      // A previous pass for the same SHA meets the normal gate, but cannot clear this blocker.
+      events: [
+        passed(),
+        {
+          ...result,
+          payload: {
+            ...check,
+            ...(scenario === "different head"
+              ? { head_sha: "b".repeat(40) }
+              : {}),
+            ...(scenario === "different attempt"
+              ? { attempt_id: "other" }
+              : {}),
+            ...(scenario === "different owner"
+              ? { assignment_id: id("assignment", 4) }
+              : {}),
+            ...(scenario === "different item"
+              ? { work_item_id: id("work_item", 3) }
+              : {}),
+            ...(scenario === "failed" ? { status: "failed" } : {}),
+          },
+        },
+      ],
+      cards: s.cards.map((c) =>
+        scenario === "hold"
+          ? {
+              ...c,
+              hold: {
+                reason: "Paused",
+                resume_condition: "PM resumes",
+                set_by: "human",
+                set_at: now,
+              },
+            }
+          : c,
+      ),
+      work_items: s.work_items.map((w) =>
+        w.id === params.work_item_id
+          ? {
+              ...w,
+              status: "blocked",
+              reported_blocker: {
+                needs: "role",
+                reason: "Wait",
+                reported_by: `assignment:${check.assignment_id}`,
+                reported_at: now,
+                auto_resume_disabled: true,
+                ...(scenario === "unrelated blocker"
+                  ? {}
+                  : {
+                      resume_when: {
+                        kind: "precheck_finished",
+                        target_id: check.attempt_id,
+                      },
+                    }),
+              },
+            }
+          : w,
+      ),
+      decisions:
+        scenario !== "blocking decision"
+          ? []
+          : [
+              {
+                id: id("decision", 1),
+                key: id("decision", 1),
+                doc_refs: [],
+                kind: "choose",
+                question: "Wait",
+                context: "Wait",
+                options: [],
+                recommended: "",
+                affected_cards: [],
+                affected_work_items: [params.work_item_id],
+                blocking: true,
+                decider: "human",
+                status: "open",
+                raised_by: "human",
+              },
+            ],
+    };
+    const submitted = submitDelivery(s, actor(), params, receipt, io);
+    if (scenario !== "matching") {
+      expect(submitted.ok).toBe(false);
+      return;
+    }
+    const effect = value(submitted);
+    expect(effect.events).toContainEqual(
+      expect.objectContaining({
+        type: "precheck_wait_delivered",
+        payload: expect.objectContaining({
+          attempt_id: "waiting",
+          evidence: result.id,
+        }),
+      }),
+    );
+    expect(
+      effect.events.some((e) => e.type === "work_item_resume_requested"),
+    ).toBe(false);
+    expect(effect.data.status).toBe("submitted");
+    const item = apply(s, effect).work_items.find(
+      (w) => w.id === params.work_item_id,
+    );
+    expect(item?.reported_blocker).toBeUndefined();
+    expect(item?.status).toBe("delivered");
+  },
+);
