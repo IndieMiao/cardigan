@@ -1143,7 +1143,11 @@ function serveRoleRead(
     listRoleVersions(tx, project_id),
   );
   if (rest === "/roles") {
-    sendJson(context.res, 200, roleList(project_id, versions));
+    sendJson(
+      context.res,
+      200,
+      roleList(project_id, versions, context.roleLaunchConfig?.()),
+    );
     return;
   }
   const match = /^\/roles\/([^/]+)(\/history)?$/u.exec(rest);
