@@ -34,9 +34,16 @@ vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
-    refreshMachineObservations: (
-      options: Parameters<typeof host.refreshMachineObservations>[0],
-    ) => host.refreshMachineObservations({ ...options, catalog: () => [] }),
+    checkRegisteredMachine: (
+      ...[options, create, source]: Parameters<
+        typeof host.checkRegisteredMachine
+      >
+    ) =>
+      host.checkRegisteredMachine(
+        { ...options, catalog: () => [] },
+        create,
+        source,
+      ),
   };
 });
 
