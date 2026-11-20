@@ -383,6 +383,7 @@
     line-height: var(--ui-leading-xs);
   }
   .markdown {
+    max-width: none;
     max-block-size: 50vh;
     overflow: auto;
     padding: var(--ui-space-2) var(--ui-space-3);
@@ -392,12 +393,6 @@
     overflow-wrap: anywhere;
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
-  }
-  .markdown > :first-child {
-    margin-block-start: 0;
-  }
-  .markdown > :last-child {
-    margin-block-end: 0;
   }
   .diff[data-op="add"] {
     color: var(--status-done);

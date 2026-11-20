@@ -54,9 +54,12 @@ const ACTION_LABELS = {
 export function RoleDiffView({
   title,
   diffs,
+  created = false,
 }: {
   title: string;
   diffs: readonly RoleFieldDiff[];
+  /** A new role has no "before": show each value as it will be saved. */
+  created?: boolean;
 }) {
   if (diffs.length === 0) return <p>{title}：内容相同（只改了状态）</p>;
   return (
@@ -67,7 +70,8 @@ export function RoleDiffView({
           key={diff.field}
           label={ROLE_FIELD_LABELS[diff.field] ?? diff.field}
         >
-          {diff.type === "value" && `${diff.before} → ${diff.after}`}
+          {diff.type === "value" &&
+            (created ? diff.after : `${diff.before} → ${diff.after}`)}
           {diff.type === "list" && (
             <>
               {diff.added.length > 0 && (
@@ -161,16 +165,16 @@ export function RoleDocumentPreviewView({
           <SettingsFact label="角色">
             {role.role.display_name}（<code>{role.role.role_id}</code>）·{" "}
             {ACTION_LABELS[role.action]}
-            {role.action !== "unchanged" && ` · v${role.role.version}`}
           </SettingsFact>
         </SettingsFacts>
         {role.action !== "unchanged" && (
           <RoleDiffView
             title={
               role.action === "create"
-                ? `新建 v${role.role.version}`
+                ? `v${role.role.version}`
                 : `v${role.role.version - 1} → v${role.role.version}`
             }
+            created={role.action === "create"}
             diffs={roleDiff(previousRole(role), role.role)}
           />
         )}
