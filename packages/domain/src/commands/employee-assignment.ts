@@ -46,9 +46,9 @@ export function noProjectEmployee(roleId: string) {
   return `本项目没有可用员工（角色 ${roleId}）`;
 }
 
-// A roster with no project memberships at all predates project-scoped staffing.
+// Old snapshots omitted projects; an explicit [] is a current all-project employee.
 function hasScopedRoster(employees: readonly Employee[]) {
-  return employees.some((e) => e.projects?.length);
+  return employees.some((e) => e.projects !== undefined);
 }
 
 function allowLegacyUnnamed(employees: readonly Employee[], roleId: string) {

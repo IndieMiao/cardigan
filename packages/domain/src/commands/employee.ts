@@ -24,7 +24,13 @@ export interface CreateEmployeeInput {
 export type UpdateEmployeeInput = Partial<
   Pick<
     Employee,
-    "name" | "title" | "role_id" | "bio" | "avatar" | "launch_profile_ref" | "projects"
+    | "name"
+    | "title"
+    | "role_id"
+    | "bio"
+    | "avatar"
+    | "launch_profile_ref"
+    | "projects"
   >
 >;
 

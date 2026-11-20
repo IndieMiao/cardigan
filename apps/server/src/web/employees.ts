@@ -226,7 +226,11 @@ export async function serveEmployees(
       .refine((patch) => Object.keys(patch).length > 0)
       .safeParse(body);
     if (!parsed.success)
-      throw new HttpRejection(400, "validation_failed", "请指定角色、所属项目或启动配置");
+      throw new HttpRejection(
+        400,
+        "validation_failed",
+        "请指定角色、所属项目或启动配置",
+      );
     const { role_id, launch_profile_ref, projects } = parsed.data;
     const result = execute((tx, ownerId) => {
       const effect = must(

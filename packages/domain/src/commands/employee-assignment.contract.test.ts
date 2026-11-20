@@ -7,6 +7,7 @@ import {
   type Employee,
   projectSnapshot,
   queueRun,
+  selectStandingEmployee,
   submitReview,
 } from "../index.js";
 import {
@@ -432,4 +433,31 @@ test("work-item ownership is selected within the project; editing membership nev
       }),
     ).data.employee_id,
   ).toBe(member.id);
+});
+
+test("an explicit empty project list is current all-project staffing, not an unnamed fallback", () => {
+  const base = state();
+  const pm = employee(1, { projects: [] });
+  const other = employee(2, { projects: ["other"], role_id: "coder" });
+  for (const employees of [[pm], [pm, other]]) {
+    expect(
+      value(selectStandingEmployee(employees, base.project_id, "pm"))?.id,
+    ).toBe(pm.id);
+    expect(value(assignItem({ ...base, employees })).data.employee_id).toBe(
+      pm.id,
+    );
+  }
+  const employees = [employee(3, { role_id: "coder", projects: [] })];
+  for (const result of [
+    selectStandingEmployee(employees, base.project_id, "pm"),
+    assignItem({ ...base, employees }),
+  ])
+    expect(result).toMatchObject({
+      ok: false,
+      error: { message: "本项目没有可用员工（角色 pm）" },
+    });
+  // An old PM snapshot without the projects field still supports legacy bootstrap.
+  expect(
+    value(selectStandingEmployee([employee(1)], base.project_id, "pm")),
+  ).toBeUndefined();
 });

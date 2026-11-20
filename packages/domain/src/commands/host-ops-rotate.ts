@@ -15,7 +15,7 @@ import {
 } from "./core.js";
 import { selectStandingEmployee } from "./employee-assignment.js";
 
-function target(d: CommandDraft) {
+function target(d: CommandDraft, reference?: string) {
   ensure(
     d.actor.kind === "human",
     "unauthorized",
@@ -49,16 +49,22 @@ function target(d: CommandDraft) {
     "host_ops 最新版本低于在岗版本",
   );
   const employeeId =
-    latest.role_version === previous.role_version
+    latest.role_version === previous.role_version && reference === undefined
       ? previous.employee_id
       : unwrap(
           selectStandingEmployee(
             d.state.employees ?? [],
             d.state.project_id,
             "host_ops",
-            previous.employee_id,
+            reference ?? previous.employee_id,
           ),
         )?.id;
+  ensure(
+    latest.role_version !== previous.role_version ||
+      employeeId === previous.employee_id,
+    "invariant_violation",
+    "Assignment 的员工创建后不能修改",
+  );
   ensure(
     !pendingHostOpsActions(d.state.events).some(
       (a) => a.assignment_id === previous.id,
@@ -81,9 +87,13 @@ function target(d: CommandDraft) {
 }
 
 /** Read-only preflight; failed exit confirmation must leave the old identity on duty. */
-export function prepareHostOpsRotation(state: CommandState, actor: Actor) {
+export function prepareHostOpsRotation(
+  state: CommandState,
+  actor: Actor,
+  reference?: string,
+) {
   return command(state, actor, "rotate_host_ops_assignment", undefined, (d) => {
-    const { previous, latest } = target(d);
+    const { previous, latest, employeeId } = target(d, reference);
     ensure(
       previous.status === "active",
       "illegal_transition",
@@ -91,6 +101,7 @@ export function prepareHostOpsRotation(state: CommandState, actor: Actor) {
     );
     return {
       previous: previous as Assignment,
+      employee_id: employeeId,
       to_version: latest.role_version,
       unchanged: previous.role_version === latest.role_version,
     };
@@ -104,11 +115,12 @@ export function finishHostOpsRotation(
   p: {
     readonly previous_assignment_id: AssignmentId;
     readonly to_version: number;
+    readonly employee_id?: string;
   },
   ports: CommandPorts,
 ): Result<CommandEffect<{ previous: Assignment; assignment: Assignment }>> {
   return command(state, actor, "rotate_host_ops_assignment", ports, (d) => {
-    const { previous, latest, employeeId } = target(d);
+    const { previous, latest, employeeId } = target(d, p.employee_id);
     ensure(
       previous.id === p.previous_assignment_id && previous.status === "active",
       "stale_target",

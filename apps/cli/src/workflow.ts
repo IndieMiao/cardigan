@@ -108,7 +108,7 @@ const USAGE = [
   "  cardigan pm create --office|--ops [--employee <E-n 或名字>] [--project <p>]",
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
-  "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
+  "  cardigan host-ops rotate [--project <p>] [--employee <编号或名字>]  切换到最新角色版本并启动，默认保留原员工",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -1226,7 +1226,13 @@ async function hostOpsCommand(
   const allowed =
     sub === "create"
       ? ["project", "data-dir", "employee"]
-      : ["project", "data-dir", "mcp-url", "hc-session"];
+      : [
+          "project",
+          "data-dir",
+          "mcp-url",
+          "hc-session",
+          ...(sub === "rotate" ? ["employee"] : []),
+        ];
   if (
     !["create", "start", "rotate"].includes(sub ?? "") ||
     parsed.positionals.length ||
@@ -1270,8 +1276,10 @@ async function hostOpsCommand(
       );
       return EXIT.ok;
     }
-    if (sub === "rotate")
+    if (sub === "rotate") {
+      const employee = optional(parsed.flags, "employee");
       await rotateHostOps({
+        ...(employee === undefined ? {} : { employee }),
         store,
         io,
         project_id,
@@ -1280,6 +1288,7 @@ async function hostOpsCommand(
           ? { session: optional(parsed.flags, "hc-session") as string }
           : {}),
       });
+    }
     const candidates = store.uow.read((tx) =>
       tx.assignments
         .list(project_id)
