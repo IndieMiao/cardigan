@@ -1,7 +1,9 @@
 import type { Actor, Event, HumanAction } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import type { AssignmentId, CardId, RunId } from "../ids.js";
-import type { CommandPorts, CommandState } from "./core.js";
-import { command, ensure } from "./core.js";
+import { transition } from "../transitions.js";
+import type { CommandDraft, CommandPorts, CommandState } from "./core.js";
+import { command, ensure, unwrap } from "./core.js";
 
 export type DeploymentControl =
   | {
@@ -193,14 +195,16 @@ export function recordDeploymentStop(
   );
 }
 
+interface DeploymentActionInput {
+  readonly key: string;
+  readonly instructions: string;
+  readonly reason?: "evidence_wait";
+}
+
 export function requestDeploymentAction(
   state: CommandState,
   actor: Actor,
-  input: {
-    readonly key: string;
-    readonly instructions: string;
-    readonly reason?: "evidence_wait";
-  },
+  input: DeploymentActionInput,
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_deployment", ports, (d) => {
@@ -219,30 +223,127 @@ export function requestDeploymentAction(
             (prior.payload as { human_action_id?: string }).human_action_id,
         );
     if (existing) return existing;
-    const id = d.ids.next(d.state.project_id, "human_action");
-    const action: HumanAction = {
-      id,
-      key: id,
-      requested_by: "system",
-      status: "open",
-      triage: input.reason === "evidence_wait" ? "pm_ops" : "human",
-      instructions: input.instructions,
-      why_human:
-        input.reason === "evidence_wait"
-          ? "中心 main 持续缺少合并门禁证据，请后台分拣核对"
-          : "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
-      expected_return: "记录核对及处理结果后标记完成",
-      blocked_work_items: [],
-    };
-    d.put("human_actions", action);
-    d.emit("host_deployment_action_requested", undefined, {
-      key: input.key,
-      human_action_id: id,
+    return createDeploymentAction(d, input);
+  });
+}
+
+function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
+  const id = d.ids.next(d.state.project_id, "human_action");
+  const action: HumanAction = {
+    id,
+    key: id,
+    requested_by: "system",
+    status: "open",
+    triage: input.reason === "evidence_wait" ? "pm_ops" : "human",
+    instructions: input.instructions,
+    why_human:
+      input.reason === "evidence_wait"
+        ? "中心 main 持续缺少合并门禁证据，请后台分拣核对"
+        : "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
+    expected_return: "记录核对及处理结果后标记完成",
+    blocked_work_items: [],
+  };
+  d.put("human_actions", action);
+  d.emit("host_deployment_action_requested", undefined, {
+    key: input.key,
+    human_action_id: id,
+  });
+  d.emit("human_action_requested", undefined, {
+    human_action_id: id,
+    blocked_work_items: [],
+  });
+  return action;
+}
+
+/** Only the watch process supplies a verified tree comparison. A notice is never deployment authority. */
+export function reconcileSupervisorNotice(
+  state: CommandState,
+  actor: Actor,
+  input: { supervisor: string; main: string; affected: readonly string[] },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    const { supervisor, main, affected } = input;
+    ensure(
+      [supervisor, main].every((sha) => /^[a-f0-9]{40}$/u.test(sha)),
+      "validation_failed",
+      "需要完整提交 SHA",
+    );
+    const key = `supervisor-outdated:${supervisor}`;
+    let current: HumanAction | undefined;
+    for (const e of eventsOfType(
+      state.events,
+      "host_deployment_action_requested",
+    )) {
+      if (
+        e.actor.kind !== "system" ||
+        e.actor.project_id !== state.project_id ||
+        e.card_id
+      )
+        continue;
+      const request = e.payload as { key: string; human_action_id: string };
+      if (!/^supervisor-outdated:[a-f0-9]{40}$/u.test(request.key)) continue;
+      const action = d
+        .list("human_actions")
+        .find((h) => h.id === request.human_action_id);
+      if (
+        action?.requested_by !== "system" ||
+        action.card_id ||
+        action.blocked_work_items.length
+      )
+        continue;
+      if (request.key === key) current = action;
+      if (action.status !== "open" || (request.key === key && affected.length))
+        continue;
+      const reason =
+        request.key === key
+          ? `监督器 ${supervisor} 与中心 main ${main} 没有监督器运行差异，无需升级`
+          : `该提醒所指的监督器版本已不在运行，当前为 ${supervisor}，旧提醒无需处理`;
+      d.put("human_actions", {
+        ...action,
+        status: unwrap(transition("human_action", action.status, "cancel")),
+        cancellation: {
+          reason,
+          by: d.author,
+          at: d.now,
+          source: "supervisor_rechecked",
+        },
+      });
+      d.emit("human_action_cancelled", undefined, {
+        human_action_id: action.id,
+        reason,
+        source: "supervisor_rechecked",
+      });
+    }
+    // Legacy false alarms do not consume the one verified reminder per running SHA.
+    if (
+      !affected.length ||
+      eventsOfType(state.events, "host_deployment_supervisor_change").some(
+        (e) =>
+          e.actor.kind === "system" &&
+          e.actor.project_id === state.project_id &&
+          !e.card_id &&
+          (e.payload as { supervisor?: string }).supervisor === supervisor,
+      )
+    )
+      return;
+    if (
+      current &&
+      current.status !== "open" &&
+      current.cancellation?.source !== "supervisor_rechecked"
+    )
+      return;
+    const instructions = `部署监督器仍运行 ${supervisor}。到中心 main ${main} 的差异涉及：${affected.join("、")}。请按 cardigan-deploy README「升级监督器本身」在维护窗口更新；系统不会自我升级。`;
+    const action =
+      current?.status === "open"
+        ? { ...current, instructions }
+        : createDeploymentAction(d, { key, instructions });
+    if (current?.status === "open") d.put("human_actions", action);
+    d.emit("host_deployment_supervisor_change", undefined, {
+      supervisor,
+      main,
+      affected: [...affected],
+      human_action_id: action.id,
     });
-    d.emit("human_action_requested", undefined, {
-      human_action_id: id,
-      blocked_work_items: [],
-    });
-    return action;
   });
 }

@@ -4,6 +4,9 @@ import { PRE_MERGE_COPY } from "./pre-merge-copy.js";
 export const EVENT_LABELS: Readonly<Record<string, string>> = {
   cross_card_read: "读取了其它卡片",
   host_deployment_recorded: "记录了主机部署",
+  host_deployment_supervisor_change: "确认部署监督器需要升级",
+  host_deployment_supervisor_comparison_unavailable:
+    "未能核实部署监督器差异，将重试",
   host_role_upgraded: "自动升级了角色",
   standing_pm_rotated: "轮换了常驻 PM",
   host_deployment_action_requested: "请求处理部署事项",

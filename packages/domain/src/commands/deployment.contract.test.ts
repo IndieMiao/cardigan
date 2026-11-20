@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   controlDeployment,
   currentDeploymentPin,
+  reconcileSupervisorNotice,
   recordDeployment,
   recordDeploymentStop,
   requestDeploymentAction,
@@ -290,4 +291,67 @@ test("evidence wait actions go to Ops, remain idempotent after completion and do
     expect(requestDeploymentAction(state, caller, input, ports()).ok).toBe(
       false,
     );
+});
+
+test("only system reconciles supervisor notices; a verified notice stays unique after restart, revert or manual handling", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const input = {
+    supervisor: "a".repeat(40),
+    main: "b".repeat(40),
+    affected: ["packages/host"],
+  };
+  const legacy = value(
+    requestDeploymentAction(
+      state,
+      system,
+      {
+        key: `supervisor-outdated:${input.supervisor}`,
+        instructions: "旧提醒",
+      },
+      io,
+    ),
+  );
+  state = apply(state, legacy);
+  for (const caller of [
+    human,
+    actor(1, "coder"),
+    actor(5, "host_ops"),
+    { ...system, project_id: "other" },
+  ])
+    expect(reconcileSupervisorNotice(state, caller, input, io).ok).toBe(false);
+  for (const status of ["done", "cancelled"] as const) {
+    const handled = { ...state, human_actions: [{ ...legacy.data, status }] };
+    expect(
+      value(reconcileSupervisorNotice(handled, system, input, io)).events,
+    ).toEqual([]);
+  }
+  const adopted = value(reconcileSupervisorNotice(state, system, input, io));
+  state = apply(state, adopted);
+  expect(
+    state.human_actions.find((h) => h.id === legacy.data.id)?.instructions,
+  ).toContain("packages/host");
+  expect(adopted.events.map((e) => e.type)).toEqual([
+    "host_deployment_supervisor_change",
+  ]);
+  expect(
+    value(reconcileSupervisorNotice(state, system, input, io)).changes,
+  ).toEqual([]);
+  const reverted = value(
+    reconcileSupervisorNotice(state, system, { ...input, affected: [] }, io),
+  );
+  state = apply(state, reverted);
+  expect(reverted.events).toMatchObject([
+    {
+      type: "human_action_cancelled",
+      payload: {
+        human_action_id: legacy.data.id,
+        reason: expect.stringContaining("没有监督器运行差异"),
+      },
+    },
+  ]);
+  expect(
+    value(reconcileSupervisorNotice(state, system, input, io)).events,
+  ).toEqual([]);
 });

@@ -155,6 +155,18 @@ function ActivityRow({
     typeof row.event.payload === "object"
       ? (row.event.payload as Record<string, unknown>)
       : undefined;
+  // Deployment notices are project-scoped; this feed is their timeline.
+  const closeReasons = (
+    row.kind === "event" ? [row.event] : row.events
+  ).flatMap((event) => {
+    const p = event.payload as { source?: string; reason?: string } | null;
+    return event.type === "human_action_cancelled" &&
+      event.actor.kind === "system" &&
+      p?.source === "supervisor_rechecked" &&
+      typeof p.reason === "string"
+      ? [p.reason]
+      : [];
+  });
   const targets = auditTargets(audit);
   const cardId = row.kind === "event" ? row.event.card_id : row.card_id;
   const cardTitle =
@@ -181,6 +193,9 @@ function ActivityRow({
           {row.kind === "event"
             ? eventLabel(row.event.type)
             : groupedLabel(row.type, row.events.length)}
+          {[...new Set(closeReasons)].map((reason) => (
+            <div key={reason}>{reason}</div>
+          ))}
           {typeof audit?.tool === "string" && audit.tool && (
             <div>工具：{audit.tool}</div>
           )}
