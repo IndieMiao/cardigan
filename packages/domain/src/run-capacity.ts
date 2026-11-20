@@ -1,5 +1,6 @@
 import type { Assignment, Run } from "./entities.js";
 
+export const DEFAULT_QUEUED_RECHECK_AFTER_MS = 5 * 60_000;
 export const DEFAULT_RUN_LIMIT = 4;
 export const DEFAULT_MAX_RUN_LIMIT = 16;
 

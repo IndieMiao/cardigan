@@ -787,6 +787,7 @@ async function assembleServer(
         leases,
         projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
+        queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
@@ -808,6 +809,11 @@ async function assembleServer(
       extSender = new ExtMessageSender({
         store,
         configuration: loadExtMessageConfig(),
+        gate: (project) => ({
+          ...mergeProjectSettings(mergeGate, project),
+          merge_gate_enabled:
+            mergeGate.forProject(project).status !== "disabled",
+        }),
       });
       extSender.recordStatus();
       const notificationSender = extSender;

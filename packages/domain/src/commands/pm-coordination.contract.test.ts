@@ -337,6 +337,35 @@ test("first producer selects a qualified employee and never creates a second per
   ).toBe(false);
 });
 
+test("two projects with the same coder role cannot borrow each other's first producer", () => {
+  const base = producerState();
+  const author = base.employees?.[0];
+  if (!author) throw new Error("missing producer fixture");
+  const employees = [
+    { ...author, projects: ["cardigan"] },
+    { ...author, name: "Other", id: id("employee", 2), projects: ["other"] },
+  ];
+  for (const [projectId, expected] of [
+    ["cardigan", author.id],
+    ["other", id("employee", 2)],
+    ["unstaffed", undefined],
+  ] as const) {
+    const state = {
+      ...base,
+      project_id: projectId,
+      cards: base.cards.map((c) => ({ ...c, project_id: projectId })),
+      employees,
+    };
+    const result = auto(state, { ...system, project_id: projectId });
+    expect(result.data?.employee_id).toBe(expected);
+    if (!expected)
+      expect(result.events[0]?.payload).toMatchObject({
+        reason: expect.stringContaining("本项目没有可用员工"),
+        candidates: [],
+      });
+  }
+});
+
 test("automatic first producer skips the idle remote worker for worktree roles and defers if local cannot run", () => {
   const base = producerState();
   const available: MachinePlacement = {

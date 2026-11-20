@@ -9,6 +9,7 @@ import {
   type Employee,
   type EmployeeCommandPorts,
   type EmployeeId,
+  employeeInProject,
   employeeNameKey,
   type Harness,
   manageCardTemplate,
@@ -241,6 +242,7 @@ export function templatePlan(
 }
 
 export function employeePlans(
+  projectId: string,
   doc: RoleMarkdown,
   role: Role,
   existing: readonly Employee[],
@@ -264,7 +266,12 @@ export function employeePlans(
     const current = employees.find(
       (e) => e.status === "active" && employeeNameKey(e.name) === name,
     );
+    if (current && !employeeInProject(current, projectId))
+      invalid(
+        `在职员工 ${current.name} 不属于本项目 ${projectId}，不能通过导入更改归属`,
+      );
     const input = {
+      projects: [projectId],
       name: entry.name,
       title: entry.title,
       role_id: role.role_id,

@@ -68,6 +68,7 @@ export type EntityChange = {
   };
 }[keyof CommandEntities];
 export interface CommandPorts {
+  readonly unreservedAssignment?: import("../ports.js").UnreservedAssignment;
   /** Workbench confirmation for ungranted scope changes. D12 high risks are gated by the actor. */
   readonly human_confirmation?: "workbench";
   readonly clock: Clock;
