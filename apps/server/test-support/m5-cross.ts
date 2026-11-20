@@ -24,6 +24,7 @@ export async function m5Cross(
     | "machineDisplayName"
     | "machineHost"
     | "resourceLimits"
+    | "roleLaunchConfig"
   > = {},
 ) {
   const f = await m4Cross();

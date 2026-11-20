@@ -6,10 +6,18 @@ import {
   useEffect,
   useId,
   useRef,
+  useState,
 } from "react";
 import { cn } from "../../lib/utils.js";
+import { renderMarkdown } from "../../markdown.js";
 import { Tooltip } from "../Tooltip.js";
-import { IconButton } from "../ui/button.js";
+import { Button, IconButton } from "../ui/button.js";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "../ui/dialog.js";
 import { Input } from "../ui/input.js";
 import { cardDetailDrawerClassName } from "./CardDetailLayout.js";
 import { DataTableLayout } from "./DataTableLayout.js";
@@ -304,6 +312,89 @@ export function SettingsSection({
 export function SettingsText(props: Omit<ComponentProps<"pre">, "className">) {
   return <pre {...props} className={styles.longText} />;
 }
+/** Rendered Markdown (a role description preview): bounded, scrolls inside. */
+export function SettingsMarkdown({
+  source,
+  label,
+}: {
+  source: string;
+  label: string;
+}) {
+  return (
+    <section
+      aria-label={label}
+      className={cn("markdown", styles.markdown)}
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: long previews scroll by keyboard.
+      tabIndex={0}
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: `renderMarkdown` escapes raw HTML and filters links.
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(source) }}
+    />
+  );
+}
+
+/**
+ * C-494: closing a drawer form with unapplied edits asks first. Keeping the
+ * edits is the default action; the drawer stays open behind the dialog.
+ */
+export function SettingsDiscardDialog({
+  open,
+  onKeep,
+  onDiscard,
+}: {
+  open: boolean;
+  onKeep: () => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onKeep();
+      }}
+    >
+      <DialogContent className={styles.dialog}>
+        <DialogTitle>放弃未应用的修改？</DialogTitle>
+        <DialogDescription>关闭后这次填写的内容不会保留。</DialogDescription>
+        <SettingsDialogActions>
+          <Button onClick={onKeep}>继续编辑</Button>
+          <Button variant="destructive" onClick={onDiscard}>
+            放弃修改
+          </Button>
+        </SettingsDialogActions>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Unapplied drawer edits: closing the tab or reloading asks through the
+ * browser; `confirmClose` routes every in-app way out through the dialog.
+ */
+export function useDiscardGuard(dirty: boolean, close: () => void) {
+  const [asking, setAsking] = useState(false);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+  const confirmClose = useCallback(() => {
+    if (dirty) setAsking(true);
+    else close();
+  }, [dirty, close]);
+  const dialog = (
+    <SettingsDiscardDialog
+      open={asking}
+      onKeep={() => setAsking(false)}
+      onDiscard={() => {
+        setAsking(false);
+        close();
+      }}
+    />
+  );
+  return { confirmClose, dialog };
+}
+
 /** One diff line or value; additions and removals use the status colours. */
 export function SettingsDiff({
   op,

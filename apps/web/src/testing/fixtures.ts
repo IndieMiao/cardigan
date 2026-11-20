@@ -262,6 +262,18 @@ export function fakeClient(
     rollbackRole: async () => {
       throw new Error("rollbackRole not stubbed");
     },
+    updateEmployee: async () => {
+      throw new Error("updateEmployee not stubbed");
+    },
+    previewRoleDocument: async () => {
+      throw new Error("previewRoleDocument not stubbed");
+    },
+    applyRoleDocument: async () => {
+      throw new Error("applyRoleDocument not stubbed");
+    },
+    exportRole: async () => {
+      throw new Error("exportRole not stubbed");
+    },
     setDelegation: async () => {},
     setCrossCardRead: async () => {},
     setAutoMerge: async () => {},

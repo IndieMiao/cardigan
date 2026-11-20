@@ -19,7 +19,7 @@ export interface ReadGlobalRepositories {
   readonly members: Pick<GlobalRepositories["members"], "get" | "list">;
   readonly employees: Pick<
     GlobalRepositories["employees"],
-    "get" | "list" | "assignmentActivity"
+    "get" | "list" | "assignmentActivity" | "roleTransferFacts"
   >;
   readonly global_events: Pick<
     GlobalRepositories["global_events"],

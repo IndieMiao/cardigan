@@ -1347,16 +1347,34 @@ export interface RoleSummary {
   readonly launch_profile_ref: string;
 }
 
+/** C-494: a launch profile the host has loaded; never endpoints or secrets. */
+export interface LaunchProfileOption {
+  readonly name: string;
+  readonly harness: string;
+  readonly model: string | null;
+}
+
 export interface RoleListView {
   readonly project_id: string;
   readonly roles: readonly RoleSummary[];
   readonly default_roles: readonly string[];
   readonly harnesses: readonly string[];
   readonly allowlists: RoleAllowlists;
+  /** Older servers omit it; role pickers then offer no profiles. */
+  readonly launch_profiles?: readonly LaunchProfileOption[];
+}
+
+/** One global employee as listed in the employee settings. */
+export interface EmployeeSummary extends CreatedEmployee {
+  readonly title?: string;
+  readonly status?: "active" | "inactive";
+  readonly avatar?: string | null;
+  /** Why a role change would be refused now: an unfinished run or a bound assignment. */
+  readonly role_change_blocked?: "run" | "assignment" | null;
 }
 
 export interface EmployeeOptions {
-  readonly employees?: readonly CreatedEmployee[];
+  readonly employees?: readonly EmployeeSummary[];
   readonly library: readonly {
     readonly id: string;
     readonly name: string;
@@ -1389,6 +1407,35 @@ export interface CreatedEmployee {
   readonly id: string;
   readonly name: string;
   readonly role_id: string;
+}
+
+/** C-492 role document preview; apply returns the same shape after writing. */
+export interface RoleDocumentPreview {
+  readonly snapshot: string;
+  readonly role: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly role: RoleDefinitionView;
+    readonly fields: readonly {
+      readonly field: string;
+      readonly before: unknown;
+      readonly after: unknown;
+    }[];
+    readonly relaxations: readonly string[];
+  };
+  readonly template: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly before: (TemplateDefinition & { version: number }) | null;
+    readonly after: TemplateDefinition & { version: number };
+  } | null;
+  readonly employees: readonly {
+    readonly name: string;
+    readonly title: string;
+    readonly bio?: string;
+    readonly role_id: string;
+    readonly launch_profile_ref: string | null;
+    readonly action: "create" | "unchanged";
+    readonly id: string | null;
+  }[];
 }
 
 /** One saved role version (V9a `Role`). */
@@ -1495,6 +1542,24 @@ export interface CardiganClient {
     input: CreateEmployeeInput,
     idempotencyKey: string,
   ): Promise<CreatedEmployee>;
+  /** C-493: a role change is a transfer; the server refuses while work is bound. */
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: { readonly role_id: string },
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee>;
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview>;
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview>;
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }>;
   templates(projectId: string): Promise<{ templates: TemplateView[] }>;
   template(projectId: string, id: string): Promise<TemplateDetail>;
   templateHistory(
@@ -2365,6 +2430,46 @@ export class HttpCardiganClient implements CardiganClient {
       input,
       idempotencyKey,
     ) as Promise<CreatedEmployee>;
+  }
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: { readonly role_id: string },
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee> {
+    return this.write(
+      projectId,
+      `employees/${encodeURIComponent(employeeId)}/update`,
+      patch,
+      idempotencyKey,
+    ) as Promise<CreatedEmployee>;
+  }
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/role-document/preview`,
+      { method: "POST", body: JSON.stringify({ markdown }) },
+    );
+  }
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.write(
+      projectId,
+      "role-document/apply",
+      { markdown, snapshot },
+      idempotencyKey,
+    ) as Promise<RoleDocumentPreview>;
+  }
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}/export`,
+    );
   }
   role(projectId: string, roleId: string): Promise<RoleDetailView> {
     return this.request(
