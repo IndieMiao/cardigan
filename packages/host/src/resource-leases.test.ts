@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
@@ -189,6 +189,20 @@ test("Run holders survive finish, release result racing the next owner cannot cl
     "释放核验",
   );
 });
+// Use the wrapper's required system interpreter as a synthetic probe. Coreutils
+// applets can be symlinks; a private probe must name a trusted regular file.
+async function syntheticProbe(program: string) {
+  return [
+    await realpath("/usr/bin/python3"),
+    "-I",
+    "-B",
+    "-c",
+    program,
+  ] as const;
+}
+const printGeneration =
+  "import json, os; print(json.loads(os.environ['CARDIGAN_RESOURCE_CONTEXT'])['generation'], flush=True)";
+
 test("the production wrapper checks the actual target, never accepts old-generation stdout, or substitutes local for remote", async () => {
   const probe = targetProbe(() => ({ mode: "local", dataDir: dir }));
   const ctx = {
@@ -198,17 +212,16 @@ test("the production wrapper checks the actual target, never accepts old-generat
     key: "fixture",
     generation: "generation-2",
   };
+  const current = await syntheticProbe(printGeneration);
+  const stale = await syntheticProbe("print('generation-1')");
+  expect(await probe(current, ctx, "local")).toBe("local");
+  expect(await probe(stale, ctx, "local")).toBeUndefined();
+  expect(await probe(current, { ...ctx, machine: "remote" })).toBeUndefined();
+
+  const alias = join(dir, "probe-link");
+  await symlink(current[0], alias);
   expect(
-    await probe(["/usr/bin/printf", "%s", "generation-1"], ctx, "local"),
-  ).toBeUndefined();
-  expect(
-    await probe(["/usr/bin/printf", "%s", "generation-2"], ctx, "local"),
-  ).toBe("local");
-  expect(
-    await probe(["/usr/bin/printf", "%s", "generation-2"], {
-      ...ctx,
-      machine: "remote",
-    }),
+    await probe([alias, ...current.slice(1)], ctx, "local"),
   ).toBeUndefined();
 });
 
@@ -299,10 +312,19 @@ test("production probe fails closed on timeout, failed status and unreachable ta
     key: "fixture",
     generation: "old",
   };
-  expect(await probe(["/usr/bin/sleep", "10"], ctx, "local")).toBeUndefined();
-  expect(await probe(["/usr/bin/false"], ctx, "local")).toBeUndefined();
+  // Even correct generation output is not proof if the process fails to finish successfully.
+  const slow = await syntheticProbe(
+    `${printGeneration}; import time; time.sleep(10)`,
+  );
+  const failed = await syntheticProbe(
+    `${printGeneration}; raise SystemExit(1)`,
+  );
+  expect(await probe(slow, ctx, "local")).toBeUndefined();
+  expect(await probe(failed, ctx, "local")).toBeUndefined();
   const offline = targetProbe(() => {
     throw new Error("unreachable");
   });
-  expect(await offline(["/usr/bin/true"], ctx, "local")).toBeUndefined();
+  expect(
+    await offline(await syntheticProbe(printGeneration), ctx, "local"),
+  ).toBeUndefined();
 }, 15_000);
