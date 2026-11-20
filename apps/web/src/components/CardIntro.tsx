@@ -116,14 +116,18 @@ export function RecentConclusions({
 }) {
   const rows = (detail.recent_conclusions ?? [])
     .flatMap((entry) => {
-      const review = detail.reviews.find((r) => r.id === entry.review_id);
+      const summary = detail.overview?.conclusion_reviews.find(
+        (r) => r.id === entry.review_id,
+      );
+      const full = detail.reviews.find((r) => r.id === entry.review_id);
+      const review = summary ?? full;
       const decision = detail.decisions.find((d) => d.id === entry.decision_id);
-      const work = detail.work_items.find((w) => w.id === review?.work_item_id);
+      const work = detail.work_items.find((w) => w.id === full?.work_item_id);
       const delivery = detail.deliveries.find(
         (d) => d.id === review?.delivery_id,
       );
       const label = review
-        ? `${review.id} ${work?.title ?? entry.author_role ?? "审核者"} ${statusLabel(review.verdict)} ${review.delivery_id} ${delivery?.kind === "card_completion" ? "完成申请" : "交付"}${delivery?.status === "superseded" ? "（旧版本）" : ""}`
+        ? `${review.id} ${summary?.work_title ?? work?.title ?? entry.author_role ?? "审核者"} ${statusLabel(review.verdict)} ${review.delivery_id} ${(summary?.delivery_kind ?? delivery?.kind) === "card_completion" ? "完成申请" : "交付"}${(summary?.delivery_status ?? delivery?.status) === "superseded" ? "（旧版本）" : ""}`
         : decision
           ? `${decision.id} ${entry.author_display ?? (entry.author === "human" ? "所有者" : (entry.author_role ?? "PM"))} ${entry.decision_option ? decisionOption(decision, entry.decision_option) : "已记录拍板结果"}`
           : undefined;

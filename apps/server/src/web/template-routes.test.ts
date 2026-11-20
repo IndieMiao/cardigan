@@ -608,7 +608,7 @@ test("Web creates parented cards once, reads paged progress, and rejects a stale
     parent_card_id: id,
   });
   expect(child.status).toBe(201);
-  for (const suffix of ["", "?limit=1"])
+  for (const suffix of ["", "?limit=1", "?limit=1&section=overview"])
     expect(
       (await read(`/cards/${id}${suffix}`)).json.card.story_progress,
     ).toMatchObject({

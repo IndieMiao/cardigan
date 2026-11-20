@@ -939,12 +939,23 @@ test("child references inherit only currently readable parent attachment IDs, ne
     });
   });
   const own = () => getCardTool.handler({ card_id: serverCard.id }, f.context);
-  expect(await own()).toMatchObject({
+  const childView = await own();
+  expect(childView).toMatchObject({
     parent_reference: {
       source_card_id: other,
       attachment_ids: ["ATT-1"],
       reference_notice: expect.any(String),
     },
+  });
+  expect(childView).not.toMatchObject({
+    timeline: expect.arrayContaining([
+      expect.objectContaining({ card_id: other }),
+    ]),
+  });
+  expect(childView).not.toMatchObject({
+    attachments: expect.arrayContaining([
+      expect.objectContaining({ card_id: other }),
+    ]),
   });
   expect(await f.read()).toMatchObject({
     card: { story_progress: { total: 1, children: [{ id: serverCard.id }] } },

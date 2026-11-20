@@ -72,6 +72,12 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly cardSources?: (
+    project: ProjectId,
+    card: CardId,
+  ) => Pick<CommandState, "timeline" | "attachments">;
+  readonly projectMergeEvents?: (project: ProjectId) => readonly Event[];
+  readonly dependencyEvents?: (project: ProjectId) => readonly Event[];
   readonly read_machine_placement?: import("@cardigan/domain").ReadMachinePlacement;
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: (

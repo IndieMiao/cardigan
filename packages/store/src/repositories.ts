@@ -60,6 +60,13 @@ export type ReadEventRepository = Pick<EventRepository, "listAfter"> & {
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {
+  /** Indexed sources only; the caller still applies its normal visibility policy. */
+  readonly cardSources?: (
+    project: ProjectId,
+    card: CardId,
+  ) => { timeline: TimelineEntry[]; attachments: Attachment[] };
+  readonly projectMergeEvents?: (project: ProjectId) => Event[];
+  readonly dependencyEvents?: (project: ProjectId) => Event[];
   readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
@@ -312,6 +319,28 @@ export function createReadRepositories(
   return {
     ...snapshotRepositories(baseRepositories(db, "read"), snapshots),
     ...createGlobalRepositories(db, "read", snapshots),
+    cardSources: (project, card) => ({
+      timeline: prepare(
+        db,
+        "SELECT doc FROM timeline WHERE project_id = ? AND card_id = ? ORDER BY event_seq",
+      )
+        .all(project, card)
+        .map((r) => JSON.parse(String(r.doc)) as TimelineEntry),
+      attachments: prepare(
+        db,
+        "SELECT doc FROM attachments WHERE project_id = ? AND json_extract(doc, '$.card_id') = ? ORDER BY id",
+      )
+        .all(project, card)
+        .map((r) => JSON.parse(String(r.doc)) as Attachment),
+    }),
+    projectMergeEvents: (project) =>
+      prepare(
+        db,
+        "SELECT doc FROM events WHERE project_id = ? AND stream = '' AND (type = 'merge_queue_configured' OR type GLOB 'merge_batch_*') ORDER BY seq",
+      )
+        .all(project)
+        .map((r) => JSON.parse(String(r.doc)) as Event),
+    dependencyEvents: (project) => readCardDependencyEvents(db, project),
   };
 }
 
@@ -473,4 +502,13 @@ function preferenceRepository(
     },
     mode,
   );
+}
+
+export function readCardDependencyEvents(db: DatabaseSync, project: ProjectId) {
+  return prepare(
+    db,
+    "SELECT doc FROM events WHERE project_id = ? AND type IN ('card_merged','card_marked_done','review_submitted','completion_reviewed','delivery_submitted','review_reused')",
+  )
+    .all(project)
+    .map((r) => JSON.parse(String(r.doc)) as Event);
 }
