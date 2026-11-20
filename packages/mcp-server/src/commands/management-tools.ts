@@ -163,7 +163,7 @@ const schemas = {
       })
       .optional()
       .describe(
-        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, or the registered baseline SHA for baseline_updated. Candidate-conflict recovery is bounded; other repeated blockers go to PM.",
+        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, or the registered baseline SHA for baseline_updated. Each new author precheck can resume its own wait. Repeated failures of the same HEAD, exhausted candidate-conflict recovery and other repeated blockers go to PM.",
       ),
   },
   request_decision: {

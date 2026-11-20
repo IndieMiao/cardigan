@@ -19,7 +19,11 @@ export interface ResponseBody {
 export async function m5Cross(
   options: Pick<
     WebServerOptions,
-    "runLimit" | "runLimitMaximum" | "machineDisplayName"
+    | "runLimit"
+    | "runLimitMaximum"
+    | "machineDisplayName"
+    | "machineHost"
+    | "resourceLimits"
   > = {},
 ) {
   const f = await m4Cross();
