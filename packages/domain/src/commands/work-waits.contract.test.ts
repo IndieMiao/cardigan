@@ -76,9 +76,22 @@ function finish() {
     ),
   );
 }
-function scan(baseline?: { branch: string; sha: string }) {
+function scan(
+  baseline?: { branch: string; sha: string },
+  precheckFailureLimit?: number,
+) {
   const effect = value(
-    resumeWorkWaits(state, system, baseline ? { baseline } : {}, io),
+    resumeWorkWaits(
+      state,
+      system,
+      {
+        ...(baseline ? { baseline } : {}),
+        ...(precheckFailureLimit !== undefined
+          ? { precheck_failure_limit: precheckFailureLimit }
+          : {}),
+      },
+      io,
+    ),
   );
   state = apply(state, effect);
   return effect;
@@ -551,3 +564,131 @@ test.each([false, true])(
     expect(scan().data).toEqual([]);
   },
 );
+
+function authorCheck(attempt: string, status: string, head = base) {
+  return event(
+    status === "queued" ? "precheck_queued" : "precheck_finished",
+    {
+      card_id: id("card", 1),
+      assignment_id: owner,
+      work_item_id: work,
+      head_sha: head,
+      attempt_id: attempt,
+      status,
+    },
+    system,
+    id("card", 1),
+  );
+}
+function runningAgain() {
+  state = {
+    ...state,
+    runs: state.runs.map((r) =>
+      r.id === runId ? { ...r, status: "running", outcome: null } : r,
+    ),
+  };
+}
+
+test("successive author precheck attempts resume and wake independently without an intervening delivery", () => {
+  for (const [n, status] of [
+    "failed",
+    "interrupted",
+    "passed",
+    "environment_failed",
+  ].entries()) {
+    const condition = {
+      kind: "precheck_finished" as const,
+      target_id: `check-${n}`,
+    };
+    authorCheck(condition.target_id, "queued");
+    block(condition);
+    expect(item()?.reported_blocker?.auto_resume_disabled).toBeUndefined();
+    if (n === 2) {
+      // An already persisted C-414 one-shot denial is not a manual stop.
+      state = {
+        ...state,
+        work_items: state.work_items.map((w) =>
+          w.id === work && w.reported_blocker
+            ? {
+                ...w,
+                reported_blocker: {
+                  ...w.reported_blocker,
+                  auto_resume_disabled: true,
+                },
+              }
+            : w,
+        ),
+      };
+    }
+    finish();
+    expect(scan().events).toEqual([]);
+    const terminal = authorCheck(condition.target_id, status);
+    const effect = scan();
+    expect(item()?.status).toBe("in_progress");
+    expect(item()?.reported_blocker).toBeUndefined();
+    expect(effect.events[0]).toMatchObject({
+      type: "work_item_resume_requested",
+      payload: { condition, evidence: terminal.id, assignment_id: owner },
+    });
+    expect(effect.timeline[0]?.body).toContain(condition.target_id);
+    expect(scan().events).toEqual([]);
+    runningAgain();
+  }
+  block({ kind: "precheck_finished", target_id: "check-3" });
+  expect(item()?.reported_blocker?.auto_resume_disabled).toBe(true);
+  finish();
+  expect(scan().events).toEqual([]);
+});
+
+test.each([true, false])(
+  "same HEAD failure loop goes to PM whether the second result preceded the report (%s)",
+  (alreadyFinished) => {
+    for (const [i, head] of [base, next, next].entries()) {
+      const target_id = `failed-${i}`;
+      authorCheck(target_id, "queued", head);
+      if (alreadyFinished) authorCheck(target_id, "failed", head);
+      block({ kind: "precheck_finished", target_id });
+      finish();
+      if (!alreadyFinished) authorCheck(target_id, "failed", head);
+      const effect = scan();
+      if (i < 2) {
+        expect(effect.data).toEqual([work]); // Changed HEAD is progress.
+        runningAgain();
+      } else {
+        expect(effect.data).toEqual([]);
+        expect(item()).toMatchObject({
+          status: "blocked",
+          reported_blocker: { auto_resume_disabled: true },
+        });
+        expect(
+          state.events.filter(
+            (e) =>
+              e.type === "precheck_wait_escalated" ||
+              (e.type === "blocker_reported" &&
+                (e.payload as Record<string, unknown>).auto_resume_disabled ===
+                  true),
+          ),
+        ).toHaveLength(1);
+        expect(scan().events).toEqual([]);
+      }
+    }
+  },
+);
+
+test("a configured failure limit counts distinct attempts for the same HEAD", () => {
+  for (const n of [1, 2, 3]) {
+    const target_id = `attempt-${n}`;
+    authorCheck(target_id, "failed");
+    block({ kind: "precheck_finished", target_id });
+    finish();
+    const effect = scan(undefined, 3);
+    if (n < 3) {
+      expect(effect.data).toEqual([work]);
+      runningAgain();
+    } else
+      expect(effect.events[0]).toMatchObject({
+        type: "precheck_wait_escalated",
+        payload: { limit: 3, attempt_id: target_id },
+      });
+  }
+});

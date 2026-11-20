@@ -74,6 +74,7 @@ import {
   invalidTestReviewPasses,
   testReviewCandidate,
 } from "./test-review.js";
+import { resumePassedDeliveryWait } from "./work-waits.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
 export type SubmitDeliveryParams = Pick<
@@ -481,6 +482,22 @@ export function deliverySubmission(
       "stale_target",
       "Verification must match this assignment, run and subject",
     );
+    // Check the blocker before superseding anything: invalidating a previous
+    // delivery must not clear a decision that should prevent this recovery.
+    if (
+      item.status === "blocked" &&
+      !completion &&
+      p.subject.kind === "git_head" &&
+      d.tool === "submit_delivery"
+    ) {
+      const resumed = resumePassedDeliveryWait(d, item, p.subject.value);
+      ensure(
+        resumed?.kind === "produce",
+        "illegal_transition",
+        "工作项仍有阻塞，只有当前作者等待的同一提交预检通过后才能直接交付",
+      );
+      item = resumed;
+    }
     const added = upgradeFastPatch(d, {
       ...p,
       evidence: verified.evidence,

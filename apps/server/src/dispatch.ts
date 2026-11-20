@@ -177,6 +177,7 @@ export interface DispatcherOptions {
   readonly frameworkWaitReminderMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
+  readonly authorPrecheckFailureLimit?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
