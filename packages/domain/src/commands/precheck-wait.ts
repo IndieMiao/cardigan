@@ -3,6 +3,13 @@ import { authorPrecheckWaitHandled, isPrecheckConflict } from "../precheck.js";
 import type { ResumeCondition } from "../work-wait.js";
 import type { CommandDraft } from "./core.js";
 
+// Candidate preparation conflicts have a separate baseline recovery budget.
+const countsAsFailure = (check: Precheck) =>
+  check.status === "failed" ||
+  check.status === "timed_out" ||
+  check.status === "executor_unreachable" ||
+  (check.status === "environment_failed" && !isPrecheckConflict(check));
+
 /** A new check is progress, not another recovery of the same blocker (C-521). */
 export function authorPrecheckWait(
   d: CommandDraft,
@@ -44,17 +51,16 @@ export function authorPrecheckWait(
     isPrecheckConflict(check)
   )
     return;
-  const consumed =
-    event.type === "precheck_finished" &&
-    authorPrecheckWaitHandled(d.state.events, event);
+  const finished = event.type === "precheck_finished";
+  const consumed = finished && authorPrecheckWaitHandled(d.state.events, event);
   function reachedFailureLimit(limit: number) {
-    if (check.status !== "failed") return false;
+    if (!finished || !countsAsFailure(check)) return false;
     const failures = new Set<string>();
     for (let i = index; i >= 0; i--) {
       const e = d.state.events[i];
       if (e?.type !== "precheck_finished" || !owned(e)) continue;
       const prior = e.payload as unknown as Precheck;
-      if (prior.status !== "failed" || prior.head_sha !== check.head_sha) break;
+      if (prior.head_sha !== check.head_sha || !countsAsFailure(prior)) break;
       failures.add(prior.attempt_id);
       if (failures.size >= limit) return true;
     }

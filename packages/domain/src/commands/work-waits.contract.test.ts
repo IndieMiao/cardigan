@@ -3,6 +3,7 @@ import type { Actor, Event, JsonValue } from "../entities.js";
 import type { ResumeCondition } from "../work-wait.js";
 import { reportBlocker } from "./coordination.js";
 import type { CommandState } from "./core.js";
+import { prepareDelivery, submitDelivery } from "./delivery.js";
 import { finishRun, settlePendingRunFinish } from "./runtime.js";
 import {
   actor,
@@ -10,7 +11,9 @@ import {
   fixture,
   human,
   id,
+  run as makeRun,
   ports,
+  subject,
   value,
 } from "./test-fixtures.js";
 import { resumeWorkWaits } from "./work-waits.js";
@@ -691,4 +694,98 @@ test("a configured failure limit counts distinct attempts for the same HEAD", ()
         payload: { limit: 3, attempt_id: target_id },
       });
   }
+});
+
+test.each([
+  ["timed_out", "timed_out"],
+  ["environment_failed", "environment_failed"],
+  ["executor_unreachable", "executor_unreachable"],
+  ["failed", "timed_out"],
+])(
+  "same HEAD: %s followed by %s escalates once instead of waking again",
+  (first, second) => {
+    for (const [i, status] of [first, second].entries()) {
+      const target_id = `attempt-${i}`;
+      authorCheck(target_id, "queued");
+      block({ kind: "precheck_finished", target_id });
+      finish();
+      const result = authorCheck(target_id, status);
+      const effect = scan();
+      if (i === 0) {
+        expect(effect.data).toEqual([work]);
+        runningAgain();
+      } else {
+        expect(effect.data).toEqual([]);
+        expect(effect.events).toMatchObject([
+          {
+            type: "precheck_wait_escalated",
+            payload: { attempt_id: target_id, evidence: result.id },
+          },
+        ]);
+        expect(item()?.status).toBe("blocked");
+        expect(scan().events).toEqual([]);
+      }
+    }
+  },
+);
+
+test.each(["interrupted", "candidate_conflict"])(
+  "%s does not count towards the next ordinary failure",
+  (kind) => {
+    event(
+      "precheck_finished",
+      {
+        card_id: id("card", 1),
+        assignment_id: owner,
+        work_item_id: work,
+        head_sha: base,
+        attempt_id: "first",
+        ...(kind === "candidate_conflict"
+          ? { status: "environment_failed", failure_kind: "candidate_conflict" }
+          : { status: "interrupted" }),
+      },
+      system,
+      id("card", 1),
+    );
+    authorCheck("next", "environment_failed");
+    block({ kind: "precheck_finished", target_id: "next" });
+    finish();
+    expect(scan().data).toEqual([work]);
+  },
+);
+
+test("a direct delivery cannot clear a blocker registered again after consuming the passed attempt", async () => {
+  state = {
+    ...state,
+    cards: state.cards.map((c) => ({ ...c, flow_version: 3 })),
+    project_settings: { merge_gate_enabled: true },
+  };
+  const condition = {
+    kind: "precheck_finished" as const,
+    target_id: "passed-attempt",
+  };
+  authorCheck(condition.target_id, "queued");
+  block(condition);
+  finish();
+  authorCheck(condition.target_id, "passed");
+  expect(scan().data).toEqual([work]);
+  state = { ...state, runs: [...state.runs, makeRun(4, 1)] };
+  block(condition);
+  expect(item()?.reported_blocker?.auto_resume_disabled).toBe(true);
+  const params = {
+    work_item_id: work,
+    kind: "code" as const,
+    summary: "Ready",
+    subject,
+    requested_verifiers: [id("work_item", 2)],
+  };
+  const receipt = value(
+    await prepareDelivery(state, actor(), params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  expect(submitDelivery(state, actor(), params, receipt, io)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
 });

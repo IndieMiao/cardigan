@@ -260,6 +260,7 @@ export function resumePassedDeliveryWait(
   const wait = authorPrecheckWait(d, item, blocker.resume_when, blocker.needs);
   if (
     wait?.event.type !== "precheck_finished" ||
+    wait.consumed ||
     wait.check.status !== "passed" ||
     wait.check.head_sha !== head
   )
