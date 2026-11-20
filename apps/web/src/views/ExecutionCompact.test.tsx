@@ -45,7 +45,7 @@ test("lane cards share employee identity, show only numeric context and keep det
     card.querySelector(".execution-task .execution-state")?.textContent,
   ).toContain("运行中");
   expect(within(card).getByText("上下文 13.54%")).toBeTruthy();
-  expect(lanes.querySelector(".execution-context-meter")).toBeNull();
+  expect(within(lanes).queryByRole("meter")).toBeNull();
   expect(within(lanes).queryByText("用量正常")).toBeNull();
   expect(within(lanes).queryByText("尚未上报")).toBeNull();
   expect(within(lanes).getAllByText("上下文 —").length).toBeGreaterThan(0);
@@ -75,9 +75,12 @@ test("lane cards share employee identity, show only numeric context and keep det
     document.getElementById(more.getAttribute("aria-controls") ?? "")?.hidden,
   ).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "表格" }));
+  // C-504: only list mode adds the meter under each reading.
   expect(
-    screen.getByRole("table").querySelector(".execution-context-meter"),
-  ).toBeNull();
+    within(screen.getByRole("table")).getAllByRole("meter", {
+      name: "上下文已用 13.54%",
+    }).length,
+  ).toBeGreaterThan(0);
 });
 
 function pointer(

@@ -2047,3 +2047,40 @@ test("C-316: advancing the baseline cannot retry a failed tree without explicit 
     ),
   ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
 });
+
+test("C-533: repository exhaustion can fail an unbound queued check, never supply execution or passing evidence", async () => {
+  const { f, state, identity, merged } = await fixture();
+  const executor = { name: "github", type: "github" as const };
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...identity, executor, status: "queued" },
+      f.io,
+    ),
+  );
+  const failure = {
+    ...identity,
+    executor,
+    status: "failed" as const,
+    startup_failure: "repository_busy" as const,
+    checks: [],
+    summary: "repository busy",
+    log_ref: `${identity.attempt_id}.log`,
+  };
+  for (const invalid of [
+    { ...failure, attempt_id: "other" },
+    {
+      ...failure,
+      checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+    },
+    {
+      ...failure,
+      status: "passed" as const,
+      checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
+    },
+  ])
+    expect(recordMergeCheck(state(), system, invalid, f.io).ok).toBe(false);
+  f.commit(recordMergeCheck(state(), system, failure, f.io));
+  expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(false);
+});

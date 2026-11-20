@@ -300,6 +300,14 @@ export async function createMergeCheckLog(input: {
   } finally {
     await file.close();
   }
+  async function writeContents(contents: string) {
+    const error = await saveCheckLog(
+      path,
+      () => privateDirectory(directory, false),
+      (handle) => handle.writeFile(contents),
+    );
+    if (error) throw new Error(`检查日志写入失败 [${error}]`);
+  }
   let finished = false;
   const workerContext = input.workerContext;
   const workerRules = input.infraFlakyRules
@@ -310,6 +318,8 @@ export async function createMergeCheckLog(input: {
     : undefined;
   return {
     log_ref,
+    waiting: (reason: string) =>
+      writeContents(`${header}\n${filter.redact(reason)}\n`),
     verifiedCheckout(context: VerifiedCheckoutContext) {
       return !finished && workerContext
         ? bindWorkerCheckout(workerContext, context)
