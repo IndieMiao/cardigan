@@ -1,14 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import {
-  defaultMigrationsDir,
-  listMigrations,
-  migrate,
-  Store,
-} from "./index.js";
-import { assignment, event } from "./test-support.js";
+import { migrate, Store } from "./index.js";
+import { assignment, event, migrationsThrough } from "./test-support.js";
 
 test.each([24, 25])(
   "machine migration upgrades v%s atomically and preserves historical identities and aliases",
@@ -17,18 +12,7 @@ test.each([24, 25])(
 
 function checkMachineUpgrade(previousVersion: number) {
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-machine-upgrade-"));
-  const migrationsDir = join(dataDir, "old-migrations");
-  mkdirSync(migrationsDir);
-  for (const migration of listMigrations(defaultMigrationsDir).filter(
-    (m) => m.version <= previousVersion,
-  ))
-    writeFileSync(
-      join(
-        migrationsDir,
-        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
-      ),
-      migration.sql,
-    );
+  const migrationsDir = migrationsThrough(dataDir, previousVersion);
   let store = Store.open({ dataDir, migrationsDir });
   try {
     store.createProject({ id: "a" });
