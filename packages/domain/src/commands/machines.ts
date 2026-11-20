@@ -127,9 +127,9 @@ export function selectMachine(
     const machine_id = machine.id,
       f = facts?.machines.get(machine_id),
       reasons = registryReasons(machine);
+    if (machine_id === options.failedMachine)
+      reasons.push("上次首发未完成，重新指派需要另一台机器");
     if (machine_id !== "local") {
-      if (machine_id === options.failedMachine)
-        reasons.push("上次首发快照失败，恢复时需要另一台机器");
       if (!facts?.harness) reasons.push("启动配置未知，无法确定所需启动器");
       else {
         const key = `harness.${facts.harness}`;

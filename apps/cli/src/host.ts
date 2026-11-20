@@ -243,6 +243,9 @@ export function runCommand<T>(store: Store, run: CommandRun<T>): T {
     const ports: CommandPorts = {
       clock: run.clock ?? systemClock,
       ids: tx.ids,
+      ...(tx.unreservedAssignment
+        ? { unreservedAssignment: tx.unreservedAssignment }
+        : {}),
     };
     const result = run.reduce(state, actor, ports);
     if (!result.ok) {

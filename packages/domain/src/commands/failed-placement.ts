@@ -1,8 +1,62 @@
-import type { Assignment } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import type { Assignment, Run } from "../entities.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import type { CardId } from "../ids.js";
+import { prelaunchRelease } from "../prelaunch-release.js";
 import { remoteWorkerLosses } from "../remote-worker-loss.js";
 import type { CommandDraft } from "./core.js";
+
+/** Only a first queue or its single host-confirmed, cleaned preparation retry may move. */
+export function neverDispatchedQueue(d: CommandDraft, run: Run, card: CardId) {
+  const runs = d
+    .list("runs")
+    .filter((r) => r.assignment_id === run.assignment_id);
+  if (
+    runs.some(
+      (r) =>
+        r.started_at ||
+        (r.launch_publication &&
+          (r.launch_publication.phase !== "exited" ||
+            r.launch_publication.provision_attempted !== false ||
+            r.launch_publication.runtime_ref !== null ||
+            r.launch_publication.process !== null)) ||
+        r.recovery_runtime ||
+        r.dispatch_stop ||
+        r.inactivity_stop ||
+        r.pending_finish,
+    )
+  )
+    return false;
+  if (
+    eventsOfType(d.state.events, "run_dispatched").some((e) => {
+      const p = e.payload as { assignment_id?: string; run_id?: string };
+      return (
+        p?.assignment_id === run.assignment_id ||
+        runs.some((r) => r.id === p?.run_id)
+      );
+    })
+  )
+    return false;
+  if (!run.preparation_retry) return runs.length === 1;
+  const source = runs.find(
+    (r) => r.id === run.preparation_retry?.source_run_id && r.id !== run.id,
+  );
+  const evidence = eventById(d.state.events, run.trigger_event_id);
+  const p = evidence?.payload as Record<string, unknown> | undefined;
+  return (
+    runs.length === 2 &&
+    source?.status === "cancelled" &&
+    !source.preparation_retry &&
+    evidence?.type === "run_preparation_recovered" &&
+    evidence.actor.kind === "system" &&
+    evidence.actor.project_id === d.state.project_id &&
+    evidence.card_id === card &&
+    p?.assignment_id === run.assignment_id &&
+    p.run_id === source.id &&
+    p.replacement_run_id === run.id &&
+    p.original_trigger_event_id === source.trigger_event_id &&
+    p.ready_at === run.preparation_retry.ready_at
+  );
+}
 
 /** A launch needs a durable Run before provisioning. A missing terminal alone is not proof. */
 export function releasedBeforeFirstLaunch(
@@ -14,34 +68,27 @@ export function releasedBeforeFirstLaunch(
     a.scope !== "work_item" ||
     a.status !== "released" ||
     a.runtime_state !== "released" ||
-    a.machine_id === "local" ||
     a.runtime_ref ||
     a.session_ref ||
     a.worktree_path ||
     a.branch ||
     a.base_sha ||
-    d.list("runs").some((r) => r.assignment_id === a.id) ||
     remoteWorkerLosses(d.state.events).some(
       (loss) => loss.assignment_id === a.id,
     )
   )
     return false;
-  const release = eventsOfType(d.state.events, "assignment_released").find(
-    (e) => {
-      const p = e.payload as Record<string, unknown>;
-      return (
-        e.card_id === card &&
-        e.actor.project_id === d.state.project_id &&
-        e.actor.kind !== "system" &&
-        p.assignment_id === a.id &&
-        p.runtime_ref === null &&
-        p.worktree_path === null &&
-        p.branch === null
-      );
-    },
-  );
+  const release = prelaunchRelease(d.state, card, a.id);
+  if (!release) return false;
+  const runs = d.list("runs").filter((r) => r.assignment_id === a.id);
+  if (runs.length) {
+    const cancelled = (release.payload as Record<string, unknown>)
+      .cancelled_queued_run_id;
+    const run = runs.find((r) => r.id === cancelled);
+    return run?.status === "cancelled" && neverDispatchedQueue(d, run, card);
+  }
   return (
-    !!release &&
+    a.machine_id !== "local" &&
     eventsOfType(d.state.events, "bell_delivery_failed").some((e) => {
       const p = e.payload as Record<string, unknown>;
       return (
