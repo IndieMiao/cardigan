@@ -410,9 +410,10 @@
   .ui-suggestion-label {
     flex: 0 1 auto;
   }
-  /* The title gives way first, so the name stays readable. */
+  /* The meta only takes the room the label leaves, so a long title never
+     shortens the name; the name itself shrinks only when it alone overflows. */
   .ui-suggestion-meta {
-    flex: 0 100 auto;
+    flex: 1 1 0;
     color: var(--text-muted);
   }
   .ui-suggestion-status {

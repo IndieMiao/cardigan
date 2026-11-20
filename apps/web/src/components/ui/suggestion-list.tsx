@@ -74,6 +74,8 @@ export function SuggestionOption({
       aria-selected={active}
       data-highlighted={active ? "" : undefined}
       className="ui-menu-item ui-suggestion"
+      // The full text, should the popover's width cut it short.
+      title={meta ? `${label} · ${meta}` : label}
       onMouseDown={(event) => event.preventDefault()}
       onMouseMove={() => {
         if (!active) onActivate();
