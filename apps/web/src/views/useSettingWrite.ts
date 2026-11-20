@@ -49,26 +49,27 @@ const subscribe = (listener: () => void) => {
   return () => listeners.delete(listener);
 };
 
-/** Last write end per project and setting. */
-const writeEnds = new Map<string, number>();
+// Project settings use their row key. A non-project resource can supply its own lock.
+type WriteKey = string | symbol;
+const writeEnds = new Map<WriteKey, number>();
 /** Newest read per project and setting: when it started and what it showed. */
 const confirmed = new Map<string, { at: number; value: unknown }>();
 /**
- * Saves in flight per project and setting, shared by every view of it: a
+ * Saves in flight per resource, shared by every view of it: a
  * page shown again while the first request runs cannot send a second one.
  * Closing or reloading the tab asks first while any save is in flight.
  */
-const inflight = new Set<string>();
+const inflight = new Set<WriteKey>();
 const warn = (event: BeforeUnloadEvent) => {
   event.preventDefault();
   event.returnValue = "";
 };
-function beginSave(key: string) {
+function beginSave(key: WriteKey) {
   if (inflight.size === 0) window.addEventListener("beforeunload", warn);
   inflight.add(key);
   emit();
 }
-function endSave(key: string, at: number) {
+function endSave(key: WriteKey, at: number) {
   inflight.delete(key);
   writeEnds.set(key, at);
   if (inflight.size === 0) window.removeEventListener("beforeunload", warn);
@@ -200,6 +201,7 @@ export function resetSettingWrites() {
 export function useSettingWrite<T>({
   name,
   id = name,
+  sharedWriteKey,
   failure,
   server,
   source,
@@ -214,6 +216,8 @@ export function useSettingWrite<T>({
   name: string;
   /** Stable identity when the name is only a display label (defaults to it). */
   id?: string;
+  /** Serialize writes and invalidate old reads across projects; notices still belong to their origin. */
+  sharedWriteKey?: symbol;
   /** What did not happen, e.g. 未能撤销“对外发布”授权; defaults to 未能保存“name”. */
   failure?: (value: T) => string;
   /** Recovery advice for commands that must read back instead of retrying a keyed save. */
@@ -264,6 +268,7 @@ export function useSettingWrite<T>({
   const place = useContext(SettingPlaceContext);
   const visible = useFeedbackVisible();
   const key = settingKey(place?.project ?? "", id);
+  const writeKey = sharedWriteKey ?? key;
   // Completions reach whichever render is current.
   const latest = useRef({
     saved,
@@ -286,11 +291,14 @@ export function useSettingWrite<T>({
   const current = useSyncExternalStore(subscribe, () =>
     notices.find((n) => n.key === key),
   );
-  // Busy while any view's request for this project and setting runs.
-  const busy = useSyncExternalStore(subscribe, () => inflight.has(key));
+  // Busy while any view is writing the same resource.
+  const busy = useSyncExternalStore(subscribe, () => inflight.has(writeKey));
   // Any write of this setting that ended after this view's read started makes
   // that read old: read again, whichever view wrote and whenever it mounted.
-  const ended = useSyncExternalStore(subscribe, () => writeEnds.get(key) ?? 0);
+  const ended = useSyncExternalStore(
+    subscribe,
+    () => writeEnds.get(writeKey) ?? 0,
+  );
   // Until that read arrives the value is known to be old: nothing may edit or
   // send it (a draft seeded from it would write it back). A failed read leaves
   // the page's load error and retry in view.
@@ -389,9 +397,9 @@ export function useSettingWrite<T>({
     return route?.kind === "settings" && route.projectId === place?.project;
   };
   const save = async (next: T): Promise<boolean> => {
-    if (inflight.has(key) || latest.current.stale) return false;
+    if (inflight.has(writeKey) || latest.current.stale) return false;
     const startedAt = settingsTick();
-    beginSave(key);
+    beginSave(writeKey);
     setError("");
     setMessage("");
     shown.current = undefined;
@@ -454,7 +462,7 @@ export function useSettingWrite<T>({
       // Only an acknowledged write tells this view the value: after a failure
       // it may still have taken effect, so the view waits for the read again.
       if (ok && alive.current) setOwnEnd(end);
-      endSave(key, end);
+      endSave(writeKey, end);
       // With no view mounted, nothing reacts to the write's end. A source
       // that outlives the page (the shared capacity read) is read again here
       // so it shows the result and confirms or keeps a failure (C-479).

@@ -14,6 +14,9 @@ import { Button } from "../components/ui/button.js";
 import { useResource } from "../useResource.js";
 import { trackSettingsRead, useSettingWrite } from "./useSettingWrite.js";
 
+// /api/me/feishu addresses one binding regardless of the settings page's project.
+const bindingWriteKey = Symbol("feishu-binding");
+
 export function FeishuSettings({ client }: { client: CardiganClient }) {
   const title = useId(),
     visible = useFeedbackVisible();
@@ -33,6 +36,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   const data = resource.data;
   const save = useSettingWrite({
     name: "飞书绑定",
+    sharedWriteKey: bindingWriteKey,
     uncertainMessage: "请先刷新确认绑定状态；如仍需绑定，请重新生成绑定码。",
     server: data?.bound,
     source: data,

@@ -187,3 +187,89 @@ test("an older poll cannot restore the binding after unlinking", async () => {
   });
   expect(screen.getByText("未绑定")).toBeTruthy();
 });
+
+function projectView(project: string, client: ReturnType<typeof fakeClient>) {
+  return (
+    <>
+      <SettingsSaveNotice />
+      <SettingsPage key={project} projectId={project} client={client} />
+    </>
+  );
+}
+
+test("switching projects serializes code issuance without moving the one-time code", async () => {
+  const status = { state: "connected", bound: false };
+  const first = Promise.withResolvers<FeishuBindingView>();
+  const refreshed = Promise.withResolvers<FeishuBindingView>();
+  let readsAfterWrite = 0,
+    issued = 0,
+    settled = false;
+  const api = vi.fn(async (action?: "code" | "unbind") => {
+    if (action === "code") {
+      if (++issued === 1) return first.promise;
+      return { ...status, code: "ONLY-B", expires: Date.now() + 60_000 };
+    }
+    if (settled && ++readsAfterWrite === 1) return refreshed.promise;
+    return { ...status };
+  });
+  const client = fakeClient({ feishuBinding: api });
+  window.location.hash = "#/p/a/settings?tab=feishu";
+  const { rerender } = render(projectView("a", client));
+  await screen.findByText("未绑定");
+  fireEvent.click(screen.getByRole("button", { name: "绑定飞书" }));
+  window.location.hash = "#/p/b/settings?tab=feishu";
+  rerender(projectView("b", client));
+  await screen.findByText("未绑定");
+  const button = screen.getByRole("button", { name: "绑定飞书" });
+  expect(button.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(button);
+  expect(issued).toBe(1);
+  await act(async () => {
+    settled = true;
+    first.resolve({ ...status, code: "ONLY-A", expires: Date.now() + 60_000 });
+  });
+  expect(screen.queryByText("ONLY-A")).toBeNull();
+  expect(readsAfterWrite).toBe(1);
+  fireEvent.click(button); // B's read started before A's write finished.
+  expect(issued).toBe(1);
+  await act(async () => {
+    refreshed.resolve({ ...status });
+  });
+  expect(button.getAttribute("aria-disabled")).toBe("false");
+  fireEvent.click(button);
+  await screen.findByText("ONLY-B");
+  expect(issued).toBe(2);
+  window.location.hash = "#/p/a/settings?tab=feishu";
+  rerender(projectView("a", client));
+  await screen.findByText("未绑定");
+  expect(screen.queryByText("ONLY-A")).toBeNull();
+  expect(screen.queryByText("ONLY-B")).toBeNull();
+});
+
+test("a late cross-project unlink failure unlocks the binding and links back to the originating project", async () => {
+  const request = Promise.withResolvers<void>();
+  const api = vi.fn(async (action?: string) => {
+    if (action === "unbind") await request.promise;
+    return { state: "connected", bound: true };
+  });
+  const client = fakeClient({ feishuBinding: api });
+  window.location.hash = "#/p/a/settings?tab=feishu";
+  const { rerender } = render(projectView("a", client));
+  fireEvent.click(await screen.findByRole("button", { name: "解除绑定" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认解绑" }));
+  window.location.hash = "#/p/b/settings?tab=feishu";
+  rerender(projectView("b", client));
+  const button = await screen.findByRole("button", { name: "解除绑定" });
+  expect(button.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(button);
+  expect(screen.queryByRole("button", { name: "确认解绑" })).toBeNull();
+  await act(async () => {
+    request.reject(new Error("请刷新"));
+  });
+  expect(button.getAttribute("aria-disabled")).toBe("false");
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "回到设置" }));
+  expect(window.location.hash).toBe("#/p/a/settings?tab=feishu");
+  rerender(projectView("a", client));
+  expect(await screen.findByText("未能解除飞书绑定：请刷新")).toBeTruthy();
+});
