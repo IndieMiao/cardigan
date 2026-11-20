@@ -183,6 +183,14 @@ export function readExecution(
       `type = 'delivery_submitted' AND ${inIds("card_id")}`,
       [JSON.stringify([...reviewCards])],
     );
+    // C-531: precheck facts tell "waiting for precheck" apart from idle.
+    const precheckEvents = readDocs(
+      store,
+      project,
+      "events",
+      `type IN ('precheck_queued', 'precheck_started', 'precheck_finished') AND ${inIds("card_id")}`,
+      [JSON.stringify([...new Set(work_items.map((w) => w.card_id))])],
+    );
     const generation = store.database.prepare(`SELECT doc FROM events
       WHERE project_id = ? AND json_extract(doc, '$.payload.assignment_id') = ?
       AND type IN ('session_replaced', 'standing_session_restarted', 'assignment_resumed', 'host_ops_action_finished')
@@ -212,6 +220,7 @@ export function readExecution(
           [
             ...runEvents(store, project, runs),
             ...targetEvents,
+            ...precheckEvents,
             ...generations,
           ].map((e) => [e.id, e]),
         ).values(),

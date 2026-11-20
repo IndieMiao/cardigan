@@ -1,0 +1,82 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* The slot keeps the avatar's own size; ring and keyline come from inside. */
+  .ring {
+    position: relative;
+    display: inline-block;
+    flex: none;
+    width: var(--ui-avatar-size);
+    height: var(--ui-avatar-size);
+    border-radius: 50%;
+    vertical-align: middle;
+  }
+  .disc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: var(--surface);
+    pointer-events: none;
+  }
+  .ring > :global(.employee-avatar) {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    height: auto;
+  }
+  .ring[data-run="queued"] > .disc {
+    border: var(--ui-stroke) dashed var(--status-pending);
+  }
+  .ring[data-run="queued"] > :global(.employee-avatar) {
+    inset: var(--ui-stroke);
+  }
+  .ring[data-run="running"] > :global(.employee-avatar) {
+    inset: calc(var(--ui-run-ring) + var(--ui-run-keyline));
+    box-shadow: 0 0 0 var(--ui-run-keyline) var(--surface);
+  }
+  .ring[data-run="running"] > .disc::before,
+  .ring[data-run="running"] > .disc::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+  }
+  .ring[data-run="running"] > .disc::before {
+    border: var(--ui-run-ring) solid
+      color-mix(in srgb, var(--status-progress) 54%, var(--surface));
+  }
+  /* Only this disc's transform animates; the gradient itself never changes. */
+  .ring[data-run="running"] > .disc::after {
+    background: conic-gradient(
+      from -54deg,
+      var(--status-progress) 0deg 108deg,
+      transparent 124deg 360deg
+    );
+    animation: orbit var(--ui-run-cycle) linear infinite;
+  }
+  @keyframes orbit {
+    to {
+      transform: rotate(1turn);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ring[data-run="running"] > .disc::after {
+      display: none;
+      animation: none;
+    }
+    .ring[data-run="running"] > .disc::before {
+      border-color: var(--status-progress);
+    }
+  }
+  @media (forced-colors: active) {
+    .ring[data-run="running"] > .disc::after {
+      display: none;
+      animation: none;
+    }
+    .ring[data-run="running"] > .disc::before {
+      border-color: Highlight;
+    }
+    .ring > :global(.employee-avatar) {
+      forced-color-adjust: none;
+    }
+  }
+}
