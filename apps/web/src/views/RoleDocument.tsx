@@ -459,7 +459,8 @@ export function RoleDocumentPreviewView({
                 <TableHead>角色</TableHead>
                 <TableHead>类型</TableHead>
                 <TableHead>机器要求</TableHead>
-                <TableHead>变化</TableHead>
+                <TableHead>变化内容</TableHead>
+                <TableHead>状态</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -467,19 +468,30 @@ export function RoleDocumentPreviewView({
                 const old = before.get(key);
                 const next = after.get(key);
                 const w = (next ?? old) as WorkItem;
-                const changes: Change[] =
-                  template.action === "create"
-                    ? [{ op: "add", text: "新增" }]
-                    : workItemChanges(old, next);
+                const status: Change =
+                  template.action === "create" || !old
+                    ? { op: "add", text: "新增" }
+                    : !next
+                      ? { op: "remove", text: "删除" }
+                      : { text: "—" };
+                // Details only for items that stay; on narrow screens they
+                // take their own labelled line, never the record's first line.
+                const changes =
+                  template.action !== "create" && old && next
+                    ? workItemChanges(old, next)
+                    : [];
+                const shownStatus: Change = changes.length
+                  ? { op: "add", text: "修改" }
+                  : status;
                 return (
                   <TableRow key={key}>
-                    <DataTableCell data-record="lead">
+                    <DataTableCell nowrap data-record="lead">
                       {w.title}（<code>{w.key}</code>）
                     </DataTableCell>
                     <DataTableCell nowrap data-label="角色">
                       <code>{w.role_id}</code>
                     </DataTableCell>
-                    <DataTableCell data-label="类型">
+                    <DataTableCell nowrap data-label="类型">
                       {w.kind === "verify"
                         ? `验证${w.target_work_item_key ? ` ${w.target_work_item_key}` : ""}`
                         : "产出"}
@@ -488,7 +500,7 @@ export function RoleDocumentPreviewView({
                     <DataTableCell data-label="机器要求">
                       {requirementsText(w) || "不限"}
                     </DataTableCell>
-                    <DataTableCell data-record="aside">
+                    <DataTableCell data-label="变化内容">
                       {changes.length
                         ? changes.map((change, index) => (
                             <SettingsDiff
@@ -501,6 +513,15 @@ export function RoleDocumentPreviewView({
                             </SettingsDiff>
                           ))
                         : "—"}
+                    </DataTableCell>
+                    <DataTableCell nowrap data-record="aside">
+                      {shownStatus.op ? (
+                        <SettingsDiff op={shownStatus.op}>
+                          {shownStatus.text}
+                        </SettingsDiff>
+                      ) : (
+                        shownStatus.text
+                      )}
                     </DataTableCell>
                   </TableRow>
                 );

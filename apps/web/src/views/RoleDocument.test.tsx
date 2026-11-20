@@ -631,8 +631,8 @@ test("the preview lists every field the server reports and every template work i
     .slice(1)
     .map((row) => row.textContent);
   expect(rows).toEqual([
-    "写作（writing）writer产出，可选不限改为可选",
-    "审核（review）reviewer验证 writing，必需不限删除",
+    "写作（writing）writer产出，可选不限改为可选修改",
+    "审核（review）reviewer验证 writing，必需不限—删除",
   ]);
 });
 
@@ -920,4 +920,48 @@ test("removing a work item's machine limits lists each removed value (V-2516)", 
     "移除机器标签 isolated-machine",
     "；移除机器能力 verified-environment",
   ]);
+});
+
+test("long work item changes get their own labelled cell; the record's first line keeps only a short status (V-2525)", async () => {
+  const limited = {
+    ...docTemplate,
+    work_items: [
+      {
+        ...docTemplate.work_items[0],
+        requirements: { os: "linux", tags: ["isolated-machine", "gpu-box"] },
+      },
+    ],
+  } as TemplateVersion;
+  await openRoles(
+    client({
+      previewRoleDocument: async () => ({
+        ...created,
+        role: { ...created.role, action: "unchanged", relaxations: [] },
+        employees: [],
+        template: {
+          action: "update",
+          before: limited,
+          after: { ...docTemplate, version: 3 },
+        },
+      }),
+    }),
+  );
+  const drawer = await openImport();
+  fireEvent.change(within(drawer).getByLabelText("Markdown"), {
+    target: { value: markdown },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  const row = within(
+    within(drawer).getByRole("table", { name: "模板工作项" }),
+  ).getAllByRole("row")[1] as HTMLElement;
+  const aside = row.querySelector("[data-record=aside]");
+  const detail = row.querySelector('[data-label="变化内容"]');
+  expect(aside?.textContent).toBe("修改");
+  expect(detail?.textContent).toBe(
+    "移除系统限制 linux；移除机器标签 isolated-machine、gpu-box",
+  );
+  expect(row.querySelector("[data-record=lead]")?.textContent).toBe(
+    "写作（writing）",
+  );
 });

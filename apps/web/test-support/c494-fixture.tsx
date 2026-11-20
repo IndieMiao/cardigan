@@ -82,7 +82,42 @@ const proofreader = {
   required_machine_tags: [],
 };
 const dev = (await base.templates("p-1")).templates[0] as TemplateVersion;
+/** V-2525 scene: an update that drops machine limits and moves the reviewer. */
+const limitedDev = {
+  ...dev,
+  id: "copy",
+  builtin: false,
+  completion: { mode: "review" as const, reviewer: "role:qa-one" },
+  work_items: dev.work_items.map((w) =>
+    w.key === "development"
+      ? {
+          ...w,
+          requirements: {
+            os: "linux",
+            tags: ["isolated-machine", "gpu-box"],
+            capabilities: ["verified-environment"],
+          },
+        }
+      : w,
+  ),
+};
+const longChange = (): RoleDocumentPreview => ({
+  snapshot: "1".repeat(64),
+  role: { action: "unchanged", role: proofreader, fields: [], relaxations: [] },
+  template: {
+    action: "update",
+    before: limitedDev,
+    after: {
+      ...dev,
+      id: "copy",
+      version: 3,
+      completion: { mode: "review", reviewer: "role:proofreader" },
+    },
+  },
+  employees: [],
+});
 const preview = (markdown: string): RoleDocumentPreview => {
+  if (markdown.includes("long-change")) return longChange();
   const append = markdown.includes('"add_work_item"');
   return {
     snapshot: "0".repeat(64),
