@@ -68,10 +68,16 @@ export function SettingsPage({
   client,
   projectId,
   revision = 0,
+  machineRevision = revision,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /**
+   * Machines are global: the machine panel also rereads on the cross-project
+   * capacity notices, which leave this project's revision unchanged.
+   */
+  machineRevision?: number;
 }) {
   const [filters] = useRouteFilters({ kind: "settings", projectId });
   const [tab, setTab] = useState<SettingsTab>(
@@ -209,7 +215,7 @@ export function SettingsPage({
           key={projectId}
           client={client}
           projectId={projectId}
-          revision={revision}
+          revision={machineRevision}
         />
       )}
       {tab === "templates" && (

@@ -52,9 +52,31 @@ const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
   capacity
     ? `${capacity.running} / ${capacity.limit || "不可用"}`
     : `— / ${m.run_limit}`;
+/**
+ * The shared capacity read for one machine. A failed refresh keeps the last
+ * snapshot in the resource, but that snapshot is no longer current: it is
+ * not shown, and the failure is offered for retry instead.
+ */
 function useMachineCapacity() {
-  const agents = useCapacity()?.data?.agents;
-  return (id: string) => agents?.find((a) => a.machine_id === id);
+  const capacity = useCapacity();
+  const agents = capacity?.error ? undefined : capacity?.data?.agents;
+  return {
+    of: (id: string) => agents?.find((a) => a.machine_id === id),
+    error: capacity?.error,
+    reload: capacity?.reload,
+  };
+}
+function CapacityFeedback({
+  capacity,
+}: {
+  capacity: ReturnType<typeof useMachineCapacity>;
+}) {
+  return (
+    <RequestFeedback
+      error={capacity.error ? `并发读数未能更新：${capacity.error}` : undefined}
+      retry={capacity.reload}
+    />
+  );
 }
 
 function MachineStatus({ status }: { status: string | undefined }) {
@@ -98,7 +120,7 @@ export function MachinesSettings({
   const [open, setOpen] = useState<MachineView>();
   const { remember } = useDrawerReturnFocus(open !== undefined);
   const machines = list.data?.machines;
-  const capacityOf = useMachineCapacity();
+  const capacity = useMachineCapacity();
   return (
     <SettingsPanel
       id="machines"
@@ -111,6 +133,8 @@ export function MachinesSettings({
         retry={list.reload}
         pendingMessage="正在加载机器…"
       />
+      {/* An open drawer reports it in its own body. */}
+      {!open && <CapacityFeedback capacity={capacity} />}
       {machines && machines.length === 0 && <EmptyState>没有机器</EmptyState>}
       {machines && machines.length > 0 && (
         <SettingsTable aria-label="机器列表">
@@ -148,7 +172,7 @@ export function MachinesSettings({
                     <Time value={machine.last_seen} />
                   </DataTableCell>
                   <DataTableCell nowrap data-label="非常驻 / 上限">
-                    {limited(machine, capacityOf(machine.id))}
+                    {limited(machine, capacity.of(machine.id))}
                   </DataTableCell>
                   <DataTableCell nowrap data-label="最近检查">
                     <CheckTag check={latest?.check} />
@@ -198,6 +222,7 @@ function MachineDrawer({
     [client, projectId, summary.id],
   );
   const detail = useResource(load, revision);
+  const capacity = useMachineCapacity();
   const machine = detail.data?.machine;
   return (
     <Drawer
@@ -220,6 +245,7 @@ function MachineDrawer({
             retry={detail.reload}
             pendingMessage="正在加载机器…"
           />
+          <CapacityFeedback capacity={capacity} />
         </SettingsDrawerFeedback>
         {machine && <MachineFacts machine={machine} />}
       </CardDetailLayout>
@@ -228,7 +254,7 @@ function MachineDrawer({
 }
 
 function MachineFacts({ machine }: { machine: MachineView }) {
-  const capacity = useMachineCapacity()(machine.id);
+  const capacity = useMachineCapacity().of(machine.id);
   const bindings = [...machine.bindings].sort(
     (a, b) => Number(b.is_current) - Number(a.is_current),
   );

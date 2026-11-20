@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { App } from "../App.js";
 import {
   type CardiganClient,
   type ExecutionCapacity,
@@ -16,6 +17,7 @@ import {
   type MachineView,
 } from "../api.js";
 import { CapacityProvider } from "../components/Capacity.js";
+import type { StreamCallbacks } from "../stream.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { SettingsPage } from "./SettingsPage.js";
@@ -523,4 +525,127 @@ test("a machine linked by ?tab=machines opens its panel", async () => {
   } finally {
     window.location.hash = "";
   }
+});
+
+test("a cross-project capacity notice rereads the open machine; other settings panels are not reread", async () => {
+  const [mine, peer] = byId("local").bindings;
+  if (!mine || !peer) throw new Error("fixture");
+  let current = withBindings([
+    { ...mine, assignments: [] },
+    { ...peer, assignments: [] },
+  ]);
+  let agent = {
+    ...(capacity.agents[0] as ExecutionCapacity["agents"][number]),
+  };
+  agent = { ...agent, running: 0, total_running: 0 };
+  let stream: StreamCallbacks | undefined;
+  const machines = vi.fn(async () => ({ machines: [current] }));
+  const machine = vi.fn(async () => ({ machine: current }));
+  const roles = vi.fn(fakeClient().roles);
+  const c = client({
+    machines,
+    machine,
+    roles,
+    executionCapacity: async () => ({ ...capacity, agents: [agent] }),
+    subscribe: (_p, callbacks) => {
+      stream = callbacks;
+      return () => {};
+    },
+  });
+  window.location.hash = "#/p/p-1/settings?tab=machines";
+  try {
+    render(<App client={c} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "本机" }, { timeout: 6000 }),
+    );
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(await dialog.findByText("没有在跑任务")).toBeTruthy();
+    const reads = {
+      list: machines.mock.calls.length,
+      detail: machine.mock.calls.length,
+    };
+    // Another project starts a Run; this project sees no event of its own,
+    // only the global capacity notice.
+    current = withBindings([
+      { ...mine, assignments: [] },
+      {
+        ...peer,
+        assignments: [
+          {
+            assignment_id: "A-70",
+            role_id: "coder",
+            employee_id: null,
+            employee_name: null,
+            card_id: "C-70",
+            runs: [{ id: "R-17", status: "running", card_id: "C-70" }],
+          },
+        ],
+      },
+    ]);
+    agent = { ...agent, running: 1, total_running: 1 };
+    await act(async () => stream?.capacity?.());
+    expect(await dialog.findByRole("table", { name: "在跑任务" })).toBeTruthy();
+    const facts = (label: string) =>
+      dialog.getByText(label, { selector: "dt" }).nextElementSibling
+        ?.textContent;
+    await waitFor(() => expect(facts("全部在跑")).toBe("1"));
+    await waitFor(() => expect(facts("非常驻 / 上限")).toBe("1 / 6"));
+    expect(machines.mock.calls.length).toBe(reads.list + 1);
+    expect(machine.mock.calls.length).toBe(reads.detail + 1);
+    expect(roles).not.toHaveBeenCalled();
+  } finally {
+    window.location.hash = "";
+  }
+});
+
+test("a failed capacity refresh is not shown as current: only the machine's own limit, and a retry", async () => {
+  let fail = false;
+  let limit = 6;
+  const executionCapacity = vi.fn(async () => {
+    if (fail) throw new Error("合成容量读取失败");
+    return {
+      ...capacity,
+      agents: capacity.agents.map((a) =>
+        a.machine_id === "local" ? { ...a, limit } : a,
+      ),
+    };
+  });
+  const local = () => ({ ...byId("local"), run_limit: limit });
+  const c = client({
+    executionCapacity,
+    machines: vi.fn(async () => ({ machines: [local()] })),
+    machine: vi.fn(async () => ({ machine: local() })),
+  });
+  const view = render(
+    <CapacityProvider client={c} projectId="p-1" revision={0} canEdit>
+      <SettingsPage projectId="p-1" client={c} revision={0} />
+    </CapacityProvider>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  fireEvent.click(await screen.findByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const facts = (label: string) =>
+    dialog.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 6"));
+  // The limit changes to 3: the machine read succeeds, the capacity read fails.
+  fail = true;
+  limit = 3;
+  view.rerender(
+    <CapacityProvider client={c} projectId="p-1" revision={1} canEdit>
+      <SettingsPage projectId="p-1" client={c} revision={1} />
+    </CapacityProvider>,
+  );
+  await waitFor(() => expect(facts("Agent 并发")).toBe("3（最多可设 16）"));
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  expect(facts("排队")).toBe("—");
+  const alert = await dialog.findByText(/并发读数未能更新/);
+  const retry = within(alert.closest("[role=alert]") as HTMLElement).getByRole(
+    "button",
+    { name: "重试" },
+  );
+  expect(retry.closest("[data-feedback-host]")).not.toBeNull();
+  fail = false;
+  fireEvent.click(retry);
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
 });
