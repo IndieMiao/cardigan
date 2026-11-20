@@ -313,8 +313,16 @@ export function EmployeeIdentity({
   );
 }
 
-export function NextOwners({ owners }: { owners: readonly NextOwnerItem[] }) {
-  if (!owners.length) return <>无人</>;
+export function NextOwners({
+  owners,
+  empty = "无人",
+  avatarSize,
+}: {
+  owners: readonly NextOwnerItem[];
+  empty?: string;
+  avatarSize?: 24 | 32 | 64 | 128;
+}) {
+  if (!owners.length) return <>{empty}</>;
   return (
     <span className="employee-group">
       {owners.map((owner) => (
@@ -326,6 +334,7 @@ export function NextOwners({ owners }: { owners: readonly NextOwnerItem[] }) {
             owner.author_role ?? (owner.kind === "role" ? owner.ref : undefined)
           }
           showTitle={false}
+          {...(avatarSize ? { avatarSize } : {})}
         />
       ))}
     </span>

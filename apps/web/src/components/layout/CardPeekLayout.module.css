@@ -1,0 +1,58 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* Doubled with data-ui to win over the shared .ui-popover padding. */
+  .panel[data-ui="popover"] {
+    display: grid;
+    gap: var(--ui-space-3);
+    width: min(var(--ui-menu-max), calc(100vw - var(--ui-space-6)));
+    max-height: var(--radix-popover-content-available-height);
+    overflow-y: auto;
+    padding: var(--ui-space-3);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .heading {
+    margin: 0;
+    font-size: var(--ui-text-base);
+    font-weight: 600;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--ui-space-1) var(--ui-space-3);
+    margin: 0;
+  }
+  .fact {
+    display: contents;
+  }
+  .fact dt {
+    color: var(--text-muted);
+  }
+  .fact dd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
+    margin: 0;
+  }
+  .list {
+    display: grid;
+    gap: var(--ui-space-1);
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .list li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-2);
+    min-width: 0;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+}
