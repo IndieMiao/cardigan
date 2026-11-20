@@ -498,6 +498,12 @@ interface AssignmentFields {
   readonly machine_id: MachineId;
   readonly runtime_ref: RuntimeRef | null;
   readonly session_ref?: string;
+  /** Latest accepted external context observation; replaced in the same transaction as alert decisions. */
+  readonly context_patrol_cursor?: {
+    readonly session_id: string;
+    readonly updated_at: Timestamp;
+    readonly used_percentage: number;
+  };
   /** Durable fence while an idle session retires for a default role upgrade. */
   readonly role_upgrade?: {
     readonly role_version: number;

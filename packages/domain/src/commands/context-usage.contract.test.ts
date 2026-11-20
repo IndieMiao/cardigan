@@ -221,8 +221,12 @@ test("external Office gets handoff inbox and one manual clear request without a 
   const office = s.assignments.find(
     (a) => a.scope === "standing" && a.role_id === "pm",
   );
-  if (!office) throw new Error("Missing fixture Office");
-  const external: Assignment = { ...office, external: true };
+  if (office?.scope !== "standing") throw new Error("Missing fixture Office");
+  const external: Assignment = {
+    ...office,
+    standing_mode: "office",
+    external: true,
+  };
   const state = {
     ...s,
     assignments: s.assignments.map((a) => (a.id === office.id ? external : a)),
@@ -266,12 +270,15 @@ test("external Office gets handoff inbox and one manual clear request without a 
   if (!open) throw new Error("Expected context action");
   for (const sample of [
     u,
-    { ...u, updated_at: at },
     { ...low, updated_at: now },
     { ...low, runtime_key: "obsolete" },
     { ...low, session_id: "unbound" },
   ])
     expect(poll(next, sample).changes).toHaveLength(0);
+  // Even an unchanged level advances the durable sample time, without notifying or touching actions.
+  const steady = poll(next, { ...u, updated_at: at });
+  expect(steady.events).toEqual([]);
+  expect(steady.changes.map((c) => c.collection)).toEqual(["assignments"]);
   for (const sample of [
     low,
     { ...u, updated_at: at, session_id: "replacement" },
@@ -316,7 +323,9 @@ test("a recovered external session opens exactly one new clear action on a fresh
   let state: CommandState = {
     ...s,
     assignments: s.assignments.map((a) =>
-      a.id === office.id ? { ...a, external: true } : a,
+      a.id === office.id && a.scope === "standing"
+        ? { ...a, standing_mode: "office", external: true }
+        : a,
     ),
   };
   const io = ports();
@@ -327,7 +336,11 @@ test("a recovered external session opens exactly one new clear action on a fresh
     [2, 86, 0],
     [3, 86, 0],
     [4, 86, 1],
-    [5, 86, 1],
+    [6, 90, 1],
+    [5, 84, 1], // late low after a newer high must not settle the second episode
+    [7, 83, 0],
+    [9, 55, 0],
+    [8, 90, 0], // late high after a newer low must not open a third episode
   ] as const) {
     const updated_at = new Date(Date.parse(now) + second * 1000).toISOString();
     const effect = value(
@@ -360,7 +373,7 @@ test("a recovered external session opens exactly one new clear action on a fresh
   ).toHaveLength(2);
   expect(
     state.events.filter((e) => e.type === "human_action_completed"),
-  ).toHaveLength(1);
+  ).toHaveLength(2);
 });
 
 test("context restart binds current session, rechecks preferences, clears resume ID, and deduplicates beyond idempotency keys", () => {

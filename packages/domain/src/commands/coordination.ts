@@ -112,8 +112,12 @@ import {
 import { endRun } from "./end-run.js";
 import {
   classifyOrdinaryHost,
+  type LegacyHostResult,
+  type OrdinaryHostBasis,
+  verifyHostResult,
+} from "./host-action-evidence.js";
+import {
   completeActionDraft,
-  hasHostResult,
   humanOnlyAction,
 } from "./human-action-completion.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
@@ -251,7 +255,7 @@ export function postComment(
       p.card_id,
       {
         body: p.body,
-        ...(p.host_report_for ? { host_report_for: p.host_report_for } : {}),
+        host_report_for: p.host_report_for ?? null,
       },
       {
         type: "comment",
@@ -1618,7 +1622,8 @@ export function triageHumanAction(
     human_action_id: HumanActionId;
     disposition: "done" | "host" | "human" | "release";
     rationale: string;
-    ordinary_host_basis?: string;
+    ordinary_host_basis?: OrdinaryHostBasis;
+    legacy_host_result?: LegacyHostResult;
     title?: string;
     /** C-212: one plain line saying what the reader has to do. */
     todo?: string;
@@ -1665,6 +1670,12 @@ export function triageHumanAction(
       "Remote exit confirmation cannot be delegated",
     );
     text(p.rationale, "rationale");
+    ensure(
+      !p.legacy_host_result ||
+        (isPmOps(d) && p.disposition === "done" && action.triage === "host"),
+      "validation_failed",
+      "只有后台项目经理核销主机待办时可以核验旧回填",
+    );
     if (p.ordinary_host_basis !== undefined) {
       ensure(
         p.disposition === "host" ||
@@ -1745,7 +1756,7 @@ export function triageHumanAction(
           (action.triage === "host" &&
             reportableHostAction(action) &&
             isPmOps(d) &&
-            hasHostResult(d, action, p.rationale)),
+            verifyHostResult(d, action, p.rationale, p.legacy_host_result)),
         "unauthorized",
         "主机待办结项须引用同卡执行者关联本待办的回帖（C-n#N）",
       );

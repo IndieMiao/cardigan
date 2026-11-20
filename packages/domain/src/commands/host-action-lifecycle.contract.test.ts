@@ -862,21 +862,29 @@ test("PM can classify an unclassified legacy host request only against the origi
     disposition: "done" as const,
     rationale: `Verified ${report.data?.id}`,
   };
-  for (const basis of [
+  const basis = {
+    request: original.id,
+    explanation: "Only reads the recorded runtime version",
+  };
+  for (const invalid of [
     undefined,
-    "Read-only, no reference",
-    `Read-only ${report.data?.id}`,
-    original.id,
+    { ...basis, request: required(report.data).id },
+    ...[
+      "",
+      " ",
+      `（${original.id}）`,
+      `**${original.id}** / ${report.data?.id}`,
+      `${action.id}：123`,
+    ].map((explanation) => ({ ...basis, explanation })),
   ])
     expect(
       triageHumanAction(
         next,
         owner,
-        { ...params, ...(basis ? { ordinary_host_basis: basis } : {}) },
+        { ...params, ...(invalid ? { ordinary_host_basis: invalid } : {}) },
         io,
       ).ok,
     ).toBe(false);
-  const basis = `Only reading the recorded runtime version as requested in ${original.id}`;
   const result = value(
     triageHumanAction(
       next,
@@ -969,4 +977,121 @@ test("system evidence-wait request can be completed by its human-designated exte
     completed_by_host_assignment_id: "A-4",
     resume_work_items: [],
   });
+});
+
+test("PM can verify a pre-protocol operator's original result after release, but cannot use the legacy path for current ordinary comments", () => {
+  const { state } = diagnosticOwners();
+  const io = ports();
+  const source = value(
+    requestHumanAction(
+      state,
+      human,
+      {
+        card_id: id("card", 1),
+        instructions: "Read the installed version",
+        why_human: "Host check",
+        expected_return: "Readback",
+        blocked_work_items: [],
+      },
+      io,
+    ),
+  );
+  const request = required(source.timeline[0]);
+  const action = source.data;
+  const open = {
+    ...apply(state, source),
+    human_actions: [{ ...action, triage: "host" as const }],
+  };
+  const operator = actor(5, "host_ops");
+  const quote = "I verified that the running version is 7.2.";
+  const body = `${action.id}: ${quote}`;
+  const posted = value(
+    postComment(open, operator, { card_id: request.card_id, body }, io),
+  );
+  const entry = required(posted.data);
+  const postedState = apply(open, posted);
+  const released = {
+    ...postedState,
+    assignments: postedState.assignments.map((a) =>
+      a.id === id("assignment", 5) ? { ...a, status: "released" as const } : a,
+    ),
+  };
+  // Historical storage shape: no server protocol discriminator, no dedicated action field on the comment.
+  const old = {
+    ...released,
+    events: released.events.map((e) =>
+      e.type === "comment_posted" ? { ...e, payload: { body } } : e,
+    ),
+  };
+  const params = {
+    human_action_id: action.id,
+    disposition: "done" as const,
+    rationale: `Verified ${entry.id}`,
+    ordinary_host_basis: {
+      request: request.id,
+      explanation:
+        "Reading the installed version requires no mutation or protected operation",
+    },
+  };
+  const attestation = {
+    entry: entry.id,
+    result_quote: quote,
+    verification:
+      "Matched the reported version to the read-only supervisor status",
+  };
+  const finish = (s: CommandState, legacy = attestation) =>
+    triageHumanAction(s, owner, { ...params, legacy_host_result: legacy }, io);
+  expect(finish(released).ok).toBe(false); // new-protocol progress intentionally has no report
+  expect(triageHumanAction(old, owner, params, io).ok).toBe(false); // citing the old comment alone is not verification
+  for (const patch of [
+    { entry: request.id },
+    { result_quote: "Not in the original report" },
+    { verification: `（${entry.id}）` },
+    { verification: quote },
+  ])
+    expect(finish(old, { ...attestation, ...patch }).ok).toBe(false);
+  const noFinal = `${action.id}: will check later`;
+  expect(
+    finish({
+      ...old,
+      timeline: old.timeline.map((e) =>
+        e.id === entry.id ? { ...e, body: noFinal } : e,
+      ),
+      events: old.events.map((e) =>
+        e.type === "comment_posted" ? { ...e, payload: { body: noFinal } } : e,
+      ),
+    }).ok,
+  ).toBe(false);
+  for (const patch of [
+    { refs: [] },
+    { retracted: true },
+    { card_id: id("card", 2) },
+    { author: "system" as const },
+  ])
+    expect(
+      finish({
+        ...old,
+        timeline: old.timeline.map((e) =>
+          e.id === entry.id ? { ...e, ...patch } : e,
+        ),
+      }).ok,
+    ).toBe(false);
+  const effect = value(finish(old));
+  expect(effect.data.status).toBe("done");
+  expect(effect.events).toContainEqual(
+    expect.objectContaining({
+      type: "legacy_host_result_verified",
+      actor: owner,
+      payload: {
+        human_action_id: action.id,
+        request: request.id,
+        executor: entry.author,
+        ...attestation,
+      },
+    }),
+  );
+  expect(apply(old, effect).timeline.find((e) => e.id === entry.id)).toEqual(
+    entry,
+  );
+  expect(finish(apply(old, effect)).ok).toBe(false);
 });

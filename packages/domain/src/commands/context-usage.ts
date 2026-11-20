@@ -120,6 +120,29 @@ export function recordContextUsageNotices(
       !contextUsageFresh(usage, d.now, staleAfterMs)
     )
       return [];
+    if (a.external) {
+      const cursor = a.context_patrol_cursor;
+      const sampleTime = Date.parse(usage.updated_at);
+      const previousTime = cursor ? Date.parse(cursor.updated_at) : -Infinity;
+      // A repeated identical sample may deliver the second C-211 notice. An
+      // older or contradictory sample must never start or settle an episode.
+      if (
+        sampleTime < previousTime ||
+        (sampleTime === previousTime &&
+          (cursor?.session_id !== usage.session_id ||
+            cursor.used_percentage !== usage.used_percentage))
+      )
+        return [];
+      if (sampleTime > previousTime)
+        d.put("assignments", {
+          ...a,
+          context_patrol_cursor: {
+            session_id: usage.session_id,
+            updated_at: usage.updated_at,
+            used_percentage: usage.used_percentage,
+          },
+        });
+    }
     const level = contextUsageLevel(usage, projectPreferences(state));
     const needsClearAction =
       a.external && reconcileClearEpisodes(d, usage, level);

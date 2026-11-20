@@ -302,7 +302,14 @@ const schemas = {
       .describe(
         "release: show an action already triaged human/host whose ready_when is not met yet (PM manual release); only rationale is needed.",
       ),
-    ordinary_host_basis: text
+    legacy_host_result: z
+      .strictObject({ entry: entryId, result_quote: text, verification: text })
+      .optional()
+      .describe(
+        "For pre-protocol executor reports only: cite entry in rationale, quote the actual final outcome verbatim, and explain how you independently checked it. Never confirm progress or a second-hand report.",
+      ),
+    ordinary_host_basis: z
+      .strictObject({ request: entryId, explanation: text })
       .optional()
       .describe(
         "For an unclassified host action only: cite its original request (C-n#N) and explain why it is not human-only. Omit if uncertain; never infer safety from a result report.",
