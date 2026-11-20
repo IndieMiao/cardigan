@@ -65,7 +65,7 @@ const employeeInput = z
   })
   .strict();
 
-function owner(
+export function requireEmployeeOwner(
   c: EmployeeContext,
   tx: Pick<ReadRepositories, "members">,
 ): MemberId {
@@ -142,11 +142,11 @@ export async function serveEmployees(
   const update = /^\/employees\/(E-[1-9]\d*)\/update$/u.exec(rest)?.[1];
   if (!update && rest !== "/employees/options" && rest !== "/employees")
     return false;
-  c.store.uow.read((tx) => owner(c, tx));
+  c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
   if (rest === "/employees/options") {
     if (c.req.method !== "GET") methodNotAllowed(["GET"]);
     const options = c.store.uow.read((tx) => {
-      owner(c, tx);
+      requireEmployeeOwner(c, tx);
       const employees = tx.employees.list();
       const roles = new Map(
         listRoleVersions(tx, c.project_id).map((role) => [role.role_id, role]),
@@ -179,7 +179,7 @@ export async function serveEmployees(
   }
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   const body = await readJsonBody(c.req, maxBase64 + MAX_JSON_BODY_BYTES);
-  c.store.uow.read((tx) => owner(c, tx));
+  c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
   const key = z
     .string()
     .trim()
@@ -196,7 +196,7 @@ export async function serveEmployees(
     operation: (tx: StoreTransactionContext, ownerId: MemberId) => T,
   ): T => {
     // Check again even on an idempotent replay; body/blob IO may have outlived the session.
-    c.store.uow.read((tx) => owner(c, tx));
+    c.store.uow.read((tx) => requireEmployeeOwner(c, tx));
     return must(
       c.store.runHumanIdempotent(
         {
@@ -204,7 +204,7 @@ export async function serveEmployees(
           key: key.data,
           request: { method: "POST", rest, body },
         },
-        (tx) => operation(tx, owner(c, tx)),
+        (tx) => operation(tx, requireEmployeeOwner(c, tx)),
       ),
     ).value;
   };
@@ -313,7 +313,7 @@ export async function serveEmployees(
     );
   };
   c.store.uow.read((tx) => {
-    owner(c, tx);
+    requireEmployeeOwner(c, tx);
     // Preview the same domain command before blob IO. Discard its effect and
     // use synthetic IDs: failed forms must not allocate IDs or write events.
     prepare(
