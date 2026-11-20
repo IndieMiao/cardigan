@@ -1,5 +1,6 @@
 import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
+import type { RunPresence } from "./run-presence.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
@@ -209,7 +210,10 @@ export interface CardListItem
     readonly ahead: number;
   }[];
   readonly produce_owners?: readonly AuthorView[];
-  readonly participants?: readonly AuthorView[];
+  /** C-531: `run_presence` is this person's state for this card; older servers omit it. */
+  readonly participants?: readonly (AuthorView & {
+    readonly run_presence?: RunPresence;
+  })[];
   readonly work_items?: readonly Pick<
     WorkItemView,
     "id" | "title" | "status"
@@ -272,6 +276,9 @@ export interface WorkItemView {
   readonly depends_on: readonly string[];
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: string;
+  /** C-531: the unreleased owner and their state for this work item only. */
+  readonly assignee?: AuthorView;
+  readonly run_presence?: RunPresence;
   readonly target_work_item_id?: string;
   /** MC-2: scheduling constraints declared on the work item itself. */
   readonly requirements?: MachineRequirements;
@@ -1082,6 +1089,8 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  /** C-531: this row's own state for its card; absent on standing rows. */
+  readonly run_presence?: RunPresence;
   readonly verification_activity?: {
     readonly status: string;
     readonly label: string;

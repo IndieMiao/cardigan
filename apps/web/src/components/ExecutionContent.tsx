@@ -23,6 +23,7 @@ import {
 } from "../execution-machine.js";
 import { assignmentActivity } from "../execution-sort.js";
 import { routeHash } from "../route.js";
+import { runPresence } from "../run-presence.js";
 import { statusLabel } from "../status.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { DetailsTip } from "./DetailsTip.js";
@@ -474,7 +475,11 @@ export function AssignmentRow({
     >
       <TableCell data-column="employee">
         <IdentityRow className="execution-employee">
-          <EmployeeIdentity {...a} author_role={a.role_id} />
+          <EmployeeIdentity
+            {...a}
+            author_role={a.role_id}
+            presence={a.card_id ? runPresence(a.run_presence) : undefined}
+          />
           <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
         </IdentityRow>
       </TableCell>
@@ -529,7 +534,11 @@ export function AssignmentCard({
       <BoardCardLayout className="card-tile ui-surface-card">
         {(!lane || showEmployee) && (
           <IdentityRow className="execution-card-head">
-            <EmployeeIdentity {...a} author_role={a.role_id} />
+            <EmployeeIdentity
+              {...a}
+              author_role={a.role_id}
+              presence={a.card_id ? runPresence(a.run_presence) : undefined}
+            />
             <span className="execution-state">
               <RuntimeState a={a} run={run} />
             </span>

@@ -14,10 +14,11 @@ import {
 } from "../machine-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
+import { runPresence } from "../run-presence.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
 import { DecisionRouting } from "./DecisionRouting.js";
-import { NextOwners } from "./EmployeeIdentity.js";
+import { EmployeeIdentity, NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag, Time } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
 import { Checkbox } from "./ui/checkbox.js";
@@ -239,6 +240,16 @@ export function CardWorkItems({
                     </span>
                   </summary>
                   <p>
+                    {item.assignee && (
+                      <>
+                        <EmployeeIdentity
+                          {...item.assignee}
+                          showTitle={false}
+                          avatarSize={24}
+                          presence={runPresence(item.run_presence)}
+                        />{" "}
+                      </>
+                    )}
                     {item.assignment_id ? (
                       <IdTag id={item.assignment_id} label={item.role_id} />
                     ) : (
