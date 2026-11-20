@@ -965,3 +965,33 @@ test("long work item changes get their own labelled cell; the record's first lin
     "写作（writing）",
   );
 });
+
+test("Q-1045: the reviewers' long-target preview (attachment-7768) reads as one record per work item at every width", async () => {
+  const replay = (await import("../testing/role-document-long-target.json"))
+    .default as unknown as RoleDocumentPreview;
+  await openRoles(client({ previewRoleDocument: async () => replay }));
+  const drawer = await openImport();
+  fireEvent.change(within(drawer).getByLabelText("Markdown"), {
+    target: { value: markdown },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  const table = within(drawer).getByRole("table", { name: "模板工作项" });
+  // The record layout is on regardless of viewport width.
+  expect(table.className).toMatch(/always/);
+  const rows = within(table).getAllByRole("row").slice(1) as HTMLElement[];
+  const [first, , check] = rows;
+  expect(first?.querySelector("[data-record=lead]")?.textContent).toBe(
+    "集成环境里的长时间验证（integration_verification_long_key）",
+  );
+  expect(first?.querySelector("[data-record=aside]")?.textContent).toBe("修改");
+  expect(first?.querySelector('[data-label="变化内容"]')?.textContent).toBe(
+    "移除系统限制 linux；移除架构限制 arm64；移除机器标签 isolated-machine；移除机器能力 verified-environment",
+  );
+  expect(check?.querySelector('[data-label="类型"]')?.textContent).toBe(
+    "验证 integration_verification_long_key，必需",
+  );
+  // Ids keep their text and may only break after a separator.
+  const ids = first?.querySelector("[data-record=lead] code");
+  expect(ids?.querySelectorAll("wbr")).toHaveLength(3);
+});

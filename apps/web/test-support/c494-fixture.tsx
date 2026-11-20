@@ -12,6 +12,7 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
+import replay7768 from "../src/testing/role-document-long-target.json";
 import { settingsPanels } from "./settings-panels-data.js";
 
 // C-494 evidence: the C-479 settings panels data plus three synthetic launch
@@ -130,6 +131,9 @@ const longChange = (): RoleDocumentPreview => ({
   employees: [],
 });
 const preview = (markdown: string): RoleDocumentPreview => {
+  // Q-1045: the reviewers' preview response (attachment-7768), unchanged.
+  if (markdown.includes("replay-7768"))
+    return replay7768 as unknown as RoleDocumentPreview;
   if (markdown.includes("long-change")) return longChange();
   const append = markdown.includes('"add_work_item"');
   return {

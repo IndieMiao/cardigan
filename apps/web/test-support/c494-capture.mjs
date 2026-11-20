@@ -386,77 +386,81 @@ try {
             .scrollIntoView({ block: "start" });
         });
       });
-      // V-2525: long work item changes (machine limits removed, reviewer moved).
-      await scene("import-long-change", width, theme, async () => {
-        await roles();
-        await press("从 Markdown 导入");
-        await until("!!document.querySelector('[role=dialog] textarea')");
-        await type(
-          "Markdown",
-          "---\nrole_id: proofreader\ntemplate: {id: copy, from: source, replace_role: qa-one}\n---\nlong-change\n",
-        );
-        await press("预览");
-        await until(
-          "!!document.querySelector('[role=dialog] table[aria-label=模板工作项]')",
-        );
-        await run(() => {
-          document.activeElement?.blur?.();
-          document
-            .querySelector("[role=dialog] table[aria-label=模板工作项]")
-            .scrollIntoView({ block: "center" });
-        });
-        // No text of a record may overlap another cell of the same record.
-        report.overlaps ??= {};
-        report.overlaps[`${width}-${theme}`] = await run(() =>
-          [
-            ...document.querySelectorAll(
-              "[role=dialog] table[aria-label=模板工作项] tbody tr",
-            ),
-          ].flatMap((row) => {
-            const cells = [...row.children].map((c) => {
-              const r = c.getBoundingClientRect();
-              return { r, label: c.dataset.label ?? c.dataset.record };
-            });
-            const out = [];
-            for (let i = 0; i < cells.length; i++)
-              for (let j = i + 1; j < cells.length; j++) {
-                const a = cells[i].r,
-                  b = cells[j].r;
-                const x = Math.min(a.right, b.right) - Math.max(a.left, b.left);
-                const y = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
-                if (x > 0.5 && y > 0.5 && a.width > 0 && b.width > 0)
-                  out.push(`${cells[i].label}/${cells[j].label}`);
-              }
-            const lead = row
-              .querySelector("[data-record=lead]")
-              .getBoundingClientRect();
-            if (lead.width < 40) out.push(`lead width ${lead.width}`);
-            return out;
-          }),
-        );
-        // V-2528: the table fits its column; every cell stays inside it.
-        report.tableFit ??= {};
-        report.tableFit[`${width}-${theme}`] = await run(() => {
-          const table = document.querySelector(
-            "[role=dialog] table[aria-label=模板工作项]",
+      // V-2525 / Q-1045: long work item changes and long ids (the reviewers'
+      // attachment-7768 replay). The table must fit its column with every cell
+      // visible and no overlap inside a record; otherwise the run fails.
+      for (const [name, marker] of [
+        ["import-long-change", "long-change"],
+        ["import-replay-7768", "replay-7768"],
+      ])
+        await scene(name, width, theme, async () => {
+          await roles();
+          await press("从 Markdown 导入");
+          await until("!!document.querySelector('[role=dialog] textarea')");
+          await type(
+            "Markdown",
+            `---\nrole_id: proofreader\ntemplate: {id: copy, from: source, replace_role: qa-one}\n---\n${marker}\n`,
           );
-          const scroll = table.parentElement;
-          const box = scroll.getBoundingClientRect();
-          const outside = [...table.querySelectorAll("td")].filter((td) => {
-            const r = td.getBoundingClientRect();
-            return (
-              r.width > 0 &&
-              (r.right > box.right + 0.5 || r.left < box.left - 0.5)
+          await press("预览");
+          await until(
+            "!!document.querySelector('[role=dialog] table[aria-label=模板工作项]')",
+          );
+          await run(() => {
+            document.activeElement?.blur?.();
+            document
+              .querySelector("[role=dialog] table[aria-label=模板工作项]")
+              .scrollIntoView({ block: "start" });
+          });
+          const fit = await run(() => {
+            const table = document.querySelector(
+              "[role=dialog] table[aria-label=模板工作项]",
             );
-          }).length;
-          return {
-            tableWidth: Math.round(table.getBoundingClientRect().width),
-            scrollWidth: scroll.scrollWidth,
-            clientWidth: scroll.clientWidth,
-            cellsOutside: outside,
-          };
+            const scroll = table.parentElement;
+            const box = scroll.getBoundingClientRect();
+            const rows = [...table.querySelectorAll("tbody tr")];
+            const overlaps = rows.flatMap((row) => {
+              const cells = [...row.children].map((c) => ({
+                r: c.getBoundingClientRect(),
+                label: c.dataset.label ?? c.dataset.record,
+              }));
+              const out = [];
+              for (let i = 0; i < cells.length; i++)
+                for (let j = i + 1; j < cells.length; j++) {
+                  const a = cells[i].r,
+                    b = cells[j].r;
+                  const x =
+                    Math.min(a.right, b.right) - Math.max(a.left, b.left);
+                  const y =
+                    Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+                  if (x > 0.5 && y > 0.5 && a.width > 0 && b.width > 0)
+                    out.push(`${cells[i].label}/${cells[j].label}`);
+                }
+              return out;
+            });
+            const outside = [...table.querySelectorAll("td")].filter((td) => {
+              const r = td.getBoundingClientRect();
+              return (
+                r.width > 0 &&
+                (r.right > box.right + 0.5 || r.left < box.left - 0.5)
+              );
+            }).length;
+            return {
+              tableWidth: Math.round(table.getBoundingClientRect().width),
+              scrollWidth: scroll.scrollWidth,
+              clientWidth: scroll.clientWidth,
+              cellsOutside: outside,
+              overlaps,
+            };
+          });
+          report.tableFit ??= {};
+          report.tableFit[`${name}-${width}-${theme}`] = fit;
+          assert(
+            fit.scrollWidth <= fit.clientWidth &&
+              fit.cellsOutside === 0 &&
+              fit.overlaps.length === 0,
+            `${name}-${width}-${theme}: table does not fit ${JSON.stringify(fit)}`,
+          );
         });
-      });
       await scene("discard-dialog", width, theme, async () => {
         await roles();
         await press("从 Markdown 导入");

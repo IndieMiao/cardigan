@@ -14,7 +14,7 @@ import { Drawer } from "../components/Drawer.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import {
   DataTableCell,
-  DataTableKeep,
+  DataTableId,
 } from "../components/layout/DataTableLayout.js";
 import {
   SettingsDialogActions,
@@ -455,7 +455,7 @@ export function RoleDocumentPreviewView({
               )}
             </SettingsFact>
           </SettingsFacts>
-          <SettingsTable aria-label="模板工作项">
+          <SettingsTable aria-label="模板工作项" recordsAlways>
             <TableHeader>
               <TableRow>
                 <TableHead>工作项</TableHead>
@@ -477,8 +477,8 @@ export function RoleDocumentPreviewView({
                     : !next
                       ? { op: "remove", text: "删除" }
                       : { text: "—" };
-                // Details only for items that stay; on narrow screens they
-                // take their own labelled line, never the record's first line.
+                // A record per work item at every width (V-2538): details take
+                // their own labelled line, never the record's first line.
                 const changes =
                   template.action !== "create" && old && next
                     ? workItemChanges(old, next)
@@ -490,23 +490,25 @@ export function RoleDocumentPreviewView({
                   <TableRow key={key}>
                     <DataTableCell data-record="lead">
                       {w.title}（
-                      <DataTableKeep>
-                        <code>{w.key}</code>）
-                      </DataTableKeep>
+                      <code>
+                        <DataTableId>{w.key}</DataTableId>
+                      </code>
+                      ）
                     </DataTableCell>
-                    <DataTableCell nowrap data-label="角色">
-                      <code>{w.role_id}</code>
+                    <DataTableCell data-label="角色">
+                      <code>
+                        <DataTableId>{w.role_id}</DataTableId>
+                      </code>
                     </DataTableCell>
                     <DataTableCell data-label="类型">
                       {w.kind === "verify" ? "验证" : "产出"}
-                      {w.kind === "verify" && w.target_work_item_key && " "}
-                      <DataTableKeep>
-                        {w.kind === "verify"
-                          ? (w.target_work_item_key ?? "")
-                          : ""}
-                        ，
-                      </DataTableKeep>
-                      {w.required ? "必需" : "可选"}
+                      {w.kind === "verify" && w.target_work_item_key && (
+                        <>
+                          {" "}
+                          <DataTableId>{w.target_work_item_key}</DataTableId>
+                        </>
+                      )}
+                      {w.required ? "，必需" : "，可选"}
                     </DataTableCell>
                     <DataTableCell data-label="机器要求">
                       {requirementsText(w) || "不限"}

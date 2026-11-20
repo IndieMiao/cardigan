@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { type ComponentProps, Fragment } from "react";
 import { cn } from "../../lib/utils.js";
 import { Table, TableCell } from "../ui/table.js";
 import styles from "./DataTableLayout.module.css";
@@ -16,12 +16,15 @@ export function DataTableLayout({
   scrollClassName,
   stacked = false,
   records = false,
+  recordsAlways = false,
   label,
   ...props
 }: ComponentProps<typeof Table> & {
   scrollClassName?: string;
   stacked?: boolean;
   records?: boolean;
+  /** The record layout at every width, not only ≤640px (C-494). */
+  recordsAlways?: boolean;
   /** Names the scroll region; consecutive tables are spaced apart. */
   label?: string;
 }) {
@@ -32,6 +35,7 @@ export function DataTableLayout({
         "card-table",
         (stacked || records) && styles.stacked,
         records && styles.records,
+        recordsAlways && styles.always,
         className,
       )}
     />
@@ -47,13 +51,23 @@ export function DataTableLayout({
 }
 
 /**
- * Keeps an identifier (a key, an id with its trailing punctuation) in one
- * piece inside a wrapping cell: the cell text still wraps around it.
+ * An identifier (a key or id such as `integration_verification_long_key`)
+ * that may wrap only after `_`, `-` or `.`, never inside a word. The text is
+ * unchanged; only line-break opportunities are added.
  */
-export function DataTableKeep(
-  props: Omit<ComponentProps<"span">, "className">,
-) {
-  return <span {...props} className={styles.keep} />;
+export function DataTableId({ children }: { children: string }) {
+  const parts = children.split(/(?<=[_.-])/u);
+  return (
+    <>
+      {parts.map((part, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: parts are positional.
+        <Fragment key={index}>
+          {index > 0 && <wbr />}
+          {part}
+        </Fragment>
+      ))}
+    </>
+  );
 }
 
 /**
