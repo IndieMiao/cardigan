@@ -60,7 +60,14 @@ const measure = `(() => {
       const rects = Array.from(range.getClientRects());
       const d = description.getBoundingClientRect();
       const peer = rects.find((r) => Math.abs(r.top - d.top) < 12) || rects[0];
-      badge = { tag: box(tag), badge: box(tag.querySelector('.id-badge')), descriptionBottom: px(d.bottom), textBottom: px(peer.bottom), baselineDelta: px(d.bottom - peer.bottom), tagMinHeight: getComputedStyle(tag).minHeight, verticalAlign: getComputedStyle(tag).verticalAlign };
+      // Top of the first text line in every cell of the tag's row: equal tops
+      // mean the tag does not push its line below the neighbouring cells.
+      const rowLineTops = Array.from(td.parentElement.children).map((c) => {
+        const w = document.createTreeWalker(c, NodeFilter.SHOW_TEXT);
+        while (w.nextNode()) if (w.currentNode.textContent.trim()) { const r = document.createRange(); r.selectNodeContents(w.currentNode); return px(r.getClientRects()[0].top); }
+        return null;
+      });
+      badge = { rowLineTops, tag: box(tag), badge: box(tag.querySelector('.id-badge')), descriptionBottom: px(d.bottom), textBottom: px(peer.bottom), baselineDelta: px(d.bottom - peer.bottom), tagMinHeight: getComputedStyle(tag).minHeight, verticalAlign: getComputedStyle(tag).verticalAlign };
       break;
     }
     return { where, scroller: { className: scroller.className, overflowX: getComputedStyle(scroller).overflowX, clientWidth: scroller.clientWidth, scrollWidth: scroller.scrollWidth, ...box(scroller) }, table: box(table), head, firstRow, badge };
@@ -106,6 +113,25 @@ try {
       },
     );
   };
+  const expand = async (scope) => {
+    await evaluate(`(() => {
+      for (const button of document.querySelectorAll(${JSON.stringify(`${scope} button`)})) if (button.textContent.trim() === '展开全文') button.click();
+    })()`);
+    await delay(100);
+  };
+  // Scroll the last (10-column) table of the scope into view and to its end.
+  const wideEnd = (scope) =>
+    evaluate(`(() => {
+      const tables = document.querySelectorAll(${JSON.stringify(`${scope} table`)});
+      const table = tables[tables.length - 1];
+      if (!table) return null; // The baseline goal is plain text.
+      const scroller = table.parentElement;
+      scroller.scrollIntoView({ block: 'center' });
+      scroller.scrollLeft = scroller.scrollWidth;
+      const last = table.querySelector('tr > :last-child').getBoundingClientRect();
+      const box = scroller.getBoundingClientRect();
+      return { scrollLeft: scroller.scrollLeft, clientWidth: scroller.clientWidth, scrollWidth: scroller.scrollWidth, lastColumnRight: Math.round(last.right * 100) / 100, scrollerRight: Math.round(box.right * 100) / 100, documentScrollWidth: document.documentElement.scrollWidth };
+    })()`);
   for (const width of [1440, 390]) {
     await send("Emulation.setDeviceMetricsOverride", {
       width,
@@ -137,26 +163,28 @@ try {
         });
         await until("Boolean(document.querySelector('.card-purpose'))");
         await evaluate("document.fonts.ready");
+        await expand(".card-purpose");
         await evaluate(
           "document.querySelector('.card-purpose').scrollIntoView({block:'start'})",
         );
         const overview = await evaluate(measure);
         await shoot(`${name}-goal`);
+        overview.wideEnd = await wideEnd(".card-purpose");
+        await shoot(`${name}-goal-wide`);
         await evaluate(
           "document.getElementById('card-C-1-timeline-tab').click()",
         );
         await until(
           "!!document.getElementById('entry-C-1#1') && !document.getElementById('entry-C-1#1').closest('[hidden]')",
         );
-        await evaluate(`(() => {
-          for (const button of document.querySelectorAll('.timeline-entry button')) if (button.textContent.trim() === '展开全文') button.click();
-        })()`);
-        await delay(100);
+        await expand(".timeline-entry");
         await evaluate(
           "document.getElementById('entry-C-1#1').scrollIntoView({block:'start'})",
         );
         const timeline = await evaluate(measure);
         await shoot(`${name}-timeline`);
+        timeline.wideEnd = await wideEnd("#entry-C-1\\#1");
+        await shoot(`${name}-timeline-wide`);
         records.push({ name, overview, timeline });
       }
       const help = `help-${width}-${theme}`;
