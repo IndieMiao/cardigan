@@ -312,27 +312,35 @@ test("returning to a filter joins its pending older page instead of requesting i
 test("a failed head for a new filter keeps paging off until its retry succeeds", async () => {
   window.location.hash = "#/p/p-1/cards/C-1";
   const { client, card, page } = server(80);
-  let failHead = true;
+  const retryHead = Promise.withResolvers<void>();
+  const readHead = vi
+    .fn(() => retryHead.promise)
+    .mockRejectedValueOnce(new Error("首页失败"));
   card.mockImplementation(async (_p, _c, options) => {
-    if (options?.type && !options.before && failHead)
-      throw new Error("首页失败");
+    if (options?.type === "review" && !options.before) await readHead();
     return page(options);
   });
   render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
   await selectCardTab(/^时间线/);
   await screen.findByText("已加载 20 / 80 条");
+  await waitFor(() => expect(live()).toHaveLength(1));
+  const [oldSentinel] = live();
   await selectMenu(/^条目类型：/, "审核");
   const retry = await screen.findByRole("button", { name: "重试" });
   // The old snapshot is still shown, but its cursor is not paged.
   expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull();
-  expect(live()).toHaveLength(0);
-  reachBottom();
+  // Removing the button commits before the observer's passive effect cleanup.
+  await waitFor(() => expect(live()).toHaveLength(0));
+  act(() => oldSentinel?.emit(true)); // A notification queued before disconnect.
   reachBottom();
   expect(olderCalls(card)).toHaveLength(0);
-  const observers = live().length;
-  expect(observers).toBe(0);
-  failHead = false;
+  expect(readHead).toHaveBeenCalledTimes(1);
   fireEvent.click(retry);
+  expect(readHead).toHaveBeenCalledTimes(2);
+  expect(live()).toHaveLength(0);
+  reachBottom();
+  expect(olderCalls(card)).toHaveLength(0);
+  await act(async () => retryHead.resolve());
   await waitFor(() =>
     expect(rows()).toEqual(
       Array.from({ length: 20 }, (_, i) => `entry-C-1#${80 - 2 * i}`),
