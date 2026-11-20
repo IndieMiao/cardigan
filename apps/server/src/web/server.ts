@@ -115,6 +115,9 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly roleLaunchConfig?: () =>
+    | import("@cardigan/roles").LaunchConfig
+    | undefined;
   readonly launchProfiles?: () => readonly string[];
   readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
@@ -179,6 +182,7 @@ const API_PREFIX = "/api/";
 
 interface RequestContext {
   readonly recordTiming: (stage: string, ms: number) => void;
+  readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
@@ -355,6 +359,7 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
+        roleLaunchConfig: options.roleLaunchConfig,
         launchProfiles: options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
@@ -571,6 +576,7 @@ async function serveProjectRoute(
         project_id,
         clock,
         dataDir: context.dataDir,
+        roleLaunchConfig: context.roleLaunchConfig,
         launchProfiles: context.launchProfiles,
         mergeGate: context.mergeGate?.forProject(project_id),
         runLimit: context.runLimit,
