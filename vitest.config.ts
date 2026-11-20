@@ -1,7 +1,17 @@
 import { configDefaults, defineConfig } from "vitest/config";
 
+import { ciReporters } from "./test-support/ci-reporters.js";
+
+const processContracts = [
+  "packages/host/src/worker-claude-opener.integration.test.ts",
+  "apps/server/src/diagnostics-reader.test.ts",
+  "apps/cli/src/assignment-attach.test.ts",
+  "packages/runtime-herdr/src/runtime.acceptance.test.ts",
+];
+
 export default defineConfig({
   test: {
+    reporters: ciReporters,
     environment: "node",
     setupFiles: ["./test-support/setup.ts"],
     projects: [
@@ -10,7 +20,11 @@ export default defineConfig({
         test: {
           name: "node",
           include: ["{packages,apps}/*/src/**/*.test.{ts,tsx}"],
-          exclude: [...configDefaults.exclude, "apps/web/**"],
+          exclude: [
+            ...configDefaults.exclude,
+            "apps/web/**",
+            ...processContracts,
+          ],
         },
       },
       {
@@ -22,6 +36,15 @@ export default defineConfig({
           // web workers bounded and run them after the other packages.
           maxWorkers: 2,
           sequence: { groupOrder: 1 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "process-contract",
+          include: processContracts,
+          maxWorkers: 1,
+          sequence: { groupOrder: 2 },
         },
       },
     ],

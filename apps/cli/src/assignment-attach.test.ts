@@ -23,7 +23,6 @@ import {
   describe,
   expect,
   test,
-  vi,
 } from "vitest";
 import { HC_RELEASE } from "../../../packages/runtime-herdr/src/hc-version.js";
 
@@ -155,7 +154,9 @@ if (args[0] === '--version') {
   }));
   if (process.env.FIXTURE_EXIT !== '0') console.error('RAW HC ERROR');
   if (process.env.FIXTURE_SIGNAL) process.kill(process.pid, process.env.FIXTURE_SIGNAL);
-  else if (process.env.FIXTURE_HOLD_ATTACH === '1') setTimeout(() => process.exit(0), 600);
+  else if (process.env.FIXTURE_ATTACH_GATE) {
+    require('node:net').createConnection(process.env.FIXTURE_ATTACH_GATE).resume();
+  }
   else process.exit(Number(process.env.FIXTURE_EXIT));
 } else {
   console.error('Unexpected hc command');
@@ -800,22 +801,37 @@ describe("C-152: server-registered runtime", () => {
 test.skipIf(process.platform !== "linux")(
   "human attach holds the same retirement lock until detaching",
   async () => {
-    env.FIXTURE_HOLD_ATTACH = "1";
+    const connected = Promise.withResolvers<Socket>();
+    const gate = createServer(connected.resolve);
+    env.FIXTURE_ATTACH_GATE = join(root, "detach.sock");
+    await new Promise<void>((resolve, reject) => {
+      gate.once("error", reject);
+      gate.listen(env.FIXTURE_ATTACH_GATE, resolve);
+    });
     const store = Store.open({ dataDir: join(root, "data") });
     try {
       const attaching = run([], "tty");
-      await vi.waitFor(() =>
-        expect(existsSync(join(root, "attached"))).toBe(true),
-      );
-      expect(
-        await tryHostOpsLock(store, "fixture", "A-1" as never),
-      ).toBeUndefined();
+      const peer = await Promise.race([
+        connected.promise,
+        attaching.then(({ code }) => {
+          throw new Error(`Attach exited before holding the lock: ${code}`);
+        }),
+      ]);
+      try {
+        expect(
+          await tryHostOpsLock(store, "fixture", "A-1" as never),
+        ).toBeUndefined();
+      } finally {
+        peer.end(); // Detach only after the competing lock attempt has finished.
+        await attaching;
+      }
       expect((await attaching).code).toBe(0);
       const unlock = await tryHostOpsLock(store, "fixture", "A-1" as never);
       expect(unlock).toBeDefined();
       await unlock?.();
     } finally {
       store.close();
+      await new Promise<void>((resolve) => gate.close(() => resolve()));
     }
   },
 );
