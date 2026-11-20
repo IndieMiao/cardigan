@@ -478,24 +478,22 @@ test("U07 §3.4: only existing server-resolved numbers in an Agent comment becom
 });
 
 test("U08 §3.7: comment preview, mention completion and pasted image post through the public HTTP commands", async () => {
-  // C-514: `@` suggests employees; the card's producer works as 关羽.
+  // C-514: `@` suggests the project's active employees (Assignment
+  // employee_id is immutable, so this one is not on the card).
   f.store().uow.run((tx) => {
-    const owner = tx.assignments.get(project(), f.primary.owner.id);
-    if (!owner) throw new Error("Missing producer assignment");
     const employee: Employee = {
       id: "E-1" as Employee["id"],
       name: "关羽",
       title: "开发工程师",
       bio: "",
       avatar: null,
-      role_id: owner.role_id,
+      role_id: f.primary.owner.role_id,
       launch_profile_ref: null,
       status: "active",
-      created_at: owner.created_at,
-      updated_at: owner.created_at,
+      created_at: f.primary.owner.created_at,
+      updated_at: f.primary.owner.created_at,
     };
     tx.employees.put(employee);
-    tx.assignments.put(project(), { ...owner, employee_id: employee.id });
   });
   await f.loginBrowser();
   detail();
