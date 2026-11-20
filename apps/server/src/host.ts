@@ -61,6 +61,7 @@ const exec = promisify(execFile);
  */
 export interface HostWiring {
   readonly recoverLaunches: (project: ProjectId) => Promise<void>;
+  readonly publishWhileBackgroundOwner: () => () => void;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
   readonly runtime: RuntimeTargets;
@@ -203,8 +204,6 @@ export async function createHostWiring(options: {
         recordLaunchNotice(options.store, tx, "launch_reload_failed", message),
       );
     },
-    ({ config }) =>
-      recordAcceptedBrowserPath(options.store, config.browser?.browsers_path),
   );
   const generations = new WeakMap<
     LaunchSnapshot,
@@ -219,6 +218,10 @@ export async function createHostWiring(options: {
       return live.current().config;
     },
     refreshLaunch: live.refresh,
+    publishWhileBackgroundOwner: () =>
+      live.publishWhileOwned(({ config }) =>
+        recordAcceptedBrowserPath(options.store, config.browser?.browsers_path),
+      ),
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

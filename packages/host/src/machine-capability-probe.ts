@@ -4,14 +4,23 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 
+import {
+  type CapabilityCommand,
+  CHROMIUM_SEARCH_SCRIPT,
+} from "./chromium-search.js";
+
+export type { CapabilityCommand } from "./chromium-search.js";
+
 export interface CapabilityProbeResult {
   readonly ok: boolean;
   readonly output: string;
+  readonly attempted?: number;
+  readonly incomplete?: boolean;
 }
 export type CapabilityProbe = (
   execution: ExecutionConfig,
   os: string,
-  command: readonly string[],
+  command: CapabilityCommand,
   signal?: AbortSignal,
 ) => Promise<CapabilityProbeResult>;
 export const CAPABILITY_PROBE_TIMEOUT_MS = 10_000;
@@ -20,36 +29,52 @@ export const CAPABILITY_PROBE_TIMEOUT_MS = 10_000;
 // worker as well as the controller; restore HOME for account-scoped CLI auth.
 export const CAPABILITY_PROBE_SCRIPT = `
 import json, os, pwd, selectors, signal, subprocess, sys, time
-p = None
 class ProbeCancelled(Exception): pass
 def interrupted(*args): raise ProbeCancelled()
-for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT): signal.signal(sig, interrupted)
+for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGALRM): signal.signal(sig, interrupted)
+
+def run_command(argv, env, deadline):
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=env['HOME'], start_new_session=True)
+    try:
+        output = bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(p.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise TimeoutError()
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, 4096)
+                    if not chunk: selector.unregister(key.fd)
+                    else: output.extend(chunk)
+                    if len(output) > 16384: raise ValueError()
+        try: code = p.wait(timeout=max(0.001, deadline-time.monotonic()))
+        except subprocess.TimeoutExpired: raise TimeoutError()
+        return output.decode('utf-8', errors='replace') if code == 0 else None
+    finally:
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        p.stdout.close()
+        p.wait()
+${CHROMIUM_SEARCH_SCRIPT}
 try:
     request = json.loads(sys.argv[1])
     if sys.platform != request['os']: raise ValueError()
     account = pwd.getpwuid(os.getuid())
     env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name, LC_ALL='C')
-    p = subprocess.Popen(request['argv'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd=account.pw_dir, start_new_session=True)
-    selector = selectors.DefaultSelector(); selector.register(p.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + request['timeout_ms'] / 1000
-    output = bytearray()
-    while selector.get_map():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0: raise TimeoutError()
-        for key, _ in selector.select(remaining):
-            chunk = os.read(key.fileobj.fileno(), 4096)
-            if not chunk: selector.unregister(key.fileobj)
-            else: output.extend(chunk)
-            if len(output) > 16384: raise ValueError()
-    code = p.wait(timeout=max(0.001, deadline-time.monotonic()))
-    print(json.dumps(dict(ok=code == 0, output=output.decode('utf-8', errors='replace') if code == 0 else '')))
+    timeout = request['timeout_ms'] / 1000
+    deadline = time.monotonic() + timeout
+    if isinstance(request['argv'], dict):
+        os.chdir(account.pw_dir)  # Resolve relative PATH entries in the Run account's cwd.
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        result = search_browser(request['argv'], env, deadline)
+    else:
+        banner = run_command(request['argv'], env, deadline)
+        result = dict(ok=banner is not None, output=banner or '')
 except Exception:
-    print(json.dumps(dict(ok=False, output='')))
+    result = dict(ok=False, output='')
 finally:
-    if p:
-        try: os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError: pass
-        p.wait()
+    signal.setitimer(signal.ITIMER_REAL, 0)
+print(json.dumps(result))
 `;
 export const probeMachineCapability: CapabilityProbe = async (
   execution,
@@ -109,6 +134,20 @@ export const probeMachineCapability: CapabilityProbe = async (
               value.ok === true &&
               typeof value.output === "string",
             output: typeof value.output === "string" ? value.output : "",
+            ...(!overflow &&
+            !failed &&
+            code === 0 &&
+            "scopes" in argv &&
+            Number.isSafeInteger(value.attempted) &&
+            value.attempted >= 0 &&
+            value.attempted <= argv.scopes.length
+              ? {
+                  attempted: value.attempted as number,
+                  incomplete:
+                    value.incomplete !== false ||
+                    value.attempted !== argv.scopes.length,
+                }
+              : {}),
           });
         } catch {
           resolve({ ok: false, output: "" });

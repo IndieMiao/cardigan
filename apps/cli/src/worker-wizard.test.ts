@@ -393,7 +393,9 @@ test.each(["wizard", "capability"] as const)(
       dataDir = join(root, "data");
     const version = { ok: true, output: "codex-cli 1.2.3" };
     capabilityProbe.mockImplementation(async (_e, _os, command) =>
-      command[0] === "codex" ? version : { ok: false, output: "" },
+      !("scopes" in command) && command[0] === "codex"
+        ? version
+        : { ok: false, output: "" },
     );
     expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
       0,
@@ -446,7 +448,8 @@ test.each(["wizard", "capability"] as const)(
       capabilityProbe
         .mockClear()
         .mockImplementation(async (_e, _os, command) => {
-          if (command[0] !== "codex") return { ok: false, output: "" };
+          if ("scopes" in command || command[0] !== "codex")
+            return { ok: false, output: "" };
           if (phase === "capability") await changeRegistry();
           return version; // Result from the x64 worker, even when the registry now says arm64.
         });

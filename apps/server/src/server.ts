@@ -82,6 +82,8 @@ import { type RunningWebServer, startWebServer } from "./web/server.js";
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
   readonly role?: "web" | "background";
+  /** Activate the launch publisher only while this process owns the dispatch lock. */
+  readonly onBackgroundOwner?: () => () => void;
   readonly env?: ServerEnv;
   readonly config?: ServerConfig;
   /** Inject a store (tests); otherwise one is opened from the config. */
@@ -170,16 +172,20 @@ export async function startCardiganServer(
     join(config.dataDir, "locks", "background.lock"),
     1,
   );
+  let stopPublishing: (() => void) | undefined;
   try {
+    stopPublishing = options.onBackgroundOwner?.();
     const server = await assembleServer(options);
     return {
       ...server,
       close: async () => {
         await server.close();
+        stopPublishing?.();
         await unlock();
       },
     };
   } catch (error) {
+    stopPublishing?.();
     await unlock();
     throw error;
   }

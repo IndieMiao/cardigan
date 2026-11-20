@@ -2,7 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
+  acceptedBrowserDigest,
   beginMachineObservation,
+  browserPathDigest,
   completeMachineObservation,
   type MachineCapability,
   type MachineHealth,
@@ -71,6 +73,7 @@ export async function refreshMachineObservations(
     launch_enabled: false,
   };
   let capabilities: MachineCapability[] = [];
+  let observedBrowserDigest: string | null | undefined;
   let targetFingerprint: string | undefined;
   try {
     const target = await options.target();
@@ -85,24 +88,49 @@ export async function refreshMachineObservations(
       checked_at: now(),
       status: checked.blockers.length ? "failed" : "passed",
     };
+    let root: string | undefined;
+    if (!checked.blockers.length && !options.catalog) {
+      try {
+        root = await options.browsersPath?.();
+      } catch {
+        // This optional scope cannot invalidate the machine's other observations.
+      }
+    }
     const catalog = checked.blockers.length
       ? []
       : (options.catalog?.() ??
-        loadMachineCapabilityCatalog(
-          options.env,
-          await options.browsersPath?.(),
-          target.machine.os,
-        ));
+        loadMachineCapabilityCatalog(options.env, root, target.machine.os));
+    const failures: NonNullable<
+      MachineHealth["capability_failures"]
+    >[number][] = [];
     const probe = options.probe ?? probeMachineCapability;
     for (const entry of catalog) {
       options.signal?.throwIfAborted();
       if (!entry.os.some((os) => os === target.machine.os)) continue;
+      const search = "scopes" in entry.check ? entry.check : undefined;
+      if (search) {
+        const registry = search.scopes.find((s) => s.kind === "registry");
+        observedBrowserDigest = registry
+          ? browserPathDigest(registry.value)
+          : acceptedBrowserDigest(store);
+      }
       const result = await probe(
         target.execution,
         target.machine.os,
         entry.check,
         options.signal,
       );
+      if (search && !result.ok)
+        failures.push({
+          key: entry.key,
+          search_locations: search.scopes
+            .slice(0, result.attempted ?? 0)
+            .map((scope) => scope.label),
+          ...(result.attempted !== search.scopes.length ||
+          result.incomplete !== false
+            ? { search_incomplete: true }
+            : {}),
+        });
       if (
         !result.ok ||
         (entry.acceptsOutput && !entry.acceptsOutput(result.output))
@@ -131,15 +159,6 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
-    // Persist only the host-defined scopes, not a worker's stdout, account or
-    // absolute private configuration. A missing tool is not a machine blocker.
-    const failures = catalog.flatMap((entry) =>
-      entry.searchLocations &&
-      entry.os.some((os) => os === target.machine.os) &&
-      !capabilities.some((capability) => capability.key === entry.key)
-        ? [{ key: entry.key, search_locations: entry.searchLocations }]
-        : [],
-    );
     if (failures.length) health = { ...health, capability_failures: failures };
     const current = await options.target();
     options.signal?.throwIfAborted();
@@ -176,6 +195,7 @@ export async function refreshMachineObservations(
     health,
     capabilities,
     targetFingerprint,
+    observedBrowserDigest,
   );
   return readMachineObservations(store, project, machine, now());
 }

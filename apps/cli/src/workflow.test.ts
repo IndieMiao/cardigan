@@ -299,17 +299,21 @@ test("machine check uses the configured browser on the Run target; show retains 
     capabilityProbe.mockImplementation(async (target, _os, argv) =>
       target.mode === "agent-ssh" &&
       target.user === "agent" &&
-      argv.at(-1) === registry
+      "scopes" in argv &&
+      argv.scopes.some((s) => s.value === registry)
         ? { ok: true, output: "Chromium 152.0.1.2" }
         : { ok: false, output: "" },
     );
     expect(await run(["machine", "check", "local"])).toBe(0);
     expect(printed()).toContain('"version": "152.0.1.2"');
     expect(printed()).not.toContain("capability_failures");
-    capabilityProbe.mockResolvedValue({
+    capabilityProbe.mockImplementation(async (_target, _os, cmd) => ({
       ok: false,
       output: "private-worker-error",
-    });
+      ...("scopes" in cmd
+        ? { attempted: cmd.scopes.length, incomplete: false }
+        : {}),
+    }));
     expect(await run(["machine", "check", "local"])).toBe(0);
     const health = JSON.parse(output.at(-1) ?? "").health;
     expect(health).toMatchObject({
@@ -342,7 +346,11 @@ test("machine check uses the configured browser on the Run target; show retains 
     writeFileSync(secrets, "");
     chmodSync(secrets, 0o644);
     capabilityProbe.mockImplementation(async (_target, _os, argv) =>
-      argv.at(-1) === rejected || argv[0] === "node"
+      (
+        "scopes" in argv
+          ? argv.scopes.some((s) => s.value === rejected)
+          : argv[0] === "node"
+      )
         ? { ok: true, output: "Tool 24.0" }
         : { ok: false, output: "" },
     );
@@ -357,7 +365,8 @@ test("machine check uses the configured browser on the Run target; show retains 
       expect(await run(["machine", "check", "local"])).toBe(0);
       expect(
         capabilityProbe.mock.calls.some(
-          ([, , argv]) => argv.at(-1) === rejected,
+          ([, , argv]) =>
+            "scopes" in argv && argv.scopes.some((s) => s.value === rejected),
         ),
       ).toBe(false);
       const snapshot = JSON.parse(output.at(-1) ?? "");

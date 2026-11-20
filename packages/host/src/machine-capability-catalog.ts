@@ -1,28 +1,29 @@
 import { dirname, join } from "node:path";
 import { getHarnessAdapter, HARNESSES } from "@cardigan/roles";
+import {
+  type CapabilityCommand,
+  chromiumSearch,
+  VERSION_PATTERN,
+} from "./chromium-search.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import { readOnboardingYaml } from "./worker-onboarding-config.js";
 
 export interface CapabilityDefinition {
   readonly key: string;
   readonly os: readonly ("linux" | "darwin")[];
-  readonly check: readonly string[];
-  readonly version?: readonly string[];
+  readonly check: CapabilityCommand;
+  readonly version?: CapabilityCommand;
   readonly parseVersion: (output: string) => string | null;
-  /** Host-defined search scopes only; never include private roots or probe output. */
-  readonly searchLocations?: readonly string[];
   readonly acceptsOutput?: (output: string) => boolean;
 }
-// POSIX ERE and JavaScript share this expression; group 2 is the safe version token.
-const versionPattern = String.raw`(^|[^a-zA-Z0-9_.])v?([0-9]{1,6}(\.[0-9]{1,6}){1,3})([^0-9]|$)`;
-const versionRegex = new RegExp(versionPattern, "u");
+const versionRegex = new RegExp(VERSION_PATTERN, "u");
 /** Never persist a banner, account name, credential, or arbitrary command output. */
 export function parseCapabilityVersion(output: string): string | null {
-  return versionRegex.exec(output)?.[2] ?? null;
+  return versionRegex.exec(output)?.[1] ?? null;
 }
 function tool(
   key: string,
-  command: readonly string[],
+  command: CapabilityCommand,
   os: CapabilityDefinition["os"] = ["linux", "darwin"],
 ): CapabilityDefinition {
   return {
@@ -33,67 +34,8 @@ function tool(
     parseVersion: parseCapabilityVersion,
   };
 }
-const chromeApp =
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const pathNames = ["chromium", "chromium-browser", "google-chrome"];
-function chromiumCapability(
-  os: string,
-  browsersPath?: string,
-): CapabilityDefinition {
-  const mac = os === "darwin";
-  const cache = mac
-    ? "$HOME/Library/Caches/ms-playwright"
-    : "$HOME/.cache/ms-playwright";
-  const patterns = mac
-    ? [
-        "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
-        'chromium-*/chrome-mac*/"Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"',
-        "chromium_headless_shell-*/chrome-headless-shell-mac*/chrome-headless-shell",
-        "chromium_headless_shell-*/chrome-mac*/headless_shell",
-      ]
-    : [
-        "chromium-*/chrome-linux*/chrome",
-        "chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell",
-        "chromium_headless_shell-*/chrome-linux*/headless_shell",
-      ];
-  // Only fixed globs are shell source. Expand HOME, PATH and the literal $1
-  // on the Run target, never on the controller or in the operator's shell.
-  const check = `
-try_bin() {
-  [ -f "$1" ] && [ -x "$1" ] || return 1
-  # Keep the binary's exit status independent of the bounded banner pipeline.
-  # fd 3 carries only our failure marker; the binary cannot write to it.
-  token=$({
-    { "$1" --version 3>&- || printf '!failed!' >&3; } 2>&1 |
-      /usr/bin/head -c 16384 | LC_ALL=C /usr/bin/grep -aEo '${versionPattern}' | /usr/bin/head -n 1
-  } 3>&1)
-  case "$token" in ''|*'!failed!'*) return 1 ;; esac
-  printf '%s\\n' "$token"
-  exit 0
-}
-search_registry() {
-  for bin in ${patterns.map((pattern) => `"$1"/${pattern}`).join(" ")}; do try_bin "$bin"; done
-}
-[ -z "$1" ] || search_registry "$1"
-for name in ${pathNames.join(" ")}; do try_bin "$(command -v "$name")"; done
-${mac ? `try_bin "${chromeApp}"` : ""}
-search_registry "${cache}"
-exit 1`;
-  return {
-    ...tool("browser.chromium", [
-      "/bin/sh",
-      "-c",
-      check,
-      "chromium-probe",
-      browsersPath ?? "",
-    ]),
-    searchLocations: [
-      ...(browsersPath ? ["launch.yaml:browser.browsers_path"] : []),
-      ...pathNames.map((name) => `PATH:${name}`),
-      ...(mac ? [chromeApp] : []),
-      cache,
-    ],
-  };
+function chromiumCapability(os: string, browsersPath?: string) {
+  return tool("browser.chromium", chromiumSearch(os, browsersPath));
 }
 export const BUILTIN_MACHINE_CAPABILITIES: readonly CapabilityDefinition[] = [
   ...HARNESSES.map((harness) => {
