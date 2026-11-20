@@ -30,15 +30,20 @@ import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
-// Exercise the real check journal without discovering tools on the test runner.
-const emptyCatalog = vi.hoisted(() => vi.fn(() => []));
 vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
+    // Keep the check journal and observation writes real, but never run host tools.
     checkRegisteredMachine: (options, create, source) =>
       host.checkRegisteredMachine(
-        { ...options, catalog: emptyCatalog },
+        {
+          ...options,
+          probe: async (_target, _os, command) =>
+            command[0] === "node"
+              ? { ok: true, output: "v0.0.528" }
+              : { ok: false, output: "" },
+        },
         create,
         source,
       ),
@@ -235,7 +240,6 @@ test("machine check reports actual remote results without a blanket field-verifi
       },
     });
   try {
-    emptyCatalog.mockClear();
     for (const launch_enabled of [false, true]) {
       check.mockResolvedValueOnce({
         ok: true,
@@ -243,8 +247,8 @@ test("machine check reports actual remote results without a blanket field-verifi
       });
       expect(await run(["machine", "check", "worker-a"])).toBe(0);
       expect(printed()).toContain(`"launch_enabled": ${launch_enabled}`);
+      expect(printed()).toContain('"version": "0.0.528"');
     }
-    expect(emptyCatalog).toHaveBeenCalledTimes(2);
     check.mockResolvedValueOnce({
       ok: true,
       value: {

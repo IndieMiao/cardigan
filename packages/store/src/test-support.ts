@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -13,6 +13,22 @@ import type {
 } from "@cardigan/domain";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
+
+export function migrationsThrough(dataDir: string, previousVersion: number) {
+  const migrationsDir = join(dataDir, "old-migrations");
+  mkdirSync(migrationsDir);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= previousVersion,
+  ))
+    writeFileSync(
+      join(
+        migrationsDir,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  return migrationsDir;
+}
 
 /** Expected schema from migration files, independent of the database under test. */
 export function latestSchemaVersion(
