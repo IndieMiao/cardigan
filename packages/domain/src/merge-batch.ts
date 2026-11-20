@@ -42,6 +42,44 @@ export function hasBatchFailureEvidence(check?: MergeCheckView): boolean {
   );
 }
 
+/** A deferred completion is not a failed card check. Only an explicit recheck
+ * releases that exact member; rebuilding a batch or moving main cannot do so. */
+export function deferredMergeBatch(
+  events: readonly Event[],
+  card: CardId,
+  completion: DeliveryId,
+) {
+  const deferred = events.findLast(
+    (e) =>
+      e.card_id === card &&
+      e.actor.kind === "system" &&
+      e.type === "merge_batch_member_deferred" &&
+      (e.payload as { completion_id?: string }).completion_id === completion,
+  );
+  if (!deferred) return undefined;
+  const { batch_id } = deferred.payload as { batch_id: MergeBatchId };
+  const resumed = events.some(
+    (e) =>
+      e.card_id === card &&
+      e.seq > deferred.seq &&
+      e.type === "merge_batch_member_resumed" &&
+      (e.actor.kind === "human" ||
+        (e.actor.kind === "assignment" && e.actor.role_id === "host_ops")) &&
+      (e.payload as { batch_id?: string }).batch_id === batch_id &&
+      (e.payload as { completion_id?: string }).completion_id === completion,
+  );
+  return resumed ? undefined : batch_id;
+}
+
+/** Drain concurrent probes before retiring their family; never cancel an
+ * in-flight check or mistake a startup failure for a failed prefix. */
+export function batchStartupFailure(family: readonly MergeBatch[]) {
+  return family.find(
+    (b) =>
+      b.status === "failed" && b.check?.startup_failure === "repository_busy",
+  );
+}
+
 const batchCache = new WeakMap<readonly Event[], readonly MergeBatch[]>();
 
 /** Only host events in this project's stream can establish batch evidence. */

@@ -1015,7 +1015,9 @@ export class GithubDispatchJournal {
             : {}),
           ...(current.abandoned ? { finished: true } : {}),
         });
-        return held ? ("held" as const) : false;
+        // Suspended admission already fences POST. Do not mask the writer's
+        // proven pre-transport timeout with a concurrent hold during settlement.
+        return held && outcome !== "not_started" ? ("held" as const) : false;
       }
       this.save(tx, {
         ...settled,

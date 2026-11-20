@@ -4,6 +4,7 @@ import {
   abortMergeBatchPublish,
   activeMergeFamilies,
   batchFailures,
+  batchStartupFailure,
   beginMergeBatchPublish,
   type CommandEffect,
   type CommandPorts,
@@ -113,6 +114,25 @@ export class MergeBatches {
       }
     }
     for (const batch of activeMergeFamilies(state(id).events)) {
+      if (["failed", "bisecting"].includes(batch.status)) {
+        const family = mergeBatches(state(id).events).filter(
+          (b) => b.id === batch.id || b.parent_batch_id === batch.id,
+        );
+        if (
+          batchStartupFailure(family) &&
+          !family.some((b) => b.status === "checking")
+        ) {
+          command(id, (s, a, p) =>
+            abortMergeBatch(
+              s,
+              a,
+              { batch_id: batch.id, reason: "repository_busy" },
+              p,
+            ),
+          );
+          continue;
+        }
+      }
       let reason: "stale" | "member_left" | undefined;
       if (baseline !== batch.base_sha) reason = "stale";
       else {
@@ -284,6 +304,7 @@ export class MergeBatches {
     const probes = mergeBatches(state(id).events).filter(
       (b) => b.parent_batch_id === batch.id && b.status !== "aborted",
     );
+    if (batchStartupFailure(probes)) return;
     const failed = [batch, ...probes]
       .filter((b) => hasBatchFailureEvidence(b.check))
       .sort((a, b) => a.members.length - b.members.length)[0];

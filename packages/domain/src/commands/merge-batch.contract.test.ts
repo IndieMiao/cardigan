@@ -482,6 +482,24 @@ test.each(["main", "probe"])(
       ).ok,
     ).toBe(false);
     expect(beginMergeBatchPublish(f.state(), system, id, f.io).ok).toBe(false);
+    f.commit(
+      abortMergeBatch(
+        f.state(),
+        system,
+        { batch_id: batch.id, reason: "repository_busy" },
+        f.io,
+      ),
+    );
+    expect(mergeQueue(f.state())).toEqual([]);
+    expect(
+      f.state().events.filter((e) => e.type === "merge_batch_member_deferred"),
+    ).toHaveLength(2);
+    const [first] = f.members;
+    if (!first) throw new Error("Missing first member");
+    const { card_id } = first;
+    f.commit(recheckMerge(f.state(), human, { card_id }, f.io));
+    expect(recheckMerge(f.state(), human, { card_id }, f.io).ok).toBe(false);
+    expect(mergeQueue(f.state()).map((q) => q.plan.card_id)).toEqual([card_id]);
   },
 );
 

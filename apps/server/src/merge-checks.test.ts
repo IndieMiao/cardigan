@@ -6088,7 +6088,10 @@ test("C-533: exhaustion is a batch startup failure, never a confirmation rerun o
       await next.tick(project);
     }
     expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(3);
-    expect(batch().status).toBe("failed");
+    expect(batch()).toMatchObject({
+      status: "aborted",
+      check: { status: "failed", startup_failure: "repository_busy" },
+    });
     expect(h.f.state().events.map((e) => e.type)).not.toContain(
       "merge_batch_requeued",
     );
@@ -6101,5 +6104,223 @@ test("C-533: exhaustion is a batch startup failure, never a confirmation rerun o
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+test.each([false, true])(
+  "C-533: revalidate at first POST even with no recorded timeout (overlapping hold=%s)",
+  async (overlap) => {
+    const h = await reworkGithubFixture({ noRunId: true }),
+      gate = h.create(),
+      project = [h.f.project_id];
+    const hold = (value: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold: value }, p),
+      );
+    try {
+      if (overlap) {
+        h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+          hold({ reason: "wait", resume_condition: "ready" });
+          throw new CandidatePushNotStarted(30_000);
+        });
+        await gate.tick(project);
+        hold(null);
+        h.advance(30_000);
+      }
+      h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+        h.advance(5_000);
+        h.c.advance(true, 1);
+        return { status: "pushed" };
+      });
+      await gate.tick(project);
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(h.git.publish).not.toHaveBeenCalled();
+      await gate.tick(project);
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+      expect(h.client.dispatch.mock.calls[0]?.[1].sha).toBe("2".repeat(40));
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each([1, 3])(
+  "C-533: a simultaneous hold cannot erase lock timeout %i",
+  async (at) => {
+    const h = await reworkGithubFixture(),
+      gate = h.create(),
+      project = [h.f.project_id];
+    const set = (hold: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+      );
+    let pushes = 0;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) set({ reason: "wait", resume_condition: "ready" });
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (const [i, delay] of [0, 30_000, 60_000].entries()) {
+        h.advance(delay);
+        await gate.tick(project);
+        if (i + 1 === at) set(null);
+        await gate.tick(project);
+        expect(pushes).toBe(i + 1);
+      }
+      expect(h.check()).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        checks: [],
+      });
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-533: a stopped batch releases the project slot, not its members' budgets", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const settings = h.c.options.configuration.forProject();
+  if (settings.status !== "enabled" || !settings.queue)
+    throw new Error("Missing queue");
+  h.c.setConfig({ ...settings, queue: { ...settings.queue, maxBatchSize: 1 } });
+  for (let i = 0; i < 3; i++)
+    h.git.pushCheckCandidate.mockRejectedValueOnce(
+      new CandidatePushNotStarted(30_000),
+    );
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await gate.tick(project);
+    }
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+  const original = required(mergeBatches(h.f.state().events)[0]),
+    member = required(original.members[0]);
+  expect(original.check?.startup_failure).toBe("repository_busy");
+  const next = h.create();
+  try {
+    const { done } = await next.schedule(project);
+    await vi.waitFor(() =>
+      expect(mergeBatches(h.f.state().events)[1]?.check?.status).toBe(
+        "running",
+      ),
+    );
+    const other = required(mergeBatches(h.f.state().events)[1]);
+    expect(other.members[0]?.card_id).not.toBe(member.card_id);
+    required(
+      h.runs.get(required(other.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await next.schedule(project);
+    await done;
+    await next.tick(project);
+    expect(publish).toHaveBeenCalledOnce();
+    for (let i = 0; i < 2; i++) {
+      h.advance(86_400_000);
+      await next.tick(project);
+    }
+    expect(mergeBatches(h.f.state().events)).toHaveLength(2);
+    expect(
+      h.f
+        .state()
+        .events.filter((e) => e.type === "merge_batch_member_deferred"),
+    ).toHaveLength(1);
+    h.f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: member.card_id },
+        p,
+      ),
+    );
+    const retry = await next.schedule(project);
+    await vi.waitFor(() =>
+      expect(mergeBatches(h.f.state().events)[2]?.check?.status).toBe(
+        "running",
+      ),
+    );
+    const retried = required(mergeBatches(h.f.state().events)[2]);
+    expect(retried.members.map((m) => m.completion_id)).toEqual([
+      member.completion_id,
+    ]);
+    expect(publish).toHaveBeenCalledOnce();
+    required(
+      h.runs.get(required(retried.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await next.schedule(project);
+    await retry.done;
+    await next.tick(project);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each([1, 3])(
+  "C-533: a batch member held at timeout %i cannot reset that target's budget",
+  async (at) => {
+    const { h, gate, publish } = await confirmedGithubBatch(1),
+      project = [h.f.project_id];
+    const set = (hold: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+      );
+    let pushes = 0;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) set({ reason: "wait", resume_condition: "ready" });
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (const [i, delay] of [0, 30_000, 60_000].entries()) {
+        h.advance(delay);
+        await gate.tick(project);
+        if (i + 1 === at) {
+          await gate.tick(project);
+          set(null);
+        }
+        await gate.tick(project);
+        expect(pushes).toBe(i + 1);
+      }
+      expect(mergeBatches(h.f.state().events).at(-1)?.check).toMatchObject({
+        startup_failure: "repository_busy",
+        status: "failed",
+      });
+      expect(publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-533: SSH does not start a worker for a baseline replaced during the first distribution", async () => {
+  const { f, check } = await fixture();
+  const c = controller(f);
+  c.git.distribute.mockImplementationOnce(async () => {
+    c.advance(true, 1);
+  });
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(check()).toMatchObject({
+      candidate_sha: "2".repeat(40),
+      status: "passed",
+    });
+  } finally {
+    c.gate.stop();
+    await c.gate.idle();
   }
 });

@@ -1,6 +1,7 @@
 import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
+import { deferredMergeBatch } from "../merge-batch.js";
 import { transition } from "../transitions.js";
 import {
   attempt,
@@ -475,6 +476,18 @@ export function recordMergeCheck(
     return value;
   });
 }
+/** Used by the CLI and HTTP preflight; the command rechecks the same completion. */
+export function canRecheckMerge(
+  events: readonly Event[],
+  card: CardId,
+  completion: DeliveryId,
+) {
+  const latest = latestMergeCheck(events, card, completion);
+  return (
+    !!deferredMergeBatch(events, card, completion) ||
+    (!!latest && ["failed", "timed_out"].includes(latest.status))
+  );
+}
 export function recheckMerge(
   state: CommandState,
   actor: Actor,
@@ -488,7 +501,26 @@ export function recheckMerge(
       "Merge gate is not enabled",
     );
     d.card(p.card_id);
-    const result = requeueMergeCheck(d, p.card_id);
+    const plan = unwrap(prepareMergePlan(state, p.card_id));
+    const batch = deferredMergeBatch(
+      state.events,
+      p.card_id,
+      plan.completion_id,
+    );
+    if (batch)
+      d.emit(
+        "merge_batch_member_resumed",
+        p.card_id,
+        { batch_id: batch, completion_id: plan.completion_id },
+        { type: "status_change", body: `${batch}：已请求本卡重新组批检查` },
+      );
+    const result = batch
+      ? {
+          batch_id: batch,
+          completion_id: plan.completion_id,
+          status: "queued" as const,
+        }
+      : requeueMergeCheck(d, p.card_id);
     if (actor.kind === "assignment")
       d.emit("host_ops_action_taken", p.card_id, {
         tool: "host_ops_recheck_merge",

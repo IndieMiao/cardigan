@@ -32,6 +32,7 @@ import {
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
+  validateBatchStartupObservation,
   validateMergeBatchMembers,
 } from "@cardigan/domain";
 import type {
@@ -606,6 +607,27 @@ export class MergeChecks {
       if (plan.ok) this.publishSkips.ready(project_id, card_id);
       else this.publishSkips.skipped(project_id, card_id, plan.error);
     return plan.ok && JSON.stringify(plan.value) === JSON.stringify(task.plan);
+  }
+  private validLockObservation(task: Task, check: MergeCheckView) {
+    const latest = this.latest(task);
+    if (
+      latest?.status !== "queued" ||
+      latest.attempt_id !== check.attempt_id ||
+      latest.recheck_requested
+    )
+      return false;
+    if (!task.batch) return this.valid(task);
+    const state = this.state(task.project.project_id);
+    const batch = mergeBatches(state.events).find(
+      (b) => b.id === task.batch?.id,
+    );
+    if (batch?.status !== "checking") return false;
+    try {
+      validateBatchStartupObservation(state, batch);
+      return true;
+    } catch {
+      return false;
+    }
   }
   private passed(
     task: Task,
@@ -1472,7 +1494,6 @@ export class MergeChecks {
                 throw error;
               }
               connected = true;
-              if (!this.valid(task)) throw new Error("Merge target changed");
             }),
           ...(this.options.run ? { run: this.options.run } : {}),
         });
@@ -1493,16 +1514,20 @@ export class MergeChecks {
         executor,
         {
           beforeDispatch: async () => {
-            // A lock retry can finish distribution after main moved or the completion was replaced.
+            // Distribution can wait on its very first push. Check the target at
+            // worker start / first POST, independently of retry accounting.
             if (
-              repositoryCheckWait(
-                this.state(task.project.project_id).events,
-                check,
-              ).timeouts > 0 &&
-              ((check.base_sha &&
-                (await this.git().baseline(task.project)) !== check.base_sha) ||
-                !this.valid(task) ||
-                this.latest(task)?.attempt_id !== check.attempt_id)
+              check.base_sha &&
+              (await this.git().baseline(task.project)) !== check.base_sha
+            )
+              throw new StaleCheckTarget();
+            const latest = this.latest(task);
+            if (
+              !this.valid(task) ||
+              latest?.status !== "queued" ||
+              latest.recheck_requested ||
+              latest.attempt_id !== check.attempt_id ||
+              latest.candidate_sha !== check.candidate_sha
             )
               throw new StaleCheckTarget();
             if (this.held(task, check)) throw new CheckExecutorSuspended();
@@ -1584,11 +1609,7 @@ export class MergeChecks {
       if (error instanceof MergeLockBusy) throw error;
       if (error instanceof StaleCheckTarget) return;
       if (error instanceof CandidateRepositoryBusy) {
-        if (
-          !this.valid(task) ||
-          this.latest(task)?.attempt_id !== check.attempt_id
-        )
-          return;
+        if (!this.validLockObservation(task, check)) return;
         const { timeouts } = repositoryCheckWait(
           this.state(task.project.project_id).events,
           check,
@@ -1711,7 +1732,12 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
-    if ((executedOn?.type === "github" || task.batch) && !this.valid(task)) {
+    if (
+      (executedOn?.type === "github" || task.batch) &&
+      !(repositoryBusy
+        ? this.validLockObservation(task, check)
+        : this.valid(task))
+    ) {
       this.githubActive.delete(check.attempt_id);
       this.seen.delete(check.attempt_id);
       return;
