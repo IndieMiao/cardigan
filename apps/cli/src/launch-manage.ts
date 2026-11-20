@@ -32,14 +32,10 @@ export async function reload(paths: LaunchPaths, io: CliIo) {
       paths.dataDir,
     );
     validateLaunchSecrets(staged.config, await loadSecrets(paths, io));
-    publishLaunchRefresh(
-      store,
-      paths.configDir,
-      paths.dataDir,
-      fence,
-      staged.catalog,
-      true,
-    );
+    publishLaunchRefresh(store, paths.configDir, paths.dataDir, fence, {
+      catalog: staged.catalog,
+      reload: true,
+    });
   } finally {
     store.close();
   }

@@ -5,6 +5,7 @@ import {
   launchRevision,
   parseCachedLaunchConfig,
   publishModelFile,
+  selectableLaunchConfig,
   stageModelLaunchConfig,
   withLaunchSnapshot,
 } from "@cardigan/host";
@@ -276,6 +277,12 @@ export class LaunchSettings {
         staged.catalog,
         "人员已确认修改启动配置，新运行将使用更新后的配置。",
         {
+          hostProfiles: Object.keys(
+            selectableLaunchConfig({
+              config: staged.config,
+              secrets: f.secrets,
+            }).profiles,
+          ),
           reserve: () =>
             this.store.database
               .prepare(

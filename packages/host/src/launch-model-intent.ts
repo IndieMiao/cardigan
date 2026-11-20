@@ -39,7 +39,13 @@ export function isAcceptedLaunchRevision(
   dir: string,
   revision: number | undefined,
 ) {
-  if (revision !== launchRevision(store)) return false;
+  const current = store.database
+    .prepare(
+      "SELECT revision, pending_catalog IS NOT NULL AS pending FROM launch_catalog_generation WHERE singleton=1",
+    )
+    .get();
+  if (revision !== Number(current?.revision ?? 0) || current?.pending)
+    return false;
   const intents = store.database
     .prepare("SELECT path,before_hash FROM launch_model_intents")
     .all();
@@ -52,7 +58,36 @@ export function isAcceptedLaunchRevision(
     return false;
   }
 }
-// Fence a cache-only refresh even if its process died between rename and SQL COMMIT.
+// Only accepted, selectable names leave the host process, never profiles or secrets.
+function recordHostProfiles(
+  store: Store,
+  dir: string,
+  revision: number,
+  names: string,
+) {
+  store.database
+    .prepare(
+      `INSERT OR REPLACE INTO launch_host_profiles(singleton,revision,directory,names) VALUES (1,?,?,?)`,
+    )
+    .run(revision, realpathSync(dir), names);
+}
+/** Called again under the employee write lock. Undefined means no host has ever
+ * adopted a generation in this store; an empty list must NOT fall back to disk. */
+export function acceptedHostProfiles(store: Store): string[] | undefined {
+  const row = store.database
+    .prepare(
+      "SELECT revision,directory,names FROM launch_host_profiles WHERE singleton=1",
+    )
+    .get();
+  if (!row) return undefined;
+  return isAcceptedLaunchRevision(
+    store,
+    String(row.directory),
+    Number(row.revision),
+  )
+    ? (JSON.parse(String(row.names)) as string[])
+    : [];
+}
 function catalogStamp(dataDir: string) {
   const s = lstatSync(join(dataDir, "models-dev.json"), {
     bigint: true,
@@ -63,7 +98,7 @@ function catalogStamp(dataDir: string) {
 function accept(store: Store, dir: string) {
   store.database
     .prepare(
-      `INSERT INTO launch_catalog_generation VALUES (1,1,?) ON CONFLICT(singleton) DO UPDATE SET revision=revision+1,files=excluded.files`,
+      `INSERT INTO launch_catalog_generation(singleton,revision,files) VALUES (1,1,?) ON CONFLICT(singleton) DO UPDATE SET revision=revision+1,files=excluded.files`,
     )
     .run(launchFilesStamp(dir));
   return launchRevision(store);
@@ -79,6 +114,23 @@ function installCatalog(dataDir: string, text: string) {
   } finally {
     rmSync(temp, { force: true });
   }
+}
+
+// SQLite is authoritative. A crash on either side of rename leaves this same
+// bounded projection pending. Retrying it never advances the revision twice.
+function settleCatalog(store: Store, dataDir: string) {
+  const pending = store.database
+    .prepare(
+      "SELECT pending_catalog FROM launch_catalog_generation WHERE singleton=1",
+    )
+    .get()?.pending_catalog;
+  if (typeof pending !== "string") return;
+  installCatalog(dataDir, pending);
+  store.database
+    .prepare(
+      "UPDATE launch_catalog_generation SET pending_catalog=NULL WHERE singleton=1",
+    )
+    .run();
 }
 
 // A process can die after the YAML rename but before SQLite commits. Roll forward the
@@ -99,7 +151,9 @@ function settle(
   if (installed) {
     if (typeof intent.catalog === "string")
       installCatalog(dataDir, intent.catalog);
-    accept(store, dirname(path));
+    const revision = accept(store, dirname(path));
+    if (typeof intent.host_profiles === "string")
+      recordHostProfiles(store, dirname(path), revision, intent.host_profiles);
     recordLaunchNotice(
       store,
       tx,
@@ -133,6 +187,7 @@ export function withLaunchSnapshot<T>(
   return store.uow.run((tx) => {
     // The common case does not open a missing/unsafe YAML just to check for recovery.
     const path = join(realpathSync(dir), "launch.yaml");
+    settleCatalog(store, dataDir);
     settle(store, tx, path, dataDir, false);
     return read({
       catalogFile: catalogStamp(dataDir),
@@ -140,6 +195,20 @@ export function withLaunchSnapshot<T>(
       revision: launchRevision(store),
     });
   });
+}
+
+export function assertLaunchFence(
+  store: Store,
+  dir: string,
+  dataDir: string,
+  fence: LaunchFence,
+) {
+  if (
+    fence.files !== launchFilesStamp(dir) ||
+    fence.catalogFile !== catalogStamp(dataDir) ||
+    fence.revision !== launchRevision(store)
+  )
+    throw changed();
 }
 
 function commitGeneration<T>(
@@ -150,12 +219,7 @@ function commitGeneration<T>(
   install: (tx: StoreTransactionContext) => T,
 ) {
   return store.uow.run((tx) => {
-    if (
-      fence.files !== launchFilesStamp(dir) ||
-      fence.catalogFile !== catalogStamp(dataDir) ||
-      fence.revision !== launchRevision(store)
-    )
-      throw changed();
+    assertLaunchFence(store, dir, dataDir, fence);
     return install(tx);
   });
 }
@@ -164,11 +228,17 @@ export function publishLaunchRefresh(
   dir: string,
   dataDir: string,
   fence: LaunchFence,
-  catalog?: string,
-  reload = false,
+  {
+    catalog,
+    reload,
+    hostProfiles,
+  }: {
+    catalog?: string | undefined;
+    reload?: boolean;
+    hostProfiles?: string[];
+  },
 ) {
-  return commitGeneration(store, dir, fence, dataDir, () => {
-    if (catalog !== undefined) installCatalog(dataDir, catalog);
+  const revision = commitGeneration(store, dir, fence, dataDir, () => {
     if (reload) {
       const now = new Date();
       utimesSync(join(dir, "launch.yaml"), now, now);
@@ -176,10 +246,26 @@ export function publishLaunchRefresh(
     const accepted = store.database
       .prepare("SELECT files FROM launch_catalog_generation WHERE singleton=1")
       .get();
-    return reload || catalog !== undefined || accepted?.files !== fence.files
-      ? accept(store, dir)
-      : fence.revision;
+    const next =
+      reload || catalog !== undefined || accepted?.files !== fence.files
+        ? accept(store, dir)
+        : fence.revision;
+    if (catalog !== undefined)
+      store.database
+        .prepare(
+          "UPDATE launch_catalog_generation SET pending_catalog=? WHERE singleton=1",
+        )
+        .run(catalog);
+    if (hostProfiles)
+      recordHostProfiles(store, dir, next, JSON.stringify(hostProfiles));
+    return next;
   });
+  if (catalog !== undefined)
+    store.uow.run(() => {
+      if (launchRevision(store) !== revision) throw changed();
+      settleCatalog(store, dataDir);
+    });
+  return revision;
 }
 export function publishModelFile(
   store: Store,
@@ -193,6 +279,7 @@ export function publishModelFile(
   catalog: string | undefined,
   notice: string,
   web?: {
+    hostProfiles: string[];
     reserve: () => void;
     checkReferences: (tx: StoreTransactionContext) => void;
   },
@@ -208,7 +295,7 @@ export function publishModelFile(
     web?.reserve();
     store.database
       .prepare(
-        "INSERT INTO launch_model_intents(path,operation,before_hash,after_hash,notice,catalog) VALUES (?,?,?,?,?,?)",
+        "INSERT INTO launch_model_intents(path,operation,before_hash,after_hash,notice,catalog,host_profiles) VALUES (?,?,?,?,?,?,?)",
       )
       .run(
         path,
@@ -217,6 +304,7 @@ export function publishModelFile(
         hash(candidate),
         notice,
         catalog ?? null,
+        web ? JSON.stringify(web.hostProfiles) : null,
       );
   });
   try {

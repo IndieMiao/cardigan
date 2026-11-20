@@ -12,13 +12,20 @@ import {
   type UpdateEmployeeInput,
   updateEmployee,
 } from "@cardigan/domain";
+import {
+  acceptedHostProfiles,
+  assertLaunchFence,
+  selectableLaunchConfig,
+  withLaunchSnapshot,
+} from "@cardigan/host";
+import { validateLaunchSecrets } from "@cardigan/roles";
 import { persistEmployeeEffect, Store } from "@cardigan/store";
 import { uploadAvatarFile, validateLibraryAvatar } from "./avatar.js";
-import { validLaunchConfig } from "./config.js";
+import { loadConfig, loadSecrets } from "./config.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import { announceDataDir, resolveGlobalActor, systemClock } from "./host.js";
 import type { CliIo } from "./io.js";
-import { cliLaunchPaths } from "./paths.js";
+import { cliLaunchPaths, type LaunchPaths } from "./paths.js";
 
 const USAGE = [
   "用法：cardigan employee <命令>（全局员工，无需选择项目）",
@@ -111,6 +118,36 @@ function parse(args: readonly string[]) {
   return { command, flags, id: positionals[0] as EmployeeId };
 }
 
+/** Prepare standalone validation without holding the writer through a catalog fetch.
+ * Once a host has adopted a generation, disk candidates are never a fallback. */
+async function employeeProfileLookup(
+  store: Store,
+  paths: LaunchPaths,
+  io: CliIo,
+) {
+  const hosted = () => acceptedHostProfiles(store);
+  if (hosted() !== undefined) return () => hosted() ?? [];
+  const fence = withLaunchSnapshot(
+    store,
+    paths.configDir,
+    paths.dataDir,
+    (f) => f,
+  );
+  const config = await loadConfig(paths);
+  const secrets = await loadSecrets(paths, io);
+  validateLaunchSecrets(config, secrets);
+  const names = Object.keys(
+    selectableLaunchConfig({ config, secrets }).profiles,
+  );
+  return () => {
+    // Host startup or another publisher may have won since validation.
+    const accepted = hosted();
+    if (accepted !== undefined) return accepted;
+    assertLaunchFence(store, paths.configDir, paths.dataDir, fence);
+    return names;
+  };
+}
+
 export async function runEmployeeCommand(
   args: readonly string[],
   io: CliIo,
@@ -149,16 +186,11 @@ export async function runEmployeeCommand(
       );
       return EXIT.ok;
     }
+    const lookup = profile
+      ? await employeeProfileLookup(store, cliLaunchPaths(io, dataDir), io)
+      : undefined;
     const employee = store.uow.run((tx) => {
-      // Validate inside the same write transaction that serializes a profile deletion.
-      let profiles: string[] | undefined;
-      if (profile) {
-        const config = validLaunchConfig(cliLaunchPaths(io, dataDir));
-        if (!config) throw new CliError("找不到启动配置", EXIT.usage);
-        profiles = Object.keys(config.profiles).filter((name) =>
-          config.profiles[name]?.model?.trim(),
-        );
-      }
+      const profiles = lookup?.();
       const employees = tx.employees.list();
       const ports: EmployeeCommandPorts = {
         clock: systemClock,

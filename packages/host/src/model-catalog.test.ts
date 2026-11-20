@@ -45,7 +45,7 @@ async function loadModelLaunchConfig(
 ) {
   const fence = withLaunchSnapshot(store, dir, dir, (f) => f);
   const staged = await stageModelLaunchConfig(...args);
-  publishLaunchRefresh(store, dir, dir, fence, staged.catalog);
+  publishLaunchRefresh(store, dir, dir, fence, { catalog: staged.catalog });
   return staged.config;
 }
 beforeEach(async () => {

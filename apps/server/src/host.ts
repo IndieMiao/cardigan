@@ -17,6 +17,7 @@ import {
   recordLaunchNotice,
   recoverLaunchPublications,
   resolveMcpUrl,
+  selectableLaunchConfig,
   stageModelLaunchConfig,
   withLaunchSnapshot,
   withPreparationQueue,
@@ -44,11 +45,7 @@ import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
-import {
-  type LaunchGeneration,
-  liveLaunch,
-  selectableLaunchConfig,
-} from "./live-launch.js";
+import { type LaunchGeneration, liveLaunch } from "./live-launch.js";
 
 const exec = promisify(execFile);
 
@@ -123,13 +120,12 @@ export async function loadLaunchFiles(
   validateLaunchSecrets(staged.config, secrets);
   reportLaunchWarnings(staged.config, report); // no callbacks inside the publication critical section
   if (store) {
-    const revision = publishLaunchRefresh(
-      store,
-      dir,
-      dataDir,
-      fence,
-      staged.catalog,
-    );
+    const revision = publishLaunchRefresh(store, dir, dataDir, fence, {
+      catalog: staged.catalog,
+      hostProfiles: Object.keys(
+        selectableLaunchConfig({ config: staged.config, secrets }).profiles,
+      ),
+    });
     return { config: staged.config, secrets, revision };
   }
   if (fence.files !== launchFilesStamp(dir))

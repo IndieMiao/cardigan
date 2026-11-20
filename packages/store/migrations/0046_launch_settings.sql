@@ -28,3 +28,14 @@ CREATE TABLE launch_catalog_generation (
   revision INTEGER NOT NULL,
   files TEXT NOT NULL
 );
+
+-- A catalog-only refresh commits its redo data before touching the filesystem.
+ALTER TABLE launch_catalog_generation ADD COLUMN pending_catalog TEXT;
+-- Reference choices are only recorded by a host load or a Web adoption.
+ALTER TABLE launch_model_intents ADD COLUMN host_profiles TEXT;
+CREATE TABLE launch_host_profiles (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  revision INTEGER NOT NULL,
+  directory TEXT NOT NULL,
+  names TEXT NOT NULL
+);

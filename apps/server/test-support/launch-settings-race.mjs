@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { loadConfig } from "../../cli/dist/config.js";
+import { main } from "../../cli/dist/index.js";
 import { reload, setModel } from "../../cli/dist/launch-manage.js";
 import { resolveLaunchPaths } from "../../cli/dist/paths.js";
 import { loadLaunchFiles } from "../dist/host.js";
@@ -16,7 +17,13 @@ const paths = resolveLaunchPaths({
   CARDIGAN_CONFIG_DIR: dir,
   CARDIGAN_DATA_DIR: dataDir,
 });
-const io = { env: {}, platform: process.platform, stdout() {} };
+const io = {
+  env: { CARDIGAN_CONFIG_DIR: dir, CARDIGAN_DATA_DIR: dataDir },
+  cwd: dir,
+  platform: process.platform,
+  stdout() {},
+  stderr() {},
+};
 const store = Store.open({ dataDir });
 const rename = fs.renameSync;
 fs.renameSync = (src, dest) => {
@@ -26,12 +33,23 @@ fs.renameSync = (src, dest) => {
   }
   rename(src, dest);
   if (mode === "crash" && dest === paths.launchFile) process.exit(73);
+  if (
+    ["catalog-crash", "reload-crash"].includes(mode) &&
+    dest === join(dataDir, "models-dev.json")
+  )
+    process.exit(73);
 };
 syncBuiltinESMExports();
 globalThis.fetch = async (url) => {
   if (url !== "https://models.dev/api.json")
     throw new Error("unexpected fixture request");
-  if (!["locked", "crash", "delete"].includes(mode)) {
+  if (mode.startsWith("employee-"))
+    throw Error("hosted employee lookup must not fetch");
+  if (
+    !["locked", "crash", "delete", "catalog-crash", "reload-crash"].includes(
+      mode,
+    )
+  ) {
     const resume = once(process, "message");
     process.send("fetching");
     await resume;
@@ -47,7 +65,23 @@ globalThis.fetch = async (url) => {
 };
 try {
   if (mode === "set-model") await setModel(paths, io, "primary", "cli");
-  else if (mode === "reload") await reload(paths, io);
+  else if (mode.startsWith("employee-")) {
+    process.exitCode = await main(
+      [
+        "employee",
+        "add",
+        "--name",
+        "Fixture",
+        "--title",
+        "Dev",
+        "--role",
+        "coder",
+        "--launch-profile",
+        mode.slice("employee-".length),
+      ],
+      io,
+    );
+  } else if (["reload", "reload-crash"].includes(mode)) await reload(paths, io);
   else if (mode === "read") await loadConfig(paths);
   else if (["crash", "delete", "late-delete"].includes(mode)) {
     const manager = new LaunchSettings(

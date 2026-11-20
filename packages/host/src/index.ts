@@ -136,6 +136,8 @@ export {
 export { launchFilesStamp } from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
 export {
+  acceptedHostProfiles,
+  assertLaunchFence,
   isAcceptedLaunchRevision,
   type LaunchFence,
   launchRevision,
@@ -145,6 +147,7 @@ export {
 } from "./launch-model-intent.js";
 export { probeModel } from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
+export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";

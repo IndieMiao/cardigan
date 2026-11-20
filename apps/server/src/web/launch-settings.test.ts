@@ -13,13 +13,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEmployee } from "@cardigan/domain";
-import { isAcceptedLaunchRevision } from "@cardigan/host";
+import {
+  isAcceptedLaunchRevision,
+  selectableLaunchConfig,
+} from "@cardigan/host";
 import { defaultRoleDefinition, resolveProfile } from "@cardigan/roles";
 import { persistEmployeeEffect, roleDocument } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
 import { loadLaunchFiles } from "../host.js";
-import { liveLaunch, selectableLaunchConfig } from "../live-launch.js";
+import { liveLaunch } from "../live-launch.js";
 
 const secret = "fixture-value-private",
   config = `# keep my comment
@@ -111,6 +114,7 @@ beforeEach(async () => {
     dir,
     () => loadLaunchFiles(dir, () => {}, h.dataDir, h.store),
     () => {},
+    (next) => isAcceptedLaunchRevision(h.store, dir, next.revision),
   );
   cookie = await h.login("launch-password");
   const read = await get();
@@ -887,6 +891,47 @@ test("after the poll passes its final check no other process can publish ahead o
     await exited;
   }
 });
+test.each(["catalog-crash", "reload-crash"])(
+  "%s after the catalog rename: host and settings recover one version and reject the old preview",
+  async (mode) => {
+    await prepareCatalogRace();
+    const offline = vi.fn(async () => {
+      throw new Error("offline fixture");
+    });
+    vi.stubGlobal("fetch", offline);
+    expect((await live.refresh()).config.models?.primary?.context_window).toBe(
+      64000,
+    );
+    version = JSON.parse((await get()).body).version;
+    const data = await confirmation({
+      op: "copy_profile",
+      name: "copy",
+      source: "a",
+    });
+    const original = readFileSync(file, "utf8");
+    const before = live.current().revision;
+    expect(await racingProcess(mode).exited).toBe(73);
+    const window = () =>
+      live.refresh().then((g) => g.config.models?.primary?.context_window);
+    if (mode === "catalog-crash") expect(await window()).toBe(12800); // runtime recovers first, without a YAML change
+    const detail = JSON.parse((await get()).body);
+    expect(detail.version).not.toBe(version);
+    expect(detail.profiles[0].metadata.context_window).toBe(12800);
+    expect(await window()).toBe(12800); // settings recovered first for CLI reload
+    expect(live.current().revision).toBe(Number(before) + 1);
+    expect((await post("confirm", data)).json).toMatchObject({
+      error: { code: "stale_snapshot" },
+    });
+    expect(readFileSync(file, "utf8")).toBe(original);
+    expect(
+      h.store.database
+        .prepare("SELECT operation FROM launch_web_changes")
+        .all(),
+    ).toEqual([]);
+    expect(offline).toHaveBeenCalledTimes(1); // recovery used the committed projection
+  },
+);
+
 test("after process death between YAML and cache rename the next read recovers the pair and one receipt", async () => {
   h.store.createProject({ id: "p" });
   await prepareCatalogRace();
@@ -979,4 +1024,54 @@ test("an employee reference wins while a different server stages deletion: no YA
     child.kill();
     await exited;
   }
+});
+
+test("employee CLI and Web both keep the host's last accepted choices after a rejected catalog reload", async () => {
+  projectWithRoleUsingA();
+  const baseline = config
+    .replace("context_window: 32000, ", "")
+    .replace("  b: { harness: pi, model: standalone }\n", "");
+  writeFileSync(file, baseline);
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({
+      fetched_at: new Date(0).toISOString(),
+      entries: ["first", "removed"].map((id) => ({
+        provider: "gateway",
+        id,
+        context_window: 64000,
+      })),
+    }),
+  );
+  vi.stubGlobal("fetch", async () => {
+    throw Error("offline fixture");
+  });
+  const accepted = await live.refresh();
+  expect(Object.keys(selectableLaunchConfig(accepted).profiles)).toEqual(["a"]);
+  // A cached parse would accept b; the fresh catalog that the host actually checks removed its model.
+  writeFileSync(
+    file,
+    baseline.replace(
+      "profiles:\n",
+      "  dropped: {provider: gateway, id: removed}\nprofiles:\n  b: {harness: pi, model: dropped}\n",
+    ),
+  );
+  const refreshed = vi.fn(async () =>
+    Response.json({
+      gateway: { models: { first: { limit: { context: 64000 } } } },
+    }),
+  );
+  vi.stubGlobal("fetch", refreshed);
+  expect(await live.refresh()).toBe(accepted);
+  expect(refreshed).toHaveBeenCalledOnce();
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a"] });
+  expect((await saveEmployeeB()).status).toBe(400);
+  expect(await racingProcess("employee-b").exited).toBe(2);
+  expect(h.store.uow.read((tx) => tx.employees.list())).toEqual([]);
+  expect(await racingProcess("employee-a").exited).toBe(0);
+  expect(
+    h.store.uow.read((tx) =>
+      tx.employees.list().map((e) => e.launch_profile_ref),
+    ),
+  ).toEqual(["a"]);
 });
