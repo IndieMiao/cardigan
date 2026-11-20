@@ -155,7 +155,6 @@ export function MachinesSettings({
   );
   const list = useResource(load, revision);
   const [open, setOpen] = useState<MachineView>();
-  const { remember } = useDrawerReturnFocus(open !== undefined);
   const withdrawn = withdrawnOf(list.data);
   const machines =
     list.data && !withdrawn && "machines" in list.data
@@ -164,18 +163,20 @@ export function MachinesSettings({
   // A list the server no longer allows takes its open detail with it, and
   // so does a list read that no longer contains the open machine (V-2482):
   // its earlier detail must not outlive it, whatever the detail read says.
-  // While the list still contains it, a failed detail refresh keeps the last
-  // good detail as before.
-  const openId = open?.id;
+  // Decided while rendering, so no frame shows both. While the list still
+  // contains it, a failed detail refresh keeps the last good detail.
+  const shown =
+    open && !withdrawn && (!machines || machines.some((m) => m.id === open.id))
+      ? open
+      : undefined;
   useEffect(() => {
-    if (withdrawn) setOpen(undefined);
-    else if (
-      openId !== undefined &&
-      machines &&
-      !machines.some((m) => m.id === openId)
-    )
-      setOpen(undefined);
-  }, [withdrawn, machines, openId]);
+    if (open && !shown) setOpen(undefined);
+  }, [open, shown]);
+  // When the system closes the detail (refused list, machine gone), its
+  // opener may be gone too: focus then goes to the machine panel.
+  const { remember } = useDrawerReturnFocus(shown !== undefined, () =>
+    document.getElementById("machines"),
+  );
   const capacity = useMachineCapacity();
   return (
     <SettingsPanel
@@ -246,12 +247,12 @@ export function MachinesSettings({
           </TableBody>
         </SettingsTable>
       )}
-      {open && !withdrawn && (
+      {shown && (
         <MachineDrawer
-          key={open.id}
+          key={shown.id}
           client={client}
           projectId={projectId}
-          summary={open}
+          summary={shown}
           revision={revision}
           capacity={capacity}
           onClose={() => setOpen(undefined)}

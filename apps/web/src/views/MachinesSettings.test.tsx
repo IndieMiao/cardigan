@@ -1017,6 +1017,8 @@ test.each([false, true])(
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(document.body.textContent).not.toContain("资源上限");
       expect(document.body.textContent).not.toContain("样机");
+      // Its opener is gone with it: focus goes to the machine panel.
+      await waitFor(() => expect(document.activeElement?.id).toBe("machines"));
     } else {
       const dialog = within(screen.getByRole("dialog"));
       expect(await dialog.findByText(/详情暂未更新/)).toBeTruthy();
