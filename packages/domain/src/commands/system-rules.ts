@@ -16,7 +16,10 @@ import {
   command,
   ensure,
 } from "./core.js";
-import { automaticEmployeeSelection } from "./employee-assignment.js";
+import {
+  automaticEmployeeSelection,
+  noProjectEmployee,
+} from "./employee-assignment.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
 import { invalidateReviewReuse } from "./review-reuse.js";
@@ -145,7 +148,7 @@ export function autoAssignProducer(
       ensure(
         selection.employee,
         "invariant_violation",
-        "没有合格的在职员工，请 PM Ops 安排",
+        noProjectEmployee(item.role_id),
       );
       return assignWorkItem(
         d,
@@ -262,7 +265,7 @@ function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
     ensure(
       selection.employee,
       "invariant_violation",
-      "没有合格的在职员工，请 PM Ops 安排",
+      noProjectEmployee(item.role_id),
     );
     return assignWorkItem(
       d,

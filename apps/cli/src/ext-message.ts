@@ -6,7 +6,7 @@ import {
   loadExtMessageConfig,
   sendExtMessage,
 } from "@cardigan/host";
-import { listExtMessages, openStore } from "@cardigan/store";
+import { feishuStatus, listExtMessages, openStore } from "@cardigan/store";
 import { CliError, EXIT } from "./errors.js";
 import { announceDataDir, hasToken } from "./host.js";
 import type { CliIo } from "./io.js";
@@ -74,8 +74,8 @@ export async function runExtMessageCommand(
       .get();
     const recent = new Map<string, unknown>();
     for (const r of listExtMessages(store.database))
-      recent.set(r.channel, {
-        channel: r.channel,
+      recent.set(r.channel.split(":")[0]!, {
+        channel: r.channel.split(":")[0]!,
         status: r.status,
         attempts: r.attempts,
         error: r.last_error,
@@ -87,6 +87,7 @@ export async function runExtMessageCommand(
           configuration: status
             ? JSON.parse(String(status.doc))
             : { status: "not_loaded" },
+          lark_app: feishuStatus(store.database),
           recent: [...recent.values()],
         },
         null,

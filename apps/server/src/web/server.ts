@@ -33,7 +33,13 @@ import type {
   ReadResourceLimits,
 } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
-import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
+import {
+  feishuStatus,
+  listRoleVersions,
+  manageFeishuBinding,
+  type Store,
+  type WebSession,
+} from "@cardigan/store";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
@@ -506,6 +512,41 @@ async function handleApi(context: RequestContext): Promise<void> {
     );
   }
 
+  if (path === "/api/me/feishu") {
+    if (req.method !== "GET" && req.method !== "POST")
+      methodNotAllowed(["GET", "POST"]);
+    if (req.method === "GET") {
+      sendJson(res, 200, feishuStatus(context.store.database));
+      return;
+    }
+    const input = await readJsonBody(req);
+    const action = input.action;
+    if (
+      Object.keys(input).length !== 1 ||
+      (action !== "code" && action !== "unbind")
+    )
+      throw new HttpRejection(400, "invalid_action", "绑定操作无效");
+    const output = context.store.uow.run(() => {
+      const live = requireSession(context);
+      if (!live.member_id)
+        throw new HttpRejection(403, "owner_required", "请重新登录");
+      try {
+        return manageFeishuBinding(
+          context.store.database,
+          live.member_id,
+          action,
+        );
+      } catch {
+        throw new HttpRejection(
+          409,
+          "binding_unavailable",
+          "当前不能执行绑定操作，请刷新",
+        );
+      }
+    });
+    sendJson(res, 200, { ...feishuStatus(context.store.database), ...output });
+    return;
+  }
   if (path.startsWith("/api/avatars/")) {
     return serveAvatar(
       req,

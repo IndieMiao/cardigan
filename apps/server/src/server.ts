@@ -817,6 +817,11 @@ async function assembleServer(
       extSender = new ExtMessageSender({
         store,
         configuration: loadExtMessageConfig(),
+        gate: (project) => ({
+          ...mergeProjectSettings(mergeGate, project),
+          merge_gate_enabled:
+            mergeGate.forProject(project).status !== "disabled",
+        }),
       });
       extSender.recordStatus();
       const notificationSender = extSender;
