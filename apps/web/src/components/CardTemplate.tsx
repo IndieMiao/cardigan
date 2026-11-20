@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardDetail,
   type CardiganClient,
   describeWriteError,
 } from "../api.js";
+import { useResource } from "../useResource.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
@@ -15,6 +16,7 @@ export function CardTemplate({
   client,
   projectId,
   onSaved,
+  revision = 0,
   showMetadata = true,
   disabled = false,
   formContainer,
@@ -24,6 +26,7 @@ export function CardTemplate({
   client: CardiganClient;
   projectId: string;
   onSaved: () => void;
+  revision?: number;
   showMetadata?: boolean;
   disabled?: boolean;
   formContainer?: HTMLElement | null;
@@ -49,6 +52,15 @@ export function CardTemplate({
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
   const keys = useRef(new Map<string, string>());
+  const loadEvidence = useCallback(
+    async () =>
+      (await client.cardPanel?.(projectId, detail.card.id, "attachments"))
+        ?.attachments ?? [],
+    [client, projectId, detail.card.id],
+  );
+  const deferred = !!detail.overview && detail.overview.attachment_count > 0;
+  const evidence = useResource(loadEvidence, revision, deferred && open);
+  const choices = deferred ? evidence.data : detail.attachments;
   const template = detail.template;
   if (!template) return null;
   const allowed = detail.mark_done?.allowed === true;
@@ -132,8 +144,16 @@ export function CardTemplate({
                   </label>
                   <fieldset>
                     <legend>证据附件（可选）</legend>
-                    {detail.attachments.length === 0 && <p>本卡暂无附件。</p>}
-                    {detail.attachments.map((a) => (
+                    {deferred && (
+                      <RequestFeedback
+                        pending={evidence.pending}
+                        error={evidence.error}
+                        retry={evidence.reload}
+                        pendingMessage="正在加载附件…"
+                      />
+                    )}
+                    {choices?.length === 0 && <p>本卡暂无附件。</p>}
+                    {choices?.map((a) => (
                       <label key={a.id}>
                         <Checkbox
                           checked={attachments.includes(a.id)}
