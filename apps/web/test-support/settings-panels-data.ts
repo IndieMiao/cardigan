@@ -164,11 +164,17 @@ const templates: TemplateVersion[] = [
   },
 ];
 
+let macMiniRead = false;
 export const settingsPanels: Partial<CardiganClient> = {
   executionCapacity: async () => capacity,
   // C-512: three synthetic machines (see machines-fixture.ts).
   machines: async () => ({ machines: fixtureMachines }),
   machine: async (_p, id) => {
+    // Evidence scene: Mac mini's first detail read fails, then retries.
+    if (id === "mac-mini" && !macMiniRead) {
+      macMiniRead = true;
+      throw new Error("合成失败：机器详情未读取");
+    }
     const machine = fixtureMachines.find((m) => m.id === id);
     if (!machine) throw new Error(`合成数据中没有机器 ${id}`);
     return { machine };

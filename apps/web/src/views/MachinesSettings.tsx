@@ -12,6 +12,7 @@ import { IdTag } from "../components/IdTag.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
 import {
+  SettingsDrawerFeedback,
   SettingsFact,
   SettingsFacts,
   SettingsPanel,
@@ -213,11 +214,13 @@ function MachineDrawer({
         className="card-page-drawer"
         aria-label={`机器 ${summary.id}`}
       >
-        <RequestFeedback
-          {...detail}
-          retry={detail.reload}
-          pendingMessage="正在加载机器…"
-        />
+        <SettingsDrawerFeedback>
+          <RequestFeedback
+            {...detail}
+            retry={detail.reload}
+            pendingMessage="正在加载机器…"
+          />
+        </SettingsDrawerFeedback>
         {machine && <MachineFacts machine={machine} />}
       </CardDetailLayout>
     </Drawer>

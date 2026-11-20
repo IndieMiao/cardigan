@@ -442,7 +442,14 @@ test("a failed detail read keeps the drawer and retries", async () => {
   fireEvent.click(screen.getByRole("button", { name: "本机" }));
   const dialog = within(await screen.findByRole("dialog"));
   expect(await dialog.findByText(/详情读取失败/)).toBeTruthy();
-  fireEvent.click(dialog.getByRole("button", { name: "重试" }));
+  // The retry stays in the drawer body, not in a floating stack that the
+  // page's own stack could cover (V-2396).
+  const retry = dialog.getByRole("button", { name: "重试" });
+  expect(retry.closest("[data-feedback-host]")).not.toBeNull();
+  expect(
+    retry.closest("[data-feedback-host]")?.closest("[role=dialog]"),
+  ).not.toBeNull();
+  fireEvent.click(retry);
   expect(await dialog.findByText("概况")).toBeTruthy();
   expect(machine).toHaveBeenCalledTimes(2);
 });
