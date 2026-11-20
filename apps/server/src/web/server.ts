@@ -589,6 +589,8 @@ async function serveProjectRoute(
           context.runLimitMaximum,
           context.machineDisplayName,
           context.resourceLimits,
+          project_id,
+          clock.now(),
         ),
       ...(context.stream?.pollMs === undefined
         ? {}
@@ -642,6 +644,8 @@ async function serveProjectRoute(
         context.runLimitMaximum,
         context.machineDisplayName,
         context.resourceLimits,
+        project_id,
+        clock.now(),
       ),
     );
     return;

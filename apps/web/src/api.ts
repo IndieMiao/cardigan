@@ -1110,6 +1110,7 @@ export interface ExecutionCapacity {
     max_limit: number;
     queued: number;
     merge_check_slots: number;
+    lease_details?: readonly string[];
     /** MC-5: configured per-machine resource slots; older servers omit it. */
     resources?: readonly {
       key: string;

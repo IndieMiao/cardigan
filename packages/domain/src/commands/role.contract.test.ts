@@ -249,6 +249,7 @@ describe("tool and worktree boundaries", () => {
         const standingOnly = [
           "set_merge_solo",
           "set_merge_window",
+          "reserve_machine_resource",
           "list_templates",
           "list_roles",
           "complete_host_action",
