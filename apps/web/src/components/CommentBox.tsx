@@ -243,6 +243,9 @@ export function CommentBox({
     field: HTMLTextAreaElement,
     edit?: TextEdit | null,
   ): void {
+    // A choice is not on screen yet: React reports the selection of the old
+    // text in the same key event (Enter), which would undo the choice.
+    if (caret.current !== undefined) return;
     const { value, selectionStart } = field;
     const start = mentionAt(value, selectionStart);
     if (start !== occurrence) {
@@ -268,6 +271,9 @@ export function CommentBox({
     setBody(next.body);
     // The finished `@<name> ` offers nothing more; staying on it reads nothing.
     setCursor(next.caret);
+    // Choosing ends the typed `@`: the inserted name is an existing mention
+    // from now on, so moving back into it can swap it as a whole.
+    setTyped(undefined);
     textarea.current?.focus();
   }
 

@@ -3,8 +3,9 @@
 // still shortens the name; then checks in the browser that Escape does not
 // carry over to the next comment, a new `@` re-reads the roster, a name with
 // spaces keeps filtering, choosing inside an existing mention replaces it, a
-// new `@` before a word keeps the word (V-2490 cases by keyboard and click)
-// and a pending read offers no old names.
+// new `@` before a word keeps the word (V-2490 cases by keyboard and click),
+// a completed name can be swapped (Q-1043 S1-S3) and a pending read offers no
+// old names.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c514-rework.mjs <new output dir>
 // C514_BASELINE_REF=<git ref> serves that ref's list for before shots (no
 // behaviour checks).
@@ -385,6 +386,48 @@ try {
       checks.v2490[`colon-${how}`] = { value: await value() };
     }
 
+    // 9. Q-1043: complete, move back into the inserted name with three left
+    // arrows and swap it, from `@` and from `@B`, and before README.md.
+    checks.swap = {};
+    for (const how of ["keyboard", "click"]) {
+      for (const [label, draft, caret, typed] of [
+        ["S1", "", 0, "@"],
+        ["S2", "", 0, "@B"],
+        ["S3", "附件 README.md", 3, "@B"],
+      ]) {
+        await focusBox();
+        if (draft) await type(draft);
+        await run(
+          (caret) =>
+            document
+              .querySelector(".comment-input")
+              .setSelectionRange(caret, caret),
+          caret,
+        );
+        for (const ch of typed) await type(ch);
+        await until("document.querySelectorAll('[role=option]').length > 0");
+        await choose(how, "Bob");
+        const completed = await value();
+        for (let i = 0; i < 3; i++) await key("ArrowLeft", "ArrowLeft", 37);
+        let offered = [];
+        try {
+          await until(
+            "document.querySelectorAll('[role=option]').length > 0",
+            3000,
+          );
+          offered = await options();
+          if (how === "click" && label === "S3")
+            await shot("check-swap-1440-light.png");
+          await choose(how, "Bobby");
+        } catch {}
+        checks.swap[`${label}-${how}`] = {
+          completed,
+          offered,
+          value: await value(),
+        };
+      }
+    }
+
     // 6. While a new read is under way, the previous names cannot be chosen.
     await key("Escape", "Escape", 27);
     await run(() => {
@@ -472,6 +515,15 @@ try {
         "附件 @薛宝钗 Bob.txt",
         how,
       );
+    }
+    for (const how of ["keyboard", "click"]) {
+      const swap = (label) => checks.swap[`${label}-${how}`];
+      assert.equal(swap("S1").completed, "@Bob ", how);
+      assert.equal(swap("S1").value, "@Bobby ", `S1 ${how}`);
+      assert.equal(swap("S2").completed, "@Bob ", how);
+      assert.equal(swap("S2").value, "@Bobby ", `S2 ${how}`);
+      assert.equal(swap("S3").completed, "附件 @Bob README.md", how);
+      assert.equal(swap("S3").value, "附件 @Bobby README.md", `S3 ${how}`);
     }
     assert.deepEqual(checks.pending.options, []);
     assert.equal(checks.pending.status, "正在加载员工…");

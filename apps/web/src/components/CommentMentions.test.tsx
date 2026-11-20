@@ -320,6 +320,92 @@ test("a name with spaces keeps filtering; a finished mention lets the text go on
 
 const MINGMING = [person("E-8", "明明", "运营"), ...EMPLOYEES];
 
+/** Q-1043: Bob and Bobby to complete and then swap, by whole sequences. */
+const SWAP = [
+  person("E-1", "森·刘邦", "游戏程序", true),
+  person("E-2", "薛宝钗", "前端工程师", true),
+  person("E-8", "明明", "运营"),
+  person("E-3", "Bob", "测试"),
+  person("E-9", "Bobby", "设计"),
+];
+
+for (const how of ["keyboard", "click"] as const) {
+  const sequence = () => {
+    const box = setup(async () => ({ employees: SWAP }));
+    /** Choose `name` from the open list, by arrow keys and Enter or a click. */
+    const pick = async (name: string) => {
+      await waitFor(() => expect(box.names()).toContain(name));
+      if (how === "click") return box.click(name);
+      for (let i = 0; i < box.names().indexOf(name); i++)
+        fireEvent.keyDown(box.input, { key: "ArrowDown" });
+      fireEvent.keyDown(box.input, { key: "Enter" });
+    };
+    /** Arrow left `count` times: one caret move per key, as a browser does. */
+    const left = (count: number) => {
+      for (let i = 0; i < count; i++) box.moveTo(box.input.selectionStart - 1);
+    };
+    return { ...box, pick, left };
+  };
+
+  test(`Q-1043 S1: @, choose Bob, move back into it, swap to Bobby (${how})`, async () => {
+    const { input, typeKeys, left, pick, names } = sequence();
+    typeKeys("@");
+    await pick("Bob");
+    expect(input.value).toBe("@Bob ");
+    // Three left arrows: `@B|ob `.
+    left(3);
+    await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby ");
+    expect(input.selectionStart).toBe("@Bobby ".length);
+  });
+
+  test(`Q-1043 S2: @B, choose Bob, move back into it, swap to Bobby (${how})`, async () => {
+    const { input, typeKeys, left, pick, names } = sequence();
+    typeKeys("@B");
+    await pick("Bob");
+    expect(input.value).toBe("@Bob ");
+    left(3);
+    await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
+    await pick("Bobby");
+    expect(input.value).toBe("@Bobby ");
+  });
+
+  test(`Q-1043 S3: a swap after completing before README.md keeps it (${how})`, async () => {
+    const { input, type, typeKeys, moveTo, left, pick, names } = sequence();
+    type("附件 README.md");
+    moveTo(3);
+    typeKeys("@B");
+    await pick("Bob");
+    expect(input.value).toBe("附件 @Bob README.md");
+    // From after `@Bob `, three left arrows: `附件 @B|ob README.md`.
+    left(3);
+    await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
+    await pick("Bobby");
+    expect(input.value).toBe("附件 @Bobby README.md");
+  });
+}
+
+test("Q-1043 the old selection React reports with the Enter that chooses does not undo the choice", async () => {
+  const { input, typeKeys, moveTo, click, names } = setup(async () => ({
+    employees: SWAP,
+  }));
+  typeKeys("@B");
+  await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
+  // Chrome reports a selection of the old text in the same batch as the
+  // Enter that chooses; here a moved caret makes React report one.
+  act(() => {
+    fireEvent.keyDown(input, { key: "Enter" });
+    input.setSelectionRange(1, 1);
+    fireEvent.select(input);
+  });
+  expect(input.value).toBe("@Bob ");
+  for (const caret of [4, 3, 2]) moveTo(caret);
+  await waitFor(() => expect(names()).toEqual(["Bob", "Bobby"]));
+  click("Bobby");
+  expect(input.value).toBe("@Bobby ");
+});
+
 for (const how of ["keyboard", "click"] as const) {
   test(`V-2490 a typed @明 before 明早开会 keeps the text (${how})`, async () => {
     const { input, type, typeKeys, moveTo, click, names } = setup(async () => ({

@@ -9,8 +9,8 @@ import "../src/components/ui/theme.css";
 
 // C-514: one synthetic card (the shared cardDetail sample) and 9 synthetic
 // active employees, 3 of them on this card; library avatars for 7, initials
-// for 2. `?roster=long` adds 32 more (long names and titles, names with
-// spaces), 41 in all; `window.__c514Roster` replaces the roster for the next
+// for 2. `?roster=long` adds 33 more (long names and titles, names with
+// spaces), 42 in all; `window.__c514Roster` replaces the roster for the next
 // read, and `window.__c514Gate` holds reads until it resolves. No backend, no production data.
 Date.now = () => new Date(NOW).getTime();
 const person = (
@@ -49,6 +49,7 @@ if (new URLSearchParams(location.search).get("roster") === "long")
     person("E-100", "测试员工非常非常长的名字0号", "运营", "lin-daiyu", true),
     person("E-101", "Mary Jane", "视觉设计", null),
     person("E-103", "明明", "运营", null),
+    person("E-104", "Bobby", "设计", null),
     person("E-102", "Mary Jo", "交互设计", null),
     ...Array.from({ length: 27 }, (_, n) =>
       person(
