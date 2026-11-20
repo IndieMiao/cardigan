@@ -5,28 +5,35 @@ import {
   type CardId,
   cardDependencyComplete,
   deriveCardStatus,
-  type Event,
   type ProjectId,
 } from "@cardigan/domain";
-import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  type ReadRepositories,
+  readCardDependencyEvents,
+  type Store,
+} from "@cardigan/store";
 
 /** Page-local cards are insufficient for DAG evidence and successor lengths. */
 export function readCardDependencies(
   store: Store,
   tx: ReadRepositories,
   project: ProjectId,
+  detailCards?: ReadonlySet<CardId>,
 ): CardDependencyState | undefined {
   const cards = tx.cards.list(project);
-  if (!cards.some((c) => c.depends_on_cards?.length)) return undefined;
-  const events = store.database
-    .prepare(
-      "SELECT doc FROM events WHERE project_id = ? AND type IN ('card_merged','card_marked_done','review_submitted','completion_reviewed','delivery_submitted','review_reused')",
+  if (
+    !cards.some(
+      (c) =>
+        c.depends_on_cards?.length &&
+        (!detailCards ||
+          detailCards.has(c.id) ||
+          c.depends_on_cards.some((id) => detailCards.has(id))),
     )
-    .all(project)
-    .map((row) => JSON.parse(String(row.doc)) as Event);
+  )
+    return undefined;
   return {
     cards,
-    events,
+    events: readCardDependencyEvents(store.database, project),
     card_templates: tx.card_templates.list(project),
     work_items: tx.work_items.list(project),
     deliveries: tx.deliveries.list(project),
