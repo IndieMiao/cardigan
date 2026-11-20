@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   type Employee,
@@ -241,9 +242,14 @@ export function compileAssignmentLaunch(
   if (input.run_resources) {
     env.CARDIGAN_RESOURCE_SESSION = `${input.assignment.assignment_id}.${input.assignment.run_id}`;
     env.CARDIGAN_RESOURCE_TARGET = input.run_resources.target;
-    env.CARDIGAN_RUN_COMMAND = join(input.run_dir, "run-command.py");
+    const path = join(input.run_dir, "run-command.py");
+    const digest = createHash("sha256")
+      .update(input.run_resources.source)
+      .digest("hex");
+    // Execute the exact bytes just authenticated, never reopen by name.
+    env.CARDIGAN_RUN_COMMAND = `import hashlib,os,sys; b=os.fdopen(os.open(${JSON.stringify(path)},os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb').read(${Buffer.byteLength(input.run_resources.source) + 1}); hashlib.sha256(b).hexdigest()==${JSON.stringify(digest)} or sys.exit(125); exec(compile(b,'<run-command>','exec'))`;
     resourceFiles.push({
-      path: env.CARDIGAN_RUN_COMMAND,
+      path,
       mode: 0o600,
       content: input.run_resources.source,
     });
@@ -268,9 +274,10 @@ export function compileAssignmentLaunch(
       : [
           {
             path: secretsFile,
-            content: input.worker_launch
-              ? JSON.stringify(secretEnv)
-              : secretsFileContent(secretEnv),
+            content:
+              input.worker_launch || input.run_resources
+                ? JSON.stringify(secretEnv)
+                : secretsFileContent(secretEnv),
             mode: 0o600,
           },
         ];
@@ -311,6 +318,7 @@ export function compileAssignmentLaunch(
                 nice: agentNice,
                 cwd: input.work_dir,
                 trust_worktree: input.role.worktree !== "none",
+                secret_keys: Object.keys(secretEnv),
               }),
               mode: 0o600,
             },
@@ -325,7 +333,10 @@ export function compileAssignmentLaunch(
               tokenFile,
               firstPromptFile: firstFile,
               startFile,
-              secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
+              secretsFile:
+                secretsFiles.length === 0 || input.run_resources
+                  ? undefined
+                  : secretsFile,
               command,
               args,
               env,
@@ -441,7 +452,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
+${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

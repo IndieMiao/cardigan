@@ -91,7 +91,7 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
-import { resourceEntry } from "./run-resource-worker.js";
+import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
 import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
@@ -1034,6 +1034,8 @@ async function launch(
         assignment.machine_id,
         execution,
         mcpUrl,
+        issued.record.id,
+        host.store.runResources.publicKey(),
       ),
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
@@ -1110,8 +1112,7 @@ async function launch(
     if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
-      command: compiled.launch_script,
-      args: [],
+      ...verifiedLocalLaunch(compiled),
       cwd: workDir,
       agent_name: agentName,
       labels: {

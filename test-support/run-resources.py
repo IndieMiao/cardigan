@@ -6,6 +6,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import pathlib
 import runpy
+import socket
+import select
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,21 +21,34 @@ m = runpy.run_path(str(source))
 TAG = '1' * 64
 # Never send inherited credentials to the fixture HTTP listener.
 os.environ['MCP_TOKEN'] = 'synthetic'
+# Use a fresh, synthetic controller signing key. It never leaves this fixture.
+import base64, hashlib, hmac
+keydir = tempfile.TemporaryDirectory()
+private = str(pathlib.Path(keydir.name)/'controller.pem')
+subprocess.run(['/usr/bin/openssl','genpkey','-algorithm','EC','-pkeyopt','ec_paramgen_curve:P-256','-out',private], check=True, stderr=subprocess.DEVNULL)
+public = subprocess.check_output(['/usr/bin/openssl','pkey','-in',private,'-pubout']).decode()
 states = {}
 class Authority(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
-        if self.headers.get('Authorization') != 'Bearer synthetic':
-            self.send_error(403); return
+        assert self.headers.get('Authorization') is None
         key = self.path.split('=', 1)[-1]
-        row = dict(key=key, project='fixture', machine='isolated', state=states.get(key, 'active'))
+        nonce = self.headers['X-Resource-Nonce']
+        registration = self.headers['X-Resource-Registration']
+        proof = hmac.new(hashlib.sha256(b'synthetic').digest(),f'resource-read-v1:{registration}:{key}:{nonce}'.encode(),'sha256').hexdigest()
+        if not hmac.compare_digest(self.headers['X-Resource-Proof'],proof):
+            self.send_error(403); return
+        state = states.get(key, 'active')
+        payload = json.dumps(['resource-state-v1',registration,nonce if state != 'stale' else 'old',key,'fixture','isolated',state if state not in ('bad-signature','stale') else 'ended'])
+        sig = subprocess.run(['/usr/bin/openssl','dgst','-sha256','-sign',private], input=payload.encode(),check=True,stdout=subprocess.PIPE).stdout
+        row = dict(payload=payload,signature=base64.b64encode(sig if state != 'bad-signature' else b'invalid').decode())
         self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
 
 http = ThreadingHTTPServer(('127.0.0.1', 0), Authority)
 threading.Thread(target=http.serve_forever, daemon=True).start()
-stub = f"""import runpy,sys,os
-m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated']
-c=m['Confirmation'](sys.argv[3],os.environ['MCP_TOKEN'],interval=0.05)
+stub = f"""import runpy,sys,os,hashlib
+m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated','fixture-token-id',{public!r}]
+c=m['Confirmation'](sys.argv[3],hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest(),interval=0.05)
 sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5],confirmation=c))"""
 
 
@@ -44,18 +60,22 @@ def until(pred):
         time.sleep(0.025)
 
 
+# Test participant has no public endpoint. An inherited fd is its enrollment,
+# not its name, PID, process group, or an environment variable alone.
+WAIT = "import os,socket;s=socket.socket(fileno=int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']));s.settimeout(20);assert s.recv(128,socket.MSG_PEEK)==b'cardigan-private-settled-v1\\n'"
+
+
 def test_runs(base):
     session = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)'])
     other = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)'])
     jobs = []
     try:
         for key in ('A-1.R-1.R-1', 'A-1.R-1.R-2', 'A-2.R-3.R-3'):
-            task = '''import os,sys,time,pathlib,subprocess
+            task = f"""import os,sys,pathlib,subprocess
 p=pathlib.Path(os.environ['TMPDIR']); (p/'artifact').write_text('fixture')
-if sys.platform == 'linux':
- sub=subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(25)'],start_new_session=True)
- (p/'detached').write_text(str(sub.pid))
-(p/'ready').touch();time.sleep(25)'''
+sub=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']),),start_new_session=True)
+(p/'detached').write_text(str(sub.pid)); (p/'ready').touch()
+{WAIT}"""
             cli = other if key.startswith('A-2') else session
             job = subprocess.Popen([sys.executable, '-I', '-B', '-c', stub, str(source), TAG, key, str(cli.pid), base,
                                     sys.executable, '-I', '-c', task])
@@ -72,14 +92,16 @@ if sys.platform == 'linux':
             watch = m['session_watch'](detached)
         # A shell that launches a service and exits returns its own status;
         # the guardian must still clean the service, not recycle the old PGID.
-        starter = "import pathlib,os,sys,subprocess; p=subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(30)'],start_new_session=sys.platform=='linux'); pathlib.Path(os.environ['TMPDIR'],'orphan').write_text(str(p.pid));sys.exit(7)"
+        starter = f"import pathlib,os,sys,subprocess; p=subprocess.Popen([sys.executable,'-I','-c',{WAIT!r}],pass_fds=(int(os.environ['CARDIGAN_PRIVATE_LIFETIME_FD']),),start_new_session=True); pathlib.Path(os.environ['TMPDIR'],'orphan').write_text(str(p.pid));sys.exit(7)"
         status = subprocess.run([sys.executable, '-I', '-B', '-c', stub, str(source), TAG, keys[0], str(session.pid), base,
                                  sys.executable, '-I', '-c', starter], timeout=4)
         assert status.returncode == 7
         orphan_exit = m['session_watch'](int((parent/m['scope_name'](keys[0])/'tmp/orphan').read_text()))
         scratch = parent/m['scope_name'](keys[0])
         (scratch/'end').touch()  # disk hints have no authority
-        states[keys[0]] = 'unknown'; time.sleep(0.4)
+        for answer in ('unknown','bad-signature','stale'):
+            states[keys[0]] = answer; time.sleep(0.4)
+            assert jobs[0].poll() is None and not orphan_exit()
         states[keys[0]] = 'expired_preview'; time.sleep(0.4)
         assert jobs[0].poll() is None and not orphan_exit()
         kept = scratch/'tmp'/'artifact'
@@ -91,7 +113,7 @@ if sys.platform == 'linux':
             assert reference.read() == 'fixture' and (scratch/'tmp'/'keep').read_text() == 'fixture'
         until(orphan_exit)
         if sys.platform == 'linux':
-            assert watch(), 'detached descendant not terminated'
+            until(watch)
         assert session.poll() is None and jobs[1].poll() is None and jobs[2].poll() is None
         session.terminate(); session.wait(timeout=2)
         assert jobs[1].wait(timeout=5) == 143  # same live CLI, second Run closed only now
@@ -128,7 +150,7 @@ def foreground_contracts(base):
         os.close(root)
         scope = pathlib.Path(parent)/m['scope_name'](key)
         ready = scope/'tmp'/'foreground'
-        child = subprocess.Popen([*entry, "import os,pathlib,time;pathlib.Path(os.environ['TMPDIR'],'foreground').write_text(str(os.getpid()));time.sleep(30)"])
+        child = subprocess.Popen([*entry, "import os,pathlib,time;pathlib.Path(os.environ['TMPDIR'],'foreground').write_text(str(os.getpid()));" + WAIT])
         until(lambda: ready.exists() and ready.read_text())
         exited = m['session_watch'](int(ready.read_text()))
         child.terminate(); child.wait(timeout=3)
@@ -141,23 +163,91 @@ def foreground_contracts(base):
     assert (scope/'tmp'/'service.sock').exists()
 
 
+def registered_service(base):
+    # Real listener with an in-flight external consumer. Even --private does
+    # not entitle Cardigan to interrupt this connection or force-kill the job.
+    key = 'A-5.R-1.R-2'
+    ready = pathlib.Path(base)/'listener'
+    service = """import os,sys,socket,pathlib
+s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[2]);s.listen(1);s.settimeout(12)
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+c,_=s.accept();c.settimeout(12)
+with c:
+ while (b:=c.recv(1)): c.sendall(b)
+"""
+    path = str(pathlib.Path(base)/'socket')
+    with subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(20)']) as session:
+        try:
+            with subprocess.Popen([sys.executable,'-IB','-c',stub,str(source),TAG,key,str(session.pid),base,
+                                   sys.executable,'-I','-c',service,str(ready),path]) as job:
+                until(lambda: ready.exists() and ready.read_text())
+                exited = m['session_watch'](int(ready.read_text()))
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(4); client.connect(path)
+                    client.sendall(b'a'); assert client.recv(1) == b'a'
+                    states[key] = 'ended'
+                    assert job.wait(timeout=6) == 125 and not exited()
+                    client.sendall(b'b'); assert client.recv(1) == b'b'
+                until(exited)
+        finally:
+            session.terminate(); session.wait(timeout=3)
+
+
 def session_bypass(base):
-    # No run-command registration involved. Fake CLI starts its observer as
-    # the real wrapper does and immediately creates a direct setsid child.
-    if sys.platform != 'linux': return
+    # Keep a consumer alive across CLI exit. The service exits by itself when
+    # its private peer closes; no numeric PID is signalled by this fixture.
     ready = pathlib.Path(base)/'bypass'
-    session = subprocess.Popen([sys.executable, '-IB', '-c', """import os,pathlib,subprocess,sys,time
+    service = "import socket,sys;s=socket.socket(fileno=int(sys.argv[1]));exec('while (v:=s.recv(1)): s.sendall(v)')"
+    client, server = socket.socketpair()
+    with client, server, subprocess.Popen([sys.executable, '-IB', '-c', """import os,pathlib,subprocess,sys,time
 subprocess.run([sys.executable,'-IB',sys.argv[1],'observe-session',str(os.getpid()),'A-7.R-9'],check=True,stdout=subprocess.DEVNULL)
-p=subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(20)'],start_new_session=True)
-pathlib.Path(sys.argv[2]).write_text(str(p.pid));time.sleep(20)""", str(source), str(ready)])
-    try:
-        until(lambda: ready.exists() and ready.read_text())
-        watch = m['session_watch'](int(ready.read_text()))
-        time.sleep(1.1)
-        assert not watch()
-    finally:
-        session.terminate(); session.wait(timeout=3)
-    until(watch)
+fd=int(sys.argv[3]);p=subprocess.Popen([sys.executable,'-I','-c',sys.argv[4],str(fd)],pass_fds=(fd,), start_new_session=True)
+pathlib.Path(sys.argv[2]).write_text(str(p.pid));time.sleep(20)""", str(source), str(ready), str(server.fileno()), service], pass_fds=(server.fileno(),)) as session:
+        client.settimeout(4)
+        try:
+            until(lambda: ready.exists() and ready.read_text())
+            server.close()
+            client.sendall(b'a'); assert client.recv(1) == b'a'
+        finally:
+            session.terminate(); session.wait(timeout=3)
+        client.sendall(b'b'); assert client.recv(1) == b'b'
+
+
+def vite_owner(base, in_use):
+    # A real Vite from the locked workspace, in a private copy of an empty app.
+    # The test owns the child directly so even a failed assertion cleans up it alone.
+    work = pathlib.Path(base)
+    (work/'node_modules').mkdir()
+    (work/'node_modules'/'vite').symlink_to(source.parents[1]/'apps/web/node_modules/vite', target_is_directory=True)
+    (work/'index.html').write_text('<title>private-preview</title>')
+    owner = source.with_name('run-vite-owner.mjs').read_text()
+    sender, reader = socket.socketpair()
+    with sender, reader, subprocess.Popen(['node','--input-type=module','-e',owner,'0'],cwd=base,
+        env={'PATH':os.environ['PATH'],'HOME':base,'TMPDIR':base,'NO_COLOR':'1','CARDIGAN_PRIVATE_LIFETIME_FD':str(reader.fileno())},
+        pass_fds=(reader.fileno(),),stdout=subprocess.PIPE,stderr=subprocess.STDOUT) as child:
+        reader.close()
+        client = None
+        try:
+            output = b''
+            deadline=time.monotonic()+10
+            while not (match:=re.search(rb'127[.]0[.]0[.]1:(\d+)/',output)):
+                assert time.monotonic()<deadline and child.poll() is None, output[-600:]
+                if select.select([child.stdout],[],[],0.2)[0]: output+=os.read(child.stdout.fileno(),4096)
+            if in_use:
+                client=socket.create_connection(('127.0.0.1',int(match[1])),timeout=4)
+                # In-flight incomplete request before the terminal record.
+                client.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n')
+                time.sleep(0.15)
+            sender.sendall(m['SETTLED']); sender.shutdown(socket.SHUT_WR)
+            if in_use:
+                time.sleep(0.2); assert child.poll() is None
+                client.sendall(b'\r\n')
+                assert b'200 OK' in client.recv(4096)
+            else:
+                assert child.wait(timeout=6)==0
+        finally:
+            if client: client.close()
+            if child.poll() is None: child.terminate(); child.wait(timeout=4)
 
 
 def observer_enrollment():
@@ -169,12 +259,12 @@ def observer_enrollment():
         system.pidfd_open.return_value = 42
         system.fork.return_value = 11
         with mock.patch.dict(ns, os=system, sys=SimpleNamespace(platform='linux'),
-                             dead=lambda fd: already_dead, birth=lambda pid: 'same-stamp'):
+                             dead=lambda fd: already_dead, birth=lambda pid: 'same-stamp', audit=mock.Mock()):
             try:
                 assert m['install_observer'](73, 'A-1.R-1') == 'same-stamp' and accepted
             except ValueError:
                 assert not accepted
-        assert system.fork.call_count == int(accepted)
+        system.fork.assert_not_called()
         system.close.assert_called_once_with(42)
 
 
@@ -216,19 +306,16 @@ check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=reply, interval=0)
 assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ended']
 darwin_watch()
 observer_enrollment()
-# Simulate positive and incomplete Darwin group snapshots; not a macOS host run.
-for n, member, expected in [(4,123,True),(4,456,False),(0,123,False),(8,123,False)]:
-    def listing(kind, anchor, pids, size):
-        assert kind == 2 and anchor == 123
-        pids[0] = member
-        return n
-    with mock.patch.object(m['ctypes'], 'CDLL', return_value=SimpleNamespace(proc_listpids=listing)):
-        assert m['darwin_group_empty'](123) == expected
 with tempfile.TemporaryDirectory(dir='/tmp', prefix='cr') as base:
     foreground_contracts(base)
 with tempfile.TemporaryDirectory() as base:
     test_runs(base)
 with tempfile.TemporaryDirectory() as base:
     session_bypass(base)
-http.shutdown(); http.server_close()
+with tempfile.TemporaryDirectory(dir="/tmp", prefix="custody-") as base:
+    registered_service(base)
+for in_use in (False, True):
+    with tempfile.TemporaryDirectory() as base:
+        vite_owner(base, in_use)
+http.shutdown(); http.server_close(); keydir.cleanup()
 print('isolated run resources passed', sys.platform)

@@ -1,3 +1,4 @@
+import { createHash, createHmac, randomBytes, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import {
 } from "vitest";
 import type { McpBackend } from "./backend.js";
 import { type LogEntry, memoryLogger } from "./log.js";
+import { freshResourceNonce } from "./run-resource-state.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
   acceptingVerifierFor,
@@ -244,10 +246,55 @@ describe("tools by allowed_tools", () => {
 });
 
 describe("authenticated Run resource observations", () => {
-  const read = (key: string, token = fixture.token) =>
-    fetch(`${server.url}?run_resource=${key}`, {
-      headers: { Authorization: `Bearer ${token}` },
+  test("resource nonce freshness is bounded and invalid settings fail closed", () => {
+    const now = 1_000_000;
+    const nonce = now.toString(16).padStart(16, "0") + "0".repeat(48);
+    expect(freshResourceNonce(nonce, now + 120_000, "120")).toBe(true);
+    expect(freshResourceNonce(nonce, now + 120_001, "120")).toBe(false);
+    expect(freshResourceNonce(nonce, now, "-1")).toBe(false);
+  });
+  const read = async (key: string, token = fixture.token) => {
+    const id = fixture.store.verifyToken(token)?.id ?? `tok_${"0".repeat(24)}`;
+    const nonce =
+      Date.now().toString(16).padStart(16, "0") +
+      randomBytes(24).toString("hex");
+    const proof = createHmac(
+      "sha256",
+      createHash("sha256").update(token).digest(),
+    )
+      .update(`resource-read-v1:${id}:${key}:${nonce}`)
+      .digest("hex");
+    const res = await fetch(`${server.url}?run_resource=${key}`, {
+      headers: {
+        "x-resource-registration": id,
+        "x-resource-nonce": nonce,
+        "x-resource-proof": proof,
+      },
     });
+    return {
+      status: res.status,
+      json: async () => {
+        const { payload, signature } = await res.json();
+        expect(
+          verify(
+            "sha256",
+            Buffer.from(payload),
+            fixture.store.runResources.publicKey(),
+            Buffer.from(signature, "base64"),
+          ),
+        ).toBe(true);
+        const [protocol, i, n, k, project, machine, state] =
+          JSON.parse(payload);
+        expect([protocol, i, n, k]).toEqual([
+          "resource-state-v1",
+          id,
+          nonce,
+          key,
+        ]);
+        return { key: k, project, machine, state };
+      },
+    };
+  };
   test.each(["completed", "failed", "cancelled"] as const)(
     "an exact %s state is read without acknowledging the next Run",
     async (status) => {

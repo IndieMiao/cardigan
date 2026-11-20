@@ -9,7 +9,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
 import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
-import { authenticate, bearerToken, type Identity } from "./auth.js";
+import {
+  authenticate,
+  bearerToken,
+  type Identity,
+  recordIdentity,
+} from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
@@ -27,7 +32,7 @@ import {
 } from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
-import { runResourceState } from "./run-resource-state.js";
+import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import {
   type CheckLogOptions,
@@ -204,10 +209,24 @@ export async function startMcpServer(
       return;
     }
 
-    const identity = authenticate(
-      options.store,
-      bearerToken(req.headers.authorization),
-    );
+    const resource =
+      req.method === "GET" && url.searchParams.has("run_resource");
+    const key = url.searchParams.get("run_resource") ?? "";
+    const nonce = req.headers["x-resource-nonce"];
+    const id = req.headers["x-resource-registration"];
+    const mac = req.headers["x-resource-proof"];
+    const identity = resource
+      ? recordIdentity(
+          options.store,
+          typeof id === "string" &&
+            typeof mac === "string" &&
+            typeof nonce === "string" &&
+            freshResourceNonce(nonce) &&
+            /^A-[1-9]\d{0,15}\.R-[1-9]\d{0,15}\.R-[1-9]\d{0,15}$/u.test(key)
+            ? options.store.verifyResourceRead?.(id, key, nonce, mac)
+            : undefined,
+        )
+      : authenticate(options.store, bearerToken(req.headers.authorization));
     if (!identity.ok) {
       // Unknown, revoked and orphaned tokens all look like this on purpose.
       log({
@@ -242,19 +261,19 @@ export async function startMcpServer(
         ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
       );
 
-    if (req.method === "GET" && url.searchParams.has("run_resource")) {
+    if (resource) {
       res.setHeader("Cache-Control", "private, no-store");
       if (
         url.searchParams.size !== 1 ||
         !allowedHosts.includes(req.headers.host ?? "") ||
         (req.headers.origin !== undefined &&
           req.headers.origin !== url.origin) ||
-        identity.value.assignment.external
+        identity.value.assignment.external ||
+        !options.store.runResources
       ) {
         res.writeHead(403).end();
         return;
       }
-      const key = url.searchParams.get("run_resource") ?? "";
       const state = runResourceState(
         options.store,
         identity.value,
@@ -262,12 +281,19 @@ export async function startMcpServer(
         options.clock ? Date.parse(options.clock.now()) : Date.now(),
       );
       // No inbox advance, token rotation, wake or synthetic activity.
+      const payload = JSON.stringify([
+        "resource-state-v1",
+        id,
+        nonce,
+        key,
+        identity.value.actor.project_id,
+        identity.value.assignment.machine_id,
+        state,
+      ]);
       res.writeHead(200, { "Content-Type": "application/json" }).end(
         JSON.stringify({
-          key,
-          state,
-          project: identity.value.actor.project_id,
-          machine: identity.value.assignment.machine_id,
+          payload,
+          signature: options.store.runResources.signState(payload),
         }),
       );
       return;

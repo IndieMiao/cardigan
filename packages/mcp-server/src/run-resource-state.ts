@@ -47,3 +47,18 @@ export function runResourceState(
     return now - finished > Number(expiry) * 1000 ? "expired_preview" : "ended";
   });
 }
+
+/** Invalid policy or unsynchronised clocks never authorise a read. */
+export function freshResourceNonce(
+  nonce: string,
+  now = Date.now(),
+  skew = process.env.CARDIGAN_RUN_RESOURCE_CLOCK_SKEW_SECONDS ?? "120",
+) {
+  return (
+    /^[a-f0-9]{64}$/u.test(nonce) &&
+    /^[1-9]\d*$/u.test(skew) &&
+    Number.isSafeInteger(Number(skew) * 1000) &&
+    Math.abs(now - Number.parseInt(nonce.slice(0, 16), 16)) <=
+      Number(skew) * 1000
+  );
+}

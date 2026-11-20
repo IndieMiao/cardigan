@@ -2,13 +2,14 @@
 import base64
 import ctypes
 import hashlib
+import hmac
 import http.client
 import errno
 import json
 import os
 import re
 import select
-import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 import time
 from urllib.parse import urlsplit
 
+VITE_OWNER = None  # included by the host in the authenticated entry
 AUTHORITY = None  # pinned by the host when publishing this entry
 DIR = os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW
 KEY = re.compile(r'(A-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,15})')
@@ -131,21 +133,6 @@ def session_watch(pid, expected=None):
     raise ValueError('unsupported_worker')
 
 
-def reap_adopted():
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == 0:
-            with open('/proc/self/task/%s/children' % os.getpid(), encoding='ascii') as f:
-                for text in f.read().split():
-                    # Single-threaded subreaper: nobody can reap/recycle this PID
-                    # between the kernel child listing and signal delivery.
-                    os.kill(int(text), signal.SIGKILL)
-            time.sleep(0.02)
-
-
 def disown_stdio():
     null = os.open('/dev/null', os.O_RDWR)
     for n in range(3):
@@ -166,32 +153,54 @@ def retain_fds(keep):
                     raise
 
 
-def darwin_group_empty(anchor):
-    # PROC_PGRP_ONLY; the caller is its own live group leader. A full buffer means
-    # multiple members or truncation, never permission to forget the group.
-    lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    pids = (ctypes.c_int * 4)()
-    n = lib.proc_listpids(2, anchor, pids, ctypes.sizeof(pids))
-    return n == ctypes.sizeof(ctypes.c_int) and pids[0] == anchor
+def verify_state(public, signature, payload):
+    # Use the system crypto implementation, not a Python package/import from
+    # the project. The two short, public inputs never name writable files.
+    fds = []
+    try:
+        for data in (public.encode('ascii'), base64.b64decode(signature, validate=True)):
+            require(0 < len(data) <= 512)
+            r, w = os.pipe()
+            fds.append(r)
+            try:
+                os.write(w, data)
+            finally:
+                os.close(w)
+        result = subprocess.run(['/usr/bin/openssl', 'dgst', '-sha256', '-verify',
+            '/dev/fd/%d' % fds[0], '-signature', '/dev/fd/%d' % fds[1]],
+            input=payload.encode('utf8'), pass_fds=fds, timeout=2, cwd='/',
+            env={'PATH':'/usr/bin:/bin','OPENSSL_CONF':'/dev/null'},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        require(result.returncode == 0)
+    finally:
+        for fd in fds: os.close(fd)
 
 
-def host_state(key, token):
-    endpoint, project, machine = AUTHORITY
+def host_state(key, read_key):
+    endpoint, project, machine, registration, public = AUTHORITY
     url = urlsplit(endpoint)
     require(url.path == '/mcp' and not (url.query or url.fragment or url.username or url.password))
     require(url.scheme == 'https' or (url.scheme == 'http' and url.hostname in ('localhost', '127.0.0.1', '::1')))
+    nonce = f'{int(time.time()*1000):016x}' + os.urandom(24).hex()
+    started = time.monotonic()
+    proof = hmac.new(read_key, f'resource-read-v1:{registration}:{key}:{nonce}'.encode('ascii'), 'sha256').hexdigest()
     client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=2)
     try:
-        # No proxy discovery, redirects, URL or credential taken from a marker.
-        client.request('GET', '/mcp?run_resource=' + key, headers={'Authorization': 'Bearer ' + token})
+        client.request('GET', '/mcp?run_resource=' + key, headers={'X-Resource-Nonce':nonce,
+            'X-Resource-Registration':registration, 'X-Resource-Proof':proof})
         res = client.getresponse()
         require(res.status == 200)
         data = res.read(2049)
         require(len(data) <= 2048)
         row = json.loads(data)
-        require((row['project'], row['machine'], row['key']) == (project, machine, key))
-        require(row['state'] in ('active', 'ended', 'expired_preview', 'unknown'))
-        return row['state']
+        payload = row['payload']
+        require(isinstance(payload, str) and isinstance(row['signature'], str))
+        verify_state(public, row['signature'], payload)
+        fields = json.loads(payload)
+        require(isinstance(fields, list) and len(fields) == 7 and fields[:-1] == [
+            'resource-state-v1', registration, nonce, key, project, machine])
+        require(fields[-1] in ('active', 'ended', 'expired_preview', 'unknown') and time.monotonic()-started < 5)
+        return fields[-1]
     finally:
         client.close()
 
@@ -208,7 +217,7 @@ class Confirmation:
         self.next = time.monotonic() + self.interval
         try:
             state = self.read()
-        except (OSError, http.client.HTTPException, KeyError, TypeError, ValueError):
+        except (OSError, subprocess.SubprocessError, http.client.HTTPException, KeyError, TypeError, ValueError):
             state = 'unknown'
         if state != self.last and state in ('unknown', 'expired_preview'):
             audit(self.key, state)
@@ -216,88 +225,56 @@ class Confirmation:
         return state
 
 
+# An anonymous, invocation-specific lifetime capability, not a writable PID
+# list or a service-discovery socket. No other Run is handed either endpoint.
+# EOF alone is NOT settlement (the supervisor may have crashed). Participants
+# peek the immutable record so it remains readable by private cross-group heirs.
+SETTLED = b'cardigan-private-settled-v1\n'
+
+
 def supervise(key, argv, confirmation, exited, env, cancellation):
-    linux = sys.platform == 'linux'
-    if linux:
-        require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0)  # PR_SET_CHILD_SUBREAPER
-    reader, writer = os.pipe()
-    # A child of the supervisor anchors an isolated session/PGID. Its PID
-    # cannot be recycled until this parent waits, even if the anchor crashes.
-    anchor = os.fork()
-    if anchor == 0:
-        try:
-            retain_fds({writer})
-            os.setsid()
-            task = subprocess.Popen(argv, env=env)
-            env.clear()
-            os.environ.clear()
-            disown_stdio()
-            code = task.wait()
-            # Inspect our own still-live, private group before exiting; some
-            # kernels omit zombies from group listings.
-            empty = not linux and darwin_group_empty(os.getpid())
-            os.write(writer, bytes([(128 - code if code < 0 else code) % 256, int(empty)]))
-        finally:
-            os._exit(0)
-    os.close(writer)
-    env.clear()
-    disown_stdio()
-    os.environ.clear()
-    # Do not reap the anchor on foreground completion: an ordinary command
-    # may have forked a service that still belongs to this isolated group.
-    authorized = False
-    try:
-        while not exited() and confirmation.state() != 'ended':
-            if reader is None:
-                time.sleep(0.3)
-                continue
-            ready = select.select([reader, cancellation], [], [], 0.3)[0]
-            if cancellation in ready:
-                audit(key, 'foreground_cancelled')
-                break
-            if reader in ready:
-                data = os.read(reader, 2)
+    publisher, participant = socket.socketpair()
+    with publisher, participant:
+        participant.shutdown(socket.SHUT_WR)
+        channel = participant.fileno()
+        env['CARDIGAN_PRIVATE_LIFETIME_FD'] = str(channel)
+        task = subprocess.Popen(argv, env=env, start_new_session=True, pass_fds=(channel,))
+        participant.close()
+        env.clear()
+        disown_stdio()
+        os.environ.clear()
+        foreground = True
+        while True:
+            code = task.poll()
+            if foreground and code is not None:
+                foreground = False
                 os.close(cancellation)
-                emit_status(data[0] if data else 125)
-                os.close(reader)
-                reader = None
-                if linux:
-                    # Anchor has reaped the foreground child. Wait for its exit
-                    # without consuming status; orphans have now been adopted.
-                    os.waitid(os.P_PID, anchor, os.WEXITED | os.WNOWAIT)
-                    with open('/proc/self/task/%s/children' % os.getpid(), encoding='ascii') as f:
-                        if f.read().split() == [str(anchor)]:
-                            os.waitpid(anchor, 0)
-                            return 0
-                elif data[1:] == b"\x01":
-                    os.waitpid(anchor, 0)
-                    return 0
-        authorized = True
-        audit(key, 'closing_registered_tree')
-        return 143
-    finally:
-        if authorized:
-            stop_anchor(key, anchor, linux)
-
-
-def stop_anchor(key, anchor, linux):
-    try:
-        # Even if closure races setsid, killing our unreaped direct child
-        # first prevents it from ever creating a service after settlement.
-        os.kill(anchor, signal.SIGKILL)
-        try:
-            os.killpg(anchor, signal.SIGTERM)
-            time.sleep(0.25)
-            os.killpg(anchor, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os.waitpid(anchor, 0)
-        if linux:
-            reap_adopted()
-        else:
-            audit(key, 'unbound_descendants_not_targeted')
-    except ChildProcessError:
-        pass
+                emit_status((128-code if code < 0 else code) % 256)
+            # POLLHUP, unlike a readable half-close, means all copies of the
+            # private participant endpoint have gone. Never enumerate a PGID.
+            poll = select.poll()
+            poll.register(publisher, select.POLLHUP | select.POLLERR)
+            if not foreground and poll.poll(0):
+                return 0
+            cancelled = foreground and select.select([cancellation], [], [], 0)[0]
+            if cancelled or exited() or confirmation.state() == 'ended':
+                try:
+                    publisher.sendall(SETTLED)
+                    publisher.shutdown(socket.SHUT_WR)
+                    # Only the participant can relinquish its own work after it
+                    # has closed admission/drained users. Silence is never a
+                    # positive reply or permission to kill it or its siblings.
+                    deadline = time.monotonic() + 1
+                    while time.monotonic() < deadline:
+                        if task.poll() is not None and poll.poll(0):
+                            audit(key, 'private_participants_released')
+                            return 143
+                        time.sleep(0.05)
+                    audit(key, 'private_release_unconfirmed_retained')
+                except (BrokenPipeError,ConnectionResetError):
+                    audit(key, 'missing_private_participant_retained')
+                return 125
+            time.sleep(0.12)
 
 
 status_pipe = None
@@ -319,7 +296,7 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None):
     require(KEY.fullmatch(key) and argv)
     expected = expected or birth(pid)
     require(birth(pid) == expected)
-    confirmation = confirmation or Confirmation(key, os.environ['MCP_TOKEN'])
+    confirmation = confirmation or Confirmation(key, hashlib.sha256(os.environ['MCP_TOKEN'].encode()).digest())
     require(confirmation.state() == 'active')
     root, parent = namespace(tag, True, base)
     try:
@@ -361,87 +338,22 @@ def dead(fd):
     return bool(poll.poll(0))
 
 
-def observe_descendants(key, pid, rootfd):
-    # Walk only kernel child lists rooted at the launch PID. Retain *handles*,
-    # not PIDs, across setsid/reparenting. Identity must still be live on both
-    # ends of each edge after reading ppid. Never target the observer itself.
-    pins = {}
-    incomplete = False
-    while not dead(rootfd):
-        for child, fd in list(pins.items()):
-            if dead(fd):
-                os.close(pins.pop(child))
-        queue = [(pid, rootfd), *pins.items()]
-        for parent, parentfd in queue:
-            if dead(parentfd):
-                continue
-            try:
-                for task in Path(f'/proc/{parent}/task').iterdir():
-                    for n in (task/'children').read_text().split():
-                        child = int(n)
-                        if child == os.getpid() or child in pins:
-                            continue
-                        if len(pins) >= 4096:
-                            raise ValueError('observation_limit')
-                        fd = os.pidfd_open(child)
-                        try:
-                            fields = Path(f'/proc/{child}/stat').read_text().rsplit(') ', 1)[1].split()
-                            if (int(fields[1]) == parent and not dead(parentfd) and not dead(fd)
-                                    and Path(f'/proc/{child}').stat().st_uid == os.getuid()):
-                                pins[child] = fd
-                                queue.append((child, fd))
-                                fd = None
-                        finally:
-                            if fd is not None:
-                                os.close(fd)
-            except (FileNotFoundError, ProcessLookupError):
-                continue
-            except (OSError, ValueError):
-                if not incomplete:
-                    audit(key, 'unobservable_descendants_not_targeted')
-                    incomplete = True
-        time.sleep(0.4)
-    # Run monitors have their own session-exit watches. Give them a chance to
-    # reap their groups before the outer observer handles remaining bypasses.
-    time.sleep(1.5)
-    for fd in pins.values():
-        try:
-            if not dead(fd):
-                signal.pidfd_send_signal(fd, signal.SIGKILL)
-                audit(key, 'session_descendant_stopped')
-        except ProcessLookupError:
-            pass
-        except OSError:
-            audit(key, 'session_signal_failed')
-        finally:
-            os.close(fd)
-    audit(key, 'session_exit_unproven_not_targeted')
-
-
 def install_observer(pid, key):
     require(pid > 1 and pid == os.getppid())  # the launcher can only enroll itself
     require(re.fullmatch(r'A-[1-9][0-9]{0,15}\.R-[1-9][0-9]{0,15}', key))
     stamp = birth(pid)
     if sys.platform != 'linux':
         require(os.getppid() == pid)
-        audit(key, 'no_stable_bypass_signal_handle')
+        audit(key, 'unregistered_session_descendants_retained')
         return stamp
     fd = os.pidfd_open(pid)
     try:
         # Recheck parentage *after* pinning. A matching pair of birth reads
         # alone could both describe the process which recycled the launcher PID.
         require(birth(pid) == stamp and os.getppid() == pid and not dead(fd))
-        if os.fork() == 0:
-            try:
-                os.setsid()
-                disown_stdio()
-                retain_fds({fd})
-                os.environ.clear()
-                observe_descendants(key, pid, fd)
-            except Exception:
-                audit(key, 'session_observer_failed')
-            finally:
-                os._exit(0)
+        # Q-1019: parentage is not exclusive registration. A bypass can have
+        # clients in another Run; do not even acquire descendant handles.
+        audit(key, 'unregistered_session_descendants_retained')
         return stamp
     finally:
         os.close(fd)
@@ -482,10 +394,17 @@ def main():
     elif len(sys.argv) == 4 and sys.argv[1] == 'observe-session':
         print(install_observer(int(sys.argv[2]), sys.argv[3]))
     else:
-        require(len(sys.argv) > 3 and sys.argv[2] == '--')
+        if len(sys.argv) == 4 and sys.argv[2] == '--private-vite':
+            require(VITE_OWNER and re.fullmatch(r'[1-9][0-9]{0,4}', sys.argv[3]) and int(sys.argv[3]) <= 65535)
+            if 'CARDIGAN_RESOURCE_BINDINGS' in os.environ:
+                require(any(row.get('port') == int(sys.argv[3]) for row in json.loads(os.environ['CARDIGAN_RESOURCE_BINDINGS'])))
+            argv = ['node','--input-type=module','-e',VITE_OWNER,sys.argv[3]]
+        else:
+            require(len(sys.argv) > 4 and sys.argv[2:4] == ['--private', '--'])
+            argv = sys.argv[4:]
         key = os.environ['CARDIGAN_RESOURCE_SESSION'] + '.' + sys.argv[1]
         sys.exit(command(os.environ['CARDIGAN_RESOURCE_TARGET'], key,
-                         int(os.environ['CARDIGAN_SESSION_PID']), sys.argv[3:], expected=os.environ['CARDIGAN_SESSION_BIRTH']))
+                         int(os.environ['CARDIGAN_SESSION_PID']), argv, expected=os.environ['CARDIGAN_SESSION_BIRTH']))
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -362,20 +363,26 @@ test.each(["codex", "pi", "claude-code"] as const)(
     expect(files.some((file) => file.content.includes(f.host.mcpUrl))).toBe(
       false,
     );
-    const spec = JSON.parse(
-      files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "{}",
+    const launchJson =
+      files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "";
+    const spec = JSON.parse(launchJson);
+    const description = runtime.provision.mock.calls.at(-1)?.[3];
+    expect(description.command).toBe(execution.fileHelper?.python);
+    expect(description.args.at(-1)).toBe(
+      createHash("sha256").update(launchJson).digest("hex"),
     );
+    expect(description.args).toContain(execution.fileHelper?.path);
     expect(
       Object.values(spec.env).some(
         (v) => typeof v === "string" && v.includes("/sessions/"),
       ),
     ).toBe(true);
-    expect(spec.env.CARDIGAN_RUN_COMMAND).toMatch(
-      /\/generations\/[^/]+\/run-command\.py$/u,
+    const resource = files.find((file) =>
+      file.path.endsWith("/run-command.py"),
     );
-    expect(
-      files.find((file) => file.path === spec.env.CARDIGAN_RUN_COMMAND)?.mode,
-    ).toBe(0o600);
+    expect(resource?.mode).toBe(0o600);
+    expect(spec.env.CARDIGAN_RUN_COMMAND).toContain("hashlib.sha256(b)");
+    expect(spec.env.CARDIGAN_RUN_COMMAND).toContain(resource?.path);
     expect(spec.env.CARDIGAN_RESOURCE_SESSION).toMatch(/^A-\d+\.R-\d+$/u);
     expect(files.every((file) => file.path.includes("/generations/"))).toBe(
       true,

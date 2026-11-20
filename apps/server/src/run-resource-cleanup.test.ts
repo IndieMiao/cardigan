@@ -11,10 +11,10 @@ test("process groups, detached descendants, session exit and replaced/occupied s
   const result = await promisify(execFile)(
     "python3",
     ["-IB", "test-support/run-resources.py"],
-    { timeout: 30000 },
+    { timeout: 55000 },
   );
   expect(result.stdout).toContain("isolated run resources passed");
-}, 35000);
+}, 60000);
 
 test("draining workers are previewed without starting work or scheduling a deletion", async () => {
   const f = m4Fixture();
