@@ -3,7 +3,6 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
-  useId,
   useRef,
   useState,
 } from "react";
@@ -23,6 +22,7 @@ import {
   SettingsDiff,
   SettingsFact,
   SettingsFacts,
+  SettingsField,
   SettingsSection,
   SettingsWarning,
 } from "../components/layout/SettingsLayout.js";
@@ -382,15 +382,34 @@ function LaunchDiff({
   );
 }
 
-/** A field note: shown in place, linked to the control by `aria-describedby`. */
-function useFieldNote(message: string | undefined) {
-  const id = useId();
-  return {
-    control: message
-      ? { "aria-invalid": true as const, "aria-describedby": id }
-      : {},
-    note: message ? <SettingsWarning id={id}>{message}</SettingsWarning> : null,
-  };
+/** A text input whose problem is shown right below it (C-516). */
+function TextField({
+  label,
+  error,
+  value,
+  url = false,
+  onChange,
+}: {
+  label: string;
+  error: string | undefined;
+  value: string;
+  url?: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <SettingsField label={label} error={error}>
+      {(field) => (
+        <Input
+          value={value}
+          autoComplete="off"
+          inputMode={url ? "url" : "text"}
+          aria-invalid={field.invalid}
+          aria-describedby={field.describedBy}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </SettingsField>
+  );
 }
 
 const CUSTOM = "__custom__";
@@ -529,11 +548,6 @@ function ProfileFields({
   problems: Partial<Record<keyof ProfileDraft, string | undefined>>;
 }) {
   const models = settings.models ?? {};
-  const name = useFieldNote(problems.name);
-  const model = useFieldNote(problems.model);
-  const effort = useFieldNote(problems.effort);
-  const permission = useFieldNote(problems.permission_mode);
-  const providerFlag = useFieldNote(problems.provider_flag);
   const harnesses = HARNESSES.includes(draft.harness as never)
     ? HARNESSES
     : [draft.harness, ...HARNESSES];
@@ -548,18 +562,12 @@ function ProfileFields({
   return (
     <>
       {creating && (
-        <>
-          <label>
-            名称
-            <Input
-              value={draft.name}
-              autoComplete="off"
-              {...name.control}
-              onChange={(e) => patch({ name: e.target.value })}
-            />
-          </label>
-          {name.note}
-        </>
+        <TextField
+          label="名称"
+          error={problems.name}
+          value={draft.name}
+          onChange={(value) => patch({ name: value })}
+        />
       )}
       <label>
         Harness
@@ -612,49 +620,31 @@ function ProfileFields({
         </SelectControl>
       </label>
       {custom && (
-        <>
-          <label>
-            模型标识
-            <Input
-              value={draft.model}
-              autoComplete="off"
-              {...model.control}
-              onChange={(e) => patch({ model: e.target.value })}
-            />
-          </label>
-          {model.note}
-        </>
+        <TextField
+          label="模型标识"
+          error={problems.model}
+          value={draft.model}
+          onChange={(value) => patch({ model: value })}
+        />
       )}
-      <label>
-        推理强度
-        <Input
-          value={draft.effort}
-          autoComplete="off"
-          {...effort.control}
-          onChange={(e) => patch({ effort: e.target.value })}
-        />
-      </label>
-      {effort.note}
-      <label>
-        权限模式
-        <Input
-          value={draft.permission_mode}
-          autoComplete="off"
-          {...permission.control}
-          onChange={(e) => patch({ permission_mode: e.target.value })}
-        />
-      </label>
-      {permission.note}
-      <label>
-        Provider 参数
-        <Input
-          value={draft.provider_flag}
-          autoComplete="off"
-          {...providerFlag.control}
-          onChange={(e) => patch({ provider_flag: e.target.value })}
-        />
-      </label>
-      {providerFlag.note}
+      <TextField
+        label="推理强度"
+        error={problems.effort}
+        value={draft.effort}
+        onChange={(value) => patch({ effort: value })}
+      />
+      <TextField
+        label="权限模式"
+        error={problems.permission_mode}
+        value={draft.permission_mode}
+        onChange={(value) => patch({ permission_mode: value })}
+      />
+      <TextField
+        label="Provider 参数"
+        error={problems.provider_flag}
+        value={draft.provider_flag}
+        onChange={(value) => patch({ provider_flag: value })}
+      />
       <label>
         自动更新
         <SelectControl
@@ -719,22 +709,17 @@ function CopyFields({
   setName: (name: string) => void;
   problem: string | undefined;
 }) {
-  const note = useFieldNote(problem);
   return (
     <>
       <SettingsFacts>
         <SettingsFact label="来源">{source}</SettingsFact>
       </SettingsFacts>
-      <label>
-        新配置名称
-        <Input
-          value={name}
-          autoComplete="off"
-          {...note.control}
-          onChange={(e) => setName(e.target.value)}
-        />
-      </label>
-      {note.note}
+      <TextField
+        label="新配置名称"
+        error={problem}
+        value={name}
+        onChange={(value) => setName(value)}
+      />
     </>
   );
 }
@@ -863,9 +848,6 @@ function ProviderFields({
   }) => void;
   problems: Record<"name" | "base_url" | "secret_env", string | undefined>;
 }) {
-  const name = useFieldNote(problems.name);
-  const url = useFieldNote(problems.base_url);
-  const secret = useFieldNote(problems.secret_env);
   return (
     <>
       <SettingsFacts>
@@ -876,49 +858,46 @@ function ProviderFields({
           {used.length ? used.join("、") : "—"}
         </SettingsFact>
       </SettingsFacts>
-      <label>
-        名称
-        <Input
-          value={draft.name}
-          autoComplete="off"
-          {...name.control}
-          onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-        />
-      </label>
-      {name.note}
-      <label>
-        端点
-        <Input
-          value={draft.base_url}
-          autoComplete="off"
-          inputMode="url"
-          {...url.control}
-          onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
-        />
-      </label>
-      {url.note}
+      <TextField
+        label="名称"
+        error={problems.name}
+        value={draft.name}
+        onChange={(value) => setDraft({ ...draft, name: value })}
+      />
+      <TextField
+        label="端点"
+        error={problems.base_url}
+        value={draft.base_url}
+        url
+        onChange={(value) => setDraft({ ...draft, base_url: value })}
+      />
       {Object.entries(draft.secret_env).map(([env, key]) => (
-        <label key={env}>
-          密钥引用 {env}
-          <SelectControl
-            value={key}
-            {...secret.control}
-            onValueChange={(next) =>
-              setDraft({
-                ...draft,
-                secret_env: { ...draft.secret_env, [env]: next },
-              })
-            }
-          >
-            {(keys.includes(key) ? keys : [key, ...keys]).map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </SelectControl>
-        </label>
+        <SettingsField
+          key={env}
+          label={`密钥引用 ${env}`}
+          error={problems.secret_env}
+        >
+          {(field) => (
+            <SelectControl
+              value={key}
+              aria-invalid={field.invalid}
+              aria-describedby={field.describedBy}
+              onValueChange={(next) =>
+                setDraft({
+                  ...draft,
+                  secret_env: { ...draft.secret_env, [env]: next },
+                })
+              }
+            >
+              {(keys.includes(key) ? keys : [key, ...keys]).map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </SelectControl>
+          )}
+        </SettingsField>
       ))}
-      {secret.note}
     </>
   );
 }
@@ -974,7 +953,6 @@ function AliasFields({
   setId: (id: string) => void;
   problem: string | undefined;
 }) {
-  const note = useFieldNote(problem);
   return (
     <>
       <SettingsFacts>
@@ -983,16 +961,12 @@ function AliasFields({
           {used.length ? used.join("、") : "—"}
         </SettingsFact>
       </SettingsFacts>
-      <label>
-        模型标识
-        <Input
-          value={id}
-          autoComplete="off"
-          {...note.control}
-          onChange={(e) => setId(e.target.value)}
-        />
-      </label>
-      {note.note}
+      <TextField
+        label="模型标识"
+        error={problem}
+        value={id}
+        onChange={(value) => setId(value)}
+      />
     </>
   );
 }

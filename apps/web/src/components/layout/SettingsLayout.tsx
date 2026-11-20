@@ -384,6 +384,38 @@ export function SettingsDiff({
   return <span {...props} className={styles.diff} data-op={op} />;
 }
 
+/**
+ * C-516: one labelled form field whose problem is shown right below it and
+ * tied to the control (`aria-invalid` red border + `aria-describedby`).
+ */
+export function SettingsField({
+  label,
+  error,
+  children,
+}: {
+  label: ReactNode;
+  error?: string | undefined;
+  children: (field: {
+    invalid: true | undefined;
+    describedBy: string | undefined;
+  }) => ReactNode;
+}) {
+  const id = useId();
+  return (
+    <>
+      {/* biome-ignore lint/a11y/noLabelWithoutControl: the control comes from `children`. */}
+      <label>
+        {label}
+        {children({
+          invalid: error ? true : undefined,
+          describedBy: error ? id : undefined,
+        })}
+      </label>
+      {error && <SettingsWarning id={id}>{error}</SettingsWarning>}
+    </>
+  );
+}
+
 /** A risk or validation note inside a settings form: danger colour, icon first. */
 export function SettingsWarning({
   children,

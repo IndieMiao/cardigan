@@ -32,8 +32,8 @@ export function LaunchProfileSelect({
   return (
     <SelectControl
       value={current}
-      {...(label === undefined ? {} : { "aria-label": label })}
-      {...(disabled === undefined ? {} : { disabled })}
+      aria-label={label}
+      disabled={disabled}
       onValueChange={(next) => onChange(next === FOLLOW_ROLE ? null : next)}
     >
       <option value={FOLLOW_ROLE}>

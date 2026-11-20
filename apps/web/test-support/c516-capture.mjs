@@ -145,8 +145,7 @@ try {
     run(
       (text, scope) => {
         const dialogs = [...document.querySelectorAll("[role=dialog]")];
-        const root =
-          scope === "page" ? document : (dialogs.at(-1) ?? document);
+        const root = scope === "page" ? document : (dialogs.at(-1) ?? document);
         const b = [...root.querySelectorAll("button, a")].find(
           (x) =>
             (x.getAttribute("aria-label") ?? x.textContent.trim()) === text,
@@ -166,9 +165,9 @@ try {
   const fill = (label, value) =>
     run(
       (label, value) => {
-        const l = [
-          ...document.querySelectorAll("[role=dialog] label"),
-        ].find((x) => x.firstChild?.textContent?.trim() === label);
+        const l = [...document.querySelectorAll("[role=dialog] label")].find(
+          (x) => x.firstChild?.textContent?.trim() === label,
+        );
         const input = l?.querySelector("input");
         if (!input) throw new Error(`Missing field: ${label}`);
         Object.getOwnPropertyDescriptor(
@@ -181,10 +180,6 @@ try {
       label,
       value,
     );
-  const tab = async (name) => {
-    await click(name, "page");
-    await settle();
-  };
   const row = async (name) => {
     await run((name) => {
       const b = [
@@ -353,8 +348,20 @@ try {
       const modelsShot = await scene("models", measurePage);
       assert.deepEqual(results.models.overflowing, [], "models: column");
       pairs.push(
-        { name: "models-vs-roles", width, theme, left: rolesShot, right: modelsShot },
-        { name: "models-vs-cards", width, theme, left: cardsShot, right: modelsShot },
+        {
+          name: "models-vs-roles",
+          width,
+          theme,
+          left: rolesShot,
+          right: modelsShot,
+        },
+        {
+          name: "models-vs-cards",
+          width,
+          theme,
+          left: cardsShot,
+          right: modelsShot,
+        },
       );
       // Detail: copy / delete / edit in the title row, section actions.
       await row("claude-opus");
@@ -449,7 +456,9 @@ try {
       await delay(300);
       await fill("名称", "added-elsewhere");
       await click("预览修改");
-      await until("!!document.querySelector('[role=dialog] [aria-invalid=true]')");
+      await until(
+        "!!document.querySelector('[role=dialog] [aria-invalid=true]')",
+      );
       await scene("models-new-invalid", measureDrawer);
 
       // Provider: endpoint and the secret key reference (key names only).
