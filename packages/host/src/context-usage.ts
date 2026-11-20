@@ -1,6 +1,4 @@
-import { execFile } from "node:child_process";
 import { resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
   type Assignment,
   type CommandState,
@@ -36,7 +34,6 @@ export {
 } from "@cardigan/roles";
 
 import {
-  AGENT_PATH,
   agentProcessCommand,
   type ExecutionConfig,
   executionPaths,
@@ -44,6 +41,7 @@ import {
   workerLaunchPath,
   workerSessionPath,
 } from "@cardigan/runtime-herdr";
+import { captureTranscript } from "./capture-transcript.js";
 import { CLAUDE_CONTEXT_READER } from "./claude-context-reader.js";
 import { files, readParts } from "./session-files.js";
 import { WORKER_CLAUDE_OPENER } from "./worker-claude-transcript.js";
@@ -71,9 +69,7 @@ export interface ContextUsageOptions {
   signal?: AbortSignal;
 }
 export const DEFAULT_CONTEXT_STALE_AFTER_MS = 10 * 60_000;
-const HEAD_BYTES = 64 * 1024;
 
-const capture = promisify(execFile);
 async function privateTranscript(
   execution: ExecutionConfig,
   root: string,
@@ -109,25 +105,7 @@ async function privateTranscript(
         ? await agentProcessCommand(execution, remoteArgs)
         : { file: process.execPath, args };
     if (signal?.aborted) return undefined;
-    const pending = capture(command.file, command.args, {
-      encoding: "utf8",
-      env: { PATH: AGENT_PATH },
-      timeout: 10_000,
-      killSignal: "SIGKILL",
-      maxBuffer: HEAD_BYTES,
-      ...(signal ? { signal } : {}),
-    });
-    // Abort reports an error before the child closes. Shutdown must also wait
-    // for the actual process/stdio cleanup before dropping the in-flight slot.
-    const closed = new Promise<void>((resolve) =>
-      pending.child.once("close", () => resolve()),
-    );
-    try {
-      const { stdout } = await pending;
-      return stdout;
-    } finally {
-      await closed;
-    }
+    return await captureTranscript(command.file, command.args, signal);
   } catch {
     // No raw process output, transcript text or SSH diagnostics are disclosed.
     onReadFailure();
