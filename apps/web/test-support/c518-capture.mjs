@@ -304,7 +304,7 @@ try {
           ),
         );
       const executionReady =
-        "!!document.querySelector(\"button[aria-label^='查看 A-']\") || document.body.textContent.includes('没有匹配的执行记录')";
+        "!!document.querySelector(\"button[aria-label^='查看 A-']\") || !!document.body?.textContent.includes('没有匹配的执行记录')";
       for (const [name, query] of [
         ["execution", "view=all"],
         ["execution-employee", "view=all&employee=E-3"],
