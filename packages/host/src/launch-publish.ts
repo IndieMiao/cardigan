@@ -275,9 +275,15 @@ export class LaunchPublication {
   }
   description(): RuntimeLaunch {
     const value = this.current();
+    const digest = value.artifacts.find(
+      (f) => f.evidence_name === "launch.json",
+    )?.sha256;
+    const [command, ...args] = this.wrapper().command;
+    if (!command || !digest)
+      throw new Error("Missing verified launch descriptor");
     return {
-      command: posix.join(this.runDir, "launch.sh"),
-      args: [],
+      command,
+      args: [...args, digest],
       cwd: value.work_dir,
       agent_name: value.agent_name,
       labels: {
