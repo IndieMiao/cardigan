@@ -673,3 +673,125 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
   expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
   expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
 });
+
+/** Shared setup for the capacity cases (Q-1013): a controllable capacity read. */
+function capacityCase(machineLimit: () => number) {
+  const state = {
+    fail: false,
+    running: 2,
+    queued: 1,
+    capacityLimit: 6,
+    gate: undefined as Promise<void> | undefined,
+  };
+  const executionCapacity = vi.fn(async () => {
+    if (state.gate) await state.gate;
+    if (state.fail) throw new Error("合成容量读取失败");
+    return {
+      ...capacity,
+      agents: capacity.agents.map((a) =>
+        a.machine_id === "local"
+          ? {
+              ...a,
+              running: state.running,
+              queued: state.queued,
+              limit: state.capacityLimit,
+            }
+          : a,
+      ),
+    };
+  });
+  const local = () => ({ ...byId("local"), run_limit: machineLimit() });
+  const c = client({
+    executionCapacity,
+    machines: vi.fn(async () => ({ machines: [local()] })),
+    machine: vi.fn(async () => ({ machine: local() })),
+  });
+  const page = (revision: number) => (
+    <CapacityProvider client={c} projectId="p-1" revision={revision} canEdit>
+      <SettingsPage projectId="p-1" client={c} revision={revision} />
+    </CapacityProvider>
+  );
+  // The list stays readable behind an open (modal) drawer.
+  const listCell = () =>
+    within(
+      screen.getByRole("table", { name: "机器列表", hidden: true }),
+    ).getAllByRole("row", { hidden: true })[1]?.textContent ?? "";
+  return { state, executionCapacity, page, listCell };
+}
+const drawerFacts = (dialog: ReturnType<typeof within>) => (label: string) =>
+  dialog.getByText(label, { selector: "dt" }).nextElementSibling?.textContent;
+
+test("Q-1013: a drawer opened while a retry is in flight agrees with the list and shows no failed snapshot", async () => {
+  let limit = 6;
+  const { state, page, listCell } = capacityCase(() => limit);
+  const view = render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("2 / 6"));
+  state.fail = true;
+  limit = 3;
+  view.rerender(page(1));
+  await waitFor(() => expect(listCell()).toContain("— / 3"));
+  // The panel's own notice (no drawer open) offers the retry.
+  const alert = (await screen.findByText(/并发读数未能更新/)).closest(
+    "[role=alert]",
+  ) as HTMLElement;
+  state.fail = false;
+  const held = Promise.withResolvers<void>();
+  state.gate = held.promise;
+  fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
+  // Before the response: list and a freshly opened drawer both stay stale.
+  await waitFor(() => expect(listCell()).toContain("— / 3"));
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const facts = drawerFacts(dialog);
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  expect(facts("排队")).toBe("—");
+  expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
+  expect(document.body.textContent).not.toContain("2 / 6");
+  // After the response: both show the new reading.
+  state.gate = undefined;
+  await act(async () => held.resolve());
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  expect(facts("排队")).toBe("1");
+  expect(listCell()).toContain("2 / 3");
+});
+
+test("Q-1013: the limit beside the count is the machine read's, even when the capacity read differs", async () => {
+  const { state, page, listCell } = capacityCase(() => 3);
+  state.capacityLimit = 6;
+  render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("2 / 3"));
+  expect(listCell()).not.toContain("/ 6");
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const facts = drawerFacts(dialog);
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  expect(facts("Agent 并发")).toBe("3（最多可设 16）");
+});
+
+test("Q-1013 guard: an ordinary background refresh keeps the last good reading until it returns", async () => {
+  const { state, page, listCell } = capacityCase(() => 6);
+  const view = render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const facts = drawerFacts(dialog);
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 6"));
+  const held = Promise.withResolvers<void>();
+  state.gate = held.promise;
+  state.running = 3;
+  view.rerender(page(1));
+  // In flight: still the last good reading, no placeholder, no notice.
+  await new Promise((r) => setTimeout(r, 50));
+  expect(facts("非常驻 / 上限")).toBe("2 / 6");
+  expect(facts("排队")).toBe("1");
+  expect(listCell()).toContain("2 / 6");
+  expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
+  state.gate = undefined;
+  await act(async () => held.resolve());
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("3 / 6"));
+});

@@ -45,19 +45,20 @@ const platform = (m: MachineView) =>
   [m.os, m.arch].filter(Boolean).join(" / ") || "—";
 type AgentCapacity = ExecutionCapacity["agents"][number];
 /**
- * The limited count beside its limit, from the shared capacity read (the
- * same figures as 并发与容量): standing sessions are exempt from the limit.
+ * The limited (non-standing) count from the shared capacity read, beside the
+ * limit the machine read confirmed (the same value as its resource limits),
+ * so one drawer never shows two limits. Standing sessions are exempt.
  */
 const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
-  capacity
-    ? `${capacity.running} / ${capacity.limit || "不可用"}`
-    : `— / ${m.run_limit}`;
+  `${capacity ? capacity.running : "—"} / ${m.run_limit || "不可用"}`;
 /**
- * The shared capacity read as the machine panel uses it. A failed refresh
- * keeps the last snapshot in the resource, but that snapshot is no longer
- * current: it stays hidden until a later read succeeds, including while a
- * retry is in flight (an ordinary background refresh still shows the last
- * successful read). Read once per panel and handed to its drawer.
+ * The shared capacity read as the machine panel uses it, in one of two
+ * states (Q-1013). Usable: the last successful read is shown, also while an
+ * ordinary background refresh is in flight. Stale: entered on any failed
+ * read and left only when a later read completes without error; a retry or
+ * refresh in flight does not count. While stale the counts are "—" (the
+ * resource keeps the failed snapshot, which is no longer current). Read once
+ * per panel and handed to its drawer, so both always agree.
  */
 function useMachineCapacity() {
   const capacity = useCapacity();
