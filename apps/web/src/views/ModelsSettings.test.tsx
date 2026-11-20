@@ -20,6 +20,7 @@ import {
 } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { launchSettingsFixture } from "../testing/launch-settings-fixture.js";
+import { launchSettingsServerSample } from "../testing/launch-settings-server-sample.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SettingsPage } from "./SettingsPage.js";
 
@@ -537,3 +538,29 @@ test.each([
     }
   },
 );
+
+test("the page reads a body produced by the merged C-515 server", async () => {
+  await openModels({ launchSettings: async () => launchSettingsServerSample });
+  const table = await screen.findByRole("table", { name: "启动配置" });
+  expect(
+    within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.textContent),
+  ).toEqual([
+    "aclaude-codeprimary → firsteffort high、自定义参数 1已设置0未检查",
+    "bpistandalone——0未检查",
+    "no-modelpi———0未检查",
+  ]);
+  fireEvent.click(screen.getByRole("button", { name: "a" }));
+  const dialog = await screen.findByRole("dialog", { name: "a" });
+  for (const fact of [
+    "Fixture",
+    "https://gateway.example.invalid",
+    "32,000 tokens",
+    "1.2.3",
+    "KEY已设置",
+    "没有角色或员工使用",
+  ])
+    expect(dialog.textContent).toContain(fact);
+});
