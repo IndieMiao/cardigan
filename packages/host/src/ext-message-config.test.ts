@@ -141,3 +141,18 @@ test.each([
     expect(extMessageQuiet(c.config, now)).toBe(quiet);
   },
 );
+
+test("an unreadable private application secret never disables the independent old channel or leaks its contents", () => {
+  write(
+    `enabled: true\nworkbench_url: https://workbench.invalid\nchannels:\n  lark: {enabled: true, credential: '${JSON.stringify({ webhook: syntheticWebhook })}'}\n  lark_app: {enabled: true, credential_file: private}\n`,
+  );
+  writeFileSync(join(dir, "private"), "SYNTHETIC_PRIVATE", { mode: 0o644 });
+  const c = loadExtMessageConfig(path);
+  expect(c).toMatchObject({
+    status: "loaded",
+    config: {
+      channels: { lark: { enabled: true }, lark_app: { enabled: true } },
+    },
+  });
+  expect(JSON.stringify(c)).not.toContain("SYNTHETIC_PRIVATE");
+});

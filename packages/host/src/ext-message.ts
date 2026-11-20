@@ -4,8 +4,10 @@ import {
   buildExtMessageDigest,
   type CardId,
   type Clock,
+  type CommandState,
   type ExtMessage,
   type ExtMessagePort,
+  extInteraction,
   extMessageItems,
   type ProjectId,
 } from "@cardigan/domain";
@@ -28,6 +30,8 @@ import {
 } from "./ext-message-config.js";
 
 import { createFeishuAdapter } from "./ext-message-feishu.js";
+
+import { type FeishuApp, startFeishu } from "./feishu-app.js";
 
 export type ExtMessageAdapters = Readonly<
   Record<string, (credential: string | undefined) => ExtMessagePort>
@@ -67,6 +71,7 @@ export async function sendExtMessage(
 export interface ExtMessageOptions {
   readonly store: Store;
   readonly configuration: ExtMessageConfiguration;
+  readonly gate?: (project: ProjectId) => CommandState["project_settings"];
   readonly adapters?: ExtMessageAdapters;
   readonly clock?: Clock;
 }
@@ -75,12 +80,14 @@ export class ExtMessageSender {
   private stopped = false;
   private readonly projectedVersions = new Map<ProjectId, string>();
   private readonly clock: Clock;
+  private app?: FeishuApp | undefined;
   constructor(private readonly options: ExtMessageOptions) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
   }
   /** Persist safe startup metadata for human status; no secrets or URL are written. */
   recordStatus(): void {
     const c = this.options.configuration;
+    this.app = startFeishu(this.options.store, c, this.options.gate);
     this.options.store.uow.run(() =>
       this.options.store.database
         .prepare(
@@ -117,20 +124,27 @@ export class ExtMessageSender {
   }
   async stop(): Promise<void> {
     this.stopped = true;
+    await this.app?.stop();
     await this.running;
   }
   private async run(): Promise<void> {
     const { configuration: c, store } = this.options;
     if (this.stopped || c.status !== "loaded" || !c.config.enabled) return;
     const config = c.config;
-    const channels = Object.keys(config.channels).filter(
-      (name) => config.channels[name]?.enabled,
-    );
+    const generation = this.app?.binding?.generation;
+    await this.app?.receipts();
+    const channels = Object.keys(config.channels)
+      .filter(
+        (name) =>
+          config.channels[name]?.enabled && (name !== "lark_app" || generation),
+      )
+      .map((name) => (name === "lark_app" ? `lark_app:${generation}` : name));
     if (!channels.length) return;
     for (const project of store.listProjects()) {
       if (this.stopped) return;
       const projectedVersion = store.uow.run((tx) => {
-        const version = store.snapshotVersion(project.id);
+        const snapshot = store.snapshotVersion(project.id);
+        const version = snapshot && `${snapshot}/${generation ?? ""}`;
         if (
           version !== undefined &&
           this.projectedVersions.get(project.id) === version
@@ -196,10 +210,17 @@ export class ExtMessageSender {
     const { store } = this.options;
     const claimed = store.uow.run((tx) => {
       const now = this.clock.now();
-      const items = extMessageItems(
-        loadCommandState(tx, candidate.project_id as ProjectId),
+      const state = loadCommandState(
+        tx,
         candidate.project_id as ProjectId,
+        this.options.gate?.(candidate.project_id as ProjectId),
       );
+      const items = extMessageItems(state, candidate.project_id as ProjectId);
+      if (
+        candidate.channel.startsWith("lark_app:") &&
+        candidate.channel !== `lark_app:${this.app?.binding?.generation}`
+      )
+        return;
       const eligible = [];
       for (const pending of candidates) {
         let row = getExtMessage(store.database, pending);
@@ -263,12 +284,20 @@ export class ExtMessageSender {
       const first = reserved[0];
       if (!first) return;
       return {
+        appPort: candidate.channel.startsWith("lark_app:")
+          ? this.app?.prepare(state, first.item, digest)
+          : undefined,
         rows: reserved.map((entry) => entry.row),
         message:
           digest !== null
             ? buildExtMessageDigest(
                 candidate.project_id as ProjectId,
-                reserved.map((entry) => entry.item),
+                reserved.map(({ item }) =>
+                  candidate.channel.startsWith("lark_app:") &&
+                  extInteraction(state, item).sensitive
+                    ? { ...item, sensitive: true }
+                    : item,
+                ),
                 config.workbench_url,
                 config.policy,
               )
@@ -285,9 +314,12 @@ export class ExtMessageSender {
     ];
     let result: ExtSendResult = "adapter_unavailable";
     try {
-      if (factory)
+      const port =
+        claimed.appPort ??
+        factory?.(config.channels[candidate.channel]?.credential);
+      if (port)
         result = await sendExtMessage(
-          factory(config.channels[candidate.channel]?.credential),
+          port,
           claimed.message,
           config.policy.timeout_ms,
         );
@@ -349,7 +381,7 @@ export class ExtMessageSender {
       actor: { kind: "system", project_id: project },
       created_at: now,
       payload: {
-        channel: row.channel,
+        channel: row.channel.split(":")[0]!,
         item_id: row.item_id,
         item_kind: row.item_kind,
         attempts: row.attempts,

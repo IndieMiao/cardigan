@@ -1459,7 +1459,14 @@ export interface RoleCopyInput {
       };
 }
 
+export interface FeishuBindingView {
+  state: string;
+  bound: boolean;
+  code?: string;
+  expires?: number;
+}
 export interface CardiganClient {
+  feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** In-memory only, scoped to the currently validated login. */
   cachedCards?(
     projectId: string,
@@ -1820,6 +1827,12 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  feishuBinding(action?: "code" | "unbind") {
+    return this.request<FeishuBindingView>(
+      "/api/me/feishu",
+      action ? { method: "POST", body: JSON.stringify({ action }) } : {},
+    );
   }
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");

@@ -1,4 +1,6 @@
 import { expect, test } from "vitest";
+import { recordDecision } from "./commands/coordination.js";
+import { mergeFixture } from "./commands/merge/test-fixtures.js";
 import { markNoticesRead, notices } from "./commands/notices.js";
 import {
   apply,
@@ -9,6 +11,7 @@ import {
   value,
 } from "./commands/test-fixtures.js";
 import type { Decision, Event, HumanAction } from "./entities.js";
+import { extInteraction } from "./ext-interaction.js";
 import {
   buildExtMessage,
   buildExtMessageDigest,
@@ -295,4 +298,97 @@ test("digest filters current state and project, truncates titles and items, and 
     },
   );
   expect(configured).toMatchObject({ total: 23, items: [digest.items[0]] });
+});
+
+test("interactive eligibility is lost when a linked item is restricted, held by someone else, or unresolvable", () => {
+  const base = fixture();
+  const q: Decision = {
+    ...decision,
+    options: [{ key: "a", description: "A", impact: "none" }],
+  };
+  const input = { ...item, project_id: base.project_id, card_id: q.card_id! };
+  const s = { ...base, decisions: [q] };
+  const before = extInteraction(s, input);
+  expect(before.options.map((o) => o.key)).toEqual(["a"]);
+  expect(
+    extInteraction({ ...s, decisions: [{ ...q, question: "Other" }] }, input)
+      .basis,
+  ).not.toBe(before.basis);
+  for (const category of ["publish", "data_deletion", "scope_change"] as const)
+    expect(
+      extInteraction({ ...s, decisions: [{ ...q, category }] }, input).options,
+    ).toEqual([]);
+  expect(extInteraction({ ...s, cards: [] }, input)).toMatchObject({
+    sensitive: true,
+    options: [],
+  });
+  expect(
+    extInteraction(
+      { ...s, cards: s.cards.map((c) => ({ ...c, sensitive: true })) },
+      input,
+    ).options,
+  ).toEqual([]);
+  expect(
+    extInteraction({ ...s, decisions: [{ ...q, decider: "role:pm" }] }, input)
+      .options,
+  ).toEqual([]);
+});
+test("real merge confirmation only offers merge/hold against the current completion; inherited publish never gets a button", async () => {
+  const f = mergeFixture();
+  await f.accept();
+  const q = f.state.decisions.find((d) => d.trigger === "merge_confirmation")!;
+  const s = { ...f.state, decisions: [{ ...q, decider: "human" as const }] };
+  const input = {
+    ...item,
+    project_id: s.project_id,
+    card_id: f.card.id,
+    kind: "merge_confirmation" as const,
+    item_id: q.id,
+  };
+  const ops = extInteraction(s, input);
+  expect(ops.options.map((o) => o.key)).toEqual(["merge", "hold"]);
+  for (const option of ["merge", "hold"]) {
+    const result = recordDecision(
+      s,
+      human,
+      { decision_id: q.id, option, raw_quote: "同意", rationale: "已查看" },
+      f.io,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.value.data.status).toBe(
+        option === "merge" ? "resolved" : "snoozed",
+      );
+  }
+  expect(
+    extInteraction(
+      { ...s, project_settings: { merge_gate_enabled: true } },
+      input,
+    ).options.map((o) => o.key),
+  ).not.toContain("merge");
+  const source: Decision = {
+    ...decision,
+    id: id("decision", 999),
+    category: "publish",
+  };
+  const risky = {
+    ...s,
+    cards: s.cards.map((c) => ({
+      ...c,
+      source: { kind: "decision" as const, decision_id: source.id },
+    })),
+    decisions: [...s.decisions, source],
+  };
+  expect(extInteraction(risky, input).options).toEqual([]);
+  expect(
+    extInteraction(
+      {
+        ...s,
+        human_actions: [
+          { ...action, category: "data_deletion", card_id: f.card.id },
+        ],
+      },
+      input,
+    ).options,
+  ).toEqual([]);
 });
