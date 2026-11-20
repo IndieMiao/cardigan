@@ -34,10 +34,17 @@ interface Options {
   ) => HarnessActivity | undefined;
   inspectHarnessActivity?: (
     project: ProjectId,
+    target?: Assignment["id"],
+    localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   inspectionTimeoutMs?: number;
   onError?: (error: unknown) => void;
 }
+const missingWorkerSource = (state: CommandState, run: Run) =>
+  eventsOfType(state.events, "run_remote_activity_missing").some(
+    (e) => (e.payload as { run_id?: string }).run_id === run.id,
+  );
+
 type Target = { assignment: Assignment; run: Run };
 type Check = "completed" | "read_failed" | "timeout" | "unavailable";
 
@@ -61,7 +68,7 @@ function alertState(state: CommandState, run: Run) {
 /** Bounded diagnostic recheck before a Run's existing, durable one-shot alert. */
 export class InactivityAlerts {
   private readonly polls = new Map<
-    ProjectId,
+    string,
     { targets: Map<Run["id"], Target>; cancel: () => void }
   >();
   private closed = false;
@@ -86,7 +93,10 @@ export class InactivityAlerts {
     this.polls.clear();
   }
   pending(project: ProjectId, run: Run["id"]) {
-    return this.polls.get(project)?.targets.has(run) ?? false;
+    return (
+      this.polls.has(`${project}/${run}`) ||
+      (this.polls.get(project)?.targets.has(run) ?? false)
+    );
   }
   private due(
     state: CommandState,
@@ -159,7 +169,17 @@ export class InactivityAlerts {
       if (!assignment || !this.due(state, assignment, run, at, sample))
         continue;
       const prior = alertState(state, run);
-      if (
+      if (assignment.machine_id !== "local") {
+        // The patrol will supply a new sample if a source becomes reachable.
+        const missing = missingWorkerSource(state, run);
+        if (
+          (missing && this.options.harnessActivity && !sample) ||
+          (prior !== "new" &&
+            (missing ||
+              associatedHarnessActivity(state, assignment, at, sample)))
+        )
+          continue;
+      } else if (
         prior === "forwarded" ||
         (prior === "alerted" &&
           (run.harness !== "claude-code" ||
@@ -180,10 +200,31 @@ export class InactivityAlerts {
           },
           "unavailable",
         );
+      } else if (assignment.machine_id !== "local") {
+        // Each SSH read has its own deadline. A slow worker must not time out
+        // a healthy peer or the existing local project-wide recheck.
+        this.inspect(
+          project,
+          new Map([[run.id, { assignment, run }]]),
+          `${project}/${run.id}`,
+          assignment.id,
+        );
       } else targets.set(run.id, { assignment, run });
     }
     if (!targets.size) return;
-    const pending = this.polls.get(project);
+    const mixed = state.assignments.some(
+      (a) => a.status === "active" && !a.external && a.machine_id !== "local",
+    );
+    this.inspect(project, targets, project, undefined, mixed);
+  }
+  private inspect(
+    project: ProjectId,
+    targets: Map<Run["id"], Target>,
+    key: string,
+    target?: Assignment["id"],
+    localOnly = false,
+  ) {
+    const pending = this.polls.get(key);
     if (pending) {
       // Join the existing deadline without replacing captured session generations.
       for (const [id, target] of targets)
@@ -201,7 +242,7 @@ export class InactivityAlerts {
       if (cancelled || this.closed) return;
       cancelled = true;
       clearTimeout(timer);
-      this.polls.delete(project);
+      this.polls.delete(key);
       this.publish(project, targets.values(), samples, check);
     };
     timer = setTimeout(() => {
@@ -212,7 +253,7 @@ export class InactivityAlerts {
       }
     }, this.timeoutMs);
     timer.unref();
-    this.polls.set(project, {
+    this.polls.set(key, {
       targets,
       cancel: () => {
         cancelled = true;
@@ -224,7 +265,7 @@ export class InactivityAlerts {
       .then(() =>
         this.closed
           ? undefined
-          : this.options.inspectHarnessActivity?.(project),
+          : this.options.inspectHarnessActivity?.(project, target, localOnly),
       )
       .then(
         (samples) => finish(samples, "completed"),
@@ -282,27 +323,49 @@ export class InactivityAlerts {
     inspection: HarnessActivityInspection,
     check: Check,
   ) {
-    const claude = run.harness === "claude-code";
+    const remote = a.machine_id !== "local";
+    const needsEvidence = remote || run.harness === "claude-code";
     const unknown = !["fresh", "stale"].includes(inspection.status);
     const sample =
-      inspection.status === "read_failed" || (claude && unknown)
+      inspection.status === "read_failed" || (needsEvidence && unknown)
         ? undefined
         : inspection.activity;
     if (!this.due(state, a, run, at, sample)) return;
     const activity = currentHarnessActivity(state, a, at, sample);
-    const associated = claude
+    const associated = needsEvidence
       ? associatedHarnessActivity(state, a, at, sample)
       : activity;
     let status = inspection.status;
     if (activity) status = "fresh";
-    else if (claude && !unknown) status = associated ? "stale" : "unassociated";
+    else if (needsEvidence && !unknown)
+      status = associated ? "stale" : "unassociated";
     else if (sample && status === "fresh") {
       const age = Date.parse(at) - Date.parse(sample.updated_at);
       status =
         age < 0 || age > sample.stale_after_ms ? "stale" : "unassociated";
     }
     const prior = alertState(state, run);
-    const forward = claude && status !== "stale" && status !== "fresh";
+    if (
+      remote &&
+      (!associated || associated.source !== `${run.harness}:session_metadata`)
+    ) {
+      if (!missingWorkerSource(state, run))
+        dispatchAlert(tx, this.options.store, state, at, {
+          assignment: a,
+          run_id: run.id,
+          card_id: state.work_items.find((w) => w.id === a.work_item_id)
+            ?.card_id,
+          type: "run_remote_activity_missing",
+          reason: "远程活动来源缺失",
+          activity_source: "远程活动来源缺失",
+          activity_status: status,
+          activity_check: check,
+          audience: "activity_log",
+        });
+      return;
+    }
+    const forward =
+      !remote && needsEvidence && status !== "stale" && status !== "fresh";
     if (prior === "forwarded" || (prior === "alerted" && !forward)) return;
     dispatchAlert(tx, this.options.store, state, at, {
       assignment: a,

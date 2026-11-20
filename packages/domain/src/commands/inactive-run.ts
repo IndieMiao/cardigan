@@ -49,7 +49,7 @@ export function lastRunActivity(
     ),
   );
 }
-/** No stop deadline exists for Claude without a sample from this Run/session. */
+/** Claude and remote workers require attributable progress, not just MCP silence. */
 export function lastInactiveStopActivity(
   state: CommandState,
   run: Run,
@@ -57,7 +57,7 @@ export function lastInactiveStopActivity(
   now: string,
   sample?: HarnessActivity,
 ): number | undefined {
-  if (run.harness === "claude-code") {
+  if (run.harness === "claude-code" || assignment.machine_id !== "local") {
     const associated = associatedHarnessActivity(
       state,
       assignment,
@@ -65,7 +65,7 @@ export function lastInactiveStopActivity(
       sample,
     );
     if (
-      associated?.source !== "claude-code:session_metadata" ||
+      associated?.source !== `${run.harness}:session_metadata` ||
       associated.run_id !== run.id
     )
       return;

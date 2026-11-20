@@ -39,7 +39,70 @@ function object(value) {
 function text(value, max) {
   return typeof value === 'string' && value.length <= max ? value : null;
 }
+function summarize(lines, path, attributable, activityOnly) {
+  let activity, progress;
+  if (attributable) {
+    for (const line of lines.slice(-256)) {
+      let event;
+      try { event = object(JSON.parse(line)); } catch { continue; }
+      if (!event || event.isSidechain === true) continue;
+      const apiError = event.isApiErrorMessage === true ||
+        (event.type === 'system' && event.subtype === 'api_error');
+      if (!apiError && !['assistant', 'user'].includes(event.type)) continue;
+      if (!apiError && object(event.message)?.model === '<synthetic>') continue;
+      const timestamp = text(event.timestamp, 64);
+      if (!timestamp || !Number.isFinite(Date.parse(timestamp)) ||
+        (activity && Date.parse(timestamp) < Date.parse(activity.updated_at))) {
+        activity = undefined;
+        break;
+      }
+      const status = object(event.error)?.status;
+      const error = status === 429 ? 'rate_limit' :
+        Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
+      activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
+        updated_at: timestamp, ...(event.type === 'assistant' && object(event.message)?.stop_reason === 'end_turn' && !apiError ? { turn_ended: true } : {}), ...(apiError ? { error } : {}) };
+      if (!apiError) progress = activity;
+      else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
+    }
+  }
+  if (activityOnly) return activity ? { path, activity } : undefined;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let event;
+    try { event = object(JSON.parse(lines[i])); } catch { continue; }
+    if (event?.type !== 'assistant' || event.isSidechain === true) continue;
+    const message = object(event.message), usage = object(message?.usage);
+    if (!usage || message.model === '<synthetic>') continue;
+    const counts = {};
+    for (const key of ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens']) {
+      const value = usage[key];
+      if (value === undefined && key.startsWith('cache_')) continue;
+      // Invalid latest usage suppresses earlier usage, as in the host parser.
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return activity ? { path, activity } : undefined;
+      counts[key] = value;
+    }
+    return {
+      path, ...(activity ? { activity } : {}), type: 'assistant', sessionId: text(event.sessionId, 128),
+      cwd: text(event.cwd, 4096), timestamp: text(event.timestamp, 64),
+      message: { model: text(message.model, 256), usage: counts },
+    };
+  }
+  return activity ? { path, activity } : undefined;
+}
+function readTail(fd, path, attributable, activityOnly = false) {
+  const { fstatSync, readSync } = require('node:fs');
+  const stat = fstatSync(fd);
+  if (!stat.isFile()) return;
+  const start = Math.max(0, stat.size - 4 * 1024 * 1024);
+  const buffer = Buffer.alloc(stat.size - start);
+  const size = readSync(fd, buffer, 0, buffer.length, start);
+  const lines = buffer.subarray(0, size).toString('utf8').split('\n');
+  if (start) lines.shift();
+  return summarize(lines, path, attributable, activityOnly);
+}
 async function read() {
+  // The worker opener passed a no-follow regular file as stdin. This is
+  // activity evidence only: do not trigger context notices or restarts.
+  if (process.argv[3] === 'worker-fd') return readTail(0, root, true, true);
   const projects = join(root, 'claude', 'projects');
   const candidates = [];
   for (const slug of await entries(projects)) {
@@ -70,62 +133,10 @@ async function read() {
   try {
     file = await open('/proc/self/fd/' + dir.fd + '/' + basename(chosen.path),
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const stat = await file.stat();
-    if (!stat.isFile()) return;
-    const start = Math.max(0, stat.size - 4 * 1024 * 1024);
-    const buffer = Buffer.alloc(Math.min(stat.size, 4 * 1024 * 1024));
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
-    const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
-    if (start) lines.shift();
-    let activity, progress;
     // With no trusted session ID, a late write to an older file cannot revive it.
     const byCreation = candidates.slice().sort((a, b) => b.born - a.born);
     const latest = byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born ? byCreation[0] : undefined;
-    if ((!wanted && chosen.path === latest?.path) || chosen.name === wanted) {
-      for (const line of lines.slice(-256)) {
-        let event;
-        try { event = object(JSON.parse(line)); } catch { continue; }
-        if (!event || event.isSidechain === true) continue;
-        const apiError = event.isApiErrorMessage === true ||
-          (event.type === 'system' && event.subtype === 'api_error');
-        if (!apiError && !['assistant', 'user'].includes(event.type)) continue;
-        if (!apiError && object(event.message)?.model === '<synthetic>') continue;
-        const timestamp = text(event.timestamp, 64);
-        if (!timestamp || !Number.isFinite(Date.parse(timestamp)) ||
-          (activity && Date.parse(timestamp) < Date.parse(activity.updated_at))) {
-          activity = undefined;
-          break;
-        }
-        const status = object(event.error)?.status;
-        const error = status === 429 ? 'rate_limit' :
-          Number.isInteger(status) && status >= 500 && status <= 599 ? 'server_error' : 'unclassified';
-        activity = { session_id: text(event.sessionId, 128), cwd: text(event.cwd, 4096),
-          updated_at: timestamp, ...(event.type === 'assistant' && object(event.message)?.stop_reason === 'end_turn' && !apiError ? { turn_ended: true } : {}), ...(apiError ? { error } : {}) };
-        if (!apiError) progress = activity;
-        else if (progress && progress.session_id === activity.session_id) activity.progress = progress;
-      }
-    }
-    for (let i = lines.length - 1; i >= 0; i--) {
-      let event;
-      try { event = object(JSON.parse(lines[i])); } catch { continue; }
-      if (event?.type !== 'assistant' || event.isSidechain === true) continue;
-      const message = object(event.message), usage = object(message?.usage);
-      if (!usage || message.model === '<synthetic>') continue;
-      const counts = {};
-      for (const key of ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens']) {
-        const value = usage[key];
-        if (value === undefined && key.startsWith('cache_')) continue;
-        // Invalid latest usage suppresses earlier usage, as in the host parser.
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return activity ? { path: chosen.path, activity } : undefined;
-        counts[key] = value;
-      }
-      return {
-        path: chosen.path, ...(activity ? { activity } : {}), type: 'assistant', sessionId: text(event.sessionId, 128),
-        cwd: text(event.cwd, 4096), timestamp: text(event.timestamp, 64),
-        message: { model: text(message.model, 256), usage: counts },
-      };
-    }
-    return activity ? { path: chosen.path, activity } : undefined;
+    return readTail(file.fd, chosen.path, (!wanted && chosen.path === latest?.path) || chosen.name === wanted);
   } finally { await file?.close(); await dir.close(); }
 }
 read().catch(() => { readFailed = true; }).then(sample => {

@@ -72,6 +72,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   bell_delivery_attempt_failed: "门铃投递失败（自动重试中）",
   bell_retry_exhausted: "门铃重发已用尽",
   run_inbox_stalled: "Run 长时间未处理通知",
+  run_remote_activity_missing: "远程活动来源缺失",
   run_inactive: "Run 长时间无活动",
   reconcile_finding: "发现了对账差异",
   worktree_cleaned: "清理了工作树",

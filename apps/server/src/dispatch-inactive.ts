@@ -107,9 +107,10 @@ export class InactiveRunReaper {
               row ?? { status: "missing" },
             );
         };
-        const claude = run.harness === "claude-code";
-        if (claude) await refresh();
-        const sample = () => (claude ? inspected : cached());
+        const needsInspection =
+          run.harness === "claude-code" || a.machine_id !== "local";
+        if (needsInspection) await refresh();
+        const sample = () => (needsInspection ? inspected : cached());
         const actor = { kind: "system" as const, project_id: project };
         await runStopWorkflow(this.options, project, {
           claim: (s, p) =>
@@ -119,7 +120,7 @@ export class InactiveRunReaper {
               { run_id: run.id, after_ms: afterMs, harness_activity: sample() },
               p,
             ),
-          ...(claude ? { beforeStart: refresh } : {}),
+          ...(needsInspection ? { beforeStart: refresh } : {}),
           fence: (r) => r.inactivity_stop,
           start: (s, p, r, stop) =>
             startInactiveRunStop(

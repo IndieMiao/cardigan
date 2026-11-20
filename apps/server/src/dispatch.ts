@@ -167,6 +167,7 @@ export interface DispatcherOptions {
   readonly inspectHarnessActivity?: (
     project: ProjectId,
     stopTarget?: Assignment["id"],
+    localOnly?: boolean,
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsTick?: () => Promise<void>;

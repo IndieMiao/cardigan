@@ -41,7 +41,11 @@ export class DiagnosticsReader {
   constructor(
     private readonly options: DiagnosticsOptions,
     private readonly runtime: Runtime &
-      Partial<RuntimeInteractionReader> & { diagnostics?: () => unknown },
+      Partial<RuntimeInteractionReader> &
+      Pick<
+        ConstructorParameters<typeof HostOpsService>[0]["runtime"],
+        "executionForRef"
+      > & { diagnostics?: () => unknown },
     private readonly clock?: Clock,
   ) {}
 
@@ -82,13 +86,19 @@ export class DiagnosticsReader {
     worker.on("error", failed);
     worker.on("exit", failed);
     worker.on("message", (message) => {
-      if (message.kind === "status" || message.kind === "interaction") {
+      if (
+        message.kind === "status" ||
+        message.kind === "interaction" ||
+        message.kind === "activityExecution"
+      ) {
         if (this.closed || this.worker !== worker) return;
         void Promise.resolve()
           .then<unknown>(() =>
-            message.kind === "interaction"
-              ? this.runtime.interaction?.(message.ref, message.identity)
-              : this.runtime.status(message.ref),
+            message.kind === "activityExecution"
+              ? this.runtime.executionForRef?.(message.ref, message.project)
+              : message.kind === "interaction"
+                ? this.runtime.interaction?.(message.ref, message.identity)
+                : this.runtime.status(message.ref),
           )
           .then(
             (result) =>
