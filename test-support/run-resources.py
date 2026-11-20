@@ -1,5 +1,8 @@
 """Only processes created by this fixture and its private temp root are used."""
 import fcntl
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import pathlib
 import runpy
@@ -12,10 +15,25 @@ from types import SimpleNamespace
 
 source = pathlib.Path(__file__).resolve().parents[1] / 'deploy' / 'run-resources.py'
 m = runpy.run_path(str(source))
-# The fixture cannot attest to the shared CI host's file table. Inject a
-# dedicated reference probe; below, separately test the real lsof call against
-# a file actually opened by a synthetic process.
 TAG = '1' * 64
+# Never send inherited credentials to the fixture HTTP listener.
+os.environ['MCP_TOKEN'] = 'synthetic'
+states = {}
+class Authority(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.headers.get('Authorization') != 'Bearer synthetic':
+            self.send_error(403); return
+        key = self.path.split('=', 1)[-1]
+        row = dict(key=key, project='fixture', machine='isolated', state=states.get(key, 'active'))
+        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(row).encode())
+
+http = ThreadingHTTPServer(('127.0.0.1', 0), Authority)
+threading.Thread(target=http.serve_forever, daemon=True).start()
+stub = f"""import runpy,sys,os
+m=runpy.run_path(sys.argv[1]);m['host_state'].__globals__['AUTHORITY']=['http://127.0.0.1:{http.server_port}/mcp','fixture','isolated']
+c=m['Confirmation'](sys.argv[3],os.environ['MCP_TOKEN'],interval=0.05)
+sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5],confirmation=c))"""
 
 
 def until(pred):
@@ -29,11 +47,6 @@ def until(pred):
 def test_runs(base):
     session = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)'])
     other = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(30)'])
-    # The managed commands inherit the real exit watch for the synthetic CLI.
-    stub = '''import runpy,sys
-m=runpy.run_path(sys.argv[1]); m['reclaim'].__defaults__=(lambda path: False,)
-m['audit'].__globals__['audit']=lambda *_: None
-sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5]))'''
     jobs = []
     try:
         for key in ('A-1.R-1.R-1', 'A-1.R-1.R-2', 'A-2.R-3.R-3'):
@@ -64,23 +77,29 @@ if sys.platform == 'linux':
                                  sys.executable, '-I', '-c', starter], timeout=4)
         assert status.returncode == 7
         orphan_exit = m['session_watch'](int((parent/m['scope_name'](keys[0])/'tmp/orphan').read_text()))
-        rows = m['view'](root, 86400, time.time())
-        assert all(r['owned'] and not r['closed'] and not r['expired'] for r in rows)
-        row = next(row for row in rows if row['key'] == keys[0])
-        m['notify'](root, row, 86400, time.time())
-        assert jobs[0].wait(timeout=5) == 143
-        until(lambda: not (parent/m['scope_name'](keys[0])).exists())
-        assert orphan_exit(), 'background service survived Run end'
+        scratch = parent/m['scope_name'](keys[0])
+        (scratch/'end').touch()  # disk hints have no authority
+        states[keys[0]] = 'unknown'; time.sleep(0.4)
+        states[keys[0]] = 'expired_preview'; time.sleep(0.4)
+        assert jobs[0].poll() is None and not orphan_exit()
+        kept = scratch/'tmp'/'artifact'
+        with kept.open() as reference:
+            (scratch/'tmp').rename(scratch/'original')
+            (scratch/'tmp').mkdir(); (scratch/'tmp'/'keep').symlink_to(kept.parent.parent/'original'/'artifact')
+            states[keys[0]] = 'ended'
+            assert jobs[0].wait(timeout=5) == 143
+            assert reference.read() == 'fixture' and (scratch/'tmp'/'keep').read_text() == 'fixture'
+        until(orphan_exit)
         if sys.platform == 'linux':
             assert watch(), 'detached descendant not terminated'
         assert session.poll() is None and jobs[1].poll() is None and jobs[2].poll() is None
         session.terminate(); session.wait(timeout=2)
         assert jobs[1].wait(timeout=5) == 143  # same live CLI, second Run closed only now
-        until(lambda: not (parent/m['scope_name'](keys[1])).exists())
+        assert (parent/m['scope_name'](keys[1])/'tmp'/'ready').exists()
         assert other.poll() is None and jobs[2].poll() is None
         other.terminate(); other.wait(timeout=2)
         assert jobs[2].wait(timeout=5) == 143
-        until(lambda: not (parent/m['scope_name'](keys[2])).exists())
+        assert (parent/m['scope_name'](keys[2])/'tmp'/'ready').exists()
         os.close(root)
     finally:
         for p in [session, other]:
@@ -90,53 +109,9 @@ if sys.platform == 'linux':
             job.wait(timeout=6)
 
 
-def boundaries(base):
-    root, parent = m['namespace'](TAG, True, base)
-    key = 'A-9.R-9.R-9'
-    scope = m['directory'](root, m['scope_name'](key), True)
-    tmp = m['directory'](scope, 'tmp', True)
-    path = pathlib.Path(parent)/m['scope_name'](key)/'tmp'
-    t = os.fstat(scope).st_mtime
-    assert not m['view'](root, 86400, t+86400)[0]['expired']
-    row = m['view'](root, 86400, t+86400.1)[0]
-    assert row['expired'] and not row['owned']
-    try:
-        m['notify'](root, row, 86400, t+86401)
-        raise AssertionError('orphan without owner')
-    except ValueError:
-        pass
-    m['end'](scope)
-    artifact = path/'artifact'; artifact.write_text('preserved')
-    with artifact.open():
-        # references excludes the steward itself; a distinct fixture process
-        # pins the same file so the real positive probe must report busy.
-        child = subprocess.Popen([sys.executable, '-I', '-c', 'import sys,time;f=open(sys.argv[1]);print(1,flush=True);time.sleep(10)', str(artifact)], stdout=subprocess.PIPE)
-        try:
-            assert child.stdout.readline()
-            try:
-                assert m['references'](str(path))
-            except FileNotFoundError:
-                # No lsof: the steward skips, not equivalent to an empty result.
-                assert not pathlib.Path('/usr/sbin/lsof' if sys.platform == 'darwin' else '/usr/bin/lsof').exists()
-            assert m['reclaim'](root,key,scope,tmp,str(path),lambda _:True) == 'in_use'
-        finally:
-            child.terminate(); child.wait(timeout=2)
-    path.rename(path.with_name('old')); path.mkdir(); (path/'keep').touch()
-    try:
-        m['reclaim'](root,key,scope,tmp,str(path),lambda _:False)
-        raise AssertionError('replacement accepted')
-    except ValueError:
-        pass
-    assert (path/'keep').exists() and (path.with_name('old')/'artifact').exists()
-    os.close(tmp); os.close(scope); os.close(root)
-
-
 def foreground_contracts(base):
     # Only fixture children, its own advisory lock and private scratch.
     key = 'A-1696.R-8660.R-8759'
-    stub = """import runpy,sys
-m=runpy.run_path(sys.argv[1]);m['reclaim'].__defaults__=(lambda _:False,)
-sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.argv[5]))"""
     session = subprocess.Popen([sys.executable, '-I', '-c', 'import time;time.sleep(40)'])
     entry = [sys.executable, '-IB', '-c', stub, str(source), TAG, key, str(session.pid), base,
              sys.executable, '-I', '-c']
@@ -163,16 +138,26 @@ sys.exit(m['command'](sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[6:],sys.
         session.terminate(); session.wait(timeout=3)
         if child is not None:
             child.wait(timeout=3)
-    until(lambda: not scope.exists())
+    assert (scope/'tmp'/'service.sock').exists()
 
 
-def retry_observation():
-    probe = mock.Mock(side_effect=[subprocess.TimeoutExpired('observer', 1), 'removed'])
-    with mock.patch.dict(m['steward'].__globals__, os=SimpleNamespace(setsid=lambda:None,environ={}),
-                         disown_stdio=lambda:None, ended=lambda _:True, reclaim=probe,
-                         time=SimpleNamespace(sleep=lambda _:None), audit=lambda *_:None):
-        m['steward'](1,'A-1.R-1.R-1',2,3,'fixture',lambda:False)
-    assert probe.call_count == 2 and probe.call_args_list[0] == probe.call_args_list[1]
+def session_bypass(base):
+    # No run-command registration involved. Fake CLI starts its observer as
+    # the real wrapper does and immediately creates a direct setsid child.
+    if sys.platform != 'linux': return
+    ready = pathlib.Path(base)/'bypass'
+    session = subprocess.Popen([sys.executable, '-IB', '-c', """import os,pathlib,subprocess,sys,time
+subprocess.run([sys.executable,'-IB',sys.argv[1],'observe-session',str(os.getpid()),'A-7.R-9'],check=True,stdout=subprocess.DEVNULL)
+p=subprocess.Popen([sys.executable,'-I','-c','import time;time.sleep(20)'],start_new_session=True)
+pathlib.Path(sys.argv[2]).write_text(str(p.pid));time.sleep(20)""", str(source), str(ready)])
+    try:
+        until(lambda: ready.exists() and ready.read_text())
+        watch = m['session_watch'](int(ready.read_text()))
+        time.sleep(1.1)
+        assert not watch()
+    finally:
+        session.terminate(); session.wait(timeout=3)
+    until(watch)
 
 
 def darwin_watch():
@@ -197,8 +182,21 @@ def darwin_watch():
             pass
 
 
+with tempfile.TemporaryDirectory() as base:
+    assert m['preview'](TAG, 86400, 0, base)['expired'] == 0 and not os.listdir(base)
+    root, path = m['namespace'](TAG, True, base)
+    fd = m['directory'](root, '1.1.1', True)
+    t = os.fstat(fd).st_mtime
+    os.symlink('absent', '2.2.2', dir_fd=root)
+    assert m['preview'](TAG, 86400, t+86400, base) == dict(expired=0,unknown=1,partial=False)
+    assert m['preview'](TAG, 86400, t+86401, base) == dict(expired=1,unknown=1,partial=False)
+    assert sorted(os.listdir(root)) == ['1.1.1','2.2.2']
+    os.close(fd); os.close(root)
+# A failed observation must not translate to an exit. The same guard retries.
+reply = mock.Mock(side_effect=[TimeoutError(), 'expired_preview', 'ended'])
+check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=reply, interval=0)
+assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ended']
 darwin_watch()
-retry_observation()
 # Simulate positive and incomplete Darwin group snapshots; not a macOS host run.
 for n, member, expected in [(4,123,True),(4,456,False),(0,123,False),(8,123,False)]:
     def listing(kind, anchor, pids, size):
@@ -212,5 +210,6 @@ with tempfile.TemporaryDirectory(dir='/tmp', prefix='cr') as base:
 with tempfile.TemporaryDirectory() as base:
     test_runs(base)
 with tempfile.TemporaryDirectory() as base:
-    boundaries(base)
+    session_bypass(base)
+http.shutdown(); http.server_close()
 print('isolated run resources passed', sys.platform)

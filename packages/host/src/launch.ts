@@ -1029,7 +1029,12 @@ async function launch(
         : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
-      run_resources: resourceEntry(project, assignment.machine_id, execution),
+      run_resources: resourceEntry(
+        project,
+        assignment.machine_id,
+        execution,
+        mcpUrl,
+      ),
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),

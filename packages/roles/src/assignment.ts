@@ -441,7 +441,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(python3 -IB "$CARDIGAN_RUN_COMMAND" birth "$$") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
+${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

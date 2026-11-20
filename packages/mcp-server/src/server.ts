@@ -27,6 +27,7 @@ import {
 } from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
+import { runResourceState } from "./run-resource-state.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import {
   type CheckLogOptions,
@@ -241,6 +242,37 @@ export async function startMcpServer(
         ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
       );
 
+    if (req.method === "GET" && url.searchParams.has("run_resource")) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (
+        url.searchParams.size !== 1 ||
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined &&
+          req.headers.origin !== url.origin) ||
+        !identity.value.actor.allowed_tools.includes("whoami") ||
+        !tools.some((t) => t.name === "whoami")
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      const key = url.searchParams.get("run_resource") ?? "";
+      const state = runResourceState(
+        options.store,
+        identity.value,
+        key,
+        options.clock ? Date.parse(options.clock.now()) : Date.now(),
+      );
+      // No inbox advance, token rotation, wake or synthetic activity.
+      res.writeHead(200, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          key,
+          state,
+          project: identity.value.actor.project_id,
+          machine: identity.value.assignment.machine_id,
+        }),
+      );
+      return;
+    }
     if (req.method === "POST" && url.searchParams.has("artifact_upload")) {
       res.setHeader("Cache-Control", "private, no-store");
       if (

@@ -30,27 +30,24 @@ export function resourceEntry(
   project: string,
   machine: string,
   execution: ExecutionConfig,
+  endpoint: string,
 ) {
   return {
     target: resourceTarget(project, machine, execution),
-    source: source(),
+    source: source().replace(
+      "AUTHORITY = None",
+      () => `AUTHORITY = ${JSON.stringify([endpoint, project, machine])}`,
+    ),
   };
 }
-export interface ResourceRegistration {
-  key: string;
-  inode: [string, string];
-  expired: boolean;
-  closed: boolean;
-  owned: boolean;
-}
-/** The reconciler is always host-supplied code, never a script in agent-writable storage. */
-export async function resourceWorker(
+
+/** Metadata only. No mutation mode or commands, PIDs or paths in the request. */
+export async function previewRunResources(
   execution: ExecutionConfig,
   tag: string,
   age: number,
-  items?: ResourceRegistration[],
-): Promise<ResourceRegistration[]> {
-  const args = ["-I", "-B", "-c", source(), "reconcile"];
+): Promise<{ expired: number; unknown: number; partial: boolean }> {
+  const args = ["-I", "-B", "-c", source(), "preview"];
   const command =
     execution.mode === "agent-ssh"
       ? await agentProcessCommand(execution, [
@@ -77,22 +74,15 @@ export async function resourceWorker(
     child.stdin?.on("error", () =>
       reject(new Error("Run resource worker unavailable")),
     );
-    child.stdin?.end(JSON.stringify({ tag, age, items }));
+    child.stdin?.end(JSON.stringify({ tag, age }));
   });
-  const rows: ResourceRegistration[] = JSON.parse(data);
+  const rows = JSON.parse(data);
   if (
-    !Array.isArray(rows) ||
-    !rows.every(
-      (r) =>
-        /^A-[1-9]\d{0,15}\.R-[1-9]\d{0,15}\.R-[1-9]\d{0,15}$/u.test(r.key) &&
-        Array.isArray(r.inode) &&
-        r.inode.length === 2 &&
-        r.inode.every((v) => typeof v === "string" && /^\d+$/u.test(v)) &&
-        typeof r.expired === "boolean" &&
-        typeof r.closed === "boolean" &&
-        typeof r.owned === "boolean",
-    )
+    ![rows.expired, rows.unknown].every(
+      (v) => Number.isSafeInteger(v) && v >= 0 && v <= 1024,
+    ) ||
+    typeof rows.partial !== "boolean"
   )
-    throw new Error("Run resource response invalid");
+    throw new Error("Invalid resource preview");
   return rows;
 }

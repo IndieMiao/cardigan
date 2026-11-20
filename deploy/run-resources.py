@@ -1,9 +1,9 @@
-"""Run-scoped task entry and read/notify reconciliation. Never take PIDs from disk."""
+"""Confirm task lifecycle at its controller; never signal a PID from disk."""
 import base64
 import ctypes
 import hashlib
+import http.client
 import errno
-import fcntl
 import json
 import os
 import re
@@ -15,7 +15,9 @@ import sys
 import syslog
 from pathlib import Path
 import time
+from urllib.parse import urlsplit
 
+AUTHORITY = None  # pinned by the host when publishing this entry
 DIR = os.O_DIRECTORY | os.O_RDONLY | os.O_NOFOLLOW
 KEY = re.compile(r'(A-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,15})\.(R-[1-9][0-9]{0,15})')
 
@@ -27,17 +29,6 @@ def require(value):
 
 def audit(key, outcome):
     syslog.syslog(syslog.LOG_NOTICE, 'cardigan run_resource ' + key + ' ' + outcome)
-
-
-def owned(scope):
-    # An exclusive flock on this exact directory lives only in its creator.
-    # Files, PIDs or marker text written by a caller are not ownership proof.
-    try:
-        fcntl.flock(scope, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    fcntl.flock(scope, fcntl.LOCK_UN)
-    return False
 
 
 def directory(parent, name, create=False):
@@ -68,18 +59,6 @@ def namespace(tag, create, base='/tmp'):
         os.close(root)
 
 
-def same(parent, name, fd):
-    try:
-        return os.path.samestat(os.stat(name, dir_fd=parent, follow_symlinks=False), os.fstat(fd))
-    except FileNotFoundError:
-        return False
-
-
-def identity(fd):
-    st = os.fstat(fd)
-    return [str(st.st_dev), str(st.st_ino)]
-
-
 def scope_name(key):
     require(KEY.fullmatch(key))
     def compact(part):
@@ -90,18 +69,6 @@ def scope_name(key):
             digits = '0123456789abcdefghijklmnopqrstuvwxyz'[r] + digits
         return digits
     return '.'.join(compact(part) for part in key.split('.'))
-
-
-def ended(scope):
-    # A host notification, never a PID, path to remove, or executable command.
-    return 'end' in os.listdir(scope)
-
-
-def end(scope):
-    try:
-        os.close(os.open('end', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scope))
-    except FileExistsError:
-        pass
 
 
 class ProcBSDInfo(ctypes.Structure):
@@ -164,217 +131,6 @@ def session_watch(pid, expected=None):
     raise ValueError('unsupported_worker')
 
 
-def view(root, age, now):
-    result = []
-    for name in os.listdir(root):
-        if not re.fullmatch(r'[0-9a-z]{1,11}(?:\.[0-9a-z]{1,11}){2}', name):
-            continue
-        key = 'A-%d.R-%d.R-%d' % tuple(int(x, 36) for x in name.split('.'))
-        if not KEY.fullmatch(key) or scope_name(key) != name:
-            continue
-        try:
-            fd = directory(root, scope_name(key))
-            try:
-                result.append(dict(key=key, inode=identity(fd), expired=now-os.fstat(fd).st_mtime > age,
-                                   closed=ended(fd), owned=owned(fd)))
-            finally:
-                os.close(fd)
-        except (ValueError, OSError):
-            audit(key, 'skipped_unknown')
-    return result
-
-
-def notify(root, item, age, now):
-    key = item['key']
-    require(KEY.fullmatch(key))
-    fd = directory(root, scope_name(key))
-    try:
-        require(identity(fd) == item['inode'] and same(root, scope_name(key), fd) and owned(fd))
-        require(not item['expired'])  # no worker-side proof of exclusive service use
-        end(fd)
-        audit(key, 'notified')
-    finally:
-        os.close(fd)
-
-
-def mount(fd):
-    if sys.platform == 'linux':
-        with open('/proc/self/fdinfo/' + str(fd), encoding='ascii') as f:
-            return next(line for line in f if line.startswith('mnt_id:'))
-    # st_dev alone is insufficient on APFS (firmlinks). Never descend onto
-    # an unexpected volume. Private tmp children cannot create OS firmlinks.
-    return os.fstat(fd).st_dev, os.fstatvfs(fd).f_fsid
-
-
-def references(path, all_users=False):
-    """lsof +D includes cwd, mapped files and open files beneath this tree.
-    Treat warnings, truncation, tool absence and timeouts as unknown/busy.
-    Scoped to the executing account; no process names/paths leave the worker.
-    """
-    tool = '/usr/sbin/lsof' if sys.platform == 'darwin' else '/usr/bin/lsof'
-    # The steward pins directories itself. Exclude only that known process.
-    result = subprocess.run([tool, '-nP', '-a', '-p', '^' + str(os.getpid()), '+D', path, '-Fp'],
-                            cwd='/', env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
-                            stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-    if result.stdout:
-        return True
-    require(result.returncode == 1 and not result.stderr)
-    # A negative pathname query alone is insufficient: lsof can silently omit
-    # another process's inaccessible descriptors. Require a complete view of
-    # the project account that owns this 0700 namespace. Fail closed on policy
-    # restrictions; never ask for sudo/TCC changes. No raw output is logged.
-    if sys.platform == 'linux':
-        for proc in Path('/proc').iterdir():
-            if not proc.name.isdecimal() or int(proc.name) == os.getpid():
-                continue
-            try:
-                status = (proc/'status').read_bytes().splitlines()
-                uid = next(line for line in status if line.startswith(b'Uid:'))
-                if not all_users and os.getuid() not in map(int, uid.split()[1:]):
-                    continue
-                if next(line for line in status if line.startswith(b'State:')).split()[1] == b'Z':
-                    continue
-                for name in ('cwd', 'root', 'exe'):
-                    os.readlink(proc/name)
-                # listdir alone succeeds for some otherwise uninspectable PIDs.
-                for name in os.listdir(proc/'fd'):
-                    try:
-                        os.readlink(proc/'fd'/name)
-                    except FileNotFoundError:
-                        pass  # A concurrently closed FD is not a reference.
-                with (proc/'maps').open('rb') as maps:
-                    require(bool(maps.read(1)))
-            except FileNotFoundError:
-                # A disappearing process is harmless; an incomplete live view is not.
-                require(not proc.exists())
-    else:
-        # Verify each visible account process is represented by an inspectable
-        # cwd and descriptor set. '+'D alone cannot report TCC/NOFD omissions.
-        def query(args):
-            r = subprocess.run(args, cwd='/', stdin=subprocess.DEVNULL, capture_output=True,
-                               env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, timeout=15)
-            require(r.returncode == 0 and not r.stderr and len(r.stdout) <= 16*1024*1024)
-            return r.stdout
-        procs = query(['/bin/ps', '-axo', 'pid=,uid=,stat=,comm='])
-        expected = {p for line in procs.splitlines() for p,uid,state,cmd in [line.split(None, 3)]
-                    if (all_users or int(uid) == os.getuid()) and b'Z' not in state and cmd != b'/bin/ps'}
-        entries = query([tool, '-nP', *([] if all_users else ['-u', str(os.getuid())]), '-Fpft'])
-        visible = set()
-        for field in entries.splitlines():
-            if field.startswith(b'p'):
-                pid = field[1:]
-            if field == b'fcwd':
-                visible.add(pid)
-            require(field not in (b'fNOFD', b'tunknown'))
-        require(expected <= visible)
-    # Repeat the target-specific observation after checking visibility.
-    result = subprocess.run([tool, '-nP', '-a', '-p', '^' + str(os.getpid()), '+D', path, '-Fp'],
-                            cwd='/', env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'},
-                            stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-    if result.stdout:
-        return True
-    require(result.returncode == 1 and not result.stderr)
-    return False
-
-
-def walk_tree(fd, volume, current, expected=None):
-    """Pinned openat traversal. Links are unlinked as links, never followed."""
-    require(current() and mount(fd) == volume)
-    snapshot = {}
-    for name in os.listdir(fd):
-        require(current())
-        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        require(st.st_uid == os.getuid() and st.st_dev == os.fstat(fd).st_dev)
-        obj = (st.st_dev, st.st_ino, st.st_mode)
-        if expected is not None:
-            require(name in expected and expected[name][0] == obj)
-        children = None
-        if stat.S_ISDIR(st.st_mode):
-            child = os.open(name, DIR, dir_fd=fd)
-            try:
-                require(os.path.samestat(st, os.fstat(child)))
-                children = walk_tree(child, volume, lambda: current() and same(fd, name, child),
-                                     None if expected is None else expected[name][1])
-                if expected is not None:
-                    require(current() and same(fd, name, child))
-                    os.rmdir(name, dir_fd=fd)
-            finally:
-                os.close(child)
-        else:
-            require(stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or stat.S_ISSOCK(st.st_mode))
-            if expected is not None:
-                require(current())
-                os.unlink(name, dir_fd=fd)
-        snapshot[name] = (obj, children)
-    return snapshot
-
-
-def reclaim(root, key, scope, tmp, path, busy=references):
-    require(same(root, scope_name(key), scope) and same(scope, 'tmp', tmp) and ended(scope))
-    require(os.path.samestat(os.stat(path, follow_symlinks=False), os.fstat(tmp)))
-    try:
-        fcntl.flock(tmp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return 'in_use'
-    try:
-        def current():
-            return (os.path.samestat(os.stat(os.path.dirname(os.path.dirname(path)), follow_symlinks=False), os.fstat(root))
-                    and same(root, scope_name(key), scope) and same(scope, 'tmp', tmp))
-        volume = mount(scope)
-        snapshot = walk_tree(tmp, volume, current)
-        try:
-            in_use = busy(path)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            # A partial observation, unlike a known replacement, is retryable.
-            return 'observation_unavailable'
-        require(current())
-        if in_use:
-            return 'in_use'
-        walk_tree(tmp, volume, current, snapshot)
-        require(same(scope, 'tmp', tmp))
-        fcntl.flock(root, fcntl.LOCK_EX)
-        try:
-            require(current())
-            os.rmdir('tmp', dir_fd=scope)
-            os.unlink('end', dir_fd=scope)
-            os.rmdir(scope_name(key), dir_fd=root)
-        finally:
-            fcntl.flock(root, fcntl.LOCK_UN)
-        return 'removed'
-    finally:
-        fcntl.flock(tmp, fcntl.LOCK_UN)
-
-
-def steward(root, key, scope, tmp, path, exited):
-    # Do not retain caller's pipes, socket, credentials, worktree cwd or tty.
-    os.setsid()
-    disown_stdio()
-    os.environ.clear()
-    # Session-bound fallback if the host disappears. Only an actual kernel
-    # exit event closes the scope, never a failed observation or a reused PID.
-    while not ended(scope) and not exited():
-        time.sleep(1)
-    audit(key, 'run_end' if ended(scope) else 'session_exit_unregistered_not_targeted')
-    if not ended(scope):
-        end(scope)
-    backoff = 1
-    while True:
-        try:
-            result = reclaim(root, key, scope, tmp, path)
-            if result == 'removed' or backoff == 1:
-                audit(key, result)
-            if result == 'removed':
-                return
-        except ValueError:
-            audit(key, 'skipped_unknown')
-            return
-        except (OSError, subprocess.SubprocessError):
-            if backoff == 1:
-                audit(key, 'observation_failed_retry')
-        time.sleep(backoff)
-        backoff = min(3600, backoff * 2)
-
-
 def reap_adopted():
     while True:
         try:
@@ -419,7 +175,48 @@ def darwin_group_empty(anchor):
     return n == ctypes.sizeof(ctypes.c_int) and pids[0] == anchor
 
 
-def supervise(key, argv, scope, exited, env, cancellation):
+def host_state(key, token):
+    endpoint, project, machine = AUTHORITY
+    url = urlsplit(endpoint)
+    require(url.path == '/mcp' and not (url.query or url.fragment or url.username or url.password))
+    require(url.scheme == 'https' or (url.scheme == 'http' and url.hostname in ('localhost', '127.0.0.1', '::1')))
+    client = (http.client.HTTPSConnection if url.scheme == 'https' else http.client.HTTPConnection)(url.hostname, url.port, timeout=2)
+    try:
+        # No proxy discovery, redirects, URL or credential taken from a marker.
+        client.request('GET', '/mcp?run_resource=' + key, headers={'Authorization': 'Bearer ' + token})
+        res = client.getresponse()
+        require(res.status == 200)
+        data = res.read(2049)
+        require(len(data) <= 2048)
+        row = json.loads(data)
+        require((row['project'], row['machine'], row['key']) == (project, machine, key))
+        require(row['state'] in ('active', 'ended', 'expired_preview', 'unknown'))
+        return row['state']
+    finally:
+        client.close()
+
+
+class Confirmation:
+    def __init__(self, key, token, read=host_state, interval=15):
+        self.read = lambda: read(key, token)
+        self.key, self.interval, self.next = key, interval, 0
+        self.last = None
+
+    def state(self):
+        if time.monotonic() < self.next:
+            return self.last
+        self.next = time.monotonic() + self.interval
+        try:
+            state = self.read()
+        except (OSError, http.client.HTTPException, KeyError, TypeError, ValueError):
+            state = 'unknown'
+        if state != self.last and state in ('unknown', 'expired_preview'):
+            audit(self.key, state)
+        self.last = state
+        return state
+
+
+def supervise(key, argv, confirmation, exited, env, cancellation):
     linux = sys.platform == 'linux'
     if linux:
         require(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0)  # PR_SET_CHILD_SUBREAPER
@@ -432,6 +229,8 @@ def supervise(key, argv, scope, exited, env, cancellation):
             retain_fds({writer})
             os.setsid()
             task = subprocess.Popen(argv, env=env)
+            env.clear()
+            os.environ.clear()
             disown_stdio()
             code = task.wait()
             # Inspect our own still-live, private group before exiting; some
@@ -441,13 +240,14 @@ def supervise(key, argv, scope, exited, env, cancellation):
         finally:
             os._exit(0)
     os.close(writer)
+    env.clear()
     disown_stdio()
     os.environ.clear()
     # Do not reap the anchor on foreground completion: an ordinary command
     # may have forked a service that still belongs to this isolated group.
-    reaped = False
+    authorized = False
     try:
-        while not ended(scope) and not exited():
+        while not exited() and confirmation.state() != 'ended':
             if reader is None:
                 time.sleep(0.3)
                 continue
@@ -468,35 +268,36 @@ def supervise(key, argv, scope, exited, env, cancellation):
                     with open('/proc/self/task/%s/children' % os.getpid(), encoding='ascii') as f:
                         if f.read().split() == [str(anchor)]:
                             os.waitpid(anchor, 0)
-                            reaped = True
                             return 0
                 elif data[1:] == b"\x01":
                     os.waitpid(anchor, 0)
-                    reaped = True
                     return 0
+        authorized = True
         audit(key, 'closing_registered_tree')
         return 143
     finally:
-        # An already-reaped anchor means the optimized no-descendants path.
-        if reaped:
-            return 0
+        if authorized:
+            stop_anchor(key, anchor, linux)
+
+
+def stop_anchor(key, anchor, linux):
+    try:
+        # Even if closure races setsid, killing our unreaped direct child
+        # first prevents it from ever creating a service after settlement.
+        os.kill(anchor, signal.SIGKILL)
         try:
-            # Even if closure races setsid, killing our unreaped direct child
-            # first prevents it from ever creating a service after settlement.
-            os.kill(anchor, signal.SIGKILL)
-            try:
-                os.killpg(anchor, signal.SIGTERM)
-                time.sleep(0.25)
-                os.killpg(anchor, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(anchor, 0)
-            if linux:
-                reap_adopted()
-            else:
-                audit(key, 'unbound_descendants_not_targeted')
-        except ChildProcessError:
+            os.killpg(anchor, signal.SIGTERM)
+            time.sleep(0.25)
+            os.killpg(anchor, signal.SIGKILL)
+        except ProcessLookupError:
             pass
+        os.waitpid(anchor, 0)
+        if linux:
+            reap_adopted()
+        else:
+            audit(key, 'unbound_descendants_not_targeted')
+    except ChildProcessError:
+        pass
 
 
 status_pipe = None
@@ -513,91 +314,168 @@ def emit_status(code):
         status_pipe = None
 
 
-def command(tag, key, pid, argv, base='/tmp', expected=None):
+def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None):
     global status_pipe
     require(KEY.fullmatch(key) and argv)
+    expected = expected or birth(pid)
+    require(birth(pid) == expected)
+    confirmation = confirmation or Confirmation(key, os.environ['MCP_TOKEN'])
+    require(confirmation.state() == 'active')
     root, parent = namespace(tag, True, base)
-    fcntl.flock(root, fcntl.LOCK_EX)
     try:
+        scope = directory(root, scope_name(key), True)
         try:
-            os.mkdir(scope_name(key), 0o700, dir_fd=root)
-            new = True
-        except FileExistsError:
-            new = False
-        scope = directory(root, scope_name(key))
-        require(not ended(scope))
-        path = os.path.join(parent, scope_name(key), 'tmp')
-        if new:
-            fcntl.flock(scope, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.mkdir('tmp', 0o700, dir_fd=scope)
-        else:
-            require(owned(scope))
-        tmp = directory(scope, 'tmp')
-        # Acquire independent kernel watches before the command can execute.
-        expected = expected or birth(pid)
-        require(birth(pid) == expected)
-        if new and os.fork() == 0:
-            try:
-                retain_fds({root, scope, tmp})
-                # A fresh open-file description is required for independent flocks.
-                independent_root = os.open('.', DIR, dir_fd=root)
-                os.close(root)
-                root = independent_root
-                independent_tmp = os.open('.', DIR, dir_fd=tmp)
-                os.close(tmp)
-                tmp = independent_tmp
-                steward(root, key, scope, tmp, path, session_watch(pid, expected))
-            finally:
-                os._exit(0)
-        if new:
-            # Only the steward keeps the creating OFD (and hence its lock).
-            previous = scope
-            scope = os.open('.', DIR, dir_fd=scope)
-            os.close(previous)
-        fcntl.flock(tmp, fcntl.LOCK_SH)
+            os.close(directory(scope, 'tmp', True))
+        finally:
+            os.close(scope)
     finally:
-        fcntl.flock(root, fcntl.LOCK_UN)
+        os.close(root)
+    path = os.path.join(parent, scope_name(key), 'tmp')
+    # Q-1011: no recursive inspection, unlink, rename, or transfer of scratch.
+    audit(key, 'shared_directory_retained')
     reader, writer = os.pipe()
     cancel_read, cancel_write = os.pipe()
     if os.fork() == 0:
-        retain_fds({writer, tmp, scope, cancel_read})
+        retain_fds({writer, cancel_read})
         status_pipe = writer
         try:
             os.setsid()
-            code = supervise(key, argv, scope, session_watch(pid, expected), dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
+            code = supervise(key, argv, confirmation, session_watch(pid, expected),
+                             dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read)
             emit_status(code)
         finally:
             os._exit(0)
     os.close(cancel_read)
     os.close(writer)
-    os.close(tmp)
-    os.close(scope)
-    os.close(root)
-    data = os.read(reader, 1)
-    os.close(reader)
-    os.close(cancel_write)
-    return data[0] if data else 125
+    try:
+        data = os.read(reader, 1)
+        return data[0] if data else 125
+    finally:
+        os.close(reader)
+        os.close(cancel_write)
+
+
+def dead(fd):
+    poll = select.poll()
+    poll.register(fd, select.POLLIN)
+    return bool(poll.poll(0))
+
+
+def observe_descendants(key, pid, rootfd):
+    # Walk only kernel child lists rooted at the launch PID. Retain *handles*,
+    # not PIDs, across setsid/reparenting. Identity must still be live on both
+    # ends of each edge after reading ppid. Never target the observer itself.
+    pins = {}
+    incomplete = False
+    while not dead(rootfd):
+        for child, fd in list(pins.items()):
+            if dead(fd):
+                os.close(pins.pop(child))
+        queue = [(pid, rootfd), *pins.items()]
+        for parent, parentfd in queue:
+            if dead(parentfd):
+                continue
+            try:
+                for task in Path(f'/proc/{parent}/task').iterdir():
+                    for n in (task/'children').read_text().split():
+                        child = int(n)
+                        if child == os.getpid() or child in pins:
+                            continue
+                        if len(pins) >= 4096:
+                            raise ValueError('observation_limit')
+                        fd = os.pidfd_open(child)
+                        try:
+                            fields = Path(f'/proc/{child}/stat').read_text().rsplit(') ', 1)[1].split()
+                            if (int(fields[1]) == parent and not dead(parentfd) and not dead(fd)
+                                    and Path(f'/proc/{child}').stat().st_uid == os.getuid()):
+                                pins[child] = fd
+                                queue.append((child, fd))
+                                fd = None
+                        finally:
+                            if fd is not None:
+                                os.close(fd)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (OSError, ValueError):
+                if not incomplete:
+                    audit(key, 'unobservable_descendants_not_targeted')
+                    incomplete = True
+        time.sleep(0.4)
+    # Run monitors have their own session-exit watches. Give them a chance to
+    # reap their groups before the outer observer handles remaining bypasses.
+    time.sleep(1.5)
+    for fd in pins.values():
+        try:
+            if not dead(fd):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                audit(key, 'session_descendant_stopped')
+        except ProcessLookupError:
+            pass
+        except OSError:
+            audit(key, 'session_signal_failed')
+        finally:
+            os.close(fd)
+    audit(key, 'session_exit_unproven_not_targeted')
+
+
+def install_observer(pid, key):
+    require(pid > 1 and pid == os.getppid())  # the launcher can only enroll itself
+    require(re.fullmatch(r'A-[1-9][0-9]{0,15}\.R-[1-9][0-9]{0,15}', key))
+    stamp = birth(pid)
+    if sys.platform != 'linux':
+        audit(key, 'no_stable_bypass_signal_handle')
+        return stamp
+    fd = os.pidfd_open(pid)
+    require(birth(pid) == stamp)
+    if os.fork() == 0:
+        try:
+            os.setsid()
+            disown_stdio()
+            retain_fds({fd})
+            os.environ.clear()
+            observe_descendants(key, pid, fd)
+        except Exception:
+            audit(key, 'session_observer_failed')
+        finally:
+            os._exit(0)
+    os.close(fd)
+    return stamp
+
+
+def preview(tag, age, now, base='/tmp'):
+    require(isinstance(age, int) and age > 0)
+    summary = dict(expired=0, unknown=0, partial=False)
+    try:
+        root, _ = namespace(tag, False, base)
+    except FileNotFoundError:
+        return summary
+    try:
+        # Never open scratch or recurse. A partial preview is explicitly not
+        # a full inventory; names and directory contents stay on the worker.
+        with os.scandir(root) as entries:
+            for i, entry in enumerate(entries):
+                if i >= 1024:
+                    summary['partial'] = True
+                    break
+                try:
+                    require(re.fullmatch(r'[0-9a-z]{1,11}(?:\.[0-9a-z]{1,11}){2}', entry.name))
+                    info = entry.stat(follow_symlinks=False)
+                    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700)
+                    if now - info.st_mtime > age:
+                        summary['expired'] += 1
+                except (OSError, ValueError):
+                    summary['unknown'] += 1
+    finally:
+        os.close(root)
+    return summary
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == 'birth':
-        print(birth(int(sys.argv[2])))
-    elif len(sys.argv) == 2 and sys.argv[1] == 'reconcile':
+    if sys.argv[1:] == ['preview']:
         request = json.load(sys.stdin)
-        try:
-            root, _ = namespace(request['tag'], False)
-        except FileNotFoundError:
-            print('[]')
-            return
-        try:
-            if 'items' in request:
-                for item in request['items']:
-                    notify(root, item, request['age'], time.time())
-                print('[]')
-            else:
-                print(json.dumps(view(root, request['age'], time.time())))
-        finally:
-            os.close(root)
+        print(json.dumps(preview(request['tag'], request['age'], time.time())))
+    elif len(sys.argv) == 4 and sys.argv[1] == 'observe-session':
+        print(install_observer(int(sys.argv[2]), sys.argv[3]))
     else:
         require(len(sys.argv) > 3 and sys.argv[2] == '--')
         key = os.environ['CARDIGAN_RESOURCE_SESSION'] + '.' + sys.argv[1]

@@ -1,8 +1,8 @@
-import type { AssignmentId, ProjectId, RunId } from "@cardigan/domain";
+import type { ProjectId } from "@cardigan/domain";
 import {
+  previewRunResources,
   type RuntimeTargets,
   resourceTarget,
-  resourceWorker,
 } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
 
@@ -21,8 +21,7 @@ export async function reconcileRunResources(
   targets: Pick<RuntimeTargets, "resolve">,
   project: ProjectId,
   audit: (text: string) => void,
-  worker = resourceWorker,
-  now = Date.now,
+  worker = previewRunResources,
 ) {
   const age = resourceExpiry();
   for (const machine of store.uow.read((tx) => tx.machines.list(project))) {
@@ -30,67 +29,11 @@ export async function reconcileRunResources(
     try {
       const { execution } = targets.resolve(project, machine.id);
       const tag = resourceTarget(project, machine.id, execution);
-      const registrations = await worker(execution, tag, age);
-      const ended = store.uow.read((tx) =>
-        registrations.flatMap((item) => {
-          const [assignment, session, run] = item.key.split(".");
-          const owner = tx.assignments.get(project, assignment as AssignmentId);
-          const launch = tx.runs.get(project, session as RunId);
-          const task = tx.runs.get(project, run as RunId);
-          if (
-            !item.owned ||
-            !owner ||
-            owner.external ||
-            owner.machine_id !== machine.id ||
-            launch?.assignment_id !== assignment ||
-            task?.assignment_id !== assignment ||
-            (launch?.launch_publication &&
-              launch.launch_publication.target.fingerprint !==
-                execution.target?.fingerprint)
-          ) {
-            audit(`run_resource skipped_unknown ${machine.id} ${item.key}`);
-            return [];
-          }
-          if (item.closed) {
-            audit(`run_resource awaiting_reclaim ${machine.id} ${item.key}`);
-            return [];
-          }
-          if (
-            !task ||
-            !["completed", "failed", "cancelled"].includes(task.status)
-          )
-            return [];
-          const finished = Date.parse(task.finished_at ?? "");
-          if (!Number.isFinite(finished)) {
-            audit(`run_resource skipped_unknown ${machine.id} ${item.key}`);
-            return [];
-          }
-          // A 2-day foreground task that just ended is an ordinary close, not
-          // a legacy sweep. A missed old close needs *both* age proofs.
-          const fallback = now() - finished > age * 1000;
-          // Age is not evidence that another Run no longer uses a service.
-          // These workers have no exclusive-use witness for expired services.
-          if (fallback) {
-            audit(`run_resource expired_preview ${machine.id} ${item.key}`);
-            return [];
-          }
-          return [{ ...item, expired: fallback }];
-        }),
-      );
-      if (ended.length) {
-        if (
-          tag !==
-          resourceTarget(
-            project,
-            machine.id,
-            targets.resolve(project, machine.id).execution,
-          )
-        )
-          throw new Error();
-        await worker(execution, tag, age, ended);
-        for (const item of ended)
-          audit(`run_resource close_notified ${machine.id} ${item.key}`);
-      }
+      const { expired, unknown, partial } = await worker(execution, tag, age);
+      if (expired || unknown || partial)
+        audit(
+          `run_resource retained_preview ${machine.id} expired=${expired} unknown=${unknown} partial=${partial}`,
+        );
     } catch {
       audit(`run_resource observation_failed ${machine.id}`);
     }

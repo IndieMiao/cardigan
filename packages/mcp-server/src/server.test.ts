@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, ToolName, WorkItem } from "@cardigan/domain";
+import type { Assignment, Run, ToolName, WorkItem } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -241,6 +241,66 @@ describe("tools by allowed_tools", () => {
       error: { code: "forbidden_tool" },
     });
   });
+});
+
+describe("authenticated Run resource observations", () => {
+  const read = (key: string, token = fixture.token) =>
+    fetch(`${server.url}?run_resource=${key}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  test.each(["completed", "failed", "cancelled"] as const)(
+    "an exact %s state is read without acknowledging the next Run",
+    async (status) => {
+      const make = (id: string, state: Run["status"], finished?: Date) =>
+        fixture.store.uow.run((tx) =>
+          tx.runs.put(project_id, {
+            id: id as Run["id"],
+            assignment_id: fixture.assignment.id,
+            trigger_event_id: tx.ids.nextEventId(),
+            kind: "followup",
+            status: state,
+            role_version: 1,
+            model: "fixture",
+            agent_cli_version: "fixture",
+            outcome: null,
+            summary: "",
+            ...(finished ? { finished_at: finished.toISOString() } : {}),
+          }),
+        );
+      make("R-1", status, new Date());
+      make("R-2", "dispatched");
+      make("R-3", status, new Date(Date.now() - 86401_000));
+      const key = "A-1.R-1.R-1";
+      expect((await read(key, "invalid")).status).toBe(401);
+      expect(await (await read(key)).json()).toEqual({
+        key,
+        state: "ended",
+        project: project_id,
+        machine: fixture.assignment.machine_id,
+      });
+      expect(await (await read("A-1.R-1.R-2")).json()).toMatchObject({
+        state: "active",
+      });
+      expect(await (await read("A-1.R-1.R-3")).json()).toMatchObject({
+        state: "expired_preview",
+      });
+      for (const unknown of ["A-2.R-1.R-1", "A-1.R-99.R-1", "A-1.R-1.R-99"])
+        expect(await (await read(unknown)).json()).toMatchObject({
+          state: "unknown",
+        });
+      const denied = fixture.store.issueToken({
+        project_id,
+        assignment_id: fixture.assignment.id,
+        role: { role_version: 1, allowed_tools: ["get_updates"] },
+      });
+      expect((await read(key, denied.token)).status).toBe(403);
+      expect(
+        fixture.store.uow.read(
+          (tx) => tx.runs.get(project_id, "R-2" as Run["id"])?.status,
+        ),
+      ).toBe("dispatched");
+    },
+  );
 });
 
 describe("whoami", () => {

@@ -10,6 +10,7 @@ import pwd
 import re
 import signal
 import stat
+import subprocess
 import sys
 import time
 import uuid
@@ -438,9 +439,12 @@ def run_worker(namespace, header, policy):
         if 'CARDIGAN_RUN_COMMAND' in env:
             pid = os.getpid()
             try:
-                birth = (native.darwin_identity if sys.platform == 'darwin' else native.linux_identity)(pid)
-                stamp = ':'.join(map(str, birth[:3]))
-            except (OSError, ValueError):
+                # Unprivileged observer, same live CLI PID across exec. No launch
+                # credentials or publication FDs are passed into the helper.
+                stamp = subprocess.check_output([sys.executable, '-IB', env['CARDIGAN_RUN_COMMAND'],
+                    'observe-session', str(pid), env['CARDIGAN_RESOURCE_SESSION']], cwd='/',
+                    env={'PATH':'/usr/bin:/bin'}, timeout=5, text=True).strip()
+            except (OSError, ValueError, subprocess.SubprocessError):
                 stamp = 'unavailable'  # fail task registration, not the interactive session
             env.update(CARDIGAN_SESSION_PID=str(pid), CARDIGAN_SESSION_BIRTH=stamp)
         env['HOME'] = pwd.getpwuid(os.getuid()).pw_dir
