@@ -70,6 +70,7 @@ import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
+import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
 
 /**
@@ -764,6 +765,8 @@ export function cardDetail(
   if (card === undefined) {
     return undefined;
   }
+  const dependencySource = options.dependencyState ?? state,
+    graphSource = dependencySource.cards.find((c) => c.id === card_id);
   // Precheck display time comes from the last trusted event, not the paged timeline.
   const precheckTimes = new Map<string, { seq: number; at: string }>();
   for (const event of state.events) {
@@ -1037,6 +1040,14 @@ export function cardDetail(
       : {}),
     card: {
       ...card,
+      ...(card.dependency && graphSource
+        ? {
+            dependency: {
+              ...card.dependency,
+              graph: cardDependencyGraph(dependencySource, graphSource),
+            },
+          }
+        : {}),
       prechecks: card.prechecks?.map((check) => ({
         ...check,
         updated_at: precheckTimes.get(check.attempt_id)?.at,

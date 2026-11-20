@@ -4115,29 +4115,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-inline-start: 4px;
 }
 
-.card-dependency-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.card-dependency-list a {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-height: 44px;
-  padding: 8px 0;
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
-.card-dependency-title {
-  min-width: 0;
-  flex: 1 1 160px;
-}
-.card-dependency-list a:focus-visible {
-  outline-offset: 2px;
-}
-
 /* The source relationship is a separate action from merge approval. */
 .source-merge-suggestion {
   padding: 16px;
