@@ -1627,6 +1627,8 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<RoleDocumentPreview>;
   exportRole(projectId: string, roleId: string): Promise<{ markdown: string }>;
+  /** C-515: the launch profile names roles and employees may use (global). */
+  launchProfileNames(): Promise<readonly string[]>;
   templates(projectId: string): Promise<{ templates: TemplateView[] }>;
   template(projectId: string, id: string): Promise<TemplateDetail>;
   templateHistory(
@@ -2535,6 +2537,12 @@ export class HttpCardiganClient implements CardiganClient {
       { markdown, snapshot },
       idempotencyKey,
     ) as Promise<RoleDocumentPreview>;
+  }
+  async launchProfileNames(): Promise<readonly string[]> {
+    const { profiles } = await this.request<{ profiles: readonly string[] }>(
+      "/api/launch-settings/profiles",
+    );
+    return profiles;
   }
   exportRole(projectId: string, roleId: string): Promise<{ markdown: string }> {
     return this.request(

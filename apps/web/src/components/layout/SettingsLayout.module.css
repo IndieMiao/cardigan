@@ -382,6 +382,20 @@
     font-size: var(--ui-text-xs);
     line-height: var(--ui-leading-xs);
   }
+  /* Above the settings drawer (z 101): overlay first, then the dialog. */
+  [data-ui="overlay"].confirm {
+    z-index: var(--ui-layer-confirm);
+  }
+  [data-ui="dialog"].confirm {
+    z-index: calc(var(--ui-layer-confirm) + 1);
+  }
+  .fileButton {
+    justify-self: start;
+  }
+  /* Panels already space their children: no second gap between tables. */
+  .panel > :global(.card-table-scroll) + :global(.card-table-scroll) {
+    margin-block-start: 0;
+  }
   .markdown {
     max-width: none;
     max-block-size: 50vh;

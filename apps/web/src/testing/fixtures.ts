@@ -279,6 +279,7 @@ export function fakeClient(
     exportRole: async () => {
       throw new Error("exportRole not stubbed");
     },
+    launchProfileNames: async () => [],
     setDelegation: async () => {},
     setCrossCardRead: async () => {},
     setAutoMerge: async () => {},

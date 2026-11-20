@@ -162,6 +162,7 @@ const client = fakeClient({
     };
   },
   exportRole: async () => ({ markdown: exported }),
+  launchProfileNames: async () => ["claude-agent", "codex-agent", "pi-agent"],
   previewRoleDocument: async (_p, markdown) => preview(markdown),
   applyRoleDocument: async (_p, markdown) => preview(markdown),
 });

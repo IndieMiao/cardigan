@@ -32,9 +32,11 @@ import {
   useDiscardGuard,
   useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
+import { Menu } from "../components/Menu.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
 import { Checkbox } from "../components/ui/checkbox.js";
+import { ChevronDownIcon } from "../components/ui/icons.js";
 import { Input } from "../components/ui/input.js";
 import { SelectControl } from "../components/ui/select-control.js";
 import {
@@ -61,6 +63,10 @@ import {
   RoleImportDrawer,
   RoleTemplateDrawer,
 } from "./RoleDocument.js";
+
+/** A valid launch profile; the summary is known when the role list has it. */
+type ProfileChoice = Pick<LaunchProfileOption, "name"> &
+  Partial<Pick<LaunchProfileOption, "harness" | "model">>;
 
 /** What the role drawer shows; the list stays in the panel behind it. */
 type View =
@@ -154,6 +160,14 @@ export function RolesSettings({
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
+  // C-515: valid names come from the launch settings list; the role list only
+  // adds each name's harness and model.
+  const loadProfiles = useCallback(() => client.launchProfileNames(), [client]);
+  const names = useResource(loadProfiles, revision);
+  const profiles: readonly ProfileChoice[] = (names.data ?? []).map(
+    (name) =>
+      list.data?.launch_profiles?.find((p) => p.name === name) ?? { name },
+  );
   // A linked detail has no opener on this page: focus returns to the panel.
   const { remember } = useDrawerReturnFocus(view !== undefined, () =>
     document.getElementById("roles"),
@@ -163,6 +177,8 @@ export function RolesSettings({
     setMessage(note);
     setView(next);
     if (next === undefined) {
+      // The next-step actions are offered only until the new role's drawer closes.
+      setCreatedRole(undefined);
       list.reload();
       linkedOpen.current = false;
       if (linkedRole) onLinkedRoleClosed?.();
@@ -192,6 +208,11 @@ export function RolesSettings({
         {...list}
         retry={list.reload}
         pendingMessage="正在加载角色…"
+      />
+      <RequestFeedback
+        {...names}
+        retry={names.reload}
+        pendingMessage="正在加载启动配置…"
       />
       {list.data && list.data.roles.length === 0 && (
         <EmptyState>没有角色</EmptyState>
@@ -226,6 +247,7 @@ export function RolesSettings({
           client={client}
           projectId={projectId}
           list={list.data}
+          profiles={profiles}
           onCancel={() => open(undefined)}
           onCreated={(role) => {
             setCreatedRole(role.role_id);
@@ -247,7 +269,7 @@ export function RolesSettings({
           linkedVersion={roleId === linkedRole ? linkedVersion : undefined}
           revision={revision}
           message={message}
-          profiles={list.data?.launch_profiles ?? []}
+          profiles={profiles}
           afterCreate={
             createdRole === roleId && view?.kind === "detail"
               ? {
@@ -326,12 +348,14 @@ function NewRoleForm({
   client,
   projectId,
   list,
+  profiles,
   onCancel,
   onCreated,
 }: {
   client: CardiganClient;
   projectId: string;
   list: RoleListView | undefined;
+  profiles: readonly ProfileChoice[];
   onCancel: () => void;
   onCreated: (role: RoleDefinitionView) => void;
 }) {
@@ -339,12 +363,8 @@ function NewRoleForm({
   const [defaultRole, setDefaultRole] = useState(
     list?.default_roles[0] ?? "coder",
   );
-  const [harness, setHarness] = useState(
-    list?.launch_profiles?.[0]?.harness ?? "codex",
-  );
-  const [profile, setProfile] = useState(
-    list?.launch_profiles?.[0]?.name ?? "",
-  );
+  const [harness, setHarness] = useState(profiles[0]?.harness ?? "codex");
+  const [profile, setProfile] = useState(profiles[0]?.name ?? "");
   const [sourceProject, setSourceProject] = useState(projectId);
   const [sourceRole, setSourceRole] = useState("");
   const [sourceVersion, setSourceVersion] = useState("");
@@ -367,8 +387,22 @@ function NewRoleForm({
     (source === "default"
       ? defaultRole !== "" && profile.trim() !== ""
       : sourceRole !== "" && versionValid);
-  const profiles = list?.launch_profiles ?? [];
-  const guard = useDiscardGuard(roleId !== "" || name !== "", onCancel);
+  const draft = {
+    source,
+    defaultRole,
+    harness,
+    profile,
+    sourceProject,
+    sourceRole,
+    sourceVersion,
+    roleId,
+    name,
+  };
+  const initial = useRef(JSON.stringify(draft));
+  const guard = useDiscardGuard(
+    JSON.stringify(draft) !== initial.current,
+    onCancel,
+  );
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -471,7 +505,7 @@ function NewRoleForm({
                     onValueChange={(next) => {
                       setProfile(next);
                       const chosen = profiles.find((p) => p.name === next);
-                      if (chosen) setHarness(chosen.harness);
+                      if (chosen?.harness) setHarness(chosen.harness);
                     }}
                   >
                     {launchProfileOptions(profiles, profile)}
@@ -580,14 +614,19 @@ function NewRoleForm({
  * selectable so an edit does not silently change it.
  */
 function launchProfileOptions(
-  profiles: readonly LaunchProfileOption[],
+  profiles: readonly ProfileChoice[],
   value: string,
+  allowEmpty = true,
 ) {
   const missing = value !== "" && !profiles.some((p) => p.name === value);
   return [
-    <option key="" value="">
-      {profiles.length ? "请选择启动配置" : "没有可用的启动配置"}
-    </option>,
+    ...(allowEmpty || value === ""
+      ? [
+          <option key="" value="">
+            {profiles.length ? "请选择启动配置" : "没有可用的启动配置"}
+          </option>,
+        ]
+      : []),
     ...(missing
       ? [
           <option key={`missing:${value}`} value={value}>
@@ -597,7 +636,9 @@ function launchProfileOptions(
       : []),
     ...profiles.map((p) => (
       <option key={p.name} value={p.name}>
-        {p.name}（{p.harness} · {p.model ?? "默认模型"}）
+        {p.harness
+          ? `${p.name}（${p.harness} · ${p.model ?? "默认模型"}）`
+          : p.name}
       </option>
     )),
   ];
@@ -624,7 +665,7 @@ function RoleDetail({
   linkedVersion?: number | undefined;
   revision: number;
   message: string;
-  profiles: readonly LaunchProfileOption[];
+  profiles: readonly ProfileChoice[];
   /** Offered right after the role was created here. */
   afterCreate:
     | {
@@ -708,13 +749,16 @@ function RoleDetail({
       actions={
         data && !editing ? (
           <>
-            {/* Right after creating, the next steps take the place of export
-                and deactivate so the header stays on one line at 390px. */}
             {afterCreate ? (
               <>
+                {/* Right after creating: the next steps first, the role's own
+                    actions behind "更多" so the header stays on one line at 390px. */}
                 {afterCreate.newEmployee && (
-                  <Button onClick={afterCreate.newEmployee}>
-                    {employeeCopy.afterRole}
+                  <Button
+                    aria-label={employeeCopy.afterRole}
+                    onClick={afterCreate.newEmployee}
+                  >
+                    新建员工
                   </Button>
                 )}
                 <Button
@@ -723,6 +767,29 @@ function RoleDetail({
                 >
                   加进模板
                 </Button>
+                <Menu
+                  label="更多角色操作"
+                  trigger={
+                    <Button aria-label="更多角色操作">
+                      更多
+                      <ChevronDownIcon aria-hidden="true" />
+                    </Button>
+                  }
+                  items={[
+                    {
+                      id: "export",
+                      label: "导出 Markdown",
+                      disabled: exporting,
+                      onSelect: () => void exportMarkdown(),
+                    },
+                    {
+                      id: "active",
+                      label: data.role.status === "active" ? "停用" : "启用",
+                      disabled: write.busy,
+                      onSelect: () => void toggleActive(),
+                    },
+                  ]}
+                />
               </>
             ) : (
               <>
@@ -778,7 +845,7 @@ function RoleDetail({
                   busy={write.busy}
                   error={write.error}
                   onDirtyChange={setDirty}
-                  onCancel={() => onEdit(false)}
+                  onCancel={() => guard.ask(() => onEdit(false))}
                   onSubmit={async (patch) =>
                     saved(
                       await write.submit({ roleId, patch }, (key) =>
@@ -980,7 +1047,7 @@ function RoleEditForm({
   onSubmit,
 }: {
   detail: RoleDetailView;
-  profiles: readonly LaunchProfileOption[];
+  profiles: readonly ProfileChoice[];
   busy: boolean;
   error: string;
   onDirtyChange: (dirty: boolean) => void;
@@ -1134,10 +1201,10 @@ function RoleEditForm({
             onValueChange={(next) => {
               setProfile(next);
               const chosen = profiles.find((p) => p.name === next);
-              if (chosen) setHarness(chosen.harness);
+              if (chosen?.harness) setHarness(chosen.harness);
             }}
           >
-            {launchProfileOptions(profiles, profile)}
+            {launchProfileOptions(profiles, profile, false)}
           </SelectControl>
         </label>
         <fieldset>

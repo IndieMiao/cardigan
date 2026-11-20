@@ -5,6 +5,9 @@ import {
   describeWriteError,
   type RoleDefinitionView,
   type RoleDocumentPreview,
+  type RoleKind,
+  type RoleWorktree,
+  type TemplateDefinition,
   type TemplateView,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
@@ -16,6 +19,7 @@ import {
   SettingsDiff,
   SettingsFact,
   SettingsFacts,
+  SettingsFileButton,
   SettingsSection,
   SettingsTable,
   SettingsText,
@@ -37,9 +41,11 @@ import {
 import { Textarea } from "../components/ui/textarea.js";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group.js";
 import {
+  diffLines,
   ROLE_FIELD_LABELS,
+  ROLE_KIND_LABELS,
   type RoleFieldDiff,
-  roleDiff,
+  WORKTREE_LABELS,
 } from "../role-diff.js";
 import { useResource } from "../useResource.js";
 
@@ -111,33 +117,118 @@ export function RoleDiffView({
   );
 }
 
-const LIST_FIELDS = new Set([
-  "allowed_tools",
-  "capabilities",
-  "abilities",
-  "required_machine_tags",
-]);
-const BLANK_ROLE = {
-  display_name: "",
-  kind: "",
-  instructions: "",
-  core_prompt: "",
-  harness: "",
-  launch_profile_ref: "",
-  allowed_tools: [],
-  capabilities: [],
-  abilities: [],
-  worktree: "",
-  required_machine_tags: [],
-} as unknown as RoleDefinitionView;
+const TEXT_FIELDS = new Set(["instructions", "core_prompt"]);
 
-/** The version the preview would replace, rebuilt from its changed fields. */
-function previousRole(preview: RoleDocumentPreview["role"]) {
-  if (preview.action === "create") return BLANK_ROLE;
-  const before: Record<string, unknown> = { ...preview.role };
-  for (const { field, before: value } of preview.fields)
-    before[field] = value ?? (LIST_FIELDS.has(field) ? [] : "");
-  return before as unknown as RoleDefinitionView;
+function shown(field: string, value: unknown): string {
+  if (value === null || value === undefined || value === "") return "（空）";
+  if (field === "kind" && typeof value === "string")
+    return ROLE_KIND_LABELS[value as RoleKind] ?? value;
+  if (field === "worktree" && typeof value === "string")
+    return WORKTREE_LABELS[value as RoleWorktree] ?? value;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/**
+ * The role diff exactly as the server computed it (`fields`), including
+ * fields the edit form does not know, such as machine requirements.
+ */
+export function previewFieldDiffs(
+  fields: RoleDocumentPreview["role"]["fields"],
+): RoleFieldDiff[] {
+  return fields.map(({ field, before, after }): RoleFieldDiff => {
+    if (Array.isArray(before) || Array.isArray(after)) {
+      const a = (Array.isArray(before) ? before : []).map(String);
+      const b = (Array.isArray(after) ? after : []).map(String);
+      return {
+        field,
+        type: "list",
+        added: b.filter((v) => !a.includes(v)),
+        removed: a.filter((v) => !b.includes(v)),
+      };
+    }
+    if (TEXT_FIELDS.has(field))
+      return {
+        field,
+        type: "text",
+        lines: diffLines(
+          typeof before === "string" ? before : "",
+          typeof after === "string" ? after : "",
+        ),
+      };
+    return {
+      field,
+      type: "value",
+      before: shown(field, before),
+      after: shown(field, after),
+    };
+  });
+}
+
+type WorkItem = TemplateDefinition["work_items"][number];
+const TEMPLATE_FIELD_LABELS: Readonly<Record<string, string>> = {
+  title: "标题",
+  description: "说明",
+  requires_repo: "需要仓库",
+  merge: "合并方式",
+  require_acceptance_criteria: "需要验收标准",
+  primary_work_item_key: "主产出项",
+  completion: "完成方式",
+};
+const IGNORED_TEMPLATE_FIELDS = new Set([
+  "id",
+  "work_items",
+  "version",
+  "builtin",
+  "status",
+  "summary",
+  "created_at",
+]);
+const same = (a: unknown, b: unknown) =>
+  JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/** What changes for one work item key: added, removed or each changed part. */
+function workItemChange(
+  before: WorkItem | undefined,
+  after: WorkItem | undefined,
+) {
+  if (!before) return { op: "add" as const, text: "新增" };
+  if (!after) return { op: "remove" as const, text: "删除" };
+  const parts: string[] = [];
+  if (before.title !== after.title)
+    parts.push(`标题 ${before.title} → ${after.title}`);
+  if (before.role_id !== after.role_id)
+    parts.push(`角色 ${before.role_id} → ${after.role_id}`);
+  if (before.kind !== after.kind)
+    parts.push(
+      `类型 ${before.kind === "verify" ? "验证" : "产出"} → ${after.kind === "verify" ? "验证" : "产出"}`,
+    );
+  if (before.required !== after.required)
+    parts.push(after.required ? "改为必需" : "改为可选");
+  if (
+    (before.target_work_item_key ?? "") !== (after.target_work_item_key ?? "")
+  )
+    parts.push(
+      `验证对象 ${before.target_work_item_key ?? "—"} → ${after.target_work_item_key ?? "—"}`,
+    );
+  const known = [
+    "key",
+    "title",
+    "role_id",
+    "kind",
+    "required",
+    "target_work_item_key",
+  ];
+  const rest = new Set(
+    [...Object.keys(before), ...Object.keys(after)].filter(
+      (k) => !known.includes(k),
+    ),
+  );
+  for (const key of rest)
+    if (!same(before[key as keyof WorkItem], after[key as keyof WorkItem]))
+      parts.push(`${key} 已修改`);
+  return parts.length
+    ? { op: "add" as const, text: parts.join("；") }
+    : { op: undefined, text: "—" };
 }
 
 export function documentChanges(preview: RoleDocumentPreview): boolean {
@@ -158,6 +249,30 @@ export function RoleDocumentPreviewView({
   const before = new Map(
     (template?.before?.work_items ?? []).map((w) => [w.key, w]),
   );
+  const after = new Map(
+    (template?.after.work_items ?? []).map((w) => [w.key, w]),
+  );
+  // Removed items stay listed, after the ones that remain.
+  const itemKeys = [
+    ...after.keys(),
+    ...[...before.keys()].filter((key) => !after.has(key)),
+  ];
+  const templateFields =
+    template?.before && template.action === "update"
+      ? [
+          ...new Set([
+            ...Object.keys(template.before),
+            ...Object.keys(template.after),
+          ]),
+        ].filter(
+          (key) =>
+            !IGNORED_TEMPLATE_FIELDS.has(key) &&
+            !same(
+              template.before?.[key as keyof TemplateDefinition],
+              template.after[key as keyof TemplateDefinition],
+            ),
+        )
+      : [];
   return (
     <>
       <SettingsSection title="角色">
@@ -175,7 +290,7 @@ export function RoleDocumentPreviewView({
                 : `v${role.role.version - 1} → v${role.role.version}`
             }
             created={role.action === "create"}
-            diffs={roleDiff(previousRole(role), role.role)}
+            diffs={previewFieldDiffs(role.fields)}
           />
         )}
         {role.relaxations.length > 0 && (
@@ -199,6 +314,26 @@ export function RoleDocumentPreviewView({
                 ` · ${template.before ? `v${template.before.version} → ` : ""}v${template.after.version}`}
             </SettingsFact>
           </SettingsFacts>
+          {templateFields.length > 0 && (
+            <SettingsFacts>
+              {templateFields.map((field) => (
+                <SettingsFact
+                  key={field}
+                  label={TEMPLATE_FIELD_LABELS[field] ?? field}
+                >
+                  {shown(
+                    field,
+                    template?.before?.[field as keyof TemplateDefinition],
+                  )}{" "}
+                  →{" "}
+                  {shown(
+                    field,
+                    template?.after[field as keyof TemplateDefinition],
+                  )}
+                </SettingsFact>
+              ))}
+            </SettingsFacts>
+          )}
           <SettingsTable aria-label="模板工作项">
             <TableHeader>
               <TableRow>
@@ -209,10 +344,16 @@ export function RoleDocumentPreviewView({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {template.after.work_items.map((w) => {
-                const old = before.get(w.key);
+              {itemKeys.map((key) => {
+                const old = before.get(key);
+                const next = after.get(key);
+                const w = (next ?? old) as WorkItem;
+                const change =
+                  template.action === "create"
+                    ? { op: "add" as const, text: "新增" }
+                    : workItemChange(old, next);
                 return (
-                  <TableRow key={w.key}>
+                  <TableRow key={key}>
                     <DataTableCell data-record="lead">
                       {w.title}（<code>{w.key}</code>）
                     </DataTableCell>
@@ -223,17 +364,13 @@ export function RoleDocumentPreviewView({
                       {w.kind === "verify" ? "验证" : "产出"}
                       {w.required ? "，必需" : "，可选"}
                     </DataTableCell>
-                    <DataTableCell nowrap data-record="aside">
-                      {template.action === "unchanged" ? (
-                        "—"
-                      ) : !old ? (
-                        <SettingsDiff op="add">新增</SettingsDiff>
-                      ) : old.role_id !== w.role_id ? (
-                        <SettingsDiff op="add">
-                          {old.role_id} → {w.role_id}
+                    <DataTableCell data-record="aside">
+                      {change.op ? (
+                        <SettingsDiff op={change.op}>
+                          {change.text}
                         </SettingsDiff>
                       ) : (
-                        "—"
+                        change.text
                       )}
                     </DataTableCell>
                   </TableRow>
@@ -395,12 +532,15 @@ function DocumentActions({
   doc,
   markdown,
   ready,
+  problem,
   onCancel,
   onApplied,
 }: {
   doc: ReturnType<typeof useRoleDocument>;
   markdown: string;
   ready: boolean;
+  /** Why this preview may not be applied from here (shown above the buttons). */
+  problem?: string | undefined;
   onCancel: () => void;
   onApplied: (result: RoleDocumentPreview, note: string) => void;
 }) {
@@ -408,6 +548,9 @@ function DocumentActions({
   const changes = preview ? documentChanges(preview) : false;
   return (
     <>
+      {preview && problem && (
+        <SettingsWarning role="alert">{problem}</SettingsWarning>
+      )}
       <SettingsDialogActions>
         <Button onClick={onCancel} disabled={doc.busy !== undefined}>
           取消
@@ -422,7 +565,7 @@ function DocumentActions({
         {preview && (
           <Button
             variant="primary"
-            disabled={doc.busy !== undefined || !changes}
+            disabled={doc.busy !== undefined || !changes || !!problem}
             onClick={async () => {
               const result = await doc.apply();
               if (result) onApplied(result, appliedNote(result));
@@ -473,7 +616,9 @@ export function RoleImportDrawer({
   const doc = useRoleDocument(client, projectId);
   const [markdown, setMarkdown] = useState("");
   const [fileError, setFileError] = useState("");
+  const [reading, setReading] = useState(false);
   const [applied, setApplied] = useState(false);
+  const fileVersion = useRef(0);
   const errorId = useId();
   const { error } = doc.current(markdown);
   const fieldError = fileError || error;
@@ -481,13 +626,30 @@ export function RoleImportDrawer({
   const tooLarge = bytes > ROLE_DOCUMENT_MAX_BYTES;
   const guard = useDiscardGuard(markdown.trim() !== "" && !applied, onClose);
   const readFile = (file: File | undefined) => {
-    setFileError("");
     if (!file) return;
+    // A new choice replaces the text at once: the previous file's preview can
+    // no longer be applied, and only the latest read may fill the field.
+    const current = ++fileVersion.current;
+    setMarkdown("");
+    setFileError("");
     if (file.size > ROLE_DOCUMENT_MAX_BYTES) {
+      setReading(false);
       setFileError("Markdown 文件不能超过 64 KiB");
       return;
     }
-    file.text().then(setMarkdown, () => setFileError("无法读取这个文件"));
+    setReading(true);
+    file.text().then(
+      (text) => {
+        if (current !== fileVersion.current) return;
+        setReading(false);
+        setMarkdown(text);
+      },
+      () => {
+        if (current !== fileVersion.current) return;
+        setReading(false);
+        setFileError("无法读取这个文件");
+      },
+    );
   };
   return (
     <Drawer
@@ -503,24 +665,24 @@ export function RoleImportDrawer({
     >
       <CardDetailLayout className="card-page-drawer">
         <SettingsDialogFields>
-          <label>
-            上传 .md 文件
-            <Input
-              type="file"
-              accept=".md,.markdown,text/markdown,text/plain"
-              disabled={doc.busy !== undefined}
-              onChange={(event) => readFile(event.target.files?.[0])}
-            />
-          </label>
+          <SettingsFileButton
+            label="上传 .md 文件"
+            accept=".md,.markdown,text/markdown,text/plain"
+            disabled={doc.busy !== undefined}
+            onFile={readFile}
+          />
           <label>
             Markdown
             <Textarea
               rows={16}
               value={markdown}
-              readOnly={doc.busy !== undefined}
+              readOnly={doc.busy !== undefined || reading}
               aria-invalid={fieldError || tooLarge ? true : undefined}
               aria-describedby={fieldError || tooLarge ? errorId : undefined}
               onChange={(event) => {
+                // Typing wins over a file still being read.
+                fileVersion.current++;
+                setReading(false);
                 setFileError("");
                 setMarkdown(event.target.value);
               }}
@@ -531,18 +693,25 @@ export function RoleImportDrawer({
               {fieldError || "Markdown 文件不能超过 64 KiB"}
             </SettingsWarning>
           )}
+          {reading && (
+            <RequestFeedback
+              pending
+              interactive
+              pendingMessage="正在读取文件…"
+            />
+          )}
         </SettingsDialogFields>
+        <PreviewResult doc={doc} markdown={markdown} />
         <DocumentActions
           doc={doc}
           markdown={markdown}
-          ready={markdown.trim() !== "" && !tooLarge}
+          ready={markdown.trim() !== "" && !tooLarge && !reading}
           onCancel={guard.confirmClose}
           onApplied={(result, note) => {
             setApplied(true);
             onApplied(result, note);
           }}
         />
-        <PreviewResult doc={doc} markdown={markdown} />
         {guard.dialog}
       </CardDetailLayout>
     </Drawer>
@@ -636,15 +805,54 @@ export function RoleTemplateDrawer({
     section && exported.data
       ? withTemplate(exported.data.markdown, section)
       : "";
-  const { error } = doc.current(markdown);
+  const { error, preview } = doc.current(markdown);
+  // This entry only links the role into a template: the role itself must not
+  // change, a copy must create a new template and an append must update one.
+  const problem = !preview
+    ? undefined
+    : preview.role.action !== "unchanged"
+      ? "角色在打开后已有新版本，已重新读取，请重新预览"
+      : mode === "copy" && preview.template?.action !== "create"
+        ? `模板 ${newId} 已存在，请换一个新模板编号`
+        : mode === "append" && preview.template?.action === "create"
+          ? "所选模板已不存在，请重新选择"
+          : undefined;
+  const staleRole =
+    preview?.role.action !== "unchanged" ? preview?.snapshot : undefined;
+  const reloadExport = exported.reload;
+  const reloaded = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    // Read the current role once per stale preview; the new text needs a new preview.
+    if (!staleRole || reloaded.current === staleRole) return;
+    reloaded.current = staleRole;
+    reloadExport();
+  }, [staleRole, reloadExport]);
+  const initial = useRef({
+    mode,
+    target,
+    source,
+    newId,
+    replace,
+    key,
+    title,
+    kind,
+    required,
+    targetItem,
+  });
   const dirty =
     !applied &&
-    (target !== "" ||
-      source !== "" ||
-      newId !== "" ||
-      replace !== "" ||
-      key !== role.role_id ||
-      title !== role.display_name);
+    JSON.stringify({
+      mode,
+      target,
+      source,
+      newId,
+      replace,
+      key,
+      title,
+      kind,
+      required,
+      targetItem,
+    }) !== JSON.stringify(initial.current);
   const guard = useDiscardGuard(dirty, onClose);
   const templateLabel = (t: TemplateView) =>
     `${t.title}（${t.id}${t.builtin ? "，内置" : ""}）`;
@@ -795,17 +1003,18 @@ export function RoleTemplateDrawer({
           )}
           {error && <SettingsWarning role="alert">{error}</SettingsWarning>}
         </SettingsDialogFields>
+        <PreviewResult doc={doc} markdown={markdown} />
         <DocumentActions
           doc={doc}
           markdown={markdown}
           ready={markdown !== ""}
+          problem={problem}
           onCancel={guard.confirmClose}
           onApplied={(result, note) => {
             setApplied(true);
             onApplied(result, note);
           }}
         />
-        <PreviewResult doc={doc} markdown={markdown} />
         {guard.dialog}
       </CardDetailLayout>
     </Drawer>

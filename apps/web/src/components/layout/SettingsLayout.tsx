@@ -334,7 +334,8 @@ export function SettingsMarkdown({
 
 /**
  * C-494: closing a drawer form with unapplied edits asks first. Keeping the
- * edits is the default action; the drawer stays open behind the dialog.
+ * edits is the default action; the dialog and its overlay sit above the
+ * drawer (`--ui-layer-confirm`).
  */
 export function SettingsDiscardDialog({
   open,
@@ -352,9 +353,14 @@ export function SettingsDiscardDialog({
         if (!next) onKeep();
       }}
     >
-      <DialogContent className={styles.dialog}>
+      <DialogContent
+        className={cn(styles.dialog, styles.confirm)}
+        overlayClassName={styles.confirm}
+      >
         <DialogTitle>放弃未应用的修改？</DialogTitle>
-        <DialogDescription>关闭后这次填写的内容不会保留。</DialogDescription>
+        <DialogDescription className="visually-hidden">
+          关闭后这次填写的内容不会保留。
+        </DialogDescription>
         <SettingsDialogActions>
           <Button onClick={onKeep}>继续编辑</Button>
           <Button variant="destructive" onClick={onDiscard}>
@@ -368,31 +374,75 @@ export function SettingsDiscardDialog({
 
 /**
  * Unapplied drawer edits: closing the tab or reloading asks through the
- * browser; `confirmClose` routes every in-app way out through the dialog.
+ * browser; `ask(leave)` routes every in-app way out (closing the drawer,
+ * cancelling an edit) through the dialog and only leaves on "放弃修改".
  */
 export function useDiscardGuard(dirty: boolean, close: () => void) {
-  const [asking, setAsking] = useState(false);
+  const [pending, setPending] = useState<() => void>();
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => event.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
-  const confirmClose = useCallback(() => {
-    if (dirty) setAsking(true);
-    else close();
-  }, [dirty, close]);
+  const ask = useCallback(
+    (leave: () => void) => {
+      if (dirty) setPending(() => leave);
+      else leave();
+    },
+    [dirty],
+  );
+  const confirmClose = useCallback(() => ask(close), [ask, close]);
   const dialog = (
     <SettingsDiscardDialog
-      open={asking}
-      onKeep={() => setAsking(false)}
+      open={pending !== undefined}
+      onKeep={() => setPending(undefined)}
       onDiscard={() => {
-        setAsking(false);
-        close();
+        const leave = pending;
+        setPending(undefined);
+        leave?.();
       }}
     />
   );
-  return { confirmClose, dialog };
+  return { ask, confirmClose, dialog };
+}
+
+/**
+ * A file picker that looks like the other 28px buttons: the native input
+ * stays hidden and the button opens it. The value is reset after each
+ * choice so choosing the same file again still reports it.
+ */
+export function SettingsFileButton({
+  label,
+  accept,
+  disabled,
+  onFile,
+}: {
+  label: string;
+  accept: string;
+  disabled?: boolean;
+  onFile: (file: File | undefined) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <span className={styles.fileButton}>
+      <Button disabled={disabled} onClick={() => input.current?.click()}>
+        {label}
+      </Button>
+      <input
+        ref={input}
+        type="file"
+        hidden
+        tabIndex={-1}
+        aria-hidden="true"
+        accept={accept}
+        onChange={(event) => {
+          onFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+    </span>
+  );
 }
 
 /** One diff line or value; additions and removals use the status colours. */

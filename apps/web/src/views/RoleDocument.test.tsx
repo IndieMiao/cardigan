@@ -161,6 +161,7 @@ function client(overrides: Parameters<typeof fakeClient>[0] = {}) {
       legacy_conversion: null,
     }),
     templates: async () => ({ templates: [docTemplate] }),
+    launchProfileNames: async () => ["codex-agent", "claude-agent"],
     ...overrides,
   });
 }
@@ -567,4 +568,244 @@ test("HTTP client posts previews, keyed applies and reads exports on the project
       "Idempotency-Key"
     ],
   ).toBeUndefined();
+});
+
+test("the preview lists every field the server reports and every template work item change, removed ones included", async () => {
+  await openRoles(
+    client({
+      previewRoleDocument: async () => ({
+        ...created,
+        role: {
+          action: "update",
+          role: { ...proofreader, version: 2 },
+          fields: [
+            {
+              field: "required_capabilities",
+              before: null,
+              after: ["browser.chromium"],
+            },
+          ],
+          relaxations: [],
+        },
+        template: {
+          action: "update",
+          before: {
+            ...docTemplate,
+            work_items: [
+              ...docTemplate.work_items,
+              {
+                key: "review",
+                title: "审核",
+                kind: "verify",
+                role_id: "reviewer",
+                required: true,
+                target_work_item_key: "writing",
+              },
+            ],
+          },
+          after: {
+            ...docTemplate,
+            title: "文档卡二",
+            version: 3,
+            work_items: [
+              { ...docTemplate.work_items[0], required: false } as never,
+            ],
+          },
+        },
+        employees: [],
+      }),
+    }),
+  );
+  const drawer = await openImport();
+  fireEvent.change(within(drawer).getByLabelText("Markdown"), {
+    target: { value: markdown },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  expect(drawer.textContent).toContain("机器能力要求（required_capabilities）");
+  expect(drawer.textContent).toContain("新增 browser.chromium");
+  expect(drawer.textContent).not.toContain("只改了状态");
+  expect(drawer.textContent).toContain("文档卡 → 文档卡二");
+  const rows = within(within(drawer).getByRole("table", { name: "模板工作项" }))
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => row.textContent);
+  expect(rows).toEqual([
+    "写作（writing）writer产出，可选改为可选",
+    "审核（review）reviewer验证，必需删除",
+  ]);
+});
+
+test("choosing another file drops the previous file's preview; an oversized or failed file never applies the old text", async () => {
+  const previewRoleDocument = vi.fn(async () => created);
+  const applyRoleDocument = vi.fn();
+  await openRoles(client({ previewRoleDocument, applyRoleDocument }));
+  const drawer = await openImport();
+  const input = drawer.querySelector("input[type=file]") as HTMLInputElement;
+  const pick = (file: File) =>
+    fireEvent.change(input, { target: { files: [file] } });
+  pick(new File([markdown], "a.md", { type: "text/markdown" }));
+  await waitFor(() =>
+    expect(
+      (within(drawer).getByLabelText("Markdown") as HTMLTextAreaElement).value,
+    ).toBe(markdown),
+  );
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  await within(drawer).findByRole("button", { name: "应用" });
+  pick(new File(["x".repeat(64 * 1024 + 1)], "b.md"));
+  expect((await within(drawer).findByRole("alert")).textContent).toContain(
+    "64 KiB",
+  );
+  expect(within(drawer).queryByRole("button", { name: "应用" })).toBeNull();
+  expect(
+    (within(drawer).getByLabelText("Markdown") as HTMLTextAreaElement).value,
+  ).toBe("");
+  expect(applyRoleDocument).not.toHaveBeenCalled();
+});
+
+test("adding to a template never rewrites the role or an existing template", async () => {
+  const exportRole = vi.fn(async () => ({
+    markdown: "---\nrole_id: proofreader\n---\nbody\n",
+  }));
+  let roleChanged = false;
+  const previewRoleDocument = vi.fn(async () => ({
+    ...created,
+    employees: [],
+    role: {
+      ...created.role,
+      action: roleChanged ? ("update" as const) : ("unchanged" as const),
+      relaxations: [],
+    },
+    template: created.template && {
+      ...created.template,
+      action: "update" as const,
+    },
+  }));
+  const applyRoleDocument = vi.fn();
+  await openRoles(
+    client({
+      copyRole: async () => proofreader,
+      exportRole,
+      previewRoleDocument,
+      applyRoleDocument,
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  changeControl(within(form).getByLabelText("新角色编号"), {
+    target: { value: "proofreader" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
+  fireEvent.click(await screen.findByRole("button", { name: "加进模板" }));
+  const drawer = await screen.findByRole("dialog", { name: "加进模板" });
+  await waitFor(() => expect(exportRole).toHaveBeenCalledTimes(1));
+  fireEvent.click(
+    within(drawer).getByRole("button", { name: "复制模板并替换角色" }),
+  );
+  await waitFor(() =>
+    expect(within(drawer).getByLabelText("来源模板").textContent).toContain(
+      "请选择模板",
+    ),
+  );
+  changeControl(within(drawer).getByLabelText("来源模板"), {
+    target: { value: "doc" },
+  });
+  changeControl(within(drawer).getByLabelText("替换的角色"), {
+    target: { value: "writer" },
+  });
+  fireEvent.change(within(drawer).getByLabelText("新模板编号"), {
+    target: { value: "doc" },
+  });
+  fireEvent.click(within(drawer).getByRole("button", { name: "预览" }));
+  expect((await within(drawer).findByRole("alert")).textContent).toBe(
+    "模板 doc 已存在，请换一个新模板编号",
+  );
+  expect(
+    (within(drawer).getByRole("button", { name: "应用" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  // Someone changed the role meanwhile: the role must not be written back.
+  roleChanged = true;
+  fireEvent.click(within(drawer).getByRole("button", { name: "重新预览" }));
+  expect(
+    await within(drawer).findByText(
+      "角色在打开后已有新版本，已重新读取，请重新预览",
+    ),
+  ).toBeTruthy();
+  await waitFor(() => expect(exportRole).toHaveBeenCalledTimes(2));
+  expect(applyRoleDocument).not.toHaveBeenCalled();
+});
+
+test("every unapplied draft asks before it is dropped: template choices, a new role's profile, an edit's cancel", async () => {
+  await openRoles(client({ copyRole: async () => proofreader }));
+  // New role: only the launch profile changed.
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  changeControl(within(form).getByLabelText("启动配置"), {
+    target: { value: "claude-agent" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "取消" }));
+  let ask = await screen.findByRole("dialog", { name: "放弃未应用的修改？" });
+  fireEvent.click(within(ask).getByRole("button", { name: "继续编辑" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "放弃未应用的修改？" }),
+    ).toBeNull(),
+  );
+  changeControl(within(form).getByLabelText("新角色编号"), {
+    target: { value: "proofreader" },
+  });
+  fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
+  // Template: only the work item kind and "required" changed.
+  fireEvent.click(await screen.findByRole("button", { name: "加进模板" }));
+  const drawer = await screen.findByRole("dialog", { name: "加进模板" });
+  changeControl(within(drawer).getByLabelText("类型"), {
+    target: { value: "verify" },
+  });
+  fireEvent.keyDown(drawer, { key: "Escape" });
+  ask = await screen.findByRole("dialog", { name: "放弃未应用的修改？" });
+  fireEvent.click(within(ask).getByRole("button", { name: "放弃修改" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "加进模板" })).toBeNull(),
+  );
+  // Back on the new role: its own actions are behind 更多 until it closes.
+  expect(screen.getByRole("button", { name: "更多角色操作" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "导出 Markdown" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+  fireEvent.change(screen.getByLabelText("角色说明（instructions）"), {
+    target: { value: "改过的说明" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  ask = await screen.findByRole("dialog", { name: "放弃未应用的修改？" });
+  fireEvent.click(within(ask).getByRole("button", { name: "放弃修改" }));
+  await waitFor(() =>
+    expect(screen.queryByLabelText("角色说明（instructions）")).toBeNull(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // Reopened from the list, the role shows its usual actions again.
+  fireEvent.click(await screen.findByRole("button", { name: "校对员" }));
+  expect(
+    await screen.findByRole("button", { name: "导出 Markdown" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "停用" })).toBeTruthy();
+});
+
+test("launch profile choices are the launch settings' valid names; the role list only adds their summary", async () => {
+  await openRoles(
+    client({ launchProfileNames: async () => ["claude-agent", "new-agent"] }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
+  const form = screen.getByRole("form", { name: "新建角色" });
+  fireEvent.keyDown(within(form).getByLabelText("启动配置"), {
+    key: "ArrowDown",
+  });
+  const options = (await screen.findAllByRole("option")).map(
+    (o) => o.textContent,
+  );
+  expect(options).toEqual([
+    "请选择启动配置",
+    "claude-agent（claude-code · 默认模型）",
+    "new-agent",
+  ]);
 });

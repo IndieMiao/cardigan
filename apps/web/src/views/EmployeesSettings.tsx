@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ApiError,
   type CardiganClient,
@@ -599,6 +599,7 @@ function EmployeeRoleDrawer({
   const blocked = employee.role_change_blocked
     ? BLOCKED_REASONS[employee.role_change_blocked]
     : undefined;
+  const reasonId = useId();
   const changed = role !== employee.role_id;
   const guard = useDiscardGuard(changed, onClose);
   const roles = options.roles.some((r) => r.role_id === employee.role_id)
@@ -668,6 +669,7 @@ function EmployeeRoleDrawer({
               <SelectControl
                 value={role}
                 disabled={busy || blocked !== undefined}
+                aria-describedby={blocked ? reasonId : undefined}
                 onValueChange={(next) => {
                   setRole(next);
                   setError("");
@@ -680,7 +682,9 @@ function EmployeeRoleDrawer({
                 ))}
               </SelectControl>
             </label>
-            {blocked && <SettingsWarning>{blocked}</SettingsWarning>}
+            {blocked && (
+              <SettingsWarning id={reasonId}>{blocked}</SettingsWarning>
+            )}
             {error && <SettingsWarning role="alert">{error}</SettingsWarning>}
           </SettingsDialogFields>
           <SettingsDialogActions>

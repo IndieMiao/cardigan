@@ -134,6 +134,7 @@ function client(overrides: Parameters<typeof fakeClient>[0] = {}) {
     roles: async () => list,
     role: async () => detail,
     roleHistory: async () => history,
+    launchProfileNames: async () => ["fixture", "codex-agent"],
     ...overrides,
   });
 }
