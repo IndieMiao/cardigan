@@ -2,12 +2,14 @@
 // with an in-place field error, the diff confirmation, a stale snapshot, the
 // discard question, a referenced profile that cannot be deleted, a new
 // profile refused by the server, provider and alias forms, a running and a
-// finished check, and the list after saving. 1440/390 × light/dark, plus the
+// finished check, the list after saving, and the employee drawer's launch
+// profile choice (options, a blocked role, saved). 1440/390 × light/dark, plus the
 // card list, the roles panel and the role edit drawer at the same
 // width/theme for side-by-side comparison.
 // CHROMIUM_PATH=<chromium> node apps/web/test-support/c516-capture.mjs <new output dir>
 // C516_BASELINE_REF=<git ref> renders that ref's page files (before: only the
-// scenes that existed — card list, roles, role edit, models list and detail).
+// scenes that existed — card list, roles, role edit, models list and detail,
+// employees list and employee drawer).
 // C516_BEFORE=<before output dir> counts differing pixels per scene name.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,6 +35,7 @@ const historical = new Map(
         "testing/fixtures.ts",
         "testing/launch-settings-fixture.ts",
         "views/ModelsSettings.tsx",
+        "views/EmployeesSettings.tsx",
         "components/layout/SettingsLayout.tsx",
         "components/layout/SettingsLayout.module.css",
       ].map((path) => [
@@ -180,7 +183,10 @@ try {
       label,
       value,
     );
-  const row = async (name) => {
+  const row = async (
+    name,
+    ready = "!!document.querySelector('[role=dialog] h3')",
+  ) => {
     await run((name) => {
       const b = [
         ...document.querySelectorAll("[data-settings-content] td button"),
@@ -188,8 +194,41 @@ try {
       if (!b) throw new Error(`Missing row: ${name}`);
       b.click();
     }, name);
-    await until("!!document.querySelector('[role=dialog] h3')");
+    await until(ready);
     await delay(300);
+  };
+  const employeeReady = "!!document.querySelector('[role=dialog] form')";
+  /** Open the drawer's select labelled `label` and pick the option `value`. */
+  const choose = async (label, value) => {
+    await run((label) => {
+      const l = [...document.querySelectorAll("[role=dialog] label")].find(
+        (x) => x.firstChild?.textContent?.trim() === label,
+      );
+      const select = l?.querySelector("[role=combobox]");
+      if (!select) throw new Error(`Missing select: ${label}`);
+      select.focus();
+    }, label);
+    await key("ArrowDown", 40);
+    await until("!!document.querySelector('[role=listbox] [role=option]')");
+    await delay(200);
+    if (value === undefined) return;
+    await run((value) => {
+      const option = document.querySelector(
+        `[role=option][data-value="${value}"]`,
+      );
+      if (!option) throw new Error(`Missing option: ${value}`);
+      option.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    }, value);
+    await until("!document.querySelector('[role=listbox]')");
+  };
+  const employees = async (theme) => {
+    await open("/#/p/p-1/settings?tab=employees", settings, theme);
+    await until(
+      "!!document.querySelector('table[aria-label=员工列表] tbody tr')",
+    );
+    await settle();
   };
   const measurePage = () =>
     run(() => {
@@ -280,6 +319,13 @@ try {
         label: font(d.querySelector("form label")),
         input: font(d.querySelector("form input")),
         select: font(d.querySelector("form [role=combobox]")),
+        selects: [...d.querySelectorAll("form [role=combobox]")].map((e) => ({
+          ...font(e),
+          disabled: e.disabled,
+        })),
+        options: [
+          ...document.querySelectorAll("[role=listbox] [role=option]"),
+        ].map((e) => e.textContent.trim()),
         invalid: [...d.querySelectorAll("[aria-invalid=true]")].map((e) => ({
           ...font(e),
           note: font(
@@ -342,6 +388,32 @@ try {
       await click("编辑");
       await until("!!document.querySelector('[role=dialog] form input')");
       const roleEditShot = await scene("roles-edit", measureDrawer);
+
+      // Employees (C-494 list and drawer; C-516 adds the profile field).
+      await employees(theme);
+      const employeesShot = await scene("employees", measurePage);
+      await row("悟净", employeeReady);
+      await until(
+        "!!document.querySelector('[role=dialog] form [role=combobox]')",
+      );
+      await settle();
+      const employeeEditShot = await scene("employees-edit", measureDrawer);
+      pairs.push(
+        {
+          name: "employees-vs-roles",
+          width,
+          theme,
+          left: rolesShot,
+          right: employeesShot,
+        },
+        {
+          name: "employee-edit-vs-role-edit",
+          width,
+          theme,
+          left: roleEditShot,
+          right: employeeEditShot,
+        },
+      );
 
       // Models list (C-518 scene name: pixel diff against the baseline).
       await models(theme);
@@ -508,6 +580,49 @@ try {
         "document.querySelector('[role=dialog]').textContent.includes('推理通过')",
       );
       assert.equal(results.checkText, false);
+
+      // Employee launch profile: valid profiles or following the role.
+      await employees(theme);
+      await row("悟净", employeeReady);
+      await until(
+        "[...document.querySelectorAll('[role=dialog] form [role=combobox]')].every((s) => !s.disabled)",
+      );
+      await choose("启动配置");
+      await scene("employees-profile-options", measureDrawer);
+      assert.deepEqual(results["employees-profile-options"].options, [
+        "跟随角色（codex-sol）",
+        "claude-opus",
+        "codex-sol",
+        "pi-deepseek",
+        "claude-local",
+      ]);
+      await key("Escape", 27);
+      await until("!document.querySelector('[role=listbox]')");
+      // A run in progress blocks the role, not the profile.
+      await employees(theme);
+      await row("八戒", employeeReady);
+      await until(
+        "document.querySelectorAll('[role=dialog] form [role=combobox]:not([disabled])').length === 1",
+      );
+      await choose("启动配置", "");
+      await scene("employees-blocked", measureDrawer);
+      assert.deepEqual(
+        results["employees-blocked"].selects.map((s) => s.disabled),
+        [true, false],
+      );
+      // Pin one and save: the drawer closes and the page says what changed.
+      await employees(theme);
+      await row("悟净", employeeReady);
+      await until(
+        "[...document.querySelectorAll('[role=dialog] form [role=combobox]')].every((s) => !s.disabled)",
+      );
+      await choose("启动配置", "pi-deepseek");
+      await click("保存");
+      await until("!document.querySelector('[role=dialog]')");
+      await until(
+        "[...document.querySelectorAll('.request-feedback')].some((t) => t.textContent.includes('启动配置改为 pi-deepseek'))",
+      );
+      await scene("employees-saved", measurePage);
       cases.push({ width, theme, results });
     }
   // Side-by-side: reference (left) | models (right), same width/theme.

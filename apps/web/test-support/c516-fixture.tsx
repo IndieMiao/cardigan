@@ -2,6 +2,8 @@ import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
 import {
   ApiError,
+  type EmployeeOptions,
+  type EmployeeSummary,
   type LaunchChange,
   type LaunchProfileCheck,
   type LaunchSettingsView,
@@ -22,6 +24,9 @@ import { settingsPanels } from "./settings-panels-data.js";
 //   ?confirm=stale   the first confirmation answers 409 stale_snapshot
 //   ?preview=invalid a new profile's name is refused by the "server"
 //   ?check=hold      a started check stays running
+// Employees (C-516 item 4): the two the launch fixture names as pinning a
+// profile (悟空 → claude-opus, 八戒 → claude-local, with a run in progress)
+// and one following the role; saving the drawer updates this copy.
 Date.now = () => new Date(NOW).getTime();
 const query = new URLSearchParams(location.search);
 let current: LaunchSettingsView = structuredClone(launchSettingsFixture);
@@ -126,8 +131,80 @@ const setCheck = (name: string, last: LaunchProfileCheck) => {
   };
 };
 
+let employees: EmployeeSummary[] = [
+  {
+    id: "E-3",
+    name: "悟空",
+    title: "开发工程师",
+    status: "active",
+    avatar: "/avatars/v1/sun-wukong/head-64.webp",
+    role_id: "coder",
+    projects: ["p-1"],
+    launch_profile_ref: "claude-opus",
+    role_change_blocked: null,
+  },
+  {
+    id: "E-4",
+    name: "八戒",
+    title: "代码审核",
+    status: "active",
+    avatar: "/avatars/v1/zhu-bajie/head-64.webp",
+    role_id: "reviewer",
+    projects: ["p-1"],
+    launch_profile_ref: "claude-local",
+    role_change_blocked: "run",
+  },
+  {
+    id: "E-5",
+    name: "悟净",
+    title: "开发工程师",
+    status: "active",
+    avatar: "/avatars/v1/sha-seng/head-64.webp",
+    role_id: "coder",
+    projects: ["p-1"],
+    launch_profile_ref: null,
+    role_change_blocked: null,
+  },
+];
+const employeeOptions = async (projectId: string): Promise<EmployeeOptions> => {
+  const base = await settingsPanels.employeeOptions?.(projectId);
+  return {
+    library: (base?.library ?? []).map((item) => {
+      const used = employees.find((e) => e.avatar?.includes(`/${item.id}/`));
+      return {
+        ...item,
+        occupied_by: used
+          ? { id: used.id, name: used.name, status: "active" as const }
+          : null,
+      };
+    }),
+    // What "跟随角色" resolves to (the launch fixture's role references).
+    roles: [
+      {
+        role_id: "coder",
+        display_name: "开发工程师",
+        launch_profile_ref: "codex-sol",
+      },
+      {
+        role_id: "reviewer",
+        display_name: "代码审核",
+        launch_profile_ref: "claude-opus",
+      },
+    ],
+    employees: structuredClone(employees),
+  };
+};
+
 const client = fakeClient({
   ...settingsPanels,
+  employeeOptions,
+  launchProfileNames: async () => current.profiles.map((p) => p.name),
+  updateEmployee: async (_project, id, patch) => {
+    employees = employees.map((e) => (e.id === id ? { ...e, ...patch } : e));
+    const saved = employees.find((e) => e.id === id);
+    if (!saved) throw new ApiError(404, "not_found", "员工不存在");
+    return saved;
+  },
   // Connected at once: no "正在连接实时更新…" notice over the drawers.
   subscribe: (_project, callbacks) => {
     queueMicrotask(() => callbacks.status("live"));
