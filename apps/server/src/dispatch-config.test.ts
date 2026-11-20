@@ -212,3 +212,16 @@ test.each([
   expect(cfg.errors).toHaveLength(1);
   expect(cfg.errors.join()).not.toContain("private-value");
 });
+
+test("C-527: queued re-evaluation defaults to five minutes and accepts a positive whole-minute override", async () => {
+  expect(
+    (await loadRunCapacityConfig({ configDir })).queuedRecheckAfterMs,
+  ).toBe(300_000);
+  await write("machines: {}\nqueued_recheck_after_minutes: 2\n");
+  expect(await loadRunCapacityConfig({ configDir })).toMatchObject({
+    errors: [],
+    queuedRecheckAfterMs: 120_000,
+  });
+  await write("machines: {}\nqueued_recheck_after_minutes: 0\n");
+  expect((await loadRunCapacityConfig({ configDir })).errors).toHaveLength(1);
+});

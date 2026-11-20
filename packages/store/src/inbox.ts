@@ -196,7 +196,14 @@ export interface MoveNotificationInput {
   readonly unbind_continuation?: boolean;
   /** Extra facts the dispatcher writes in the same step (attempts, bell…). */
   readonly patch?: Partial<
-    Pick<Notification, "attempts" | "next_attempt_at" | "bell" | "run_id">
+    Pick<
+      Notification,
+      | "attempts"
+      | "next_attempt_at"
+      | "bell"
+      | "run_id"
+      | "cancelled_queue_release_id"
+    >
   >;
 }
 
