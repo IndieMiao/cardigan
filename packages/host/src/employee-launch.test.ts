@@ -14,6 +14,7 @@ import {
   corePromptFor,
   instructionsFor,
   parseLaunchConfig,
+  RUN_RESOURCE_RULE,
 } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
@@ -216,10 +217,17 @@ test.each(
           expect(core).not.toContain("旧显示名");
           expect(first).toContain(bell);
         } else {
-          expect(core).toBe(corePromptFor("pm", "旧显示名"));
+          expect(core).toBe(
+            `${corePromptFor("pm", "旧显示名")}\n\n${RUN_RESOURCE_RULE}\n`,
+          );
           expect(first).not.toContain(employee.name);
           expect(first).toContain("kind=initial");
         }
+        expect(core).toContain(
+          'python3 -IB -c "$CARDIGAN_RUN_COMMAND" R-n --private --',
+        );
+        expect(core).toContain("--private-vite-on-demand 已分配端口");
+        expect(core).toContain("临时文件写入该命令的 $TMPDIR");
         expect(first).toContain("PM Ops");
         expect(launched.run.status).toBe("dispatched");
       }

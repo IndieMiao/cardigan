@@ -153,14 +153,33 @@ export async function serveEmployees(
         listRoleVersions(tx, c.project_id).map((role) => [role.role_id, role]),
       );
       return {
-        employees: employees.map((e) => ({
-          id: e.id,
-          name: e.name,
-          role_id: e.role_id,
-          projects: e.projects ?? [],
-          // C-516: an explicit launch profile, or null to follow the role.
-          launch_profile_ref: e.launch_profile_ref ?? null,
-        })),
+        employees: employees.map((e) => {
+          const avatar = parseAvatarReference(e.avatar);
+          // C-494: the same global facts the transfer command checks, so the
+          // form can say why a role change would be refused before sending it.
+          const facts = tx.employees.roleTransferFacts(e.id, e.role_id);
+          return {
+            id: e.id,
+            name: e.name,
+            title: e.title,
+            status: e.status,
+            avatar:
+              avatar?.kind === "library"
+                ? `/avatars/v1/${avatar.id}/head-64.webp`
+                : avatar?.kind === "upload"
+                  ? `/api/avatars/${avatar.sha256}`
+                  : null,
+            role_id: e.role_id,
+            projects: e.projects ?? [],
+            // C-516: an explicit launch profile, or null to follow the role.
+            launch_profile_ref: e.launch_profile_ref ?? null,
+            role_change_blocked: facts.has_unfinished_run
+              ? "run"
+              : facts.has_unreleased_assignment
+                ? "assignment"
+                : null,
+          };
+        }),
         library: AVATAR_LIBRARY.map(([id, name, source]) => {
           const used = employees.find(
             (employee) => employee.avatar === `library:${id}`,
@@ -180,6 +199,8 @@ export async function serveEmployees(
           .map((role) => ({
             role_id: role.role_id,
             display_name: role.display_name,
+            // C-516: what "跟随角色" resolves to in this project.
+            launch_profile_ref: role.launch_profile_ref,
           })),
       };
     });

@@ -53,11 +53,14 @@ export function DialogDescription({
 }
 export function DialogContent({
   children,
+  overlayClassName,
   ...props
-}: React.ComponentProps<typeof DialogPanel>) {
+}: React.ComponentProps<typeof DialogPanel> & {
+  overlayClassName?: string | undefined;
+}) {
   return (
     <Portal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPanel {...props}>{children}</DialogPanel>
     </Portal>
   );

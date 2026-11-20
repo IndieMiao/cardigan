@@ -69,8 +69,6 @@ test("the client reads the valid profile names from the global endpoint", async 
   const client = new HttpCardiganClient(
     fetch as unknown as typeof globalThis.fetch,
   );
-  expect(await client.launchProfileNames()).toEqual({
-    profiles: ["claude-opus"],
-  });
+  expect(await client.launchProfileNames()).toEqual(["claude-opus"]);
   expect(fetch.mock.calls[0]?.[0]).toBe("/api/launch-settings/profiles");
 });

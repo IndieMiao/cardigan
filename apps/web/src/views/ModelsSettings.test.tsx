@@ -64,6 +64,7 @@ test("settings navigation lists 模型 after the existing panels", async () => {
     "角色",
     "卡片模板",
     "员工",
+    "机器",
     "模型",
   ]);
   fireEvent.click(within(nav).getByRole("button", { name: "模型" }));

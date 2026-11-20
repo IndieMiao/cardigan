@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GitPublicationGuard } from "@cardigan/domain";
+import type { Event, GitPublicationGuard, MergeBatch } from "@cardigan/domain";
 import {
   completeHumanAction,
   latestMergeCheck,
@@ -50,6 +50,7 @@ import {
   workerReport,
 } from "../../../packages/host/test-support/worker-failure.js";
 import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
+import { CandidatePushNotStarted } from "./git.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -60,6 +61,14 @@ import {
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import { MergeLockBusy, withPublication } from "./publication-lock.js";
+import { RepositoryCheckCalls } from "./repository-check-calls.js";
+import {
+  batchCallHistory,
+  callOpened,
+  callSettled,
+  type RepositoryReceipt,
+  repositoryCheckWait,
+} from "./repository-check-wait.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
@@ -2632,8 +2641,8 @@ test.each([
         };
       }),
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: vi.fn(
-        async () => "FAIL synthetic token=synthetic-secret",
+      fetchFailureLog: vi.fn(async (_handle, open) =>
+        open()("FAIL example.test.ts > synthetic token=synthetic-secret"),
       ),
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -2658,7 +2667,13 @@ test.each([
     if (status === "executor_unreachable")
       expect(check()?.status).toBe("queued");
     if (status === "failed") {
-      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      expect(check()?.summary).toContain(
+        "FAIL example.test.ts > synthetic token=[REDACTED]",
+      );
+      expect(
+        f.state().timeline.find((t) => t.body.startsWith("合并检查 failed"))
+          ?.body,
+      ).toContain("example.test.ts > synthetic token=[REDACTED]");
       const contents = await readFile(
         join(
           f.dataDir,
@@ -2775,9 +2790,9 @@ test.each(["timed_out", "executor_unreachable"] as const)(
       },
       poll: async () => terminal,
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: () => {
+      fetchFailureLog: (_handle, open) => {
         started.resolve(required(input));
-        return download.promise;
+        return download.promise.then(open());
       },
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -3179,9 +3194,11 @@ test.each([
         },
       ]),
       cancel: vi.fn(async () => {}),
-      jobLog: vi.fn(
-        async () =>
-          "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+      jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
+        open()(
+          '##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n' +
+            "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+        ),
       ),
     };
     const pushCheckCandidate = vi.fn(async () => ({
@@ -3780,10 +3797,12 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
 
 async function reworkGithubFixture(
   options: {
-    log?: string;
+    log?: string | string[];
     excerptBytes?: number;
     noRunId?: boolean;
+    waitStartMs?: number;
     scoped?: boolean;
+    failedStep?: "lint" | "e2e" | "Setup Node";
   } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
@@ -3805,6 +3824,9 @@ async function reworkGithubFixture(
     privateKeyFile: "/synthetic/app.pem",
     botLogin: "fixture[bot]",
     maxConcurrent: 1,
+    ...(options.waitStartMs === undefined
+      ? {}
+      : { waitStartMs: options.waitStartMs }),
     ...(options.scoped ? { scopedChecks: true } : {}),
     ...(options.excerptBytes
       ? { failureExcerptBytes: options.excerptBytes }
@@ -3825,6 +3847,7 @@ async function reworkGithubFixture(
   });
   if (options.scoped) c.git.changedPaths.mockResolvedValue(["docs/fixture.md"]);
   let inputs: Readonly<Record<string, string>> = {};
+  let createdAt = new Date(now).toISOString();
   const run = () => ({
     id: 123,
     run_attempt: 1,
@@ -3835,7 +3858,7 @@ async function reworkGithubFixture(
     actor: { login: config.botLogin },
     display_title: githubCheckRunName(inputs),
     html_url: "https://github.com/fixture/project/actions/runs/123",
-    created_at: "2030-01-01T00:00:00.000Z",
+    created_at: createdAt,
     status: conclusion ? "completed" : "in_progress",
     conclusion: conclusion ?? null,
   });
@@ -3844,6 +3867,7 @@ async function reworkGithubFixture(
     dispatch: vi.fn(
       async (_ref: string, value: Readonly<Record<string, string>>) => {
         inputs = value;
+        createdAt = new Date(now).toISOString();
         return options.noRunId ? undefined : 123;
       },
     ),
@@ -3868,12 +3892,33 @@ async function reworkGithubFixture(
           number: index + 1,
           status: "completed",
           conclusion:
-            conclusion === "failure" && name === "test" ? "failure" : "success",
+            conclusion === "failure" && name === (options.failedStep ?? "test")
+              ? "failure"
+              : conclusion === "failure" &&
+                  options.failedStep === "Setup Node" &&
+                  index > GITHUB_WORKFLOW_STEPS.indexOf("Setup Node")
+                ? "skipped"
+                : "success",
+          ...(options.failedStep
+            ? {
+                started_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index),
+                ).toISOString(),
+                completed_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index, 59),
+                ).toISOString(),
+              }
+            : {}),
         })),
       },
     ]),
     cancel: vi.fn(async () => {}),
-    jobLog: vi.fn(async () => options.log ?? "FAIL synthetic\n"),
+    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) => {
+      const write = open();
+      write('##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n');
+      const log = options.log ?? "FAIL synthetic\n";
+      for (const part of typeof log === "string" ? [log] : log) write(part);
+    }),
   };
   const git = {
     ...c.git,
@@ -3921,6 +3966,44 @@ test.each(["sk-learn", "ghp_x", "-----END RSA PRIVATE KEY-----"])(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+test("C-529: failed log acquisition persists only its fixed category and bound job link without replacing the execution result", async () => {
+  const h = await reworkGithubFixture();
+  const { GithubExecutorError } = await import("@cardigan/host");
+  const err = new GithubExecutorError("auth");
+  err.diagnostic = "do-not-record-provider-detail";
+  h.client.jobLog.mockRejectedValueOnce(err);
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.status).toBe("failed");
+    expect(check.summary).toContain(
+      "日志获取失败（auth）：https://github.com/fixture/project/actions/runs/123/job/456",
+    );
+    expect(check.summary).not.toContain("do-not-record-provider-detail");
+    expect(check.infra_flaky).not.toBe(true);
+    const log = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    expect(log.slice(0, 1024)).toContain(check.summary);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
 
 test.each(["markers", "controls", "clipped"])(
   "D4 rework: GitHub %s diagnostics cannot strand a trusted failed attempt",
@@ -4559,9 +4642,20 @@ test.each([false, true])(
 test("C-375: 204 then a same-tree rebuild after restart discovers the original candidate without an outage or second POST", async () => {
   const h = await reworkGithubFixture({ noRunId: true });
   const first = h.create();
+  h.git.pushCheckCandidate.mockRejectedValueOnce(
+    new CandidatePushNotStarted(30_000),
+  );
+  await first.tick([h.f.project_id]);
+  const waiting = required(h.check());
+  expect(h.client.dispatch).not.toHaveBeenCalled();
+  h.advance(30_000);
   await first.tick([h.f.project_id]);
   const original = required(h.check());
-  expect(original.status).toBe("queued");
+  expect(original).toMatchObject({
+    status: "queued",
+    attempt_id: waiting.attempt_id,
+  });
+  expect(h.client.dispatch).toHaveBeenCalledOnce();
   first.stop();
   h.git.prepare.mockResolvedValue({
     status: "candidate",
@@ -4589,7 +4683,7 @@ test("C-375: 204 then a same-tree rebuild after restart discovers the original c
       candidate_sha: original.candidate_sha,
     });
     expect(h.client.dispatch).toHaveBeenCalledOnce();
-    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
     expect(h.client.cancel).not.toHaveBeenCalled();
     expect(
       h.f
@@ -5299,8 +5393,8 @@ test("C-400: deployment waiting allows existing GitHub results to settle and pre
   }
 });
 
-test("C-391: GitHub batch survives controller restart without redispatch and binds all three completions", async () => {
-  const h = await parallelGithub(3);
+async function confirmedGithubBatch(count: number) {
+  const h = await parallelGithub(count);
   const initial = h.c.options.configuration.forProject();
   if (initial.status !== "enabled") throw new Error("Missing config");
   h.c.setConfig({
@@ -5333,10 +5427,9 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   });
   const gate = h.create();
   await gate.schedule([h.f.project_id]);
-  await h.running(0, 1, 2);
-  h.finish(0);
-  h.finish(1);
-  h.finish(2);
+  const indices = h.cards.map((_, i) => i);
+  await h.running(...indices);
+  for (const i of indices) h.finish(i);
   await gate.schedule([h.f.project_id]);
   await gate.idle();
   for (const item of h.cards)
@@ -5344,6 +5437,11 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
       required(mergeConfirmation(h.f, item.scenario.card.id)),
       "merge",
     );
+  return { h, gate, publish };
+}
+
+test("C-391: GitHub batch survives controller restart without redispatch and binds all three completions", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(3);
   await gate.schedule([h.f.project_id]);
   await vi.waitFor(() => {
     expect(h.c.errors.mock.calls.map((c) => String(c[0]))).toEqual([]);
@@ -5842,5 +5940,1405 @@ test("expired abandoned GitHub dispatch is settled after a complete empty scan w
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+test.each(["release", "exhaust", "base", "during_push", "cancel"] as const)(
+  "C-533: queued GitHub lock wait survives restart (%s)",
+  async (mode) => {
+    const h = await reworkGithubFixture();
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    h.git.pushCheckCandidate.mockRejectedValueOnce(
+      new CandidatePushNotStarted(30_000),
+    );
+    const project = [h.f.project_id];
+    const first = h.create();
+    await first.tick(project);
+    const original = required(h.check());
+    expect(original).toMatchObject({
+      status: "queued",
+      queue_wait: { reason: expect.stringContaining("仓库忙") },
+    });
+    const log = () =>
+      readFile(
+        join(
+          h.f.dataDir,
+          "merge-gate/logs",
+          h.f.project_id,
+          `${original.attempt_id}.log`,
+        ),
+        "utf8",
+      );
+    expect(await log()).toContain("等待锁超时");
+    expect(journal.admitted()).toEqual([]);
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    first.stop();
+    await first.idle();
+    const next = h.create();
+    try {
+      h.advance(29_999);
+      await Promise.all([next.tick(project), next.tick(project)]);
+      expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(1);
+      h.advance(1);
+      if (mode === "cancel") {
+        h.f.apply((s, a, p) =>
+          updateCard(
+            s,
+            a,
+            { card_id: h.scenario.card.id, status: "cancelled" },
+            p,
+          ),
+        );
+        await next.tick(project);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        expect(journal.unfinished()).toEqual([]);
+      } else if (mode === "exhaust") {
+        h.git.pushCheckCandidate.mockRejectedValue(
+          new CandidatePushNotStarted(30_000),
+        );
+        await next.tick(project);
+        h.advance(59_999);
+        await next.tick(project);
+        expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(2);
+        h.advance(1);
+        await next.tick(project);
+        expect(h.check()).toMatchObject({
+          status: "failed",
+          attempt_id: original.attempt_id,
+          startup_failure: "repository_busy",
+          checks: [],
+          summary: expect.stringContaining("仓库忙"),
+        });
+        expect(await log()).toContain("已停止自动重试");
+        h.advance(24 * 60 * 60_000);
+        await next.tick(project);
+        expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(3);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        expect(journal.unfinished()).toEqual([]);
+      } else {
+        if (mode === "during_push") {
+          h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+            h.c.advance(true, 1);
+            return { status: "pushed" };
+          });
+          await next.tick(project);
+          expect(h.client.dispatch).not.toHaveBeenCalled();
+        }
+        if (mode === "base") h.c.advance(true, 1);
+        h.complete("success");
+        const pending = next.schedule(project);
+        await vi.waitFor(() =>
+          expect(h.client.dispatch).toHaveBeenCalledTimes(1),
+        );
+        h.advance();
+        await next.schedule(project);
+        await (await pending).done;
+        expect(h.check()?.status).toBe("passed");
+        if (mode === "base" || mode === "during_push") {
+          expect(h.check()?.attempt_id).not.toBe(original.attempt_id);
+          expect(h.check()?.base_sha).not.toBe(original.base_sha);
+          expect(
+            journal.all().find((i) => i.attempt === original.attempt_id),
+          ).toMatchObject({ finished: true, abandoned: expect.any(String) });
+        } else expect(h.check()?.attempt_id).toBe(original.attempt_id);
+        expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+      }
+      expect(
+        h.f
+          .state()
+          .events.filter((e) => e.type === "merge_executor_unreachable"),
+      ).toEqual([]);
+      expect(h.git.publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      next.stop();
+      await next.idle();
+    }
+  },
+);
+
+test("C-533: SSH candidate distribution resumes after lock timeout, never invokes the worker while waiting", async () => {
+  let time = Date.parse("2030-01-01T00:00:00Z");
+  const { f, check } = await fixture("confirm", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.git.distribute.mockRejectedValueOnce(new CandidatePushNotStarted(30_000));
+  await c.gate.tick([f.project_id]);
+  const id = check()?.attempt_id;
+  expect(check()?.queue_wait?.reason).toContain("仓库忙");
+  expect(c.run).not.toHaveBeenCalled();
+  c.gate.stop();
+  const next = new MergeChecks(c.options);
+  try {
+    time += 30_000;
+    await Promise.all([next.tick([f.project_id]), next.tick([f.project_id])]);
+    expect(check()).toMatchObject({ status: "passed", attempt_id: id });
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.git.publish).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-533: a rebuilt candidate does not inherit dispatch identity or reset the completion's retry budget", async () => {
+  const h = await reworkGithubFixture();
+  const project = [h.f.project_id];
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  const gate = () =>
+    new MergeChecks({
+      ...h.c.options,
+      git: h.git,
+      githubClient: () => h.client as never,
+      repositoryRetryDelaysMs: [500],
+    });
+  const first = gate();
+  await first.tick(project);
+  const old = required(h.check());
+  const setHold = (hold: { reason: string; resume_condition: string } | null) =>
+    h.f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+    );
+  setHold({ reason: "wait", resume_condition: "ready" });
+  await first.tick(project);
+  expect(h.check()?.queue_wait?.reason).toContain("暂停");
+  first.stop();
+  await first.idle();
+  setHold(null);
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "9".repeat(40),
+    tree_sha: old.tree_sha,
+    previous_sha: required(old.base_sha),
+  });
+  const second = gate();
+  try {
+    h.advance(499);
+    await second.tick(project);
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(1);
+    h.advance(1);
+    await second.tick(project);
+    expect(h.check()).toMatchObject({
+      status: "failed",
+      startup_failure: "repository_busy",
+      candidate_sha: "9".repeat(40),
+    });
+    expect(h.git.pushCheckCandidate).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sha: "9".repeat(40) }),
+    );
+    expect(h.check()?.attempt_id).not.toBe(old.attempt_id);
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    second.stop();
+    await second.idle();
+  }
+});
+
+test("C-533: exhaustion is a batch startup failure, never a confirmation rerun or evidence against a member", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(1);
+  const project = [h.f.project_id];
+  h.git.pushCheckCandidate
+    .mockClear()
+    .mockRejectedValue(new CandidatePushNotStarted(30_000));
+  const batch = () => required(mergeBatches(h.f.state().events)[0]);
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await gate.tick(project);
+    }
+    expect(batch().check).toMatchObject({
+      status: "failed",
+      startup_failure: "repository_busy",
+      checks: [],
+    });
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+  const next = h.create();
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await next.tick(project);
+    }
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledTimes(3);
+    expect(batch()).toMatchObject({
+      status: "aborted",
+      check: { status: "failed", startup_failure: "repository_busy" },
+    });
+    expect(h.f.state().events.map((e) => e.type)).not.toContain(
+      "merge_batch_requeued",
+    );
+    expect(h.f.state().events.map((e) => e.type)).not.toContain(
+      "merge_batch_culprit_identified",
+    );
+    expect(h.client.dispatch).toHaveBeenCalledTimes(1); // Only the card check.
+    expect(publish).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each([false, true])(
+  "C-533: revalidate at first POST even with no recorded timeout (overlapping hold=%s)",
+  async (overlap) => {
+    const h = await reworkGithubFixture({ noRunId: true }),
+      gate = h.create(),
+      project = [h.f.project_id];
+    const hold = (value: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold: value }, p),
+      );
+    try {
+      if (overlap) {
+        h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+          hold({ reason: "wait", resume_condition: "ready" });
+          throw new CandidatePushNotStarted(30_000);
+        });
+        await gate.tick(project);
+        hold(null);
+        h.advance(30_000);
+      }
+      h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+        h.advance(5_000);
+        h.c.advance(true, 1);
+        return { status: "pushed" };
+      });
+      await gate.tick(project);
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(h.git.publish).not.toHaveBeenCalled();
+      await gate.tick(project);
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+      expect(h.client.dispatch.mock.calls[0]?.[1].sha).toBe("2".repeat(40));
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each([1, 3])(
+  "C-533: a simultaneous hold cannot erase lock timeout %i",
+  async (at) => {
+    const h = await reworkGithubFixture(),
+      gate = h.create(),
+      project = [h.f.project_id];
+    const set = (hold: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+      );
+    let pushes = 0;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) set({ reason: "wait", resume_condition: "ready" });
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (const [i, delay] of [0, 30_000, 60_000].entries()) {
+        h.advance(delay);
+        await gate.tick(project);
+        if (i + 1 === at) set(null);
+        await gate.tick(project);
+        expect(pushes).toBe(i + 1);
+      }
+      expect(h.check()).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        checks: [],
+      });
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-533: a stopped batch releases the project slot, not its members' budgets", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const settings = h.c.options.configuration.forProject();
+  if (settings.status !== "enabled" || !settings.queue)
+    throw new Error("Missing queue");
+  h.c.setConfig({ ...settings, queue: { ...settings.queue, maxBatchSize: 1 } });
+  for (let i = 0; i < 3; i++)
+    h.git.pushCheckCandidate.mockRejectedValueOnce(
+      new CandidatePushNotStarted(30_000),
+    );
+  try {
+    for (let i = 0; i < 3; i++) {
+      h.advance(100_000);
+      await gate.tick(project);
+    }
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+  const original = required(mergeBatches(h.f.state().events)[0]),
+    member = required(original.members[0]);
+  expect(original.check?.startup_failure).toBe("repository_busy");
+  const next = h.create();
+  try {
+    const { done } = await next.schedule(project);
+    await vi.waitFor(() =>
+      expect(mergeBatches(h.f.state().events)[1]?.check?.status).toBe(
+        "running",
+      ),
+    );
+    const other = required(mergeBatches(h.f.state().events)[1]);
+    expect(other.members[0]?.card_id).not.toBe(member.card_id);
+    required(
+      h.runs.get(required(other.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await next.schedule(project);
+    await done;
+    await next.tick(project);
+    expect(publish).toHaveBeenCalledOnce();
+    for (let i = 0; i < 2; i++) {
+      h.advance(86_400_000);
+      await next.tick(project);
+    }
+    expect(mergeBatches(h.f.state().events)).toHaveLength(2);
+    expect(
+      h.f
+        .state()
+        .events.filter((e) => e.type === "merge_batch_member_deferred"),
+    ).toHaveLength(1);
+    h.f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: member.card_id },
+        p,
+      ),
+    );
+    const retry = await next.schedule(project);
+    await vi.waitFor(() =>
+      expect(mergeBatches(h.f.state().events)[2]?.check?.status).toBe(
+        "running",
+      ),
+    );
+    const retried = required(mergeBatches(h.f.state().events)[2]);
+    expect(retried.members.map((m) => m.completion_id)).toEqual([
+      member.completion_id,
+    ]);
+    expect(publish).toHaveBeenCalledOnce();
+    required(
+      h.runs.get(required(retried.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await next.schedule(project);
+    await retry.done;
+    await next.tick(project);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each([1, 3])(
+  "C-533: a batch member held at timeout %i cannot reset that target's budget",
+  async (at) => {
+    const { h, gate, publish } = await confirmedGithubBatch(1),
+      project = [h.f.project_id];
+    const set = (hold: { reason: string; resume_condition: string } | null) =>
+      h.f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: h.scenario.card.id, hold }, p),
+      );
+    let pushes = 0;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) set({ reason: "wait", resume_condition: "ready" });
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (const [i, delay] of [0, 30_000, 60_000].entries()) {
+        h.advance(delay);
+        await gate.tick(project);
+        if (i + 1 === at) {
+          await gate.tick(project);
+          set(null);
+        }
+        await gate.tick(project);
+        expect(pushes).toBe(i + 1);
+      }
+      expect(mergeBatches(h.f.state().events).at(-1)?.check).toMatchObject({
+        startup_failure: "repository_busy",
+        status: "failed",
+      });
+      expect(publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-533: SSH does not start a worker for a baseline replaced during the first distribution", async () => {
+  const { f, check } = await fixture();
+  const c = controller(f);
+  c.git.distribute.mockImplementationOnce(async () => {
+    c.advance(true, 1);
+  });
+  try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(check()).toMatchObject({
+      candidate_sha: "2".repeat(40),
+      status: "passed",
+    });
+  } finally {
+    c.gate.stop();
+    await c.gate.idle();
+  }
+});
+
+test.each([
+  [1, false],
+  [3, false],
+  [1, true],
+  [3, true],
+] as const)(
+  "Q-1022: timeout %i settles after abort (successor formed first: %s)",
+  async (at, early) => {
+    const { h, gate, publish } = await confirmedGithubBatch(1),
+      project = [h.f.project_id];
+    const set = (hold: boolean) =>
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: h.scenario.card.id,
+            hold: hold ? { reason: "wait", resume_condition: "ready" } : null,
+          },
+          p,
+        ),
+      );
+    const began = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    const batches = () => mergeBatches(h.f.state().events);
+    let pushes = 0,
+      next: MergeChecks | undefined;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) {
+        began.resolve();
+        await release.promise;
+      }
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (let n = 1; n < at; n++) {
+        await gate.tick(project);
+        h.advance(n === 1 ? 30_000 : 60_000);
+      }
+      const original = await gate.schedule(project);
+      await began.promise;
+      set(true);
+      await gate.tick(project);
+      await vi.waitFor(() => expect(batches()[0]?.status).toBe("aborted"));
+      if (early) {
+        set(false);
+        await gate.schedule(project);
+        await vi.waitFor(() =>
+          expect(batches()[1]?.check?.status).toBe("queued"),
+        );
+        const successor = required(batches()[1]);
+        // The provider's own reservation also blocks this fixture. Exercise
+        // the target admission transaction independently, while its owner lives.
+        expect(
+          new RepositoryCheckCalls(h.f.store, h.c.options.clock).begin(
+            successor,
+            required(successor.check),
+            [30_000, 60_000],
+          ),
+        ).toEqual({ kind: "wait" });
+        expect(pushes).toBe(at);
+      }
+      h.advance(30_000);
+      release.resolve();
+      await original.done;
+      await gate.idle();
+      gate.stop();
+      await gate.idle();
+      if (!early) set(false);
+      next = h.create();
+      await next.tick(project);
+      expect(pushes).toBe(at);
+      const old = required(batches()[0]);
+      const last = required(
+        h.f
+          .state()
+          .events.findLast(
+            (e) =>
+              e.type === callSettled &&
+              (e.payload as RepositoryReceipt).batch_id === old.id,
+          ),
+      ).payload as RepositoryReceipt;
+      const replay = new RepositoryCheckCalls(
+        h.c.options.store,
+        h.c.options.clock,
+      );
+      h.advance(100);
+      expect(
+        replay.settle(
+          h.f.project_id,
+          h.scenario.card.id,
+          last.call_id,
+          "timeout",
+        ),
+      ).toEqual(last);
+      expect(
+        h.f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === callSettled &&
+              (e.payload as RepositoryReceipt).call_id === last.call_id,
+          ),
+      ).toHaveLength(1);
+      if (at === 1) {
+        const detail = cardDetail(h.f.state(), h.scenario.card.id);
+        expect(
+          detail?.card.merge_stage?.batch_check?.queue_wait?.reason,
+        ).toContain(last.retry_at);
+        h.advance(29_899);
+        await next.tick(project);
+        expect(pushes).toBe(1);
+        h.advance(1);
+        await next.tick(project);
+        expect(pushes).toBe(2);
+        h.advance(59_999);
+        await next.tick(project);
+        expect(pushes).toBe(2);
+        h.advance(1);
+        await next.tick(project);
+      }
+      h.advance(86_400_000);
+      await next.tick(project);
+      expect(pushes).toBe(3);
+      expect(batches()[0]).toMatchObject({
+        status: "aborted",
+        check: { status: "interrupted" },
+      });
+      expect(batches()[1]?.check).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        summary: expect.stringContaining("3 次"),
+      });
+      expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+      expect(publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      gate.stop();
+      next?.stop();
+      await gate.idle();
+      await next?.idle();
+    }
+  },
+);
+
+test("Q-1022: a late receipt belongs to the registered group and recovery epoch, not another target", async () => {
+  const { h, gate } = await confirmedGithubBatch(2);
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  try {
+    await gate.tick([h.f.project_id]);
+    const events = h.f.state().events,
+      batch = required(mergeBatches(events)[0]),
+      member = required(batch.members[0]);
+    const formed = required(
+      events.find((e) => e.type === "merge_batch_formed"),
+    );
+    const oldReceipt = required(
+      events.find(
+        (e) =>
+          e.type === callSettled &&
+          (e.payload as RepositoryReceipt).batch_id === batch.id,
+      ),
+    );
+    const id = "MB-999" as MergeBatch["id"];
+    const abort: Event = {
+      ...formed,
+      seq: formed.seq + 100,
+      type: "merge_batch_aborted",
+      payload: { batch_id: batch.id, reason: "member_left" },
+    };
+    const interrupted: Event = {
+      ...formed,
+      seq: abort.seq - 1,
+      type: "merge_batch_check_finished",
+      payload: {
+        batch_id: batch.id,
+        check: {
+          ...(batch.check as unknown as Record<string, string>),
+          status: "interrupted",
+        },
+      },
+    };
+    const regroup = (changes: Partial<MergeBatch>, extra: Event[] = []) => {
+      const successor = {
+        ...batch,
+        id,
+        status: "checking" as const,
+        ...changes,
+      };
+      const rebuild: Event = {
+        ...formed,
+        seq: abort.seq + 1,
+        payload: {
+          ...(formed.payload as Record<string, string>),
+          ...(changes as Record<string, string>),
+          id,
+        },
+      };
+      // Deliver the old receipt only AFTER replacement formation and any reset.
+      return batchCallHistory(
+        [
+          ...events.filter((e) => e !== oldReceipt),
+          interrupted,
+          abort,
+          rebuild,
+          ...extra,
+          oldReceipt,
+        ],
+        successor,
+      );
+    };
+    expect(regroup({}).timeout?.ordinal).toBe(1);
+    for (const changed of [
+      { base_sha: "9".repeat(40) },
+      { purpose: "bisect" as const, parent_batch_id: batch.id },
+      { final_tree_sha: "8".repeat(40) },
+      { members: batch.members.toReversed() },
+      {
+        members: [
+          { ...member, completion_id: "D-999" as typeof member.completion_id },
+          ...batch.members.slice(1),
+        ],
+      },
+      {
+        members: [
+          { ...member, tree_sha: "7".repeat(40) },
+          ...batch.members.slice(1),
+        ],
+      },
+    ])
+      expect(regroup(changed).timeout).toBeUndefined();
+    expect(
+      regroup({}, [
+        {
+          ...oldReceipt,
+          id: "resume" as Event["id"],
+          card_id: member.card_id,
+          actor: { kind: "human", project_id: batch.project_id },
+          type: "merge_batch_member_resumed",
+          payload: { completion_id: member.completion_id, batch_id: batch.id },
+        },
+      ]).timeout,
+    ).toBeUndefined();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("Q-1022: a registration with no result is not proof of a pre-transport timeout after restart", async () => {
+  const { h, gate } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const settings = h.c.options.configuration.forProject();
+  if (settings.status !== "enabled" || !settings.queue)
+    throw new Error("Missing queue");
+  h.c.setConfig({ ...settings, queue: { ...settings.queue, maxBatchSize: 1 } });
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  let next: MergeChecks | undefined;
+  try {
+    await gate.tick(project);
+    gate.stop();
+    await gate.idle();
+    const old = required(mergeBatches(h.f.state().events)[0]),
+      check = required(old.check),
+      card = required(old.members[0]).card_id;
+    h.advance(30_000);
+    const before = new RepositoryCheckCalls(h.f.store, h.c.options.clock);
+    const unknown = before.begin(old, check, [30_000, 60_000]);
+    if (unknown.kind !== "opened") throw new Error("Expected registration"); // no callback at restart
+    expect(repositoryCheckWait(h.f.state().events, check, old)).toMatchObject({
+      timeouts: 1,
+      lastWaitWasLockTimeout: false,
+    });
+    h.f.apply((s, a, p) =>
+      updateCard(
+        s,
+        a,
+        { card_id: card, hold: { reason: "wait", resume_condition: "ready" } },
+        p,
+      ),
+    );
+    next = h.create();
+    await next.tick(project);
+    const other = required(mergeBatches(h.f.state().events)[1]);
+    expect(other.members[0]?.card_id).not.toBe(card);
+    // An unanswered registration on the old target neither blocks nor charges the new one.
+    expect(batchCallHistory(h.f.state().events, other).timeout?.ordinal).toBe(
+      1,
+    );
+    expect(batchCallHistory(h.f.state().events, old).pending.size).toBe(1);
+    // A later verified receipt still belongs to the old cycle.
+    expect(
+      before.settle(h.f.project_id, card, unknown.id, "timeout").ordinal,
+    ).toBe(2);
+    expect(batchCallHistory(h.f.state().events, other).timeout?.ordinal).toBe(
+      1,
+    );
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    next?.stop();
+    await gate.idle();
+    await next?.idle();
+  }
+});
+
+test("Q-1028: every regrouped member sees the original lock deadline until the batch starts", async () => {
+  const { h, gate, publish } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const began = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+    began.resolve();
+    await release.promise;
+    throw new CandidatePushNotStarted(30_000);
+  });
+  const batches = () => mergeBatches(h.f.state().events);
+  const holdAll = (hold: boolean) => {
+    for (const { scenario } of h.cards)
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: scenario.card.id,
+            hold: hold ? { reason: "wait", resume_condition: "ready" } : null,
+          },
+          p,
+        ),
+      );
+  };
+  const cardChecks = () =>
+    h.cards.map(
+      ({ scenario }) =>
+        cardDetail(h.f.state(), scenario.card.id)?.card.merge_stage
+          ?.batch_check,
+    );
+  try {
+    const original = await gate.schedule(project);
+    await began.promise;
+    holdAll(true);
+    await gate.tick(project);
+    expect(batches()[0]?.status).toBe("aborted");
+    release.resolve();
+    await original.done;
+    const receipt = required(
+      h.f.state().events.findLast((e) => e.type === callSettled),
+    ).payload as RepositoryReceipt;
+    expect(receipt).toMatchObject({
+      outcome: "timeout",
+      ordinal: 1,
+      retry_at: new Date(h.now() + 30_000).toISOString(),
+    });
+    holdAll(false);
+    await gate.tick(project);
+    const successor = required(batches()[1]);
+    for (const check of cardChecks()) {
+      expect(check).toMatchObject({
+        batch_id: successor.id,
+        status: "queued",
+        queue_wait: { reason: expect.stringContaining("仓库忙") },
+      });
+      expect(check?.queue_wait?.reason).toContain(
+        `第 ${receipt.ordinal} 次等待锁超时，${receipt.retry_at}`,
+      );
+    }
+    h.advance(29_999);
+    await gate.tick(project);
+    const waits = h.f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "merge_check_waiting" &&
+          (e.payload as { batch_id?: string }).batch_id === successor.id &&
+          (e.payload as { reason: string }).reason.includes("仓库忙"),
+      );
+    expect(waits).toHaveLength(1);
+    expect(waits[0]?.payload).not.toHaveProperty("repository_retry_at");
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(publish).not.toHaveBeenCalled();
+    h.advance(1);
+    await gate.schedule(project);
+    await vi.waitFor(() => expect(batches()[1]?.check?.status).toBe("running"));
+    for (const check of cardChecks()) expect(check?.queue_wait).toBeUndefined();
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    required(
+      h.runs.get(required(batches()[1]?.check?.external_run).run_id),
+    ).conclusion = "success";
+    h.advance();
+    await gate.schedule(project);
+    await gate.idle();
+    await gate.tick(project);
+    expect(batches().map((b) => b.status)).toEqual(["aborted", "published"]);
+    expect(publish).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    release.resolve();
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test.each([
+  ["single", 1, false],
+  ["single", 3, false],
+  ["batch", 1, false],
+  ["batch", 3, false],
+  ["single", 1, true],
+  ["batch", 3, true],
+] as const)(
+  "V-2499: a detached publisher settles its original %s lock timeout %i (early successor: %s)",
+  async (mode, at, early) => {
+    const batch = mode === "batch" ? await confirmedGithubBatch(1) : undefined;
+    const h = batch?.h ?? (await reworkGithubFixture());
+    const gate = batch?.gate ?? h.create(),
+      project = [h.f.project_id];
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    const enter = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let calls = 0,
+      next: MergeChecks | undefined;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++calls === at) {
+        enter.resolve();
+        await release.promise;
+      }
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (let i = 1; i < at; i++) {
+        await gate.tick(project);
+        h.advance(i === 1 ? 30_000 : 60_000);
+      }
+      const flight = await gate.schedule(project);
+      await enter.promise;
+      const publisher = required(
+        journal.all().find((i) => i.phase === "publishing"),
+      );
+      gate.stop();
+      await flight.done;
+      await gate.idle();
+      const receipts = () =>
+        h.f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === callSettled &&
+              (e.payload as RepositoryReceipt).attempt_id ===
+                publisher.attempt &&
+              (e.payload as RepositoryReceipt).outcome === "timeout",
+          );
+      expect(receipts()).toHaveLength(at - 1); // detachment is not a timeout
+      if (early) {
+        next = h.create();
+        await next.tick(project);
+        expect(calls).toBe(at);
+      }
+      h.advance(1_000); // backoff starts at the proof, not at handoff
+      release.resolve();
+      await vi.waitFor(() =>
+        expect(
+          journal.all().find((i) => i.attempt === publisher.attempt),
+        ).toMatchObject({ phase: "reserved", admission_suspended: true }),
+      );
+      expect(receipts()).toHaveLength(at);
+      expect(receipts().at(-1)?.payload).toMatchObject({
+        ordinal: at,
+        retry_at: at === 1 ? new Date(h.now() + 30_000).toISOString() : null,
+      });
+      next ??= h.create();
+      await next.tick(project);
+      expect(calls).toBe(at);
+      const check = () =>
+        batch ? mergeBatches(h.f.state().events)[0]?.check : h.check();
+      if (at === 1) {
+        expect(check()?.status).toBe("queued");
+        h.advance(29_999);
+        await next.tick(project);
+        expect(calls).toBe(1);
+        h.advance(1);
+        await next.tick(project);
+        expect(calls).toBe(2);
+      } else {
+        expect(check()).toMatchObject({
+          status: "failed",
+          startup_failure: "repository_busy",
+        });
+        h.advance(86_400_000);
+        await next.tick(project);
+        expect(calls).toBe(3);
+      }
+      expect(h.client.dispatch).toHaveBeenCalledTimes(batch ? 1 : 0);
+      if (batch) expect(batch.publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      gate.stop();
+      next?.stop();
+      await gate.idle();
+      await next?.idle();
+    }
+  },
+);
+
+test("V-2499: a late single-card receipt cannot charge another completion or cross a recheck", async () => {
+  const h = await reworkGithubFixture(),
+    gate = h.create();
+  const target = { project_id: h.f.project_id, card_id: h.scenario.card.id };
+  h.git.pushCheckCandidate.mockRejectedValueOnce(
+    new CandidatePushNotStarted(30_000),
+  );
+  try {
+    await gate.tick([target.project_id]);
+    const check = required(h.check()),
+      events = h.f.state().events;
+    const receipt = required(events.find((e) => e.type === callSettled));
+    const reset: Event = {
+      ...receipt,
+      type: "merge_check_requeued",
+      actor: { kind: "human", project_id: target.project_id },
+      payload: { completion_id: check.completion_id },
+    };
+    const after = [...events.filter((e) => e !== receipt), reset, receipt];
+    expect(repositoryCheckWait(events, check, target).timeouts).toBe(1);
+    expect(repositoryCheckWait(after, check, target)).toMatchObject({
+      timeouts: 0,
+      retryAt: undefined,
+      exhausted: false,
+    });
+    expect(
+      repositoryCheckWait(
+        events,
+        { ...check, completion_id: "D-999" as typeof check.completion_id },
+        target,
+      ).timeouts,
+    ).toBe(0);
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test.each(["lint", "e2e"] as const)(
+  "whole-job logs publish only the failed %s step on the timeline and first page",
+  async (failedStep) => {
+    const { GITHUB_WORKFLOW_STEPS } = await import("@cardigan/host");
+    const line = (step: "test" | "lint" | "e2e", text: string) =>
+      `2030-01-01T00:${String(GITHUB_WORKFLOW_STEPS.indexOf(step)).padStart(2, "0")}:02.1234567Z ${text}\n`;
+    // Exercise both a label in the failing step and one in the previous step.
+    const labelStep = failedStep === "lint" ? failedStep : "test";
+    const h = await reworkGithubFixture({
+      failedStep,
+      log: [
+        line("test", ".".repeat(132000)).trimEnd() + "\x1b[",
+        "2K\n",
+        line("test", "Error: recovered sample") +
+          line("test", "FAIL recovered sample") +
+          line("test", "Tests 99 passed") +
+          line("test", "display_label=YQ==; password =") +
+          line(labelStep, "  'private-continuation") +
+          line(labelStep, "FAIL private-continuation'") +
+          line(labelStep, "display_label=cmFpbnk=") +
+          line(failedStep, "FAIL src/check.spec.ts > required check") +
+          line(
+            failedStep,
+            "Error: required diagnostic CI_COLOR = 'private synthetic phrase'",
+          ) +
+          line(
+            failedStep,
+            "##[error] connect postgresql://demo:private-uri@db.invalid/path",
+          ) +
+          line(failedStep, "Tests 1 failed"),
+      ],
+    });
+    const gate = h.create();
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete("failure");
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      const body = await readFile(
+        join(
+          h.f.dataDir,
+          "merge-gate/logs",
+          h.f.project_id,
+          required(check.log_ref),
+        ),
+        "utf8",
+      );
+      const timeline = h.f
+        .state()
+        .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+      for (const text of [check.summary, timeline, body.split("===")[0]]) {
+        expect(text).toContain("required check");
+        expect(text).toContain("required diagnostic");
+        expect(text).toContain("Tests 1 failed");
+        expect(text).not.toContain("recovered sample");
+        expect(text).not.toContain("Tests 99 passed");
+      }
+      expect(body.split(`=== ${failedStep} ===`)[1]).toContain(
+        "required check",
+      );
+      expect(check.failure_excerpt).toContain("required check");
+      expect(check.failure_excerpt).not.toContain("recovered sample");
+      expect(check.timeout_only).not.toBe(true);
+      for (const secret of [
+        "private-uri",
+        "private synthetic phrase",
+        "private-continuation",
+        "cmFpbnk",
+        "YQ==",
+      ])
+        expect(body + JSON.stringify(check) + timeline).not.toContain(secret);
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["success", "failure"] as const)(
+  "persistent local storage fault preserves verified GitHub %s and does not redispatch",
+  async (conclusion) => {
+    const h = await reworkGithubFixture();
+    const gate = h.create();
+    const original = fs.rename;
+    let attempts = 0;
+    const rename = vi
+      .spyOn(fs, "rename")
+      .mockImplementation(async (from, to) => {
+        if (String(to).endsWith(".log")) {
+          attempts++;
+          throw Object.assign(new Error("private detail"), { code: "ENOSPC" });
+        }
+        return original(from, to);
+      });
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete(conclusion);
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      expect(check.status).toBe(conclusion === "success" ? "passed" : "failed");
+      expect(check.checks).toHaveLength(6);
+      expect(check.summary).toContain("ENOSPC");
+      expect(check.summary).toContain(check.external_run?.html_url);
+      expect(check.summary).not.toContain("private detail");
+      expect(attempts).toBe(3);
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+    } finally {
+      rename.mockRestore();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("verified setup failure reaches the result, first page and timeline without unrelated annotations", async () => {
+  const h = await reworkGithubFixture({
+    failedStep: "Setup Node",
+    log:
+      "2030-01-01T00:00:02.1234567Z ##[error]wrong passed step\n" +
+      "2030-01-01T00:03:02Z ##[error]Unable to install Node\n" +
+      "##[group]Run Setup Node\n##[error]wrong unverified step\n",
+  });
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.checks.map((c) => c.status)).toEqual(Array(6).fill("not_run"));
+    const body = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    const timeline = h.f
+      .state()
+      .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+    for (const text of [check.summary, timeline, body.split("===")[0]]) {
+      expect(text).toContain("Setup Node");
+      expect(text).toContain("Unable to install Node");
+      expect(text).not.toContain("wrong");
+    }
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test.each([5_000, undefined])(
+  "V-2510: pre-POST handoff does not inherit the discovery window (%s)",
+  async (waitStartMs) => {
+    const h = await reworkGithubFixture(
+      waitStartMs === undefined ? {} : { waitStartMs },
+    );
+    const project = [h.f.project_id];
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    const entered = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    const release = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let calls = 0,
+      gate = h.create();
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      const i = calls++;
+      entered[i]?.resolve();
+      await release[i]?.promise;
+      throw new CandidatePushNotStarted(30_000);
+    });
+    const events = (type: string) =>
+      h.f.state().events.filter((e) => e.type === type);
+    try {
+      for (const [i, delay] of [30_000, 60_000].entries()) {
+        const flight = await gate.schedule(project);
+        await required(entered[i]).promise;
+        const intent = required(journal.admitted()[0]);
+        gate.stop();
+        await flight.done;
+        await gate.idle();
+        gate = h.create();
+        h.advance(6_000);
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toBe("等待本次候选推送结束");
+        expect(events(callOpened)).toHaveLength(i + 1);
+        expect(events(callSettled)).toHaveLength(i);
+        expect(events("merge_executor_unreachable")).toHaveLength(0);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        h.advance(24_000);
+        required(release[i]).resolve();
+        await vi.waitFor(() => expect(journal.admitted()).toHaveLength(0));
+        const at = new Date(h.now() + delay).toISOString();
+        expect(events(callSettled).at(-1)?.payload).toMatchObject({
+          ordinal: i + 1,
+          outcome: "timeout",
+          retry_at: at,
+        });
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toContain(at);
+        expect(
+          await readFile(
+            join(
+              h.f.dataDir,
+              "merge-gate/logs",
+              h.f.project_id,
+              `${intent.attempt}.log`,
+            ),
+            "utf8",
+          ),
+        ).toContain(at);
+        h.advance(delay - 1);
+        await gate.tick(project);
+        expect(calls).toBe(i + 1);
+        h.advance(1); // next iteration starts exactly at the displayed deadline
+      }
+      await Promise.all([gate.tick(project), gate.tick(project)]);
+      expect(calls).toBe(3);
+      expect(h.check()).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        checks: [],
+      });
+      h.advance(86_400_000);
+      await gate.tick(project);
+      expect(calls).toBe(3);
+      expect(events("merge_executor_unreachable")).toHaveLength(0);
+      expect(events("merge_executor_recovered")).toHaveLength(0);
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      for (const latch of release) latch.resolve();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["handoff", "watchdog"] as const)(
+  "V-2510: original local deadline retains the writer fence and never revives a cancelled target (%s)",
+  async (mode) => {
+    const h = await reworkGithubFixture({ waitStartMs: 5_000 });
+    const project = [h.f.project_id],
+      start = h.now();
+    const { GithubDispatchJournal, GITHUB_POLL_DEFAULTS } = await import(
+      "@cardigan/host"
+    );
+    const journal = new GithubDispatchJournal(h.f.store);
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new CandidatePushNotStarted(30_000);
+    });
+    let gate = h.create();
+    if (mode === "watchdog")
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const flight = await gate.schedule(project);
+      await entered.promise;
+      const writer = required(journal.admitted()[0]);
+      const deadline =
+        start +
+        3600_000 +
+        GITHUB_POLL_DEFAULTS.queueWaitMs +
+        CHECKOUT_LIMITS.graceMs;
+      expect(writer.publicationDeadlineAt).toBe(deadline);
+      if (mode === "watchdog") {
+        h.advance(deadline - start);
+        await vi.advanceTimersByTimeAsync(deadline - start);
+        await flight.done;
+        await gate.idle();
+        vi.useRealTimers();
+      } else {
+        gate.stop();
+        await flight.done;
+        await gate.idle();
+        gate = h.create();
+        h.advance(deadline - start - 1);
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toBe("等待本次候选推送结束");
+        h.advance(1);
+        await gate.tick(project);
+      }
+      expect(h.check()?.queue_wait?.reason).toBe("本地候选发布未结算，待恢复");
+      gate.stop();
+      await gate.idle();
+      gate = h.create();
+      await gate.tick(project);
+      const reason = "本地候选发布未结算，待恢复";
+      expect(h.check()?.queue_wait?.reason).toBe(reason);
+      expect(
+        h.f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === "merge_check_waiting" &&
+              (e.payload as { reason: string }).reason === reason,
+          ),
+      ).toHaveLength(1);
+      expect(journal.admitted()).toEqual([writer]);
+      expect(
+        h.f.state().events.filter((e) => e.type === callOpened),
+      ).toHaveLength(1);
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          { card_id: h.scenario.card.id, status: "cancelled" },
+          p,
+        ),
+      );
+      await gate.tick(project);
+      expect(journal.admitted()).toMatchObject([
+        { phase: "publishing", abandoned: "superseded" },
+      ]);
+      release.resolve();
+      await vi.waitFor(() => expect(journal.admitted()).toHaveLength(0));
+      h.advance(60_000);
+      await gate.tick(project);
+      expect(
+        h.f
+          .state()
+          .events.filter((e) => e.type === callSettled)
+          .map((e) => e.payload),
+      ).toMatchObject([
+        { attempt_id: writer.attempt, ordinal: 1, outcome: "timeout" },
+      ]);
+      expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(
+        h.f.state().events.some((e) => e.type === "merge_executor_unreachable"),
+      ).toBe(false);
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      release.resolve();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("V-2510: an actual API outage before publication keeps its project backoff", async () => {
+  const h = await reworkGithubFixture({ waitStartMs: 5_000 });
+  const { GithubExecutorError } = await import("@cardigan/host");
+  h.client.token.mockRejectedValueOnce(new GithubExecutorError("api"));
+  const gate = h.create(),
+    project = [h.f.project_id];
+  try {
+    await gate.tick(project);
+    expect(
+      h.f.state().events.filter((e) => e.type === "merge_executor_unreachable"),
+    ).toHaveLength(1);
+    expect(h.git.pushCheckCandidate).not.toHaveBeenCalled();
+    h.advance(6_000);
+    await gate.tick(project);
+    expect(h.client.token).toHaveBeenCalledOnce();
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    expect(
+      h.f
+        .state()
+        .events.some(
+          (e) =>
+            e.type === callSettled &&
+            (e.payload as RepositoryReceipt).outcome === "timeout",
+        ),
+    ).toBe(false);
+  } finally {
+    gate.stop();
+    await gate.idle();
   }
 });

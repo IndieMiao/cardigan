@@ -77,6 +77,7 @@ export {
 } from "./commands/merge.js";
 export * from "./commands/merge-batch.js";
 export {
+  canRecheckMerge,
   FAILURE_EXCERPT_MAX_BYTES,
   hasAutoRerun,
   hasPassedMergeCheck,

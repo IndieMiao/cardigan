@@ -4,7 +4,15 @@ import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 type Json = Record<string, unknown>;
 
 test("V9b role routes list, show, version history and run every write as the logged-in human", async () => {
-  const f = await m5Cross();
+  const f = await m5Cross({
+    roleLaunchConfig: () => ({
+      profiles: {
+        fixture: { harness: "codex", model: "gpt-fixture" },
+        "codex-agent": { harness: "codex" },
+      },
+      providers: {},
+    }),
+  });
   try {
     const roles = f.projectPath("/roles");
     expect((await f.call(roles)).status).toBe(401);
@@ -45,6 +53,11 @@ test("V9b role routes list, show, version history and run every write as the log
     expect(list.default_roles).toEqual(
       expect.arrayContaining(["coder", "frontend_engineer", "host_ops"]),
     );
+    // C-494: the role pickers list the host's loaded profiles, no secrets.
+    expect(list.launch_profiles).toEqual([
+      { name: "codex-agent", harness: "codex", model: null },
+      { name: "fixture", harness: "codex", model: "gpt-fixture" },
+    ]);
     expect((list.allowlists as Record<string, string[]>).produce).not.toContain(
       "submit_review",
     );

@@ -122,19 +122,30 @@ test("owner creates audited global employees; options include all characters and
   expect(options.status).toBe(200);
   expect(options.json).toMatchObject({
     library: expect.any(Array),
-    roles: [{ role_id: "coder", display_name: expect.any(String) }],
+    // C-516: the profile "跟随角色" resolves to.
+    roles: [
+      {
+        role_id: "coder",
+        display_name: expect.any(String),
+        launch_profile_ref: "fixture",
+      },
+    ],
   });
-  // C-516: each employee says whether it pins a launch profile (null: follow the role).
+  const library = (options.json as { library: unknown[] }).library;
   expect((options.json as { employees: unknown[] }).employees).toEqual([
     {
       id: "E-1",
       name: "云长",
+      title: input.title,
+      status: "inactive",
+      avatar: "/avatars/v1/guan-yu/head-64.webp",
       role_id: "coder",
       projects: ["p-test"],
+      // C-516: a pinned launch profile, or null to follow the role.
       launch_profile_ref: null,
+      role_change_blocked: null,
     },
   ]);
-  const library = (options.json as { library: unknown[] }).library;
   expect(library).toHaveLength(60);
   expect(library).toContainEqual({
     id: "guan-yu",
@@ -568,6 +579,14 @@ test("owner transfers across projects only after all bindings and runs end; repl
         .listAfter(0)
         .filter((e) => e.type === "employee_role_changed"),
     );
+  // C-494: the options read names the same blocker the transfer would hit.
+  const blocked = async () =>
+    (
+      (await call(h.port, `${path}/options`, { cookie })).json as {
+        employees: { id: string; role_change_blocked: string | null }[];
+      }
+    ).employees.find((e) => e.id === employee.id)?.role_change_blocked;
+  expect(await blocked()).toBe("assignment");
   expect((await update({})).status).toBe(400);
   expect((await update({ ...patch, changed_by_member_id: "M-1" })).status).toBe(
     400,
@@ -582,12 +601,14 @@ test("owner transfers across projects only after all bindings and runs end; repl
     tx.assignments.put(other, { ...owned, status: "released" });
     tx.runs.put(other, { ...run(1), status: "unknown" });
   });
+  expect(await blocked()).toBe("run");
   expect((await update(patch)).status).toBe(409);
   expect(employees()).toEqual([employee]);
   expect(events()).toEqual([]);
   h.store.uow.run((tx) =>
     tx.runs.put(other, { ...run(1), status: "cancelled" }),
   );
+  expect(await blocked()).toBeNull();
   for (let i = 0; i < 2; ++i) {
     const result = await update(patch, "idle-transfer");
     expect(result.status).toBe(200);

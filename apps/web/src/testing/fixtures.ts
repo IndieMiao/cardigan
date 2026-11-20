@@ -179,7 +179,6 @@ export function fakeClient(
       profiles: [],
       providers: [],
     }),
-    launchProfileNames: async () => ({ profiles: [] }),
     previewLaunchChange: async (version, change) => ({
       version,
       preview_id: "00000000-0000-4000-8000-000000000000",
@@ -219,6 +218,10 @@ export function fakeClient(
       merge_config_invalid: false,
     }),
     setRunLimit: async () => {},
+    machines: async () => ({ machines: [] }),
+    machine: async (_p, id) => {
+      throw new Error(`机器 ${id} 不存在`);
+    },
     execution: async () => ({ assignments: [], runs: [], machines: [] }),
     // Pages the overridden execution view's Runs like the server does, so a
     // test that only fakes `execution` still sees the drawer's Run history.
@@ -281,6 +284,19 @@ export function fakeClient(
     rollbackRole: async () => {
       throw new Error("rollbackRole not stubbed");
     },
+    updateEmployee: async () => {
+      throw new Error("updateEmployee not stubbed");
+    },
+    previewRoleDocument: async () => {
+      throw new Error("previewRoleDocument not stubbed");
+    },
+    applyRoleDocument: async () => {
+      throw new Error("applyRoleDocument not stubbed");
+    },
+    exportRole: async () => {
+      throw new Error("exportRole not stubbed");
+    },
+    launchProfileNames: async () => [],
     setDelegation: async () => {},
     setCrossCardRead: async () => {},
     setAutoMerge: async () => {},

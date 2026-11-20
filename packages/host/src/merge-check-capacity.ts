@@ -43,7 +43,10 @@ export function acquireMergeCheckCapacity(
     assertCheckAdmission(store, project, machine, grant);
     reclaimMergeCheckCapacity(store);
     if (deploymentInProgress(store)) throw new DeploymentInProgress();
-    if (limit !== undefined && attemptRunning(store, project, attempt))
+    if (
+      limit !== undefined &&
+      mergeCheckAttemptRunningInTransaction(store, project, attempt)
+    )
       throw new CheckAdmissionClosed();
     if (
       limit !== undefined &&
@@ -139,7 +142,8 @@ export function mergeCheckCapacityAvailable(
   );
 }
 
-function attemptRunning(
+/** Caller holds the capacity read or admission write transaction. */
+export function mergeCheckAttemptRunningInTransaction(
   store: Store,
   project: ProjectId,
   attempt: string,
@@ -159,5 +163,7 @@ export function mergeCheckAttemptRunning(
   project: ProjectId,
   attempt: string,
 ): boolean {
-  return store.uow.read(() => attemptRunning(store, project, attempt));
+  return store.uow.read(() =>
+    mergeCheckAttemptRunningInTransaction(store, project, attempt),
+  );
 }
