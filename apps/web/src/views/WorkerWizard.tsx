@@ -372,12 +372,19 @@ export function WorkerWizardDrawer({
     }
     const create = client.createWorkerWizard;
     if (!create) return;
+    const replaced = wizard?.id;
     void act(
       "preview",
       async () => {
         const { wizard: created } = await create.call(client, projectId, input);
         // Kept even if the reader left meanwhile: the session exists now.
         rememberWizard(projectId, created.id);
+        // An edit that changed the machine leaves the old session behind on
+        // the server (same machine: the server already replaced it).
+        if (replaced && replaced !== created.id)
+          void client
+            .workerWizardAction?.(projectId, replaced, { kind: "cancel" })
+            .catch(() => undefined);
         return created;
       },
       () => setEditing(false),
@@ -760,28 +767,36 @@ function DiffTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {diff.map((d) => (
-          <TableRow key={d.field}>
-            <DataTableCell data-record="lead">
-              <code>{d.field}</code>
-            </DataTableCell>
-            <DataTableCell data-label="原值">{value(d.before)}</DataTableCell>
-            <DataTableCell data-label="新值">{value(d.after)}</DataTableCell>
-            <DataTableCell nowrap data-record="aside">
-              <SettingsDiff
-                op={
-                  d.change === "add"
-                    ? "add"
-                    : d.change === "remove"
-                      ? "remove"
-                      : undefined
-                }
-              >
-                {CHANGES[d.change] ?? d.change}
-              </SettingsDiff>
-            </DataTableCell>
-          </TableRow>
-        ))}
+        {diff.map((raw) => {
+          // The launch switch reports its values as "false → true".
+          const pair = /^(.+?) → (.+)$/u.exec(raw.change);
+          const d =
+            pair && raw.before === undefined && raw.after === undefined
+              ? { ...raw, change: "change", before: pair[1], after: pair[2] }
+              : raw;
+          return (
+            <TableRow key={d.field}>
+              <DataTableCell data-record="lead">
+                <code>{d.field}</code>
+              </DataTableCell>
+              <DataTableCell data-label="原值">{value(d.before)}</DataTableCell>
+              <DataTableCell data-label="新值">{value(d.after)}</DataTableCell>
+              <DataTableCell nowrap data-record="aside">
+                <SettingsDiff
+                  op={
+                    d.change === "add"
+                      ? "add"
+                      : d.change === "remove"
+                        ? "remove"
+                        : undefined
+                  }
+                >
+                  {CHANGES[d.change] ?? d.change}
+                </SettingsDiff>
+              </DataTableCell>
+            </TableRow>
+          );
+        })}
       </TableBody>
     </SettingsTable>
   );
@@ -870,7 +885,17 @@ function Steps({
                   {s.state === "blocked" ? (
                     <>
                       {s.reason && <code>{s.reason}</code>}
-                      {s.next && <SettingsText>{s.next}</SettingsText>}
+                      {s.next && (
+                        <p>
+                          {s.next.split("\n").map((line, i) => (
+                            // biome-ignore lint/suspicious/noArrayIndexKey: lines of one fixed hint
+                            <span key={i}>
+                              {i > 0 && <br />}
+                              {line}
+                            </span>
+                          ))}
+                        </p>
+                      )}
                       {command && (
                         <Button
                           onClick={() =>

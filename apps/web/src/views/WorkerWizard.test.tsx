@@ -311,7 +311,16 @@ test("nine steps: preview, confirm before writing, fail in place, continue, then
   // Remote launch stays off until previewed and confirmed separately.
   expect(dialog.getByText("未开启")).toBeTruthy();
   fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
-  await dialog.findByRole("table", { name: "派发配置差异" });
+  const launchDiff = await dialog.findByRole("table", { name: "派发配置差异" });
+  // "false → true" is shown in the 原值 / 新值 columns, as a 修改.
+  const cells = within(
+    within(launchDiff)
+      .getByText("allow_remote_launch")
+      .closest("tr") as HTMLElement,
+  )
+    .getAllByRole("cell")
+    .map((c) => c.textContent);
+  expect(cells).toEqual(["allow_remote_launch", "false", "true", "修改"]);
   const enable = dialog.getByRole("button", { name: "开启远程派发" });
   expect((enable as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(dialog.getByRole("checkbox", { name: "我确认开启远程派发" }));
@@ -684,4 +693,37 @@ test("V-2530: a preview the server accepted after the page was left can still be
   );
   const again = within(await screen.findByRole("dialog"));
   await again.findByRole("button", { name: "确认写入配置" });
+});
+
+test("editing the preview to another machine gives up the replaced session", async () => {
+  const fake = backend([]);
+  // The fake reuses its id; give the next session a new one.
+  const create = fake.client.createWorkerWizard;
+  let creates = 0;
+  fake.client.createWorkerWizard = vi.fn(async (p, body) => {
+    const reply = await create(p, body);
+    if (++creates === 1) return reply;
+    fake.mutate((w) => ({ ...w, id: "6f1c2a7e-0000-4000-8000-0000000000aa" }));
+    return { wizard: fake.current() as WorkerWizardView };
+  });
+  page(fake.client);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 worker" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await fill(dialog);
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "返回修改" }));
+  const first = fake.current()?.id;
+  fireEvent.change(dialog.getByRole("textbox", { name: "机器编号" }), {
+    target: { value: "studio-2" },
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await dialog.findByRole("button", { name: "确认写入配置" });
+  await waitFor(() =>
+    expect(fake.client.workerWizardAction).toHaveBeenCalledWith("p-1", first, {
+      kind: "cancel",
+    }),
+  );
+  expect(window.localStorage.getItem("cardigan.worker-wizard.p-1")).toBe(
+    "6f1c2a7e-0000-4000-8000-0000000000aa",
+  );
 });
