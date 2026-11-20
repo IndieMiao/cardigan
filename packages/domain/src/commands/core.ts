@@ -478,6 +478,12 @@ export class CommandDraft {
       (this.state[collection] ?? NONE) as readonly CommandEntities[K][],
     ).get(id);
     ensure(entity, "not_found", `${collection}:${id} was not found`);
+    ensure(
+      collection !== "attachments" ||
+        !(entity as E.Attachment).streamed_artifact?.expired,
+      "not_found",
+      `Attachment ${id} has expired`,
+    );
     return entity;
   }
   put<K extends keyof CommandEntities>(

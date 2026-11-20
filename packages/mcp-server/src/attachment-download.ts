@@ -1,7 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AttachmentStore } from "@cardigan/domain";
+import type { AttachmentId, AttachmentStore } from "@cardigan/domain";
+import { sendArtifact } from "./artifact-files.js";
 import { ToolError } from "./errors.js";
-import { readVerifiedAttachment } from "./tools/read-attachment.js";
+import {
+  accessibleAttachment,
+  readVerifiedAttachment,
+} from "./tools/read-attachment.js";
+import { auditReferenceRead, referenceCard } from "./tools/reference-read.js";
 import type { ToolContext } from "./tools/types.js";
 
 /** Binary transport for the existing read_attachment capability. No paths or
@@ -13,6 +18,7 @@ export async function serveAttachmentDownload(
   attachments: Pick<AttachmentStore, "get">,
   context: ToolContext,
   allowedHosts: readonly string[],
+  dataDir?: string,
 ) {
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -34,8 +40,21 @@ export async function serveAttachmentDownload(
       [...url.searchParams.keys()].some((key) => key !== "attachment_id")
     )
       throw ToolError.validation("Provide only one attachment_id");
+    const a = accessibleAttachment(ids[0] as AttachmentId, context);
+    if (a.streamed_artifact) {
+      await sendArtifact(dataDir, a, res, false, () => {
+        accessibleAttachment(a.id, context);
+        const { provenance } = context.store.uow.read((tx) =>
+          referenceCard(tx, context, a.card_id),
+        );
+        if (provenance.source_card_id)
+          res.setHeader("X-Source-Card-Id", provenance.source_card_id);
+        auditReferenceRead(context, [a.card_id], "read_attachment");
+      });
+      return;
+    }
     const { attachment, content, provenance } = await readVerifiedAttachment(
-      ids[0],
+      a,
       attachments,
       context,
     );
@@ -51,6 +70,10 @@ export async function serveAttachmentDownload(
     });
     res.end(Buffer.from(content));
   } catch (error) {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     const safe =
       error instanceof ToolError
         ? error
