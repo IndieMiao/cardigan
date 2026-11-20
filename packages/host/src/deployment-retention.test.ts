@@ -67,6 +67,9 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
       await writeFile(path, "db", { mode: 0o600 });
       await utimes(path, n, n);
     }
+    await writeFile(join(dir, backup(3)), "unverified", { mode: 0o640 });
+    await chmod(join(dir, backup(3)), 0o640);
+    await utimes(join(dir, backup(3)), 0, 0);
     const ready = {
       stillReady: async () => true,
       keep: [dir],
@@ -95,6 +98,8 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
         .candidates.map((i: { name: string }) => i.name)
         .sort(),
     ).toEqual(["A-1", "A-2", backup(1)]);
+    expect(JSON.parse(text).skipped).toContain(backup(3));
+    await chmod(join(dir, backup(3)), 0o600);
     const auth = { sha256: sha, pm_review: "Q-1", data_deletion: "Q-2" };
     const apply = () => maintenance({ ...policy, approval: auth });
     const check = async () => {
@@ -149,6 +154,12 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
     await expect(readFile(join(parent, "A-2"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    await job.poll({
+      ...ready,
+      attempt: "later",
+      deployed_at: new Date(Date.now() + 10_000).toISOString(),
+    });
+    expect(await readFile(join(dir, backup(3)), "utf8")).toBe("unverified");
     expect(await readFile(join(dir, backup(2)), "utf8")).toBe("db");
     expect(
       store.uow

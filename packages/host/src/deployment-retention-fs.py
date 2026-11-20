@@ -150,6 +150,9 @@ def releases(req,root):
     kept = set(req['keep'])
     names = generated(root,RELEASE)[req['latest']:]
     names = [n for n in names if n not in kept]
+    if 'names' in req:
+        requested = req['names']; require(len(requested) == 1 and RELEASE.fullmatch(requested[0]))
+        names = [n for n in names if n == requested[0]]
     if 'item' in req:
         names = [n for n in names if n == req['item']['name']]; require(len(names)==1)
     result = {'candidates':[], 'skipped':[]}

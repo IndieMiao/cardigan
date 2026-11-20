@@ -86,12 +86,13 @@ export async function scan(
   input: object,
   kind: Item["kind"],
   allowed?: Set<string>,
+  timeout = 5 * 60_000,
 ): Promise<Scan> {
   const text = await new Promise<string>((resolve, reject) => {
     const p = execFile(
       cmd.file,
       cmd.args,
-      { ...opts, timeout: 5 * 60_000 },
+      { ...opts, timeout },
       (error, stdout) =>
         error
           ? reject(new Error("Retention helper unavailable"))

@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { requireHostDirectory } from "./deployment-config.js";
+import { ReleaseSurvey } from "./deployment-release-inventory.js";
 import {
   type Item,
   localCommand,
@@ -42,7 +43,7 @@ interface Inventory {
   total_bytes: number;
 }
 interface Report extends Inventory {
-  version: 1;
+  version: 2;
   captured_at: string;
   scope: string;
   policy: Omit<RetentionPolicy, "approval">;
@@ -62,6 +63,7 @@ export function releaseKeep(directory: string, paths: readonly string[]) {
 }
 
 export class DeploymentRetention {
+  private readonly releases = new ReleaseSurvey();
   private next = 0;
   private attempt = "";
   private queue: Item[] = [];
@@ -96,21 +98,24 @@ export class DeploymentRetention {
       }),
     );
   }
-  private async snapshots(ready: Ready): Promise<Item[]> {
+  private async snapshots(ready: Ready) {
     const s = await previewDeploymentSnapshots(this.dir, ready.backup, {
       latest: this.policy.snapshots,
       days: this.policy.daily_days,
     });
-    return s.candidates.map(
-      ({ name, device, inode, size_bytes, mtime_ns: stamp }) => ({
-        kind: "snapshot",
-        name,
-        device,
-        inode,
-        size_bytes,
-        stamp,
-      }),
-    );
+    return {
+      ...s,
+      candidates: s.candidates.map<Item>(
+        ({ name, device, inode, size_bytes, mtime_ns: stamp }) => ({
+          kind: "snapshot",
+          name,
+          device,
+          inode,
+          size_bytes,
+          stamp,
+        }),
+      ),
+    };
   }
   private releaseInput(ready: Ready) {
     return {
@@ -120,16 +125,20 @@ export class DeploymentRetention {
       latest: this.policy.releases,
     };
   }
-  private async inventory(ready: Ready, t: Target): Promise<Inventory> {
-    const candidates = await this.snapshots(ready);
-    const releases = await scan(
-      localCommand("releases"),
-      this.releaseInput(ready),
-      "release",
-    );
-    candidates.push(...releases.candidates);
-    const skipped = [...releases.skipped];
-    const namespace: Record<string, string> = {};
+  private async inventory(
+    ready: Ready,
+    t: Target,
+    scope: string,
+  ): Promise<Inventory | undefined> {
+    const releases = await this.releases.poll(scope, this.releaseInput(ready));
+    if (!releases) return;
+    const snapshots = await this.snapshots(ready);
+    const candidates = [...snapshots.candidates, ...releases.candidates];
+    const skipped = [...snapshots.skipped, ...releases.skipped];
+    const namespace: Record<string, string> = {
+      ...snapshots.namespace,
+      ...releases.namespace,
+    };
     if (t) {
       // Record only the host-owned namespace bindings, not the content of live runs.
       // An old but still-protected assignment may legitimately age out later.
@@ -168,13 +177,6 @@ export class DeploymentRetention {
         }
       }
     } else skipped.push("isolated_run_target_unavailable");
-    // Old retained entries may roll out of the N/day window after a later deployment.
-    // Never promote an unverified/skipped old candidate to that class.
-    for (const n of await readdir(this.dir))
-      if (/^(?:release-[a-f0-9-]{77}|database-[a-f0-9-]{36}\.bak)$/u.test(n)) {
-        const st = await lstat(join(this.dir, n), { bigint: true });
-        namespace[n] = `${st.dev}:${st.ino}`;
-      }
     return {
       candidates,
       skipped,
@@ -262,21 +264,27 @@ export class DeploymentRetention {
       ]),
     );
     if (!text) {
+      const current = await this.inventory(ready, t, scope);
+      if (!current) {
+        this.next = 0;
+        return;
+      }
+      if (!(await ready.stillReady())) return;
       await this.publish(path, {
-        version: 1,
+        version: 2,
         captured_at: new Date(now).toISOString(),
         scope,
         policy,
         authorization_scope:
           "首轮仅处理清单原件。批准持续启用后，后续成功部署按同一策略回收新增或退出保留期的对象。旧清单中跳过或变更的实例仍保留。",
-        ...(await this.inventory(ready, t)),
+        ...current,
       });
       return;
     }
     if (!approval) return;
     const report = JSON.parse(text) as Report;
     if (
-      report.version !== 1 ||
+      report.version !== 2 ||
       scope !== report.scope ||
       JSON.stringify(policy) !== JSON.stringify(report.policy)
     ) {
@@ -285,7 +293,11 @@ export class DeploymentRetention {
       return;
     }
     if (!this.queue.length) {
-      const current = await this.inventory(ready, t);
+      const current = await this.inventory(ready, t, scope);
+      if (!current) {
+        this.next = 0;
+        return;
+      }
       const originals = new Map(report.candidates.map((i) => [key(i), i]));
       const skipped = new Set(report.skipped);
       for (const name of current.skipped)
@@ -393,7 +405,7 @@ export class DeploymentRetention {
           await held.close();
         }
       } else if (item.kind === "snapshot") {
-        const fresh = (await this.snapshots(ready)).find(
+        const fresh = (await this.snapshots(ready)).candidates.find(
           (s) => s.name === item.name,
         );
         if (!fresh || !same(fresh, item)) throw new Error("Snapshot retained");

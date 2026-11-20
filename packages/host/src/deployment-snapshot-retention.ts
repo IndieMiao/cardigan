@@ -33,19 +33,26 @@ export async function previewDeploymentSnapshots(
       throw new Error("Unsafe deployment directory");
     const pinned = `/proc/self/fd/${root.fd}`;
     const snapshots = [];
+    const skipped: string[] = [],
+      namespace: Record<string, string> = {};
     for (const name of await readdir(pinned)) {
       if (!snapshotName.test(name)) continue;
-      const stat = await lstat(join(pinned, name), { bigint: true });
+      const stat = await lstat(join(pinned, name), { bigint: true }).catch(
+        () => undefined,
+      );
       // VACUUM INTO followed by chmod(0600); an incomplete or substituted entry is not ours to prune.
       if (
-        !stat.isFile() ||
+        !stat?.isFile() ||
         stat.uid !== BigInt(info.uid) ||
         (stat.mode & 0o7777n) !== 0o600n ||
         stat.nlink !== 1n ||
         stat.dev !== BigInt(info.dev) ||
         stat.mtimeMs > BigInt(now.getTime())
-      )
+      ) {
+        skipped.push(name);
         continue;
+      }
+      namespace[name] = `${stat.dev}:${stat.ino}`;
       snapshots.push({
         name,
         size_bytes: Number(stat.size),
@@ -71,6 +78,8 @@ export async function previewDeploymentSnapshots(
     });
     return {
       candidates,
+      skipped,
+      namespace,
       total_bytes: candidates.reduce((sum, file) => sum + file.size_bytes, 0),
     };
   } finally {
