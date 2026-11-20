@@ -287,3 +287,5 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 | `worker_config_conflict` | 核对物理身份、其它项目或已应用配置冲突；确认参数不能绕过，也不改绑活跃 Assignment |
 
 本卡自动测试均为合成夹具，**未现场验证 Mac**。合并后由 human_action 跟进：专用账号安装/许可、无桌面登录及锁屏/重启后的核心、add/check/resume、空 Run、真实开发 commit/回传/同 SHA 预检、失联后准确退出证明。现场结果分别记录；未知退出保留占用，不建第二个 Run，不把本向导当作接管授权。
+
+Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新可写工作区的第一次** `godot --headless --import`。不在机器登记或普通 worktree 检出时自动运行。预热、只读包发布、损坏回退和计时口径见 [C-498](plans/C-498.md)。

@@ -107,6 +107,7 @@ import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { readPagedCard } from "./timeline-state.js";
+import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
 
 /**
@@ -192,6 +193,7 @@ const API_PREFIX = "/api/";
 
 interface RequestContext {
   readonly launchSettings: LaunchSettings | undefined;
+  readonly wizards: WorkerWizards;
   readonly checks: MachineChecks;
   readonly host: MachineHost | undefined;
   readonly recordTiming: (stage: string, ms: number) => void;
@@ -276,6 +278,16 @@ export async function startWebServer(
     clock,
     shutdown.signal,
     options.machineHost,
+  );
+
+  const wizards = new WorkerWizards(
+    store,
+    clock,
+    checks,
+    shutdown.signal,
+    options.machineHost?.wizard,
+    options.runLimit,
+    options.runLimitMaximum,
   );
 
   const http = createServer((req, res) => {
@@ -372,6 +384,7 @@ export async function startWebServer(
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
         checks,
+        wizards,
         host: options.machineHost,
         recordTiming,
         buildInfo,
@@ -446,6 +459,7 @@ export async function startWebServer(
           else
             void Promise.all([
               checks.settled(),
+              wizards.settled(),
               launchSettings?.checks.drain(),
             ]).then(() => resolve(), reject);
         });
@@ -578,6 +592,11 @@ async function serveProjectRoute(
 ): Promise<void> {
   const { req, res, url, clock, store } = context;
   const now = clock.now();
+
+  if (rest === "/worker-wizards" || rest.startsWith("/worker-wizards/"))
+    return context.wizards.serve(req, res, project_id, rest, () =>
+      requireSession(context),
+    );
 
   if (rest === "/machines" || rest.startsWith("/machines/")) {
     return serveMachines(
