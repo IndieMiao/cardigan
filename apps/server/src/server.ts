@@ -787,6 +787,7 @@ async function assembleServer(
         leases,
         projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
+        queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.

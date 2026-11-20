@@ -335,7 +335,25 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     );
   }
   exclusive(d, assignment);
-  const id = d.ids.next(state.project_id, "run");
+  return createQueuedRun(d, assignment, p);
+}
+
+/** Entry points validate their own cause before recording creation and snapshot together. */
+export function createQueuedRun(
+  d: CommandDraft,
+  assignment: Assignment,
+  p: Pick<
+    QueueRunParams,
+    | "kind"
+    | "trigger_event_id"
+    | "model"
+    | "agent_cli_version"
+    | "launch_profile_ref"
+    | "effort"
+    | "harness"
+  > & { queue_reason?: "awaiting_dispatch" },
+) {
+  const id = d.ids.next(d.state.project_id, "run");
   const event = d.emit("run_queued", cardId(d, assignment), {
     run_id: id,
     assignment_id: assignment.id,
@@ -355,6 +373,8 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     trigger_event_id: p.trigger_event_id ?? event.id,
     kind: p.kind ?? "initial",
     status: "queued",
+    queue_entered_at: event.created_at,
+    ...(p.queue_reason ? { queue_reason: p.queue_reason } : {}),
     role_version: assignment.role_version,
     model: p.model,
     agent_cli_version: p.agent_cli_version,

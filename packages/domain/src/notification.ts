@@ -87,6 +87,8 @@ export interface Notification {
   readonly status: NotificationStatus;
   /** How many bells were sent (used by the exponential backoff of §3.3). */
   readonly attempts: number;
+  /** This pending bell was retired, not acknowledged, on an explicit queue cancellation. */
+  readonly cancelled_queue_release_id?: EventId;
   readonly next_attempt_at?: Timestamp;
   /** The bell text of the last successful merge (§3.2). */
   readonly bell?: string;
