@@ -172,18 +172,22 @@ export function webMemberView(
   member: import("@cardigan/domain").MemberView | null,
 ) {
   if (!member) return null;
-  const avatar = parseAvatarReference(member.avatar);
   return {
     id: member.id,
     name: member.name,
     title: member.title,
-    avatar:
-      avatar?.kind === "library"
-        ? `/avatars/v1/${avatar.id}/head-64.webp`
-        : avatar?.kind === "upload"
-          ? `/api/avatars/${avatar.sha256}`
-          : null,
+    avatar: webAvatarPath(member.avatar),
   };
+}
+
+/** Same-origin image path for a stored avatar reference; opaque values are none. */
+export function webAvatarPath(reference: string | null | undefined) {
+  const avatar = parseAvatarReference(reference);
+  return avatar?.kind === "library"
+    ? `/avatars/v1/${avatar.id}/head-64.webp`
+    : avatar?.kind === "upload"
+      ? `/api/avatars/${avatar.sha256}`
+      : null;
 }
 export function webDecisionView(
   state: CommandState,
@@ -258,7 +262,6 @@ export function webAuthorView(state: CommandState, author: Author) {
           : undefined
       : undefined;
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
-  const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author_display:
@@ -274,12 +277,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           title: employee.title,
           bio: employee.bio,
           role_id: assignment?.role_id ?? employee.role_id,
-          avatar:
-            avatar?.kind === "library"
-              ? `/avatars/v1/${avatar.id}/head-64.webp`
-              : avatar?.kind === "upload"
-                ? `/api/avatars/${avatar.sha256}`
-                : null,
+          avatar: webAvatarPath(employee.avatar),
         }
       : null,
   };

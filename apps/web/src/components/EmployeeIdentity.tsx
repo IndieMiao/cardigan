@@ -94,6 +94,24 @@ function EmployeeAvatar({
   );
 }
 
+/** The avatar alone (decorative), e.g. beside a name in a suggestion list. */
+export function EmployeeFace({
+  employee,
+  size,
+}: {
+  employee: { id: string; name: string; avatar: string | null };
+  size?: 24 | 32;
+}) {
+  return (
+    <EmployeeAvatar
+      src={avatarPath(employee.avatar)}
+      initial={Array.from(employee.name)[0]?.toUpperCase()}
+      color={colorIndex(employee.id)}
+      size={size}
+    />
+  );
+}
+
 export function EmployeeIdentity({
   employee,
   member,

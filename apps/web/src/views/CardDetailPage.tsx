@@ -30,11 +30,7 @@ import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
-import {
-  CommentBox,
-  type CommentBoxHandle,
-  type MentionOption,
-} from "../components/CommentBox.js";
+import { CommentBox, type CommentBoxHandle } from "../components/CommentBox.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
@@ -867,7 +863,6 @@ function CardContent({
             client={client}
             projectId={projectId}
             cardId={cardId}
-            mentions={mentionOptions(detail)}
             hasPmOps={detail.has_pm_ops}
             onPosted={onPosted}
             onConflict={onCommentConflict}
@@ -922,33 +917,4 @@ function CardContent({
       </div>
     </CardDetailLayout>
   );
-}
-
-/** `@` suggestions: the roles and Assignments this card already knows. */
-export function mentionOptions(detail: CardDetail): MentionOption[] {
-  const options = new Map<string, MentionOption>();
-  for (const item of detail.work_items) {
-    options.set(item.role_id, {
-      value: item.role_id,
-      label: `角色 ${item.role_id}`,
-    });
-    if (item.assignment_id !== undefined) {
-      options.set(item.assignment_id, {
-        value: item.assignment_id,
-        label: `Assignment ${item.assignment_id}`,
-      });
-    }
-  }
-  for (const owner of detail.card.next_owners) {
-    if (owner.kind === "role") {
-      options.set(owner.ref, { value: owner.ref, label: `角色 ${owner.ref}` });
-    }
-    if (owner.kind === "assignment") {
-      options.set(owner.ref, {
-        value: owner.ref,
-        label: `Assignment ${owner.ref}`,
-      });
-    }
-  }
-  return [...options.values()];
 }

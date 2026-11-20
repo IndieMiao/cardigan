@@ -1,7 +1,9 @@
 // biome-ignore-all lint/security/noDangerouslySetInnerHtml: the preview is
 // `renderMarkdown` output (html off, filtered links), not raw user HTML.
 import {
+  type KeyboardEvent,
   type Ref,
+  useEffect,
   useId,
   useImperativeHandle,
   useLayoutEffect,
@@ -14,35 +16,39 @@ import {
   type CardiganClient,
   describeError,
   describeWriteError,
+  type MentionCandidate,
   type PostedComment,
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
+import { EmployeeFace } from "./EmployeeIdentity.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import { Input } from "./ui/input.js";
+import {
+  SuggestionList,
+  SuggestionOption,
+  SuggestionStatus,
+} from "./ui/suggestion-list.js";
 import { Textarea } from "./ui/textarea.js";
 
 /**
  * The comment box (M5 plan §3.7, §4 M5.3; the write endpoints arrive with M5.2).
  *
- * A plain Markdown textarea with a preview — not a WYSIWYG editor. Mentions are
- * offered as buttons after an `@`, pasted images are uploaded and attached to
- * the comment's timeline entry, and the send button is live: the comment is
- * posted as the human, through `POST /cards/:card/comments`, and every pasted
- * image goes to `POST /cards/:card/attachments` attached to that entry.
+ * A plain Markdown textarea with a preview — not a WYSIWYG editor. Typing `@`
+ * suggests the project's employees (C-514; the card's own people first) and
+ * inserts `@<name>`, which the server routes like any typed employee name;
+ * hand-typed `@role` / `@A-n` keep working. Pasted images are uploaded and
+ * attached to the comment's timeline entry, and the send button is live: the
+ * comment is posted as the human, through `POST /cards/:card/comments`, and
+ * every pasted image goes to `POST /cards/:card/attachments` attached to that
+ * entry.
  */
-
-export interface MentionOption {
-  readonly value: string;
-  readonly label: string;
-}
 
 export interface CommentBoxProps {
   readonly ref?: Ref<CommentBoxHandle>;
   readonly client: CardiganClient;
   readonly projectId: string;
   readonly cardId: string;
-  readonly mentions?: readonly MentionOption[];
   readonly hasPmOps?: boolean | undefined;
   /** Called after the comment and its images were accepted. */
   readonly onPosted?: (comment: PostedComment) => void | Promise<void>;
@@ -68,16 +74,26 @@ export function CommentBox({
   client,
   projectId,
   cardId,
-  mentions = [],
   hasPmOps,
   onPosted,
   onConflict,
 }: CommentBoxProps) {
   const routingHintId = useId();
+  const listId = useId();
   const [body, setBody] = useState("");
   const [tab, setTab] = useState<"write" | "preview">("write");
   const [images, setImages] = useState<readonly PastedImage[]>([]);
-  const [suggesting, setSuggesting] = useState(false);
+  const [mention, setMention] = useState<MentionQuery>();
+  // Escape closes the list for the `@` it was opened at, until a new `@`.
+  const [dismissedAt, setDismissedAt] = useState<number>();
+  const [active, setActive] = useState(0);
+  const [candidates, setCandidates] = useState<{
+    readonly cardId: string;
+    readonly employees?: readonly MentionCandidate[];
+    readonly error?: string;
+  }>();
+  const candidateRead = useRef(0);
+  const caret = useRef<number | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   const [focused, setFocused] = useState(false);
@@ -125,16 +141,101 @@ export function CommentBox({
   const preview = useMemo(() => renderMarkdown(body), [body]);
   const canSubmit = body.trim().length > 0 && !submitting;
 
-  function insertMention(mention: string): void {
+  const loaded = candidates?.cardId === cardId ? candidates : undefined;
+  const ordered = useMemo(
+    () => orderMentionCandidates(loaded?.employees ?? []),
+    [loaded],
+  );
+  const matches = mention ? matchMentionCandidates(ordered, mention.query) : [];
+  const suggesting =
+    expanded &&
+    tab === "write" &&
+    !submitting &&
+    mention !== undefined &&
+    mention.start !== dismissedAt;
+  const listOpen =
+    suggesting &&
+    (loaded?.employees === undefined ||
+      loaded.error !== undefined ||
+      matches.length > 0);
+  const current = Math.min(active, Math.max(matches.length - 1, 0));
+  const optionId = (index: number) => `${listId}-option-${index}`;
+
+  // Read once per card, at the first `@`; a failed read retries at the next `@`.
+  function loadCandidates(): void {
+    if (loaded && loaded.error === undefined) return;
+    const read = ++candidateRead.current;
+    setCandidates({ cardId });
+    client.mentionCandidates(projectId, cardId).then(
+      ({ employees }) => {
+        if (read === candidateRead.current)
+          setCandidates({ cardId, employees });
+      },
+      (failure: unknown) => {
+        if (read === candidateRead.current)
+          setCandidates({ cardId, error: describeError(failure) });
+      },
+    );
+  }
+
+  useLayoutEffect(() => {
+    if (caret.current === undefined || !textarea.current) return;
+    textarea.current.setSelectionRange(caret.current, caret.current);
+    caret.current = undefined;
+  });
+  useEffect(() => {
+    if (!listOpen) return;
+    document
+      .getElementById(optionId(current))
+      ?.scrollIntoView?.({ block: "nearest" });
+  });
+
+  /** Recompute the `@query` before the caret after typing or moving it. */
+  function trackMention(field: HTMLTextAreaElement): void {
+    const next = mentionQuery(field.value, field.selectionStart);
+    if (next && next.start !== mention?.start) loadCandidates();
+    if (!next) setDismissedAt(undefined);
+    if (next?.start !== mention?.start || next?.query !== mention?.query)
+      setActive(0);
+    setMention(next);
+  }
+
+  function choose(candidate: MentionCandidate): void {
+    if (!mention) return;
     startDraft();
-    const field = textarea.current;
-    const at = field?.selectionStart ?? body.length;
-    // Replace the `@` that opened the suggestion list.
-    const before = body.slice(0, at).replace(/@[^\s@]*$/u, "");
-    const next = `${before}@${mention} ${body.slice(at)}`;
-    setBody(next);
-    setSuggesting(false);
-    field?.focus();
+    const next = insertMention(body, mention, candidate.name);
+    caret.current = next.caret;
+    setBody(next.body);
+    setMention(undefined);
+    textarea.current?.focus();
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (!listOpen || event.nativeEvent.isComposing) return;
+    if (event.key === "Escape") {
+      // Close the list only; an enclosing drawer stays open.
+      event.preventDefault();
+      event.stopPropagation();
+      setDismissedAt(mention?.start);
+      return;
+    }
+    if (matches.length === 0) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActive((current + step + matches.length) % matches.length);
+    } else if (
+      (event.key === "Enter" || event.key === "Tab") &&
+      !event.shiftKey &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
+      const candidate = matches[current];
+      if (!candidate) return;
+      event.preventDefault();
+      choose(candidate);
+    }
   }
 
   async function submit(): Promise<void> {
@@ -184,7 +285,7 @@ export function CommentBox({
       setImages([]);
       draftKey.current = undefined;
       setTab("write");
-      setSuggesting(false);
+      setMention(undefined);
       if (section.current?.contains(document.activeElement))
         (document.activeElement as HTMLElement).blur();
       setFocused(false);
@@ -270,7 +371,13 @@ export function CommentBox({
             className="comment-input"
             aria-label="评论正文"
             aria-describedby={hasPmOps === false ? routingHintId : undefined}
-            placeholder="支持 Markdown；@ 提及角色或 Assignment；可以直接粘贴图片"
+            aria-autocomplete="list"
+            data-escape-handled={listOpen ? "" : undefined}
+            aria-controls={listOpen ? listId : undefined}
+            aria-activedescendant={
+              listOpen && matches.length > 0 ? optionId(current) : undefined
+            }
+            placeholder="支持 Markdown；@ 提及员工；可以直接粘贴图片"
             rows={expanded ? 6 : 2}
             value={body}
             disabled={submitting}
@@ -281,8 +388,10 @@ export function CommentBox({
                 setError(undefined);
               } else startDraft();
               setBody(value);
-              setSuggesting(/@[^\s@]*$/u.test(value));
+              trackMention(event.target);
             }}
+            onSelect={(event) => trackMention(event.currentTarget)}
+            onKeyDown={onKeyDown}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files).filter(
                 (file) => file.type.startsWith("image/"),
@@ -302,22 +411,34 @@ export function CommentBox({
               ]);
             }}
           />
-          {expanded && suggesting && mentions.length > 0 && (
-            <ul className="mention-list" aria-label="提及建议">
-              {mentions.map((mention) => (
-                <li key={mention.value}>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={submitting}
-                    onClick={() => insertMention(mention.value)}
-                  >
-                    {mention.label}
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
+          <SuggestionList
+            open={listOpen}
+            onOpenChange={(open) => {
+              if (!open) setDismissedAt(mention?.start);
+            }}
+            field={textarea}
+            id={listId}
+            label="提及员工"
+          >
+            {loaded?.error !== undefined ? (
+              <SuggestionStatus>未能加载员工：{loaded.error}</SuggestionStatus>
+            ) : loaded?.employees === undefined ? (
+              <SuggestionStatus>正在加载员工…</SuggestionStatus>
+            ) : (
+              matches.map((candidate, index) => (
+                <SuggestionOption
+                  key={candidate.id}
+                  id={optionId(index)}
+                  active={index === current}
+                  icon={<EmployeeFace employee={candidate} size={24} />}
+                  label={candidate.name}
+                  meta={candidate.title}
+                  onActivate={() => setActive(index)}
+                  onSelect={() => choose(candidate)}
+                />
+              ))
+            )}
+          </SuggestionList>
         </>
       ) : (
         <div
@@ -380,6 +501,67 @@ export function CommentBox({
       )}
     </section>
   );
+}
+
+export interface MentionQuery {
+  /** Index of the `@`. */
+  readonly start: number;
+  /** What follows the `@` up to the caret. */
+  readonly query: string;
+}
+
+/** The `@query` being typed right before the caret; never inside an e-mail. */
+export function mentionQuery(
+  text: string,
+  caret: number,
+): MentionQuery | undefined {
+  const match = /(?:^|[^A-Za-z0-9._%+-])@([^\s@]*)$/u.exec(
+    text.slice(0, caret),
+  );
+  if (!match) return undefined;
+  const query = match[1] ?? "";
+  return { start: caret - query.length - 1, query };
+}
+
+/** The card's own people first, then everyone; each group by name. */
+export function orderMentionCandidates(
+  candidates: readonly MentionCandidate[],
+): MentionCandidate[] {
+  return [...candidates].sort(
+    (a, b) =>
+      Number(b.related) - Number(a.related) ||
+      a.name.localeCompare(b.name, "zh-Hans-CN") ||
+      a.id.localeCompare(b.id),
+  );
+}
+
+/** Candidates whose name contains the query, ignoring case; order is kept. */
+export function matchMentionCandidates(
+  candidates: readonly MentionCandidate[],
+  query: string,
+): MentionCandidate[] {
+  const key = query.toLowerCase();
+  return candidates.filter((c) => c.name.toLowerCase().includes(key));
+}
+
+/**
+ * Replace the typed `@query` with `@<name> `. The server only reads a mention
+ * after a space, punctuation or the start, so one is added when needed.
+ */
+export function insertMention(
+  body: string,
+  mention: MentionQuery,
+  name: string,
+): { body: string; caret: number } {
+  const before = body.slice(0, mention.start);
+  const after = body.slice(mention.start + 1 + mention.query.length);
+  const lead = /[\p{L}\p{N}\p{M}_@]$/u.test(before) ? " " : "";
+  const space = /^\s/u.test(after);
+  const inserted = `${lead}@${name}${space ? "" : " "}`;
+  return {
+    body: before + inserted + after,
+    caret: before.length + inserted.length + (space ? 1 : 0),
+  };
 }
 
 /** `@coder` tokens in the body, de-duplicated, without the `@`. */

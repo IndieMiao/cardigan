@@ -174,6 +174,7 @@ export function fakeClient(
       probes: [],
     }),
     employeeOptions: async () => ({ library: [], roles: [] }),
+    mentionCandidates: async () => ({ employees: [] }),
     createEmployee: async (_projectId, input) => ({
       id: "E-1",
       name: input.name,
