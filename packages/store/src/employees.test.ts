@@ -319,6 +319,9 @@ test("v9 case-insensitive migration resolves collisions, preserves identities/st
     const upgraded = Store.open({ dataDir });
     try {
       const employees = upgraded.uow.read((tx) => tx.employees.list());
+      expect(employees.map((e) => e.projects)).toEqual(
+        employees.map(() => ["cardigan"]),
+      );
       expect(employees.map((e) => e.name)).toEqual([
         "Alice",
         "alice (E-2-1)",
