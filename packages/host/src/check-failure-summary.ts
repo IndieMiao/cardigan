@@ -3,17 +3,14 @@ const MAX_LINE = 16_384;
 const MAX_NAMES = 5;
 class Sample {
   readonly values: string[] = [];
-  count = 0;
+  overflow = false;
   add(value: string) {
     if (this.values.includes(value)) return;
-    this.count++;
     if (this.values.length < MAX_NAMES) this.values.push(value);
+    else this.overflow = true;
   }
 }
 export class CheckFailureSummary {
-  private pending = "";
-  private oversized = false;
-  private privateKey = false;
   private readonly detailed = new Sample();
   private readonly reported = new Sample();
   private readonly files = new Sample();
@@ -23,47 +20,31 @@ export class CheckFailureSummary {
   private testStats?: string;
   private failedCount = 0;
   private lintFile = "";
-  constructor(
-    private readonly normalize: (line: string) => string,
-    private readonly redact: (line: string) => string,
-  ) {}
-
-  append(chunk: string) {
-    for (let start = 0; start < chunk.length; ) {
-      const newline = chunk.indexOf("\n", start);
-      const end = newline === -1 ? chunk.length : newline;
-      if (!this.oversized && this.pending.length + end - start <= MAX_LINE)
-        this.pending += chunk.slice(start, end);
-      else this.oversized = true;
-      if (newline === -1) break;
-      this.flush();
-      start = newline + 1;
-    }
-  }
-  private flush() {
-    if (!this.oversized && this.pending) this.inspect(this.pending);
-    this.pending = "";
-    this.oversized = false;
-  }
-  private inspect(raw: string) {
-    // PEM bodies can span callbacks and even contain diagnostic-looking lines.
-    const normalized = this.normalize(raw);
-    if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/u.test(normalized))
-      this.privateKey = true;
-    if (this.privateKey) {
-      if (/-----END [A-Z ]*PRIVATE KEY-----/u.test(normalized))
-        this.privateKey = false;
-      return;
-    }
-    const line = normalized
+  constructor(private readonly redact: (line: string) => string) {}
+  inspect(safe: string, oversized = false) {
+    const line = safe
       .trim()
       .replace(/^##\[group\]\s*/u, "")
       .replace(/^(?:packages|apps)\/\S+ (?:test|lint|build)(?:\$|:)\s*/u, "");
+    if (oversized || safe.length > MAX_LINE) {
+      // A clipped value may lack its redaction boundary. Publish only a fixed type.
+      const type =
+        /^(AssertionError|TypeError|ReferenceError|SyntaxError|RangeError|Error)\b/u.exec(
+          line,
+        )?.[1];
+      if (type) this.error ??= type;
+      return;
+    }
     const compact = (s: string) => this.redact(s).slice(0, 480).trimEnd();
     if (/^Test Files\s+\d/u.test(line)) this.fileStats = compact(line);
     else if (/^Tests\s+\d/u.test(line)) {
       this.testStats = compact(line);
-      this.failedCount = Number(/\b(\d+) failed\b/u.exec(line)?.[1] ?? 0);
+      const total =
+        /^Tests\s+(\d+) failed(?:\s*\|\s*\d+ (?:passed|skipped|todo|pending))*\s*(?:\(\d+\))?$/u.exec(
+          line,
+        );
+      this.failedCount =
+        total && Number.isSafeInteger(Number(total[1])) ? Number(total[1]) : 0;
     } else if (/^##\[error\]/u.test(line)) this.annotations.add(compact(line));
     else if (/^FAIL\s+/u.test(line)) {
       (line.includes(" > ") ? this.detailed : this.files).add(compact(line));
@@ -87,15 +68,16 @@ export class CheckFailureSummary {
       this.lintFile = compact(line);
   }
   lines(): string[] {
-    this.flush();
-    const names = this.detailed.count ? this.detailed : this.reported;
-    const extra = Math.max(this.failedCount, names.count) - names.values.length;
+    const names = this.detailed.values.length ? this.detailed : this.reported;
+    const extra = this.failedCount - names.values.length;
     return [
-      ...(!this.detailed.count
-        ? this.files.values.slice(0, names.count ? 1 : MAX_NAMES)
-        : []),
+      ...this.files.values,
       ...names.values,
-      ...(extra > 0 ? [`另有 ${extra} 个失败用例`] : []),
+      ...(extra > 0
+        ? [`另有 ${extra} 个失败用例`]
+        : names.overflow
+          ? ["另有失败用例"]
+          : []),
       this.error,
       this.fileStats,
       this.testStats,

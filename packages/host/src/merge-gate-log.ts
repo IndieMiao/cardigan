@@ -1,22 +1,11 @@
 import { constants } from "node:fs";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  realpath,
-  unlink,
-} from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { BoundedOutput } from "./bounded-check-output.js";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
-import { CheckFailureSummary } from "./check-failure-summary.js";
-import {
-  checkInfraFlaky,
-  checkTimedOutOnly,
-  TRUNCATED_OUTPUT,
-} from "./merge-check-timeout.js";
+import { pruneCheckLogs, saveCheckLog } from "./check-log-storage.js";
+import { checkInfraFlaky, checkTimedOutOnly } from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 import {
   bindWorkerCheckout,
@@ -28,8 +17,7 @@ import {
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
 export const CHECK_SUMMARY_LIMIT = 12000;
-const MASK = "[REDACTED]",
-  OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
+const MASK = "[REDACTED]";
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 function normalizeOutput(value: string, github = false): string {
@@ -53,7 +41,9 @@ function redactor(
     ...new Set(
       Object.values(env)
         .filter(
-          (value) => Buffer.byteLength(value, "utf8") >= MIN_REDACTED_ENV_BYTES,
+          (value) =>
+            /[\r\n]/u.test(value) ||
+            Buffer.byteLength(value, "utf8") >= MIN_REDACTED_ENV_BYTES,
         )
         .flatMap((value) => {
           let uri = value;
@@ -62,6 +52,7 @@ function redactor(
           } catch {}
           return [
             value,
+            ...value.split(/[\r\n]+/u),
             uri,
             JSON.stringify(value).slice(1, -1),
             Buffer.from(value).toString("base64"),
@@ -75,11 +66,6 @@ function redactor(
     ? new RegExp(values.map(escapeRegex).join("|"), "gu")
     : undefined;
   return {
-    // Padding lets a secret crossing either retained edge be redacted before clipping.
-    padding: values.reduce(
-      (size, value) => Math.max(size, Buffer.byteLength(value)),
-      8192,
-    ),
     redact(value: string) {
       let text = normalizeOutput(value, github);
       if (pattern) text = text.replace(pattern, () => MASK);
@@ -89,25 +75,38 @@ function redactor(
           MASK,
         )
         .replace(/-----+(?:BEGIN|END) [A-Z ]*PRIVATE KEY-----+/gu, MASK)
-        .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/giu, `$1${MASK}`)
+        .replace(/(\b(?:bearer|basic)[ \t]+)\S+/giu, `$1${MASK}`)
+        // An unquoted value with spaces has no trustworthy end delimiter.
         .replace(
-          /\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
+          /((?:["'](?:[A-Z_][A-Z0-9_]*|password|secret|token|api_key)["'][ \t]*[:=]|\b[A-Z_][A-Z0-9_]*[ \t]*=|\b[A-Z_][A-Z0-9_]+[ \t]*:)[ \t]*)[^\n]*/gu,
+          `$1${MASK}`,
+        )
+        .replace(
+          /(\b(?:api[_-]?key|token|password|secret)[ \t]*[:=][ \t]*)[^\n]*/giu,
           `$1${MASK}`,
         )
         .replace(/\b(?:sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/gu, MASK);
+      if (text.includes("://"))
+        text = text.replace(/\S+/gu, (word) =>
+          word.includes("://")
+            ? word.startsWith("##[error]")
+              ? "##[error][URL]"
+              : "[URL]"
+            : word,
+        );
       return redactPaths
         ? text.replace(/(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s]+/gu, "[私有路径]")
         : text;
     },
   };
 }
-function clip(text: string, limit: number, tail = false): string {
+function clip(text: string, limit: number): string {
   const bytes = Buffer.from(text);
   if (bytes.length <= limit) return text;
-  let at = tail ? bytes.length - limit : limit;
+  let at = limit;
   while (at > 0 && at < bytes.length && ((bytes[at] ?? 0) & 0xc0) === 0x80)
-    at += tail ? 1 : -1;
-  return (tail ? bytes.subarray(at) : bytes.subarray(0, at)).toString("utf8");
+    at--;
+  return bytes.subarray(0, at).toString("utf8");
 }
 /** All parts must already be redacted; preserve the existing UTF-8 summary budget. */
 export function boundedCheckSummary(...parts: readonly string[]): string {
@@ -170,76 +169,6 @@ export function safeCheckDiagnostic(
         : line),
     CHECK_SUMMARY_LIMIT,
   );
-}
-class BoundedOutput {
-  // Grow only on demand. Once full, overwrite the tail as a ring rather than
-  // copying a megabyte for every network chunk.
-  private buffer = Buffer.alloc(0);
-  private bytes = 0;
-  private readonly half: number;
-  readonly failure: CheckFailureSummary;
-  constructor(
-    private readonly filter: ReturnType<typeof redactor>,
-    failure: CheckFailureSummary,
-  ) {
-    this.failure = failure;
-    this.half = CHECK_OUTPUT_LIMIT / 2 + filter.padding;
-  }
-  append(text: string) {
-    this.failure.append(text);
-    let chunk = Buffer.from(text);
-    const capacity = 2 * this.half,
-      size = this.bytes + chunk.length;
-    if (this.buffer.length < Math.min(size, capacity)) {
-      const next = Buffer.allocUnsafe(
-        Math.min(capacity, Math.max(size, 1024, this.buffer.length * 2)),
-      );
-      this.buffer.copy(next, 0, 0, this.bytes);
-      this.buffer = next;
-    }
-    if (this.bytes < capacity) {
-      const copied = chunk.copy(this.buffer, this.bytes);
-      this.bytes += copied;
-      chunk = chunk.subarray(copied);
-    }
-    if (chunk.length) {
-      chunk = chunk.subarray(-this.half);
-      const start = (size - chunk.length) % this.half;
-      const copied = chunk.copy(this.buffer, this.half + start);
-      chunk.copy(this.buffer, this.half, copied);
-    }
-    this.bytes = size;
-  }
-  text(): string {
-    if (this.bytes <= CHECK_OUTPUT_LIMIT) {
-      const text = this.filter.redact(
-        this.buffer.toString("utf8", 0, this.bytes),
-      );
-      return Buffer.byteLength(text) <= CHECK_OUTPUT_LIMIT
-        ? text
-        : this.edges(text, text);
-    }
-    const start = this.bytes % this.half;
-    const tail =
-      this.bytes <= this.half * 2
-        ? this.buffer.subarray(Math.max(0, this.bytes - this.half), this.bytes)
-        : Buffer.concat([
-            this.buffer.subarray(this.half + start),
-            this.buffer.subarray(this.half, this.half + start),
-          ]);
-    return this.edges(
-      this.filter.redact(
-        this.buffer.toString("utf8", 0, Math.min(this.half, this.bytes)),
-      ),
-      this.filter.redact(tail.toString("utf8")),
-    );
-  }
-  private edges(head: string, tail: string) {
-    const size = Math.floor(
-      (CHECK_OUTPUT_LIMIT - Buffer.byteLength(OMITTED)) / 2,
-    );
-    return clip(head, size) + OMITTED + clip(tail, size, true);
-  }
 }
 async function privateDirectory(path: string, create: boolean) {
   if (create) {
@@ -331,6 +260,8 @@ export async function createMergeCheckLog(input: {
   // Include individual lines of multiline configured values; the summary parser
   // intentionally never retains the surrounding raw block. Mask unconfigured
   // assignment values too (including quoted values containing whitespace).
+  const jobKey =
+    input.failureExcerptBytes !== undefined ? { open: false } : undefined;
   const fragments = Object.values(input.env ?? {})
     .flatMap((v) => normalizeOutput(v).split(/[\r\n]+/u))
     .filter(Boolean)
@@ -338,17 +269,12 @@ export async function createMergeCheckLog(input: {
   const fragmentPattern = fragments.length
     ? new RegExp(fragments.map(escapeRegex).join("|"), "gu")
     : undefined;
-  const summarizeLine = (line: string) => {
-    let safe = filter.redact(line);
-    if (fragmentPattern) safe = safe.replace(fragmentPattern, MASK);
-    return safe
-      .replace(
-        /((?:["'](?:[A-Z_][A-Z0-9_]*|password|secret|token|api_key)["']|\b[A-Z][A-Z0-9_]+)\s*:\s*|\b[A-Za-z_]\w*=)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gu,
-        `$1${MASK}`,
-      )
-      .replace(/https?:\/\/\S+/giu, "[URL]")
-      .replace(/(\b(?:bearer|basic)\s+)\S+/giu, `$1${MASK}`);
-  };
+  const redactLine = (line: string) =>
+    filter
+      .redact(line)
+      .replace(/(\b[A-Za-z_]\w*[ \t]*=[ \t]*)[^\n]*/gu, `$1${MASK}`);
+  const summarizeLine = (safe: string) =>
+    fragmentPattern ? safe.replace(fragmentPattern, MASK) : safe;
   const header = filter.redact(
     `合并检查 ${input.project} / ${input.attempt}\n`,
   );
@@ -374,25 +300,31 @@ export async function createMergeCheckLog(input: {
         : false;
     },
     resetOutput(name: string) {
-      if (!finished) output.delete(name);
+      if (!finished) {
+        output.delete(name);
+        if (jobKey) jobKey.open = false;
+      }
     },
     append(name: string, text: string) {
       if (finished) throw new Error("Merge check log is already closed");
       let buffer = output.get(name);
       if (!buffer) {
         buffer = new BoundedOutput(
-          filter,
-          new CheckFailureSummary(
-            (line) =>
-              normalizeOutput(line, input.failureExcerptBytes !== undefined),
-            summarizeLine,
-          ),
+          CHECK_OUTPUT_LIMIT,
+          (line) =>
+            normalizeOutput(line, input.failureExcerptBytes !== undefined),
+          redactLine,
+          summarizeLine,
+          jobKey,
         );
         output.set(name, buffer);
       }
       buffer.append(text);
     },
-    async finish(result: CheckoutResult) {
+    async finish(
+      result: CheckoutResult,
+      bound?: { readonly run_id: number; readonly html_url: string },
+    ) {
       if (finished) throw new Error("Merge check log is already closed");
       finished = true;
       const safe: CheckoutResult = {
@@ -408,7 +340,8 @@ export async function createMergeCheckLog(input: {
         (c) => !["passed", "not_run", "skipped"].includes(c.status),
       );
       // A partial download cannot provide redaction boundaries or retry evidence.
-      if (result.logFailure) output.delete(failed?.name ?? "executor");
+      if (result.logFailure) output.clear();
+      for (const buffer of output.values()) buffer.seal();
       const failures =
         output.get(failed?.name ?? "executor")?.failure.lines() ?? [];
       const baseSummary =
@@ -445,29 +378,33 @@ export async function createMergeCheckLog(input: {
           ? undefined
           : namesForExcerpt();
       function namesForExcerpt() {
-        for (const buffer of output.values()) {
+        const buffer = output.get(failed?.name ?? "executor");
+        if (buffer) {
           const text = buffer.text();
           const match = /(?:^|\n)[^\n]*?\bFAIL\b/u.exec(text);
           if (match?.index !== undefined)
             return clip(
-              text.slice(match.index).trimStart(),
+              summarizeLine(text.slice(match.index).trimStart()),
               input.failureExcerptBytes ?? 4096,
             );
         }
         return undefined;
       }
       // C-116: classified from the full retained output, before it is cleared.
-      const timeout_only =
+      const completeEvidence =
         !result.logFailure &&
+        !result.logAttributionIncomplete &&
         !result.manual_attention &&
+        ![...output.values()].some((b) => b.incomplete);
+      const timeout_only =
+        completeEvidence &&
         checkTimedOutOnly(
           result.status,
           result.checks,
           (name) => output.get(name)?.text() ?? "",
         );
       const infra_flaky =
-        !result.logFailure &&
-        !result.manual_attention &&
+        completeEvidence &&
         [...output.keys()].every((name) =>
           result.checks.some((check) => check.name === name),
         ) &&
@@ -484,20 +421,8 @@ export async function createMergeCheckLog(input: {
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];
-      const handle = await open(
-        path,
-        constants.O_WRONLY | constants.O_NOFOLLOW,
-      );
-      try {
-        const entry = await handle.stat();
-        if (
-          !entry.isFile() ||
-          entry.uid !== process.getuid?.() ||
-          entry.nlink !== 1 ||
-          (entry.mode & 0o777) !== 0o600
-        )
-          throw new Error("Unsafe merge check log file");
-        await handle.truncate(0);
+      await privateDirectory(directory, false);
+      const writeError = await saveCheckLog(path, async (handle) => {
         await handle.writeFile(
           header + (result.status === "passed" ? "" : `\n${summary}\n`),
         );
@@ -505,7 +430,6 @@ export async function createMergeCheckLog(input: {
           await handle.writeFile(
             `\n=== ${filter.redact(name)} ===\n${output.get(name)?.text() ?? "未输出内容\n"}`,
           );
-          output.delete(name);
         }
         if (result.status === "passed")
           await handle.writeFile(`\n${summary}\n`);
@@ -513,22 +437,46 @@ export async function createMergeCheckLog(input: {
           await handle.writeFile(
             `\n清理提示：\n${safe.cleanup_errors.join("\n")}\n`,
           );
-        await handle.sync();
-      } finally {
-        await handle.close();
+      });
+      output.clear();
+      let note = "";
+      if (writeError) {
+        // Only a known body I/O failure *after* binding/step validation may
+        // degrade diagnostics instead of failing the check. Never accept a URL from output.
+        const url = bound?.html_url;
+        const match =
+          url &&
+          /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/([1-9]\d*)$/u.exec(
+            url,
+          );
+        if (
+          !bound ||
+          !match ||
+          Number(match[1]) !== bound.run_id ||
+          (result.logSource && result.logSource.url !== url) ||
+          result.checks.map((c) => c.name).join(",") !==
+            "install,build,test,lint,deps,e2e"
+        )
+          throw new Error(`检查日志写入失败 [${writeError}]`);
+        note = `本地日志保存失败（${writeError}，已尝试三次），可从远端重试读取；${result.logFailure ? `日志获取失败（${result.logFailure}）；` : ""}检查结论不变：${url}${result.logSource?.jobId ? `/job/${result.logSource.jobId}` : ""}`;
+      } else {
+        try {
+          await pruneCheckLogs(directory);
+        } catch {
+          note = "旧日志清理未完成，本次日志已保存";
+        }
       }
-      const logs = [];
-      for (const name of await readdir(directory)) {
-        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\.log$/u.test(name)) continue;
-        const info = await lstat(join(directory, name));
-        if (info.isFile() && info.uid === process.getuid?.())
-          logs.push({ name, time: info.mtimeMs });
-      }
-      logs.sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
-      for (const old of logs.slice(50)) await unlink(join(directory, old.name));
       return {
         ...safe,
-        summary,
+        summary: note
+          ? clip(
+              baseSummary,
+              CHECK_SUMMARY_LIMIT - Buffer.byteLength(note + locator) - 2,
+            ) +
+            "\n" +
+            note +
+            (writeError ? "" : locator)
+          : summary,
         log_ref,
         timeout_only,
         infra_flaky,

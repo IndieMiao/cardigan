@@ -727,3 +727,84 @@ test.each([
     expect(result.summary).toContain(expected);
   },
 );
+
+test.each([true, false])(
+  "suite failures and repeated cases stay independent; authoritative total=%s",
+  async (stats) => {
+    const writer = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "mixed",
+    });
+    writer.append(
+      "test",
+      [
+        "FAIL load.test.ts",
+        ...[1, 2, 3, 4, 5, 6, 6].map((i) => `FAIL another.test.ts > case ${i}`),
+        ...(stats ? ["Tests 6 failed"] : []),
+      ].join("\n"),
+    );
+    const { summary } = await writer.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(summary).toContain("FAIL load.test.ts");
+    expect(summary.match(/ > case /gu)).toHaveLength(5);
+    expect(summary).toContain(stats ? "另有 1 个失败用例" : "另有失败用例");
+    expect(summary).not.toContain("另有 2");
+  },
+);
+
+test.each([1, 17000, 30000])(
+  "long assertion retains only its fixed type (split at %i)",
+  async (split) => {
+    const writer = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt: "long",
+    });
+    const text = `AssertionError: synthetic prefix ${"z".repeat(20000)}`;
+    for (const line of [text.slice(0, split), text.slice(split) + "\n"])
+      writer.append("test", line);
+    const saved = await writer.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(saved.summary.split("\n")).toContain("AssertionError");
+    expect(saved.summary).not.toContain("synthetic prefix");
+  },
+);
+
+test("a single GitHub PEM block stays redacted across step and ANSI chunk boundaries", async () => {
+  const dataDir = await fixture();
+  const writer = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "key-boundary",
+    failureExcerptBytes: 4096,
+  });
+  writer.append("test", "-----BE\x1b[");
+  writer.append("test", "31mGIN PRIVATE KEY-----\n");
+  writer.append(
+    "lint",
+    "FAIL synthetic-private-fragment\n-----END PRIVATE KEY-----\nFAIL visible after key\n",
+  );
+  const saved = await writer.finish({
+    status: "failed",
+    checks: [
+      { name: "test", status: "passed" },
+      { name: "lint", status: "failed" },
+    ],
+    cleanup_errors: [],
+  });
+  const body = await readFile(
+    join(dataDir, "merge-gate/logs/p", saved.log_ref),
+    "utf8",
+  );
+  expect(saved.summary).toContain("visible after key");
+  expect(body + JSON.stringify(saved)).not.toContain(
+    "synthetic-private-fragment",
+  );
+});

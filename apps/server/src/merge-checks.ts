@@ -1601,7 +1601,10 @@ export class MergeChecks {
     };
     try {
       finished = log
-        ? await log.finish(result)
+        ? await log.finish(
+            result,
+            executedOn?.type === "github" ? bound : undefined,
+          )
         : {
             ...result,
             summary: "检查日志无法创建，检查未执行",

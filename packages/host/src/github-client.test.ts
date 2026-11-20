@@ -864,3 +864,25 @@ test("C-529: streams a job larger than the retained log and decodes split UTF-8 
   expect(bytes).toBe(48 * 65536 + tail.length);
   expect(last).toBe("中文");
 });
+
+test("signed job storage Retry-After pauses other calls on the same REST budget", async () => {
+  const f = await setup(new GithubRateLimit(100));
+  vi.spyOn(f.client, "token").mockResolvedValue(syntheticToken(1));
+  f.fetcher
+    .mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://test.blob.core.windows.net/job" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(null, { status: 429, headers: { "Retry-After": "90" } }),
+    );
+  const open = vi.fn();
+  await expect(f.client.jobLog(11, open)).rejects.toBeInstanceOf(
+    GithubRetryLater,
+  );
+  await expect(f.client.run(123)).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(open).not.toHaveBeenCalled();
+});

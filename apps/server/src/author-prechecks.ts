@@ -691,7 +691,10 @@ export class AuthorPrechecks {
       );
       stage = "保存日志";
       finishedLog = true;
-      const saved = await log.finish(result);
+      const saved = await log.finish(
+        result,
+        target.type === "github" ? bound : undefined,
+      );
       const completed: Precheck = {
         ...check,
         ...(bound ? { external_run: bound } : {}),

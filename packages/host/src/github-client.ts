@@ -107,6 +107,8 @@ export function sameGithubRun(a: GithubRun, b: GithubRun): boolean {
 }
 /** Host-only REST client. No response text or credential enters diagnostics. */
 export interface GithubStep {
+  readonly started_at?: string | null;
+  readonly completed_at?: string | null;
   readonly name: string;
   readonly number: number;
   readonly status: string;
@@ -590,6 +592,8 @@ export class GithubClient {
           });
         }
         signal.throwIfAborted();
+        if (response.status === 403 || response.status === 429)
+          this.rate.backoff(response.headers.get("retry-after"));
         if (response.status === 404) throw new GithubNotFoundError();
         if (response.status === 401) throw new GithubExecutorError("auth");
         if (!response.ok || !response.body)

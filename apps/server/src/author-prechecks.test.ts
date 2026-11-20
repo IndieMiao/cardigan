@@ -1612,3 +1612,34 @@ test("a queued author precheck reports the blocking GitHub attempt once across c
   expect(x.check().status).toBe("queued");
   expect(x.reserve).not.toHaveBeenCalled();
 });
+
+test("a verified author precheck still records its six passing steps when local log storage is unavailable", async () => {
+  const { x, remote, options, client } = await setupGithubPrechecks();
+  const fs = (await import("node:fs/promises")).default;
+  const gate = new MergeChecks(options);
+  const original = fs.rename;
+  const rename = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+    if (String(to).endsWith(".log"))
+      throw Object.assign(new Error("private storage detail"), { code: "EIO" });
+    return original(from, to);
+  });
+  try {
+    const round = await gate.schedule([x.f.project_id]);
+    await vi.waitFor(() => expect(x.check().status).toBe("running"));
+    remote.complete = true;
+    x.advance();
+    await gate.schedule([x.f.project_id]);
+    await round.done;
+    expect(x.check().status).toBe("passed");
+    expect(x.check().checks).toHaveLength(6);
+    expect(x.check().summary).toContain("EIO");
+    expect(x.check().summary).toContain(
+      "https://github.com/fixture/project/actions/runs/123",
+    );
+    expect(client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    rename.mockRestore();
+    gate.stop();
+    await gate.idle();
+  }
+});

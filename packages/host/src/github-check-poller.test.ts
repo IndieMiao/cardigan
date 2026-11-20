@@ -295,7 +295,11 @@ test.each(["failure", "timed_out", "skipped"])(
       open = () => write;
     await f.poller.fetchFailureLog(external(1), open);
     expect(write.mock.calls[0]?.[0]).toContain("FAIL");
-    expect(f.client.jobLog).toHaveBeenCalledWith(1001, open, undefined);
+    expect(f.client.jobLog).toHaveBeenCalledWith(
+      1001,
+      expect.any(Function),
+      undefined,
+    );
   },
 );
 test("D4: shared hourly budget refunds 304, counts details, and enforces Retry-After seconds/date", () => {
@@ -414,6 +418,8 @@ test("D4: log rate limiting cannot delay or replace a verified failed result", a
   await expect(
     f.poller.fetchFailureLog(external(1), () => vi.fn()),
   ).rejects.toMatchObject({ category: "rate_limited" });
+  expect(f.waitForLogRetry).not.toHaveBeenCalled();
+  expect(f.client.jobLog).toHaveBeenCalledOnce();
 });
 
 test.each(["security", "api"] as const)(

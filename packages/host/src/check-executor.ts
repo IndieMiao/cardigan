@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { withCheckoutDeadline } from "./checkout-deadline.js";
+import { githubJobLog, type StepTime } from "./github-job-log.js";
 import {
   type CheckoutInput,
   type CheckoutResult,
@@ -43,7 +44,9 @@ export interface CheckHandle {
   readonly id: string;
 }
 /** Each download attempt starts a fresh stream; partial logs must not be spliced. */
-export type OpenFailureLog = () => (text: string) => void;
+export type OpenFailureLog = (
+  steps?: readonly StepTime[],
+) => (text: string) => void;
 export class FailureLogError extends Error {
   constructor(readonly category: NonNullable<CheckoutResult["logFailure"]>) {
     super(category);
@@ -157,18 +160,32 @@ export async function runCheckExecutor(
               request.hostSignal && input.signal
                 ? AbortSignal.any([input.signal, request.hostSignal])
                 : input.signal;
+            const streams = new Set([name]);
+            let router: ReturnType<typeof githubJobLog> | undefined;
+            const emit = (step: string, text: string) => {
+              if (closed || signal?.aborted) return;
+              streams.add(step);
+              input.onOutput?.(step, text);
+            };
             try {
               await executor.fetchFailureLog(
                 handle,
-                () => {
-                  if (!closed && !signal?.aborted) resetFailureLog?.(name);
-                  return (text) => {
-                    if (!closed && !signal?.aborted)
-                      input.onOutput?.(name, text);
-                  };
+                (steps) => {
+                  if (!closed && !signal?.aborted)
+                    for (const key of streams) resetFailureLog?.(key);
+                  router = steps
+                    ? githubJobLog(
+                        steps,
+                        terminal.checks.map((s) => s.name),
+                        emit,
+                      )
+                    : undefined;
+                  return router?.write ?? ((text) => emit(name, text));
                 },
                 signal,
               );
+              if (router && !router.finish())
+                polled = { ...terminal, logAttributionIncomplete: true };
             } catch (error) {
               const category = signal?.aborted
                 ? "timeout_or_cancel"

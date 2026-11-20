@@ -69,6 +69,7 @@ interface Pending {
   binding?: RetryBinding | undefined;
   listed?: { etag: string; run: GithubRun };
   failedJob?: number | undefined;
+  logSteps?: GithubJob["steps"];
   boundByDispatchId: boolean;
   progress?: string;
   started?: boolean;
@@ -195,7 +196,11 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     for (let attempt = 0; ; attempt++) {
       signal?.throwIfAborted();
       try {
-        await this.options.client.jobLog(state.failedJob, open, signal);
+        await this.options.client.jobLog(
+          state.failedJob,
+          () => open(state.logSteps ?? []),
+          signal,
+        );
         return;
       } catch (error) {
         signal?.throwIfAborted();
@@ -419,6 +424,8 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     if (signal.aborted || state.revision !== revision) return;
     const result = mapGithubCheckResult(state.request, run, jobs);
     state.failedJob = result.logSource?.jobId;
+    if (state.failedJob && result.checks.length && jobs[0])
+      state.logSteps = jobs[0].steps;
     state.onTerminal?.();
     this.close(state, result);
   }

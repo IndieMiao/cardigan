@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GitPublicationGuard } from "@cardigan/domain";
@@ -3187,7 +3187,8 @@ test.each([
       cancel: vi.fn(async () => {}),
       jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
         open()(
-          "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+          '##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n' +
+            "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
         ),
       ),
     };
@@ -3791,6 +3792,7 @@ async function reworkGithubFixture(
     excerptBytes?: number;
     noRunId?: boolean;
     scoped?: boolean;
+    failedStep?: "lint" | "e2e";
   } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
@@ -3875,13 +3877,28 @@ async function reworkGithubFixture(
           number: index + 1,
           status: "completed",
           conclusion:
-            conclusion === "failure" && name === "test" ? "failure" : "success",
+            conclusion === "failure" && name === (options.failedStep ?? "test")
+              ? "failure"
+              : "success",
+          ...(options.failedStep
+            ? {
+                started_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index),
+                ).toISOString(),
+                completed_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index, 59),
+                ).toISOString(),
+              }
+            : {}),
         })),
       },
     ]),
     cancel: vi.fn(async () => {}),
     jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
-      open()(options.log ?? "FAIL synthetic\n"),
+      open()(
+        '##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n' +
+          (options.log ?? "FAIL synthetic\n"),
+      ),
     ),
   };
   const git = {
@@ -5891,3 +5908,103 @@ test("expired abandoned GitHub dispatch is settled after a complete empty scan w
     await next.idle();
   }
 });
+
+test.each(["lint", "e2e"] as const)(
+  "whole-job logs publish only the failed %s step on the timeline and first page",
+  async (failedStep) => {
+    const { GITHUB_WORKFLOW_STEPS } = await import("@cardigan/host");
+    const line = (step: "test" | "lint" | "e2e", text: string) =>
+      `2030-01-01T00:${String(GITHUB_WORKFLOW_STEPS.indexOf(step)).padStart(2, "0")}:02.1234567Z ${text}\n`;
+    const h = await reworkGithubFixture({
+      failedStep,
+      log:
+        line("test", "Error: recovered sample") +
+        line("test", "FAIL recovered sample") +
+        line("test", "Tests 99 passed") +
+        line(failedStep, "FAIL src/check.spec.ts > required check") +
+        line(
+          failedStep,
+          "Error: required diagnostic CI_COLOR = 'private synthetic phrase'",
+        ) +
+        line(
+          failedStep,
+          "##[error] connect postgresql://demo:private-uri@db.invalid/path",
+        ),
+    });
+    const gate = h.create();
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete("failure");
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      const body = await readFile(
+        join(
+          h.f.dataDir,
+          "merge-gate/logs",
+          h.f.project_id,
+          required(check.log_ref),
+        ),
+        "utf8",
+      );
+      const timeline = h.f
+        .state()
+        .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+      for (const text of [check.summary, timeline, body.split("===")[0]]) {
+        expect(text).toContain("required check");
+        expect(text).toContain("required diagnostic");
+        expect(text).not.toContain("recovered sample");
+        expect(text).not.toContain("Tests 99 passed");
+      }
+      expect(check.failure_excerpt).toContain("required check");
+      expect(check.failure_excerpt).not.toContain("recovered sample");
+      expect(check.timeout_only).not.toBe(true);
+      for (const secret of ["private-uri", "private synthetic phrase"])
+        expect(body + JSON.stringify(check) + timeline).not.toContain(secret);
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["success", "failure"] as const)(
+  "persistent local storage fault preserves verified GitHub %s and does not redispatch",
+  async (conclusion) => {
+    const h = await reworkGithubFixture();
+    const gate = h.create();
+    const original = fs.rename;
+    let attempts = 0;
+    const rename = vi
+      .spyOn(fs, "rename")
+      .mockImplementation(async (from, to) => {
+        if (String(to).endsWith(".log")) {
+          attempts++;
+          throw Object.assign(new Error("private detail"), { code: "ENOSPC" });
+        }
+        return original(from, to);
+      });
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete(conclusion);
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      expect(check.status).toBe(conclusion === "success" ? "passed" : "failed");
+      expect(check.checks).toHaveLength(6);
+      expect(check.summary).toContain("ENOSPC");
+      expect(check.summary).toContain(check.external_run?.html_url);
+      expect(check.summary).not.toContain("private detail");
+      expect(attempts).toBe(3);
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+    } finally {
+      rename.mockRestore();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);

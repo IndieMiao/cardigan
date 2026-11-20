@@ -52,6 +52,7 @@ export interface CheckoutResult {
   readonly manual_attention?: boolean;
   /** Trusted GitHub binding, independent of candidate output and signed storage URLs. */
   readonly logSource?: { readonly url: string; readonly jobId?: number };
+  readonly logAttributionIncomplete?: boolean;
   readonly logFailure?:
     | "not_found"
     | "api"
