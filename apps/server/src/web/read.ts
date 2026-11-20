@@ -74,6 +74,12 @@ import { runQueuedAt } from "../run-queued-at.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
+import {
+  assignmentPresence,
+  precheckIndex,
+  type RunPresence,
+  strongestPresence,
+} from "./run-presence.js";
 
 /**
  * The Workbench read model (M5 plan §4 M5.1: 只读接口).
@@ -346,7 +352,9 @@ export interface CardListView extends WebCardView {
   } | null;
   readonly queued_runs?: readonly RunQueuePosition[];
   readonly produce_owners: readonly WebAuthorView[];
-  readonly participants: readonly WebAuthorView[];
+  readonly participants: readonly (WebAuthorView & {
+    readonly run_presence: RunPresence;
+  })[];
   readonly work_items: readonly Pick<WorkItem, "id" | "title" | "status">[];
   readonly attachment_count: number;
   readonly progress: { readonly completed: number; readonly total: number };
@@ -378,23 +386,48 @@ export function cardListViews(
   const assignments = new Map(
     state.assignments.map((assignment) => [assignment.id, assignment]),
   );
+  const live = (items: readonly WorkItem[]) =>
+    items.flatMap((item) => {
+      const assignment = item.assignment_id
+        ? assignments.get(item.assignment_id)
+        : undefined;
+      return assignment && assignment.status !== "released" ? [assignment] : [];
+    });
   const owners = (items: readonly WorkItem[]) => [
     ...new Map(
-      items.flatMap((item) => {
-        const assignment = item.assignment_id
-          ? assignments.get(item.assignment_id)
-          : undefined;
-        return assignment && assignment.status !== "released"
-          ? [
-              [
-                assignment.employee_id ?? assignment.id,
-                webAuthorView(state, `assignment:${assignment.id}`),
-              ] as const,
-            ]
-          : [];
-      }),
+      live(items).map(
+        (assignment) =>
+          [
+            assignment.employee_id ?? assignment.id,
+            webAuthorView(state, `assignment:${assignment.id}`),
+          ] as const,
+      ),
     ).values(),
   ];
+  const cardPrechecks = precheckIndex(state);
+  // C-531: the same people as `owners`, each with what they are doing for
+  // this card, merged over all of their assignments on it.
+  const participants = (cardId: string, items: readonly WorkItem[]) => {
+    const people = new Map<
+      string,
+      { view: WebAuthorView; presences: RunPresence[] }
+    >();
+    for (const assignment of live(items)) {
+      const key = assignment.employee_id ?? assignment.id;
+      const person = people.get(key) ?? {
+        view: webAuthorView(state, `assignment:${assignment.id}`),
+        presences: [],
+      };
+      person.presences.push(
+        assignmentPresence(state, assignment, cardPrechecks(cardId)),
+      );
+      people.set(key, person);
+    }
+    return [...people.values()].map(({ view, presences }) => ({
+      ...view,
+      run_presence: strongestPresence(presences),
+    }));
+  };
   return cardViews(state, dependencyState, mergeState).map((card) => {
     const template = cardTemplate(card, state.card_templates);
     const items = state.work_items.filter((item) => item.card_id === card.id),
@@ -430,7 +463,7 @@ export function cardListViews(
           }
         : {}),
       produce_owners: owners(items.filter((item) => item.kind === "produce")),
-      participants: owners(items),
+      participants: participants(card.id, items),
       work_items: items.map(({ id, title, status }) => ({ id, title, status })),
       attachment_count: attachmentCounts.get(card.id) ?? 0,
       progress: { completed, total: items.length },
@@ -755,6 +788,7 @@ export function cardDetail(
   }
   const dependencySource = options.dependencyState ?? state,
     graphSource = dependencySource.cards.find((c) => c.id === card_id);
+  const cardPrechecks = precheckIndex(state);
   // Precheck display time comes from the last trusted event, not the paged timeline.
   const precheckTimes = new Map<string, { seq: number; at: string }>();
   for (const event of state.events) {
@@ -1050,10 +1084,24 @@ export function cardDetail(
       const selection = options.overviewOnly
         ? undefined
         : machineSelection(state.events, item.id);
+      // C-531: the work item's own owner and what they do for this item only.
+      const assignment = item.assignment_id
+        ? state.assignments.find((a) => a.id === item.assignment_id)
+        : undefined;
       return {
         ...item,
         verification_activity: verificationActivity(item, state),
         ...(selection ? { machine_selection: selection } : {}),
+        ...(assignment && assignment.status !== "released"
+          ? {
+              assignee: webAuthorView(state, `assignment:${assignment.id}`),
+              run_presence: assignmentPresence(
+                state,
+                assignment,
+                cardPrechecks(card_id),
+              ),
+            }
+          : {}),
       };
     }),
     timeline: timeRead(options.recordTiming, "timeline_view", () =>
@@ -1791,6 +1839,7 @@ export function executionView<M extends Machine = Machine>(
     const usage = contextByRun.get(run.id);
     return usage ? { context_usage: usage } : {};
   };
+  const cardPrechecks = precheckIndex(state);
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1824,6 +1873,16 @@ export function executionView<M extends Machine = Machine>(
         ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
+        // C-531: only a row bound to a card's work item has a card presence.
+        ...(assignment.scope === "work_item" && card_id
+          ? {
+              run_presence: assignmentPresence(
+                state,
+                assignment,
+                cardPrechecks(card_id),
+              ),
+            }
+          : {}),
         verification_activity: (() => {
           const item = state.work_items.find(
             (w) => w.id === assignment.work_item_id,
