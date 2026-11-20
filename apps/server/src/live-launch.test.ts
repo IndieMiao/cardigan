@@ -1,6 +1,7 @@
 import { chmodSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RuntimeTargets } from "@cardigan/host";
+import { isAcceptedBrowserPath, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { createHostWiring } from "./host.js";
@@ -23,6 +24,14 @@ test("each new snapshot reads hot edits; an in-flight start retains its whole ge
       secrets = join(f.dataDir, "secrets.env");
     const config = (id: string) =>
       JSON.stringify({
+        ...(id === "fixed"
+          ? {}
+          : {
+              browser: {
+                command: "/fixture/mcp",
+                browsers_path: `/fixture/${id}`,
+              },
+            }),
         providers: { relay: { harness: "pi", secret_env: { TOKEN: "KEY" } } },
         models: { alias: { id, provider: "relay", context_window: 4096 } },
         profiles: { fixture: { harness: "pi", model: "alias" } },
@@ -45,9 +54,11 @@ test("each new snapshot reads hot edits; an in-flight start retains its whole ge
       dataDir: f.dataDir,
       execution,
     });
+    host.publishWhileBackgroundOwner();
     const take = () => host.snapshot(assignment, f.project);
     const first = await take();
     expect(first.model).toBe("old");
+    expect(isAcceptedBrowserPath(f.store, "/fixture/old")).toBe(true);
     writeFileSync(`${yaml}.tmp`, config("new"));
     renameSync(`${yaml}.tmp`, yaml);
     writeFileSync(secrets, "KEY=fixture-after");
@@ -80,6 +91,8 @@ test("each new snapshot reads hot edits; an in-flight start retains its whole ge
     expect(
       f.state().events.filter((e) => e.type === "launch_reload_failed"),
     ).toHaveLength(1);
+    expect(isAcceptedBrowserPath(f.store, "/fixture/unsafe")).toBe(false);
+    expect(isAcceptedBrowserPath(f.store, "/fixture/new")).toBe(true);
     chmodSync(secrets, 0o600);
     writeFileSync(yaml, "profiles: [private-marker");
     await host.refreshLaunch();
@@ -88,7 +101,68 @@ test("each new snapshot reads hot edits; an in-flight start retains its whole ge
     expect(warn.mock.calls.flat().join(" ")).not.toContain("private-marker");
     writeFileSync(yaml, config("fixed"));
     expect((await take()).model).toBe("fixed");
+    expect(isAcceptedBrowserPath(f.store, "/fixture/new")).toBe(false);
   } finally {
+    f.close();
+  }
+});
+
+test("only the dispatch owner publishes, and a busy publication retries the unchanged files", async () => {
+  const f = dispatchFixture(),
+    other = Store.open({ dataDir: f.dataDir });
+  try {
+    const yaml = join(f.dataDir, "launch.yaml"),
+      secrets = join(f.dataDir, "secrets.env");
+    const config = (dir: string) =>
+      JSON.stringify({
+        browser: { command: "/fixture/mcp", browsers_path: dir },
+      });
+    const a = "/fixture/A",
+      b = "/fixture/B",
+      c = "/fixture/C";
+    const host = (store: Store) =>
+      createHostWiring({
+        env: { CARDIGAN_CONFIG_DIR: f.dataDir },
+        dataDir: f.dataDir,
+        store,
+        execution: { mode: "local", dataDir: f.dataDir },
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    writeFileSync(yaml, config(a));
+    writeFileSync(secrets, "", { mode: 0o600 });
+    const background = await host(f.store);
+    const release = background.publishWhileBackgroundOwner();
+    writeFileSync(yaml, config(b));
+    const web = await host(other); // Starting web with B cannot certify it.
+    expect(web.upstream.browser?.browsers_path).toBe(b);
+    chmodSync(secrets, 0o644);
+    await background.refreshLaunch();
+    expect(background.upstream.browser?.browsers_path).toBe(a);
+    expect(isAcceptedBrowserPath(other, b)).toBe(false);
+    chmodSync(secrets, 0o600);
+    writeFileSync(yaml, config(c));
+    await web.refreshLaunch();
+    expect(web.upstream.browser?.browsers_path).toBe(c);
+    expect(isAcceptedBrowserPath(other, a)).toBe(true);
+    f.store.database.exec("PRAGMA busy_timeout=5");
+    other.database.exec("BEGIN IMMEDIATE");
+    try {
+      await background.refreshLaunch();
+      expect(background.upstream.browser?.browsers_path).toBe(a);
+      expect(isAcceptedBrowserPath(other, c)).toBe(false);
+    } finally {
+      other.database.exec("ROLLBACK");
+    }
+    expect(warn.mock.calls.flat().join(" ")).toContain("下次刷新重试");
+    await background.refreshLaunch(); // no chmod, file edit or restart
+    expect(background.upstream.browser?.browsers_path).toBe(c);
+    expect(isAcceptedBrowserPath(other, c)).toBe(true);
+    release();
+    writeFileSync(yaml, config(b));
+    await background.refreshLaunch();
+    expect(isAcceptedBrowserPath(other, c)).toBe(true);
+  } finally {
+    other.close();
     f.close();
   }
 });

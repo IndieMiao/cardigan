@@ -180,7 +180,10 @@ test("C-73: a Run re-queued after a decision or unblock (no run_queued) counts f
   queueResumedRun(draft, item, resolved);
   state = apply(state, {
     changes: draft.changes,
-    events: draft.events.map((e) => ({ ...e, created_at: at(9) })),
+    // Model historical rows written before resumed Runs gained a creation event.
+    events: draft.events
+      .filter((e) => e.type !== "run_queued")
+      .map((e) => ({ ...e, created_at: at(9) })),
     timeline: draft.timeline,
   } as never);
   const resumed = state.runs.find(

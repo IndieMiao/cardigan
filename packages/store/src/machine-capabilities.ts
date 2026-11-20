@@ -1,7 +1,45 @@
+import { createHash } from "node:crypto";
 import type { Actor } from "@cardigan/domain";
 import type { Store } from "./store.js";
 
 export const MACHINE_OBSERVATION_TTL_MS = 24 * 60 * 60 * 1000;
+export const browserPathDigest = (path: string) =>
+  createHash("sha256").update(path).digest("hex");
+
+export function acceptedBrowserDigest(store: Store): string | null {
+  const row = store.database
+    .prepare("SELECT digest FROM accepted_browser_path WHERE singleton=1")
+    .get();
+  return row ? String(row.digest) : null;
+}
+
+/** Only the background lock owner publishes. Invalidate prior browser proof atomically. */
+export function recordAcceptedBrowserPath(
+  store: Store,
+  path: string | undefined,
+) {
+  const digest = path ? browserPathDigest(path) : null;
+  if (acceptedBrowserDigest(store) === digest) return;
+  store.uow.run(() => {
+    if (digest === null)
+      store.database
+        .prepare("DELETE FROM accepted_browser_path WHERE singleton=1")
+        .run();
+    else
+      store.database
+        .prepare(
+          "INSERT INTO accepted_browser_path VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET digest=excluded.digest",
+        )
+        .run(digest);
+    store.database
+      .prepare("DELETE FROM machine_capabilities WHERE key='browser.chromium'")
+      .run();
+  });
+}
+export function isAcceptedBrowserPath(store: Store, path: string): boolean {
+  return acceptedBrowserDigest(store) === browserPathDigest(path);
+}
+
 export interface MachineCapability {
   readonly key: string;
   readonly version: string | null;
@@ -13,6 +51,11 @@ export interface MachineHealth {
   readonly checked_at: string;
   readonly blockers: readonly string[];
   readonly launch_enabled: boolean;
+  readonly capability_failures?: readonly {
+    readonly key: string;
+    readonly search_locations: readonly string[];
+    readonly search_incomplete?: true;
+  }[];
 }
 function systemOnly(actor: Actor, project: string): void {
   if (actor.kind !== "system" || actor.project_id !== project)
@@ -133,15 +176,40 @@ export function completeMachineObservation(
   health: MachineHealth,
   capabilities: readonly MachineCapability[],
   targetFingerprint?: string,
+  observedBrowserDigest?: string | null,
 ): boolean {
   systemOnly(actor, project);
   return store.uow.run(() => {
+    // The writer and the probe commit use the same SQLite write fence. Whichever
+    // commits first, an old browser proof cannot outlive a path change.
+    const browserChanged =
+      observedBrowserDigest !== undefined &&
+      observedBrowserDigest !== acceptedBrowserDigest(store);
+    const scopedHealth =
+      browserChanged && health.status === "passed"
+        ? {
+            ...health,
+            capability_failures: [
+              ...(health.capability_failures ?? []).filter(
+                (f) => f.key !== "browser.chromium",
+              ),
+              {
+                key: "browser.chromium",
+                search_locations: [],
+                search_incomplete: true,
+              },
+            ],
+          }
+        : health;
     const updated = store.database
       .prepare(
         "UPDATE machine_health SET doc = ? WHERE project_id = ? AND machine_id = ? AND observation_id = ? AND json_extract(doc, '$.status') = 'checking'",
       )
       .run(
-        JSON.stringify({ ...health, target_fingerprint: targetFingerprint }),
+        JSON.stringify({
+          ...scopedHealth,
+          target_fingerprint: targetFingerprint,
+        }),
         project,
         machine,
         observation,
@@ -150,7 +218,8 @@ export function completeMachineObservation(
     const insert = store.database.prepare(
       "INSERT INTO machine_capabilities VALUES (?, ?, ?, ?, ?, ?)",
     );
-    for (const c of capabilities)
+    for (const c of capabilities) {
+      if (browserChanged && c.key === "browser.chromium") continue;
       insert.run(
         project,
         machine,
@@ -159,6 +228,7 @@ export function completeMachineObservation(
         c.verified_at,
         c.evidence_ref,
       );
+    }
     return true;
   });
 }
