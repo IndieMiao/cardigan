@@ -601,7 +601,9 @@ test("a cross-project capacity notice rereads the open machine; other settings p
 test("a failed capacity refresh is not shown as current: only the machine's own limit, and a retry", async () => {
   let fail = false;
   let limit = 6;
+  let gate: Promise<void> | undefined;
   const executionCapacity = vi.fn(async () => {
+    if (gate) await gate;
     if (fail) throw new Error("合成容量读取失败");
     return {
       ...capacity,
@@ -644,8 +646,21 @@ test("a failed capacity refresh is not shown as current: only the machine's own 
     { name: "重试" },
   );
   expect(retry.closest("[data-feedback-host]")).not.toBeNull();
+  // V-2441: while the retry is in flight the failed snapshot (2 / 6, 排队 1)
+  // must not come back as current; it waits for a read that succeeds.
   fail = false;
+  const held = Promise.withResolvers<void>();
+  gate = held.promise;
   fireEvent.click(retry);
+  expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
+  expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
+  expect(facts("非常驻 / 上限")).toBe("— / 3");
+  expect(facts("排队")).toBe("—");
+  expect(dialog.queryByText("2 / 6")).toBeNull();
+  gate = undefined;
+  await act(async () => held.resolve());
   await waitFor(() => expect(facts("非常驻 / 上限")).toBe("2 / 3"));
+  expect(facts("排队")).toBe("1");
+  expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
   expect(dialog.queryByText(/并发读数未能更新/)).toBeNull();
 });

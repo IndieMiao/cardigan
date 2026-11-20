@@ -348,6 +348,10 @@
     max-width: none;
     max-height: none;
   }
+  /* Separate a visible notice from the drawer content that follows it. */
+  .drawerFeedback:has(:global(.request-feedback):not(:empty)) {
+    margin-bottom: var(--ui-space-3);
+  }
   /* While such a drawer is open the page stack waits in the bottom corner,
      so the two stacks never share a place (the page stack paints above the
      drawer) and the drawer's retry stays reachable on every width. */

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   CardiganClient,
   ExecutionCapacity,
@@ -53,27 +53,38 @@ const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
     ? `${capacity.running} / ${capacity.limit || "不可用"}`
     : `— / ${m.run_limit}`;
 /**
- * The shared capacity read for one machine. A failed refresh keeps the last
- * snapshot in the resource, but that snapshot is no longer current: it is
- * not shown, and the failure is offered for retry instead.
+ * The shared capacity read as the machine panel uses it. A failed refresh
+ * keeps the last snapshot in the resource, but that snapshot is no longer
+ * current: it stays hidden until a later read succeeds, including while a
+ * retry is in flight (an ordinary background refresh still shows the last
+ * successful read). Read once per panel and handed to its drawer.
  */
 function useMachineCapacity() {
   const capacity = useCapacity();
-  const agents = capacity?.error ? undefined : capacity?.data?.agents;
+  const error = capacity?.error;
+  const pending = capacity?.pending ?? false;
+  const [failed, setFailed] = useState(Boolean(error));
+  useEffect(() => {
+    if (error) setFailed(true);
+    else if (!pending) setFailed(false);
+  }, [error, pending]);
+  const stale = Boolean(error) || failed;
+  const agents = stale ? undefined : capacity?.data?.agents;
   return {
     of: (id: string) => agents?.find((a) => a.machine_id === id),
-    error: capacity?.error,
+    error,
+    retrying: stale && !error && pending,
     reload: capacity?.reload,
   };
 }
-function CapacityFeedback({
-  capacity,
-}: {
-  capacity: ReturnType<typeof useMachineCapacity>;
-}) {
+type MachineCapacity = ReturnType<typeof useMachineCapacity>;
+function CapacityFeedback({ capacity }: { capacity: MachineCapacity }) {
   return (
     <RequestFeedback
       error={capacity.error ? `并发读数未能更新：${capacity.error}` : undefined}
+      pending={capacity.retrying}
+      interactive
+      pendingMessage="正在重新读取并发读数…"
       retry={capacity.reload}
     />
   );
@@ -196,6 +207,7 @@ export function MachinesSettings({
           projectId={projectId}
           summary={open}
           revision={revision}
+          capacity={capacity}
           onClose={() => setOpen(undefined)}
         />
       )}
@@ -209,12 +221,14 @@ function MachineDrawer({
   projectId,
   summary,
   revision,
+  capacity,
   onClose,
 }: {
   client: CardiganClient;
   projectId: string;
   summary: MachineView;
   revision: number;
+  capacity: MachineCapacity;
   onClose: () => void;
 }) {
   const load = useCallback(
@@ -222,7 +236,6 @@ function MachineDrawer({
     [client, projectId, summary.id],
   );
   const detail = useResource(load, revision);
-  const capacity = useMachineCapacity();
   const machine = detail.data?.machine;
   return (
     <Drawer
@@ -247,14 +260,20 @@ function MachineDrawer({
           />
           <CapacityFeedback capacity={capacity} />
         </SettingsDrawerFeedback>
-        {machine && <MachineFacts machine={machine} />}
+        {machine && <MachineFacts machine={machine} capacity={capacity} />}
       </CardDetailLayout>
     </Drawer>
   );
 }
 
-function MachineFacts({ machine }: { machine: MachineView }) {
-  const capacity = useMachineCapacity().of(machine.id);
+function MachineFacts({
+  machine,
+  capacity: shared,
+}: {
+  machine: MachineView;
+  capacity: MachineCapacity;
+}) {
+  const capacity = shared.of(machine.id);
   const bindings = [...machine.bindings].sort(
     (a, b) => Number(b.is_current) - Number(a.is_current),
   );
