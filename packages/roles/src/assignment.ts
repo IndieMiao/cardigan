@@ -16,6 +16,7 @@ import {
   type CompiledAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  RUN_RESOURCE_RULE,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
@@ -61,6 +62,7 @@ export function compileAssignmentLaunch(
     (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
       : composeRolePrompt(input.role.instructions)) + policyRule;
+  const resourceRule = input.run_resources ? `\n\n${RUN_RESOURCE_RULE}` : "";
   const corePrompt =
     identity === undefined
       ? rolePrompt
@@ -235,6 +237,17 @@ export function compileAssignmentLaunch(
     env.ANDROID_SERIAL =
       (devices.length === 1 ? devices[0] : undefined) ?? "cardigan-unassigned";
   }
+  const resourceFiles: CompiledFile[] = [];
+  if (input.run_resources) {
+    env.CARDIGAN_RESOURCE_SESSION = `${input.assignment.assignment_id}.${input.assignment.run_id}`;
+    env.CARDIGAN_RESOURCE_TARGET = input.run_resources.target;
+    env.CARDIGAN_RUN_COMMAND = join(input.run_dir, "run-command.py");
+    resourceFiles.push({
+      path: env.CARDIGAN_RUN_COMMAND,
+      mode: 0o600,
+      content: input.run_resources.source,
+    });
+  }
   if (input.agent_local_tests) env.CARDIGAN_AGENT_LOCAL_TESTS = "1";
   const testLimit =
     input.test_max_workers === undefined
@@ -273,7 +286,7 @@ export function compileAssignmentLaunch(
     files: [
       {
         path: coreFile,
-        content: withTrailingNewline(corePrompt),
+        content: withTrailingNewline(corePrompt + resourceRule),
         mode: 0o600,
       },
       {
@@ -284,6 +297,7 @@ export function compileAssignmentLaunch(
       ...strippedBaseFiles,
       ...harnessFiles,
       ...(testLimit ? [testLimit.file] : []),
+      ...resourceFiles,
       ...secretsFiles,
       ...(input.worker_launch
         ? [
@@ -427,7 +441,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-# Git's legacy command-line environment must not override the scoped list.
+${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(python3 -IB "$CARDIGAN_RUN_COMMAND" birth "$$") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

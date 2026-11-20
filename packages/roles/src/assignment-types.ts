@@ -1,6 +1,8 @@
 import type { Employee, Harness } from "@cardigan/domain";
 import type { CompiledFile } from "./launch-types.js";
 import type { LaunchConfig } from "./schema-definition.js";
+export const RUN_RESOURCE_RULE =
+  '开发服务、浏览器及临时命令必须经 python3 -IB "$CARDIGAN_RUN_COMMAND" R-n -- 命令 参数 启动（R-n 取当前门铃，不沿用上次编号）。临时文件写入该命令的 $TMPDIR。不要绕开入口或依赖旁路进程自动回收。';
 export const MCP_SERVER_NAME = "card";
 export const TOKEN_ENV_VAR = "MCP_TOKEN";
 /** The token file the wrapper reads and removes before starting the CLI. */
@@ -123,6 +125,7 @@ export interface CompileAssignmentInput {
   readonly test_max_workers?: number;
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;
+  readonly run_resources?: { source: string; target: string };
   /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
   readonly worker_test_lock?: { path: string; python: string; helper: string };
   /** Trusted worker wrapper; material and persistent session homes are separate. */

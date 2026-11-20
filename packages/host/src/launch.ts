@@ -91,6 +91,7 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
+import { resourceEntry } from "./run-resource-worker.js";
 import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
@@ -1028,6 +1029,7 @@ async function launch(
         : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
+      run_resources: resourceEntry(project, assignment.machine_id, execution),
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),

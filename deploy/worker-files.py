@@ -20,7 +20,7 @@ native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 TRAILER = b'\nCARDIGAN-PUBLISH-1\n'
-FILES = re.compile(r'(core\.md|first\.md|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
+FILES = re.compile(r'(core\.md|first\.md|run-command\.py|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
 
 
 def require(ok):
@@ -435,6 +435,14 @@ def run_worker(namespace, header, policy):
         os.unlink('start', dir_fd=generation)
         write_file(generation, 'running', b'')
         env = dict(os.environ, **launch['env'], **secret, MCP_TOKEN=token)
+        if 'CARDIGAN_RUN_COMMAND' in env:
+            pid = os.getpid()
+            try:
+                birth = (native.darwin_identity if sys.platform == 'darwin' else native.linux_identity)(pid)
+                stamp = ':'.join(map(str, birth[:3]))
+            except (OSError, ValueError):
+                stamp = 'unavailable'  # fail task registration, not the interactive session
+            env.update(CARDIGAN_SESSION_PID=str(pid), CARDIGAN_SESSION_BIRTH=stamp)
         env['HOME'] = pwd.getpwuid(os.getuid()).pw_dir
         # Runtime defaults must not send project data to a cross-account temp/cache.
         for name in ('temporary', 'cache'):

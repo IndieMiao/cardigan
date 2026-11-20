@@ -370,6 +370,13 @@ test.each(["codex", "pi", "claude-code"] as const)(
         (v) => typeof v === "string" && v.includes("/sessions/"),
       ),
     ).toBe(true);
+    expect(spec.env.CARDIGAN_RUN_COMMAND).toMatch(
+      /\/generations\/[^/]+\/run-command\.py$/u,
+    );
+    expect(
+      files.find((file) => file.path === spec.env.CARDIGAN_RUN_COMMAND)?.mode,
+    ).toBe(0o600);
+    expect(spec.env.CARDIGAN_RESOURCE_SESSION).toMatch(/^A-\d+\.R-\d+$/u);
     expect(files.every((file) => file.path.includes("/generations/"))).toBe(
       true,
     );
