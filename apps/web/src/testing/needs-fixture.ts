@@ -30,6 +30,9 @@ export function fixtureNeedsSection(
       ...empty,
       human_actions: page.human_actions,
       incidents: page.incidents,
+      ...(page.provider_incidents
+        ? { provider_incidents: page.provider_incidents }
+        : {}),
       ...(page.attention ? { attention: page.attention } : {}),
       ...(page.system_rule_attention
         ? { system_rule_attention: page.system_rule_attention }

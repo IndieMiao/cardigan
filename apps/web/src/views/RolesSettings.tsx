@@ -122,23 +122,51 @@ export function RolesSettings({
   projectId,
   revision = 0,
   onNewEmployee,
+  linkedRole,
+  linkedVersion,
+  onLinkedRoleClosed,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
   onNewEmployee?: (roleId: string) => void;
+  /** A role opened from a link (the models page lists who uses a profile). */
+  linkedRole?: string | undefined;
+  /** The referenced version, marked in the linked role's version history. */
+  linkedVersion?: number | undefined;
+  onLinkedRoleClosed?: () => void;
 }) {
-  const [view, setView] = useState<View>();
+  const [view, setView] = useState<View | undefined>(
+    linkedRole ? { kind: "detail", roleId: linkedRole } : undefined,
+  );
+  // Whether the open drawer came from the link, so history can take it away again.
+  const linkedOpen = useRef(false);
+  useEffect(() => {
+    if (linkedRole) {
+      linkedOpen.current = true;
+      setView({ kind: "detail", roleId: linkedRole });
+    } else if (linkedOpen.current) {
+      linkedOpen.current = false;
+      setView(undefined);
+    }
+  }, [linkedRole]);
   const [createdRole, setCreatedRole] = useState<string>();
   const [message, setMessage] = useState("");
   const load = useCallback(() => client.roles(projectId), [client, projectId]);
   const list = useResource(load, revision);
-  const { remember } = useDrawerReturnFocus(view !== undefined);
+  // A linked detail has no opener on this page: focus returns to the panel.
+  const { remember } = useDrawerReturnFocus(view !== undefined, () =>
+    document.getElementById("roles"),
+  );
   const open = (next: View | undefined, note = "") => {
     if (next) remember();
     setMessage(note);
     setView(next);
-    if (next === undefined) list.reload();
+    if (next === undefined) {
+      list.reload();
+      linkedOpen.current = false;
+      if (linkedRole) onLinkedRoleClosed?.();
+    }
   };
   const roleId =
     view?.kind === "detail" || view?.kind === "edit" ? view.roleId : undefined;
@@ -216,6 +244,7 @@ export function RolesSettings({
           projectId={projectId}
           roleId={roleId}
           editing={view?.kind === "edit"}
+          linkedVersion={roleId === linkedRole ? linkedVersion : undefined}
           revision={revision}
           message={message}
           profiles={list.data?.launch_profiles ?? []}
@@ -579,6 +608,7 @@ function RoleDetail({
   projectId,
   roleId,
   editing,
+  linkedVersion,
   revision,
   message,
   profiles,
@@ -591,6 +621,7 @@ function RoleDetail({
   projectId: string;
   roleId: string;
   editing: boolean;
+  linkedVersion?: number | undefined;
   revision: number;
   message: string;
   profiles: readonly LaunchProfileOption[];
@@ -616,6 +647,13 @@ function RoleDetail({
   const [saves, setSaves] = useState(0);
   const detail = useResource(loadDetail, revision + saves);
   const history = useResource(loadHistory, revision + saves);
+  // Scroll when the linked row itself mounts: the history table appears only
+  // once both the detail and the history have arrived, in either order.
+  const linkedEntry = useCallback(
+    (row: HTMLTableRowElement | null) =>
+      row?.scrollIntoView?.({ block: "nearest" }),
+    [],
+  );
   const write = useRoleWrite();
   const saved = (role: RoleDefinitionView | undefined, note: string) => {
     if (!role) return;
@@ -793,7 +831,15 @@ function RoleDetail({
                   </TableHeader>
                   <TableBody>
                     {history.data.versions.map((entry) => (
-                      <TableRow key={entry.version}>
+                      <TableRow
+                        key={entry.version}
+                        current={entry.version === linkedVersion}
+                        ref={
+                          entry.version === linkedVersion
+                            ? linkedEntry
+                            : undefined
+                        }
+                      >
                         <DataTableCell nowrap data-record="lead">
                           v{entry.version}
                         </DataTableCell>

@@ -36,10 +36,16 @@ export function TableFooter({ className, ...props }: ComponentProps<"tfoot">) {
     />
   );
 }
-export function TableRow({ className, ...props }: ComponentProps<"tr">) {
+/** `current` marks the row a link pointed at (shared selected background). */
+export function TableRow({
+  className,
+  current,
+  ...props
+}: ComponentProps<"tr"> & { current?: boolean }) {
   return (
     <tr
       {...props}
+      aria-current={current ? "true" : props["aria-current"]}
       data-ui="table-row"
       className={cn("ui-table-row", className)}
     />

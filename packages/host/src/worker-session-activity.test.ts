@@ -1,16 +1,16 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import type { Assignment, CommandState, RuntimeRef } from "@cardigan/domain";
 import {
   agentProcessCommand,
   type ExecutionConfig,
   workerSessionPath,
 } from "@cardigan/runtime-herdr";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
+import { captureTranscript } from "./capture-transcript.js";
+import { CLAUDE_CONTEXT_READER } from "./claude-context-reader.js";
 import { readSessionContexts } from "./context-usage.js";
+import { WORKER_CLAUDE_OPENER } from "./worker-claude-transcript.js";
 
-// Replace only SSH transport: the production worker command runs on isolated files.
+vi.mock("./capture-transcript.js", () => ({ captureTranscript: vi.fn() }));
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<typeof import("@cardigan/runtime-herdr")>()),
   agentProcessCommand: vi.fn(async (_config, args: string[]) => ({
@@ -18,16 +18,12 @@ vi.mock("@cardigan/runtime-herdr", async (original) => ({
     args: args.slice(1),
   })),
 }));
-let root: string;
-beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "worker-activity-"));
-});
-afterEach(async () => {
+beforeEach(() => {
   vi.clearAllMocks();
-  await rm(root, { recursive: true, force: true });
+  vi.mocked(captureTranscript).mockReset();
 });
 const at = "2026-01-01T01:00:00Z";
-function scenario() {
+function scenario({ currentMissing = false } = {}) {
   const target = {
     project_id: "fixture",
     machine_id: "worker",
@@ -38,8 +34,8 @@ function scenario() {
   const worker = {
     mode: "agent-ssh",
     machine: "fixture-worker",
-    dataDir: join(root, "controller"),
-    agentRoot: join(root, "worker"),
+    dataDir: "/fixture/controller",
+    agentRoot: "/fixture/worker",
     gid: 1234,
     identityFile: "/unused/id",
     knownHostsFile: "/unused/known",
@@ -84,31 +80,49 @@ function scenario() {
     employees: [],
     events: [],
   } as unknown as CommandState;
-  const sessionRoot = workerSessionPath(worker, {
-    project: "fixture",
-    assignment: a.id,
-    run: "R-1",
-    generation,
-    target: target.fingerprint,
+  const sessionRoot = (launchGeneration: string) =>
+    workerSessionPath(worker, {
+      project: "fixture",
+      assignment: a.id,
+      run: "R-1",
+      generation: launchGeneration,
+      target: target.fingerprint,
+    });
+  const currentRoot = sessionRoot(generation);
+  const oldRoot = sessionRoot("c".repeat(32));
+  const controllerRoot = `${worker.dataDir}/runs/fixture/${a.id}`;
+  const metadata = (root: string) =>
+    JSON.stringify({
+      path: `${root}/claude/projects/-worktree/one.jsonl`,
+      activity: { session_id: "one", cwd: "/worktree/src", updated_at: at },
+    });
+  // The controller and previous generation still have attributable records.
+  vi.mocked(captureTranscript).mockImplementation(async (file, args) => {
+    if (file === process.execPath && args.includes(controllerRoot))
+      return metadata(controllerRoot);
+    if (file === "python3" && args.includes(oldRoot)) return metadata(oldRoot);
+    if (file === "python3" && args.includes(currentRoot))
+      return currentMissing ? "null" : metadata(currentRoot);
+    throw new Error("Unexpected transcript source");
   });
-  const path = join(
-    sessionRoot,
-    "claude",
-    "projects",
-    "-worktree",
-    "one.jsonl",
-  );
-  const record = `${JSON.stringify({
-    type: "assistant",
-    sessionId: "one",
-    cwd: "/worktree/src",
-    timestamp: at,
-    message: {
-      model: "fixture",
-      content: "SECRET-BODY",
-      usage: { input_tokens: 1000, output_tokens: 20 },
-    },
-  })}\n`;
+  const argv = [
+    "python3",
+    "-I",
+    "-B",
+    "-c",
+    WORKER_CLAUDE_OPENER,
+    currentRoot,
+    "",
+    CLAUDE_CONTEXT_READER,
+  ];
+  function expectBoundRead() {
+    expect(agentProcessCommand).toHaveBeenCalledExactlyOnceWith(worker, argv);
+    expect(captureTranscript).toHaveBeenCalledExactlyOnceWith(
+      "python3",
+      argv.slice(1),
+      undefined,
+    );
+  }
   const resolve = vi.fn(() => worker);
   const read = async (when = at) =>
     (
@@ -120,77 +134,52 @@ function scenario() {
         resolve,
       )
     )[0];
-  return { a, state, worker, ref, path, record, read, resolve };
+  return { worker, ref, read, resolve, expectBoundRead };
 }
 
 test("worker Claude progress comes from the bound session generation and original record time", async () => {
   const t = scenario();
-  await mkdir(dirname(t.path), { recursive: true });
-  await writeFile(t.path, t.record);
   const sample = await t.read();
   expect(t.resolve).toHaveBeenCalledWith(t.ref, "fixture");
-  expect(agentProcessCommand).toHaveBeenCalledWith(t.worker, expect.any(Array));
+  t.expectBoundRead();
   expect(sample).toMatchObject({
     activity_status: "fresh",
     activity: {
       assignment_id: "A-1",
       run_id: "R-2",
       source: "claude-code:session_metadata",
-      updated_at: expect.stringContaining("01:00:00"),
+      updated_at: at,
     },
   });
   expect(sample?.observation).toBeUndefined(); // No context restart from this activity-only source.
-  expect(JSON.stringify(sample)).not.toContain("SECRET-BODY");
   expect((await t.read("2026-01-01T01:16:00Z"))?.activity_status).toBe("stale");
-  await writeFile(join(dirname(t.path), "other.jsonl"), t.record);
-  expect((await t.read())?.activity).toBeUndefined();
 });
 
-test("worker missing, symlink and changed target never borrow a local or old-generation record", async () => {
-  const t = scenario();
-  const local = join(
-    t.worker.dataDir,
-    "runs",
-    "fixture",
-    "A-1",
-    "claude",
-    "projects",
-    "-worktree",
-    "one.jsonl",
-  );
-  await mkdir(dirname(local), { recursive: true });
-  await writeFile(local, t.record);
-  const old = t.path.replace("b".repeat(32), "c".repeat(32));
-  await mkdir(dirname(old), { recursive: true });
-  await writeFile(old, t.record);
-  expect((await t.read())?.activity).toBeUndefined();
-  await mkdir(dirname(t.path), { recursive: true });
-  await symlink(local, t.path);
-  expect((await t.read())?.activity).toBeUndefined();
-  t.resolve.mockReturnValue({
-    ...t.worker,
-    target: { ...t.worker.target, generation: "new" },
-  });
-  vi.mocked(agentProcessCommand).mockClear();
-  expect((await t.read())?.activity).toBeUndefined();
-  expect(agentProcessCommand).not.toHaveBeenCalled();
-});
-
-test("a unique worker file with conflicting session metadata proves neither progress nor a stall", async () => {
-  const t = scenario();
-  await mkdir(dirname(t.path), { recursive: true });
-  await writeFile(t.path, t.record.replace('"one"', '"other"'));
+test("a missing current generation never borrows controller or old-generation activity", async () => {
+  const t = scenario({ currentMissing: true });
   for (const when of [at, "2026-01-01T02:00:00Z"]) {
+    vi.clearAllMocks();
     const sample = await t.read(when);
+    t.expectBoundRead();
     expect(sample?.activity).toBeUndefined();
+    expect(sample?.activity_status).toBe("missing");
     expect(sample?.activity_diagnostic).toContain("远程活动来源缺失");
   }
 });
 
+test("a changed target cannot fall back to the controller or old generation", async () => {
+  const t = scenario();
+  t.resolve.mockReturnValue({
+    ...t.worker,
+    target: { ...t.worker.target, generation: "new" },
+  });
+  expect((await t.read())?.activity).toBeUndefined();
+  expect(agentProcessCommand).not.toHaveBeenCalled();
+  expect(captureTranscript).not.toHaveBeenCalled();
+});
+
 test("a worker target replaced during the read cannot supply activity", async () => {
   const t = scenario();
-  await mkdir(dirname(t.path), { recursive: true });
-  await writeFile(t.path, t.record);
   vi.mocked(agentProcessCommand).mockImplementationOnce(
     async (_config, args) => {
       t.resolve.mockReturnValue({

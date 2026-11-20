@@ -99,6 +99,7 @@ const statusShapes = {
   running: "progress",
   unknown: "unknown",
   lost: "error",
+  provider_unavailable: "error",
   queued: "pending",
   dispatched: "dispatched",
   acked: "dispatched",

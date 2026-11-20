@@ -60,6 +60,7 @@ export const STATUS_LABELS = {
   unknown: "状态未知",
   lost: "失联",
   queued: "排队中",
+  provider_unavailable: "模型服务不可用",
   dispatched: "已派发",
   acked: "已签收",
   completed: "已完成",
