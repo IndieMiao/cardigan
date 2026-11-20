@@ -583,6 +583,19 @@ test("Web creates parented cards once, reads paged progress, and rejects a stale
     goal: "Original words",
     template_id: "story",
   };
+  expect((await write("/cards", input)).json).toMatchObject({
+    error: { code: "validation_failed", message: "拆解角色不能发表评论" },
+  });
+  h.store.uow.run((tx) => {
+    const pm = tx.roles.get(project, { role_id: "pm", role_version: 1 });
+    if (!pm) throw new Error("Missing fixture PM");
+    tx.roles.put(project, {
+      ...pm,
+      role_version: 2,
+      allowed_tools: ["post_comment"],
+      capabilities: ["verify"],
+    });
+  });
   const parent = await write("/cards", input, "story-create");
   expect(parent.status).toBe(201);
   const id = parent.json.id;
