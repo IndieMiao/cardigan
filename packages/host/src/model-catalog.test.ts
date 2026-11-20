@@ -13,6 +13,7 @@ const fixture = {
     models: {
       v1: {
         limit: { context: 8000, output: 500 },
+        cost: { input: 0.5, output: 1.5 },
         reasoning_options: [{ type: "effort", values: ["low", "high"] }],
         extra: "not-metadata",
       },
@@ -48,6 +49,7 @@ test("fetches only the public catalog, caches a dated projection, and reuses it 
     credentials: "omit",
   });
   expect(online.models?.active).toMatchObject({
+    cost: { input: 0.5, output: 1.5 },
     context_window: 8000,
     max_output_tokens: 500,
     reasoning_efforts: ["low", "high"],

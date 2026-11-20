@@ -78,6 +78,7 @@ import {
   sessionCookie,
   unauthorized,
 } from "./http.js";
+import { LaunchSettings } from "./launch-settings.js";
 import { LoginLimiter } from "./login-limiter.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
@@ -114,6 +115,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly launchSettingsDir?: string;
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
     | undefined;
@@ -180,6 +182,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly launchSettings: LaunchSettings | undefined;
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
@@ -242,6 +245,9 @@ export async function startWebServer(
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
   });
+  const launchSettings = options.launchSettingsDir
+    ? new LaunchSettings(store, options.launchSettingsDir, dataDir)
+    : undefined;
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;
@@ -351,8 +357,13 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
-        roleLaunchConfig: options.roleLaunchConfig,
-        launchProfiles: options.launchProfiles,
+        launchSettings,
+        roleLaunchConfig: launchSettings
+          ? () => launchSettings.effective()
+          : options.roleLaunchConfig,
+        launchProfiles: launchSettings
+          ? () => Object.keys(launchSettings.effective().profiles)
+          : options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -400,6 +411,8 @@ export async function startWebServer(
         http.close((error) => {
           cancel();
           if (error) reject(error);
+          else if (launchSettings)
+            launchSettings.checks.drain().then(resolve, reject);
           else resolve();
         });
         shutdown.abort();
@@ -424,6 +437,24 @@ async function handleApi(context: RequestContext): Promise<void> {
 
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
+
+  if (
+    path === "/api/launch-settings" ||
+    path.startsWith("/api/launch-settings/")
+  ) {
+    if (!context.launchSettings)
+      throw new HttpRejection(503, "unavailable", "未配置启动设置");
+    const owner = createHash("sha256")
+      .update(`launch-settings:${sessionToken(req)}`)
+      .digest("hex");
+    return context.launchSettings.serve(
+      path.slice("/api/launch-settings".length),
+      req,
+      res,
+      () => requireSession(context),
+      owner,
+    );
+  }
 
   if (path.startsWith("/api/avatars/")) {
     return serveAvatar(

@@ -135,6 +135,11 @@ export {
 } from "./launch.js";
 export { launchFilesStamp } from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
+export {
+  publishModelFile,
+  readSettledModelFile,
+} from "./launch-model-intent.js";
+export { probeModel } from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";

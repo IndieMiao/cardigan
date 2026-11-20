@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { lstat, realpath, rm, utimes, writeFile } from "node:fs/promises";
-import { loadModelLaunchConfig } from "@cardigan/host";
+import {
+  loadModelLaunchConfig,
+  publishModelFile,
+  readSettledModelFile,
+} from "@cardigan/host";
 import { parseSecretsText, validateLaunchSecrets } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { isMap, isScalar, parseDocument } from "yaml";
@@ -9,10 +13,6 @@ import { CliError, EXIT } from "./errors.js";
 import { currentSecretsVersion, readSecretsSnapshot } from "./fs-io.js";
 import { resolveGlobalActor } from "./host.js";
 import type { CliIo } from "./io.js";
-import {
-  publishModelFile,
-  readSettledModelFile,
-} from "./launch-model-intent.js";
 import type { LaunchPaths } from "./paths.js";
 
 export async function reload(paths: LaunchPaths, io: CliIo) {

@@ -121,6 +121,7 @@ export interface StartServerOptions {
    * endpoint (§3.1); absent in tests that only exercise the MCP surface.
    */
   readonly web?: {
+    readonly launchSettingsDir?: string;
     readonly config: WebConfig;
     readonly log?: (event: Readonly<Record<string, unknown>>) => void;
     /** SSE cadence; tests shorten it. */
@@ -571,6 +572,9 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          ...(webOptions.launchSettingsDir
+            ? { launchSettingsDir: webOptions.launchSettingsDir }
+            : {}),
           roleLaunchConfig: () => options.dispatcher?.upstream,
           launchProfiles: () =>
             Object.keys(options.dispatcher?.upstream?.profiles ?? {}),

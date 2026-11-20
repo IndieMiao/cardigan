@@ -1,0 +1,286 @@
+import { randomUUID } from "node:crypto";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { publishModelFile, readSettledModelFile } from "@cardigan/host";
+import { type LaunchConfig, requiredSecretKeys } from "@cardigan/roles";
+import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
+import { z } from "zod";
+import {
+  HttpRejection,
+  methodNotAllowed,
+  readJsonBody,
+  sendJson,
+} from "./http.js";
+import {
+  type Change,
+  candidate,
+  changeSchema,
+} from "./launch-settings-change.js";
+import { ProfileChecks } from "./launch-settings-check.js";
+import {
+  digest,
+  invalid,
+  legacyEndpoint,
+  publicFields,
+  readLaunchSettings,
+  references,
+  type SettingsFile,
+  snapshot,
+  stale,
+  validSettings,
+} from "./launch-settings-file.js";
+
+const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+const previewBody = z.strictObject({
+  version: versionSchema,
+  change: changeSchema,
+});
+const confirmBody = z.strictObject({
+  version: versionSchema,
+  preview_id: z.uuid(),
+});
+const checkBody = z.strictObject({
+  profile: z.string(),
+  mode: z.enum(["metadata", "online"]),
+});
+
+export class LaunchSettings {
+  private readonly previews = new Map<
+    string,
+    { change: Change; version: string; owner: string; after: string }
+  >();
+  readonly checks: ProfileChecks;
+  constructor(
+    private readonly store: Store,
+    private readonly dir: string,
+    private readonly dataDir: string,
+  ) {
+    this.checks = new ProfileChecks(store);
+  }
+  effective(): LaunchConfig {
+    return validSettings(this.file());
+  }
+  private file() {
+    return readLaunchSettings(this.dir, this.dataDir);
+  }
+  private async read() {
+    const f = this.file();
+    const { config, secrets } = f;
+    const refs = this.store.uow.read((tx) => references(this.store, tx));
+    const profiles = await Promise.all(
+      Object.entries(config.profiles).map(async ([name, p]) => {
+        const raw = f.raw.profiles[name];
+        const alias =
+          raw.model && Object.hasOwn(config.models ?? {}, raw.model)
+            ? raw.model
+            : null;
+        const last = this.checks.latest(name);
+        // Hand-written args/config may embed credentials; only disclose semantic parameters.
+        return {
+          name,
+          harness: p.harness,
+          provider: p.provider ?? null,
+          model_alias: alias,
+          model_id: p.model ?? null,
+          metadata: alias ? config.models?.[alias] : null,
+          parameters: {
+            effort: p.effort ?? null,
+            permission_mode: p.permission_mode ?? null,
+            auto_update: p.auto_update ?? null,
+            provider_flag: p.provider_flag ?? null,
+            custom_args_count: raw.args?.length ?? 0,
+            custom_config_count: Object.keys(raw.config ?? {}).length,
+          },
+          cli: await this.checks.cli(p.harness),
+          secrets: requiredSecretKeys(config, name).map((key) => ({
+            key,
+            set: Object.hasOwn(secrets, key) && !!secrets[key],
+          })),
+          references: refs.get(name) ?? [],
+          last_check: last,
+        };
+      }),
+    );
+    const providers = Object.entries(config.providers).map(([id, p]) => ({
+      id,
+      name: p.name ?? p.codex?.name ?? id,
+      base_url: p.base_url ?? legacyEndpoint(p)?.value ?? null,
+      secret_env: p.secret_env,
+    }));
+    return publicFields(
+      {
+        version: f.version,
+        profiles,
+        providers,
+        models: config.models ?? {},
+        secret_keys: Object.keys(secrets),
+      },
+      secrets,
+    );
+  }
+  private guardDelete(
+    f: SettingsFile,
+    change: Change,
+    tx: Pick<ReadRepositories, "roles" | "employees">,
+  ) {
+    if (change.op !== "delete_profile") return;
+    const refs = references(this.store, tx).get(change.name);
+    if (refs?.length)
+      throw new HttpRejection(
+        409,
+        "profile_in_use",
+        "仍有角色版本或员工使用该配置",
+        publicFields({ references: refs }, f.secrets),
+      );
+  }
+  private preview(body: unknown, owner: string) {
+    const parsed = previewBody.safeParse(body);
+    if (!parsed.success) throw invalid();
+    const { version, change } = parsed.data,
+      f = this.file();
+    if (version !== f.version) throw stale();
+    this.store.uow.read((tx) => this.guardDelete(f, change, tx));
+    const { diff, text } = candidate(f, change, this.dataDir);
+    // A user may not paste an existing secret into public metadata or YAML fields.
+    const projected = publicFields(diff, f.secrets);
+    if (JSON.stringify(diff) !== JSON.stringify(projected)) throw invalid();
+    const id = randomUUID();
+    if (this.previews.size >= 256)
+      this.previews.delete(this.previews.keys().next().value ?? "");
+    this.previews.set(id, { change, version, owner, after: digest(text) });
+    return { preview_id: id, version, diff: projected };
+  }
+  private confirm(body: unknown, key: unknown, owner: string, actor: string) {
+    const parsed = confirmBody.safeParse(body);
+    if (
+      !parsed.success ||
+      typeof key !== "string" ||
+      !key.trim() ||
+      key.length > 256
+    )
+      throw invalid();
+    const { version, preview_id: id } = parsed.data,
+      requestKey = digest(`${owner}:${key}`);
+    const f = this.file();
+    const path = realpathSync(f.path);
+    readSettledModelFile(this.store, path); // also repairs a committed rename after an interrupted response
+    const receipt = this.store.database
+      .prepare(
+        "SELECT operation,snapshot,installed FROM launch_web_changes WHERE request_key=?",
+      )
+      .get(requestKey);
+    if (receipt) {
+      if (receipt.operation !== id || receipt.snapshot !== version)
+        throw new HttpRejection(
+          409,
+          "idempotency_conflict",
+          "此幂等键已用于其它预览",
+        );
+      if (receipt.installed) return { ok: true, preview_id: id };
+      throw stale();
+    }
+    const pending = this.previews.get(id);
+    if (
+      !pending ||
+      pending.owner !== owner ||
+      pending.version !== version ||
+      f.version !== version
+    )
+      throw stale();
+    const { change } = pending;
+    this.store.uow.read((tx) => this.guardDelete(f, change, tx));
+    const { text } = candidate(f, change, this.dataDir);
+    if (digest(text) !== pending.after || snapshot(this.dir) !== version)
+      throw stale();
+    const suffix = randomUUID(),
+      temp = `${path}.${suffix}.tmp`,
+      opts = { flag: "wx", mode: 0o600 };
+    writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+    try {
+      writeFileSync(temp, text, opts);
+      publishModelFile(
+        this.store,
+        path,
+        temp,
+        id,
+        f.original,
+        text,
+        () => snapshot(this.dir) === version,
+        "人员已确认修改启动配置，新运行将使用更新后的配置。",
+        {
+          reserve: () =>
+            this.store.database
+              .prepare(
+                "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
+              )
+              .run(
+                id,
+                requestKey,
+                version,
+                change.op,
+                change.name,
+                actor,
+                new Date().toISOString(),
+              ),
+          checkReferences: (tx) => this.guardDelete(f, change, tx),
+        },
+      );
+    } catch (error) {
+      if (error instanceof HttpRejection) throw error;
+      if (snapshot(this.dir) !== version) throw stale();
+      throw error;
+    } finally {
+      rmSync(temp, { force: true });
+    }
+    this.previews.delete(id);
+    return { ok: true, preview_id: id };
+  }
+  async serve(
+    rest: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+    authorize: () => WebSession,
+    owner: string,
+  ) {
+    if (req.headers.authorization !== undefined)
+      throw new HttpRejection(403, "unauthorized", "仅限人员登录会话");
+    if (rest === "" || rest === "/profiles") {
+      if (req.method !== "GET") methodNotAllowed(["GET"]);
+      if (!rest) {
+        const body = await this.read();
+        authorize();
+        sendJson(res, 200, body);
+      } else {
+        const f = this.file();
+        const profiles = Object.keys(validSettings(f).profiles);
+        sendJson(res, 200, publicFields({ profiles }, f.secrets));
+      }
+      return;
+    }
+    if (!["/preview", "/confirm", "/checks"].includes(rest))
+      throw new HttpRejection(404, "not_found", "接口不存在");
+    if (req.method !== "POST") methodNotAllowed(["POST"]);
+    const body = await readJsonBody(req);
+    const actor = authorize().member_id ?? "human";
+    if (rest === "/preview") sendJson(res, 200, this.preview(body, owner));
+    else if (rest === "/confirm")
+      sendJson(
+        res,
+        200,
+        this.confirm(body, req.headers["idempotency-key"], owner, actor),
+      );
+    else {
+      const input = checkBody.safeParse(body);
+      if (!input.success) throw invalid();
+      const f = this.file();
+      sendJson(
+        res,
+        202,
+        publicFields(
+          this.checks.start(f, input.data.profile, input.data.mode, actor),
+          f.secrets,
+        ),
+      );
+    }
+  }
+}

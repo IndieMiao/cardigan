@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFileSync, renameSync } from "node:fs";
-import { recordLaunchNotice } from "@cardigan/host";
+import { LaunchConfigError } from "@cardigan/roles";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
-import { CliError, EXIT } from "./errors.js";
+import { recordLaunchNotice } from "./launch-notice.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-const changed = () => new CliError("启动配置已变化，请重新预检", EXIT.usage);
+const changed = () =>
+  new LaunchConfigError("invalid_config", "启动配置已变化，请重新预检");
 
 /** Called under BEGIN IMMEDIATE, including on a same-ID retry. Only attest the exact installed file. */
 function settle(
@@ -27,11 +28,14 @@ function settle(
       String(intent.notice),
     );
   } else if (digest !== intent.before_hash) {
-    throw new CliError(
+    throw new LaunchConfigError(
+      "invalid_config",
       "换模中断后文件又被修改，无法核对知会；请先核对并恢复原备份或已预检版本",
-      EXIT.usage,
     );
   }
+  store.database
+    .prepare("UPDATE launch_web_changes SET installed=? WHERE operation=?")
+    .run(digest === intent.after_hash ? 1 : 0, String(intent.operation));
   store.database
     .prepare("DELETE FROM launch_model_intents WHERE path=?")
     .run(path);
@@ -54,6 +58,10 @@ export function publishModelFile(
   candidate: string,
   secretsStillCurrent: () => boolean,
   notice: string,
+  web?: {
+    reserve: () => void;
+    checkReferences: (tx: StoreTransactionContext) => void;
+  },
 ) {
   // Commit a recoverable intent *before* replacing the file. A competing CLI
   // may retire an uninstalled intent; its original owner must then abort.
@@ -61,8 +69,9 @@ export function publishModelFile(
     const disk = readFileSync(path, "utf8");
     if (disk !== original) throw changed();
     settle(store, tx, path, disk);
-    if (!store.listProjects().length)
-      throw new CliError("没有可记录换模知会的项目", EXIT.usage);
+    if (!web && !store.listProjects().length)
+      throw new LaunchConfigError("invalid_config", "没有可记录换模知会的项目");
+    web?.reserve();
     store.database
       .prepare(
         "INSERT INTO launch_model_intents(path, operation, before_hash, after_hash, notice) VALUES (?,?,?,?,?)",
@@ -88,6 +97,7 @@ export function publishModelFile(
         .run(path, operation);
       return false;
     }
+    web?.checkReferences(tx);
     renameSync(temp, path);
     settle(store, tx, path, candidate);
     return true;
