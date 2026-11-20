@@ -10,6 +10,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { selectStandingEmployee } from "./employee-assignment.js";
 import type { RotateStandingPmResult } from "./pm-rotate.js";
 
 /** Host maintenance only; the upgrade audit must come from the deployed default pack. */
@@ -63,9 +64,16 @@ export function rotateStandingAfterDeployment(
       "illegal_transition",
       "常驻会话忙碌，等待空闲",
     );
+    const employeeId =
+      previous.role_id === "host_ops"
+        ? unwrap(
+            selectStandingEmployee(state, "host_ops", previous.employee_id),
+          )?.id
+        : previous.employee_id;
     const { session_ref: _oldSession, ...identity } = previous;
     const assignment: Assignment = {
       ...identity,
+      ...(employeeId ? { employee_id: employeeId } : {}),
       id: d.ids.next(state.project_id, "assignment"),
       role_version: latest.role_version,
       runtime_state: "not_provisioned" as const,

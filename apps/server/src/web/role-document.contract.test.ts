@@ -1,4 +1,4 @@
-import type { Actor, Role } from "@cardigan/domain";
+import { type Actor, employeeInProject, type Role } from "@cardigan/domain";
 import { applyRoleDocument, previewRoleDocument } from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import { getRoleVersion, roleDocument } from "@cardigan/store";
@@ -42,8 +42,9 @@ function post(
   body: object,
   key?: string,
   headers: Record<string, string> = {},
+  projectId = project,
 ) {
-  return call(h.port, route(`role-document/${op}`), {
+  return call(h.port, `/api/projects/${projectId}/role-document/${op}`, {
     method: "POST",
     cookie,
     body: JSON.stringify(body),
@@ -419,4 +420,56 @@ test("employee preview, applied and unchanged results agree with the normalized 
     (await post("apply", { markdown: text, snapshot: again.snapshot }, "same"))
       .json,
   ).toMatchObject(staff(saved.id, "unchanged"));
+});
+
+test("role imports scope new employees to the importing project and never add membership on a name collision", async () => {
+  const other = "other-doc-project";
+  h.store.createProject({ id: other });
+  const inOther = (op: string, body: object, key?: string) =>
+    post(op, body, key, {}, other);
+  const before = await inOther("preview", { markdown });
+  expect(before.status).toBe(200);
+  const local = await preview();
+  expect(
+    (await post("apply", { markdown, snapshot: local.snapshot }, "local"))
+      .status,
+  ).toBe(200);
+  const staff = () => h.store.uow.read((tx) => tx.employees.list());
+  const existing = staff();
+  expect(existing).toHaveLength(2);
+  for (const e of existing) {
+    expect(e.projects).toEqual([project]);
+    expect(employeeInProject(e, other)).toBe(false);
+  }
+  const snapshot = (before.json as { snapshot: string }).snapshot;
+  expect((await inOther("apply", { markdown, snapshot }, "stale")).status).toBe(
+    409,
+  );
+  const collision = await inOther("preview", { markdown });
+  expect(collision.status).toBe(400);
+  expect(JSON.stringify(collision.json)).toContain("不属于本项目");
+  expect(staff()).toEqual(existing);
+  expect(
+    h.store.uow.read((tx) => getRoleVersion(tx, other, "author")),
+  ).toBeUndefined();
+  // Shared employees remain shared and are reused without rewriting the roster.
+  h.store.uow.run((tx) => {
+    for (const e of existing)
+      tx.employees.put({ ...e, projects: [project, other] });
+  });
+  const shared = staff();
+  const again = await inOther("preview", { markdown });
+  expect(again.status).toBe(200);
+  expect(
+    (
+      await inOther(
+        "apply",
+        { markdown, snapshot: (again.json as { snapshot: string }).snapshot },
+        "shared",
+      )
+    ).json,
+  ).toMatchObject({
+    employees: [{ action: "unchanged" }, { action: "unchanged" }],
+  });
+  expect(staff()).toEqual(shared);
 });
