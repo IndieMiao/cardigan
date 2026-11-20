@@ -32,10 +32,19 @@ export function CardSidebar({
   projectId: string;
   cardId: string;
 }) {
-  const { card, work_items, relations } = detail;
-  const completed = work_items.filter((w) =>
-    ["accepted", "passed"].includes(w.status),
-  ).length;
+  const { card, overview, work_items, relations } = detail;
+  const completed =
+    overview?.completed_work_count ??
+    work_items.filter((w) => ["accepted", "passed"].includes(w.status)).length;
+  const verifiers =
+    overview?.verifiers ??
+    work_items
+      .filter((w) => w.kind === "verify")
+      .map((w) => ({
+        ...w,
+        verdict: detail.review_matrix.findLast((r) => r.work_item_id === w.id)
+          ?.verdict,
+      }));
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
@@ -49,7 +58,8 @@ export function CardSidebar({
               <dd>
                 <StatusTag status={card.status} />
                 <span>
-                  工作项 {completed}/{work_items.length} 完成
+                  工作项 {completed}/{overview?.work_count ?? work_items.length}{" "}
+                  完成
                 </span>
               </dd>
             </div>
@@ -73,25 +83,14 @@ export function CardSidebar({
           <section>
             <h3>谁验收、依据是什么</h3>
             <ul className="plain-list">
-              {work_items
-                .filter((w) => w.kind === "verify")
-                .map((w) => {
-                  const latest = [...detail.review_matrix]
-                    .reverse()
-                    .find((r) => r.work_item_id === w.id);
-                  return (
-                    <li key={w.id}>
-                      {w.role_id}：
-                      {latest?.verdict ? (
-                        <StatusTag status={latest.verdict} />
-                      ) : (
-                        "还没有结论"
-                      )}
-                      {w.completion_criteria.length > 0 &&
-                        `，依据 ${w.completion_criteria.join("；")}`}
-                    </li>
-                  );
-                })}
+              {verifiers.map((w) => (
+                <li key={w.id}>
+                  {w.role_id}：
+                  {w.verdict ? <StatusTag status={w.verdict} /> : "还没有结论"}
+                  {w.completion_criteria.length > 0 &&
+                    `，依据 ${w.completion_criteria.join("；")}`}
+                </li>
+              ))}
             </ul>
           </section>
         </section>
@@ -209,7 +208,9 @@ export function CardWorkItems({
         {!work_items.length && <EmptyState>这张卡还没有工作项。</EmptyState>}
         <ul className="work-item-list">
           {work_items.map((item) => {
-            const delivery = [...detail.deliveries]
+            const delivery = [
+              ...(detail.work_delivery_links ?? detail.deliveries),
+            ]
               .reverse()
               .find(
                 (d) => d.work_item_id === item.id && d.status !== "superseded",
