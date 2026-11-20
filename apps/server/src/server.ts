@@ -16,6 +16,7 @@ import {
   loadMergeGateConfig,
   loadRunCapacityConfig,
   loadRuntimeWorkers,
+  MachineLeases,
   machineRunCapacity,
   RuntimeTargets,
   redactFailureLine,
@@ -23,6 +24,7 @@ import {
   runtimeWorkersPath,
   scrubRunCredentials,
   sessionFingerprint,
+  targetProbe,
 } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
@@ -76,6 +78,7 @@ import {
   tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
+import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
@@ -294,6 +297,24 @@ async function assembleServer(
   const runCapacity = await loadRunCapacityConfig({
     env: { ...(options.env ?? process.env) },
   });
+  const targets = options.dispatcher?.runtime;
+  const leases = new MachineLeases(
+    store,
+    runCapacity,
+    targetProbe(async (project, machine_id) =>
+      targets instanceof RuntimeTargets
+        ? (
+            await targets.forLaunch(project, {
+              machine_id,
+              runtime_ref: null,
+            })
+          ).execution
+        : execution,
+    ),
+    targets instanceof RuntimeTargets
+      ? targets.publicationResourceProbe
+      : undefined,
+  );
   configureMachinePlacement(
     store,
     config.dataDir,
@@ -453,6 +474,16 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              reserveResource: (actor, input, revalidate) =>
+                leases.reserve(
+                  actor,
+                  input.machine,
+                  input.resource,
+                  input.starts_at,
+                  input.ends_at,
+                  () => new Date().toISOString(),
+                  { key: input.idempotency_key, revalidate },
+                ),
               auditProbeCall: (actor, code) =>
                 store.uow.run((tx) => {
                   tx.global_events.append({
@@ -563,6 +594,9 @@ async function assembleServer(
                     : hostOps.executionDiagnostics(project),
               }
             : {}),
+          machineHost: machineHost(store, execution, session, {
+            ...runtimeEnv,
+          }),
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,
           capabilityCatalog: () =>
@@ -740,6 +774,8 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        leases,
+        projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,

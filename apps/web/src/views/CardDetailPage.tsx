@@ -698,7 +698,7 @@ function CardContent({
           />
         )}
         <section {...panel("overview")}>
-          <CardDependencies card={card} projectId={projectId} />
+          <CardDependencies card={card} projectId={projectId} client={client} />
           <CardBatchChecks
             card={card}
             projectId={projectId}

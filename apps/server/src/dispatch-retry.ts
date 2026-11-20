@@ -36,6 +36,7 @@ import {
   crossRepairSendBoundary,
   deferIfTargetWait,
   failAutomaticContextRun,
+  type MachineLeases,
   refreshTargetWait,
   testReviewRunPrompt,
   tryHostOpsLock,
@@ -282,6 +283,7 @@ export function dispatchRecovery(
 /** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
 export async function retryDispatchedRuns(
   options: {
+    leases?: MachineLeases;
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
@@ -533,6 +535,20 @@ export async function retryDispatchedRuns(
           shared &&
           last?.outcome === "failed" &&
           !binding.sending_at);
+      const retryablePublication =
+        !unconfirmed &&
+        run.status === "dispatched" &&
+        !run.started_at &&
+        (!last || last.outcome === "failed");
+      const readmit =
+        retryablePublication &&
+        !disposition &&
+        (!binding || sameTarget) &&
+        options.leases?.readmissionReason(project, a, run, tx);
+      const resourceWait =
+        retryablePublication &&
+        !readmit &&
+        options.leases?.publicationWait(project, run);
       const ackSince = reconcile
         ? last?.finished_at
         : shared
@@ -540,17 +556,21 @@ export async function retryDispatchedRuns(
             (last?.outcome === "sent" ? last.finished_at : undefined))
           : fromWithdrawal
             ? last?.finished_at
-            : undefined;
+            : last?.outcome === "sent" &&
+                options.leases?.configured(project, a.machine_id)
+              ? last.finished_at
+              : undefined;
       const timedOut =
         started &&
         Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
           policy.timeoutMs;
       const recover =
-        (timedOut &&
-          !noSendYet &&
+        !resourceWait &&
+        ((timedOut &&
+          (!noSendYet || readmit) &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-        (!unconfirmed && failures >= policy.maxRetries + 1);
+          (!unconfirmed && failures >= policy.maxRetries + 1));
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
@@ -570,10 +590,11 @@ export async function retryDispatchedRuns(
         failures,
         recover,
         reconcile,
+        readmit,
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
-          (withdrawn || (retry && !unconfirmed)) &&
+          (withdrawn || ((retry || resourceWait) && !unconfirmed)) &&
           !unreadable &&
           (!binding || sameTarget) &&
           !disposition,
@@ -630,7 +651,34 @@ export async function retryDispatchedRuns(
         );
       continue;
     }
-    if (!observed.retry || !observed.a.runtime_ref) continue;
+    if (observed.readmit) {
+      // A missing original grant cannot become healthy by polling a mount.
+      // Keep the reason visible but leave the bounded stop/exit recovery armed.
+      store.uow.run((tx) => {
+        const fresh = inspect(loadState(tx, project), tx);
+        if (fresh?.readmit)
+          options.leases?.wait(
+            tx,
+            project,
+            fresh.a,
+            fresh.run,
+            fresh.readmit,
+            fresh.at,
+          );
+      });
+      continue;
+    }
+    if (
+      !observed.retry ||
+      !observed.a.runtime_ref ||
+      options.leases?.startBlocked(
+        project,
+        observed.a,
+        observed.run,
+        clock.now(),
+      )
+    )
+      continue;
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
     const status = await runtime.status(observed.a.runtime_ref);
@@ -746,11 +794,41 @@ export async function retryDispatchedRuns(
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (currentRun.status !== "dispatched") sent = true;
       else {
+        const leases = options.leases;
+        const preflight =
+          leases &&
+          (leases.configured(project, job.a.machine_id) ||
+            leases.hasProbeTarget(project, job.run))
+            ? () =>
+                leases.canPublish(project, job.a, job.run, () => clock.now())
+            : undefined;
+        if (preflight && !(await preflight())) {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
+        if (preflight && currentWakeRun()?.status !== "dispatched") {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
         const result = await runtime.wake(
           job.a.runtime_ref,
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
+            ...(preflight ? { resource_preflight: preflight } : {}),
             before_send: () => {
+              if (
+                options.leases?.startBlocked(
+                  project,
+                  job.a,
+                  job.run,
+                  clock.now(),
+                )
+              )
+                return false;
               if (job.attempt.review_wake)
                 return (
                   !options.closing?.() &&

@@ -2875,3 +2875,347 @@ test("C-297: current harness activity prevents both inactivity alerts and automa
     }),
   );
 });
+
+test.each(["total", "resource"])(
+  "C-497 project %s ceilings constrain automatic and explicit starts without charging other projects",
+  async (kind) => {
+    const busy = f.create();
+    for (const item of [busy.item, target.item])
+      requireCapabilities(item, ["godot"]);
+    f.session(busy.assignment, false);
+    const limits = {
+      runLimit: () => 4,
+      resourceLimits: () => new Map([["godot", 3]]),
+      projectQuota: () =>
+        kind === "total"
+          ? { limit: 1, resources: new Map<string, number>() }
+          : { resources: new Map([["godot", 1]]) },
+    };
+    const other = "other-project";
+    f.store.createProject({ id: other });
+    f.store.uow.read((tx) => {
+      const capacity = runCapacitySnapshot(
+        f.store,
+        tx,
+        limits.resourceLimits,
+        limits.projectQuota,
+      );
+      expect(
+        capacity.withinProjectQuota(f.project, target.assignment, ["godot"]),
+      ).toBe(false);
+      expect(
+        capacity.withinProjectQuota(other, target.assignment, ["godot"]),
+      ).toBe(true);
+      expect(
+        capacity.withinProjectQuota(
+          f.project,
+          { ...target.assignment, machine_id: "other-worker" },
+          ["godot"],
+        ),
+      ).toBe(true);
+    });
+    comment();
+    const dispatcher = new Dispatcher({ ...options, ...limits });
+    await dispatcher.tick();
+    const run = f
+      .state()
+      .runs.find(
+        (r) =>
+          r.assignment_id === target.assignment.id && r.status === "queued",
+      );
+    if (!run) throw new Error("Expected quota wait");
+    expect(runtime.wake).not.toHaveBeenCalled();
+    await expect(
+      launchRun(
+        {
+          store: f.store,
+          runtime,
+          launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
+          mcpUrl: "http://localhost/mcp",
+          dataDir: f.dataDir,
+          ...limits,
+        },
+        {
+          project: f.project,
+          assignment_id: target.assignment.id,
+          run,
+          actor: { kind: "human", project_id: f.project },
+          reuse_session: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(RunCapacityDeferred);
+    finish(busy.assignment);
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);
+
+test.each(["mount", "memory"])(
+  "C-497 failed %s preflight never publishes a wake and the same run proceeds after recovery",
+  async (name) => {
+    requireCapabilities(target.item, ["godot"]);
+    await writeFile(
+      join(f.dataDir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            resources: { godot: 1 },
+            resource_policies: {
+              godot: { checks: { [name]: ["/test/check"] } },
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const { loadRunCapacityConfig, MachineLeases } = await import(
+      "@cardigan/host"
+    );
+    const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+    let pass = false;
+    const leases = new MachineLeases(f.store, cfg, async () =>
+      pass ? "local" : undefined,
+    );
+    const dispatcher = new Dispatcher({
+      ...options,
+      leases,
+      resourceLimits: cfg.resourcesForMachine,
+    });
+    comment();
+    await dispatcher.tick();
+    const [wait] = readRunQueue(f.store);
+    expect(wait?.assignment_id).toBe(target.assignment.id);
+    expect(runtime.wake).not.toHaveBeenCalled();
+    const view = executionCapacity(
+      f.store,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      cfg.resourcesForMachine,
+      f.project,
+      f.clock.now(),
+    );
+    expect(view.agents[0]?.lease_details?.join()).toContain(name);
+    pass = true;
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
+      "dispatched",
+    );
+  },
+);
+
+test("C-497 another project reservation blocks a live wake, hard deadline unblocks the same queued Run", async () => {
+  requireCapabilities(target.item, ["godot"]);
+  f.store.createProject({ id: "priority" });
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({ machines: { local: { resources: { godot: 1 } } } }),
+    { mode: 0o600 },
+  );
+  const { loadRunCapacityConfig, MachineLeases } = await import(
+    "@cardigan/host"
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const leases = new MachineLeases(f.store, cfg, vi.fn());
+  const at = f.clock.now(),
+    end = new Date(Date.parse(at) + 60_000).toISOString();
+  await leases.reserve(
+    { kind: "human", project_id: "priority" },
+    "local",
+    "godot",
+    at,
+    end,
+    () => at,
+  );
+  const d = new Dispatcher({
+    ...options,
+    leases,
+    resourceLimits: cfg.resourcesForMachine,
+  });
+  comment();
+  await d.tick();
+  const [wait] = readRunQueue(f.store);
+  expect(wait?.assignment_id).toBe(target.assignment.id);
+  expect(runtime.wake).not.toHaveBeenCalled();
+  f.advance(60_000);
+  await d.tick();
+  expect(f.state().runs.find((r) => r.id === wait?.run_id)?.status).toBe(
+    "dispatched",
+  );
+});
+
+test("C-497 a bound admission replaces a legacy live session and passes only that owner generation to start", async () => {
+  requireCapabilities(target.item, ["fixture"]);
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({
+      machines: {
+        local: {
+          resources: { fixture: 1 },
+          resource_policies: {
+            fixture: {
+              bindings: {
+                [f.project]: {
+                  adb_port: 17234,
+                  device: "synthetic",
+                  release: ["/test/inspect"],
+                },
+                other: { adb_port: 17345, release: ["/test/inspect"] },
+              },
+            },
+          },
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const { loadRunCapacityConfig, MachineLeases } = await import(
+    "@cardigan/host"
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const leases = new MachineLeases(f.store, cfg, async () => "local");
+  comment();
+  await new Dispatcher({
+    ...options,
+    leases,
+    resourceLimits: cfg.resourcesForMachine,
+  }).tick();
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(options.startRun).toHaveBeenCalledWith(
+    expect.objectContaining({
+      replacement: expect.objectContaining({
+        previous: target.assignment.runtime_ref ?? expect.anything(),
+      }),
+      resourceAccess: {
+        target: "local",
+        bindings: [
+          {
+            generation: expect.any(String),
+            key: "fixture",
+            device: "synthetic",
+            port: 17234,
+          },
+        ],
+      },
+    }),
+  );
+});
+
+test("C-497 priority project takes the next free slot ahead of an earlier borrower, without preempting it", async () => {
+  const other = secondProject();
+  other.comment();
+  f.advance(1000);
+  comment();
+  const busy = f.create();
+  f.session(busy.assignment, false);
+  await writeFile(
+    join(f.dataDir, "run-capacity.yaml"),
+    JSON.stringify({
+      machines: { local: { limit: 1, preferred_project: f.project } },
+    }),
+    { mode: 0o600 },
+  );
+  const { loadRunCapacityConfig, MachineLeases } = await import(
+    "@cardigan/host"
+  );
+  const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+  const d = new Dispatcher({
+    ...options,
+    leases: new MachineLeases(f.store, cfg, vi.fn()),
+    runLimit: cfg.forMachine,
+  });
+  await d.tick();
+  expect(readRunQueue(f.store)).toHaveLength(2);
+  expect(runtime.wake).not.toHaveBeenCalled();
+  finish(busy.assignment);
+  await d.tick();
+  expect(readRunQueue(f.store).map((r) => r.project_id)).toEqual([
+    other.project,
+  ]);
+  expect(runtime.wake).toHaveBeenCalledOnce();
+});
+
+test.each(["preparation", "backoff", "send slot"])(
+  "C-497 a lost mount during %s does not publish or consume retries while waiting",
+  async (stage) => {
+    requireCapabilities(target.item, ["godot"]);
+    await writeFile(
+      join(f.dataDir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            resources: { godot: 1 },
+            resource_policies: {
+              godot: { checks: { mount: ["/test/check"] } },
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const { loadRunCapacityConfig, MachineLeases } = await import(
+      "@cardigan/host"
+    );
+    const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+    let mounted = true,
+      breakAtBoundary = true,
+      sends = 0;
+    const leases = new MachineLeases(f.store, cfg, async () =>
+      mounted ? "local" : undefined,
+    );
+    vi.mocked(runtime.wake).mockImplementation(async (_ref, _msg, opts) => {
+      if (stage === "send slot" && breakAtBoundary) mounted = false;
+      if (opts?.resource_preflight && !(await opts.resource_preflight()))
+        return { ok: true, value: { sent: false, withdrawn: true } };
+      if (opts?.before_send && !opts.before_send())
+        return { ok: true, value: { sent: false, withdrawn: true } };
+      if (stage === "backoff" && breakAtBoundary)
+        return {
+          ok: false,
+          error: { code: "runtime_timeout", message: "synthetic" },
+        };
+      sends++;
+      return { ok: true, value: { sent: true } };
+    });
+    const d = new Dispatcher({
+      ...options,
+      leases,
+      resourceLimits: cfg.resourcesForMachine,
+      deliveryRetryBaseMs: 100,
+      beforeWake: async () => {
+        if (stage === "preparation" && breakAtBoundary) mounted = false;
+        return undefined;
+      },
+    });
+    comment();
+    await d.tick();
+    if (stage === "backoff") {
+      mounted = false;
+      f.advance(100);
+      await d.tick();
+    }
+    expect(sends).toBe(0);
+    const waits = () =>
+      f.store.database
+        .prepare(
+          "SELECT run_id,reason FROM machine_resource_waits WHERE project=?",
+        )
+        .all(f.project);
+    expect(waits()).toEqual([
+      expect.objectContaining({ reason: expect.stringContaining("mount") }),
+    ]);
+    const id = waits()[0]?.run_id;
+    // Do not time out an explicitly withheld send during a long outage.
+    f.advance(600_000);
+    await d.tick();
+    expect(sends).toBe(0);
+    breakAtBoundary = false;
+    mounted = true;
+    await d.tick();
+    expect(sends).toBe(1);
+    expect(f.state().runs.find((r) => r.id === id)?.status).toBe("dispatched");
+  },
+);

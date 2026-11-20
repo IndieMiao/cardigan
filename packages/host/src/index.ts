@@ -140,6 +140,7 @@ export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
+export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
 export {
   DEFAULT_MCP_HOST,
@@ -206,12 +207,19 @@ export {
 export { previewPorts } from "./preview-ports.js";
 export * from "./probe-config.js";
 export * from "./probe-service.js";
+export type { ReadProjectQuota } from "./project-quotas.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,
   hostRepositoryLock,
   repositoryLockPath,
 } from "./repository-lock.js";
+export {
+  MachineLeases,
+  type ResourceAccess,
+  type ResourceAdmission,
+} from "./resource-leases.js";
+export { targetProbe } from "./resource-probe.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   applyRoleDocument,
@@ -288,6 +296,7 @@ export {
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
 export { WorkerGitTransport } from "./worker-git.js";
+export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
 export {
   prepareReadonlyWorktree,
