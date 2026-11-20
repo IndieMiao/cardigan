@@ -568,20 +568,43 @@ function Checks({
       alive.current = false;
     };
   }, []);
-  // The check the host accepted from this click, until a read shows it.
+  // The check the host accepted from this click, and the latest check the
+  // page showed when it was clicked. Waiting ends as soon as a read shows any
+  // other check: this one, or a newer one someone else ran meanwhile.
   const [accepted, setAccepted] = useState<{
     readonly id: string;
     readonly mode: LaunchProfileCheck["mode"];
+    readonly before: string | null;
   }>();
-  const waiting =
-    accepted !== undefined && profile.last_check?.id !== accepted.id;
+  const shown = profile.last_check?.id ?? null;
+  const waiting = accepted !== undefined && shown === accepted.before;
+  useEffect(() => {
+    if (accepted && shown !== accepted.before) setAccepted(undefined);
+  }, [accepted, shown]);
   const running = waiting || profile.last_check?.status === "running";
-  // Re-read (GET only) until the accepted check appears, also after a failed read.
+  // Re-read (GET only) one read at a time until the check appears; the next
+  // read waits for the previous one, also after a failed read.
   useEffect(() => {
     if (!waiting) return;
-    const timer = window.setInterval(onRefresh, CHECK_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [waiting, onRefresh]);
+    let stopped = false;
+    let timer: number | undefined;
+    const next = () => {
+      timer = window.setTimeout(async () => {
+        try {
+          const read = await client.launchSettings();
+          if (!stopped) onRefreshed(read);
+        } catch {
+          // Read again on the next round; no new check is started.
+        }
+        if (!stopped) next();
+      }, CHECK_POLL_MS);
+    };
+    next();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [waiting, client, onRefreshed]);
   const start = async (mode: LaunchProfileCheck["mode"]) => {
     if (starting || running) return;
     setStarting(mode);
@@ -592,7 +615,7 @@ function Checks({
         profile.name,
         mode,
       );
-      if (alive.current) setAccepted({ id: check.id, mode });
+      if (alive.current) setAccepted({ id: check.id, mode, before: shown });
     } catch (error) {
       if (alive.current) setProblem(launchProblem(error, "check"));
     } finally {

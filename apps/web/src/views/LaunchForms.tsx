@@ -488,8 +488,19 @@ export function ProfileForm({
   const [custom, setCustom] = useState(
     initial.model !== "" && !aliases.includes(initial.model),
   );
+  // A field put back to the read's value is no longer an edit.
   const patch = (next: Partial<ProfileDraft>) =>
-    setEdits((old) => ({ ...old, ...next }));
+    setEdits((old) => {
+      const out = { ...old };
+      for (const [key, value] of Object.entries(next) as [
+        keyof ProfileDraft,
+        string,
+      ][]) {
+        if (value === initial[key]) delete out[key];
+        else out[key] = value;
+      }
+      return out;
+    });
   const creating = profile === undefined;
   const taken =
     creating && settings.profiles.some((p) => p.name === draft.name.trim());
@@ -853,11 +864,24 @@ export function ProviderForm({
           keys={keys}
           draft={draft}
           patch={(next) =>
-            setEdits((old) => ({
-              ...old,
-              ...next,
-              secret_env: { ...old.secret_env, ...next.secret_env },
-            }))
+            // A field put back to the read's value is no longer an edit.
+            setEdits((old) => {
+              const out: ProviderEdits = {
+                ...old,
+                secret_env: { ...old.secret_env },
+              };
+              for (const key of ["name", "base_url"] as const) {
+                const value = next[key];
+                if (value === undefined) continue;
+                if (value === initial[key]) delete out[key];
+                else out[key] = value;
+              }
+              for (const [env, key] of Object.entries(next.secret_env ?? {})) {
+                if (key === initial.secret_env[env]) delete out.secret_env[env];
+                else out.secret_env[env] = key;
+              }
+              return out;
+            })
           }
           problems={{
             ...problems,
@@ -961,8 +985,11 @@ export function AliasForm({
   const model = context.settings.models?.[alias];
   const initial = model?.id ?? "";
   // The person's edit, if any; otherwise the latest read (see `ProfileForm`).
-  const [edit, setId] = useState<string>();
+  const [edit, setEdit] = useState<string>();
   const id = edit ?? initial;
+  // Typing the read's value back is no longer an edit.
+  const setId = (value: string) =>
+    setEdit(value === initial ? undefined : value);
   const local = textProblem(id);
   const used = context.settings.profiles
     .filter((p) => p.model_alias === alias)

@@ -548,10 +548,11 @@ test("checks start only on a click and report exactly what ran", async () => {
   expect(dialog.textContent).not.toContain("推理通过");
   expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
 
-  current = withCheck(
-    "pi-deepseek",
-    check("metadata", "failed", ["cli_missing"]),
-  );
+  // Each started check has its own id.
+  current = withCheck("pi-deepseek", {
+    ...check("metadata", "failed", ["cli_missing"]),
+    id: "c-metadata",
+  });
   fireEvent.click(within(dialog).getByRole("button", { name: "本地检查" }));
   expect(await within(dialog).findByText("本地检查未通过")).toBeTruthy();
   expect(dialog.textContent).toContain("找不到 CLI");
@@ -820,5 +821,185 @@ test("the Provider form also keeps someone else's endpoint after a stale re-prev
       name: "anthropic",
       fields: { name: "Anthropic 网关" },
     },
+  ]);
+});
+
+// D-2016 review cases (林黛玉, V-2563), kept as regression tests.
+test("a status read slower than the poll interval still finishes and shows the result", async () => {
+  const { act } = await import("@testing-library/react");
+  const profile = "pi-deepseek";
+  let completed = 0;
+  const reads = vi
+    .fn()
+    .mockResolvedValueOnce(withCheck(profile, null))
+    .mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      completed++;
+      return withCheck(profile, check("online", "passed"));
+    });
+  const api = harness({ launchSettings: reads });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+    });
+    for (let i = 0; i < 9; i++)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    expect(completed).toBeGreaterThan(0);
+    expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+    expect(within(d).queryByText("已列出模型")).not.toBeNull();
+    expect(
+      within(d)
+        .getByRole("button", { name: "在线探测" })
+        .hasAttribute("disabled"),
+    ).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a newer finished check replaces this person's check once it was seen", async () => {
+  const { act } = await import("@testing-library/react");
+  const profile = "pi-deepseek";
+  let state = withCheck(profile, null);
+  const reads = vi.fn(async () => state);
+  const api = harness({ launchSettings: reads });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  vi.useFakeTimers();
+  try {
+    state = withCheck(profile, check("online", "running"));
+    await act(async () => {
+      fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+    });
+    expect(within(d).queryByText("在线探测中")).not.toBeNull();
+    expect(reads).toHaveBeenCalledTimes(2);
+    state = withCheck(profile, {
+      ...check("metadata", "passed"),
+      id: "c2",
+      started_at: "2026-01-01T00:00:05Z",
+      finished_at: "2026-01-01T00:00:06Z",
+    });
+    for (let i = 0; i < 3; i++)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+    expect(within(d).queryByText("本地检查通过")).not.toBeNull();
+    expect(
+      within(d)
+        .getByRole("button", { name: "在线探测" })
+        .hasAttribute("disabled"),
+    ).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a newer check shown by the first read after starting ends the wait", async () => {
+  const profile = "pi-deepseek";
+  let state = withCheck(profile, null);
+  const api = harness({ launchSettings: vi.fn(async () => state) });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  // Ours (id c) finished and someone else's c2 is now the latest.
+  state = withCheck(profile, {
+    ...check("metadata", "passed"),
+    id: "c2",
+  });
+  fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+  expect(await within(d).findByText("本地检查通过")).toBeTruthy();
+  expect(
+    within(d)
+      .getByRole("button", { name: "本地检查" })
+      .hasAttribute("disabled"),
+  ).toBe(false);
+});
+
+test("a field changed and put back before preview is not sent after a refresh", async () => {
+  let current = launchSettingsFixture;
+  const api = harness({
+    launchSettings: vi.fn(async () => current),
+    confirmLaunchChange: vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, "stale_snapshot", "stale")),
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  const click = (name: string) =>
+    fireEvent.click(within(d).getByRole("button", { name }));
+  click("编辑 Provider");
+  const endpoint = field(d, "端点");
+  const orig = (endpoint as HTMLInputElement).value;
+  fireEvent.change(endpoint, {
+    target: { value: "https://temporary.example.test" },
+  });
+  fireEvent.change(endpoint, { target: { value: orig } });
+  fireEvent.change(field(d, "名称"), { target: { value: "Demo" } });
+  click("预览修改");
+  await within(d).findByRole("button", { name: "确认保存" });
+  const expected = {
+    op: "edit_provider",
+    name: "anthropic",
+    fields: { name: "Demo" },
+  };
+  expect(api.previewLaunchChange.mock.lastCall).toEqual([V1, expected]);
+  click("确认保存");
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  current = {
+    ...current,
+    version: V2,
+    providers: current.providers.map((p) =>
+      p.id === "anthropic" ? { ...p, base_url: "https://new.example.test" } : p,
+    ),
+  };
+  click("刷新并重新预览");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("返回修改");
+  click("预览修改");
+  expect(api.previewLaunchChange.mock.lastCall).toEqual([V2, expected]);
+});
+
+test("a profile field changed and put back is not sent after a refresh", async () => {
+  let current = launchSettingsFixture;
+  const api = harness({
+    launchSettings: vi.fn(async () => current),
+    confirmLaunchChange: vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, "stale_snapshot", "stale")),
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  const click = (name: string) =>
+    fireEvent.click(within(d).getByRole("button", { name }));
+  click("编辑");
+  const permission = field(d, "权限模式");
+  const orig = (permission as HTMLInputElement).value;
+  fireEvent.change(permission, { target: { value: "plan" } });
+  fireEvent.change(permission, { target: { value: orig } });
+  fireEvent.change(field(d, "推理强度"), { target: { value: "medium" } });
+  click("预览修改");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("确认保存");
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  current = {
+    ...current,
+    version: V2,
+    profiles: current.profiles.map((p) =>
+      p.name === "claude-opus"
+        ? { ...p, parameters: { ...p.parameters, permission_mode: "auto" } }
+        : p,
+    ),
+  };
+  click("刷新并重新预览");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("返回修改");
+  click("预览修改");
+  expect(api.previewLaunchChange.mock.lastCall).toEqual([
+    V2,
+    { op: "edit_profile", name: "claude-opus", fields: { effort: "medium" } },
   ]);
 });
