@@ -160,6 +160,24 @@ pathlib.Path(sys.argv[2]).write_text(str(p.pid));time.sleep(20)""", str(source),
     until(watch)
 
 
+def observer_enrollment():
+    # Synthetic parent identity and fake handles; never look up a recycled PID.
+    ns = m['install_observer'].__globals__
+    for parent, already_dead, accepted in [(73, False, True), (1, False, False), (73, True, False)]:
+        system = mock.Mock()
+        system.getppid.side_effect = [73, parent]
+        system.pidfd_open.return_value = 42
+        system.fork.return_value = 11
+        with mock.patch.dict(ns, os=system, sys=SimpleNamespace(platform='linux'),
+                             dead=lambda fd: already_dead, birth=lambda pid: 'same-stamp'):
+            try:
+                assert m['install_observer'](73, 'A-1.R-1') == 'same-stamp' and accepted
+            except ValueError:
+                assert not accepted
+        assert system.fork.call_count == int(accepted)
+        system.close.assert_called_once_with(42)
+
+
 def darwin_watch():
     ns = m['session_watch'].__globals__
     queue = mock.Mock()
@@ -197,6 +215,7 @@ reply = mock.Mock(side_effect=[TimeoutError(), 'expired_preview', 'ended'])
 check = m['Confirmation']('A-1.R-1.R-1', 'synthetic', read=reply, interval=0)
 assert [check.state() for _ in range(3)] == ['unknown', 'expired_preview', 'ended']
 darwin_watch()
+observer_enrollment()
 # Simulate positive and incomplete Darwin group snapshots; not a macOS host run.
 for n, member, expected in [(4,123,True),(4,456,False),(0,123,False),(8,123,False)]:
     def listing(kind, anchor, pids, size):

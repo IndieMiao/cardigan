@@ -423,23 +423,28 @@ def install_observer(pid, key):
     require(re.fullmatch(r'A-[1-9][0-9]{0,15}\.R-[1-9][0-9]{0,15}', key))
     stamp = birth(pid)
     if sys.platform != 'linux':
+        require(os.getppid() == pid)
         audit(key, 'no_stable_bypass_signal_handle')
         return stamp
     fd = os.pidfd_open(pid)
-    require(birth(pid) == stamp)
-    if os.fork() == 0:
-        try:
-            os.setsid()
-            disown_stdio()
-            retain_fds({fd})
-            os.environ.clear()
-            observe_descendants(key, pid, fd)
-        except Exception:
-            audit(key, 'session_observer_failed')
-        finally:
-            os._exit(0)
-    os.close(fd)
-    return stamp
+    try:
+        # Recheck parentage *after* pinning. A matching pair of birth reads
+        # alone could both describe the process which recycled the launcher PID.
+        require(birth(pid) == stamp and os.getppid() == pid and not dead(fd))
+        if os.fork() == 0:
+            try:
+                os.setsid()
+                disown_stdio()
+                retain_fds({fd})
+                os.environ.clear()
+                observe_descendants(key, pid, fd)
+            except Exception:
+                audit(key, 'session_observer_failed')
+            finally:
+                os._exit(0)
+        return stamp
+    finally:
+        os.close(fd)
 
 
 def preview(tag, age, now, base='/tmp'):

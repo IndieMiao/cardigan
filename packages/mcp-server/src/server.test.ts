@@ -288,17 +288,37 @@ describe("authenticated Run resource observations", () => {
         expect(await (await read(unknown)).json()).toMatchObject({
           state: "unknown",
         });
-      const denied = fixture.store.issueToken({
+      const least = fixture.store.issueToken({
         project_id,
         assignment_id: fixture.assignment.id,
         role: { role_version: 1, allowed_tools: ["get_updates"] },
       });
-      expect((await read(key, denied.token)).status).toBe(403);
+      expect(
+        await (await read("A-1.R-1.R-2", least.token)).json(),
+      ).toMatchObject({
+        state: "active",
+      });
+      expect(
+        await (await read("A-2.R-1.R-2", least.token)).json(),
+      ).toMatchObject({
+        state: "unknown",
+      });
       expect(
         fixture.store.uow.read(
           (tx) => tx.runs.get(project_id, "R-2" as Run["id"])?.status,
         ),
       ).toBe("dispatched");
+      const client = await connect(least.token);
+      expect((await client.listTools()).tools.map((t) => t.name)).toEqual([
+        "get_updates",
+      ]);
+      expect(
+        textOf(await client.callTool({ name: "whoami", arguments: {} })),
+      ).toMatchObject({
+        error: { code: "forbidden_tool" },
+      });
+      fixture.store.revokeToken(least.record.id);
+      expect((await read(key, least.token)).status).toBe(401);
     },
   );
 });

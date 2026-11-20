@@ -249,8 +249,7 @@ export async function startMcpServer(
         !allowedHosts.includes(req.headers.host ?? "") ||
         (req.headers.origin !== undefined &&
           req.headers.origin !== url.origin) ||
-        !identity.value.actor.allowed_tools.includes("whoami") ||
-        !tools.some((t) => t.name === "whoami")
+        identity.value.assignment.external
       ) {
         res.writeHead(403).end();
         return;
