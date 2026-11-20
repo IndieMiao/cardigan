@@ -8,9 +8,9 @@ import type {
 import {
   acceptMergePushHold,
   type CommandState,
+  canRecheckMerge,
   type EffectivePreMergeCheck,
   effectivePreMergeChecks,
-  latestMergeCheck,
   mergeCheckBlockers,
   mergePlan,
   parseId,
@@ -316,12 +316,7 @@ async function mergeRecheck(
             }),
             EXIT.usage,
           );
-        const latest = latestMergeCheck(
-          state.events,
-          id,
-          plan.value.completion_id,
-        );
-        if (!latest || !["failed", "timed_out"].includes(latest.status))
+        if (!canRecheckMerge(state.events, id, plan.value.completion_id))
           throw new CliError(
             `${id} 当前完成申请没有失败或超时的检查结果，不能重新检查。`,
             EXIT.usage,

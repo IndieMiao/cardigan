@@ -6,7 +6,11 @@ import type {
   CheckRequest,
   OpenFailureLog,
 } from "./check-executor.js";
-import { CheckExecutorSuspended } from "./checkout-deadline.js";
+import {
+  CandidateRepositoryBusy,
+  CheckExecutorSuspended,
+  checkoutSupervisionMs,
+} from "./checkout-deadline.js";
 import { githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
@@ -172,9 +176,15 @@ export class GithubCheckExecutor implements CheckExecutor {
     let claimedIntent: GithubDispatchIntent | undefined;
     let dispatchToken = "";
     try {
+      const registeredAt = this.options.now?.() ?? Date.now();
       const startedAt = new Date(
-        Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
+        Math.floor(registeredAt / 1000) * 1000,
       ).toISOString();
+      const publicationDeadlineAt =
+        request.kind === "merge_check"
+          ? registeredAt +
+            checkoutSupervisionMs(request.totalTimeoutMs, this.startupTimeoutMs)
+          : undefined;
       const claimed = abandoned
         ? { intent: this.options.journal.recoverAbandoned(abandoned) }
         : this.options.journal.claim(
@@ -226,7 +236,9 @@ export class GithubCheckExecutor implements CheckExecutor {
           dispatchToken = token;
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
-          if (this.options.journal.beginPublication(intent)) {
+          if (
+            this.options.journal.beginPublication(intent, publicationDeadlineAt)
+          ) {
             let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
             let dispatch: boolean;
             try {
@@ -239,10 +251,13 @@ export class GithubCheckExecutor implements CheckExecutor {
               });
               if (result.status === "not_started") {
                 outcome = "not_started";
-                throw new CheckExecutorSuspended();
+                throw new CandidateRepositoryBusy();
               }
-              if (result.status === "pushed" && !request.signal?.aborted)
-                outcome = "pushed";
+              if (result.status === "pushed" && !request.signal?.aborted) {
+                if (request.kind === "merge_check")
+                  await request.beforeDispatch?.();
+                if (!request.signal?.aborted) outcome = "pushed";
+              }
             } finally {
               // Settle every push outcome before releasing its writer fence.
               // Only a successful, still-current publication may cross POST.

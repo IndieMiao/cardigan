@@ -3,12 +3,15 @@ import {
   abortMergeBatch,
   abortMergeBatchPublish,
   activeMergeFamilies,
+  batchFailures,
+  batchStartupFailure,
   beginMergeBatchPublish,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
   formBisectProbe,
   formMergeBatch,
+  hasBatchFailureEvidence,
   identifyMergeBatchCulprit,
   type MergeBatch,
   mergeBatches,
@@ -111,6 +114,25 @@ export class MergeBatches {
       }
     }
     for (const batch of activeMergeFamilies(state(id).events)) {
+      if (["failed", "bisecting"].includes(batch.status)) {
+        const family = mergeBatches(state(id).events).filter(
+          (b) => b.id === batch.id || b.parent_batch_id === batch.id,
+        );
+        if (
+          batchStartupFailure(family) &&
+          !family.some((b) => b.status === "checking")
+        ) {
+          command(id, (s, a, p) =>
+            abortMergeBatch(
+              s,
+              a,
+              { batch_id: batch.id, reason: "repository_busy" },
+              p,
+            ),
+          );
+          continue;
+        }
+      }
       let reason: "stale" | "member_left" | undefined;
       if (baseline !== batch.base_sha) reason = "stale";
       else {
@@ -146,6 +168,11 @@ export class MergeBatches {
         if (prefix?.status === "passed") await this.publish(project, prefix);
         continue;
       }
+      if (
+        ["failed", "bisecting"].includes(batch.status) &&
+        !hasBatchFailureEvidence(batch.check)
+      )
+        continue;
       if (batch.status === "failed") {
         const rerun = state(id).events.some(
           (e) =>
@@ -277,10 +304,9 @@ export class MergeBatches {
     const probes = mergeBatches(state(id).events).filter(
       (b) => b.parent_batch_id === batch.id && b.status !== "aborted",
     );
+    if (batchStartupFailure(probes)) return;
     const failed = [batch, ...probes]
-      .filter(
-        (b) => b.check && ["failed", "timed_out"].includes(b.check.status),
-      )
+      .filter((b) => hasBatchFailureEvidence(b.check))
       .sort((a, b) => a.members.length - b.members.length)[0];
     if (!failed) return;
     const length = failed.members.length;
@@ -288,14 +314,7 @@ export class MergeBatches {
       (b) => b.members.length === length - 1 && b.status === "passed",
     );
     if (length === 1 || prefix) {
-      const failures = state(id).events.filter(
-        (e) =>
-          e.type === "merge_batch_check_finished" &&
-          (e.payload as { batch_id?: string }).batch_id === batch.id &&
-          ["failed", "timed_out"].includes(
-            (e.payload as { check: { status: string } }).check.status,
-          ),
-      ).length;
+      const failures = batchFailures(state(id).events, batch.id).length;
       if (failed.id === batch.id && failures < 2) {
         command(id, (s, a, p) =>
           requeueMergeBatch(s, a, { batch_id: batch.id }, p),

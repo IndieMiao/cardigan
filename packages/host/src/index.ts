@@ -23,6 +23,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export {
+  CandidateRepositoryBusy,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckExecutorUnavailable,
@@ -169,6 +170,7 @@ export {
   type ExecutionOwner,
   executionOwner,
   mergeCheckAttemptRunning,
+  mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
