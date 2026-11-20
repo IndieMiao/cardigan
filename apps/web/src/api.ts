@@ -1600,6 +1600,18 @@ export interface EmployeePatch {
   /** A pinned profile, or null to follow the role. */
   readonly launch_profile_ref?: string | null;
 }
+/** `@` candidates for one card's comment box (active employees only). */
+export interface MentionCandidate {
+  readonly id: string;
+  readonly name: string;
+  readonly title: string;
+  readonly avatar: string | null;
+  /** Works on the card, wrote on its timeline, or is a standing PM. */
+  readonly related: boolean;
+}
+export interface MentionCandidates {
+  readonly employees: readonly MentionCandidate[];
+}
 export interface CreateEmployeeInput {
   readonly projects?: readonly string[];
   readonly launch_profile_ref?: string | null;
@@ -2078,6 +2090,10 @@ export interface CardiganClient {
     cardId: string,
     panel: CardPanel,
   ): Promise<Partial<CardDetail>>;
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates>;
   addComment(
     projectId: string,
     cardId: string,
@@ -2295,6 +2311,15 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<Partial<CardDetail>> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}?section=${panel}`,
+    );
+  }
+
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
     );
   }
 

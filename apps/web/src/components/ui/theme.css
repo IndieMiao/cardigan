@@ -370,6 +370,14 @@
     max-height: var(--radix-dropdown-menu-content-available-height);
     overflow-y: auto;
   }
+  .ui-suggestions {
+    width: var(--ui-menu-max);
+    max-height: min(
+      var(--radix-popover-content-available-height),
+      calc(var(--ui-control-regular) * 8 + var(--ui-space-1) * 2)
+    );
+    overflow-y: auto;
+  }
   .ui-select-item,
   .ui-menu-item {
     display: flex;
@@ -394,6 +402,32 @@
   .ui-select-item[data-state="checked"] {
     color: var(--ui-selected-text);
     background: var(--ui-selected);
+  }
+  .ui-suggestion {
+    min-height: var(--ui-control-regular);
+    padding-inline-end: var(--ui-space-2);
+    cursor: pointer;
+  }
+  .ui-suggestion-label,
+  .ui-suggestion-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-suggestion-label {
+    flex: 0 1 auto;
+  }
+  /* The meta only takes the room the label leaves, so a long title never
+     shortens the name; the name itself shrinks only when it alone overflows. */
+  .ui-suggestion-meta {
+    flex: 1 1 0;
+    color: var(--text-muted);
+  }
+  .ui-suggestion-status {
+    padding: var(--ui-space-1) var(--ui-space-2);
+    color: var(--text-muted);
+    line-height: var(--ui-leading);
   }
   .ui-item-indicator {
     position: absolute;

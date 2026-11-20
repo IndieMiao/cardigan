@@ -174,6 +174,7 @@ export function fakeClient(
       probes: [],
     }),
     employeeOptions: async () => ({ library: [], roles: [] }),
+    mentionCandidates: async () => ({ employees: [] }),
     launchSettings: async () => ({
       version: "0".repeat(64),
       profiles: [],
