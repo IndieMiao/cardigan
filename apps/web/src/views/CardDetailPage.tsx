@@ -140,6 +140,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     undefined,
   );
   const loadGeneration = useRef(0);
+  // Older pages follow only a head read for the current query; after a filter,
+  // anchor or card change the old snapshot's cursor must not be paged.
+  const [pagerReady, setPagerReady] = useState(false);
   const previousFilters = useRef(
     `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`,
   );
@@ -165,8 +168,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
               timeline_next_cursor: previous.timeline_next_cursor ?? null,
             }
           : detail;
-      if (request === loadGeneration.current)
+      if (request === loadGeneration.current) {
         history.current = { key, detail: merged };
+        setPagerReady(true);
+      }
       return merged;
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) return null;
@@ -181,21 +186,26 @@ export function CardDetailPage(props: CardDetailPageProps) {
   // dropped when filters, anchors or the card change while it is in flight.
   const [pager, setPager] = useState<PagerStatus>();
   const paging = useRef<object | undefined>(undefined);
+  // Reads still in flight by exact request, kept across resets: returning to a
+  // query joins its pending page instead of asking for the same page again.
+  const inflight = useRef(new Map<string, Promise<CardDetail>>());
   const resetPaging = useCallback(() => {
     paging.current = undefined;
     setPager(undefined);
+    setPagerReady(false);
   }, []);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the card identity is the reset signal.
   useEffect(resetPaging, [projectId, cardId, resetPaging]);
-  const loadOlder = useCallback(async () => {
+  /** Starts or joins one older-page read; false when there is nothing to read. */
+  const loadOlder = useCallback(() => {
     const base = history.current;
-    if (paging.current || !base) return;
+    if (paging.current || !base) return false;
     const { timeline, timeline_next_cursor: cursor, counts } = base.detail;
     if (
       cursor === null ||
       (cursor === undefined && timeline.length >= counts.timeline)
     )
-      return;
+      return false;
     const token = {};
     paging.current = token;
     setPager({ loading: true });
@@ -209,40 +219,55 @@ export function CardDetailPage(props: CardDetailPageProps) {
               Math.max(head.limit ?? PAGE_SIZE, timeline.length) + PAGE_SIZE,
           }
         : { ...head, before: cursor, limit: PAGE_SIZE };
-    try {
-      const detail = await client.card(projectId, cardId, options);
-      if (paging.current !== token) return;
-      const latest = history.current;
-      if (cursor === undefined) {
-        if (latest?.key === base.key) {
-          query.current = { ...query.current, limit: options.limit };
-          history.current = {
-            key: historyKey(projectId, cardId, options),
-            detail,
-          };
-          replace(detail);
-        }
-      } else if (
-        latest?.key === base.key &&
-        latest.detail.timeline_next_cursor === cursor
-      ) {
-        // A disconnected head refresh moves the cursor; that page is skipped
-        // and the sentinel asks again from the new cursor.
-        const merged = {
-          ...latest.detail,
-          timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
-          timeline_next_cursor: detail.timeline_next_cursor ?? null,
-        };
-        history.current = { key: base.key, detail: merged };
-        replace(merged);
-      }
-      paging.current = undefined;
-      setPager(undefined);
-    } catch (error) {
-      if (paging.current !== token) return;
-      paging.current = undefined;
-      setPager({ error: describeError(error) });
+    const id = JSON.stringify([projectId, cardId, options]);
+    let read = inflight.current.get(id);
+    if (!read) {
+      const started = client.card(projectId, cardId, options);
+      const settle = () => {
+        if (inflight.current.get(id) === started) inflight.current.delete(id);
+      };
+      started.then(settle, settle);
+      inflight.current.set(id, started);
+      read = started;
     }
+    const { key } = base;
+    void (async () => {
+      try {
+        const detail = await read;
+        if (paging.current !== token) return;
+        const latest = history.current;
+        if (cursor === undefined) {
+          if (latest?.key === key) {
+            query.current = { ...query.current, limit: options.limit };
+            history.current = {
+              key: historyKey(projectId, cardId, options),
+              detail,
+            };
+            replace(detail);
+          }
+        } else if (
+          latest?.key === key &&
+          latest.detail.timeline_next_cursor === cursor
+        ) {
+          // A disconnected head refresh moves the cursor; that page is skipped
+          // and the sentinel asks again from the new cursor.
+          const merged = {
+            ...latest.detail,
+            timeline: mergeTimeline(latest.detail.timeline, detail.timeline),
+            timeline_next_cursor: detail.timeline_next_cursor ?? null,
+          };
+          history.current = { key, detail: merged };
+          replace(merged);
+        }
+        paging.current = undefined;
+        setPager(undefined);
+      } catch (error) {
+        if (paging.current !== token) return;
+        paging.current = undefined;
+        setPager({ error: describeError(error) });
+      }
+    })();
+    return true;
   }, [client, projectId, cardId, replace]);
   useEffect(() => {
     if (data?.card.title) onTitleChange?.(data.card.title, data);
@@ -347,6 +372,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
           reload={reload}
           anchorReady={!anchor || (query.current.at === anchor && !pending)}
           pager={pager}
+          pagerReady={pagerReady}
           loadOlder={loadOlder}
         />
       )}
@@ -366,6 +392,7 @@ function CardContent({
   onCommentConflict,
   reload,
   pager,
+  pagerReady,
   loadOlder,
   anchorReady,
 }: {
@@ -381,7 +408,8 @@ function CardContent({
   reload: () => void;
   anchorReady: boolean;
   pager: PagerStatus;
-  loadOlder: () => void;
+  pagerReady: boolean;
+  loadOlder: () => boolean;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "card",
@@ -811,6 +839,7 @@ function CardContent({
                   : detail.timeline_next_cursor !== null
               }
               status={pager}
+              ready={pagerReady}
               scrollRoot={timelineRoot}
               onLoad={loadOlder}
             />

@@ -266,6 +266,86 @@ test("changing a filter drops the page in flight and restarts paging from the fi
   expect(screen.getByText("已到最早的记录")).toBeTruthy();
 });
 
+test("returning to a filter joins its pending older page instead of requesting it again", async () => {
+  window.location.hash = "#/p/p-1/cards/C-1";
+  const { client, card, page } = server(80);
+  const held: (() => void)[] = [];
+  card.mockImplementation(async (_p, _c, options) => {
+    if (options?.before && !options.type)
+      await new Promise<void>((resolve) => held.push(resolve));
+    return page(options);
+  });
+  render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
+  await selectCardTab(/^时间线/);
+  await screen.findByText("已加载 20 / 80 条");
+  reachBottom();
+  expect(olderCalls(card)).toHaveLength(1);
+  await selectMenu(/^条目类型：/, "审核");
+  await waitFor(() =>
+    expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
+      limit: 20,
+      type: "review",
+    }),
+  );
+  await selectMenu(/^条目类型：/, "全部");
+  await waitFor(() =>
+    expect(card).toHaveBeenLastCalledWith("p-1", "C-1", { limit: 20 }),
+  );
+  await waitFor(() => expect(live()).toHaveLength(1));
+  reachBottom();
+  // The same page (no filter, before=61) is still pending: joined, not re-sent.
+  expect(
+    olderCalls(card).filter(
+      (call) => !call[2]?.type && call[2]?.before === "61",
+    ),
+  ).toHaveLength(1);
+  expect(held).toHaveLength(1);
+  await act(async () => {
+    for (const release of held) release();
+  });
+  await screen.findByText("已加载 40 / 80 条");
+  expect(rows()).toEqual(
+    Array.from({ length: 40 }, (_, i) => `entry-C-1#${80 - i}`),
+  );
+});
+
+test("a failed head for a new filter keeps paging off until its retry succeeds", async () => {
+  window.location.hash = "#/p/p-1/cards/C-1";
+  const { client, card, page } = server(80);
+  let failHead = true;
+  card.mockImplementation(async (_p, _c, options) => {
+    if (options?.type && !options.before && failHead)
+      throw new Error("首页失败");
+    return page(options);
+  });
+  render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
+  await selectCardTab(/^时间线/);
+  await screen.findByText("已加载 20 / 80 条");
+  await selectMenu(/^条目类型：/, "审核");
+  const retry = await screen.findByRole("button", { name: "重试" });
+  // The old snapshot is still shown, but its cursor is not paged.
+  expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull();
+  expect(live()).toHaveLength(0);
+  reachBottom();
+  reachBottom();
+  expect(olderCalls(card)).toHaveLength(0);
+  const observers = live().length;
+  expect(observers).toBe(0);
+  failHead = false;
+  fireEvent.click(retry);
+  await waitFor(() =>
+    expect(rows()).toEqual(
+      Array.from({ length: 20 }, (_, i) => `entry-C-1#${80 - 2 * i}`),
+    ),
+  );
+  await waitFor(() => expect(live()).toHaveLength(1));
+  reachBottom();
+  await waitFor(() => expect(rows()).toHaveLength(40));
+  expect(olderCalls(card).map((call) => call[2])).toEqual([
+    { limit: 20, type: "review", before: "42" },
+  ]);
+});
+
 test("a live refresh during a page load keeps new and older entries without duplicates", async () => {
   const { client, card, page, add } = server(40);
   let release: (() => void) | undefined;

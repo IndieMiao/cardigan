@@ -82,21 +82,25 @@ export function TimelinePager({
   loaded,
   hasMore,
   status,
+  ready,
   scrollRoot,
   onLoad,
 }: {
   loaded: number;
   hasMore: boolean;
   status: { loading: true } | { error: string } | undefined;
+  /** False until the current query's newest page has loaded; nothing to page yet. */
+  ready: boolean;
   /** The element that scrolls the timeline; `null` for the viewport. */
   scrollRoot: () => Element | null;
-  onLoad: () => void;
+  /** Returns whether a read was started or joined. */
+  onLoad: () => boolean;
 }) {
   const sentinel = useRef<HTMLButtonElement>(null);
   // A fast page can land before "loading" ever renders; counting each request
   // still re-arms a fresh observer, whose first report reflects the new layout.
   const [round, setRound] = useState(0);
-  const idle = hasMore && !status;
+  const idle = ready && hasMore && !status;
   // biome-ignore lint/correctness/useExhaustiveDependencies: round re-arms the observer.
   useEffect(() => {
     const target = sentinel.current;
@@ -107,8 +111,9 @@ export function TimelinePager({
         if (!active || !entries.some((entry) => entry.isIntersecting)) return;
         active = false;
         observer.disconnect();
-        onLoad();
-        setRound((n) => n + 1);
+        // Re-arm only after a real request; an empty call would re-observe a
+        // visible sentinel forever.
+        if (onLoad()) setRound((n) => n + 1);
       },
       { root: scrollRoot(), rootMargin: "0px 0px 200px 0px" },
     );
@@ -119,6 +124,7 @@ export function TimelinePager({
     };
   }, [idle, scrollRoot, onLoad, round]);
   const loading = !!status && "loading" in status;
+  if (!ready) return null;
   return (
     <div aria-live="polite">
       {!hasMore ? (
