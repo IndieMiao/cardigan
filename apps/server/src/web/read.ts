@@ -67,7 +67,12 @@ import {
   type RecordReadTiming,
   timeRead,
 } from "@cardigan/mcp-server";
-import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
+import {
+  convertLegacyRole,
+  HARNESSES,
+  isDefaultRoleId,
+  type LaunchConfig,
+} from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 import { runQueuedAt } from "../run-queued-at.js";
@@ -2222,8 +2227,26 @@ function roleStatus(role: Role): "active" | "inactive" {
   return role.status === "inactive" ? "inactive" : "active";
 }
 
+/**
+ * C-494: the host's loaded launch profiles for role pickers — name, harness and
+ * model only. Providers, endpoints and secrets never leave the host.
+ */
+export function launchProfileOptions(config: LaunchConfig | undefined) {
+  return Object.entries(config?.profiles ?? {})
+    .map(([name, profile]) => ({
+      name,
+      harness: profile.harness,
+      model: profile.model ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** V9b 角色列表: the latest version of every role, inactive ones included. */
-export function roleList(project_id: ProjectId, versions: readonly Role[]) {
+export function roleList(
+  project_id: ProjectId,
+  versions: readonly Role[],
+  config?: LaunchConfig,
+) {
   return {
     project_id,
     roles: latestRoles(versions).map((role) => ({
@@ -2238,6 +2261,7 @@ export function roleList(project_id: ProjectId, versions: readonly Role[]) {
     default_roles: DEFAULT_ROLE_IDS,
     harnesses: HARNESSES,
     allowlists: ROLE_TOOL_ALLOWLISTS,
+    launch_profiles: launchProfileOptions(config),
   };
 }
 
