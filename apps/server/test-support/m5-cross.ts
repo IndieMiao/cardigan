@@ -23,6 +23,7 @@ export async function m5Cross(
     | "runLimitMaximum"
     | "machineDisplayName"
     | "machineHost"
+    | "launchSettings"
     | "resourceLimits"
   > = {},
 ) {

@@ -4,8 +4,13 @@ import type {
   CheckExecutor,
   CheckHandle,
   CheckRequest,
+  OpenFailureLog,
 } from "./check-executor.js";
-import { CheckExecutorSuspended } from "./checkout-deadline.js";
+import {
+  CandidateRepositoryBusy,
+  CheckExecutorSuspended,
+  checkoutSupervisionMs,
+} from "./checkout-deadline.js";
 import { githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
@@ -54,7 +59,11 @@ export interface GithubCheckLifecycle {
   ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
-  fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined>;
+  fetchFailureLog(
+    run: ExternalGithubRun,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 /** Trusted dispatch adapter; handles share the configured executor lifecycle. */
 export class GithubCheckExecutor implements CheckExecutor {
@@ -167,9 +176,15 @@ export class GithubCheckExecutor implements CheckExecutor {
     let claimedIntent: GithubDispatchIntent | undefined;
     let dispatchToken = "";
     try {
+      const registeredAt = this.options.now?.() ?? Date.now();
       const startedAt = new Date(
-        Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
+        Math.floor(registeredAt / 1000) * 1000,
       ).toISOString();
+      const publicationDeadlineAt =
+        request.kind === "merge_check"
+          ? registeredAt +
+            checkoutSupervisionMs(request.totalTimeoutMs, this.startupTimeoutMs)
+          : undefined;
       const claimed = abandoned
         ? { intent: this.options.journal.recoverAbandoned(abandoned) }
         : this.options.journal.claim(
@@ -221,7 +236,9 @@ export class GithubCheckExecutor implements CheckExecutor {
           dispatchToken = token;
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
-          if (this.options.journal.beginPublication(intent)) {
+          if (
+            this.options.journal.beginPublication(intent, publicationDeadlineAt)
+          ) {
             let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
             let dispatch: boolean;
             try {
@@ -234,10 +251,13 @@ export class GithubCheckExecutor implements CheckExecutor {
               });
               if (result.status === "not_started") {
                 outcome = "not_started";
-                throw new CheckExecutorSuspended();
+                throw new CandidateRepositoryBusy();
               }
-              if (result.status === "pushed" && !request.signal?.aborted)
-                outcome = "pushed";
+              if (result.status === "pushed" && !request.signal?.aborted) {
+                if (request.kind === "merge_check")
+                  await request.beforeDispatch?.();
+                if (!request.signal?.aborted) outcome = "pushed";
+              }
             } finally {
               // Settle every push outcome before releasing its writer fence.
               // Only a successful, still-current publication may cross POST.
@@ -489,11 +509,15 @@ export class GithubCheckExecutor implements CheckExecutor {
       throw new GithubExecutorError("api");
     }
   }
-  async fetchFailureLog(handle: CheckHandle) {
-    try {
-      return await this.options.lifecycle.fetchFailureLog(this.run(handle));
-    } catch {
-      throw new GithubExecutorError("api");
-    }
+  async fetchFailureLog(
+    handle: CheckHandle,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ) {
+    await this.options.lifecycle.fetchFailureLog(
+      this.run(handle),
+      open,
+      signal,
+    );
   }
 }

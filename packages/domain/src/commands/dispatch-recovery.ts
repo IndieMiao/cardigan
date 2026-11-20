@@ -4,6 +4,11 @@ import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
+import {
+  DEFAULT_PROVIDER_COOLDOWN_MS,
+  DEFAULT_PROVIDER_FAILURES,
+  recordProviderFailure,
+} from "../provider-start.js";
 import { runById } from "../run-index.js";
 import {
   c3ExitCandidate,
@@ -142,11 +147,14 @@ export const dispatchRecoveryUsed = (
     (e) =>
       e.type === "run_dispatch_recovered" &&
       field(e.payload, "assignment_id") === assignment &&
-      field(e.payload, "reason") !== "server_restart",
+      !["server_restart", "provider_unavailable"].includes(
+        String(field(e.payload, "reason")),
+      ),
   );
 
 export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
   !run.started_at &&
+  run.failure_reason !== "provider_unavailable" &&
   ["cancelled", "failed"].includes(run.status) &&
   !!dispatchRecoveryQueuedAt(state, run) &&
   state.events.some(
@@ -177,6 +185,8 @@ export function recoverDispatch(
     timeout_ms: number;
     failed_attempts: number;
     max_failures: number;
+    provider_failure_threshold?: number;
+    provider_cooldown_ms?: number;
     stopped_runtime?: RuntimeRef | null;
     stop_failed?: boolean;
     stop_id?: string;
@@ -261,9 +271,11 @@ export function recoverDispatch(
     )
       return;
     const restart = reason === "server_restart";
+    const provider = reason === "provider_unavailable";
     const recovered =
-      (!restart && dispatchRecoveryUsed(state.events, a.id)) ||
-      recoveryChainUsed(state, run);
+      !provider &&
+      ((!restart && dispatchRecoveryUsed(state.events, a.id)) ||
+        recoveryChainUsed(state, run));
     const unreadable = unreadableCommentTrigger(state, run);
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
@@ -296,16 +308,31 @@ export function recoverDispatch(
       );
       const { dispatch_stop: _stop, ...unfenced } = run;
       if (finished(run)) d.put("runs", unfenced);
-      else
-        cancelRunDispatch(
+      else {
+        const cancelled = cancelRunDispatch(
           d,
           unfenced,
-          unreadable
-            ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
-            : reviewWake
-              ? `${context}；审核目标已暂停或变更，确认终端退出后不再重排。`
-              : `${context}；${reason}，确认终端退出后自动重排一次。`,
+          provider
+            ? "模型服务不可用，未开工。"
+            : unreadable
+              ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
+              : reviewWake
+                ? `${context}；审核目标已暂停或变更，确认终端退出后不再重排。`
+                : `${context}；${reason}，确认终端退出后自动重排一次。`,
         );
+        if (provider) {
+          d.put("runs", {
+            ...cancelled,
+            failure_reason: "provider_unavailable",
+          });
+          recordProviderFailure(
+            d,
+            run,
+            p.provider_failure_threshold ?? DEFAULT_PROVIDER_FAILURES,
+            p.provider_cooldown_ms ?? DEFAULT_PROVIDER_COOLDOWN_MS,
+          );
+        }
+      }
       // Preserve any host-recorded terminal outcome, but always settle credentials.
       if (["unknown", "lost"].includes(a.runtime_state))
         d.put("assignments", {
@@ -369,9 +396,11 @@ export function recoverDispatch(
         if (policy && a.scope === "work_item")
           checkEmployeeSeparation(d, d.work(a.work_item_id), a.employee_id);
         const id = d.ids.next(state.project_id, "run");
-        const body = restart
-          ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。${policy ? "本业务根链的一次后继额度已使用。" : ""}`
-          : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
+        const body = provider
+          ? `${context}；模型服务不可用，已排队重试（${id}），不计开工或返工。`
+          : restart
+            ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。${policy ? "本业务根链的一次后继额度已使用。" : ""}`
+            : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
         const event = d.emit(
           "run_dispatch_recovered",
           card?.id,
@@ -410,6 +439,9 @@ export function recoverDispatch(
           trigger_event_id: event.id,
           kind: run.kind,
           status: "queued",
+          ...(provider
+            ? { queue_reason: "provider_unavailable" as const }
+            : {}),
           ...(policy ? { recovery_policy: policy } : {}),
           model: run.model,
           ...launchSettings(run),

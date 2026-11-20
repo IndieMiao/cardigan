@@ -373,6 +373,7 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  readonly startup_failure?: "repository_busy";
   /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
   readonly failure_excerpt?: string;
   /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */
@@ -549,6 +550,11 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  readonly failure_reason?: "provider_unavailable";
+  readonly provider_probe?: {
+    readonly episode: EventId;
+    readonly at: Timestamp;
+  };
   /** Physical resources pinned by the host at admission, not live editable requirements. */
   readonly resource_keys?: readonly string[];
   /** Q-744: fixed on the first independent queue, inherited without reset. */
@@ -631,6 +637,7 @@ export interface Run {
      */
     readonly reason:
       | "dispatch_timeout"
+      | "provider_unavailable"
       | "delivery_retry_exhausted"
       | "server_restart"
       | "runtime_exited";
@@ -643,7 +650,16 @@ export interface Run {
     readonly lease_until: Timestamp;
   };
   /** Host scheduling metadata; only meaningful while status is queued. */
-  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  readonly queue_reason?:
+    | "concurrency_limit"
+    | "runtime_unavailable"
+    | "awaiting_dispatch"
+    | "provider_unavailable";
+  /** Start of the current queue episode; legacy rows use the creation or trigger event. */
+  readonly queue_entered_at?: Timestamp;
+  /** Watchdog checkpoints for this Run, updated with the diagnostic/PM notice in one transaction. */
+  readonly queue_last_recheck_at?: Timestamp;
+  readonly queue_notified_at?: Timestamp;
   /** Host-only target wait; elapsed time is excluded from dispatch recovery. */
   readonly dispatch_target_wait?: {
     readonly since?: Timestamp;

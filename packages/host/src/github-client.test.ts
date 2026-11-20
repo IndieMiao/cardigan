@@ -635,7 +635,9 @@ test("D4: signed job logs get no App credential; untrusted redirects and incompl
     expect(init?.redirect).toBe("error");
     return new Response("FAIL synthetic\n");
   });
-  expect(await f.client.jobLog(11)).toBe("FAIL synthetic\n");
+  const write = vi.fn();
+  await f.client.jobLog(11, () => write);
+  expect(write).toHaveBeenCalledWith("FAIL synthetic\n");
   f.fetcher.mockImplementationOnce(
     async () =>
       new Response(null, {
@@ -643,7 +645,9 @@ test("D4: signed job logs get no App credential; untrusted redirects and incompl
         headers: { location: "https://evil.invalid/log" },
       }),
   );
-  await expect(f.client.jobLog(11)).rejects.toMatchObject({ category: "api" });
+  await expect(f.client.jobLog(11, () => write)).rejects.toMatchObject({
+    category: "security",
+  });
   f.fetcher.mockImplementationOnce(
     async () => new Response(JSON.stringify({ jobs: [], total_count: 2 })),
   );
@@ -827,4 +831,58 @@ test("C-466: discovery distinguishes TLS and invalid JSON without exposing provi
       message: "Check executor unavailable: api",
     });
   }
+});
+
+test("C-529: streams a job larger than the retained log and decodes split UTF-8 exactly once", async () => {
+  const f = await setup();
+  await f.client.token();
+  const padding = new Uint8Array(65536).fill(65),
+    tail = Buffer.from("中文");
+  let chunks = 0;
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            if (++chunks <= 48) controller.enqueue(padding);
+            else if (chunks === 49) controller.enqueue(tail.subarray(0, 1));
+            else {
+              controller.enqueue(tail.subarray(1));
+              controller.close();
+            }
+          },
+        }),
+      ),
+  );
+  let bytes = 0,
+    last = "";
+  await f.client.jobLog(11, () => (chunk) => {
+    bytes += Buffer.byteLength(chunk);
+    if (chunk) last = chunk;
+    expect(chunk.length).toBeLessThanOrEqual(65536);
+  });
+  expect(bytes).toBe(48 * 65536 + tail.length);
+  expect(last).toBe("中文");
+});
+
+test("signed job storage Retry-After pauses other calls on the same REST budget", async () => {
+  const f = await setup(new GithubRateLimit(100));
+  vi.spyOn(f.client, "token").mockResolvedValue(syntheticToken(1));
+  f.fetcher
+    .mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://test.blob.core.windows.net/job" },
+      }),
+    )
+    .mockResolvedValueOnce(
+      new Response(null, { status: 429, headers: { "Retry-After": "90" } }),
+    );
+  const open = vi.fn();
+  await expect(f.client.jobLog(11, open)).rejects.toBeInstanceOf(
+    GithubRetryLater,
+  );
+  await expect(f.client.run(123)).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(open).not.toHaveBeenCalled();
 });

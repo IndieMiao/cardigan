@@ -1,3 +1,4 @@
+import { probeModel } from "@cardigan/host";
 import {
   getHarnessAdapter,
   type LaunchConfig,
@@ -8,7 +9,6 @@ import { loadOptionalConfigSync, loadSecrets } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { findExecutable } from "./fs-io.js";
 import type { CliIo } from "./io.js";
-import { probeModel } from "./launch-online.js";
 import type { LaunchPaths } from "./paths.js";
 import { scanSettingsFiles } from "./runtime-files.js";
 

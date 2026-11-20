@@ -28,6 +28,9 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { FeishuSettings } from "./FeishuSettings.js";
+import { MachinesSettings } from "./MachinesSettings.js";
+import { ModelsSettings } from "./ModelsSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -40,15 +43,31 @@ import {
 } from "./useSettingWrite.js";
 
 type SettingsTab =
+  | "feishu"
   | "preferences"
   | "authorization"
   | "roles"
   | "templates"
   | "employees"
+  | "machines"
+  | "models"
   | "capacity";
-/** Panels a link may open (Needs You and the save-failure notice link here). */
+const settingsTabs: readonly SettingsTab[] = [
+  "feishu",
+  "preferences",
+  "authorization",
+  "roles",
+  "templates",
+  "employees",
+  "machines",
+  "models",
+  "capacity",
+];
+/** The open panel lives in the URL, so links and browser history restore it (C-518). */
 const routeTab = (tab: string | undefined): SettingsTab | undefined =>
-  tab === "authorization" || tab === "capacity" ? tab : undefined;
+  settingsTabs.find((known) => known === tab);
+const routeVersion = (version: string | undefined): number | undefined =>
+  version && /^[1-9][0-9]*$/u.test(version) ? Number(version) : undefined;
 
 /** Categories that go to the human unless the human delegates them. */
 const humanCategories = [
@@ -64,19 +83,42 @@ export function SettingsPage({
   client,
   projectId,
   revision = 0,
+  machineRevision = revision,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /**
+   * Machines are global: the machine panel also rereads on the cross-project
+   * capacity notices, which leave this project's revision unchanged.
+   */
+  machineRevision?: number;
 }) {
-  const [filters] = useRouteFilters({ kind: "settings", projectId });
-  const [tab, setTab] = useState<SettingsTab>(
-    routeTab(filters.tab) ?? "preferences",
-  );
+  const [filters, setFilters] = useRouteFilters({
+    kind: "settings",
+    projectId,
+  });
+  const navigate = useRef(setFilters);
+  navigate.current = setFilters;
+  // Switching projects keeps the open panel, as it did before the tab lived in the URL.
+  const shown = useRef({ projectId, tab: "preferences" as SettingsTab });
+  const carried =
+    shown.current.projectId !== projectId ? shown.current.tab : undefined;
+  const tab = routeTab(filters.tab) ?? carried ?? "preferences";
   useEffect(() => {
-    const linked = routeTab(filters.tab);
-    if (linked) setTab(linked);
-  }, [filters.tab]);
+    if (tab !== "preferences" && routeTab(filters.tab) === undefined)
+      navigate.current({ tab }, { replace: true });
+    shown.current = { projectId, tab };
+  }, [projectId, tab, filters.tab]);
+  const setTab = useCallback(
+    (next: SettingsTab) =>
+      navigate.current(next === "preferences" ? {} : { tab: next }),
+    [],
+  );
+  // A role reference on the models page opens that role's version (C-518).
+  const linkedRole = tab === "roles" ? filters.role : undefined;
+  const linkedVersion =
+    tab === "roles" ? routeVersion(filters.version) : undefined;
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
     () => trackSettingsRead(client.preferences(projectId)),
@@ -94,7 +136,7 @@ export function SettingsPage({
       panel: "preferences" as const,
       reveal: () => setTab("preferences"),
     }),
-    [projectId],
+    [projectId, setTab],
   );
   const capacityPlace = useMemo(
     () => ({
@@ -102,7 +144,15 @@ export function SettingsPage({
       panel: "capacity" as const,
       reveal: () => setTab("capacity"),
     }),
-    [projectId],
+    [projectId, setTab],
+  );
+  const feishuPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "feishu" as const,
+      reveal: () => setTab("feishu"),
+    }),
+    [projectId, setTab],
   );
   const authorizationPlace = useMemo(
     () => ({
@@ -110,7 +160,7 @@ export function SettingsPage({
       panel: "authorization" as const,
       reveal: () => setTab("authorization"),
     }),
-    [projectId],
+    [projectId, setTab],
   );
   return (
     <SettingsLayout
@@ -134,6 +184,12 @@ export function SettingsPage({
             onClick={() => setTab("authorization")}
           >
             授权
+          </SettingsNavItem>
+          <SettingsNavItem
+            current={tab === "feishu"}
+            onClick={() => setTab("feishu")}
+          >
+            飞书绑定
           </SettingsNavItem>
           <SettingsNavItem
             current={tab === "roles"}
@@ -161,9 +217,26 @@ export function SettingsPage({
           >
             {employeeCopy.tab}
           </SettingsNavItem>
+          <SettingsNavItem
+            current={tab === "machines"}
+            onClick={() => setTab("machines")}
+          >
+            机器
+          </SettingsNavItem>
+          <SettingsNavItem
+            current={tab === "models"}
+            onClick={() => setTab("models")}
+          >
+            模型
+          </SettingsNavItem>
         </>
       }
     >
+      <RequestFeedbackScope hidden={tab !== "feishu"}>
+        <SettingPlaceContext.Provider value={feishuPlace}>
+          <FeishuSettings key={projectId} client={client} />
+        </SettingPlaceContext.Provider>
+      </RequestFeedbackScope>
       <RequestFeedbackScope hidden={tab !== "capacity"}>
         <SettingPlaceContext.Provider value={capacityPlace}>
           <CapacitySettings
@@ -179,6 +252,12 @@ export function SettingsPage({
           client={client}
           projectId={projectId}
           revision={revision}
+          linkedRole={linkedRole}
+          linkedVersion={linkedVersion}
+          // Closing the linked detail drops the link, so following it again reopens it.
+          onLinkedRoleClosed={() =>
+            setFilters({ tab: "roles" }, { replace: true })
+          }
           onNewEmployee={(roleId) => {
             setEmployeeRole(roleId);
             setTab("employees");
@@ -193,6 +272,17 @@ export function SettingsPage({
           initialRole={employeeRole}
           revision={revision}
         />
+      )}
+      {tab === "machines" && (
+        <MachinesSettings
+          key={projectId}
+          client={client}
+          projectId={projectId}
+          revision={machineRevision}
+        />
+      )}
+      {tab === "models" && (
+        <ModelsSettings key={projectId} client={client} projectId={projectId} />
       )}
       {tab === "templates" && (
         <TemplateSettings

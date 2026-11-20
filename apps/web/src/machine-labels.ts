@@ -1,9 +1,11 @@
 import type {
   ExecutionMachine,
+  MachineBindingView,
   MachineCapabilityView,
   MachineRequirements,
   MachineSelection,
   MachineSelectionCandidate,
+  MachineView,
 } from "./api.js";
 import { STATUS_LABELS } from "./status.js";
 
@@ -132,4 +134,144 @@ export function selectionSummary(
   );
   const reasons = chosen ? candidateReasons(chosen) : [];
   return `${machine}（自动选择${reasons.length ? `：${reasons.join("，")}` : ""}）`;
+}
+
+/** C-512: one check record of a machine binding, as the settings page shows it. */
+export interface MachineCheckRow {
+  readonly key: string;
+  readonly kind: string;
+  readonly status: "passed" | "failed" | "running" | "unknown" | "unreadable";
+  readonly label: string;
+  /** Null only for a record the host could not read. */
+  readonly checked_at: string | null;
+  readonly steps: readonly string[];
+}
+const CHECK_LABELS: Readonly<Record<MachineCheckRow["status"], string>> = {
+  passed: "通过",
+  failed: "失败",
+  running: "检查中",
+  unknown: "未知",
+  unreadable: "无法读取",
+};
+const checkRow = (
+  key: string,
+  kind: string,
+  status: string,
+  checked_at: string,
+  steps: readonly string[],
+): MachineCheckRow => {
+  const normal =
+    status === "checking" || status === "running"
+      ? "running"
+      : status === "passed" || status === "failed"
+        ? status
+        : "unknown";
+  return {
+    key,
+    kind,
+    status: normal,
+    label: CHECK_LABELS[normal],
+    checked_at,
+    steps,
+  };
+};
+const time = (value: string | null) => {
+  const t = value === null ? Number.NaN : Date.parse(value);
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+};
+
+/**
+ * The check records of one project binding, newest first: the machine health
+ * check, the worker onboarding check and the latest explicitly requested one.
+ * A requested check already shown as the health or worker record is not
+ * repeated. A worker record the host could not read is listed as such, never
+ * as "no check"; `local` has no worker record to read.
+ */
+export function bindingChecks(
+  binding: MachineBindingView,
+  machineId: string,
+): MachineCheckRow[] {
+  const rows: MachineCheckRow[] = [];
+  const health = binding.machine_check;
+  if (health)
+    rows.push(
+      checkRow(
+        "machine",
+        "机器检查",
+        health.status,
+        health.checked_at,
+        health.blockers.map(healthBlockerLabel),
+      ),
+    );
+  const worker = binding.worker_check;
+  if (worker)
+    rows.push(
+      checkRow(
+        "worker",
+        "接入检查",
+        worker.status,
+        worker.checked_at,
+        worker.failed_steps,
+      ),
+    );
+  const requested = binding.last_requested_check;
+  if (requested) {
+    const row = checkRow(
+      "requested",
+      requested.kind === "worker" ? "手动接入检查" : "手动机器检查",
+      requested.status,
+      requested.checked_at,
+      requested.failed_steps,
+    );
+    if (
+      !rows.some(
+        (r) => r.checked_at === row.checked_at && r.status === row.status,
+      )
+    )
+      rows.push(row);
+  }
+  rows.sort((a, b) => time(b.checked_at) - time(a.checked_at));
+  if (!binding.worker_record_readable && machineId !== "local")
+    rows.push({
+      key: "worker-unreadable",
+      kind: "接入检查",
+      status: "unreadable",
+      label: CHECK_LABELS.unreadable,
+      checked_at: null,
+      steps: [],
+    });
+  return rows;
+}
+
+/**
+ * The machine's newest check across every binding the server returned, with
+ * the project it belongs to (this project wins a tie). Without any dated
+ * record, an unreadable one is reported rather than "never checked".
+ */
+export function latestMachineCheck(
+  machine: MachineView,
+): { check: MachineCheckRow; binding: MachineBindingView } | undefined {
+  const rows = machine.bindings.flatMap((binding) =>
+    bindingChecks(binding, machine.id).map((check) => ({ check, binding })),
+  );
+  const dated = rows
+    .filter((r) => r.check.checked_at !== null)
+    .sort(
+      (a, b) =>
+        time(b.check.checked_at) - time(a.check.checked_at) ||
+        Number(b.binding.is_current) - Number(a.binding.is_current),
+    );
+  return dated[0] ?? rows[0];
+}
+
+/**
+ * Every active Run on the machine across the projects it serves, including
+ * the standing sessions the Agent limit exempts; it matches the running-task
+ * list, not the limited count.
+ */
+export function machineActiveRuns(machine: MachineView): number {
+  return machine.bindings.reduce(
+    (sum, b) => sum + b.assignments.reduce((n, a) => n + a.runs.length, 0),
+    0,
+  );
 }

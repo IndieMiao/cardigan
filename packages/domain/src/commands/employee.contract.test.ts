@@ -134,6 +134,7 @@ test("global employee lifecycle preserves identity, role, creation time and audi
   );
   const employee = first.data;
   expect(employee).toEqual({
+    projects: [],
     id: "E-1",
     name: "诸葛 亮",
     title: "产品经理",

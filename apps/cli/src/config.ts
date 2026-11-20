@@ -1,8 +1,8 @@
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import {
   launchFilesStamp,
-  loadModelLaunchConfig,
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "@cardigan/host";
 import {
   type LaunchConfig,
@@ -26,7 +26,7 @@ export async function loadConfig(
       "可以手写 providers/profiles，或用 cardigan launch import-claude-settings 生成",
     ]);
   }
-  const config = await loadModelLaunchConfig(
+  const { config } = await stageModelLaunchConfig(
     decodeConfig(text, paths),
     paths.dataDir,
   );
@@ -48,7 +48,7 @@ export function loadOptionalConfigSync(
   return parseCachedLaunchConfig(decodeConfig(text, paths), paths.dataDir);
 }
 
-function decodeConfig(text: string, paths: LaunchPaths): unknown {
+export function decodeConfig(text: string, paths: LaunchPaths): unknown {
   let decoded: unknown;
   try {
     decoded = parseYaml(text, { prettyErrors: false });

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CommandState } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import * as transcript from "./capture-transcript.js";
 import { readSessionContexts } from "./context-usage.js";
 import { readParts } from "./session-files.js";
 
@@ -261,29 +262,29 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
     id: `R-${i + 1}` as typeof run.id,
     assignment_id: a.id,
   }));
-  const record = (id: string, dir: string, timestamp: string) =>
-    write(
-      join(
-        root,
-        "runs",
-        "fixture",
-        id,
-        "claude",
-        "projects",
-        "worktree",
-        `${id}.jsonl`,
-      ),
-      line({
-        type: "user",
-        sessionId: id,
-        cwd: join(dir, "apps/web"),
-        timestamp,
-      }),
-    );
   const [one, ten] = assignments;
   if (!one || !ten) throw new Error("Missing fixture");
-  await record(one.id, one.worktree_path, now);
-  await record(ten.id, ten.worktree_path, "2026-01-01T00:30:00Z");
+  let firstCwd = one.worktree_path;
+  // Scope the stub to this attribution test; reader and no-follow contracts stay real.
+  using capture = vi
+    .spyOn(transcript, "captureTranscript")
+    .mockImplementation(async (_file, args) => {
+      const [dir, session] = args.slice(-2);
+      const first = session === one.id;
+      if (
+        (!first && session !== ten.id) ||
+        dir !== join(root, "runs", "fixture", session)
+      )
+        throw new Error("Unexpected session root");
+      return JSON.stringify({
+        path: `${dir}/claude/projects/worktree/${session}.jsonl`,
+        activity: {
+          session_id: session,
+          cwd: join(first ? firstCwd : ten.worktree_path, "apps/web"),
+          updated_at: first ? now : "2026-01-01T00:30:00Z",
+        },
+      });
+    });
   const inspect = () =>
     readSessionContexts(
       { ...s, assignments, runs },
@@ -300,8 +301,9 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
       activity: { assignment_id: ten.id, session_id: ten.id, run_id: "R-2" },
     },
   ]);
-  await record(one.id, ten.worktree_path, now);
+  firstCwd = ten.worktree_path;
   expect((await inspect())[0]?.activity_status).toBe("unassociated");
+  expect(capture).toHaveBeenCalledTimes(4);
 });
 
 test("regressed record clocks, mismatched session/cwd and old generations fail association", async () => {
@@ -442,3 +444,147 @@ test.each(["claude-code", "codex"] as const)(
     expect((await read(state(harness)))?.activity?.turn_ended).toBeUndefined();
   },
 );
+
+test.each(["no_output", "assistant", "agent_message", "incomplete"])(
+  "C-499 Codex startup 503 distinguishes an input-only turn from %s",
+  async (mode) => {
+    const message = (type: string, payload: object) =>
+      line({ timestamp: now, type, payload });
+    await write(
+      rollout(),
+      codex(
+        message("response_item", { type: "message", role: "user" }) +
+          message("event_msg", { type: "token_count", info: null }) +
+          (mode === "assistant"
+            ? message("response_item", { type: "message", role: "assistant" })
+            : mode === "agent_message"
+              ? message("event_msg", { type: "agent_message" })
+              : mode === "incomplete"
+                ? "invalid\n"
+                : "") +
+          message("event_msg", {
+            type: "error",
+            codex_error_info: {
+              http_connection_failed: { http_status_code: 503 },
+            },
+          }),
+      ),
+    );
+    const sample = await read();
+    expect(sample?.activity?.error).toBe("server_error");
+    expect(sample?.startupFailure?.model_silent_since).toBe(
+      mode === "incomplete"
+        ? undefined
+        : mode === "no_output"
+          ? 0
+          : Date.parse(now),
+    );
+  },
+);
+
+const faultAt = "2026-01-01T00:59:00.000Z";
+const codexFault = line({
+  timestamp: faultAt,
+  type: "event_msg",
+  payload: {
+    type: "error",
+    codex_error_info: { http_connection_failed: { http_status_code: 503 } },
+  },
+});
+test.each([
+  { type: "token_count", info: null },
+  { type: "task_complete", last_agent_message: null },
+])(
+  "C-499: $type without output is latest activity but cannot redate or erase a startup fault",
+  async (payload) => {
+    await write(
+      rollout(),
+      codex(codexFault + line({ type: "event_msg", timestamp: now, payload })),
+    );
+    const row = await read();
+    expect(row?.activity?.updated_at).toBe(now);
+    expect(row?.activity?.error).toBeUndefined();
+    expect(row?.activity?.turn_ended).toBe(
+      payload.type === "task_complete" ? true : undefined,
+    );
+    expect(row?.startupFailure).toMatchObject({
+      error: "server_error",
+      updated_at: faultAt,
+      model_silent_since: 0,
+    });
+  },
+);
+test.each([
+  line({
+    type: "response_item",
+    timestamp: now,
+    payload: { type: "message", role: "assistant" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: { type: "agent_reasoning" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: { type: "task_complete", last_agent_message: "done" },
+  }),
+  line({
+    type: "event_msg",
+    timestamp: now,
+    payload: {
+      type: "token_count",
+      info: { last_token_usage: { total_tokens: 1 } },
+    },
+  }),
+  '{"type":',
+])(
+  "C-499: output or a partial record after a Codex error withdraws startup evidence",
+  async (suffix) => {
+    await write(rollout(), codex(codexFault + suffix));
+    expect((await read())?.startupFailure).toBeUndefined();
+  },
+);
+test("C-499: an unfinished Claude line after a 503 invalidates silence on every read", async () => {
+  const path = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const fault = line({
+    type: "system",
+    subtype: "api_error",
+    sessionId: "session-1",
+    cwd,
+    timestamp: faultAt,
+    error: { status: 503 },
+  });
+  await write(path, fault);
+  const inspect = () => read(state("claude-code"));
+  expect((await inspect())?.startupFailure).toMatchObject({
+    error: "server_error",
+    updated_at: faultAt,
+    model_silent_since: 0,
+  });
+  await appendFile(path, '{"type":"assistant",');
+  for (let i = 0; i < 2; i++) {
+    const row = await inspect();
+    expect(row?.startupFailure).toBeUndefined();
+    expect(row?.activity?.error).toBe("server_error");
+  }
+  await appendFile(
+    path,
+    JSON.stringify({
+      sessionId: "session-1",
+      cwd,
+      timestamp: now,
+      message: { model: "fixture" },
+    }).slice(1) + "\n",
+  );
+  const row = await inspect();
+  expect(row?.activity).toMatchObject({ updated_at: now });
+  expect(row?.startupFailure).toBeUndefined();
+});

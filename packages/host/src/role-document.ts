@@ -155,7 +155,14 @@ function evaluate(
           preview,
         )
       : undefined;
-  const staff = employeePlans(doc, role.result, employees, profiles, preview);
+  const staff = employeePlans(
+    project_id,
+    doc,
+    role.result,
+    employees,
+    profiles,
+    preview,
+  );
   const ids = new Map<string, string>();
   if (writer) {
     const ports = { clock: c.clock, ids: writer.ids };

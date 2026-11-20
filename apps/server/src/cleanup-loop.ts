@@ -15,6 +15,7 @@ import {
   releaseAssignment,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { unrevokedTokensForProject } from "@cardigan/store";
@@ -22,6 +23,7 @@ import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
+import { reconcileRunResources } from "./run-resource-cleanup.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /**
@@ -147,6 +149,13 @@ export class CleanupExecutor {
     await profileSpan("cleanup.idle_builds", () =>
       this.removeIdleBuilds(project_id, unconfirmed),
     );
+    if (this.options.runtime instanceof RuntimeTargets)
+      await reconcileRunResources(
+        this.options.store,
+        this.options.runtime,
+        project_id,
+        (line) => this.report(line),
+      );
   }
 
   /**

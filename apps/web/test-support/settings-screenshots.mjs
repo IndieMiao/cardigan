@@ -218,7 +218,7 @@ try {
         "!!document.querySelector('[role=switch], .settings-layout input[type=checkbox]')",
       );
       if (panels) {
-        const drawer = async (name, trigger) => {
+        const drawer = async (name, trigger, end = false) => {
           await run((text) => {
             const target = [
               ...document.querySelectorAll("main button, main a"),
@@ -302,6 +302,22 @@ try {
             resolve(output, `${name}-${width}-${theme}.png`),
             Buffer.from(shot.data, "base64"),
           );
+          if (end) {
+            // C-512: a long read-only drawer; its last section, scrolled in.
+            await run(() => {
+              const d = document.querySelector("[role=dialog]");
+              const sections = d.querySelectorAll("section");
+              sections[sections.length - 1]?.scrollIntoView({ block: "end" });
+            });
+            await settle();
+            const bottom = await send("Page.captureScreenshot", {
+              format: "png",
+            });
+            await writeFile(
+              resolve(output, `${name}-end-${width}-${theme}.png`),
+              Buffer.from(bottom.data, "base64"),
+            );
+          }
           for (const hit of report.scenes[`${name}-${width}-${theme}`].hits)
             assert(
               hit.hit,
@@ -359,6 +375,84 @@ try {
         await until("document.body.textContent.includes('孙悟空')");
         await capture("employees", width, theme);
         if (isNew) await drawer("employee-drawer", "选用孙悟空");
+        // C-512: the read-only machine panel (absent before C-512).
+        const machines = await evaluate(
+          "[...document.querySelectorAll(\"nav[aria-label='设置分栏'] button\")].some((b) => b.textContent.trim() === '机器')",
+        );
+        if (machines) {
+          await click("机器");
+          await until(
+            "!!document.querySelector('table[aria-label=\"机器列表\"]') && document.body.textContent.includes('Mac mini')",
+          );
+          await blur();
+          await capture("machines", width, theme);
+          await drawer("machine-drawer", "本机", true);
+          await drawer("machine-failed-drawer", "构建机", true);
+          // C-512 (V-2396): a failed detail read keeps 重试 in the drawer
+          // body; the page stack (e.g. 正在连接实时更新…) must not cover it.
+          await run(() => {
+            const target = [...document.querySelectorAll("main button")].find(
+              (b) => b.offsetParent && b.textContent.trim() === "Mac mini",
+            );
+            window.__settingsOpener = target;
+            target.focus();
+            target.click();
+          });
+          await until(
+            "[...document.querySelectorAll('[role=dialog] button')].some((b) => b.textContent.trim() === '重试')",
+          );
+          await delay(300);
+          await settle();
+          const failedShot = await send("Page.captureScreenshot", {
+            format: "png",
+          });
+          const retryScene = `machine-detail-error-${width}-${theme}`;
+          report.scenes[retryScene] = await run(() => {
+            const button = [
+              ...document.querySelectorAll("[role=dialog] button"),
+            ].find((b) => b.textContent.trim() === "重试");
+            const b = button.getBoundingClientRect();
+            const top = document.elementFromPoint(
+              b.left + b.width / 2,
+              b.top + b.height / 2,
+            );
+            const alert = button.closest("[role=alert]");
+            return {
+              retry: { x: b.left, y: b.top, w: b.width, h: b.height },
+              hit: !!top && button.contains(top),
+              topmost: top?.textContent?.trim().slice(0, 24),
+              text: alert?.textContent,
+              scrollWidth: document.documentElement.scrollWidth,
+            };
+          });
+          await writeFile(
+            resolve(output, `${retryScene}.png`),
+            Buffer.from(failedShot.data, "base64"),
+          );
+          assert(
+            report.scenes[retryScene].hit,
+            `${retryScene}: 重试 is covered by ${report.scenes[retryScene].topmost}`,
+          );
+          // A real pointer click on the uncovered button reads again.
+          const r = report.scenes[retryScene].retry;
+          for (const type of ["mousePressed", "mouseReleased"])
+            await send("Input.dispatchMouseEvent", {
+              type,
+              x: r.x + r.w / 2,
+              y: r.y + r.h / 2,
+              button: "left",
+              clickCount: 1,
+            });
+          await until("!!document.querySelector('[role=dialog] dl')");
+          for (const type of ["keyDown", "keyUp"])
+            await send("Input.dispatchKeyEvent", {
+              type,
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            });
+          await until("!document.querySelector('[role=dialog]')");
+        }
         continue;
       }
       await capture("preferences", width, theme);

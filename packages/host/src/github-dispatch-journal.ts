@@ -49,6 +49,8 @@ export interface GithubDispatchIntent {
   readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
+  /** Local merge publisher's supervision deadline, fixed before Git IO; never a POST deadline. */
+  readonly publicationDeadlineAt?: number;
   /** Only the dispatching process can still send or receive this POST. */
   readonly postOwner?: ExecutionOwner;
   /** Proof the POST writer settled or exited, plus a full visibility window. */
@@ -542,6 +544,23 @@ export class GithubDispatchJournal {
       if (!current.deleted) this.save(tx, { ...current, deleted: true });
     });
   }
+  /** A same-tree rebuild may discover an existing POST, never push an old SHA.
+   * Only dispatching is irreversible; a live publisher can still settle to reserved. */
+  crossedDispatchBoundary(
+    project: string,
+    card: string,
+    attempt: string,
+    sha: string,
+  ): boolean {
+    return this.store.uow.read((tx) =>
+      this.current(tx, project, card).some(
+        (intent) =>
+          intent.attempt === attempt &&
+          intent.candidate?.sha === sha &&
+          intent.phase === "dispatching",
+      ),
+    );
+  }
   /** Scope recovery to its exact card/attempt; never scan other cards to retry. */
   hasUnboundIntent(project: string, card: string, attempt: string): boolean {
     return this.store.uow.read((tx) =>
@@ -930,7 +949,10 @@ export class GithubDispatchJournal {
     }
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
-  beginPublication(intent: GithubDispatchIntent): boolean {
+  beginPublication(
+    intent: GithubDispatchIntent,
+    publicationDeadlineAt?: number,
+  ): boolean {
     const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
@@ -960,7 +982,14 @@ export class GithubDispatchJournal {
         return false;
       const publisher = executionOwner(process.pid);
       if (!publisher) throw new GithubExecutorError("recovery_incomplete");
-      this.save(tx, { ...current, phase: "publishing", publisher });
+      this.save(tx, {
+        ...current,
+        phase: "publishing",
+        publisher,
+        ...(publicationDeadlineAt !== undefined
+          ? { publicationDeadlineAt }
+          : {}),
+      });
       return true;
     });
     if (result === "held") throw new CheckExecutorSuspended();
@@ -983,7 +1012,11 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "publishing") return false;
-      const { publisher: _publisher, ...settled } = current;
+      const {
+        publisher: _publisher,
+        publicationDeadlineAt: _deadline,
+        ...settled
+      } = current;
       const held = !!tx.cards.get(
         intent.project as ProjectId,
         intent.card as CardId,
@@ -998,7 +1031,9 @@ export class GithubDispatchJournal {
             : {}),
           ...(current.abandoned ? { finished: true } : {}),
         });
-        return held ? ("held" as const) : false;
+        // Suspended admission already fences POST. Do not mask the writer's
+        // proven pre-transport timeout with a concurrent hold during settlement.
+        return held && outcome !== "not_started" ? ("held" as const) : false;
       }
       this.save(tx, {
         ...settled,
