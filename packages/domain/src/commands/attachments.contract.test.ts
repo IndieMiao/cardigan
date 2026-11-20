@@ -1,5 +1,10 @@
 import { expect, test } from "vitest";
-import { prepareAttachment, uploadAttachment } from "./attachments.js";
+import {
+  artifactUploadRun,
+  prepareAttachment,
+  prepareStreamedArtifact,
+  uploadAttachment,
+} from "./attachments.js";
 import { postComment } from "./coordination.js";
 import { actor, apply, fixture, id, ports, value } from "./test-fixtures.js";
 
@@ -108,3 +113,44 @@ test.each(["original_filename", "note"] as const)(
     }
   },
 );
+
+test("streamed evidence binds its original run and cannot publish after the run has changed", async () => {
+  const io = ports(),
+    state = fixture();
+  const posted = value(
+    postComment(
+      state,
+      actor(),
+      { card_id: id("card", 1), body: "Package" },
+      io,
+    ),
+  );
+  if (!posted.data) throw Error("Missing entry");
+  const current = apply(state, posted),
+    target = {
+      card_id: id("card", 1),
+      mime: "application/octet-stream",
+      kind: "evidence" as const,
+      attach_to: { kind: "timeline_entry" as const, id: posted.data.id },
+    };
+  const run = value(artifactUploadRun(current, actor(), target)).data;
+  const receipt = await prepareStreamedArtifact(run, async () => ({
+    sha256: "a".repeat(64),
+    size: 2 ** 31,
+    id: "473bd8c2-5552-44a5-ad33-8b5492ee15b3",
+  }));
+  expect(
+    value(uploadAttachment(current, actor(), target, receipt, io)).data,
+  ).toMatchObject({
+    size: 2 ** 31,
+    streamed_artifact: { run_id: run },
+    attach_to: target.attach_to,
+  });
+  expect(
+    uploadAttachment({ ...current, runs: [] }, actor(), target, receipt, io).ok,
+  ).toBe(false);
+  expect(
+    artifactUploadRun(current, actor(), { ...target, card_id: id("card", 2) })
+      .ok,
+  ).toBe(false);
+});
