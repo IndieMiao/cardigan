@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -19,6 +20,7 @@ import {
 } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { launchSettingsFixture } from "../testing/launch-settings-fixture.js";
+import { RolesSettings } from "./RolesSettings.js";
 import { SettingsPage } from "./SettingsPage.js";
 
 afterEach(() => {
@@ -472,3 +474,66 @@ test("browser back on the roles panel closes a role opened by a link", async () 
   );
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
+
+test.each([
+  ["detail first", ["role", "history"]],
+  ["history first", ["history", "role"]],
+] as const)(
+  "the linked version scrolls into view when the %s returns",
+  async (_name, order) => {
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.textContent ?? "");
+    };
+    const role = Promise.withResolvers<RoleDetailView>();
+    const history = Promise.withResolvers<{
+      project_id: string;
+      role_id: string;
+      versions: RoleHistoryEntry[];
+    }>();
+    try {
+      render(
+        <RolesSettings
+          client={fakeClient({
+            roles: async () => roleList,
+            role: () => role.promise,
+            roleHistory: () => history.promise,
+          })}
+          projectId="p-1"
+          linkedRole="coder"
+          linkedVersion={1}
+        />,
+      );
+      const release = {
+        role: () =>
+          role.resolve({
+            project_id: "p-1",
+            role: coder(30),
+            previous: coder(29),
+            allowlist: [],
+            allowlists: roleList.allowlists,
+            harnesses: ["pi"],
+            legacy_conversion: null,
+          }),
+        history: () =>
+          history.resolve({
+            project_id: "p-1",
+            role_id: "coder",
+            versions: Array.from({ length: 30 }, (_, i) =>
+              coderHistory(30 - i),
+            ),
+          }),
+      };
+      for (const step of order) {
+        await act(async () => release[step]());
+      }
+      const table = await screen.findByRole("table", { name: "版本历史" });
+      const current = table.querySelector('[aria-current="true"]');
+      expect(current?.textContent).toContain("v1");
+      expect(scrolled.filter((text) => text.startsWith("v1"))).toHaveLength(1);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  },
+);

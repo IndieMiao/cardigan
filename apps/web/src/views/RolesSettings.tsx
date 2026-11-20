@@ -564,11 +564,13 @@ function RoleDetail({
   const [saves, setSaves] = useState(0);
   const detail = useResource(loadDetail, revision + saves);
   const history = useResource(loadHistory, revision + saves);
-  const linkedEntry = useRef<HTMLTableRowElement>(null);
-  useEffect(() => {
-    if (history.data && linkedVersion !== undefined)
-      linkedEntry.current?.scrollIntoView?.({ block: "nearest" });
-  }, [history.data, linkedVersion]);
+  // Scroll when the linked row itself mounts: the history table appears only
+  // once both the detail and the history have arrived, in either order.
+  const linkedEntry = useCallback(
+    (row: HTMLTableRowElement | null) =>
+      row?.scrollIntoView?.({ block: "nearest" }),
+    [],
+  );
   const write = useRoleWrite();
   const saved = (role: RoleDefinitionView | undefined, note: string) => {
     if (!role) return;

@@ -420,17 +420,24 @@ try {
             "document.querySelector(\"nav[aria-label='设置分栏'] [aria-current='page']\").textContent.trim()",
           ),
         };
-        // The referenced version (v1, current is v2) is marked in the history.
+        // The referenced version (v1, current is v2) is marked in the history
+        // and the drawer scrolls it into view by itself (no scripted scroll).
         await until(
           "!!document.querySelector('[role=dialog] table[aria-label=版本历史] tbody tr')",
         );
-        await run(() =>
-          document
-            .querySelector("[role=dialog] table[aria-label=版本历史]")
-            .scrollIntoView({ block: "end" }),
-        );
         await settle();
         await shot(`role-link-history-${suffix}`);
+        results.roleLink.linkedRowVisible = await run(() => {
+          const row = document.querySelector(
+            "[role=dialog] table[aria-label=版本历史] tr[aria-current='true']",
+          );
+          const r = row.getBoundingClientRect();
+          const d = document
+            .querySelector("[role=dialog]")
+            .getBoundingClientRect();
+          return r.top >= d.top && r.bottom <= Math.min(d.bottom, innerHeight);
+        });
+        assert(results.roleLink.linkedRowVisible, "role link: v1 row in view");
         results.roleLink.history = await run(() =>
           [
             ...document.querySelectorAll(
