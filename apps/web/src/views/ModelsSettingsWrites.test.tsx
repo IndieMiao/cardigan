@@ -532,12 +532,12 @@ test("checks start only on a click and report exactly what ran", async () => {
   expect(
     within(dialog)
       .getByRole("button", { name: "本地检查" })
-      .hasAttribute("disabled"),
+      .getAttribute("aria-disabled") === "true",
   ).toBe(true);
   expect(
     within(dialog)
       .getByRole("button", { name: "在线探测" })
-      .hasAttribute("disabled"),
+      .getAttribute("aria-disabled") === "true",
   ).toBe(true);
   // The page reads again while the check runs (GET only), then shows the result.
   current = withCheck("pi-deepseek", check("online", "passed"));
@@ -704,12 +704,12 @@ test("an accepted check keeps both actions unavailable until a read shows it", a
   expect(
     within(d)
       .getByRole("button", { name: "本地检查" })
-      .hasAttribute("disabled"),
+      .getAttribute("aria-disabled") === "true",
   ).toBe(true);
   expect(
     within(d)
       .getByRole("button", { name: "在线探测" })
-      .hasAttribute("disabled"),
+      .getAttribute("aria-disabled") === "true",
   ).toBe(true);
   expect(await within(d).findByText("在线探测中")).toBeTruthy();
   expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
@@ -855,7 +855,7 @@ test("a status read slower than the poll interval still finishes and shows the r
     expect(
       within(d)
         .getByRole("button", { name: "在线探测" })
-        .hasAttribute("disabled"),
+        .getAttribute("aria-disabled") === "true",
     ).toBe(false);
   } finally {
     vi.useRealTimers();
@@ -892,7 +892,7 @@ test("a newer finished check replaces this person's check once it was seen", asy
     expect(
       within(d)
         .getByRole("button", { name: "在线探测" })
-        .hasAttribute("disabled"),
+        .getAttribute("aria-disabled") === "true",
     ).toBe(false);
   } finally {
     vi.useRealTimers();
@@ -915,7 +915,7 @@ test("a newer check shown by the first read after starting ends the wait", async
   expect(
     within(d)
       .getByRole("button", { name: "本地检查" })
-      .hasAttribute("disabled"),
+      .getAttribute("aria-disabled") === "true",
   ).toBe(false);
 });
 
@@ -1002,4 +1002,54 @@ test("a profile field changed and put back is not sent after a refresh", async (
     V2,
     { op: "edit_profile", name: "claude-opus", fields: { effort: "medium" } },
   ]);
+});
+
+// D-2016 design review suggestions (妙玉, V-2564).
+test("a busy check button keeps focus and ignores another click", async () => {
+  let current = withCheck("pi-deepseek", null);
+  const api = harness({ launchSettings: vi.fn(async () => current) });
+  await openModels(api.client);
+  const d = await openProfile("pi-deepseek");
+  current = withCheck("pi-deepseek", check("online", "running"));
+  const online = within(d).getByRole("button", { name: "在线探测" });
+  online.focus();
+  fireEvent.click(online);
+  expect(await within(d).findByText("在线探测中")).toBeTruthy();
+  const busy = within(d).getByRole("button", { name: "在线探测" });
+  expect(busy.getAttribute("aria-disabled")).toBe("true");
+  expect(busy.hasAttribute("disabled")).toBe(false);
+  expect(document.activeElement).toBe(busy);
+  fireEvent.click(busy);
+  fireEvent.click(within(d).getByRole("button", { name: "本地检查" }));
+  expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+});
+
+test("the alias confirmation names the alias and the profiles following it", async () => {
+  const api = harness();
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  fireEvent.click(within(d).getByRole("button", { name: "编辑模型别名" }));
+  fireEvent.change(field(d, "模型标识"), {
+    target: { value: "claude-opus-fixture-2" },
+  });
+  fireEvent.click(within(d).getByRole("button", { name: "预览修改" }));
+  const alias = await within(d).findByRole("form", {
+    name: "确认编辑模型别名",
+  });
+  expect(alias.textContent).toContain("别名opus");
+  expect(alias.textContent).toContain("使用它的配置claude-opus");
+});
+
+test("the Provider confirmation names the Provider and the profiles using it", async () => {
+  const api = harness();
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  fireEvent.click(within(d).getByRole("button", { name: "编辑 Provider" }));
+  fireEvent.change(field(d, "名称"), { target: { value: "Anthropic 网关" } });
+  fireEvent.click(within(d).getByRole("button", { name: "预览修改" }));
+  const provider = await within(d).findByRole("form", {
+    name: "确认编辑 Provider",
+  });
+  expect(provider.textContent).toContain("Provideranthropic");
+  expect(provider.textContent).toContain("使用它的配置");
 });

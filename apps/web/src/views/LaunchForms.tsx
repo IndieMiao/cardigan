@@ -206,9 +206,12 @@ function LaunchEditor({
   confirmLabel = "确认保存",
   destructive = false,
   heading = true,
+  reviewFacts,
 }: {
   context: EditorContext;
   label: string;
+  /** What the confirmation names besides the diff (a shared alias or Provider and its users). */
+  reviewFacts?: ReactNode;
   /** False when the drawer title already names the form (a new profile). */
   heading?: boolean;
   /** `undefined` while the draft is invalid or unchanged. */
@@ -271,6 +274,7 @@ function LaunchEditor({
           }}
         >
           <SettingsDialogFields>
+            {reviewFacts}
             <LaunchDiff change={previewed} diff={result.diff} />
             {notice}
           </SettingsDialogFields>
@@ -857,6 +861,9 @@ export function ProviderForm({
       }
       dirty={JSON.stringify(draft) !== JSON.stringify(initial)}
       fieldNames={["base_url", "secret_env"]}
+      reviewFacts={
+        <SharedFacts label="Provider" name={provider.id} used={used} />
+      }
       fields={(server) => (
         <ProviderFields
           id={provider.id}
@@ -974,6 +981,28 @@ function ProviderFields({
   );
 }
 
+/** A shared alias or Provider and the profiles that follow a change to it. */
+function SharedFacts({
+  label,
+  name,
+  used,
+}: {
+  label: string;
+  name: string;
+  used: readonly string[];
+}) {
+  return (
+    <SettingsFacts>
+      <SettingsFact label={label}>
+        <code>{name}</code>
+      </SettingsFact>
+      <SettingsFact label="使用它的配置">
+        {used.length ? used.join("、") : "—"}
+      </SettingsFact>
+    </SettingsFacts>
+  );
+}
+
 /** Point a model alias at another concrete id; every profile using it follows. */
 export function AliasForm({
   context,
@@ -1005,6 +1034,7 @@ export function AliasForm({
       }
       dirty={id !== initial}
       fieldNames={["id"]}
+      reviewFacts={<SharedFacts label="别名" name={alias} used={used} />}
       fields={(server) => (
         <AliasFields
           alias={alias}

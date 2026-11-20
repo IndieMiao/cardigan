@@ -582,6 +582,7 @@ function Checks({
     if (accepted && shown !== accepted.before) setAccepted(undefined);
   }, [accepted, shown]);
   const running = waiting || profile.last_check?.status === "running";
+  const busy = starting !== undefined || running;
   // Re-read (GET only) one read at a time until the check appears; the next
   // read waits for the previous one, also after a failed read.
   useEffect(() => {
@@ -678,14 +679,18 @@ function Checks({
         </SettingsWarning>
       )}
       <SettingsDialogActions>
+        {/* While busy the buttons stay focusable (aria-disabled) so keyboard
+            users keep their place; `start` ignores the click. */}
         <Button
-          disabled={starting !== undefined || running}
+          aria-disabled={busy || undefined}
+          data-disabled={busy ? "" : undefined}
           onClick={() => void start("metadata")}
         >
           {starting === "metadata" ? "正在开始…" : "本地检查"}
         </Button>
         <Button
-          disabled={starting !== undefined || running}
+          aria-disabled={busy || undefined}
+          data-disabled={busy ? "" : undefined}
           onClick={() => void start("online")}
         >
           {starting === "online" ? "正在开始…" : "在线探测"}
