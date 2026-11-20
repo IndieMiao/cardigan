@@ -169,20 +169,24 @@ test("three participant avatars plus overflow preserve employee navigation indep
       avatar: null,
       bio: "公开简介",
     },
+    // C-531: the hidden runner is named on +N, which itself never spins.
+    run_presence: { state: n === 4 ? "running" : "idle" } as const,
   }));
   renderCard({ ...example, participants }, onOpenCard);
   const group = screen.getByRole("group", { name: "参与员工" });
   expect(
-    within(group).getAllByRole("button", { name: /的员工卡片$/ }),
+    within(group).getAllByRole("button", { name: /，已指派，当前无运行$/ }),
   ).toHaveLength(3);
   const overflow = within(group).getByRole("button", {
-    name: "另有 2 位参与员工",
+    name: "另有 2 位参与员工，其中正在为这张卡运行：员工4",
   });
   expect(overflow.textContent).toBe("+2");
   act(() => overflow.focus());
-  expect((await screen.findByRole("tooltip")).textContent).toBe("员工4、员工5");
+  expect((await screen.findByRole("tooltip")).textContent).toBe(
+    "员工4，正在为这张卡运行；员工5，已指派，当前无运行",
+  );
   const employee = within(group).getByRole("button", {
-    name: "员工1的员工卡片",
+    name: "员工1，已指派，当前无运行",
   });
   expect(employee.closest("a")).toBeNull();
   fireEvent.click(employee);
@@ -247,11 +251,14 @@ test("anonymous participants retain a named role placeholder and hover hint", as
     ...example,
     participants: [{ employee: null, author_role: "reviewer" }],
   });
-  const placeholder = screen.getByRole("img", { name: "未命名的 reviewer" });
+  // C-531: without run facts the state is unknown, never idle.
+  const placeholder = screen.getByRole("img", {
+    name: "未命名的 reviewer，运行状态未知",
+  });
   expect(placeholder.getAttribute("title")).toBeNull();
   fireEvent.focus(placeholder);
   expect((await screen.findByRole("tooltip")).textContent).toBe(
-    "未命名的 reviewer",
+    "未命名的 reviewer，运行状态未知",
   );
   expect(placeholder.querySelector(".employee-avatar")?.textContent).toBe("R");
 });
