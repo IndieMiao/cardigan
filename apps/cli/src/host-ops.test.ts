@@ -521,3 +521,50 @@ test.each(["exit-code", "exception"])(
     expect(assignments()).toHaveLength(2);
   },
 );
+
+test("rotating an unnamed operator can select a project employee without rewriting history", async () => {
+  const previous = await prepareRotation();
+  for (const [name, membership] of [
+    ["First", project],
+    ["Second", project],
+    ["Foreign", "other"],
+  ] as const) {
+    expect(
+      await main(
+        [
+          "employee",
+          "add",
+          "--name",
+          name,
+          "--title",
+          "Operations",
+          "--role",
+          "host_ops",
+          "--projects",
+          membership,
+        ],
+        io,
+      ),
+    ).toBe(0);
+  }
+  const start = vi.fn(async () => 0);
+  const rotate = (...flags: string[]) =>
+    main(["host-ops", "rotate", ...flags], io, { start });
+  expect(await rotate()).toBe(2);
+  expect(errors.join("\n")).toContain("--employee");
+  expect(await rotate("--employee", "Foreign")).toBe(2);
+  expect(errors.join("\n")).toContain("不属于本项目");
+  expect(assignments()).toEqual([previous]);
+  expect(start).not.toHaveBeenCalled();
+  expect(await rotate("--employee", "Second")).toBe(0);
+  const after = assignments();
+  expect(after.find((a) => a.status === "active")).toMatchObject({
+    employee_id: "E-2",
+    role_version: 2,
+  });
+  expect(after.find((a) => a.id === previous.id)).not.toHaveProperty(
+    "employee_id",
+  );
+  expect(await rotate("--employee", "E-1")).toBe(2);
+  expect(assignments()).toEqual(after);
+});

@@ -52,6 +52,10 @@ try {
     role,
     store,
     git,
+    onBackgroundOwner: () => {
+      process.send({ type: "publisher-start" });
+      return () => process.send({ type: "publisher-stop" });
+    },
     env: { CARDIGAN_CONFIG_DIR: dataDir, CARDIGAN_RUNTIME_MODE: "local" },
     config: { dataDir, host: "127.0.0.1", port: Number(mcpPort) },
     web: {

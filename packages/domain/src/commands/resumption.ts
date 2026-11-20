@@ -1,9 +1,8 @@
 import type { Assignment, Event, Run, WorkItem } from "../entities.js";
 import { isMergePrerequisite } from "../human-action.js";
-import { newRecoveryPolicy } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
-import { launchSettings } from "./launch.js";
+import { createQueuedRun, launchSettings } from "./launch.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -160,32 +159,15 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     "invariant_violation",
     "Resume requires the previous role/model/CLI snapshot",
   );
-  const run: Run = {
-    id: d.ids.next(d.state.project_id, "run"),
-    assignment_id: assignment.id,
-    ...(assignment.employee_id ? { employee_id: assignment.employee_id } : {}),
+  createQueuedRun(d, assignment, {
     trigger_event_id: event.id,
     kind: item.status === "waiting_decision" ? "decision_resumed" : "followup",
-    status: "queued",
-    role_version: previous.role_version,
+    queue_reason: "awaiting_dispatch",
     ...(previous.launch_profile_ref && !assignment.employee_id
       ? { launch_profile_ref: previous.launch_profile_ref }
       : {}),
     model: previous.model,
     ...launchSettings(previous),
     agent_cli_version: previous.agent_cli_version,
-    outcome: null,
-    summary: "",
-  };
-  const policy = newRecoveryPolicy(
-    {
-      ...d.state,
-      events: [...d.state.events, ...d.events],
-      work_items: d.list("work_items"),
-      deliveries: d.list("deliveries"),
-    },
-    assignment,
-    run,
-  );
-  d.put("runs", policy ? { ...run, recovery_policy: policy } : run);
+  });
 }

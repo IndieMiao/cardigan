@@ -11,13 +11,19 @@ import { EXT_MESSAGE_DEFAULTS, type ExtMessagePolicy } from "@cardigan/domain";
 import { parse } from "yaml";
 import { parseFeishuCredential } from "./ext-message-feishu.js";
 
+interface ExtChannel {
+  enabled: boolean;
+  credential?: string;
+  binding_ttl_ms?: number;
+  action_ttl_ms?: number;
+  binding_attempts_per_minute?: number;
+  pending_limit?: number;
+}
 export interface ExtMessageConfig {
   readonly enabled: boolean;
   readonly workbench_url: string;
   readonly policy: ExtMessagePolicy;
-  readonly channels: Readonly<
-    Record<string, { readonly enabled: boolean; readonly credential?: string }>
-  >;
+  readonly channels: Readonly<Record<string, ExtChannel>>;
   readonly quiet_hours?: {
     readonly timezone: string;
     readonly start: string;
@@ -135,8 +141,7 @@ export function loadExtMessageConfig(
         EXT_MESSAGE_DEFAULTS.digest_limit,
       ),
     };
-    const channels: Record<string, { enabled: boolean; credential?: string }> =
-      {};
+    const channels: Record<string, ExtChannel> = {};
     for (const [name, value] of Object.entries(
       raw.channels === undefined ? {} : record(raw.channels),
     )) {
@@ -145,42 +150,58 @@ export function loadExtMessageConfig(
         ["constructor", "prototype", "__proto__"].includes(name)
       )
         return invalid();
-      const channel = record(value);
-      const active = bool(channel.enabled);
-      if (
-        channel.credential !== undefined &&
-        channel.credential_file !== undefined
-      )
-        return invalid();
-      let credential: string | undefined;
-      // Disabled channels never read secrets. Error results never contain input or paths.
-      if (enabled && active) {
-        if (channel.credential !== undefined) {
-          if (
-            typeof channel.credential !== "string" ||
-            !channel.credential.trim()
-          )
-            return invalid();
-          credential = channel.credential;
-        } else if (channel.credential_file !== undefined) {
-          if (
-            typeof channel.credential_file !== "string" ||
-            !channel.credential_file
-          )
-            return invalid();
-          const file = channel.credential_file;
-          credential = privateText(
-            isAbsolute(file) ? file : resolve(dirname(path), file),
-          ).trim();
-          if (!credential) return invalid();
+      try {
+        const channel = record(value);
+        const active = bool(channel.enabled);
+        if (
+          channel.credential !== undefined &&
+          channel.credential_file !== undefined
+        )
+          return invalid();
+        let credential: string | undefined;
+        // Disabled channels never read secrets. Error results never contain input or paths.
+        if (enabled && active) {
+          if (channel.credential !== undefined) {
+            if (
+              typeof channel.credential !== "string" ||
+              !channel.credential.trim()
+            )
+              return invalid();
+            credential = channel.credential;
+          } else if (channel.credential_file !== undefined) {
+            if (
+              typeof channel.credential_file !== "string" ||
+              !channel.credential_file
+            )
+              return invalid();
+            const file = channel.credential_file;
+            credential = privateText(
+              isAbsolute(file) ? file : resolve(dirname(path), file),
+            ).trim();
+            if (!credential) return invalid();
+          }
         }
+        if (enabled && active && name === "lark")
+          parseFeishuCredential(credential);
+        channels[name] = {
+          enabled: active,
+          ...(name === "lark_app"
+            ? {
+                binding_attempts_per_minute: integer(
+                  channel.binding_attempts_per_minute,
+                  30,
+                ),
+                pending_limit: integer(channel.pending_limit, 32),
+                binding_ttl_ms: integer(channel.binding_ttl_ms, 300_000),
+                action_ttl_ms: integer(channel.action_ttl_ms, 86_400_000),
+              }
+            : {}),
+          ...(credential === undefined ? {} : { credential }),
+        };
+      } catch (error) {
+        if (name !== "lark_app") throw error;
+        channels.lark_app = { enabled: true };
       }
-      if (enabled && active && name === "lark")
-        parseFeishuCredential(credential);
-      channels[name] = {
-        enabled: active,
-        ...(credential === undefined ? {} : { credential }),
-      };
     }
     let quiet_hours: ExtMessageConfig["quiet_hours"];
     if (raw.quiet_hours !== undefined) {

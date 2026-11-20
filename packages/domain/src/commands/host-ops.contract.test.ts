@@ -497,6 +497,21 @@ test("bootstrap pins the role and employee; disabled or ambiguous new identities
     created_at: now,
     updated_at: now,
   };
+  const scoped = {
+    ...state(),
+    employees: [{ ...employee, projects: ["other"] }],
+  };
+  for (const [params, reason] of [
+    [{}, "本项目没有可用员工"],
+    [{ employee_id: employee.id }, "不属于本项目"],
+  ] as const) {
+    expect(
+      createHostOpsAssignment(scoped, human, params, ports()),
+    ).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(reason) },
+    });
+  }
   const base = { ...state(), employees: [employee] };
   const effect = value(createHostOpsAssignment(base, human, {}, ports()));
   expect(effect.data.assignment.employee_id).toBe(employee.id);
@@ -596,4 +611,53 @@ test("rotation changes identity and cursors atomically after a read-only human p
   });
   expect(finishHostOpsRotation(state, human, params, allocator).ok).toBe(false);
   expect(value(prepareHostOpsRotation(state, human)).data.unchanged).toBe(true);
+});
+
+test("manual rotation rechecks the chosen operator's project after preflight", () => {
+  const s = standing();
+  const { project_id } = s.state;
+  const operator = {
+    id: id("employee", 1),
+    name: "Operator",
+    title: "Operations",
+    role_id: "host_ops",
+    bio: "",
+    avatar: null,
+    launch_profile_ref: null,
+    status: "active" as const,
+    projects: [project_id],
+    created_at: now,
+    updated_at: now,
+  };
+  const second = { ...operator, id: id("employee", 2), name: "Second" };
+  const upgraded = {
+    ...s.state,
+    roles: [
+      ...s.state.roles,
+      roleReference({ ...definition, core_prompt: "", version: 2 }),
+    ],
+    employees: [operator, second],
+  };
+  const ready = value(prepareHostOpsRotation(upgraded, human, operator.name));
+  expect(ready.data.employee_id).toBe(operator.id);
+  expect(ready.changes).toEqual([]);
+  const moved = {
+    ...upgraded,
+    employees: [{ ...operator, projects: ["other"] }, second],
+  };
+  expect(
+    finishHostOpsRotation(
+      moved,
+      human,
+      {
+        previous_assignment_id: s.assignment.id,
+        to_version: ready.data.to_version,
+        employee_id: operator.id,
+      },
+      ports(),
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("不属于本项目") },
+  });
 });

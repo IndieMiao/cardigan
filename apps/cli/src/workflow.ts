@@ -34,6 +34,7 @@ import {
   projectSnapshot,
   runtimeUnknownDeferred,
   saveMachine,
+  selectStandingEmployee,
   setCardSensitive,
   standingTools,
   supersedeCard,
@@ -107,10 +108,10 @@ const USAGE = [
   "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
-  "  cardigan pm create --office|--ops [--project <p>]",
+  "  cardigan pm create --office|--ops [--employee <E-n 或名字>] [--project <p>]",
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
-  "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
+  "  cardigan host-ops rotate [--project <p>] [--employee <编号或名字>]  切换到最新角色版本并启动，默认保留原员工",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -955,7 +956,15 @@ async function machineCommand(
         const machine = selected[0] as Machine;
         const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
         const observations = await checkRegisteredMachine(
-          { store, project: project_id, machine: machine.id, env: io.env },
+          {
+            store,
+            project: project_id,
+            machine: machine.id,
+            env: io.env,
+            browsersPath: () =>
+              loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+                ?.browsers_path,
+          },
           async () => {
             const connection = await terminalExecution(
               io,
@@ -1264,7 +1273,13 @@ async function hostOpsCommand(
   const allowed =
     sub === "create"
       ? ["project", "data-dir", "employee"]
-      : ["project", "data-dir", "mcp-url", "hc-session"];
+      : [
+          "project",
+          "data-dir",
+          "mcp-url",
+          "hc-session",
+          ...(sub === "rotate" ? ["employee"] : []),
+        ];
   if (
     !["create", "start", "rotate"].includes(sub ?? "") ||
     parsed.positionals.length ||
@@ -1308,8 +1323,10 @@ async function hostOpsCommand(
       );
       return EXIT.ok;
     }
-    if (sub === "rotate")
+    if (sub === "rotate") {
+      const employee = optional(parsed.flags, "employee");
       await rotateHostOps({
+        ...(employee === undefined ? {} : { employee }),
         store,
         io,
         project_id,
@@ -1318,6 +1335,7 @@ async function hostOpsCommand(
           ? { session: optional(parsed.flags, "hc-session") as string }
           : {}),
       });
+    }
     const candidates = store.uow.read((tx) =>
       tx.assignments
         .list(project_id)
@@ -2056,12 +2074,32 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         );
       }
 
+      const reference = optional(parsed.flags, "employee");
+      let employeeId = existing?.employee_id;
+      if (!existing || reference !== undefined) {
+        const selected = selectStandingEmployee(
+          {
+            project_id,
+            assignments,
+            employees: tx.employees.list(),
+            employee_activity: tx.employees.assignmentActivity?.() ?? [],
+          },
+          "pm",
+          reference,
+        );
+        if (!selected.ok)
+          throw new CliError(selected.error.message, EXIT.usage);
+        if (existing && selected.value?.id !== employeeId)
+          throw new CliError("Assignment 的员工创建后不能修改", EXIT.usage);
+        employeeId = selected.value?.id;
+      }
       const stamped =
         existing === undefined
           ? applyStandingMode(
               {
                 id: tx.ids.next(project_id, "assignment"),
                 scope: "standing",
+                ...(employeeId ? { employee_id: employeeId } : {}),
                 role_id: "pm",
                 role_version: latest.role_version,
                 status: "active",

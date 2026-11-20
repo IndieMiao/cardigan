@@ -1,6 +1,10 @@
 import type { Assignment, Run, ToolName } from "@cardigan/domain";
 import { STANDING_ROLE_TOOLS, standingTools } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import {
+  beginLaunchAttempt,
+  Store,
+  withdrawBellAttempt,
+} from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -320,3 +324,67 @@ test.each(["queued", "dispatched", "acked", "running", "unknown"] as const)(
     ).toBe(false);
   },
 );
+
+test("C-527: PM Ops may cancel an exact queued Run only after its startup reservation is gone", async () => {
+  const ops = await connect(
+    pm("ops"),
+    standingTools(STANDING_ROLE_TOOLS, "ops"),
+  );
+  const run: Run = {
+    id: "R-1" as never,
+    trigger_event_id: "fixture" as never,
+    assignment_id: target.id,
+    kind: "initial",
+    status: "queued",
+    role_version: 1,
+    model: "m",
+    agent_cli_version: "v",
+    outcome: null,
+    summary: "",
+  };
+  store.uow.run((tx) => {
+    const { worktree_path: _w, branch: _b, base_sha: _s, ...clean } = target;
+    tx.assignments.put(project_id, {
+      ...clean,
+      runtime_state: "not_provisioned",
+    });
+    tx.runs.put(project_id, run);
+    beginLaunchAttempt(store.database, {
+      id: "startup",
+      project_id,
+      assignment_id: target.id,
+      run_id: run.id,
+      started_at: NOW,
+      lease_until: new Date(Date.parse(NOW) + 60_000).toISOString(),
+    });
+  });
+  const cancel = (key: string) =>
+    ops.callTool({
+      name: "release_assignment",
+      arguments: {
+        assignment_id: target.id,
+        cancel_queued_run_id: run.id,
+        idempotency_key: key,
+      },
+    });
+  expect((await cancel("reserved")).isError).toBe(true);
+  expect(store.uow.read((tx) => tx.runs.get(project_id, run.id))).toEqual(run);
+  store.uow.run(() =>
+    withdrawBellAttempt(store.database, project_id, "startup"),
+  );
+  expect((await cancel("confirmed")).structuredContent).toMatchObject({
+    status: "released",
+  });
+  expect((await cancel("confirmed")).isError).not.toBe(true);
+  const events = store.uow.read((tx) =>
+    tx.events.listAfter(project_id, card_id, 0),
+  );
+  expect(events.filter((e) => e.type === "run_dispatch_aborted")).toMatchObject(
+    [
+      {
+        actor: { kind: "assignment", assignment_id: "A-2" },
+        payload: { run_id: run.id },
+      },
+    ],
+  );
+});

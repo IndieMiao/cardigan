@@ -612,3 +612,25 @@ test("Markdown role apply defaults to preview, --yes writes, role export stdout 
     });
   }
 });
+
+test("project role apply binds imported staff locally and rejects the same name from another project", async () => {
+  const file = join(root, "staff.md");
+  writeFileSync(
+    file,
+    "---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: fixture\nemployees: [{name: First, title: Writer}]\n---\nWrite.\n",
+  );
+  expect(await run(["project", "create", "p-other"])).toBe(0);
+  const apply = (project: string) =>
+    run(["role", "apply", file, "--yes", "--project", project]);
+  expect(await apply("p-roles")).toBe(0);
+  expect(await apply("p-other")).toBe(2);
+  expect(errors.join("\n")).toContain("不属于本项目");
+  const store = Store.open({ dataDir });
+  try {
+    expect(store.uow.read((tx) => tx.employees.list())).toMatchObject([
+      { name: "First", projects: ["p-roles"] },
+    ]);
+  } finally {
+    store.close();
+  }
+});
