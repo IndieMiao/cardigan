@@ -77,6 +77,11 @@ const kinds: Readonly<Record<string, string>> = {
 };
 export const unfinished = (run: RunView) =>
   !["completed", "failed", "cancelled"].includes(run.status);
+const runStatus = (run: RunView) =>
+  run.failure_reason ??
+  (run.queue_reason === "provider_unavailable"
+    ? run.queue_reason
+    : (run.outcome ?? run.status));
 const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
 const runTime = (run: RunView) =>
   run.finished_at ?? run.started_at ?? run.queued_at;
@@ -110,7 +115,7 @@ function useRunDetails(run: RunView | undefined): string[] {
       run.queue_warning.after_minutes * 60_000
       ? `已长时间排队（超过 ${run.queue_warning.after_minutes} 分钟）`
       : "",
-    abnormalRun(run) ? `最近执行${statusLabel(run.outcome ?? run.status)}` : "",
+    abnormalRun(run) ? `最近执行${statusLabel(runStatus(run))}` : "",
   ];
 }
 export function RunLine({ run }: { readonly run: RunView }) {
@@ -118,9 +123,9 @@ export function RunLine({ run }: { readonly run: RunView }) {
   return (
     <>
       <IdTag id={run.id} label={runKind(run)} />
-      <DetailsTip lines={[statusLabel(run.outcome ?? run.status), ...details]}>
+      <DetailsTip lines={[statusLabel(runStatus(run)), ...details]}>
         <Button variant="ghost" className="ui-status-tip">
-          <StatusTag status={run.outcome ?? run.status} />
+          <StatusTag status={runStatus(run)} />
         </Button>
       </DetailsTip>
       <MachineBadge id={runMachine(run)} />
@@ -357,11 +362,9 @@ function RuntimeState({
           <StatusTag status={a.runtime_state} />
         )}
         {!a.external && run?.status === "queued" && (
-          <StatusTag status="queued" />
+          <StatusTag status={runStatus(run)} />
         )}
-        {run && abnormalRun(run) && (
-          <StatusTag status={run.outcome ?? run.status} />
-        )}
+        {run && abnormalRun(run) && <StatusTag status={runStatus(run)} />}
         {a.status !== "active" && a.status !== a.runtime_state && (
           <StatusTag status={a.status} />
         )}

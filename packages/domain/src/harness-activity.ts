@@ -16,6 +16,8 @@ export interface HarnessActivity
   /** Latest protocol record explicitly ended a turn (not a tool call or an error). */
   readonly turn_ended?: true;
   readonly stale_after_ms: number;
+  /** Lower bound of verified absence of model output (epoch ms); absent for incomplete reads. */
+  readonly model_silent_since?: number;
   /** Last normal Claude record in the same bounded transcript read, before an error. */
   readonly last_progress_at?: string;
   readonly error?:

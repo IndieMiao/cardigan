@@ -442,3 +442,40 @@ test.each(["claude-code", "codex"] as const)(
     expect((await read(state(harness)))?.activity?.turn_ended).toBeUndefined();
   },
 );
+
+test.each(["no_output", "assistant", "agent_message", "incomplete"])(
+  "C-499 Codex startup 503 distinguishes an input-only turn from %s",
+  async (mode) => {
+    const message = (type: string, payload: object) =>
+      line({ timestamp: now, type, payload });
+    await write(
+      rollout(),
+      codex(
+        message("response_item", { type: "message", role: "user" }) +
+          message("event_msg", { type: "token_count", info: null }) +
+          (mode === "assistant"
+            ? message("response_item", { type: "message", role: "assistant" })
+            : mode === "agent_message"
+              ? message("event_msg", { type: "agent_message" })
+              : mode === "incomplete"
+                ? "invalid\n"
+                : "") +
+          message("event_msg", {
+            type: "error",
+            codex_error_info: {
+              http_connection_failed: { http_status_code: 503 },
+            },
+          }),
+      ),
+    );
+    const sample = (await read())?.activity;
+    expect(sample?.error).toBe("server_error");
+    expect(sample?.model_silent_since).toBe(
+      mode === "incomplete"
+        ? undefined
+        : mode === "no_output"
+          ? 0
+          : Date.parse(now),
+    );
+  },
+);

@@ -46,3 +46,32 @@ test("queue warning appears at the configured threshold without a new server eve
   view.rerender(<RunLine run={{ ...run, status: "running" }} />);
   expect(screen.getByRole("tooltip").textContent).not.toContain("超过 10 分钟");
 });
+
+test("C-499: the execution badge distinguishes a failed startup and a paused profile from inactivity", () => {
+  const run = {
+    id: "R-8",
+    assignment_id: "A-2",
+    status: "cancelled",
+    kind: "initial",
+    model: "test",
+    role_version: 1,
+    agent_cli_version: "test",
+    summary: "",
+    outcome: "failed",
+  };
+  const view = render(
+    <RunLine run={{ ...run, failure_reason: "provider_unavailable" }} />,
+  );
+  expect(screen.getByRole("button").textContent).toContain("模型服务不可用");
+  view.rerender(
+    <RunLine
+      run={{
+        ...run,
+        status: "queued",
+        outcome: null,
+        queue_reason: "provider_unavailable",
+      }}
+    />,
+  );
+  expect(screen.getByRole("button").textContent).toContain("模型服务不可用");
+});

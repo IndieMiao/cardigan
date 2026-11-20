@@ -71,6 +71,8 @@ export interface ControlPlaneOptions {
   readonly retryBaseMs?: number;
   readonly maxRetries?: number;
   readonly inactivityGraceMs?: number;
+  readonly providerFailureThreshold?: number;
+  readonly providerCooldownMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
   readonly inboxStallAfterMs?: number;
@@ -229,6 +231,12 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     startRun: options.startRun,
     ...(options.recoverLaunches
       ? { recoverLaunches: options.recoverLaunches }
+      : {}),
+    ...(options.providerFailureThreshold !== undefined
+      ? { providerFailureThreshold: options.providerFailureThreshold }
+      : {}),
+    ...(options.providerCooldownMs !== undefined
+      ? { providerCooldownMs: options.providerCooldownMs }
       : {}),
     ...(options.dispatchTimeoutMs === undefined
       ? {}

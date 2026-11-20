@@ -547,6 +547,11 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  readonly failure_reason?: "provider_unavailable";
+  readonly provider_probe?: {
+    readonly episode: EventId;
+    readonly at: Timestamp;
+  };
   /** Physical resources pinned by the host at admission, not live editable requirements. */
   readonly resource_keys?: readonly string[];
   /** Q-744: fixed on the first independent queue, inherited without reset. */
@@ -629,6 +634,7 @@ export interface Run {
      */
     readonly reason:
       | "dispatch_timeout"
+      | "provider_unavailable"
       | "delivery_retry_exhausted"
       | "server_restart"
       | "runtime_exited";
@@ -641,7 +647,10 @@ export interface Run {
     readonly lease_until: Timestamp;
   };
   /** Host scheduling metadata; only meaningful while status is queued. */
-  readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
+  readonly queue_reason?:
+    | "concurrency_limit"
+    | "runtime_unavailable"
+    | "provider_unavailable";
   /** Host-only target wait; elapsed time is excluded from dispatch recovery. */
   readonly dispatch_target_wait?: {
     readonly since?: Timestamp;

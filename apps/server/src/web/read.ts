@@ -1553,6 +1553,9 @@ export function needsYou(
     auto_merge_pause: autoMergePauseView(state),
     attention: data.attention,
     system_rule_attention: data.system_rule_attention,
+    ...(data.provider_incidents.length
+      ? { provider_incidents: data.provider_incidents }
+      : {}),
     incident_handling: {
       ...incidentHandling(state, hostOpsPatrolIntervalMs),
       // C-153: the session the server registered in runtime.json; null when

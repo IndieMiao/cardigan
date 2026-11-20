@@ -91,7 +91,13 @@ function codexError(info: unknown): HarnessActivity["error"] {
   const v = object(info);
   if (v?.stream_disconnected !== undefined || info === "stream_disconnected")
     return "stream_disconnected";
-  const status = object(v?.http_connection_failed)?.http_status_code;
+  const connection = object(v?.http_connection_failed);
+  if (
+    info === "http_connection_failed" ||
+    (connection && connection.http_status_code == null)
+  )
+    return "stream_disconnected";
+  const status = connection?.http_status_code;
   return status === 429
     ? "rate_limit"
     : typeof status === "number" &&
@@ -113,9 +119,29 @@ export function parseCodexActivity(
       .find((v) => v?.type === "session_meta")?.payload,
   );
   let last: ActivityMetadata | undefined;
+  // Never infer silence from a truncated prefix or an unreadable record.
+  const lines = tail.trimEnd().split("\n");
+  let silentSince =
+    !start && lines.length < 256 && lines.every((line) => json(line))
+      ? 0
+      : undefined;
   for (const event of records(tail, start)) {
     const payload = object(event?.payload);
     const error = event?.type === "event_msg" && payload?.type === "error";
+    const agentMessage =
+      event?.type === "event_msg" &&
+      [
+        "agent_message",
+        "agent_reasoning",
+        "agent_reasoning_raw_content",
+      ].includes(String(payload?.type));
+    if (agentMessage) {
+      const timestamp = Date.parse(String(event?.timestamp));
+      silentSince =
+        silentSince !== undefined && Number.isFinite(timestamp)
+          ? Math.max(timestamp, silentSince)
+          : undefined;
+    }
     if (
       !(
         event?.type === "response_item" ||
@@ -142,7 +168,18 @@ export function parseCodexActivity(
       (last && Date.parse(sample.updated_at) < Date.parse(last.updated_at))
     )
       return;
+    if (
+      silentSince !== undefined &&
+      !error &&
+      ((event?.type === "response_item" &&
+        !["user", "developer", "system"].includes(String(payload?.role))) ||
+        payload?.type === "task_complete" ||
+        (payload?.type === "token_count" && payload.info != null))
+    )
+      silentSince = Date.parse(sample.updated_at);
     last = sample;
   }
-  return last;
+  return last?.error && silentSince !== undefined
+    ? { ...last, model_silent_since: silentSince }
+    : last;
 }

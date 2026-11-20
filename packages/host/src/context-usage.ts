@@ -340,6 +340,9 @@ export async function readSessionContexts(
             matchesCwd(progress.cwd)
               ? { last_progress_at: progress.updated_at }
               : {}),
+            ...(activityMetadata.model_silent_since !== undefined
+              ? { model_silent_since: activityMetadata.model_silent_since }
+              : {}),
             ...(activityMetadata.turn_ended
               ? { turn_ended: true as const }
               : {}),
