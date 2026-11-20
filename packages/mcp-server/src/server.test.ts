@@ -1,8 +1,9 @@
+import { createHash, createHmac, randomBytes, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, ToolName, WorkItem } from "@cardigan/domain";
+import type { Assignment, Run, ToolName, WorkItem } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -16,6 +17,7 @@ import {
 } from "vitest";
 import type { McpBackend } from "./backend.js";
 import { type LogEntry, memoryLogger } from "./log.js";
+import { freshResourceNonce } from "./run-resource-state.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
   acceptingVerifierFor,
@@ -241,6 +243,131 @@ describe("tools by allowed_tools", () => {
       error: { code: "forbidden_tool" },
     });
   });
+});
+
+describe("authenticated Run resource observations", () => {
+  test("resource nonce freshness is bounded and invalid settings fail closed", () => {
+    const now = 1_000_000;
+    const nonce = now.toString(16).padStart(16, "0") + "0".repeat(48);
+    expect(freshResourceNonce(nonce, now + 120_000, "120")).toBe(true);
+    expect(freshResourceNonce(nonce, now + 120_001, "120")).toBe(false);
+    expect(freshResourceNonce(nonce, now, "-1")).toBe(false);
+  });
+  const read = async (key: string, token = fixture.token) => {
+    const id = fixture.store.verifyToken(token)?.id ?? `tok_${"0".repeat(24)}`;
+    const nonce =
+      Date.now().toString(16).padStart(16, "0") +
+      randomBytes(24).toString("hex");
+    const proof = createHmac(
+      "sha256",
+      createHash("sha256").update(token).digest(),
+    )
+      .update(`resource-read-v1:${id}:${key}:${nonce}`)
+      .digest("hex");
+    const res = await fetch(`${server.url}?run_resource=${key}`, {
+      headers: {
+        "x-resource-registration": id,
+        "x-resource-nonce": nonce,
+        "x-resource-proof": proof,
+      },
+    });
+    return {
+      status: res.status,
+      json: async () => {
+        const { payload, signature } = await res.json();
+        expect(
+          verify(
+            "sha256",
+            Buffer.from(payload),
+            fixture.store.runResources.publicKey(),
+            Buffer.from(signature, "base64"),
+          ),
+        ).toBe(true);
+        const [protocol, i, n, k, project, machine, state] =
+          JSON.parse(payload);
+        expect([protocol, i, n, k]).toEqual([
+          "resource-state-v1",
+          id,
+          nonce,
+          key,
+        ]);
+        return { key: k, project, machine, state };
+      },
+    };
+  };
+  test.each(["completed", "failed", "cancelled"] as const)(
+    "an exact %s state is read without acknowledging the next Run",
+    async (status) => {
+      const make = (id: string, state: Run["status"], finished?: Date) =>
+        fixture.store.uow.run((tx) =>
+          tx.runs.put(project_id, {
+            id: id as Run["id"],
+            assignment_id: fixture.assignment.id,
+            trigger_event_id: tx.ids.nextEventId(),
+            kind: "followup",
+            status: state,
+            role_version: 1,
+            model: "fixture",
+            agent_cli_version: "fixture",
+            outcome: null,
+            summary: "",
+            ...(finished ? { finished_at: finished.toISOString() } : {}),
+          }),
+        );
+      make("R-1", status, new Date());
+      make("R-2", "dispatched");
+      make("R-3", status, new Date(Date.now() - 86401_000));
+      const key = "A-1.R-1.R-1";
+      expect((await read(key, "invalid")).status).toBe(401);
+      expect(await (await read(key)).json()).toEqual({
+        key,
+        state: "ended",
+        project: project_id,
+        machine: fixture.assignment.machine_id,
+      });
+      expect(await (await read("A-1.R-1.R-2")).json()).toMatchObject({
+        state: "active",
+      });
+      expect(await (await read("A-1.R-1.R-3")).json()).toMatchObject({
+        state: "expired_preview",
+      });
+      for (const unknown of ["A-2.R-1.R-1", "A-1.R-99.R-1", "A-1.R-1.R-99"])
+        expect(await (await read(unknown)).json()).toMatchObject({
+          state: "unknown",
+        });
+      const least = fixture.store.issueToken({
+        project_id,
+        assignment_id: fixture.assignment.id,
+        role: { role_version: 1, allowed_tools: ["get_updates"] },
+      });
+      expect(
+        await (await read("A-1.R-1.R-2", least.token)).json(),
+      ).toMatchObject({
+        state: "active",
+      });
+      expect(
+        await (await read("A-2.R-1.R-2", least.token)).json(),
+      ).toMatchObject({
+        state: "unknown",
+      });
+      expect(
+        fixture.store.uow.read(
+          (tx) => tx.runs.get(project_id, "R-2" as Run["id"])?.status,
+        ),
+      ).toBe("dispatched");
+      const client = await connect(least.token);
+      expect((await client.listTools()).tools.map((t) => t.name)).toEqual([
+        "get_updates",
+      ]);
+      expect(
+        textOf(await client.callTool({ name: "whoami", arguments: {} })),
+      ).toMatchObject({
+        error: { code: "forbidden_tool" },
+      });
+      fixture.store.revokeToken(least.record.id);
+      expect((await read(key, least.token)).status).toBe(401);
+    },
+  );
 });
 
 describe("whoami", () => {

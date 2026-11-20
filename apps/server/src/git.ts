@@ -152,6 +152,19 @@ export interface ServerGitOptions {
 /** The candidate transport was never entered, even if other Git work was done. */
 export class CandidatePushNotStarted extends RepositoryLockTimeoutError {}
 
+/** Only a proven pre-transport lock timeout can release a GitHub publication fence. */
+export async function pushCheckCandidateOrWait(
+  push: () => Promise<PushResult>,
+) {
+  try {
+    return await push();
+  } catch (error) {
+    if (error instanceof CandidatePushNotStarted)
+      return { status: "not_started" } as const;
+    throw error;
+  }
+}
+
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
   deleteCheckCandidate?(
@@ -580,14 +593,23 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     input: CandidatePushRequest,
   ): Promise<PushResult> {
+    const repository = await this.central.ensureCentral(project);
+    return this.withCandidateLock(project, repository, () =>
+      this.transport.pushCandidateCommit(repository, input),
+    );
+  }
+  private async withCandidateLock<T>(
+    project: CentralProject,
+    repository: string,
+    transfer: () => Promise<T>,
+  ): Promise<T> {
     let started = false;
     try {
-      const repository = await this.central.ensureCentral(project);
       return await this.lock(
         { project_id: project.project_id, repository },
         () => {
           started = true;
-          return this.transport.pushCandidateCommit(repository, input);
+          return transfer();
         },
       );
     } catch (error) {
@@ -783,7 +805,7 @@ export class ServerGit implements GitBinding {
     );
     // Candidate distribution updates the base clone's refs: it shares the
     // wake path's project lock, held only for the transfer, not the checks.
-    await this.lock({ project_id: project.project_id, repository }, () =>
+    await this.withCandidateLock(project, repository, () =>
       this.transfer(execution, source, repository),
     );
   }

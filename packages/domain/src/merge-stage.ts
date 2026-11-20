@@ -2,7 +2,11 @@ import type { CommandState } from "./commands/core.js";
 import { mergeQueue } from "./commands/merge-batch.js";
 import { heldByMergeWindow } from "./commands/merge-window.js";
 import type { Card, MergeStage } from "./entities.js";
-import { mergeBatches, passedCardCheck } from "./merge-batch.js";
+import {
+  batchQueueWait,
+  mergeBatches,
+  passedCardCheck,
+} from "./merge-batch.js";
 
 export function mergeStage(
   state: CommandState,
@@ -32,12 +36,19 @@ export function mergeStage(
     batches.findLast((b) => b.purpose === "main" && b.status !== "aborted");
   const pass =
     completion && passedCardCheck(state.events, card.id, completion.id);
+  const wait = batch && batchQueueWait(state.events, batch);
   const detail = batch
     ? {
         batch_id: batch.id,
         peers: batch.members.map((m) => m.card_id),
         color: Number(batch.id.slice(3)) % 4,
-        ...(batch.check ? { batch_check: batch.check } : {}),
+        ...(batch.check
+          ? {
+              batch_check: wait
+                ? { ...batch.check, queue_wait: wait }
+                : batch.check,
+            }
+          : {}),
         ...(pass ? { card_check: pass } : {}),
       }
     : {};

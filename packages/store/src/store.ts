@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import * as Path from "node:path";
 import { dirname, join } from "node:path";
@@ -73,6 +73,7 @@ import {
   type ReadEventRepository,
   type ReadRepositories,
 } from "./repositories.js";
+import { RunResourceAuthority } from "./run-resource-authority.js";
 import { backfillStandingModesInTransaction } from "./standing.js";
 import { seedCardTemplates } from "./templates.js";
 import {
@@ -281,8 +282,10 @@ export class Store {
     return changesSince(this.#db, project, collections, since);
   }
 
+  readonly runResources: RunResourceAuthority;
   private constructor(db: DatabaseSync, clock: Clock, migrationsDir?: string) {
     this.#db = db;
+    this.runResources = new RunResourceAuthority(db);
     this.#clock = clock;
     this.#migrationsDir = migrationsDir;
   }
@@ -890,6 +893,28 @@ export class Store {
     return verifyToken(this.#db, token);
   }
 
+  /** Narrow request proof; neither the bearer nor its reusable hash goes on the wire. */
+  verifyResourceRead(
+    id: string,
+    key: string,
+    challenge: string,
+    proof: string,
+  ) {
+    if (!/^tok_[0-9a-f]{24}$/u.test(id) || !/^[0-9a-f]{64}$/u.test(proof))
+      return undefined;
+    const hash = this.#db
+      .prepare(
+        "SELECT token_hash FROM tokens WHERE id=? AND revoked_at IS NULL",
+      )
+      .get(id)?.token_hash;
+    if (typeof hash !== "string") return undefined;
+    const expected = createHmac("sha256", Buffer.from(hash, "hex"))
+      .update(`resource-read-v1:${id}:${key}:${challenge}`)
+      .digest();
+    return timingSafeEqual(expected, Buffer.from(proof, "hex"))
+      ? findTokenByHash(this.#db, hash)
+      : undefined;
+  }
   findTokenByHash(hash: string): TokenRecord | undefined {
     return findTokenByHash(this.#db, hash);
   }

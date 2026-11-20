@@ -23,6 +23,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export {
+  CandidateRepositoryBusy,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckExecutorUnavailable,
@@ -169,6 +170,7 @@ export {
   type ExecutionOwner,
   executionOwner,
   mergeCheckAttemptRunning,
+  mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
@@ -254,6 +256,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export { assignmentResourceKeys } from "./run-resources.js";
 export {
   deferIfTargetWait,
