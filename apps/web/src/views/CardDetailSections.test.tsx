@@ -18,6 +18,15 @@ test("renders the head without waiting on panels, then requests just the selecte
     attachments: [],
     overview: {
       work_count: 2,
+      completed_work_count: 0,
+      verifiers: [
+        {
+          id: "W-2",
+          role_id: "reviewer",
+          completion_criteria: ["确认结果"],
+          verdict: null,
+        },
+      ],
       attachment_count: 1,
       waiting_delivery: [],
       conclusion_reviews: [],
@@ -42,6 +51,8 @@ test("renders the head without waiting on panels, then requests just the selecte
     limit: 20,
     section: "overview",
   });
+  expect(screen.getByText("工作项 0/2 完成")).toBeTruthy();
+  expect(screen.getByText(/reviewer：还没有结论，依据 确认结果/)).toBeTruthy();
   expect(cardPanel).not.toHaveBeenCalled();
   await selectCardTab(/^工作项/);
   await screen.findByText("已完成 0/2");

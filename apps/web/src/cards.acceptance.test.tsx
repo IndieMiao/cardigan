@@ -464,6 +464,7 @@ test("U07 §3.4: only existing server-resolved numbers in an Agent comment becom
     expect.objectContaining({ id: "C-999999", exists: false }),
   );
   const page = detail();
+  await selectCardTab(/^时间线/);
   await screen.findByText(/C-999999/, { exact: false });
   const bad = [...page.container.querySelectorAll("a")].filter((a) =>
     /C-999999|W-999999/.test(a.textContent ?? ""),
@@ -695,6 +696,7 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
     rows.cards.find((card) => card.id === f.card.id)?.attachment_count,
   ).toBe(3);
   const page = detail();
+  await selectCardTab(/^时间线/);
   await screen.findByText("Design attachments");
   // Inspect the attachment's owning comment, not the separate upload-event
   // thumbnail which now appears before it in the newest-first timeline.

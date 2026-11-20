@@ -22,6 +22,19 @@ export function cardSectionPayload(detail: Detail, section: string | null) {
         ...head,
         overview: {
           work_count: work_items.length,
+          completed_work_count: work_items.filter((w) =>
+            ["accepted", "passed"].includes(w.status),
+          ).length,
+          verifiers: work_items
+            .filter((w) => w.kind === "verify")
+            .map(({ id, role_id, completion_criteria }) => ({
+              id,
+              role_id,
+              completion_criteria,
+              verdict:
+                review_matrix.findLast((row) => row.work_item_id === id)
+                  ?.verdict ?? null,
+            })),
           attachment_count: attachments.length,
           completion_id: deliveries.findLast(
             (d) => d.kind === "card_completion" && d.status === "accepted",

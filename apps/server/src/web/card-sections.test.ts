@@ -6,6 +6,20 @@ test("overview preserves the head, page and counts; each panel returns only its 
   const f = await webHarness({ password: "synthetic-panel-test" });
   try {
     seedWebProject(f.store, f.dataDir);
+    f.store.uow.run((tx) => {
+      const work = tx.work_items.get(project_id, "W-1");
+      if (!work) throw new Error("Missing fixture work item");
+      tx.work_items.put(project_id, { ...work, status: "accepted" });
+      tx.work_items.put(project_id, {
+        ...work,
+        id: "W-3" as typeof work.id,
+        kind: "verify",
+        role_id: "reviewer",
+        target_work_item_id: work.id,
+        status: "todo",
+        completion_criteria: ["matches the plan"],
+      });
+    });
     const cookie = await f.login("synthetic-panel-test");
     const path = `/api/projects/${project_id}/cards/C-1?limit=1`;
     const get = async (section = "") => {
@@ -36,7 +50,16 @@ test("overview preserves the head, page and counts; each panel returns only its 
     ])
       expect(overview[key]).toEqual(full[key]);
     expect(overview.overview).toMatchObject({
-      work_count: full.work_items.length,
+      work_count: 2,
+      completed_work_count: 1,
+      verifiers: [
+        {
+          id: "W-3",
+          role_id: "reviewer",
+          completion_criteria: ["matches the plan"],
+          verdict: null,
+        },
+      ],
       attachment_count: full.attachments.length,
     });
     expect((await get("work")).work_items).toEqual(full.work_items);

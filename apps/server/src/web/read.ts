@@ -901,11 +901,9 @@ export function cardDetail(
   const roles = new Map<string, string>(
     state.assignments.map((a) => [a.id, a.role_id]),
   );
-  const review_matrix = options.overviewOnly
-    ? []
-    : timeRead(options.recordTiming, "review_matrix", () =>
-        deriveReviewMatrix(deliveries, work_items, reviews),
-      );
+  const review_matrix = timeRead(options.recordTiming, "review_matrix", () =>
+    deriveReviewMatrix(deliveries, work_items, reviews),
+  );
   const updated_at =
     [...events.map((e) => e.created_at), card.created_at].sort().at(-1) ??
     card.created_at;

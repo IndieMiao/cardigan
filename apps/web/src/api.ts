@@ -589,6 +589,12 @@ export type CardPanel = "work" | "records" | "attachments" | "timeline";
 export interface CardDetail {
   readonly overview?: {
     work_count: number;
+    completed_work_count: number;
+    verifiers: readonly (Pick<
+      WorkItemView,
+      "id" | "role_id" | "completion_criteria"
+    > &
+      Pick<ReviewMatrixRow, "verdict">)[];
     attachment_count: number;
     completion_id?: string;
     waiting_delivery: readonly string[];
