@@ -1,6 +1,7 @@
 import {
   type Actor,
   type AttachmentStore,
+  type AttachmentTarget,
   authorView,
   type CardId,
   type Clock,
@@ -20,6 +21,8 @@ import {
   uploadAttachment,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { MAX_ARTIFACT_BYTES } from "../artifact-files.js";
+import type { ArtifactUploads } from "../artifact-uploads.js";
 import {
   decodeAttachment,
   fileAttachmentStore,
@@ -42,6 +45,7 @@ import { entryId, id, idempotency_key } from "./schemas.js";
 
 export interface SupportToolOptions {
   readonly dataDir?: string;
+  readonly artifactUploads?: ArtifactUploads;
   /** Trusted host setting; never taken from tool arguments. */
   readonly attachmentInlineBytes?: number;
   readonly attachmentStore?: AttachmentStore;
@@ -65,18 +69,29 @@ export function supportTools(options: SupportToolOptions = {}) {
   const attachments =
     options.attachmentStore ?? fileAttachmentStore(options.dataDir);
   return [
-    readAttachmentTool(attachments, options.attachmentInlineBytes),
+    readAttachmentTool(
+      attachments,
+      options.attachmentInlineBytes,
+      options.dataDir,
+    ),
     defineTool({
       name: "upload_attachment",
       description:
-        "Upload an attachment to a timeline entry or delivery (up to 10 MiB).",
+        "Upload a base64 attachment (10 MiB), or omit file and provide artifact_size and sha256 to request a one-use raw artifact upload (2 GiB) on the configured MCP endpoint.",
       input: z.object({
         idempotency_key,
         card_id: id("card"),
         file: z
           .string()
           .max(MAX_ATTACHMENT_BASE64)
-          .describe("Canonical padded base64 file content."),
+          .describe("Canonical padded base64 file content.")
+          .optional(),
+        artifact_size: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_ARTIFACT_BYTES)
+          .optional(),
         sha256: z
           .string()
           .regex(/^[a-f0-9]{64}$/u)
@@ -102,8 +117,25 @@ export function supportTools(options: SupportToolOptions = {}) {
         basis: id("decision").optional(),
         supersedes: z.string().min(1).optional(),
       }),
-      handler: ({ idempotency_key, ...params }, context) =>
-        executePreparedCommand(
+      handler: (
+        { idempotency_key, artifact_size, file, ...target },
+        context,
+      ) => {
+        if (artifact_size !== undefined) {
+          if (file !== undefined || !target.sha256 || !options.artifactUploads)
+            throw ToolError.validation(
+              "Provide artifact_size and sha256 without file",
+            );
+          return options.artifactUploads.reserve(context, idempotency_key, {
+            ...(target as AttachmentTarget),
+            sha256: target.sha256,
+            artifact_size,
+          });
+        }
+        if (file === undefined)
+          throw ToolError.validation("Attachment file required");
+        const params = { ...target, file };
+        return executePreparedCommand(
           context,
           "upload_attachment",
           idempotency_key,
@@ -129,7 +161,8 @@ export function supportTools(options: SupportToolOptions = {}) {
               ports,
             ),
           options.clock,
-        ),
+        );
+      },
     }),
     defineTool({
       name: "heartbeat",
