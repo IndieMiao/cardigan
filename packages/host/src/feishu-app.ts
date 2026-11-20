@@ -38,6 +38,7 @@ export interface AppTransport {
     uuid: string,
     content: string,
   ): Promise<string | undefined>;
+  bindingFailure(to: string): Promise<void>;
   patch(id: string, content: string): Promise<boolean>;
 }
 function transport(c: AppCredential, timeout: number): AppTransport {
@@ -55,6 +56,19 @@ function transport(c: AppCredential, timeout: number): AppTransport {
         data: { receive_id: to, msg_type: "interactive", content, uuid },
       });
       return r.code === 0 ? r.data?.message_id : undefined;
+    },
+    async bindingFailure(to) {
+      await client.im.message.create({
+        params: { receive_id_type: "open_id" },
+        data: {
+          receive_id: to,
+          msg_type: "text",
+          uuid: randomUUID(),
+          content: JSON.stringify({
+            text: "未能绑定，请回到 Workbench 重新生成绑定码。",
+          }),
+        },
+      });
     },
     async patch(id, content) {
       return (
@@ -143,30 +157,35 @@ export function startFeishu(
         });
       status(scope, "stopped");
     };
-    worker.on("message", (m: { state?: string; job?: FeishuJob }) => {
-      if (app.stopped) return;
-      try {
-        if (m.job) {
-          try {
-            app.execute(m.job);
-          } catch {
-            app.abandon(m.job.ref);
-          }
-        } else if (
-          m.state &&
-          [
-            "idle",
-            "connecting",
-            "connected",
-            "reconnecting",
-            "failed",
-          ].includes(m.state)
-        )
-          status(scope, m.state);
-      } catch {
-        /* never log callback text; abandoned claims reconciled on restart */
-      }
-    });
+    worker.on(
+      "message",
+      (m: { state?: string; job?: FeishuJob; bindingFailure?: string }) => {
+        if (app.stopped) return;
+        try {
+          if (m.bindingFailure) {
+            void app.remote.bindingFailure(m.bindingFailure).catch(() => {});
+          } else if (m.job) {
+            try {
+              app.execute(m.job);
+            } catch {
+              app.abandon(m.job.ref);
+            }
+          } else if (
+            m.state &&
+            [
+              "idle",
+              "connecting",
+              "connected",
+              "reconnecting",
+              "failed",
+            ].includes(m.state)
+          )
+            status(scope, m.state);
+        } catch {
+          /* never log callback text; abandoned claims reconciled on restart */
+        }
+      },
+    );
     worker.on("error", () => {
       if (!app.stopped) status(scope, "failed");
     });

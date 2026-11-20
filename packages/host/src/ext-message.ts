@@ -167,7 +167,12 @@ export class ExtMessageSender {
           loadCommandState(tx, project.id),
           project.id,
         ))
-          for (const channel of channels)
+          for (const channel of channels) {
+            if (
+              channel.startsWith("lark_app:") &&
+              (item.handled || !item.ready)
+            )
+              continue;
             projectExtMessage(
               store.database,
               item,
@@ -177,6 +182,7 @@ export class ExtMessageSender {
                 (item.created_at !== undefined &&
                   extMessageQuiet(config, item.created_at)),
             );
+          }
         return version;
       });
       // Publish the replay cursor only after the transaction commits; restart always replays.

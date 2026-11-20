@@ -40,7 +40,14 @@ port.once("message", () => {
 void ws
   .start({
     eventDispatcher: feishuDispatcher(
-      feishuInbox(db, c, (job) => port.postMessage({ job }), Date.now, limits),
+      feishuInbox(
+        db,
+        c,
+        (job) => port.postMessage({ job }),
+        Date.now,
+        limits,
+        (recipient) => port.postMessage({ bindingFailure: recipient }),
+      ),
     ),
   })
   .then(status, () => port.postMessage({ state: "failed" }));

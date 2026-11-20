@@ -57,6 +57,7 @@ export function feishuInbox(
   post: (job: FeishuJob) => void,
   clock = Date.now,
   limits = { bindingAttempts: 30, pending: 32 },
+  bindingFailed?: (recipient: string) => void,
 ) {
   const scope = appScope(c);
   let window = 0,
@@ -67,6 +68,7 @@ export function feishuInbox(
       sender = object(e.sender),
       now = clock();
     let job: FeishuJob | undefined;
+    let failedRecipient: string | undefined;
     const run = () => {
       const reject = (reason: string, stale = false) => {
         feishuAudit(db, reason);
@@ -112,8 +114,10 @@ export function feishuInbox(
             .run(scope, e.event_id).changes
         )
           return;
-        if (!redeemFeishuCode(db, scope, user, m.chat_id, code.trim(), now))
+        if (!redeemFeishuCode(db, scope, user, m.chat_id, code.trim(), now)) {
+          failedRecipient = user;
           return reject("invalid_code");
+        }
         return;
       }
       const b = feishuBinding(db, scope),
@@ -203,6 +207,7 @@ export function feishuInbox(
         throw err;
       }
       if (job) post(job);
+      if (failedRecipient) bindingFailed?.(failedRecipient);
       return kind === "action" ? result : undefined;
     } catch {
       return kind === "action"

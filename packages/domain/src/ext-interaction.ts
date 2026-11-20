@@ -33,23 +33,27 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
     if (w) ids.add(w.card_id);
     else missing = true;
   }
-  if (subject.card_id) ids.add(subject.card_id);
-  if (subject.ready_when && "card_id" in subject.ready_when)
-    ids.add(subject.ready_when.card_id);
-  for (const c of q?.affected_cards ?? []) ids.add(c);
-  for (const w of q?.affected_work_items ?? h?.blocked_work_items ?? [])
-    work(w);
-  const deliveryId =
-    q?.kind === "approve" && "delivery_id" in q.target
-      ? q.target.delivery_id
-      : undefined;
-  const target = deliveryId
-    ? s.deliveries.find((d) => d.id === deliveryId)
-    : undefined;
-  if (q?.kind === "approve" && "delivery_id" in q.target) {
+  // Follow the same edges for the requested item and every inherited source.
+  // In particular, an approval may point to a delivery on a different card.
+  const inspect = (d: typeof subject) => {
+    if (d.card_id) ids.add(d.card_id);
+    if (d.ready_when && "card_id" in d.ready_when)
+      ids.add(d.ready_when.card_id);
+    if ("blocked_work_items" in d) {
+      for (const w of d.blocked_work_items) work(w);
+      for (const w of d.follow_up_work_items ?? []) work(w);
+      return;
+    }
+    for (const c of d.affected_cards) ids.add(c);
+    for (const w of d.affected_work_items) work(w);
+    if (d.kind !== "approve" || !("delivery_id" in d.target)) return;
+    const id = d.target.delivery_id;
+    const target = s.deliveries.find((row) => row.id === id);
     if (target) work(target.work_item_id);
     else missing = true;
-  }
+    return target;
+  };
+  const target = inspect(subject);
   // Trace related facts, including a general merge confirmation whose source is restricted.
   const related = new Set<typeof subject>();
   related.add(subject);
@@ -75,9 +79,7 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
             )))
       ) {
         related.add(d);
-        if (d.card_id) ids.add(d.card_id);
-        for (const a of d.affected_cards) ids.add(a);
-        for (const w of d.affected_work_items) work(w);
+        inspect(d);
       }
     }
     if (item.kind === "merge_confirmation")
@@ -89,8 +91,7 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
           )
         ) {
           related.add(a);
-          if (a.card_id) ids.add(a.card_id);
-          for (const w of a.blocked_work_items) work(w);
+          inspect(a);
         }
   }
   if (missing) sensitive = true;
@@ -105,7 +106,7 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
           "account",
           "credential",
           "permission",
-        ].includes(d.category ?? "general"),
+        ].includes(d.category ?? ""),
     )
   )
     return readOnly();
@@ -140,11 +141,15 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
   const relevantEvents = s.events.filter(
     (e) =>
       !e.type.startsWith("ext_message_") &&
-      ((e.card_id &&
-        ids.has(e.card_id) &&
-        /decision|merge|review|sensitive|human_action|delivery/u.test(
-          e.type,
-        )) ||
+      ((e.type === "card_sensitivity_changed" &&
+        e.card_id &&
+        ids.has(e.card_id)) ||
+        (merge &&
+          e.card_id &&
+          ids.has(e.card_id) &&
+          /decision|merge|review|sensitive|human_action|delivery/u.test(
+            e.type,
+          )) ||
         (e.payload &&
           typeof e.payload === "object" &&
           (("decision_id" in e.payload && e.payload.decision_id === q?.id) ||
@@ -156,9 +161,10 @@ export function extInteraction(s: CommandState, item: ExtMessageItem) {
     options,
     basis: JSON.stringify([
       subject,
-      [...related],
-      target?.subject,
-      q ? suggestionBasis(s, q) : null,
+      merge ? [...related] : [...related].map((d) => [d.id, d.category]),
+      [...ids].sort(),
+      target ? [target.subject, target.status] : null,
+      merge ? suggestionBasis(s, q) : null,
       blockers,
       relevantEvents.map((e) => e.id),
       merge ? s.project_preferences : null,

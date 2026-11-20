@@ -108,6 +108,14 @@ export function SettingsPage({
     }),
     [projectId],
   );
+  const feishuPlace = useMemo(
+    () => ({
+      project: projectId,
+      panel: "feishu" as const,
+      reveal: () => setTab("feishu"),
+    }),
+    [projectId],
+  );
   const authorizationPlace = useMemo(
     () => ({
       project: projectId,
@@ -174,7 +182,11 @@ export function SettingsPage({
         </>
       }
     >
-      {tab === "feishu" && <FeishuSettings client={client} />}
+      <RequestFeedbackScope hidden={tab !== "feishu"}>
+        <SettingPlaceContext.Provider value={feishuPlace}>
+          <FeishuSettings key={projectId} client={client} />
+        </SettingPlaceContext.Provider>
+      </RequestFeedbackScope>
       <RequestFeedbackScope hidden={tab !== "capacity"}>
         <SettingPlaceContext.Provider value={capacityPlace}>
           <CapacitySettings

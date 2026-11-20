@@ -81,7 +81,7 @@ const UNSEEN_MS = 500;
 /** The settings panel a setting is shown in (provided by SettingsPage). */
 export interface SettingPlace {
   project: string;
-  panel: "preferences" | "authorization" | "capacity";
+  panel: "preferences" | "authorization" | "capacity" | "feishu";
   /** Shows the panel when it is hidden behind another one. */
   reveal: () => void;
 }
@@ -203,6 +203,7 @@ export function useSettingWrite<T>({
   failure,
   server,
   source,
+  uncertainMessage,
   confirmable = true,
   sharedSource = false,
   write,
@@ -215,6 +216,8 @@ export function useSettingWrite<T>({
   id?: string;
   /** What did not happen, e.g. 未能撤销“对外发布”授权; defaults to 未能保存“name”. */
   failure?: (value: T) => string;
+  /** Recovery advice for commands that must read back instead of retrying a keyed save. */
+  uncertainMessage?: string;
   server: T;
   /** Identity of the read that produced `server`; a new read resets `value`. */
   source: unknown;
@@ -422,7 +425,7 @@ export function useSettingWrite<T>({
       const what = latest.current.failure?.(next) ?? `未能保存“${name}”`;
       const text = `${what}，请回到设置重试`;
       // Named, so failures shown together stay identifiable.
-      const cause = `${what}：${describeWriteError(thrown)}`;
+      const cause = `${what}：${describeWriteError(thrown, uncertainMessage) || "请刷新后重试。"}`;
       const away = !inView();
       if (alive.current) {
         setError(cause);

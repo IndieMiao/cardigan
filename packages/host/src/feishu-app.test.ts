@@ -18,7 +18,7 @@ import {
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { card, project_id } from "../../store/src/test-support.js";
+import { card, project_id, workItem } from "../../store/src/test-support.js";
 import { ExtMessageSender } from "./ext-message.js";
 import { FeishuApp } from "./feishu-app.js";
 import { appScope, type FeishuJob, feishuInbox } from "./feishu-inbox.js";
@@ -33,6 +33,7 @@ const h: HumanAction = {
   id: "H-1",
   key: "H-1",
   card_id: "C-1",
+  category: "general",
   requested_by: "human",
   instructions: "PRIVATE",
   why_human: "private",
@@ -45,6 +46,7 @@ const q: Decision = {
   key: "Q-1",
   card_id: "C-1",
   kind: "choose",
+  category: "general",
   raised_by: "human",
   question: "选择",
   context: "private",
@@ -65,6 +67,7 @@ let store: Store,
   job: FeishuJob | undefined,
   member: string;
 const remote = {
+  bindingFailure: vi.fn(async (_to: string) => {}),
   create: vi.fn(async () => `m-${randomUUID()}`),
   patch: vi.fn(async () => true),
 };
@@ -74,9 +77,14 @@ function issue() {
   return store.uow.run(() => manageFeishuBinding(db, member, "code", now))
     .code!;
 }
-function redeem(code: string, chat_type = "p2p", open_id = "owner") {
+function redeem(
+  code: string,
+  chat_type = "p2p",
+  open_id = "owner",
+  event_id = randomUUID(),
+) {
   receive("binding", {
-    event_id: randomUUID(),
+    event_id,
     app_id: c.app_id,
     tenant_key: c.tenant_key,
     sender: {
@@ -127,6 +135,7 @@ beforeEach(() => {
   now = Date.now();
   job = undefined;
   remote.create.mockClear();
+  remote.bindingFailure.mockClear();
   remote.patch.mockClear();
   db.prepare(
     "INSERT INTO feishu_runtime(id,scope,state,heartbeat) VALUES(1,?,'connected',?)",
@@ -168,6 +177,8 @@ beforeEach(() => {
       job = j;
     },
     () => now,
+    undefined,
+    remote.bindingFailure,
   );
 });
 afterEach(() => {
@@ -253,6 +264,7 @@ test.each(["H-1", "Q-1"])(
 );
 test.each([
   "version",
+  "uncategorized",
   "publish",
   "sensitive",
   "revoked",
@@ -273,6 +285,10 @@ test.each([
           : { expected_return: "changed" }),
       }),
     );
+  if (change === "uncategorized") {
+    const { category: _, ...legacy } = h;
+    store.uow.run((tx) => tx.human_actions.put(project_id, legacy));
+  }
   if (change === "sensitive")
     store.uow.run((tx) => tx.cards.put(project_id, card({ sensitive: true })));
   if (change === "revoked") {
@@ -341,12 +357,22 @@ test("outbox sends old notifications independently; each new binding reprojects 
     expect(remote.create).toHaveBeenCalledTimes(2);
     const r = db.prepare("SELECT * FROM feishu_cards WHERE item=?").get(h.id);
     expect(r).toBeDefined();
-    store.uow.run(() => manageFeishuBinding(db, member, "unbind", now));
+    store.uow.run((tx) => {
+      tx.human_actions.put(project_id, { ...h, status: "done" });
+      manageFeishuBinding(db, member, "unbind", now);
+    });
     redeem(issue());
     receive("action", click(r!));
     expect(job).toBeUndefined();
     await sender.tick();
-    expect(remote.create).toHaveBeenCalledTimes(4);
+    expect(remote.create).toHaveBeenCalledTimes(3);
+    expect(
+      db
+        .prepare(
+          "SELECT count(*) AS n FROM ext_message_outbox WHERE channel=? AND item_id=?",
+        )
+        .get(`lark_app:${binding()?.generation}`, h.id)?.n,
+    ).toBe(0);
     expect(legacy).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(remote.create.mock.calls)).not.toContain(
       h.instructions,
@@ -354,4 +380,70 @@ test("outbox sends old notifications independently; each new binding reprojects 
   } finally {
     await sender.stop();
   }
+});
+
+test("only verified private code attempts get one generic failure; deduplication and rate limits suppress replies", () => {
+  const code = issue();
+  issue(); // The first code can no longer be redeemed.
+  const eventId = randomUUID();
+  redeem(code, "group");
+  redeem("ordinary chat");
+  expect(remote.bindingFailure).not.toHaveBeenCalled();
+  redeem(code, "p2p", "owner", eventId);
+  redeem(code, "p2p", "owner", eventId);
+  expect(remote.bindingFailure).toHaveBeenCalledExactlyOnceWith("owner");
+  now += 60_000;
+  for (let i = 0; i < 31; i++) redeem(code);
+  expect(remote.bindingFailure).toHaveBeenCalledTimes(31);
+  expect(binding()).toBeUndefined();
+});
+
+test("the worker cannot apply a previously accepted click after an indirect approval target becomes sensitive", async () => {
+  redeem(issue());
+  const other = card({ id: "C-2" });
+  store.uow.run((tx) => {
+    tx.cards.put(
+      project_id,
+      card({ source: { kind: "decision", decision_id: "Q-2" } }),
+    );
+    tx.cards.put(project_id, other);
+    tx.work_items.put(project_id, workItem({ id: "W-2", card_id: other.id }));
+    tx.deliveries.put(project_id, {
+      id: "D-2",
+      work_item_id: "W-2",
+      run_id: "R-2",
+      kind: "code",
+      summary: "synthetic",
+      subject: { kind: "git_head", value: "1".repeat(40) },
+      status: "accepted",
+      attachments: [],
+      requested_verifiers: [],
+      evidence: [],
+      known_gaps: [],
+    });
+    tx.decisions.put(project_id, {
+      ...q,
+      id: "Q-2",
+      key: "Q-2",
+      kind: "approve",
+      target: { delivery_id: "D-2" },
+    });
+  });
+  const r = await send(q.id);
+  receive("action", click(r, "ok"));
+  if (!job) throw new Error("expected accepted action");
+  store.uow.run((tx) =>
+    tx.cards.put(project_id, { ...other, sensitive: true }),
+  );
+  app.execute(job);
+  expect(
+    store.uow.read((tx) => tx.decisions.get(project_id, q.id)?.status),
+  ).toBe("open");
+  expect(
+    db.prepare("SELECT state FROM feishu_cards WHERE ref=?").get(String(r.ref))
+      ?.state,
+  ).toBe("stale");
+  await send(q.id);
+  expect(JSON.stringify(remote.create.mock.lastCall)).not.toContain("choice_0");
+  expect(JSON.stringify(remote.create.mock.lastCall)).toContain("敏感事项");
 });
