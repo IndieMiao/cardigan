@@ -1,5 +1,6 @@
 /** M5.T1: expectations from phase-1-m5 §0/§3.2 and development-plan §14. */
-import { existsSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_DB_FILE, webCredential } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -281,3 +282,32 @@ test.each(["image/svg+xml", "text/html"])(
     expect(response.text).toBe('<svg onload="alert(1)"></svg>');
   },
 );
+
+test("Workbench serves a streamed artifact through the authenticated download with integrity and sandbox headers", async () => {
+  const body = "<svg/>",
+    a = await f.attachment("image/svg+xml", body),
+    id = randomUUID();
+  mkdirSync(join(f.dataDir, "artifacts"), { recursive: true });
+  writeFileSync(join(f.dataDir, "artifacts", id), body);
+  f.store().uow.run((tx) =>
+    tx.attachments.put(f.project.project_id, {
+      ...a,
+      storage_path: `artifacts/${id}`,
+      streamed_artifact: {
+        blob_id: id,
+        run_id: "R-1" as never,
+        created_at: new Date().toISOString(),
+      },
+    }),
+  );
+  const path = f.projectPath(`/attachments/${a.id}`);
+  expect((await f.call(path, { anonymous: true })).status).toBe(401);
+  await success();
+  const r = await f.call(path);
+  expect(r.status).toBe(200);
+  expect(r.text).toBe(body);
+  expect(r.headers["x-attachment-sha256"]).toBe(a.sha256);
+  expect(r.headers["content-disposition"]).toMatch(/^attachment/);
+  expect(r.headers["x-content-type-options"]).toBe("nosniff");
+  expect(r.headers["content-security-policy"]).toContain("sandbox");
+});

@@ -1,7 +1,9 @@
-import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { type FileHandle, link, open, rm } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { MAX_ATTACHMENT_BYTES, sha256 } from "./attachments.js";
+import { MAX_ARTIFACT_BYTES } from "./artifact-files.js";
+import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
 
 const messages = {
   arguments:
@@ -50,7 +52,7 @@ export async function downloadAttachment(
     response = await fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
       redirect: "error",
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(60 * 60_000),
     });
   } catch {
     throw new AttachmentDownloadError("download");
@@ -58,39 +60,51 @@ export async function downloadAttachment(
   const sizeText = response.headers.get("content-length");
   const size = Number(sizeText);
   const digest = response.headers.get("x-attachment-sha256") ?? "";
-  let content: Buffer;
+  const temporary = join(dirname(file), `.${randomUUID()}.tmp`);
+  let handle: FileHandle | undefined;
   try {
     if (!response.ok) throw new AttachmentDownloadError("download");
     if (
       sizeText === null ||
       !/^\d+$/u.test(sizeText) ||
       !Number.isSafeInteger(size) ||
-      size > MAX_ATTACHMENT_BYTES ||
+      size >
+        (response.headers.get("x-artifact-size") === sizeText
+          ? MAX_ARTIFACT_BYTES
+          : MAX_ATTACHMENT_BYTES) ||
       !/^[a-f0-9]{64}$/u.test(digest) ||
       response.headers.get("x-attachment-id") !== attachmentId ||
       !response.body
     )
       throw new AttachmentDownloadError("integrity");
-    const chunks: Uint8Array[] = [];
+    handle = await open(temporary, "wx", 0o600).catch(() => {
+      throw new AttachmentDownloadError("file");
+    });
+    const hash = createHash("sha256");
     let received = 0;
     for await (const chunk of response.body) {
       received += chunk.byteLength;
       if (received > size) throw new AttachmentDownloadError("integrity");
-      chunks.push(chunk);
+      hash.update(chunk);
+      await handle.writeFile(chunk).catch(() => {
+        throw new AttachmentDownloadError("file");
+      });
     }
-    content = Buffer.concat(chunks);
-    if (content.length !== size || sha256(content) !== digest)
+    if (received !== size || hash.digest("hex") !== digest)
       throw new AttachmentDownloadError("integrity");
+    await link(temporary, file).catch(() => {
+      throw new AttachmentDownloadError("file");
+    });
   } catch (error) {
     await response.body?.cancel().catch(() => undefined);
     throw error instanceof AttachmentDownloadError
       ? error
       : new AttachmentDownloadError("download");
-  }
-  try {
-    await writeFile(file, content, { flag: "wx", mode: 0o600 });
-  } catch {
-    throw new AttachmentDownloadError("file");
+  } finally {
+    if (handle) {
+      await handle.close();
+      await rm(temporary, { force: true });
+    }
   }
   return {
     attachment_id: attachmentId,
