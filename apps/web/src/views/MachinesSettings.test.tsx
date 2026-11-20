@@ -795,3 +795,76 @@ test("Q-1013 guard: an ordinary background refresh keeps the last good reading u
   await act(async () => held.resolve());
   await waitFor(() => expect(facts("非常驻 / 上限")).toBe("3 / 6"));
 });
+
+test("Q-1017: failed → slow retry → 偏好 → back to 机器 and its detail shows no failed snapshot until the reply", async () => {
+  let limit = 6;
+  const { state, page, listCell } = capacityCase(() => limit);
+  const view = render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("2 / 6"));
+  state.fail = true;
+  limit = 3;
+  view.rerender(page(1));
+  await waitFor(() => expect(listCell()).toContain("— / 3"));
+  const alert = (await screen.findByText(/并发读数未能更新/)).closest(
+    "[role=alert]",
+  ) as HTMLElement;
+  state.fail = false;
+  const held = Promise.withResolvers<void>();
+  state.gate = held.promise;
+  fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
+  // Leave the machine panel while the retry is still in flight, then return.
+  fireEvent.click(screen.getByRole("button", { name: "偏好" }));
+  expect(screen.queryByRole("table", { name: "机器列表" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("— / 3"));
+  fireEvent.click(screen.getByRole("button", { name: "本机" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  const facts = drawerFacts(dialog);
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("— / 3"));
+  expect(facts("排队")).toBe("—");
+  expect(await dialog.findByText("正在重新读取并发读数…")).toBeTruthy();
+  expect(listCell()).toContain("— / 3");
+  expect(document.body.textContent).not.toMatch(/2 \/ [36]/);
+  // The reply brings the new reading to both at once.
+  state.running = 0;
+  state.queued = 0;
+  state.gate = undefined;
+  await act(async () => held.resolve());
+  await waitFor(() => expect(facts("非常驻 / 上限")).toBe("0 / 3"));
+  expect(facts("排队")).toBe("0");
+  expect(listCell()).toContain("0 / 3");
+  expect(dialog.queryByText("正在重新读取并发读数…")).toBeNull();
+});
+
+test("Q-1017: a retry that succeeds while the user is on another panel shows the new reading on return", async () => {
+  let limit = 6;
+  const { state, page, listCell } = capacityCase(() => limit);
+  const view = render(page(0));
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("2 / 6"));
+  state.fail = true;
+  limit = 3;
+  view.rerender(page(1));
+  const alert = (await screen.findByText(/并发读数未能更新/)).closest(
+    "[role=alert]",
+  ) as HTMLElement;
+  state.fail = false;
+  const held = Promise.withResolvers<void>();
+  state.gate = held.promise;
+  fireEvent.click(within(alert).getByRole("button", { name: "重试" }));
+  fireEvent.click(screen.getByRole("button", { name: "偏好" }));
+  state.running = 0;
+  state.queued = 0;
+  state.gate = undefined;
+  await act(async () => held.resolve());
+  fireEvent.click(screen.getByRole("button", { name: "机器" }));
+  await screen.findByRole("table", { name: "机器列表" });
+  await waitFor(() => expect(listCell()).toContain("0 / 3"));
+  expect(listCell()).not.toContain("—");
+  expect(screen.queryByText(/并发读数未能更新/)).toBeNull();
+  expect(screen.queryByText("正在重新读取并发读数…")).toBeNull();
+});

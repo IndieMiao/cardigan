@@ -17,7 +17,17 @@ import * as Popover from "./ui/popover.js";
 
 type CapacityResource = ReturnType<typeof useResource<ExecutionCapacity>>;
 const CapacityContext = createContext<
-  (CapacityResource & { canEdit: boolean }) | undefined
+  | (CapacityResource & {
+      canEdit: boolean;
+      /**
+       * C-512 (Q-1017): true from a failed read until a later read of this
+       * project completes without error; a retry or refresh in flight does
+       * not clear it. The kept `data` is then not current. Readers that do
+       * not use it keep their behaviour.
+       */
+      stale: boolean;
+    })
+  | undefined
 >(undefined);
 
 /** One read shared by every page title and the settings form. No browser polling. */
@@ -50,8 +60,16 @@ export function CapacityProvider({
     [client, projectId],
   );
   const resource = useResource(load, revision);
+  // Held by the provider (one per project, always mounted), so leaving and
+  // returning to a page that reads it does not lose a failure.
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (resource.error) setFailed(true);
+    else if (!resource.pending) setFailed(false);
+  }, [resource.error, resource.pending]);
+  const stale = Boolean(resource.error) || failed;
   return (
-    <CapacityContext.Provider value={{ ...resource, canEdit }}>
+    <CapacityContext.Provider value={{ ...resource, canEdit, stale }}>
       {children}
     </CapacityContext.Provider>
   );

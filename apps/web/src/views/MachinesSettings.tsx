@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type {
   CardiganClient,
   ExecutionCapacity,
@@ -57,19 +57,17 @@ const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
  * ordinary background refresh is in flight. Stale: entered on any failed
  * read and left only when a later read completes without error; a retry or
  * refresh in flight does not count. While stale the counts are "—" (the
- * resource keeps the failed snapshot, which is no longer current). Read once
- * per panel and handed to its drawer, so both always agree.
+ * resource keeps the failed snapshot, which is no longer current). The state
+ * lives with the project's shared capacity read; it is read once per panel
+ * and handed to its drawer, so both always agree.
  */
 function useMachineCapacity() {
   const capacity = useCapacity();
   const error = capacity?.error;
   const pending = capacity?.pending ?? false;
-  const [failed, setFailed] = useState(Boolean(error));
-  useEffect(() => {
-    if (error) setFailed(true);
-    else if (!pending) setFailed(false);
-  }, [error, pending]);
-  const stale = Boolean(error) || failed;
+  // Kept by the project's capacity provider, not this panel: leaving the
+  // panel and coming back does not forget a failure (Q-1017).
+  const stale = capacity?.stale ?? false;
   const agents = stale ? undefined : capacity?.data?.agents;
   return {
     of: (id: string) => agents?.find((a) => a.machine_id === id),
