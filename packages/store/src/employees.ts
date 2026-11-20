@@ -40,6 +40,31 @@ export function createGlobalRepositories(
   return {
     members: createMemberRepository(db, mode),
     employees: {
+      roleTransferFacts: (employeeId, roleId) => {
+        // Scalar subquery: a missing registration yields NULL; only an existing
+        // legacy version without a status is treated as active.
+        const enabled = prepare(
+          db,
+          `SELECT 1 FROM projects p WHERE (
+          SELECT COALESCE(json_extract(r.doc, '$.status'), 'active') FROM roles r
+          WHERE r.project_id = p.id AND r.role_id = ? ORDER BY r.role_version DESC LIMIT 1
+        ) = 'active' LIMIT 1`,
+        ).get(roleId);
+        const activity = prepare(
+          db,
+          `SELECT
+          MAX(json_extract(a.doc, '$.status') != 'released') AS bound,
+          MAX(s.unfinished_runs) AS unfinished
+          FROM assignment_activity s JOIN assignments a
+            ON a.project_id = s.project_id AND a.id = s.assignment_id
+          WHERE s.employee_id = ?`,
+        ).get(employeeId);
+        return {
+          role_enabled: !!enabled,
+          has_unreleased_assignment: !!activity?.bound,
+          has_unfinished_run: !!activity?.unfinished,
+        };
+      },
       assignmentActivity: () =>
         snapshots
           ? snapshots.global(

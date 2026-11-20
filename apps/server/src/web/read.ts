@@ -269,7 +269,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           name: employee.name,
           title: employee.title,
           bio: employee.bio,
-          role_id: employee.role_id,
+          role_id: assignment?.role_id ?? employee.role_id,
           avatar:
             avatar?.kind === "library"
               ? `/avatars/v1/${avatar.id}/head-64.webp`
@@ -576,7 +576,9 @@ function attachmentViewMapper(state: CommandState) {
       uploaded_at: uploaded.get(attachment.id) ?? null,
       basis,
       supersedes: attachment.supersedes ?? null,
-      inline: INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
+      inline:
+        !attachment.streamed_artifact &&
+        INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
       // §6 C-95: the same authenticated download route serves decision previews.
       download_path: `/api/projects/${encodeURIComponent(
         state.project_id,
@@ -596,6 +598,7 @@ export function attachmentViews(
   ]);
   return state.attachments
     .filter((attachment) => {
+      if (attachment.streamed_artifact?.expired) return false;
       if (attachment.card_id === card_id) return true;
       if (attachment.attach_to.kind === "timeline_entry") {
         return entryCard.get(attachment.attach_to.id) === card_id;

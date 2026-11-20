@@ -4,6 +4,7 @@ import {
   referenceReadScope,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { verifyArtifact } from "../artifact-files.js";
 import {
   attachmentPreview,
   MAX_ATTACHMENT_PAGE_BYTES,
@@ -33,13 +34,15 @@ const metadata = z.object({
     .regex(/^[\w!#$%&'*+.^`|~-]+\/[\w!#$%&'*+.^`|~-]+(?:;[\x20-\x7e]+)?$/u),
 });
 
-function accessibleAttachment(id: AttachmentId, context: ToolContext) {
+export function accessibleAttachment(id: AttachmentId, context: ToolContext) {
+  if (!context.identity.actor.allowed_tools.includes("read_attachment"))
+    throw ToolError.forbiddenTool("read_attachment");
   const { store, identity } = context;
   const attachment = safeReferenceQuery(() =>
     store.uow.read((tx) => tx.attachments.get(identity.actor.project_id, id)),
   );
   const missing = () => ToolError.notFound("Attachment not found");
-  if (!attachment) throw missing();
+  if (!attachment || attachment.streamed_artifact?.expired) throw missing();
   try {
     const read = safeReferenceQuery(() =>
       store.uow.read((tx) => referenceCard(tx, context, attachment.card_id)),
@@ -102,16 +105,10 @@ function accessibleAttachment(id: AttachmentId, context: ToolContext) {
 
 /** Shared by bounded MCP previews and the authenticated binary download. */
 export async function readVerifiedAttachment(
-  attachment_id: string,
+  attachment: ReturnType<typeof accessibleAttachment>,
   attachments: Pick<AttachmentStore, "get">,
   context: ToolContext,
 ) {
-  if (!context.identity.actor.allowed_tools.includes("read_attachment"))
-    throw ToolError.forbiddenTool("read_attachment");
-  const attachment = accessibleAttachment(
-    attachment_id as AttachmentId,
-    context,
-  );
   if (!metadata.safeParse(attachment).success)
     throw ToolError.validation(
       "Invalid attachment metadata or size exceeds 10 MiB",
@@ -171,14 +168,19 @@ export async function readVerifiedAttachment(
 export function readAttachmentTool(
   attachments: Pick<AttachmentStore, "get">,
   inlineBytes?: number,
+  dataDir?: string,
 ) {
   const threshold = resolveAttachmentInlineBytes(inlineBytes);
   return defineTool({
     name: "read_attachment",
     description:
-      "Read verified attachment metadata. Binary files and text above the host inline threshold (default 64 KiB) omit content and include authenticated download instructions. Small UTF-8 text retains base64 file. Explicit byte offset/limit pages UTF-8 text (max 65536 bytes); follow next_offset. Metadata alone is not evidence review.",
+      "Read verified attachment metadata. Binary files and text above the host inline threshold (default 64 KiB) omit content and include authenticated download instructions. Small UTF-8 text retains base64 file. Explicit byte offset/limit pages UTF-8 text (max 65536 bytes); follow next_offset. For a streamed artifact supply verify_sha256 to rehash stored bytes. Metadata alone is not evidence review.",
     input: z.object({
       attachment_id: z.string().min(1),
+      verify_sha256: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/u)
+        .optional(),
       offset: z
         .number()
         .int()
@@ -196,13 +198,54 @@ export function readAttachmentTool(
         .optional()
         .describe("Maximum bytes in a text page (default/max 65536)."),
     }),
-    handler: async ({ attachment_id, offset, limit }, context) => {
+    handler: async (
+      { attachment_id, offset, limit, verify_sha256 },
+      context,
+    ) => {
+      const a = accessibleAttachment(attachment_id as AttachmentId, context);
+      if (a.streamed_artifact) {
+        if (offset !== undefined || limit !== undefined)
+          throw ToolError.validation(
+            "Streamed artifacts do not support text pages",
+          );
+        if (verify_sha256) {
+          await verifyArtifact(dataDir, a, verify_sha256);
+          accessibleAttachment(a.id, context);
+        }
+        const read = context.store.uow.read((tx) =>
+          referenceCard(tx, context, a.card_id),
+        );
+        auditReferenceRead(context, [a.card_id], "read_attachment");
+        return {
+          ...read.provenance,
+          attachment_id: a.id,
+          card_id: a.card_id,
+          run_id: a.streamed_artifact.run_id,
+          attach_to: a.attach_to,
+          filename: a.original_filename,
+          size: a.size,
+          mime: a.mime,
+          sha256: a.sha256,
+          verified: !!verify_sha256,
+          content_mode: "metadata",
+          download: {
+            method: "GET",
+            query: { attachment_id: a.id },
+            instructions:
+              "Stream from the configured MCP URL with this query and the current Bearer. Check the downloaded SHA-256.",
+          },
+        };
+      }
+
       const { attachment, content, provenance } = await readVerifiedAttachment(
-        attachment_id,
+        a,
         attachments,
         context,
       );
+      if (verify_sha256 && verify_sha256 !== attachment.sha256)
+        throw ToolError.validation("Attachment sha256 mismatch");
       return {
+        ...(verify_sha256 ? { verified: true } : {}),
         ...provenance,
         ...attachmentPreview(attachment, content, threshold, { offset, limit }),
       };
