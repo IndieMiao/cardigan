@@ -10,12 +10,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEmployee } from "@cardigan/domain";
-import { defaultRoleDefinition } from "@cardigan/roles";
+import { defaultRoleDefinition, resolveProfile } from "@cardigan/roles";
 import { persistEmployeeEffect, roleDocument } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
-import { liveLaunch } from "../live-launch.js";
-import { readLaunchSettings } from "./launch-settings-file.js";
+import { loadLaunchFiles } from "../host.js";
+import { liveLaunch, selectableLaunchConfig } from "../live-launch.js";
 
 const secret = "fixture-value-private",
   config = `# keep my comment
@@ -30,8 +30,12 @@ models:
   primary: { provider: gateway, id: first, context_window: 32000, cost: { input: 1, output: 2 } }
 profiles:
   a: { harness: claude-code, model: primary, effort: high, args: [hidden-argument] }
-  b: { harness: pi }
+  b: { harness: pi, model: standalone }
+  no-model: { harness: pi }
 `;
+let live: Awaited<
+  ReturnType<typeof liveLaunch<Awaited<ReturnType<typeof loadLaunchFiles>>>>
+>;
 let dir: string,
   h: Awaited<ReturnType<typeof webHarness>>,
   cookie: string,
@@ -71,7 +75,23 @@ beforeEach(async () => {
     { mode: 0o700 },
   );
   vi.stubEnv("PATH", dir);
-  h = await webHarness({ password: "launch-password", launchSettingsDir: dir });
+  h = await webHarness({
+    password: "launch-password",
+    launchSettings: {
+      dir,
+      effective: () => selectableLaunchConfig(live.current()),
+    },
+  });
+  // Purely local fixtures; no catalog fetch unless a test explicitly supplies a fake upstream.
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({ fetched_at: new Date().toISOString(), entries: [] }),
+  );
+  live = await liveLaunch(
+    dir,
+    () => loadLaunchFiles(dir, () => {}, h.dataDir),
+    () => {},
+  );
   cookie = await h.login("launch-password");
   const read = await get();
   expect(read.status, read.body).toBe(200);
@@ -119,19 +139,14 @@ test("only cookie-authenticated humans may read/write; views are offline, allowl
   expect(JSON.parse((await get()).body).profiles[0].secrets).toEqual([
     { key: "KEY", set: false },
   ]);
-  expect((await get("/profiles")).json).toEqual({ profiles: ["b"] });
+  await live.refresh(); // missing secret rejects the entire disk generation
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
   chmodSync(join(dir, "secrets.env"), 0o644);
   expect((await get()).status).toBe(400);
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
   expect(network).not.toHaveBeenCalled();
 });
 test("a preview binds exact YAML, secret generation and human session; install once, keep comments and reload", async () => {
-  const live = await liveLaunch(
-    dir,
-    async () => readLaunchSettings(dir, h.dataDir).config,
-    () => {
-      throw Error("bad reload");
-    },
-  );
   const data = await confirmation({
     op: "set_model",
     name: "primary",
@@ -147,7 +162,7 @@ test("a preview binds exact YAML, secret generation and human session; install o
   expect(
     (await post("confirm", { ...data, version: "0".repeat(64) })).status,
   ).toBe(409);
-  expect((await live.refresh()).profiles.a?.model).toBe("second");
+  expect((await live.refresh()).config.profiles.a?.model).toBe("second");
   expect(readFileSync(file, "utf8")).toContain("# keep my comment");
   const backups = readdirSync(dir).filter((n) => n.endsWith(".bak"));
   expect(backups).toHaveLength(1);
@@ -180,6 +195,7 @@ test("unpreviewed, invalid or stale writes never install; secrets can only be se
     },
     { op: "edit_profile", name: "a", fields: { provider: "absent" } },
     { op: "create_profile", name: "a", fields: { harness: "pi" } },
+    { op: "set_model", name: "primary", id: "   " },
   ]) {
     const rejected = await preview(change);
     expect(rejected.status).toBe(400);
@@ -299,6 +315,7 @@ test("creation, copy, edit, provider remap and unreferenced delete keep both vie
     expect(ok.status, ok.body).toBe(200);
     const view = JSON.parse((await get()).body);
     version = view.version;
+    await live.refresh();
     return view;
   }
   await install({
@@ -398,4 +415,190 @@ test("only the installed, explicitly selected endpoint may receive a credential;
     .prepare("SELECT result FROM launch_profile_checks")
     .all();
   expect(JSON.stringify(audit)).not.toContain(secret);
+});
+
+test("confirm revalidates stale catalog entries with the real reload loader before any installation", async () => {
+  h.store.createProject({ id: "catalog" });
+  const cache = join(h.dataDir, "models-dev.json");
+  const entries = ["first", "removed"].map((id) => ({
+    provider: "gateway",
+    id,
+    context_window: 32000,
+  }));
+  writeFileSync(
+    cache,
+    JSON.stringify({ fetched_at: new Date(0).toISOString(), entries }),
+  );
+  const original = config.replace("context_window: 32000, ", "");
+  writeFileSync(file, original);
+  const catalog = vi.fn(async () =>
+    Response.json({
+      gateway: { models: { first: { limit: { context: 32000 } } } },
+    }),
+  );
+  vi.stubGlobal("fetch", catalog);
+  version = JSON.parse((await get()).body).version;
+  const data = await confirmation({
+    op: "set_model",
+    name: "primary",
+    id: "removed",
+  });
+  expect(catalog).not.toHaveBeenCalled();
+  expect((await post("confirm", data)).json).toMatchObject({
+    error: { code: "validation_failed" },
+  });
+  expect(catalog).toHaveBeenCalledOnce();
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(readdirSync(dir).filter((n) => /\.(tmp|bak)$/u.test(n))).toEqual([]);
+  expect(
+    h.store.database.prepare("SELECT * FROM launch_web_changes").all(),
+  ).toEqual([]);
+  expect(
+    h.store.database.prepare("SELECT * FROM launch_model_intents").all(),
+  ).toEqual([]);
+  expect(
+    h.store.uow.read((tx) =>
+      tx.events
+        .listAfter("catalog", undefined, 0)
+        .filter((e) => e.type === "launch_model_changed"),
+    ),
+  ).toEqual([]);
+  expect((await live.refresh()).config.profiles.a?.model).toBe("first");
+});
+
+test("employees and roles validate the accepted generation, excluding model-less profiles", async () => {
+  h.store.createProject({ id: "p" });
+  h.store.uow.run((tx) =>
+    tx.roles.put(
+      "p",
+      roleDocument({
+        ...defaultRoleDefinition("coder", {
+          harness: "claude-code",
+          launch_profile_ref: "a",
+        }),
+        version: 1,
+      }),
+    ),
+  );
+  writeFileSync(file, config.replace("  b: ", "  new: "));
+  writeFileSync(join(dir, "secrets.env"), "");
+  await live.refresh();
+  expect(
+    JSON.parse((await get()).body).profiles.map(
+      (p: { name: string }) => p.name,
+    ),
+  ).toEqual(["a", "new", "no-model"]);
+  expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
+  const write = (route: string, body: unknown, key: string) =>
+    call(h.port, `/api/projects/p/${route}`, {
+      method: "POST",
+      cookie,
+      headers: {
+        origin: `http://${h.hostHeader}`,
+        "content-type": "application/json",
+        "idempotency-key": key,
+      },
+      body: JSON.stringify(body),
+    });
+  for (const [name, status] of [
+    ["new", 400],
+    ["no-model", 400],
+    ["b", 200],
+  ] as const) {
+    const employee = await write(
+      "employees",
+      {
+        name: "Writer",
+        title: "Dev",
+        avatar: "library:guan-yu",
+        role_id: "coder",
+        launch_profile_ref: name,
+      },
+      `employee-${name}`,
+    );
+    expect(employee.status, employee.body).toBe(status);
+    const role = await write(
+      "role-document/preview",
+      {
+        markdown: `---\nrole_id: author\nbased_on: default:coder\nlaunch_profile: ${name}\n---\nDraft.`,
+      },
+      `role-${name}`,
+    );
+    expect(role.status, role.body).toBe(status);
+  }
+});
+
+test("a shared Claude endpoint is shown and updated through the same adapter as the running profile", async () => {
+  const legacy = config
+    .replace("    base_url: https://gateway.example.invalid\n", "")
+    .replace(
+      "PRIVATE_ENV: hidden-inline-value",
+      "ANTHROPIC_BASE_URL: https://legacy.example.invalid",
+    );
+  writeFileSync(file, legacy);
+  const read = JSON.parse((await get()).body);
+  expect(read.providers[0].base_url).toBe("https://legacy.example.invalid");
+  version = read.version;
+  const url = "https://next.example.invalid";
+  const change = {
+    op: "edit_provider",
+    name: "gateway",
+    fields: { base_url: url },
+  };
+  const data = await confirmation(change);
+  expect(readFileSync(file, "utf8")).toBe(legacy);
+  expect((await post("confirm", data)).status).toBe(200);
+  const resolved = resolveProfile((await live.refresh()).config, "a").provider
+    ?.definition;
+  expect(resolved).toMatchObject({
+    base_url: url,
+    env: { ANTHROPIC_BASE_URL: url },
+  });
+  expect(JSON.parse((await get()).body).providers[0].base_url).toBe(url);
+  writeFileSync(
+    file,
+    legacy.replace(
+      "legacy.example.invalid",
+      "fixture:password@legacy.example.invalid",
+    ),
+  );
+  const unsafe = await get();
+  expect(unsafe.body).not.toContain("password");
+  version = JSON.parse(unsafe.body).version;
+  expect(JSON.parse(unsafe.body).providers[0].base_url).toBeNull();
+  expect((await preview(change)).status).toBe(400);
+});
+
+test("secret values can collide with protocol keys, statuses and snapshot characters without breaking round trips", async () => {
+  writeFileSync(
+    join(dir, "secrets.env"),
+    `KEY=${secret}\nOTHER=version\nTINY=0\nSTATE=running\n`,
+  );
+  writeFileSync(file, config.replace("name: Fixture", `name: '${secret}'`));
+  const read = await get();
+  version = JSON.parse(read.body).version;
+  expect(version).toMatch(/^[0-9a-f]{64}$/u);
+  expect(JSON.parse(read.body).providers[0].name).toBe("***");
+  const task = await post("checks", {
+    profile: "a",
+    mode: "metadata",
+    version,
+  });
+  expect(task.json).toMatchObject({ status: "running", version });
+  await vi.waitFor(async () =>
+    expect(JSON.parse((await get()).body).profiles[0].last_check).toMatchObject(
+      { id: JSON.parse(task.body).id, version, status: "failed" },
+    ),
+  );
+  const data = await confirmation({
+    op: "set_model",
+    name: "primary",
+    id: "second",
+  });
+  expect((await post("confirm", data)).json).toEqual({
+    ok: true,
+    preview_id: data.preview_id,
+  });
+  expect((await live.refresh()).config.profiles.a?.model).toBe("second");
+  expect((await get()).body).not.toContain(secret);
 });

@@ -139,7 +139,13 @@ export async function runServer(
       // resolved execution it uses for the rest of startup.
       captureAgent: (command, args, timeout) =>
         host.runtime.captureAgent(command, args, timeout),
-      web: { config: webConfig, launchSettingsDir: configDir(env) },
+      web: {
+        config: webConfig,
+        launchSettings: {
+          dir: configDir(env),
+          effective: host.selectableLaunchConfig,
+        },
+      },
       dispatcher: {
         runtime: host.runtime,
         get upstream() {

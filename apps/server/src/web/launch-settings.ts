@@ -1,8 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { publishModelFile, readSettledModelFile } from "@cardigan/host";
-import { type LaunchConfig, requiredSecretKeys } from "@cardigan/roles";
+import {
+  loadModelLaunchConfig,
+  parseCachedLaunchConfig,
+  publishModelFile,
+  readSettledModelFile,
+} from "@cardigan/host";
+import {
+  type LaunchConfig,
+  requiredSecretKeys,
+  validateLaunchSecrets,
+} from "@cardigan/roles";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
 import { z } from "zod";
 import {
@@ -20,14 +29,13 @@ import { ProfileChecks } from "./launch-settings-check.js";
 import {
   digest,
   invalid,
-  legacyEndpoint,
+  legacyEndpoints,
   publicFields,
   readLaunchSettings,
   references,
   type SettingsFile,
   snapshot,
   stale,
-  validSettings,
 } from "./launch-settings-file.js";
 
 const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -45,6 +53,18 @@ const checkBody = z.strictObject({
   mode: z.enum(["metadata", "online"]),
 });
 
+function redactedFields(
+  values: Record<string, unknown>,
+  secrets: Record<string, string>,
+) {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [
+      key,
+      publicFields(value, secrets),
+    ]),
+  );
+}
+
 export class LaunchSettings {
   private readonly previews = new Map<
     string,
@@ -55,11 +75,9 @@ export class LaunchSettings {
     private readonly store: Store,
     private readonly dir: string,
     private readonly dataDir: string,
+    readonly effective: () => LaunchConfig,
   ) {
     this.checks = new ProfileChecks(store, () => snapshot(dir));
-  }
-  effective(): LaunchConfig {
-    return validSettings(this.file());
   }
   private file() {
     return readLaunchSettings(this.dir, this.dataDir);
@@ -77,9 +95,8 @@ export class LaunchSettings {
             : null;
         const last = this.checks.latest(name);
         // Hand-written args/config may embed credentials; only disclose semantic parameters.
-        return {
+        const data = {
           name,
-          harness: p.harness,
           provider: p.provider ?? null,
           model_alias: alias,
           model_id: p.model ?? null,
@@ -98,26 +115,35 @@ export class LaunchSettings {
             set: Object.hasOwn(secrets, key) && !!secrets[key],
           })),
           references: refs.get(name) ?? [],
-          last_check: last,
+        };
+        return {
+          ...redactedFields(data, secrets),
+          harness: p.harness,
+          last_check: last && {
+            ...last,
+            cli_version: publicFields(last.cli_version, secrets),
+          },
         };
       }),
     );
     const providers = Object.entries(config.providers).map(([id, p]) => ({
-      id,
-      name: p.name ?? p.codex?.name ?? id,
-      base_url: p.base_url ?? legacyEndpoint(p)?.value ?? null,
-      secret_env: p.secret_env,
+      ...redactedFields(
+        {
+          id,
+          name: p.name ?? p.codex?.name ?? id,
+          base_url: p.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null,
+        },
+        secrets,
+      ),
+      secret_env: publicFields(p.secret_env, secrets, true),
     }));
-    return publicFields(
-      {
-        version: f.version,
-        profiles,
-        providers,
-        models: config.models ?? {},
-        secret_keys: Object.keys(secrets),
-      },
-      secrets,
-    );
+    return {
+      version: f.version,
+      profiles,
+      providers,
+      models: publicFields(config.models ?? {}, secrets, true),
+      secret_keys: publicFields(Object.keys(secrets), secrets),
+    };
   }
   private guardDelete(
     f: SettingsFile,
@@ -141,17 +167,27 @@ export class LaunchSettings {
       f = this.file();
     if (version !== f.version) throw stale();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { diff, text } = candidate(f, change, this.dataDir);
-    // A user may not paste an existing secret into public metadata or YAML fields.
-    const projected = publicFields(diff, f.secrets);
-    if (JSON.stringify(diff) !== JSON.stringify(projected)) throw invalid();
+    const { diff, text, raw } = candidate(f, change);
+    try {
+      validateLaunchSecrets(
+        parseCachedLaunchConfig(raw, this.dataDir),
+        f.secrets,
+      );
+    } catch {
+      throw invalid();
+    }
     const id = randomUUID();
     if (this.previews.size >= 256)
       this.previews.delete(this.previews.keys().next().value ?? "");
     this.previews.set(id, { change, version, owner, after: digest(text) });
-    return { preview_id: id, version, diff: projected };
+    return { preview_id: id, version, diff };
   }
-  private confirm(body: unknown, key: unknown, owner: string, actor: string) {
+  private async confirm(
+    body: unknown,
+    key: unknown,
+    owner: string,
+    authorize: () => WebSession,
+  ) {
     const parsed = confirmBody.safeParse(body);
     if (
       !parsed.success ||
@@ -165,21 +201,26 @@ export class LaunchSettings {
     const f = this.file();
     const path = realpathSync(f.path);
     readSettledModelFile(this.store, path); // also repairs a committed rename after an interrupted response
-    const receipt = this.store.database
-      .prepare(
-        "SELECT operation,snapshot,installed FROM launch_web_changes WHERE request_key=?",
-      )
-      .get(requestKey);
-    if (receipt) {
-      if (receipt.operation !== id || receipt.snapshot !== version)
-        throw new HttpRejection(
-          409,
-          "idempotency_conflict",
-          "此幂等键已用于其它预览",
-        );
-      if (receipt.installed) return { ok: true, preview_id: id };
-      throw stale();
-    }
+    const installed = () => {
+      const receipt = this.store.database
+        .prepare(
+          "SELECT operation,snapshot,installed FROM launch_web_changes WHERE request_key=?",
+        )
+        .get(requestKey);
+      if (receipt) {
+        if (receipt.operation !== id || receipt.snapshot !== version)
+          throw new HttpRejection(
+            409,
+            "idempotency_conflict",
+            "此幂等键已用于其它预览",
+          );
+        if (receipt.installed) return true;
+        throw stale();
+      }
+      return false;
+    };
+    const success = { ok: true, preview_id: id };
+    if (installed()) return success;
     const pending = this.previews.get(id);
     if (
       !pending ||
@@ -190,7 +231,18 @@ export class LaunchSettings {
       throw stale();
     const { change } = pending;
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { text } = candidate(f, change, this.dataDir);
+    const { text, raw } = candidate(f, change);
+    // The host reloads via the refresh-aware catalog loader, not the offline preview cache.
+    try {
+      validateLaunchSecrets(
+        await loadModelLaunchConfig(raw, this.dataDir),
+        f.secrets,
+      );
+    } catch {
+      throw invalid();
+    }
+    const actor = authorize().member_id ?? "human";
+    if (installed()) return success; // a concurrent identical request finished during preflight
     if (digest(text) !== pending.after || snapshot(this.dir) !== version)
       throw stale();
     const suffix = randomUUID(),
@@ -252,9 +304,8 @@ export class LaunchSettings {
         authorize();
         sendJson(res, 200, body);
       } else {
-        const f = this.file();
-        const profiles = Object.keys(validSettings(f).profiles);
-        sendJson(res, 200, publicFields({ profiles }, f.secrets));
+        const profiles = Object.keys(this.effective().profiles);
+        sendJson(res, 200, { profiles });
       }
       return;
     }
@@ -268,7 +319,12 @@ export class LaunchSettings {
       sendJson(
         res,
         200,
-        this.confirm(body, req.headers["idempotency-key"], owner, actor),
+        await this.confirm(
+          body,
+          req.headers["idempotency-key"],
+          owner,
+          authorize,
+        ),
       );
     else {
       const input = checkBody.safeParse(body);
@@ -278,10 +334,7 @@ export class LaunchSettings {
       sendJson(
         res,
         202,
-        publicFields(
-          this.checks.start(f, input.data.profile, input.data.mode, actor),
-          f.secrets,
-        ),
+        this.checks.start(f, input.data.profile, input.data.mode, actor),
       );
     }
   }

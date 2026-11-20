@@ -46,7 +46,7 @@ import type { ServerEnv } from "./config.js";
 import type { DispatcherOptions, LaunchSnapshot } from "./dispatch.js";
 import { startQueuedRun } from "./host-start.js";
 
-import { liveLaunch } from "./live-launch.js";
+import { liveLaunch, selectableLaunchConfig } from "./live-launch.js";
 
 const exec = promisify(execFile);
 
@@ -59,6 +59,7 @@ export interface HostWiring {
   readonly recoverLaunches: (project: ProjectId) => Promise<void>;
   readonly refreshLaunch: () => Promise<unknown>;
   readonly upstream: LaunchConfig;
+  readonly selectableLaunchConfig: () => LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
@@ -211,6 +212,7 @@ export async function createHostWiring(options: {
       return live.current().config;
     },
     refreshLaunch: live.refresh,
+    selectableLaunchConfig: () => selectableLaunchConfig(live.current()),
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {

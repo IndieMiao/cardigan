@@ -36,7 +36,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
-  readonly launchSettingsDir?: string;
+  readonly launchSettings?: WebServerOptions["launchSettings"];
   readonly roleLaunchConfig?: WebServerOptions["roleLaunchConfig"];
   readonly executionDiagnostics?: WebServerOptions["executionDiagnostics"];
   readonly mergeGate?: WebServerOptions["mergeGate"];
@@ -75,8 +75,8 @@ export async function webHarness(
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
-    ...(options.launchSettingsDir
-      ? { launchSettingsDir: options.launchSettingsDir }
+    ...(options.launchSettings
+      ? { launchSettings: options.launchSettings }
       : {}),
     roleLaunchConfig:
       options.roleLaunchConfig ??

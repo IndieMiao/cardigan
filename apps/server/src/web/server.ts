@@ -115,7 +115,10 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
-  readonly launchSettingsDir?: string;
+  readonly launchSettings?: {
+    dir: string;
+    effective: () => import("@cardigan/roles").LaunchConfig;
+  };
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
     | undefined;
@@ -245,8 +248,13 @@ export async function startWebServer(
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
   });
-  const launchSettings = options.launchSettingsDir
-    ? new LaunchSettings(store, options.launchSettingsDir, dataDir)
+  const launchSettings = options.launchSettings
+    ? new LaunchSettings(
+        store,
+        options.launchSettings.dir,
+        dataDir,
+        options.launchSettings.effective,
+      )
     : undefined;
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.

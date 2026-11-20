@@ -9,10 +9,10 @@ import {
 import { join } from "node:path";
 import { launchFilesStamp, parseCachedLaunchConfig } from "@cardigan/host";
 import {
+  getHarnessAdapter,
+  type Harness,
   type LaunchConfig,
-  type ProviderDefinition,
   parseSecretsText,
-  requiredSecretKeys,
 } from "@cardigan/roles";
 import {
   listRoleVersions,
@@ -58,12 +58,7 @@ export function readLaunchSettings(dir: string, dataDir: string) {
     if (doc.errors.length) throw invalid();
     const raw = doc.toJS();
     const config = parseCachedLaunchConfig(raw, dataDir);
-    let secrets: Record<string, string> = {};
-    try {
-      secrets = parseSecretsText(readFile(join(dir, "secrets.env"), true));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    const secrets = readSettingsSecrets(dir);
     if (version !== snapshot(dir)) throw stale();
     return { path, original, doc, raw, config, secrets, version };
   } catch (error) {
@@ -72,17 +67,13 @@ export function readLaunchSettings(dir: string, dataDir: string) {
   }
 }
 export type SettingsFile = ReturnType<typeof readLaunchSettings>;
-export function validSettings({ config, secrets }: SettingsFile): LaunchConfig {
-  return {
-    ...config,
-    profiles: Object.fromEntries(
-      Object.entries(config.profiles).filter(([n]) =>
-        requiredSecretKeys(config, n).every(
-          (k) => Object.hasOwn(secrets, k) && !!secrets[k],
-        ),
-      ),
-    ),
-  };
+function readSettingsSecrets(dir: string): Record<string, string> {
+  try {
+    return parseSecretsText(readFile(join(dir, "secrets.env"), true));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw invalid();
+  }
 }
 
 /** Free form env, CLI output, args/config and raw YAML are not public fields. Guard
@@ -90,21 +81,25 @@ export function validSettings({ config, secrets }: SettingsFile): LaunchConfig {
 export function publicFields(
   value: unknown,
   secrets: Record<string, string>,
+  dictionaryKeys = false,
 ): unknown {
   const privateValues = Object.values(secrets).filter(Boolean);
   const text = (s: string) =>
     privateValues.some((v) => s.includes(v)) ? "***" : s;
-  const project = (v: unknown): unknown =>
+  const project = (v: unknown, dynamicKeys = false): unknown =>
     typeof v === "string"
       ? text(v)
       : Array.isArray(v)
-        ? v.map(project)
+        ? v.map((item) => project(item))
         : v && typeof v === "object"
           ? Object.fromEntries(
-              Object.entries(v).map(([k, x]) => [text(k), project(x)]),
+              Object.entries(v).map(([k, x]) => [
+                dynamicKeys ? text(k) : k,
+                project(x),
+              ]),
             )
           : v;
-  return project(value);
+  return project(value, dictionaryKeys);
 }
 export function references(
   store: Store,
@@ -140,22 +135,36 @@ export function references(
 }
 
 /** Imported Claude settings predate base_url. Never display a legacy env URL with credentials. */
-export function legacyEndpoint(p: ProviderDefinition) {
-  const key =
-    p.harness === "claude-code" ? "ANTHROPIC_BASE_URL" : p.base_url_env;
-  const value = key && p.env[key];
-  if (!value || !key) return undefined;
-  const url = URL.parse(value);
-  return {
-    key,
-    value:
-      url &&
-      ["http:", "https:"].includes(url.protocol) &&
-      !url.username &&
-      !url.password &&
-      !url.search &&
-      !url.hash
-        ? value
-        : null,
-  };
+export function legacyEndpoints(config: LaunchConfig, id: string) {
+  const provider = config.providers[id];
+  if (!provider) return [];
+  const harnesses = new Set<Harness>();
+  if (provider.harness) harnesses.add(provider.harness);
+  if (provider.base_url_env) harnesses.add("pi");
+  for (const profile of Object.values(config.profiles))
+    if (profile.provider === id) harnesses.add(profile.harness);
+  const keys = new Set(
+    Array.from(harnesses, (h) =>
+      getHarnessAdapter(h).endpointEnvKey?.(provider),
+    ),
+  );
+  return Array.from(keys).flatMap((key) => {
+    if (!key || !Object.hasOwn(provider.env, key)) return [];
+    const value = provider.env[key];
+    const url = value && URL.parse(value);
+    return [
+      {
+        key,
+        value:
+          url &&
+          ["http:", "https:"].includes(url.protocol) &&
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash
+            ? value
+            : null,
+      },
+    ];
+  });
 }

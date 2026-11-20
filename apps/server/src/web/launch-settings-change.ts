@@ -1,10 +1,10 @@
-import { parseCachedLaunchConfig } from "@cardigan/host";
-import { HARNESSES, validateLaunchSecrets } from "@cardigan/roles";
+import { HARNESSES } from "@cardigan/roles";
 import { isAlias, isMap, isScalar } from "yaml";
 import { z } from "zod";
 import {
   invalid,
-  legacyEndpoint,
+  legacyEndpoints,
+  publicFields,
   type SettingsFile,
 } from "./launch-settings-file.js";
 
@@ -35,7 +35,11 @@ export const changeSchema = z.discriminatedUnion("op", [
   z.strictObject({ op: z.literal("copy_profile"), name, source: name }),
   z.strictObject({ op: z.literal("edit_profile"), name, fields: params }),
   z.strictObject({ op: z.literal("delete_profile"), name }),
-  z.strictObject({ op: z.literal("set_model"), name, id: text }),
+  z.strictObject({
+    op: z.literal("set_model"),
+    name,
+    id: text.refine((id) => !!id.trim()),
+  }),
   z.strictObject({
     op: z.literal("edit_provider"),
     name,
@@ -62,7 +66,7 @@ function independent(file: SettingsFile, path: string[]) {
   }
 }
 
-export function candidate(file: SettingsFile, change: Change, dataDir: string) {
+export function candidate(file: SettingsFile, change: Change) {
   const { doc, config, secrets } = file;
   const group =
     change.op === "set_model"
@@ -88,6 +92,7 @@ export function candidate(file: SettingsFile, change: Change, dataDir: string) {
     if (value === null) doc.deleteIn([...path, ...field]);
     else doc.setIn([...path, ...field], doc.createNode(value));
   }
+  if (publicFields(change.name, secrets) !== change.name) throw invalid("name");
   switch (change.op) {
     case "create_profile":
     case "edit_profile":
@@ -125,6 +130,7 @@ export function candidate(file: SettingsFile, change: Change, dataDir: string) {
             change.fields.secret_env ?? {},
           )) {
             if (
+              publicFields(env, secrets) !== env ||
               !Object.hasOwn(
                 config.providers[change.name]?.secret_env ?? {},
                 env,
@@ -135,10 +141,13 @@ export function candidate(file: SettingsFile, change: Change, dataDir: string) {
             set(["secret_env", env], key);
           }
         } else if (k === "base_url") {
-          const legacy = legacyEndpoint(provider);
-          if (legacy) {
+          for (const legacy of legacyEndpoints(config, change.name)) {
             // Unsafe historical URLs may contain an embedded key; edit these on the host.
-            if (!legacy.value) throw invalid("base_url");
+            if (
+              !legacy.value ||
+              publicFields(legacy.key, secrets) !== legacy.key
+            )
+              throw invalid("base_url");
             set(["env", legacy.key], v);
           }
           set(["base_url"], v);
@@ -148,11 +157,13 @@ export function candidate(file: SettingsFile, change: Change, dataDir: string) {
     }
   }
   if (!diff.length) throw invalid();
-  try {
-    const next = parseCachedLaunchConfig(doc.toJS(), dataDir);
-    validateLaunchSecrets(next, secrets);
-    return { diff, text: doc.toString() };
-  } catch {
-    throw invalid();
-  }
+  // Field paths contain protocol literals; only their dynamic components and
+  // displayed values can contain private configuration data.
+  for (const { before, after } of diff)
+    for (const value of [before, after])
+      if (
+        JSON.stringify(value) !== JSON.stringify(publicFields(value, secrets))
+      )
+        throw invalid();
+  return { diff, text: doc.toString(), raw: doc.toJS() };
 }
