@@ -38,6 +38,7 @@ import { Tooltip } from "./Tooltip.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { MoreHorizontalIcon } from "./ui/icons.js";
+import { Meter, type MeterTone } from "./ui/meter.js";
 import { TableCell, TableRow } from "./ui/table.js";
 
 export const MachinesContext = createContext<ExecutionData["machines"]>([]);
@@ -234,19 +235,40 @@ export function contextUsage(run: RunView | undefined): string {
   if (!reading) return NONE;
   return `已用 ${reading.used}%，剩余 ${reading.remaining}%（${reading.window}）`;
 }
-/** The execution list consistently shows used percentage, including missing samples. */
+const meterTones: Record<ContextLevel, MeterTone> = {
+  normal: "neutral",
+  handoff: "warning",
+  restart: "danger",
+};
+/**
+ * The execution list consistently shows used percentage, including missing
+ * samples. C-504: list mode adds a meter under a recorded reading.
+ */
 function ContextCell({
   run,
   labelled = false,
+  meter = false,
 }: {
   readonly run: RunView | undefined;
   readonly labelled?: boolean;
+  readonly meter?: boolean;
 }) {
   const reading = contextReading(run);
+  const value = reading ? `${reading.used}%` : NONE;
   return (
     <span className="execution-context hint" data-level={reading?.level}>
       {labelled ? "上下文 " : ""}
-      {reading ? `${reading.used}%` : NONE}
+      {meter && reading ? (
+        <Meter
+          value={reading.meter}
+          tone={meterTones[reading.level]}
+          label={`上下文已用 ${reading.used}%`}
+        >
+          {value}
+        </Meter>
+      ) : (
+        value
+      )}
     </span>
   );
 }
@@ -504,7 +526,7 @@ export function AssignmentRow({
         <AssignmentMachine a={a} />
       </TableCell>
       <TableCell data-column="context">
-        <ContextCell run={run} />
+        <ContextCell run={run} meter />
       </TableCell>
       <TableCell data-column="config" className="execution-config">
         <LongContent lines={2}>{runConfig(run)}</LongContent>
@@ -569,7 +591,7 @@ export function AssignmentCard({
 
         <IdentityRow className="execution-card-context metadata">
           <AssignmentMachine a={a} />
-          <ContextCell run={run} labelled />
+          <ContextCell run={run} labelled meter={!lane} />
         </IdentityRow>
         <IdentityRow className="execution-card-foot">
           <OpenButton a={a} open={open} onOpen={onOpen} button={button} />

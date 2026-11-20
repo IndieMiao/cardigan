@@ -294,16 +294,20 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   expect(coder.state).not.toContain("有效");
   expect(coder.config).toBe("claude / opus-5.5 / xhigh");
   expect(coder.context).toBe("90.00%");
-  expect(coder.row.querySelector(".execution-context-meter")).toBeNull();
   expect(
     coder.row.querySelector(".execution-context")?.getAttribute("data-level"),
   ).toBe("restart");
+  // C-504: the list puts a meter under a recorded reading only.
+  expect(
+    within(coder.row).getByRole("meter", { name: "上下文已用 90.00%" }),
+  ).toBeTruthy();
 
   // Recorded Run without launch profile data or context usage.
   const backstage = cells("A-7");
   expect(backstage.task).toBe("常驻 PM · 后台");
   expect(backstage.config).toBe("— / fixture-model / —");
   expect(backstage.context).toBe("—");
+  expect(within(backstage.row).queryByRole("meter")).toBeNull();
 
   // The external Assignment has no Run.
   const outside = cells("A-9");
@@ -312,6 +316,7 @@ test("C-436: seven columns put employee, task, state and context first and fold 
   expect(outside.state).toContain("外接身份");
   expect(outside.config).toBe("—");
   expect(outside.context).toBe("—");
+  expect(within(outside.row).queryByRole("meter")).toBeNull();
 
   // C-73: newest activity first is unchanged.
   expect(
@@ -319,6 +324,61 @@ test("C-436: seven columns put employee, task, state and context first and fold 
       (row) => row.querySelector(".execution-open")?.textContent,
     ),
   ).toEqual(["A-1", "A-7", "A-9"]);
+});
+
+test("C-504: the list meter follows the reading's length and level; no reading has no meter", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all";
+  const rows = [
+    ["A-1", 0.6875],
+    ["A-2", 0.82],
+    ["A-3", 0.9],
+    ["A-4", 1.2],
+  ] as const;
+  render(
+    <ExecutionPage
+      client={fakeClient({
+        execution: async () => ({
+          assignments: [...rows.map(([id]) => ({ ...base, id })), pm],
+          runs: [
+            ...rows.map(([id, used_ratio]) => ({
+              ...withUsage(used_ratio),
+              id: `R-${id}`,
+              assignment_id: id,
+            })),
+            legacyRun,
+          ],
+          machines: [],
+        }),
+        executionRuns: async () => ({ runs: [], total: 0, next_cursor: null }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const meterOf = (id: string) => within(cells(id).row).getByRole("meter");
+  const expected = [
+    ["A-1", "68.75", "68.75", "neutral"],
+    ["A-2", "82.00", "82", "warning"],
+    ["A-3", "90.00", "90", "danger"],
+    // Over the window: the text keeps the reading, the bar stops at full.
+    ["A-4", "120.00", "100", "danger"],
+  ] as const;
+  for (const [id, used, width, tone] of expected) {
+    const meter = meterOf(id);
+    expect(meter.getAttribute("aria-label")).toBe(`上下文已用 ${used}%`);
+    expect((meter as HTMLMeterElement).value).toBe(Number(width));
+    expect(meter.closest("[data-ui=meter]")?.getAttribute("data-tone")).toBe(
+      tone,
+    );
+    expect(cells(id).context).toBe(`${used}%`);
+  }
+  expect(cells("A-7").context).toBe("—");
+  expect(within(cells("A-7").row).queryByRole("meter")).toBeNull();
+  // The detail drawer keeps its one-line text without a meter.
+  fireEvent.click(screen.getByRole("button", { name: "查看 A-2 详情" }));
+  const drawer = await screen.findByRole("dialog", { name: "A-2 详情" });
+  expect(within(drawer).queryByRole("meter")).toBeNull();
+  expect(drawer.textContent).toContain("已用 82.00%，剩余 18.00%（200K）");
 });
 
 test("C-207: abnormal Assignment status and a bad Run outcome stay in the row", async () => {
@@ -431,6 +491,12 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
     const positions = order.map((part) => text.indexOf(part));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((x, y) => x - y)).toEqual(positions);
+    // C-504: narrow list mode keeps the meter under the percentage only.
+    expect(
+      within(card)
+        .getByRole("meter", { name: "上下文已用 90.00%" })
+        .closest("[data-ui=meter]")?.textContent,
+    ).toBe("90.00%");
     // The configuration is folded.
     const details = within(card)
       .getByText("运行配置与最近执行")

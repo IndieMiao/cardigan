@@ -58,6 +58,8 @@
     --ui-run-ring: 2px;
     --ui-run-keyline: 1px;
     --ui-run-cycle: 2.8s;
+    /* C-504: a thin meter track under its value text. */
+    --ui-meter: 3px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;
@@ -472,6 +474,52 @@
   }
   .ui-skeleton > div:last-child {
     width: 80%;
+  }
+  /* The track hangs below the value's line box, so the value keeps its
+     baseline and the row keeps its height. */
+  .ui-meter {
+    --ui-meter-color: var(--text-muted);
+    position: relative;
+    display: inline-block;
+  }
+  .ui-meter[data-tone="warning"] {
+    --ui-meter-color: var(--status-wait);
+  }
+  .ui-meter[data-tone="danger"] {
+    --ui-meter-color: var(--danger);
+  }
+  .ui-meter-track {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    display: block;
+    width: 100%;
+    height: var(--ui-meter);
+    margin: 0;
+    border: 0;
+    border-radius: var(--ui-pill-radius);
+    overflow: hidden;
+    appearance: none;
+    background: var(--border);
+  }
+  .ui-meter-track::-webkit-meter-inner-element {
+    display: block;
+  }
+  .ui-meter-track::-webkit-meter-bar {
+    height: var(--ui-meter);
+    border: 0;
+    border-radius: var(--ui-pill-radius);
+    background: var(--border);
+  }
+  .ui-meter-track::-webkit-meter-optimum-value,
+  .ui-meter-track::-webkit-meter-suboptimum-value,
+  .ui-meter-track::-webkit-meter-even-less-good-value {
+    border-radius: var(--ui-pill-radius);
+    background: var(--ui-meter-color);
+  }
+  .ui-meter-track::-moz-meter-bar {
+    border-radius: var(--ui-pill-radius);
+    background: var(--ui-meter-color);
   }
   .ui-badge {
     display: inline-flex;
