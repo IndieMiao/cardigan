@@ -240,17 +240,23 @@ class Confirmation:
 # EOF alone is NOT settlement (the supervisor may have crashed). Participants
 # peek the immutable record so it remains readable by private cross-group heirs.
 SETTLED = b'cardigan-private-settled-v1\n'
-VITE_RETAINED = {b'U': 'vite_external_use_unreleased_retained', b'?': 'vite_ingress_unproven_retained'}
 
 
-def supervise(key, argv, confirmation, exited, env, cancellation, vite_feedback=False):
+def supervise(key, argv, confirmation, exited, env, cancellation, project_vite=False):
     publisher, participant = socket.socketpair()
     with publisher, participant:
-        if not vite_feedback:
-            participant.shutdown(socket.SHUT_WR)
-        channel = participant.fileno()
-        env['CARDIGAN_PRIVATE_LIFETIME_FD'] = str(channel)
-        task = subprocess.Popen(argv, env=env, start_new_session=True, pass_fds=(channel,))
+        participant.shutdown(socket.SHUT_WR)
+        # The signed entry identifies the adapter, not the Node selected by
+        # PATH, its startup hooks or code imported from the project. Do not
+        # entrust this eager project launch with a settlement capability.
+        if project_vite:
+            env.pop('CARDIGAN_PRIVATE_LIFETIME_FD', None)
+            task_fds = ()
+        else:
+            channel = participant.fileno()
+            env['CARDIGAN_PRIVATE_LIFETIME_FD'] = str(channel)
+            task_fds = (channel,)
+        task = subprocess.Popen(argv, env=env, start_new_session=True, pass_fds=task_fds)
         participant.close()
         env.clear()
         disown_stdio()
@@ -270,6 +276,9 @@ def supervise(key, argv, confirmation, exited, env, cancellation, vite_feedback=
                 return 0
             cancelled = foreground and select.select([cancellation], [], [], 0)[0]
             if cancelled or exited() or confirmation.state() == 'ended':
+                if project_vite:
+                    audit(key, 'vite_ingress_unproven_retained')
+                    return 125
                 try:
                     publisher.sendall(SETTLED)
                     # Keep our write half open. With the participant's write
@@ -280,13 +289,6 @@ def supervise(key, argv, confirmation, exited, env, cancellation, vite_feedback=
                     # positive reply or permission to kill it or its siblings.
                     deadline = time.monotonic() + 1
                     while time.monotonic() < deadline:
-                        if vite_feedback and select.select([publisher], [], [], 0)[0]:
-                            # Only fixed, negative acknowledgements are meaningful. No
-                            # task-supplied data grants release or enters the audit log.
-                            reason = VITE_RETAINED.get(publisher.recv(1))
-                            if reason:
-                                audit(key, reason)
-                                return 125
                         if task.poll() is not None and poll.poll(0):
                             audit(key, 'private_participants_released')
                             return 143
@@ -312,7 +314,7 @@ def emit_status(code):
         status_pipe = None
 
 
-def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, vite_feedback=False):
+def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, project_vite=False):
     global status_pipe
     require(KEY.fullmatch(key) and argv)
     expected = expected or birth(pid)
@@ -343,7 +345,7 @@ def command(tag, key, pid, argv, base='/tmp', expected=None, confirmation=None, 
         try:
             os.setsid()
             code = supervise(key, argv, confirmation, session_watch(pid, expected),
-                             dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read, vite_feedback)
+                             dict(os.environ, TMPDIR=path, TEMP=path, TMP=path), cancel_read, project_vite)
             emit_status(code)
         finally:
             os._exit(0)
@@ -430,7 +432,7 @@ def main():
         key = os.environ['CARDIGAN_RESOURCE_SESSION'] + '.' + sys.argv[1]
         sys.exit(command(os.environ['CARDIGAN_RESOURCE_TARGET'], key,
                          int(os.environ['CARDIGAN_SESSION_PID']), argv, expected=os.environ['CARDIGAN_SESSION_BIRTH'],
-                         vite_feedback=sys.argv[2] == '--private-vite'))
+                         project_vite=sys.argv[2] == '--private-vite'))
 
 
 if __name__ == '__main__':

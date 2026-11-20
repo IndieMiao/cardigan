@@ -16,6 +16,15 @@ test("process groups, detached descendants, session exit and replaced/occupied s
   expect(result.stdout).toContain("isolated run resources passed");
 }, 60000);
 
+test("a proven exclusively owned Vite instance with no admissions releases its port", async () => {
+  const result = await promisify(execFile)(
+    "python3",
+    ["-IB", "test-support/run-resources.py", "unused-vite"],
+    { timeout: 20000 },
+  );
+  expect(result.stdout).toContain("unused private Vite released");
+}, 25000);
+
 test("draining workers are previewed without starting work or scheduling a deletion", async () => {
   const f = m4Fixture();
   try {
