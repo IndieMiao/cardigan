@@ -73,6 +73,7 @@ export async function webHarness(
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
+    roleProfiles: () => ({ fixture: { harness: "codex" } }),
     launchProfiles: () => ["fixture"],
     log: options.log ?? (() => undefined),
     store,

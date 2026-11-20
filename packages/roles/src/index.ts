@@ -68,6 +68,12 @@ export {
 } from "./model-catalog.js";
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
+  exportRoleMarkdown,
+  parseRoleMarkdown,
+  type RoleMarkdown,
+  RoleMarkdownError,
+} from "./role-markdown.js";
+export {
   AGENT_PROTOCOL,
   BROWSER_SCREENSHOT_RULE,
   type ConvertedRoleInstructions,

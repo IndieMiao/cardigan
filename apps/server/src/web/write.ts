@@ -49,8 +49,12 @@ import {
   uploadAttachment,
 } from "@cardigan/domain";
 import {
+  applyRoleDocument,
   effectiveRunLimit,
   type ProjectMergeGate,
+  previewPorts,
+  previewRoleDocument,
+  RoleDocumentError,
   runCapacityMachines,
 } from "@cardigan/host";
 import {
@@ -63,27 +67,28 @@ import {
 } from "@cardigan/mcp-server";
 import {
   defaultRoleDefinition,
+  exportRoleMarkdown,
   HARNESSES,
   isDefaultRoleId,
+  RoleMarkdownError,
 } from "@cardigan/roles";
 import {
   getRoleVersion,
   listRoleVersions,
   persistRoleEffect,
   persistRunLimitEffect,
+  type ReadRepositories,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { z } from "zod";
-import { serveEmployees } from "./employees.js";
+import { requireEmployeeOwner, serveEmployees } from "./employees.js";
 import {
   HttpRejection,
   methodNotAllowed,
   readJsonBody,
   sendJson,
 } from "./http.js";
-
-import { previewPorts } from "./read.js";
 
 const text = z
   .string()
@@ -265,6 +270,9 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly roleProfiles?:
+    | (() => import("@cardigan/roles").LaunchConfig["profiles"])
+    | undefined;
   readonly launchProfiles?: (() => readonly string[]) | undefined;
   readonly runLimit?: ((machine: string) => number) | undefined;
   readonly runLimitMaximum?: ((machine: string) => number) | undefined;
@@ -588,6 +596,67 @@ export async function serveWrite(
   c: WriteContext,
   rest: string,
 ): Promise<boolean> {
+  const exportId = /^\/roles\/([a-z0-9][a-z0-9._-]*)\/export$/u.exec(rest)?.[1];
+  if (exportId) {
+    if (c.req.method !== "GET") methodNotAllowed(["GET"]);
+    c.authorize();
+    const role = c.store.uow.read((tx) =>
+      getRoleVersion(tx, c.project_id, exportId),
+    );
+    if (!role) throw new HttpRejection(404, "not_found", "角色不存在");
+    sendJson(c.res, 200, { markdown: exportRoleMarkdown(role) });
+    return true;
+  }
+  if (rest === "/role-document/preview" || rest === "/role-document/apply") {
+    if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+    c.authorize();
+    if (c.req.headers.authorization !== undefined)
+      throw new HttpRejection(403, "unauthorized", "仅支持人类会话");
+    const body = await readJsonBody(c.req);
+    const context = {
+      ...c,
+      actor: { kind: "human" as const, project_id: c.project_id },
+      profiles: c.roleProfiles ?? (() => ({})),
+      authorize: (
+        tx: Pick<ReadRepositories, "members">,
+        employees: boolean,
+      ) => {
+        if (employees) requireEmployeeOwner(c, tx);
+        else c.authorize();
+      },
+    };
+    const schema = z.strictObject({ markdown: z.string() });
+    try {
+      if (rest.endsWith("/preview"))
+        sendJson(
+          c.res,
+          200,
+          previewRoleDocument(context, parsed(schema, body).markdown),
+        );
+      else {
+        const { markdown, snapshot } = parsed(
+          schema.extend({ snapshot: z.string() }),
+          body,
+        );
+        const key = parsed(
+          requiredKey,
+          c.req.headers["idempotency-key"],
+          "应用需要 Idempotency-Key",
+        );
+        sendJson(
+          c.res,
+          200,
+          applyRoleDocument(context, markdown, snapshot, key),
+        );
+      }
+    } catch (e) {
+      if (e instanceof RoleDocumentError) rejected(e);
+      if (e instanceof RoleMarkdownError)
+        throw new HttpRejection(400, "validation_failed", e.message);
+      throw e;
+    }
+    return true;
+  }
   if (await serveEmployees(c, rest)) return true;
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
     // "validate" is also a legal template ID: GET reads its details, POST previews.
