@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -10,7 +11,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import type { ExecutionCapacity } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
-import { CapacityProvider } from "./Capacity.js";
+import { CapacityProvider, useCapacity } from "./Capacity.js";
 import { PageTitle } from "./Foundation.js";
 
 const capacity: ExecutionCapacity = {
@@ -212,3 +213,79 @@ test.each(["github", "ssh", "local"] as const)(
     ).toBeTruthy();
   },
 );
+
+type Seen = { stale: boolean; pending: boolean; error: boolean };
+/** Records what the shared capacity read reports on every render. */
+function StaleProbe({
+  seen,
+  onReload,
+}: {
+  seen: Seen[];
+  onReload: (reload: (() => void) | undefined) => void;
+}) {
+  const c = useCapacity();
+  onReload(c?.reload);
+  if (c) seen.push({ stale: c.stale, pending: c.pending, error: !!c.error });
+  return <span>{c?.stale ? "stale" : "usable"}</span>;
+}
+
+test("C-512 (Q-1017): stale holds from a failed read until a later read succeeds, not while one is in flight", async () => {
+  let fail = false;
+  let gate: Promise<void> | undefined;
+  const client = fakeClient({
+    executionCapacity: async () => {
+      if (gate) await gate;
+      if (fail) throw new Error("合成容量读取失败");
+      return capacity;
+    },
+  });
+  const seen: Seen[] = [];
+  let reload: (() => void) | undefined;
+  const probe = (
+    <StaleProbe
+      seen={seen}
+      onReload={(r) => {
+        reload = r;
+      }}
+    />
+  );
+  const at = (revision: number) => (
+    <CapacityProvider
+      client={client}
+      projectId="p-1"
+      revision={revision}
+      canEdit
+    >
+      {probe}
+    </CapacityProvider>
+  );
+  const view = render(at(0));
+  expect(await screen.findByText("usable")).toBeTruthy();
+  // A background refresh without an earlier failure is never stale.
+  let held = Promise.withResolvers<void>();
+  gate = held.promise;
+  seen.length = 0;
+  view.rerender(at(1));
+  await waitFor(() => expect(seen.some((s) => s.pending)).toBe(true));
+  expect(seen.every((s) => !s.stale)).toBe(true);
+  gate = undefined;
+  await act(async () => held.resolve());
+  // A failure makes it stale.
+  fail = true;
+  view.rerender(at(2));
+  expect(await screen.findByText("stale")).toBeTruthy();
+  // The retry in flight keeps it stale (the error is cleared meanwhile).
+  fail = false;
+  held = Promise.withResolvers<void>();
+  gate = held.promise;
+  seen.length = 0;
+  act(() => reload?.());
+  await waitFor(() =>
+    expect(seen.some((s) => s.pending && !s.error)).toBe(true),
+  );
+  expect(seen.filter((s) => s.pending).every((s) => s.stale)).toBe(true);
+  // A completed read without error makes it usable again.
+  gate = undefined;
+  await act(async () => held.resolve());
+  expect(await screen.findByText("usable")).toBeTruthy();
+});

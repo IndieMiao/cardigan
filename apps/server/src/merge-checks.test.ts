@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GitPublicationGuard } from "@cardigan/domain";
@@ -2632,8 +2632,8 @@ test.each([
         };
       }),
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: vi.fn(
-        async () => "FAIL synthetic token=synthetic-secret",
+      fetchFailureLog: vi.fn(async (_handle, open) =>
+        open()("FAIL example.test.ts > synthetic token=synthetic-secret"),
       ),
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -2658,7 +2658,13 @@ test.each([
     if (status === "executor_unreachable")
       expect(check()?.status).toBe("queued");
     if (status === "failed") {
-      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      expect(check()?.summary).toContain(
+        "FAIL example.test.ts > synthetic token=[REDACTED]",
+      );
+      expect(
+        f.state().timeline.find((t) => t.body.startsWith("合并检查 failed"))
+          ?.body,
+      ).toContain("example.test.ts > synthetic token=[REDACTED]");
       const contents = await readFile(
         join(
           f.dataDir,
@@ -2775,9 +2781,9 @@ test.each(["timed_out", "executor_unreachable"] as const)(
       },
       poll: async () => terminal,
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: () => {
+      fetchFailureLog: (_handle, open) => {
         started.resolve(required(input));
-        return download.promise;
+        return download.promise.then(open());
       },
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -3179,9 +3185,11 @@ test.each([
         },
       ]),
       cancel: vi.fn(async () => {}),
-      jobLog: vi.fn(
-        async () =>
-          "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+      jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
+        open()(
+          '##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n' +
+            "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+        ),
       ),
     };
     const pushCheckCandidate = vi.fn(async () => ({
@@ -3780,10 +3788,11 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
 
 async function reworkGithubFixture(
   options: {
-    log?: string;
+    log?: string | string[];
     excerptBytes?: number;
     noRunId?: boolean;
     scoped?: boolean;
+    failedStep?: "lint" | "e2e" | "Setup Node";
   } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
@@ -3868,12 +3877,33 @@ async function reworkGithubFixture(
           number: index + 1,
           status: "completed",
           conclusion:
-            conclusion === "failure" && name === "test" ? "failure" : "success",
+            conclusion === "failure" && name === (options.failedStep ?? "test")
+              ? "failure"
+              : conclusion === "failure" &&
+                  options.failedStep === "Setup Node" &&
+                  index > GITHUB_WORKFLOW_STEPS.indexOf("Setup Node")
+                ? "skipped"
+                : "success",
+          ...(options.failedStep
+            ? {
+                started_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index),
+                ).toISOString(),
+                completed_at: new Date(
+                  Date.UTC(2030, 0, 1, 0, index, 59),
+                ).toISOString(),
+              }
+            : {}),
         })),
       },
     ]),
     cancel: vi.fn(async () => {}),
-    jobLog: vi.fn(async () => options.log ?? "FAIL synthetic\n"),
+    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) => {
+      const write = open();
+      write('##[group]Run workers="$(getconf _NPROCESSORS_ONLN)"\n');
+      const log = options.log ?? "FAIL synthetic\n";
+      for (const part of typeof log === "string" ? [log] : log) write(part);
+    }),
   };
   const git = {
     ...c.git,
@@ -3921,6 +3951,44 @@ test.each(["sk-learn", "ghp_x", "-----END RSA PRIVATE KEY-----"])(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+test("C-529: failed log acquisition persists only its fixed category and bound job link without replacing the execution result", async () => {
+  const h = await reworkGithubFixture();
+  const { GithubExecutorError } = await import("@cardigan/host");
+  const err = new GithubExecutorError("auth");
+  err.diagnostic = "do-not-record-provider-detail";
+  h.client.jobLog.mockRejectedValueOnce(err);
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.status).toBe("failed");
+    expect(check.summary).toContain(
+      "日志获取失败（auth）：https://github.com/fixture/project/actions/runs/123/job/456",
+    );
+    expect(check.summary).not.toContain("do-not-record-provider-detail");
+    expect(check.infra_flaky).not.toBe(true);
+    const log = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    expect(log.slice(0, 1024)).toContain(check.summary);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
 
 test.each(["markers", "controls", "clipped"])(
   "D4 rework: GitHub %s diagnostics cannot strand a trusted failed attempt",
@@ -5842,5 +5910,166 @@ test("expired abandoned GitHub dispatch is settled after a complete empty scan w
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+test.each(["lint", "e2e"] as const)(
+  "whole-job logs publish only the failed %s step on the timeline and first page",
+  async (failedStep) => {
+    const { GITHUB_WORKFLOW_STEPS } = await import("@cardigan/host");
+    const line = (step: "test" | "lint" | "e2e", text: string) =>
+      `2030-01-01T00:${String(GITHUB_WORKFLOW_STEPS.indexOf(step)).padStart(2, "0")}:02.1234567Z ${text}\n`;
+    // Exercise both a label in the failing step and one in the previous step.
+    const labelStep = failedStep === "lint" ? failedStep : "test";
+    const h = await reworkGithubFixture({
+      failedStep,
+      log: [
+        line("test", ".".repeat(132000)).trimEnd() + "\x1b[",
+        "2K\n",
+        line("test", "Error: recovered sample") +
+          line("test", "FAIL recovered sample") +
+          line("test", "Tests 99 passed") +
+          line("test", "display_label=YQ==; password =") +
+          line(labelStep, "  'private-continuation") +
+          line(labelStep, "FAIL private-continuation'") +
+          line(labelStep, "display_label=cmFpbnk=") +
+          line(failedStep, "FAIL src/check.spec.ts > required check") +
+          line(
+            failedStep,
+            "Error: required diagnostic CI_COLOR = 'private synthetic phrase'",
+          ) +
+          line(
+            failedStep,
+            "##[error] connect postgresql://demo:private-uri@db.invalid/path",
+          ) +
+          line(failedStep, "Tests 1 failed"),
+      ],
+    });
+    const gate = h.create();
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete("failure");
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      const body = await readFile(
+        join(
+          h.f.dataDir,
+          "merge-gate/logs",
+          h.f.project_id,
+          required(check.log_ref),
+        ),
+        "utf8",
+      );
+      const timeline = h.f
+        .state()
+        .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+      for (const text of [check.summary, timeline, body.split("===")[0]]) {
+        expect(text).toContain("required check");
+        expect(text).toContain("required diagnostic");
+        expect(text).toContain("Tests 1 failed");
+        expect(text).not.toContain("recovered sample");
+        expect(text).not.toContain("Tests 99 passed");
+      }
+      expect(body.split(`=== ${failedStep} ===`)[1]).toContain(
+        "required check",
+      );
+      expect(check.failure_excerpt).toContain("required check");
+      expect(check.failure_excerpt).not.toContain("recovered sample");
+      expect(check.timeout_only).not.toBe(true);
+      for (const secret of [
+        "private-uri",
+        "private synthetic phrase",
+        "private-continuation",
+        "cmFpbnk",
+        "YQ==",
+      ])
+        expect(body + JSON.stringify(check) + timeline).not.toContain(secret);
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["success", "failure"] as const)(
+  "persistent local storage fault preserves verified GitHub %s and does not redispatch",
+  async (conclusion) => {
+    const h = await reworkGithubFixture();
+    const gate = h.create();
+    const original = fs.rename;
+    let attempts = 0;
+    const rename = vi
+      .spyOn(fs, "rename")
+      .mockImplementation(async (from, to) => {
+        if (String(to).endsWith(".log")) {
+          attempts++;
+          throw Object.assign(new Error("private detail"), { code: "ENOSPC" });
+        }
+        return original(from, to);
+      });
+    try {
+      const round = await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+      h.complete(conclusion);
+      h.advance();
+      await gate.schedule([h.f.project_id]);
+      await round.done;
+      const check = required(h.check());
+      expect(check.status).toBe(conclusion === "success" ? "passed" : "failed");
+      expect(check.checks).toHaveLength(6);
+      expect(check.summary).toContain("ENOSPC");
+      expect(check.summary).toContain(check.external_run?.html_url);
+      expect(check.summary).not.toContain("private detail");
+      expect(attempts).toBe(3);
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+    } finally {
+      rename.mockRestore();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("verified setup failure reaches the result, first page and timeline without unrelated annotations", async () => {
+  const h = await reworkGithubFixture({
+    failedStep: "Setup Node",
+    log:
+      "2030-01-01T00:00:02.1234567Z ##[error]wrong passed step\n" +
+      "2030-01-01T00:03:02Z ##[error]Unable to install Node\n" +
+      "##[group]Run Setup Node\n##[error]wrong unverified step\n",
+  });
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.checks.map((c) => c.status)).toEqual(Array(6).fill("not_run"));
+    const body = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    const timeline = h.f
+      .state()
+      .timeline.find((t) => t.body.startsWith("合并检查 failed"))?.body;
+    for (const text of [check.summary, timeline, body.split("===")[0]]) {
+      expect(text).toContain("Setup Node");
+      expect(text).toContain("Unable to install Node");
+      expect(text).not.toContain("wrong");
+    }
+  } finally {
+    gate.stop();
+    await gate.idle();
   }
 });

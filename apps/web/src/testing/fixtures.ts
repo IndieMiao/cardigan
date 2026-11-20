@@ -205,6 +205,10 @@ export function fakeClient(
       merge_config_invalid: false,
     }),
     setRunLimit: async () => {},
+    machines: async () => ({ machines: [] }),
+    machine: async (_p, id) => {
+      throw new Error(`机器 ${id} 不存在`);
+    },
     execution: async () => ({ assignments: [], runs: [], machines: [] }),
     // Pages the overridden execution view's Runs like the server does, so a
     // test that only fakes `execution` still sees the drawer's Run history.

@@ -29,6 +29,7 @@ import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { FeishuSettings } from "./FeishuSettings.js";
+import { MachinesSettings } from "./MachinesSettings.js";
 import { ModelsSettings } from "./ModelsSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
@@ -48,6 +49,7 @@ type SettingsTab =
   | "roles"
   | "templates"
   | "employees"
+  | "machines"
   | "models"
   | "capacity";
 const settingsTabs: readonly SettingsTab[] = [
@@ -57,6 +59,7 @@ const settingsTabs: readonly SettingsTab[] = [
   "roles",
   "templates",
   "employees",
+  "machines",
   "models",
   "capacity",
 ];
@@ -80,10 +83,16 @@ export function SettingsPage({
   client,
   projectId,
   revision = 0,
+  machineRevision = revision,
 }: {
   client: CardiganClient;
   projectId: string;
   revision?: number;
+  /**
+   * Machines are global: the machine panel also rereads on the cross-project
+   * capacity notices, which leave this project's revision unchanged.
+   */
+  machineRevision?: number;
 }) {
   const [filters, setFilters] = useRouteFilters({
     kind: "settings",
@@ -209,6 +218,12 @@ export function SettingsPage({
             {employeeCopy.tab}
           </SettingsNavItem>
           <SettingsNavItem
+            current={tab === "machines"}
+            onClick={() => setTab("machines")}
+          >
+            机器
+          </SettingsNavItem>
+          <SettingsNavItem
             current={tab === "models"}
             onClick={() => setTab("models")}
           >
@@ -256,6 +271,14 @@ export function SettingsPage({
           projectId={projectId}
           initialRole={employeeRole}
           revision={revision}
+        />
+      )}
+      {tab === "machines" && (
+        <MachinesSettings
+          key={projectId}
+          client={client}
+          projectId={projectId}
+          revision={machineRevision}
         />
       )}
       {tab === "models" && (

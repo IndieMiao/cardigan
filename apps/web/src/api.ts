@@ -1181,6 +1181,80 @@ export interface ExecutionMachine {
   } | null;
 }
 
+/**
+ * C-512: the human-only machine read (C-509). Machines are global; each
+ * binding is one project's registration of the machine, as far as the server
+ * authorises it. Only these fields are read; credentials never appear here.
+ */
+export interface MachineBindingView {
+  readonly project_id: string;
+  readonly project_name: string;
+  readonly is_current: boolean;
+  readonly status: string;
+  readonly last_seen: string | null;
+  /** Account, directory and session summary; null without a binding. */
+  readonly runtime: {
+    readonly account: string | null;
+    readonly directory: string | null;
+    readonly session: string;
+    readonly path_entries: number;
+  } | null;
+  /** False when the host's private configuration could not be read. */
+  readonly config_available: boolean;
+  readonly capabilities: readonly MachineCapabilityView[];
+  /** The latest machine check (health) for this project. */
+  readonly machine_check: {
+    readonly status: "checking" | "passed" | "failed";
+    readonly checked_at: string;
+    readonly blockers: readonly string[];
+    readonly available: boolean;
+  } | null;
+  /** The latest explicitly requested check (Web or CLI). */
+  readonly last_requested_check: {
+    readonly id: string;
+    readonly kind: "machine" | "worker";
+    readonly status: "running" | "passed" | "failed";
+    readonly step: string;
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  /** The latest worker onboarding check; `local` has none. */
+  readonly worker_check: {
+    readonly status: "failed" | "passed" | "checking" | "unknown";
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  readonly worker_record_readable: boolean;
+  readonly assignments: readonly {
+    readonly assignment_id: string;
+    readonly role_id: string;
+    readonly employee_id: string | null;
+    readonly employee_name: string | null;
+    readonly card_id: string | null;
+    readonly runs: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly card_id: string | null;
+    }[];
+  }[];
+}
+export interface MachineView {
+  readonly id: string;
+  readonly label: string;
+  readonly os: string;
+  readonly arch: string;
+  /** The most restrictive status across bindings; absent if none is known. */
+  readonly status?: string;
+  readonly last_seen: string | null;
+  readonly run_limit: number;
+  readonly run_limit_maximum: number;
+  readonly resources: readonly {
+    readonly key: string;
+    readonly limit: number;
+  }[];
+  readonly bindings: readonly MachineBindingView[];
+}
+
 /** C-75: one server page of an Assignment's Run history, newest first. */
 export interface ExecutionRunPage {
   readonly runs: readonly RunView[];
@@ -1819,6 +1893,12 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
+  /** C-512: read only; the machine actions belong to C-511. */
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }>;
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -2183,6 +2263,19 @@ export class HttpCardiganClient implements CardiganClient {
   executionDiagnostics(projectId: string): Promise<ExecutionDiagnosticsData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
+    );
+  }
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines`,
+    );
+  }
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}`,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {

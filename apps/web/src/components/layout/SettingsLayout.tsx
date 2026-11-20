@@ -490,6 +490,20 @@ export function SettingsIdentity({ children }: { children: ReactNode }) {
 }
 
 /**
+ * Request feedback for a drawer's own content (loading, a failed read and its
+ * retry) shown in the drawer body where it sits, not in the floating stacks.
+ * While it is mounted the page stack moves to the bottom corner, so a page
+ * notice never covers the drawer's retry.
+ */
+export function SettingsDrawerFeedback({ children }: { children: ReactNode }) {
+  return (
+    <div data-feedback-host="" className={styles.drawerFeedback}>
+      {children}
+    </div>
+  );
+}
+
+/**
  * Settings drawers use the card detail drawer frame. While one is open the
  * request feedback stacks (the drawer's own and the page's) start below the
  * drawer header, so a toast never covers its actions or the close button.
