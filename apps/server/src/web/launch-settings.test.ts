@@ -258,7 +258,8 @@ test("metadata and online jobs run on demand, mutually exclude one profile, and 
       }),
   );
   vi.stubGlobal("fetch", fetch);
-  const check = (mode: string) => post("checks", { profile: "a", mode });
+  const check = (mode: string) =>
+    post("checks", { profile: "a", mode, version });
   expect((await check("metadata")).status).toBe(202);
   async function last() {
     return JSON.parse((await get()).body).profiles[0].last_check;
@@ -358,4 +359,43 @@ test("a lost commit after rename is recovered by the same confirmation without a
   expect(
     h.store.database.prepare("SELECT installed FROM launch_web_changes").all(),
   ).toEqual([{ installed: 1 }]);
+});
+
+test("only the installed, explicitly selected endpoint may receive a credential; errors do not echo the upstream", async () => {
+  const network = vi.fn(async () => new Response(secret, { status: 403 }));
+  vi.stubGlobal("fetch", network);
+  const data = await confirmation({
+    op: "edit_provider",
+    name: "gateway",
+    fields: { base_url: "https://new.example.invalid" },
+  });
+  expect(network).not.toHaveBeenCalled();
+  const check = () => post("checks", { profile: "a", mode: "online", version });
+  expect((await check()).status).toBe(202);
+  await vi.waitFor(async () =>
+    expect(JSON.parse((await get()).body).profiles[0].last_check.status).toBe(
+      "failed",
+    ),
+  );
+  expect(network).toHaveBeenCalledOnce();
+  expect(network.mock.calls[0]).toMatchObject([
+    "https://gateway.example.invalid/v1/models",
+    { headers: { "x-api-key": secret }, redirect: "error" },
+  ]);
+  expect((await post("confirm", data)).status).toBe(200);
+  expect((await check()).status).toBe(409);
+  expect(network).toHaveBeenCalledTimes(1);
+  const next = await get();
+  expect(next.body).not.toContain(secret);
+  version = JSON.parse(next.body).version;
+  expect((await check()).status).toBe(202);
+  await vi.waitFor(() => expect(network).toHaveBeenCalledTimes(2));
+  expect(network.mock.calls[1]).toMatchObject([
+    "https://new.example.invalid/v1/models",
+    { headers: { "x-api-key": secret }, redirect: "error" },
+  ]);
+  const audit = h.store.database
+    .prepare("SELECT result FROM launch_profile_checks")
+    .all();
+  expect(JSON.stringify(audit)).not.toContain(secret);
 });

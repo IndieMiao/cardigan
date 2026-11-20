@@ -40,6 +40,7 @@ const confirmBody = z.strictObject({
   preview_id: z.uuid(),
 });
 const checkBody = z.strictObject({
+  version: versionSchema,
   profile: z.string(),
   mode: z.enum(["metadata", "online"]),
 });
@@ -55,7 +56,7 @@ export class LaunchSettings {
     private readonly dir: string,
     private readonly dataDir: string,
   ) {
-    this.checks = new ProfileChecks(store);
+    this.checks = new ProfileChecks(store, () => snapshot(dir));
   }
   effective(): LaunchConfig {
     return validSettings(this.file());
@@ -273,6 +274,7 @@ export class LaunchSettings {
       const input = checkBody.safeParse(body);
       if (!input.success) throw invalid();
       const f = this.file();
+      if (input.data.version !== f.version) throw stale();
       sendJson(
         res,
         202,

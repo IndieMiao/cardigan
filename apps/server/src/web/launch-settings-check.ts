@@ -52,7 +52,10 @@ async function cliVersion(path: string, harness: Harness) {
 export type CheckMode = "metadata" | "online";
 export class ProfileChecks {
   private readonly active = new Map<string, Promise<void>>();
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    private readonly currentVersion: () => string,
+  ) {}
   private readonly versions = new Map<
     Harness,
     { stamp: string; version: Promise<string | null> }
@@ -140,6 +143,8 @@ export class ProfileChecks {
                 "reasoning_efforts",
               ] as const)
                 if (model[key] === undefined) problems.push(`missing_${key}`);
+          } else if (this.currentVersion() !== file.version) {
+            problems.push("stale_snapshot");
           } else if (
             !missing &&
             (await probeModel(
