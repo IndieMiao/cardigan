@@ -49,6 +49,8 @@ export interface GithubDispatchIntent {
   readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
+  /** Local merge publisher's supervision deadline, fixed before Git IO; never a POST deadline. */
+  readonly publicationDeadlineAt?: number;
   /** Only the dispatching process can still send or receive this POST. */
   readonly postOwner?: ExecutionOwner;
   /** Proof the POST writer settled or exited, plus a full visibility window. */
@@ -947,7 +949,10 @@ export class GithubDispatchJournal {
     }
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
-  beginPublication(intent: GithubDispatchIntent): boolean {
+  beginPublication(
+    intent: GithubDispatchIntent,
+    publicationDeadlineAt?: number,
+  ): boolean {
     const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
@@ -977,7 +982,14 @@ export class GithubDispatchJournal {
         return false;
       const publisher = executionOwner(process.pid);
       if (!publisher) throw new GithubExecutorError("recovery_incomplete");
-      this.save(tx, { ...current, phase: "publishing", publisher });
+      this.save(tx, {
+        ...current,
+        phase: "publishing",
+        publisher,
+        ...(publicationDeadlineAt !== undefined
+          ? { publicationDeadlineAt }
+          : {}),
+      });
       return true;
     });
     if (result === "held") throw new CheckExecutorSuspended();
@@ -1000,7 +1012,11 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "publishing") return false;
-      const { publisher: _publisher, ...settled } = current;
+      const {
+        publisher: _publisher,
+        publicationDeadlineAt: _deadline,
+        ...settled
+      } = current;
       const held = !!tx.cards.get(
         intent.project as ProjectId,
         intent.card as CardId,

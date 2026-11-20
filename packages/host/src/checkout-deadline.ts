@@ -10,6 +10,17 @@ export class CheckExecutorSuspended extends Error {
 /** The trusted Git adapter did not enter transport; the publisher fence has settled. */
 export class CandidateRepositoryBusy extends CheckExecutorSuspended {}
 
+/** Shared by the supervisor timer and recovery of its still-live local writer. */
+export function checkoutSupervisionMs(
+  totalTimeoutMs = 60 * 60_000,
+  startupTimeoutMs = 0,
+): number {
+  return Math.min(
+    2147483647,
+    totalTimeoutMs + startupTimeoutMs + CHECKOUT_LIMITS.graceMs,
+  );
+}
+
 /** A controller must recover even when an executor ignores cancellation or never settles. */
 export async function withCheckoutDeadline<
   T extends Omit<CheckoutInput, "execution"> & {
@@ -46,25 +57,14 @@ export async function withCheckoutDeadline<
     };
     timer = setTimeout(
       expire,
-      Math.min(
-        2147483647,
-        (input.totalTimeoutMs ?? 60 * 60_000) +
-          startupTimeoutMs +
-          CHECKOUT_LIMITS.graceMs,
-      ),
+      checkoutSupervisionMs(input.totalTimeoutMs, startupTimeoutMs),
     );
     startExecution = () => {
       if (closed || executionStarted || abort.signal.aborted) return;
       executionStarted = true;
       if (startupTimeoutMs > 0) {
         clearTimeout(timer);
-        timer = setTimeout(
-          expire,
-          Math.min(
-            2147483647,
-            (input.totalTimeoutMs ?? 60 * 60_000) + CHECKOUT_LIMITS.graceMs,
-          ),
-        );
+        timer = setTimeout(expire, checkoutSupervisionMs(input.totalTimeoutMs));
       }
       input.onExecutionStarted?.();
     };

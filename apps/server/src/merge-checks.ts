@@ -1118,6 +1118,36 @@ export class MergeChecks {
     );
     return false;
   }
+  /** The pre-POST writer alone can settle publication. Losing its process identity,
+   * or reaching its local supervision deadline, is not permission to take over. */
+  private publicationWait(
+    task: Task,
+    check?: MergeCheckView,
+    own?: GithubDispatchIntent,
+  ) {
+    if (
+      own?.phase !== "publishing" ||
+      own.externalRun ||
+      !check ||
+      own.attempt !== check.attempt_id
+    )
+      return undefined;
+    const executor = task.settings.executor;
+    if (
+      executor?.type === "github" &&
+      own.candidate?.repo === executor.repo &&
+      own.candidate.sha === check.candidate_sha &&
+      own.candidate.delivery === task.plan.completion_id &&
+      own.publisher &&
+      own.publicationDeadlineAt !== undefined &&
+      Date.parse(this.options.clock.now()) < own.publicationDeadlineAt &&
+      executionOwner(own.publisher.pid)?.start === own.publisher.start
+    )
+      return "等待本次候选推送结束";
+    // Legacy/missing evidence also stays fenced; repeated observations of the
+    // same reason do not append another event or consume another retry.
+    return "本地候选发布未结算，待恢复";
+  }
   private capacity(task: Task): boolean {
     if (task.repositoryCooling) return false;
     if (this.fenced(task.project.project_id))
@@ -1159,16 +1189,8 @@ export class MergeChecks {
           intent.card === task.plan.card_id &&
           intent.attempt === latest?.attempt_id,
       );
-      // A detached supervisor can leave its actual publisher inside Git. Within
-      // the existing startup window, wait for that live writer's settlement;
-      // neither its ownership nor a mere registration certifies a timeout.
-      if (
-        own?.phase === "publishing" &&
-        own.publisher &&
-        Date.parse(this.options.clock.now()) < (own.discoveryDeadlineAt ?? 0) &&
-        executionOwner(own.publisher.pid)?.start === own.publisher.start
-      )
-        return this.waiting(task, "等待本次候选推送结束");
+      const publication = this.publicationWait(task, latest, own);
+      if (publication) return this.waiting(task, publication, latest);
       if (
         own &&
         Date.parse(this.options.clock.now()) <
@@ -1450,6 +1472,13 @@ export class MergeChecks {
         return result;
       } finally {
         receipt = settle(id, outcome);
+        // Detachment may have already closed execute(). Keep the attempt log
+        // aligned with the durable receipt while this publisher still owns it.
+        if (receipt.outcome === "timeout" && receipt.retry_at) {
+          await log
+            ?.waiting(repositoryWaitReason(receipt.ordinal, receipt.retry_at))
+            .catch((error: unknown) => this.report(error));
+        }
       }
     };
     let bound = check.external_run;
@@ -1619,7 +1648,8 @@ export class MergeChecks {
               latest.candidate_sha !== check.candidate_sha
             )
               throw new StaleCheckTarget();
-            if (this.held(task, check)) throw new CheckExecutorSuspended();
+            if (this.abort.signal.aborted || this.held(task, check))
+              throw new CheckExecutorSuspended();
           },
           kind: "merge_check",
           ...(task.settings.queue
@@ -1720,7 +1750,7 @@ export class MergeChecks {
         if (retryAt) {
           const reason = repositoryWaitReason(timeouts, retryAt);
           if (current) this.waiting(task, reason, check);
-          await log?.waiting(reason);
+          if (executedOn?.type !== "github") await log?.waiting(reason);
           return;
         }
         repositoryBusy = true;
@@ -1731,6 +1761,7 @@ export class MergeChecks {
           reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts} 次，检查未启动，已停止自动重试`,
         };
       } else if (error instanceof CheckExecutorSuspended) {
+        if (this.abort.signal.aborted) return;
         this.waiting(task, "卡片已暂停，等待恢复检查");
         return;
       } else {
@@ -1782,6 +1813,28 @@ export class MergeChecks {
       } finally {
         releaseCapacity();
         this.executions.delete(this.key(task));
+      }
+    }
+    // A watchdog may return while its Git call still owns the writer fence.
+    // Do not turn that local observation into a terminal check or project outage.
+    if (
+      executedOn?.type === "github" &&
+      !bound &&
+      result.status === "executor_unreachable"
+    ) {
+      const own = new GithubDispatchJournal(this.options.store)
+        .unfinished()
+        .find(
+          (i) =>
+            i.executor === executedOn.name &&
+            i.project === task.project.project_id &&
+            i.card === task.plan.card_id &&
+            i.attempt === check.attempt_id,
+        );
+      const publication = this.publicationWait(task, check, own);
+      if (publication) {
+        this.waiting(task, publication, check);
+        return; // The unsettled writer still owns its receipt and log.
       }
     }
     // Unconfigured projects keep their previous entry-failure behavior.

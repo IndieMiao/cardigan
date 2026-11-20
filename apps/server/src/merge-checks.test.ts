@@ -64,6 +64,7 @@ import { MergeLockBusy, withPublication } from "./publication-lock.js";
 import { RepositoryCheckCalls } from "./repository-check-calls.js";
 import {
   batchCallHistory,
+  callOpened,
   callSettled,
   type RepositoryReceipt,
   repositoryCheckWait,
@@ -3799,6 +3800,7 @@ async function reworkGithubFixture(
     log?: string | string[];
     excerptBytes?: number;
     noRunId?: boolean;
+    waitStartMs?: number;
     scoped?: boolean;
     failedStep?: "lint" | "e2e" | "Setup Node";
   } = {},
@@ -3822,6 +3824,9 @@ async function reworkGithubFixture(
     privateKeyFile: "/synthetic/app.pem",
     botLogin: "fixture[bot]",
     maxConcurrent: 1,
+    ...(options.waitStartMs === undefined
+      ? {}
+      : { waitStartMs: options.waitStartMs }),
     ...(options.scoped ? { scopedChecks: true } : {}),
     ...(options.excerptBytes
       ? { failureExcerptBytes: options.excerptBytes }
@@ -7103,6 +7108,235 @@ test("verified setup failure reaches the result, first page and timeline without
       expect(text).toContain("Unable to install Node");
       expect(text).not.toContain("wrong");
     }
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test.each([5_000, undefined])(
+  "V-2510: pre-POST handoff does not inherit the discovery window (%s)",
+  async (waitStartMs) => {
+    const h = await reworkGithubFixture(
+      waitStartMs === undefined ? {} : { waitStartMs },
+    );
+    const project = [h.f.project_id];
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    const entered = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    const release = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let calls = 0,
+      gate = h.create();
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      const i = calls++;
+      entered[i]?.resolve();
+      await release[i]?.promise;
+      throw new CandidatePushNotStarted(30_000);
+    });
+    const events = (type: string) =>
+      h.f.state().events.filter((e) => e.type === type);
+    try {
+      for (const [i, delay] of [30_000, 60_000].entries()) {
+        const flight = await gate.schedule(project);
+        await required(entered[i]).promise;
+        const intent = required(journal.admitted()[0]);
+        gate.stop();
+        await flight.done;
+        await gate.idle();
+        gate = h.create();
+        h.advance(6_000);
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toBe("等待本次候选推送结束");
+        expect(events(callOpened)).toHaveLength(i + 1);
+        expect(events(callSettled)).toHaveLength(i);
+        expect(events("merge_executor_unreachable")).toHaveLength(0);
+        expect(h.client.dispatch).not.toHaveBeenCalled();
+        h.advance(24_000);
+        required(release[i]).resolve();
+        await vi.waitFor(() => expect(journal.admitted()).toHaveLength(0));
+        const at = new Date(h.now() + delay).toISOString();
+        expect(events(callSettled).at(-1)?.payload).toMatchObject({
+          ordinal: i + 1,
+          outcome: "timeout",
+          retry_at: at,
+        });
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toContain(at);
+        expect(
+          await readFile(
+            join(
+              h.f.dataDir,
+              "merge-gate/logs",
+              h.f.project_id,
+              `${intent.attempt}.log`,
+            ),
+            "utf8",
+          ),
+        ).toContain(at);
+        h.advance(delay - 1);
+        await gate.tick(project);
+        expect(calls).toBe(i + 1);
+        h.advance(1); // next iteration starts exactly at the displayed deadline
+      }
+      await Promise.all([gate.tick(project), gate.tick(project)]);
+      expect(calls).toBe(3);
+      expect(h.check()).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        checks: [],
+      });
+      h.advance(86_400_000);
+      await gate.tick(project);
+      expect(calls).toBe(3);
+      expect(events("merge_executor_unreachable")).toHaveLength(0);
+      expect(events("merge_executor_recovered")).toHaveLength(0);
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      for (const latch of release) latch.resolve();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["handoff", "watchdog"] as const)(
+  "V-2510: original local deadline retains the writer fence and never revives a cancelled target (%s)",
+  async (mode) => {
+    const h = await reworkGithubFixture({ waitStartMs: 5_000 });
+    const project = [h.f.project_id],
+      start = h.now();
+    const { GithubDispatchJournal, GITHUB_POLL_DEFAULTS } = await import(
+      "@cardigan/host"
+    );
+    const journal = new GithubDispatchJournal(h.f.store);
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    h.git.pushCheckCandidate.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new CandidatePushNotStarted(30_000);
+    });
+    let gate = h.create();
+    if (mode === "watchdog")
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const flight = await gate.schedule(project);
+      await entered.promise;
+      const writer = required(journal.admitted()[0]);
+      const deadline =
+        start +
+        3600_000 +
+        GITHUB_POLL_DEFAULTS.queueWaitMs +
+        CHECKOUT_LIMITS.graceMs;
+      expect(writer.publicationDeadlineAt).toBe(deadline);
+      if (mode === "watchdog") {
+        h.advance(deadline - start);
+        await vi.advanceTimersByTimeAsync(deadline - start);
+        await flight.done;
+        await gate.idle();
+        vi.useRealTimers();
+      } else {
+        gate.stop();
+        await flight.done;
+        await gate.idle();
+        gate = h.create();
+        h.advance(deadline - start - 1);
+        await gate.tick(project);
+        expect(h.check()?.queue_wait?.reason).toBe("等待本次候选推送结束");
+        h.advance(1);
+        await gate.tick(project);
+      }
+      expect(h.check()?.queue_wait?.reason).toBe("本地候选发布未结算，待恢复");
+      gate.stop();
+      await gate.idle();
+      gate = h.create();
+      await gate.tick(project);
+      const reason = "本地候选发布未结算，待恢复";
+      expect(h.check()?.queue_wait?.reason).toBe(reason);
+      expect(
+        h.f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === "merge_check_waiting" &&
+              (e.payload as { reason: string }).reason === reason,
+          ),
+      ).toHaveLength(1);
+      expect(journal.admitted()).toEqual([writer]);
+      expect(
+        h.f.state().events.filter((e) => e.type === callOpened),
+      ).toHaveLength(1);
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          { card_id: h.scenario.card.id, status: "cancelled" },
+          p,
+        ),
+      );
+      await gate.tick(project);
+      expect(journal.admitted()).toMatchObject([
+        { phase: "publishing", abandoned: "superseded" },
+      ]);
+      release.resolve();
+      await vi.waitFor(() => expect(journal.admitted()).toHaveLength(0));
+      h.advance(60_000);
+      await gate.tick(project);
+      expect(
+        h.f
+          .state()
+          .events.filter((e) => e.type === callSettled)
+          .map((e) => e.payload),
+      ).toMatchObject([
+        { attempt_id: writer.attempt, ordinal: 1, outcome: "timeout" },
+      ]);
+      expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+      expect(h.client.dispatch).not.toHaveBeenCalled();
+      expect(
+        h.f.state().events.some((e) => e.type === "merge_executor_unreachable"),
+      ).toBe(false);
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      release.resolve();
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("V-2510: an actual API outage before publication keeps its project backoff", async () => {
+  const h = await reworkGithubFixture({ waitStartMs: 5_000 });
+  const { GithubExecutorError } = await import("@cardigan/host");
+  h.client.token.mockRejectedValueOnce(new GithubExecutorError("api"));
+  const gate = h.create(),
+    project = [h.f.project_id];
+  try {
+    await gate.tick(project);
+    expect(
+      h.f.state().events.filter((e) => e.type === "merge_executor_unreachable"),
+    ).toHaveLength(1);
+    expect(h.git.pushCheckCandidate).not.toHaveBeenCalled();
+    h.advance(6_000);
+    await gate.tick(project);
+    expect(h.client.token).toHaveBeenCalledOnce();
+    expect(h.client.dispatch).not.toHaveBeenCalled();
+    expect(
+      h.f
+        .state()
+        .events.some(
+          (e) =>
+            e.type === callSettled &&
+            (e.payload as RepositoryReceipt).outcome === "timeout",
+        ),
+    ).toBe(false);
   } finally {
     gate.stop();
     await gate.idle();
