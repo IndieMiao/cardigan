@@ -1,14 +1,16 @@
 import { expect, test } from "vitest";
-import type { Actor, Assignment, HumanAction } from "../entities.js";
+import type { Actor, Assignment, Event, HumanAction } from "../entities.js";
 import {
   acknowledgeRun,
   cancelHumanAction,
   completeHumanAction,
   dispatchRun,
   listNeedsYou,
+  NEEDS_YOU_ITEM_READY,
   notices,
   postComment,
   queueRun,
+  readyNotices,
   refreshCancelledHumanActions,
   requestDecision,
   requestDeploymentAction,
@@ -982,6 +984,56 @@ test("system evidence-wait request can be completed by its human-designated exte
   });
 });
 
+function startHostOpsRun(
+  routed: CommandState,
+  trigger: Event,
+  io: ReturnType<typeof ports>,
+) {
+  const system = { kind: "system" as const, project_id: routed.project_id };
+  const queued = value(
+    queueRun(
+      routed,
+      system,
+      {
+        assignment_id: id("assignment", 5),
+        trigger_event_id: trigger.id,
+        kind: "followup",
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      io,
+    ),
+  );
+  routed = apply(routed, queued);
+  const dispatched = value(
+    dispatchRun(
+      routed,
+      system,
+      {
+        run_id: queued.data.id,
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "local",
+          terminal_ref: "fixture-host",
+          agent_name: "host_ops",
+        },
+      },
+      io,
+    ),
+  );
+  routed = apply(routed, dispatched);
+  const started = value(
+    acknowledgeRun(
+      routed,
+      actor(5, "host_ops"),
+      { run_id: queued.data.id },
+      io,
+    ),
+  );
+  expect(started.data.trigger_event_id).toBe(trigger.id);
+  return apply(routed, started);
+}
+
 function historicalReport(
   executor: "host_ops" | "fallback" | "external" | "team" = "host_ops",
   link: "action" | "request" | "handoff" | "comment" = "action",
@@ -989,7 +1041,7 @@ function historicalReport(
     moveToOffice?: "before" | "after";
     poster?: Actor;
     readback?: string;
-    dispatch?: "immediate" | "manual" | "unrelated";
+    dispatch?: "immediate" | "manual" | "ready" | "unrelated";
   } = {},
 ) {
   const f = diagnosticOwners();
@@ -1035,7 +1087,14 @@ function historicalReport(
         expected_return: "Installed version number",
         ...(options.dispatch === "manual"
           ? { ready_when: { kind: "manual" as const } }
-          : {}),
+          : options.dispatch === "ready"
+            ? {
+                ready_when: {
+                  kind: "card_merged" as const,
+                  card_id: id("card", 2),
+                },
+              }
+            : {}),
         human_action_id: action.id,
         ...(executor === "external"
           ? {
@@ -1076,6 +1135,34 @@ function historicalReport(
         disposition: "host",
         human_action_id: action.id,
       });
+    } else if (options.dispatch === "ready") {
+      const sourceCard = id("card", 2);
+      const fact: Event = {
+        type: "card_merged",
+        card_id: sourceCard,
+        actor: { kind: "system", project_id: routed.project_id },
+        created_at: io.clock.now(),
+        id: io.ids.nextEventId(),
+        seq: io.ids.nextEventSequence(routed.project_id, sourceCard),
+        payload: {},
+      };
+      routed = {
+        ...routed,
+        cards: routed.cards.map((c) =>
+          c.id === sourceCard ? { ...c, status: "done" } : c,
+        ),
+        events: [...routed.events, fact],
+      };
+      const notice = required(readyNotices(routed, fact)[0]);
+      trigger = {
+        ...fact,
+        type: NEEDS_YOU_ITEM_READY,
+        card_id: request.card_id,
+        payload: notice.payload,
+        id: io.ids.nextEventId(),
+        seq: io.ids.nextEventSequence(routed.project_id, request.card_id),
+      };
+      routed = { ...routed, events: [...routed.events, trigger] };
     } else if (options.dispatch === "unrelated") {
       const note = value(
         postComment(
@@ -1088,50 +1175,8 @@ function historicalReport(
       routed = apply(routed, note);
       trigger = required(note.events[0]);
     }
-    const system = { kind: "system" as const, project_id: routed.project_id };
-    const queued = value(
-      queueRun(
-        routed,
-        system,
-        {
-          assignment_id: f.host.id,
-          trigger_event_id: trigger.id,
-          kind: "followup",
-          model: "fixture",
-          agent_cli_version: "fixture",
-        },
-        io,
-      ),
-    );
-    routed = apply(routed, queued);
-    const dispatched = value(
-      dispatchRun(
-        routed,
-        system,
-        {
-          run_id: queued.data.id,
-          runtime_ref: {
-            machine_id: "local",
-            runtime_machine: "local",
-            terminal_ref: "fixture-host",
-            agent_name: "host_ops",
-          },
-        },
-        io,
-      ),
-    );
-    routed = apply(routed, dispatched);
     tick += 1000;
-    const started = value(
-      acknowledgeRun(
-        routed,
-        actor(5, "host_ops"),
-        { run_id: queued.data.id },
-        io,
-      ),
-    );
-    expect(started.data.trigger_event_id).toBe(trigger.id);
-    routed = apply(routed, started);
+    routed = startHostOpsRun(routed, trigger, io);
     tick += 1000;
   }
   const other = value(
@@ -1470,6 +1515,7 @@ test("a same-card release does not replace the handoff and a timeline link is no
 test.each([
   ["immediate", true],
   ["manual", true],
+  ["ready", true],
   ["unrelated", false],
 ] as const)("historical team dispatch: %s", (dispatch, valid) => {
   const { old, finish } = historicalReport("team", "handoff", { dispatch });
@@ -1504,19 +1550,75 @@ test("literal readback cannot substitute punctuation, citation, a progress fragm
     ["Will check 7.2.1 later", "7.2.1"],
     ["7.2.1", "7.2"],
     ["7.2.1", "7.2.0"],
-  ]) {
+  ] as const) {
     const { old, finish, attestation } = historicalReport(
       "host_ops",
       "handoff",
-      { readback: body! },
+      { readback: body },
     );
-    expect(finish(old, { ...attestation, result_quote: quote! }).ok).toBe(
-      false,
-    );
+    expect(finish(old, { ...attestation, result_quote: quote }).ok).toBe(false);
   }
   const { old, finish, attestation } = historicalReport("host_ops", "handoff", {
     readback: "7.2.1",
   });
   for (const verification of ["", "...", "C-1#123", "7.2.1"])
     expect(finish(old, { ...attestation, verification }).ok).toBe(false);
+});
+
+test.each(["manual", "ready"] as const)(
+  "a %s dispatch must be for this action during its effective handoff, before the run and post",
+  (dispatch) => {
+    const { old, finish, entry, assigned } = historicalReport(
+      "team",
+      "handoff",
+      { dispatch },
+    );
+    const run = required(
+      old.runs.find((r) => r.assignment_id === id("assignment", 5)),
+    );
+    const wake = required(
+      old.events.find((e) => e.id === run.trigger_event_id),
+    );
+    const effect = value(finish(old));
+    expect(
+      effect.events.find((e) => e.type === "legacy_host_result_verified")
+        ?.payload,
+    ).toMatchObject({
+      executor_run_id: run.id,
+      executor_trigger_event_id: wake.id,
+      handoff: assigned.id,
+    });
+    const fields = wake.payload as object;
+    for (const change of [
+      { seq: assigned.event_seq - 1 },
+      { seq: entry.event_seq + 1 },
+      { card_id: id("card", 2) },
+      { created_at: entry.created_at },
+      { payload: { ...fields, human_action_id: target } },
+      ...(dispatch === "manual"
+        ? [
+            { payload: { ...fields, disposition: "human" } },
+            { payload: { ...fields, released: false } },
+          ]
+        : [
+            { actor: human },
+            { payload: { ...fields, condition: { kind: "manual" } } },
+          ]),
+    ])
+      expect(
+        finish({
+          ...old,
+          events: old.events.map((e) =>
+            e.id === wake.id ? { ...e, ...change } : e,
+          ),
+        }).ok,
+      ).toBe(false);
+  },
+);
+
+test("a literal readback may follow the action address without rewriting the quote", () => {
+  const { old, finish } = historicalReport("host_ops", "action", {
+    readback: "7.2.1",
+  });
+  expect(finish(old).ok).toBe(true);
 });

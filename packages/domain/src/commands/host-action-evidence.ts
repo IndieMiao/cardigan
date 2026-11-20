@@ -1,6 +1,7 @@
 import type { Actor, Event, HumanAction, TimelineEntry } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import type { TimelineEntryId } from "../ids.js";
+import { NEEDS_YOU_ITEM_READY } from "../readiness.js";
 import { extractReferences } from "../references.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
 import { type CommandDraft, ensure, text } from "./core.js";
@@ -16,17 +17,41 @@ export type LegacyHostResult = {
   verification: string;
 };
 
-// References, numbers and formatting alone do not explain a classification or verification.
-function explanation(value: string, field: string) {
-  text(value, field);
-  const prose = value.replace(
+function withoutReferences(value: string) {
+  return value.replace(
     /https?:\/\/\S+|[a-z][a-z0-9_-]*-\d+(?:#\d+)?|[qh]\(\d+\)/giu,
     "",
   );
+}
+
+// References, numbers and formatting alone do not explain a classification or verification.
+function explanation(value: string, field: string) {
+  text(value, field);
   ensure(
-    /\p{L}/u.test(prose),
+    /\p{L}/u.test(withoutReferences(value)),
     "validation_failed",
     `${field} 须有文字说明，不能只有引用或标点`,
+  );
+}
+
+/** A readback may itself be a measurement, unlike the PM's verification prose.
+ * Don't extract a bare number from a citation, another version or a progress sentence. */
+function matchesResultQuote(body: string, quote: string, action: HumanAction) {
+  text(quote, "legacy_host_result.result_quote");
+  if (!body.includes(quote)) return false;
+  const content = withoutReferences(quote);
+  if (/\p{L}/u.test(content)) return true;
+  if (!/\p{N}/u.test(content)) return false;
+  const original = body.trim();
+  if (original === quote.trim()) return true;
+  // Some old direct reports prefix the value with the action they answer.
+  const prefix = /^(H-[1-9]\d*|h\([1-9]\d*\))\s*[:：]\s*/u.exec(original);
+  return (
+    !!prefix &&
+    extractReferences(prefix[0]).some(
+      (r) => r.kind === "human_action" && r.id === action.id,
+    ) &&
+    original.slice(prefix[0].length) === quote.trim()
   );
 }
 
@@ -142,6 +167,7 @@ type Transfer = {
   host_operator?: string;
   host_diagnostic?: boolean;
   handoff?: object;
+  ready_when?: HumanAction["ready_when"];
 };
 
 function hostTransferEntry(event: Event, entry: TimelineEntry | undefined) {
@@ -197,16 +223,54 @@ function historicalBinding(
   return { event: latest, transfer: latest.payload as Transfer, entry };
 }
 
+type Binding = NonNullable<ReturnType<typeof historicalBinding>>;
+
+/** The dispatcher queues the Run against the notification that made the work
+ * visible. Release/ready events identify a wake, never a change of ownership. */
+function dispatchWake(wake: Event, binding: Binding, report: TimelineEntry) {
+  const { event, transfer } = binding;
+  if (
+    wake.card_id !== event.card_id ||
+    wake.actor.project_id !== event.actor.project_id ||
+    wake.seq < event.seq ||
+    wake.seq >= report.event_seq ||
+    Date.parse(wake.created_at) < Date.parse(event.created_at)
+  )
+    return false;
+  if (wake.id === event.id) return true;
+  if (!transfer.ready_when || wake.seq <= event.seq) return false;
+  const p = wake.payload as Transfer & {
+    condition?: HumanAction["ready_when"];
+  };
+  if (p.human_action_id !== transfer.human_action_id) return false;
+  if (wake.type === "human_action_requested")
+    return p.disposition === "host" && p.released === true;
+  // This is the system's per-item ready notice, not the other card's raw merge or delivery.
+  return (
+    wake.type === NEEDS_YOU_ITEM_READY &&
+    wake.actor.kind === "system" &&
+    !!p.condition &&
+    p.condition.kind !== "manual" &&
+    p.condition.kind === transfer.ready_when.kind &&
+    p.condition.card_id === transfer.ready_when.card_id &&
+    !(
+      p.condition.kind === "card_delivery" &&
+      transfer.ready_when.kind === "card_delivery" &&
+      p.condition.after !== transfer.ready_when.after
+    )
+  );
+}
+
 function executorBinding(
   d: CommandDraft,
   actor: Actor,
-  binding: NonNullable<ReturnType<typeof historicalBinding>>,
+  binding: Binding,
   report: TimelineEntry,
 ) {
   if (actor.kind !== "assignment") return;
   const a = d.state.assignments.find((a) => a.id === actor.assignment_id);
   if (a?.scope !== "standing" || a.role_id !== actor.role_id) return;
-  const { transfer, event } = binding;
+  const { transfer } = binding;
   if (
     transfer.host_assignment_id != null &&
     transfer.host_assignment_id !== a.id
@@ -230,19 +294,19 @@ function executorBinding(
       return {};
     return;
   }
-  // Older non-diagnostic handoffs selected a particular host_ops in the dispatcher,
-  // not in the triage payload. A run started for this exact handoff before the post
-  // is positive evidence; a role, later assignment or wake for some other card isn't.
+  // A team name alone proves nothing. Find the personal dispatch and keep its actual wake in the audit.
   if (a.role_id !== "host_ops" || transfer.host_diagnostic) return;
-  const run = d.state.runs.find(
-    (r) =>
-      r.assignment_id === a.id &&
-      r.trigger_event_id === event.id &&
-      r.started_at &&
-      Date.parse(r.started_at) >= Date.parse(event.created_at) &&
-      Date.parse(r.started_at) < Date.parse(report.created_at),
-  );
-  return run ? { executor_run_id: run.id } : undefined;
+  for (const run of d.state.runs) {
+    if (run.assignment_id !== a.id || !run.started_at) continue;
+    const wake = eventById(d.state.events, run.trigger_event_id);
+    if (
+      wake &&
+      dispatchWake(wake, binding, report) &&
+      Date.parse(run.started_at) >= Date.parse(wake.created_at) &&
+      Date.parse(run.started_at) < Date.parse(report.created_at)
+    )
+      return { executor_run_id: run.id, executor_trigger_event_id: wake.id };
+  }
 }
 
 /** The caller has verified PM Ops authority. Only the original event authenticates a historical author. */
@@ -274,10 +338,9 @@ export function verifyHostResult(
   if (!binding) return false;
   const proof = executorBinding(d, actor, binding, entry);
   if (!proof) return false;
-  explanation(legacy.result_quote, "legacy_host_result.result_quote");
   explanation(legacy.verification, "legacy_host_result.verification");
   if (
-    !entry.body.includes(legacy.result_quote) ||
+    !matchesResultQuote(entry.body, legacy.result_quote, action) ||
     legacy.result_quote.trim() === legacy.verification.trim()
   )
     return false;
