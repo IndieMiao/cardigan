@@ -1,10 +1,17 @@
 import { idBadgeClass, idType } from "../../id-types.js";
-export function IdBadge({ id }: { id: string }) {
+/** `titled={false}` drops the native type hint where a richer tooltip covers it. */
+export function IdBadge({
+  id,
+  titled = true,
+}: {
+  id: string;
+  titled?: boolean;
+}) {
   return (
     <span
       data-ui="id-badge"
       className={idBadgeClass(id)}
-      title={idType(id)?.label}
+      title={titled ? idType(id)?.label : undefined}
     >
       {id}
     </span>

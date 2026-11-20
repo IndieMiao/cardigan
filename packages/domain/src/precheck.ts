@@ -33,6 +33,34 @@ export function latestPrecheckConflict(
     : undefined;
 }
 
+/** Both the idle scanner and inline delivery bind settlement to this terminal event. */
+export function authorPrecheckWaitHandled(
+  events: readonly Event[],
+  result: Event,
+): boolean {
+  const check = result.payload as unknown as Precheck;
+  return events.some((e) => {
+    if (
+      e.card_id !== result.card_id ||
+      e.actor.project_id !== result.actor.project_id
+    )
+      return false;
+    const p = e.payload as Record<string, unknown>;
+    return (
+      ((e.type === "precheck_wait_delivered" &&
+        e.actor.kind === "assignment" &&
+        e.actor.assignment_id === check.assignment_id) ||
+        (["work_item_resume_requested", "precheck_wait_escalated"].includes(
+          e.type,
+        ) &&
+          e.actor.kind === "system" &&
+          p.assignment_id === check.assignment_id)) &&
+      p.work_item_id === check.work_item_id &&
+      p.evidence === result.id
+    );
+  });
+}
+
 /** Persisted automatic handling; previousRunId scopes notification suppression. */
 export function precheckConflictHandling(
   events: readonly Event[],
