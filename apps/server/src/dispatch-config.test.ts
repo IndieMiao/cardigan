@@ -179,3 +179,36 @@ test.each(["0", "-1", "1.5", "'30'", "null", "35792"])(
     expect(config.inactiveCancelAfterMs).toBeNull();
   },
 );
+
+test("project quotas only narrow configured machine and resource ceilings", async () => {
+  await write(`machines:
+  worker:
+    resources: { renderer: 2 }
+    projects: { example: { limit: 0, resources: { renderer: 1 } } }
+`);
+  const cfg = await loadRunCapacityConfig({ configDir });
+  expect(cfg.errors).toEqual([]);
+  expect(cfg.projectQuota("worker", "example")).toEqual({
+    limit: 0,
+    resources: new Map([["renderer", 1]]),
+  });
+  expect(cfg.projectQuota("other", "example")).toBeUndefined();
+  expect(cfg.projectQuota("worker", "other")).toBeUndefined();
+});
+
+test.each([
+  "{ limit: -1 }",
+  "{ limit: '2' }",
+  "{ limit: 17 }",
+  "{ resources: { renderer: 2 } }",
+  "{ resources: { unknown: 1 } }",
+  "{ typo: private-value }",
+])("invalid project quota fails closed: %s", async (quota) => {
+  await write(
+    `machines: { worker: { resources: { renderer: 1 }, projects: { sample: ${quota} } } }`,
+  );
+  const cfg = await loadRunCapacityConfig({ configDir });
+  expect(cfg.forMachine("worker")).toBe(0);
+  expect(cfg.errors).toHaveLength(1);
+  expect(cfg.errors.join()).not.toContain("private-value");
+});

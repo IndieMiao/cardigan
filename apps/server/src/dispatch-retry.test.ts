@@ -493,10 +493,10 @@ test("two dispatchers share a retry lease and a late ACK wins over failure", asy
   f.comment();
   await dispatcher().tick();
   const entered = Promise.withResolvers<void>();
-  const released = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
   vi.mocked(f.runtime.wake).mockImplementationOnce(async () => {
     entered.resolve();
-    await released.promise;
+    await release.promise;
     start();
     const note = f.notes()[0];
     if (!note?.card_id) throw new Error("Missing notice");
@@ -511,12 +511,22 @@ test("two dispatchers share a retry lease and a late ACK wins over failure", asy
   f.advance(30000);
   const sending = dispatcher().tick();
   try {
-    await entered.promise;
-    expect(unfinishedBellAttempts(f.store.database, f.project)).toHaveLength(1);
+    // A durable retry intent can exist before the first dispatcher enters wake.
+    await Promise.race([
+      entered.promise,
+      sending.then(() => {
+        throw new Error("Retry settled without entering wake");
+      }),
+    ]);
+    const attempts = unfinishedBellAttempts(f.store.database, f.project);
+    expect(attempts).toHaveLength(1);
     await dispatcher().tick();
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual(
+      attempts,
+    );
     expect(f.runtime.wake).toHaveBeenCalledTimes(2);
   } finally {
-    released.resolve();
+    release.resolve();
     await sending;
   }
   expect(f.notes()[0]?.status).toBe("acked");

@@ -41,6 +41,7 @@ import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
+import { cardSectionPayload } from "./card-sections.js";
 import {
   type CardsCacheOptions,
   readCachedCardsPage,
@@ -180,6 +181,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly recordTiming: (stage: string, ms: number) => void;
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
   readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
@@ -276,6 +278,7 @@ export async function startWebServer(
     } catch {
       /* Invalid URLs are handled below. */
     }
+    const phases: Record<string, number> = {};
     let logged = false;
     const completed = () => {
       if (logged) return;
@@ -287,6 +290,7 @@ export async function startWebServer(
         pid: process.pid,
         request_id: requestId,
         phases_ms: {
+          ...phases,
           to_headers: (headersAt ?? performance.now()) - startedAt,
           response: performance.now() - (headersAt ?? startedAt),
         },
@@ -299,7 +303,9 @@ export async function startWebServer(
     };
     res.once("finish", completed);
     res.once("close", completed);
-    void handle(req, res).catch((error: unknown) => {
+    void handle(req, res, (stage, ms) => {
+      phases[stage] = ms;
+    }).catch((error: unknown) => {
       code = error instanceof HttpRejection ? error.code : "internal_error";
       if (!(error instanceof HttpRejection)) {
         if (!res.headersSent) {
@@ -323,6 +329,7 @@ export async function startWebServer(
   async function handle(
     req: IncomingMessage,
     res: ServerResponse,
+    recordTiming: RequestContext["recordTiming"],
   ): Promise<void> {
     applySecurityHeaders(res);
     // Parsing against a fixed base keeps the URL independent of the Host header;
@@ -336,6 +343,7 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
@@ -540,6 +548,8 @@ async function serveProjectRoute(
           context.runLimitMaximum,
           context.machineDisplayName,
           context.resourceLimits,
+          project_id,
+          clock.now(),
         ),
       ...(context.stream?.pollMs === undefined
         ? {}
@@ -593,6 +603,8 @@ async function serveProjectRoute(
         context.runLimitMaximum,
         context.machineDisplayName,
         context.resourceLimits,
+        project_id,
+        clock.now(),
       ),
     );
     return;
@@ -739,6 +751,7 @@ async function serveProjectRoute(
   if (card !== null) {
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
     const detail = readPagedCard(store, project_id, card_id, url, {
+      recordTiming: context.recordTiming,
       mergeGateStatus:
         context.mergeGate?.forProject(project_id).status ?? "disabled",
       now,
@@ -749,7 +762,10 @@ async function serveProjectRoute(
     if (detail === undefined) {
       throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
     }
-    sendJson(res, 200, { project_id, ...detail });
+    sendJson(res, 200, {
+      project_id,
+      ...cardSectionPayload(detail, url.searchParams.get("section")),
+    });
     return;
   }
 

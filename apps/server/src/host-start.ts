@@ -7,7 +7,12 @@ import type {
   Run,
   Runtime,
 } from "@cardigan/domain";
-import { type LaunchHost, launchRun, projectActor } from "@cardigan/host";
+import {
+  type LaunchHost,
+  launchRun,
+  projectActor,
+  type ResourceAccess,
+} from "@cardigan/host";
 import type { LaunchConfig } from "@cardigan/roles";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
@@ -40,6 +45,9 @@ export interface StartRunInput {
   readonly assignment: Assignment;
   readonly run: Run;
   readonly bell: string;
+  readonly resourceAccess?: ResourceAccess;
+  readonly resourcePreflight?: () => Promise<boolean>;
+  readonly resourceGate?: () => boolean;
   readonly replacement?: DispatchRunParams["replacement"];
 }
 
@@ -69,6 +77,11 @@ export async function startQueuedRun(
     assignment_id: input.assignment.id,
     run: input.run,
     actor: hostActor(input.project),
+    ...(input.resourceAccess ? { resourceAccess: input.resourceAccess } : {}),
+    ...(input.resourcePreflight
+      ? { resourcePreflight: input.resourcePreflight }
+      : {}),
+    ...(input.resourceGate ? { resourceGate: input.resourceGate } : {}),
     first_prompt: input.bell,
     retry_target_preflight: true,
     ...(input.replacement ? { replacement: input.replacement } : {}),
