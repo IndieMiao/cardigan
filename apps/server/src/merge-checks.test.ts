@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GitPublicationGuard } from "@cardigan/domain";
+import type { Event, GitPublicationGuard, MergeBatch } from "@cardigan/domain";
 import {
   completeHumanAction,
   latestMergeCheck,
@@ -50,6 +50,7 @@ import {
   workerReport,
 } from "../../../packages/host/test-support/worker-failure.js";
 import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
+import { BatchRepositoryCalls } from "./batch-repository-calls.js";
 import { CandidatePushNotStarted } from "./git.js";
 import {
   acceptThroughMergeGate,
@@ -61,6 +62,12 @@ import {
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
 import { MergeLockBusy, withPublication } from "./publication-lock.js";
+import {
+  batchCallHistory,
+  callSettled,
+  type RepositoryReceipt,
+  repositoryCheckWait,
+} from "./repository-check-wait.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
@@ -6322,5 +6329,306 @@ test("C-533: SSH does not start a worker for a baseline replaced during the firs
   } finally {
     c.gate.stop();
     await c.gate.idle();
+  }
+});
+
+test.each([
+  [1, false],
+  [3, false],
+  [1, true],
+  [3, true],
+] as const)(
+  "Q-1022: timeout %i settles after abort (successor formed first: %s)",
+  async (at, early) => {
+    const { h, gate, publish } = await confirmedGithubBatch(1),
+      project = [h.f.project_id];
+    const set = (hold: boolean) =>
+      h.f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: h.scenario.card.id,
+            hold: hold ? { reason: "wait", resume_condition: "ready" } : null,
+          },
+          p,
+        ),
+      );
+    const began = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    const batches = () => mergeBatches(h.f.state().events);
+    let pushes = 0,
+      next: MergeChecks | undefined;
+    h.git.pushCheckCandidate.mockImplementation(async () => {
+      if (++pushes === at) {
+        began.resolve();
+        await release.promise;
+      }
+      throw new CandidatePushNotStarted(30_000);
+    });
+    try {
+      for (let n = 1; n < at; n++) {
+        await gate.tick(project);
+        h.advance(n === 1 ? 30_000 : 60_000);
+      }
+      const original = await gate.schedule(project);
+      await began.promise;
+      set(true);
+      await gate.tick(project);
+      await vi.waitFor(() => expect(batches()[0]?.status).toBe("aborted"));
+      if (early) {
+        set(false);
+        await gate.schedule(project);
+        await vi.waitFor(() =>
+          expect(batches()[1]?.check?.status).toBe("queued"),
+        );
+        const successor = required(batches()[1]);
+        // The provider's own reservation also blocks this fixture. Exercise
+        // the target admission transaction independently, while its owner lives.
+        expect(
+          new BatchRepositoryCalls(h.f.store, h.c.options.clock).begin(
+            successor,
+            required(successor.check),
+            [30_000, 60_000],
+          ),
+        ).toEqual({ kind: "wait" });
+        expect(pushes).toBe(at);
+      }
+      h.advance(30_000);
+      release.resolve();
+      await original.done;
+      await gate.idle();
+      gate.stop();
+      await gate.idle();
+      if (!early) set(false);
+      next = h.create();
+      await next.tick(project);
+      expect(pushes).toBe(at);
+      const old = required(batches()[0]);
+      const last = required(
+        h.f
+          .state()
+          .events.findLast(
+            (e) =>
+              e.type === callSettled &&
+              (e.payload as RepositoryReceipt).batch_id === old.id,
+          ),
+      ).payload as RepositoryReceipt;
+      const replay = new BatchRepositoryCalls(
+        h.c.options.store,
+        h.c.options.clock,
+      );
+      h.advance(100);
+      expect(
+        replay.settle(
+          h.f.project_id,
+          h.scenario.card.id,
+          last.call_id,
+          "timeout",
+        ),
+      ).toEqual(last);
+      expect(
+        h.f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === callSettled &&
+              (e.payload as RepositoryReceipt).call_id === last.call_id,
+          ),
+      ).toHaveLength(1);
+      if (at === 1) {
+        h.advance(29_899);
+        await next.tick(project);
+        expect(pushes).toBe(1);
+        h.advance(1);
+        await next.tick(project);
+        expect(pushes).toBe(2);
+        h.advance(59_999);
+        await next.tick(project);
+        expect(pushes).toBe(2);
+        h.advance(1);
+        await next.tick(project);
+      }
+      h.advance(86_400_000);
+      await next.tick(project);
+      expect(pushes).toBe(3);
+      expect(batches()[0]).toMatchObject({
+        status: "aborted",
+        check: { status: "interrupted" },
+      });
+      expect(batches()[1]?.check).toMatchObject({
+        status: "failed",
+        startup_failure: "repository_busy",
+        summary: expect.stringContaining("3 次"),
+      });
+      expect(h.client.dispatch).toHaveBeenCalledTimes(1);
+      expect(publish).not.toHaveBeenCalled();
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      gate.stop();
+      next?.stop();
+      await gate.idle();
+      await next?.idle();
+    }
+  },
+);
+
+test("Q-1022: a late receipt belongs to the registered group and recovery epoch, not another target", async () => {
+  const { h, gate } = await confirmedGithubBatch(2);
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  try {
+    await gate.tick([h.f.project_id]);
+    const events = h.f.state().events,
+      batch = required(mergeBatches(events)[0]),
+      member = required(batch.members[0]);
+    const formed = required(
+      events.find((e) => e.type === "merge_batch_formed"),
+    );
+    const oldReceipt = required(events.find((e) => e.type === callSettled));
+    const id = "MB-999" as MergeBatch["id"];
+    const abort: Event = {
+      ...formed,
+      seq: formed.seq + 100,
+      type: "merge_batch_aborted",
+      payload: { batch_id: batch.id, reason: "member_left" },
+    };
+    const interrupted: Event = {
+      ...formed,
+      seq: abort.seq - 1,
+      type: "merge_batch_check_finished",
+      payload: {
+        batch_id: batch.id,
+        check: {
+          ...(batch.check as unknown as Record<string, string>),
+          status: "interrupted",
+        },
+      },
+    };
+    const regroup = (changes: Partial<MergeBatch>, extra: Event[] = []) => {
+      const successor = {
+        ...batch,
+        id,
+        status: "checking" as const,
+        ...changes,
+      };
+      const rebuild: Event = {
+        ...formed,
+        seq: abort.seq + 1,
+        payload: {
+          ...(formed.payload as Record<string, string>),
+          ...(changes as Record<string, string>),
+          id,
+        },
+      };
+      // Deliver the old receipt only AFTER replacement formation and any reset.
+      return batchCallHistory(
+        [
+          ...events.filter((e) => e !== oldReceipt),
+          interrupted,
+          abort,
+          rebuild,
+          ...extra,
+          oldReceipt,
+        ],
+        successor,
+      );
+    };
+    expect(regroup({}).timeout?.ordinal).toBe(1);
+    for (const changed of [
+      { base_sha: "9".repeat(40) },
+      { purpose: "bisect" as const, parent_batch_id: batch.id },
+      { final_tree_sha: "8".repeat(40) },
+      { members: batch.members.toReversed() },
+      {
+        members: [
+          { ...member, completion_id: "D-999" as typeof member.completion_id },
+          ...batch.members.slice(1),
+        ],
+      },
+      {
+        members: [
+          { ...member, tree_sha: "7".repeat(40) },
+          ...batch.members.slice(1),
+        ],
+      },
+    ])
+      expect(regroup(changed).timeout).toBeUndefined();
+    expect(
+      regroup({}, [
+        {
+          ...oldReceipt,
+          id: "resume" as Event["id"],
+          card_id: member.card_id,
+          actor: { kind: "human", project_id: batch.project_id },
+          type: "merge_batch_member_resumed",
+          payload: { completion_id: member.completion_id, batch_id: batch.id },
+        },
+      ]).timeout,
+    ).toBeUndefined();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("Q-1022: a registration with no result is not proof of a pre-transport timeout after restart", async () => {
+  const { h, gate } = await confirmedGithubBatch(2),
+    project = [h.f.project_id];
+  const settings = h.c.options.configuration.forProject();
+  if (settings.status !== "enabled" || !settings.queue)
+    throw new Error("Missing queue");
+  h.c.setConfig({ ...settings, queue: { ...settings.queue, maxBatchSize: 1 } });
+  h.git.pushCheckCandidate.mockRejectedValue(
+    new CandidatePushNotStarted(30_000),
+  );
+  let next: MergeChecks | undefined;
+  try {
+    await gate.tick(project);
+    gate.stop();
+    await gate.idle();
+    const old = required(mergeBatches(h.f.state().events)[0]),
+      check = required(old.check),
+      card = required(old.members[0]).card_id;
+    h.advance(30_000);
+    const before = new BatchRepositoryCalls(h.f.store, h.c.options.clock);
+    const unknown = before.begin(old, check, [30_000, 60_000]);
+    if (unknown.kind !== "opened") throw new Error("Expected registration"); // no callback at restart
+    expect(repositoryCheckWait(h.f.state().events, check)).toMatchObject({
+      timeouts: 1,
+      lastWaitWasLockTimeout: false,
+    });
+    h.f.apply((s, a, p) =>
+      updateCard(
+        s,
+        a,
+        { card_id: card, hold: { reason: "wait", resume_condition: "ready" } },
+        p,
+      ),
+    );
+    next = h.create();
+    await next.tick(project);
+    const other = required(mergeBatches(h.f.state().events)[1]);
+    expect(other.members[0]?.card_id).not.toBe(card);
+    // An unanswered registration on the old target neither blocks nor charges the new one.
+    expect(batchCallHistory(h.f.state().events, other).timeout?.ordinal).toBe(
+      1,
+    );
+    expect(batchCallHistory(h.f.state().events, old).pending.size).toBe(1);
+    // A later verified receipt still belongs to the old cycle.
+    expect(
+      before.settle(h.f.project_id, card, unknown.id, "timeout").ordinal,
+    ).toBe(2);
+    expect(batchCallHistory(h.f.state().events, other).timeout?.ordinal).toBe(
+      1,
+    );
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    next?.stop();
+    await gate.idle();
+    await next?.idle();
   }
 });

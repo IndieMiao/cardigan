@@ -156,6 +156,7 @@ export {
   type ExecutionOwner,
   executionOwner,
   mergeCheckAttemptRunning,
+  mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {

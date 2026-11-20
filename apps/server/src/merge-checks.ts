@@ -98,6 +98,7 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
+import { BatchRepositoryCalls } from "./batch-repository-calls.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
   CandidatePushNotStarted,
@@ -119,6 +120,11 @@ import {
 } from "./repository-check-wait.js";
 import { profileSpan, profileSpanSync, tickProfiler } from "./tick-profile.js";
 
+class BatchWaitExhausted extends Error {
+  constructor(readonly timeouts: number) {
+    super("Batch repository wait exhausted");
+  }
+}
 class StaleCheckTarget extends CheckExecutorSuspended {}
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
@@ -258,6 +264,7 @@ export class MergeChecks {
     ProjectId,
     Promise<{ done: Promise<void> }>
   >();
+  private readonly repositoryCalls: BatchRepositoryCalls;
   private readonly lockBackoff: readonly number[];
   private readonly gitPasses = new Map<string, Promise<void>>();
   private readonly prepared = new Map<
@@ -274,6 +281,10 @@ export class MergeChecks {
       report?: (message: string) => void;
     },
   ) {
+    this.repositoryCalls = new BatchRepositoryCalls(
+      options.store,
+      options.clock,
+    );
     this.lockBackoff = repositoryRetryDelays(options.repositoryRetryDelaysMs);
     if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
       throw new Error(
@@ -1392,6 +1403,7 @@ export class MergeChecks {
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
     let repositoryBusy = false;
+    let callId: string | undefined;
     let bound = check.external_run;
     const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
@@ -1504,6 +1516,30 @@ export class MergeChecks {
             provider.poll(await provider.dispatch(request))
         : runCheckExecutor;
       if (this.held(task, check)) return;
+      if (
+        task.batch &&
+        check.status === "queued" &&
+        !bound &&
+        !(
+          executedOn?.type === "github" &&
+          new GithubDispatchJournal(this.options.store).crossedDispatchBoundary(
+            task.project.project_id,
+            task.plan.card_id,
+            check.attempt_id,
+            check.candidate_sha,
+          )
+        )
+      ) {
+        const admission = this.repositoryCalls.begin(
+          task.batch,
+          check,
+          this.lockBackoff,
+        );
+        if (admission.kind === "wait") return;
+        if (admission.kind === "exhausted")
+          throw new BatchWaitExhausted(admission.timeouts);
+        callId = admission.id;
+      }
       this.waiting(
         task,
         executedOn?.type === "github"
@@ -1608,19 +1644,46 @@ export class MergeChecks {
       // lock. Leave this attempt queued; contention is not an executor failure.
       if (error instanceof MergeLockBusy) throw error;
       if (error instanceof StaleCheckTarget) return;
-      if (error instanceof CandidateRepositoryBusy) {
-        if (!this.validLockObservation(task, check)) return;
-        const { timeouts } = repositoryCheckWait(
-          this.state(task.project.project_id).events,
-          check,
-        );
-        const delay = this.lockBackoff[timeouts];
-        if (delay !== undefined) {
-          const retryAt = new Date(
-            Date.parse(this.options.clock.now()) + delay,
-          ).toISOString();
-          const reason = `仓库忙，候选尚未分发；第 ${timeouts + 1} 次等待锁超时，${retryAt} 后重试`;
-          this.waiting(task, reason, check, retryAt);
+      if (
+        error instanceof CandidateRepositoryBusy ||
+        error instanceof BatchWaitExhausted
+      ) {
+        // Settle the original call even if another tick already aborted its
+        // batch. Recording a fact does not authorize a business transition.
+        const receipt =
+          callId && task.batch
+            ? this.repositoryCalls.settle(
+                task.batch.project_id,
+                task.plan.card_id,
+                callId,
+                "timeout",
+              )
+            : undefined;
+        if (receipt) callId = undefined;
+        const timeouts =
+          error instanceof BatchWaitExhausted
+            ? error.timeouts
+            : (receipt?.ordinal ??
+              repositoryCheckWait(
+                this.state(task.project.project_id).events,
+                check,
+              ).timeouts + 1);
+        const delay = this.lockBackoff[timeouts - 1];
+        const retryAt =
+          error instanceof BatchWaitExhausted
+            ? undefined
+            : receipt
+              ? receipt.retry_at
+              : delay === undefined
+                ? undefined
+                : new Date(
+                    Date.parse(this.options.clock.now()) + delay,
+                  ).toISOString();
+        const current = this.validLockObservation(task, check);
+        if (retryAt) {
+          const reason = `仓库忙，候选尚未分发；第 ${timeouts} 次等待锁超时，${retryAt} 后重试`;
+          if (current)
+            this.waiting(task, reason, check, receipt ? undefined : retryAt);
           await log?.waiting(reason);
           return;
         }
@@ -1629,7 +1692,7 @@ export class MergeChecks {
           status: "failed",
           checks: [],
           cleanup_errors: [],
-          reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts + 1} 次，检查未启动，已停止自动重试`,
+          reason: `仓库忙：候选分发等待仓库锁已超时 ${timeouts} 次，检查未启动，已停止自动重试`,
         };
       } else if (error instanceof CheckExecutorSuspended) {
         this.waiting(task, "卡片已暂停，等待恢复检查");
@@ -1675,8 +1738,18 @@ export class MergeChecks {
     } finally {
       // Always release runtime occupancy, even if a returned/cancelled target
       // makes the subsequent business result command reject.
-      releaseCapacity();
-      this.executions.delete(this.key(task));
+      try {
+        if (callId && task.batch)
+          this.repositoryCalls.settle(
+            task.batch.project_id,
+            task.plan.card_id,
+            callId,
+            "other",
+          );
+      } finally {
+        releaseCapacity();
+        this.executions.delete(this.key(task));
+      }
     }
     // Unconfigured projects keep their previous entry-failure behavior.
     if (!task.settings.executor && result.status === "executor_unreachable")
