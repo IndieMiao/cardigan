@@ -18,6 +18,7 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const changed = () =>
   new LaunchConfigError("invalid_config", "启动配置已变化，请重新预检");
 export interface LaunchFence {
+  readonly canAdoptCatalog: boolean;
   catalogFile: string;
   files: string;
   revision: number;
@@ -98,7 +99,7 @@ function catalogStamp(dataDir: string) {
 function accept(store: Store, dir: string) {
   store.database
     .prepare(
-      `INSERT INTO launch_catalog_generation(singleton,revision,files) VALUES (1,1,?) ON CONFLICT(singleton) DO UPDATE SET revision=revision+1,files=excluded.files`,
+      `INSERT INTO launch_catalog_generation(singleton,revision,files) VALUES (1,1,?) ON CONFLICT(singleton) DO UPDATE SET revision=revision+1,files=excluded.files,installed_catalog_file=NULL`,
     )
     .run(launchFilesStamp(dir));
   return launchRevision(store);
@@ -128,9 +129,9 @@ function settleCatalog(store: Store, dataDir: string) {
   installCatalog(dataDir, pending);
   store.database
     .prepare(
-      "UPDATE launch_catalog_generation SET pending_catalog=NULL WHERE singleton=1",
+      "UPDATE launch_catalog_generation SET pending_catalog=NULL,installed_catalog_file=? WHERE singleton=1",
     )
-    .run();
+    .run(catalogStamp(dataDir));
 }
 
 // A process can die after the YAML rename but before SQLite commits. Roll forward the
@@ -189,10 +190,21 @@ export function withLaunchSnapshot<T>(
     const path = join(realpathSync(dir), "launch.yaml");
     settleCatalog(store, dataDir);
     settle(store, tx, path, dataDir, false);
+    const accepted = store.database
+      .prepare(
+        "SELECT revision,files,installed_catalog_file FROM launch_catalog_generation WHERE singleton=1",
+      )
+      .get();
+    const catalogFile = catalogStamp(dataDir),
+      files = launchFilesStamp(dir);
     return read({
-      catalogFile: catalogStamp(dataDir),
-      files: launchFilesStamp(dir),
-      revision: launchRevision(store),
+      canAdoptCatalog:
+        catalogFile !== "" &&
+        accepted?.files === files &&
+        accepted.installed_catalog_file === catalogFile,
+      catalogFile,
+      files,
+      revision: Number(accepted?.revision ?? 0),
     });
   });
 }
@@ -223,6 +235,25 @@ function commitGeneration<T>(
     return install(tx);
   });
 }
+/** Adopt a previously installed projection, without treating it as a refresh candidate. */
+export function adoptInstalledCatalog(
+  store: Store,
+  dir: string,
+  dataDir: string,
+  fence: LaunchFence,
+  hostProfiles: string[],
+) {
+  if (!fence.canAdoptCatalog) throw changed();
+  return commitGeneration(store, dir, fence, dataDir, () => {
+    recordHostProfiles(
+      store,
+      dir,
+      fence.revision,
+      JSON.stringify(hostProfiles),
+    );
+    return fence.revision;
+  });
+}
 export function publishLaunchRefresh(
   store: Store,
   dir: string,
@@ -244,10 +275,16 @@ export function publishLaunchRefresh(
       utimesSync(join(dir, "launch.yaml"), now, now);
     }
     const accepted = store.database
-      .prepare("SELECT files FROM launch_catalog_generation WHERE singleton=1")
+      .prepare(
+        "SELECT files,installed_catalog_file FROM launch_catalog_generation WHERE singleton=1",
+      )
       .get();
     const next =
-      reload || catalog !== undefined || accepted?.files !== fence.files
+      reload ||
+      catalog !== undefined ||
+      accepted?.files !== fence.files ||
+      (accepted.installed_catalog_file !== null &&
+        accepted.installed_catalog_file !== fence.catalogFile)
         ? accept(store, dir)
         : fence.revision;
     if (catalog !== undefined)

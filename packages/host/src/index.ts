@@ -137,6 +137,7 @@ export { launchFilesStamp } from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
 export {
   acceptedHostProfiles,
+  adoptInstalledCatalog,
   assertLaunchFence,
   isAcceptedLaunchRevision,
   type LaunchFence,

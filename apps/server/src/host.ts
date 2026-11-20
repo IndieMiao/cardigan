@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Assignment, Clock, ProjectId } from "@cardigan/domain";
 import {
+  adoptInstalledCatalog,
   agentCliVersion,
   harnessBinary,
   isAcceptedLaunchRevision,
   launchFilesStamp,
   launchFingerprint,
   type PreparationRetryOptions,
+  parseCachedLaunchConfig,
   prepareRoleWorktree,
   publishLaunchRefresh,
   RuntimeTargets,
@@ -92,7 +94,12 @@ export async function loadLaunchFiles(
   // Isolated callers may validate without publishing; runtime wiring supplies the shared store.
   const fence = store
     ? withLaunchSnapshot(store, dir, dataDir, (f) => f)
-    : { files: launchFilesStamp(dir), revision: 0, catalogFile: "" };
+    : {
+        files: launchFilesStamp(dir),
+        revision: 0,
+        catalogFile: "",
+        canAdoptCatalog: false,
+      };
   let text: string;
   try {
     text = await readFile(launchFile, "utf8");
@@ -116,16 +123,23 @@ export async function loadLaunchFiles(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const staged = await stageModelLaunchConfig(raw, dataDir);
+  // A committed projection is already validated. Its TTL governs the *next* refresh,
+  // not whether the host can catch up to this revision (even if a GET recovered it).
+  const staged = fence.canAdoptCatalog
+    ? { config: parseCachedLaunchConfig(raw, dataDir), catalog: undefined }
+    : await stageModelLaunchConfig(raw, dataDir);
   validateLaunchSecrets(staged.config, secrets);
   reportLaunchWarnings(staged.config, report); // no callbacks inside the publication critical section
   if (store) {
-    const revision = publishLaunchRefresh(store, dir, dataDir, fence, {
-      catalog: staged.catalog,
-      hostProfiles: Object.keys(
-        selectableLaunchConfig({ config: staged.config, secrets }).profiles,
-      ),
-    });
+    const profiles = Object.keys(
+      selectableLaunchConfig({ config: staged.config, secrets }).profiles,
+    );
+    const revision = fence.canAdoptCatalog
+      ? adoptInstalledCatalog(store, dir, dataDir, fence, profiles)
+      : publishLaunchRefresh(store, dir, dataDir, fence, {
+          catalog: staged.catalog,
+          hostProfiles: profiles,
+        });
     return { config: staged.config, secrets, revision };
   }
   if (fence.files !== launchFilesStamp(dir))

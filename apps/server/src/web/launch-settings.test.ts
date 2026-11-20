@@ -775,12 +775,17 @@ test("a settled confirmation replays after unrelated invalid edits but never for
 
 // No sleeps: the IPC gate is before the old download returns, or *inside* the
 // old publisher's final rename. The latter cannot be tested by an in-process mutex.
-function racingProcess(mode: string) {
+function racingProcess(mode: string, publicationTime?: number) {
   const child = fork(
     fileURLToPath(
       new URL("../../test-support/launch-settings-race.mjs", import.meta.url),
     ),
-    [dir, h.dataDir, mode],
+    [
+      dir,
+      h.dataDir,
+      mode,
+      ...(publicationTime === undefined ? [] : [String(publicationTime)]),
+    ],
     {
       execArgv: [],
       env: { HOME: dir, PATH: dir },
@@ -891,9 +896,14 @@ test("after the poll passes its final check no other process can publish ahead o
     await exited;
   }
 });
-test.each(["catalog-crash", "reload-crash"])(
-  "%s after the catalog rename: host and settings recover one version and reject the old preview",
-  async (mode) => {
+test.each([
+  ["catalog-crash", "host-first", false],
+  ["reload-crash", "settings-first", false],
+  ["reload-crash", "host-first", true],
+  ["reload-crash", "settings-first", true],
+] as const)(
+  "%s, %s, expired=%s: adopt the installed catalog before any new refresh",
+  async (mode, order, expired) => {
     await prepareCatalogRace();
     const offline = vi.fn(async () => {
       throw new Error("offline fixture");
@@ -910,15 +920,41 @@ test.each(["catalog-crash", "reload-crash"])(
     });
     const original = readFileSync(file, "utf8");
     const before = live.current().revision;
-    expect(await racingProcess(mode).exited).toBe(73);
-    const window = () =>
-      live.refresh().then((g) => g.config.models?.primary?.context_window);
-    if (mode === "catalog-crash") expect(await window()).toBe(12800); // runtime recovers first, without a YAML change
+    const publicationTime = expired ? Date.now() - 2 * 86400000 : undefined;
+    expect(await racingProcess(mode, publicationTime).exited).toBe(73);
+    const removed = vi.fn(async () =>
+      Response.json({
+        gateway: { models: { other: { limit: { context: 4096 } } } },
+      }),
+    );
+    vi.stubGlobal("fetch", removed);
+    const assertHost = async () => {
+      const host = await live.refresh();
+      expect(host.config.models?.primary?.context_window).toBe(12800);
+      expect(host.revision).toBe(Number(before) + 1);
+      expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
+    };
+    if (order === "host-first") await assertHost();
     const detail = JSON.parse((await get()).body);
     expect(detail.version).not.toBe(version);
     expect(detail.profiles[0].metadata.context_window).toBe(12800);
-    expect(await window()).toBe(12800); // settings recovered first for CLI reload
-    expect(live.current().revision).toBe(Number(before) + 1);
+    await assertHost();
+    if (expired) {
+      // Explicit reload still validates the next candidate against the (removed-model) upstream.
+      expect(await racingProcess("removed-reload").exited).toBe(2);
+      await assertHost();
+      const after = JSON.parse((await get()).body);
+      expect(after.version).toBe(detail.version);
+      expect(after.profiles[0].metadata.context_window).toBe(12800);
+    }
+    expect(removed).not.toHaveBeenCalled();
+    expect(
+      h.store.database
+        .prepare(
+          "SELECT revision,pending_catalog FROM launch_catalog_generation",
+        )
+        .get(),
+    ).toEqual({ revision: Number(before) + 1, pending_catalog: null });
     expect((await post("confirm", data)).json).toMatchObject({
       error: { code: "stale_snapshot" },
     });

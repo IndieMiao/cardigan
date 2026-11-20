@@ -26,7 +26,8 @@ ALTER TABLE launch_model_intents ADD COLUMN catalog TEXT;
 CREATE TABLE launch_catalog_generation (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   revision INTEGER NOT NULL,
-  files TEXT NOT NULL
+  files TEXT NOT NULL,
+  installed_catalog_file TEXT -- identity of the catalog installed for this revision
 );
 
 -- A catalog-only refresh commits its redo data before touching the filesystem.

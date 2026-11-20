@@ -1,9 +1,11 @@
 // Independent process: same private YAML, catalog and SQLite writer as the HTTP fixture.
 
+import assert from "node:assert/strict";
 import { once } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
+import { mock } from "node:test";
 import { Store } from "@cardigan/store";
 import { loadConfig } from "../../cli/dist/config.js";
 import { main } from "../../cli/dist/index.js";
@@ -12,7 +14,10 @@ import { resolveLaunchPaths } from "../../cli/dist/paths.js";
 import { loadLaunchFiles } from "../dist/host.js";
 import { LaunchSettings } from "../dist/web/launch-settings.js";
 
-const [dir, dataDir, mode] = process.argv.slice(2);
+const [dir, dataDir, mode, publicationTime] = process.argv.slice(2);
+// Recovery uses the parent clock: no file edits or sleeps to expire an installed projection.
+if (publicationTime)
+  mock.timers.enable({ apis: ["Date"], now: Number(publicationTime) });
 const paths = resolveLaunchPaths({
   CARDIGAN_CONFIG_DIR: dir,
   CARDIGAN_DATA_DIR: dataDir,
@@ -43,6 +48,10 @@ syncBuiltinESMExports();
 globalThis.fetch = async (url) => {
   if (url !== "https://models.dev/api.json")
     throw new Error("unexpected fixture request");
+  if (mode === "removed-reload")
+    return Response.json({
+      gateway: { models: { other: { limit: { context: 4096 } } } },
+    });
   if (mode.startsWith("employee-"))
     throw Error("hosted employee lookup must not fetch");
   if (
@@ -65,7 +74,14 @@ globalThis.fetch = async (url) => {
 };
 try {
   if (mode === "set-model") await setModel(paths, io, "primary", "cli");
-  else if (mode.startsWith("employee-")) {
+  else if (mode === "removed-reload") {
+    const errors = [];
+    process.exitCode = await main(["launch", "reload"], {
+      ...io,
+      stderr: (text) => errors.push(text),
+    });
+    assert.match(errors.join("\n"), /models\.primary\.context_window/u);
+  } else if (mode.startsWith("employee-")) {
     process.exitCode = await main(
       [
         "employee",

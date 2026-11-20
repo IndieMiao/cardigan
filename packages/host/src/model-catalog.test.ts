@@ -1,9 +1,17 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
+  adoptInstalledCatalog,
   publishLaunchRefresh,
   withLaunchSnapshot,
 } from "./launch-model-intent.js";
@@ -56,6 +64,36 @@ afterEach(async () => {
   store.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+test.each(["launch.yaml", "secrets.env", "models-dev.json"])(
+  "replacing %s invalidates both the stored adoption proof and an in-flight adoption",
+  async (filename) => {
+    await writeFile(join(dir, "launch.yaml"), JSON.stringify(config));
+    await writeFile(join(dir, "secrets.env"), "private-ref=fixture", {
+      mode: 0o600,
+    });
+    await loadModelLaunchConfig(config, dir, {
+      now,
+      fetch: async () => Response.json(fixture),
+    });
+    const snapshot = () => withLaunchSnapshot(store, dir, dir, (f) => f);
+    const installed = snapshot();
+    expect(installed.canAdoptCatalog).toBe(true);
+    const path = join(dir, filename);
+    await writeFile(`${path}.new`, await readFile(path), { mode: 0o600 });
+    await rename(`${path}.new`, path);
+    expect(snapshot()).toMatchObject({
+      revision: installed.revision,
+      canAdoptCatalog: false,
+    });
+    expect(() =>
+      adoptInstalledCatalog(store, dir, dir, installed, ["coder"]),
+    ).toThrow();
+    expect(
+      store.database.prepare("SELECT revision FROM launch_host_profiles").all(),
+    ).toEqual([]);
+  },
+);
 
 test("fetches only the public catalog, caches a dated projection, and reuses it offline", async () => {
   const fetch = vi.fn(async () => Response.json(fixture));
