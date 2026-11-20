@@ -262,7 +262,10 @@ test("C-237 failure is audited once and visible in Needs You without Ops", async
   expect(
     needsYou(f.state(), f.clock.now()).system_rule_attention,
   ).toMatchObject([
-    { work_item_id: verifier.id, detail: expect.stringContaining("没有合格") },
+    {
+      work_item_id: verifier.id,
+      detail: expect.stringContaining("本项目没有可用员工（角色 reviewer）"),
+    },
   ]);
   expect(
     f.store
@@ -768,7 +771,7 @@ test("C1 disabled legacy switch still projects future assignment failures withou
     {
       card_id: f.card.id,
       work_item_id: verifier.id,
-      detail: expect.stringContaining("没有合格"),
+      detail: expect.stringContaining("本项目没有可用员工（角色 reviewer）"),
     },
   ]);
   expect(

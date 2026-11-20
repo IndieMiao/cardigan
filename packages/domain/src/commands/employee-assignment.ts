@@ -1,4 +1,8 @@
-import { type Employee, employeeNameKey } from "../employee.js";
+import {
+  type Employee,
+  employeeInProject,
+  employeeNameKey,
+} from "../employee.js";
 import type { Delivery, WorkItem } from "../entities.js";
 import type { EmployeeId } from "../ids.js";
 import { isCompletionVerifier } from "../templates.js";
@@ -12,7 +16,13 @@ import { resolveCardTemplate } from "./templates.js";
 
 /** Resolve an explicit ID, or an active display name, without accepting identity claims. */
 export function resolveEmployee(d: CommandDraft, reference: string): Employee {
-  const employees = d.state.employees ?? [];
+  return findEmployee(d.state.employees ?? [], reference);
+}
+
+function findEmployee(
+  employees: readonly Employee[],
+  reference: string,
+): Employee {
   const employee =
     employees.find((e) => e.id === reference) ??
     employees.find(
@@ -24,8 +34,87 @@ export function resolveEmployee(d: CommandDraft, reference: string): Employee {
   return employee;
 }
 
+export function checkEmployeeProject(employee: Employee, projectId: string) {
+  ensure(
+    employeeInProject(employee, projectId),
+    "validation_failed",
+    `员工 ${employee.id} 不属于本项目 ${projectId}`,
+  );
+}
+
+export function noProjectEmployee(roleId: string) {
+  return `本项目没有可用员工（角色 ${roleId}）`;
+}
+
+// Old snapshots omitted projects; an explicit [] is a current all-project employee.
+function hasScopedRoster(employees: readonly Employee[]) {
+  return employees.some((e) => e.projects !== undefined);
+}
+
+function allowLegacyUnnamed(employees: readonly Employee[], roleId: string) {
+  ensure(
+    !hasScopedRoster(employees),
+    "invariant_violation",
+    noProjectEmployee(roleId),
+  );
+}
+
+type StaffingState = Pick<
+  CommandState,
+  "project_id" | "employees" | "assignments" | "employee_activity"
+>;
+
+export function selectStandingEmployee(
+  state: StaffingState,
+  roleId: "pm" | "host_ops",
+  reference?: string,
+  destination: "internal" | "external" = "internal",
+) {
+  return attempt(() => {
+    const employees = state.employees ?? [];
+    const eligible = (e: Employee) =>
+      destination === "external" || !isExternalEmployee(state, e.id);
+    if (reference !== undefined) {
+      const employee = findEmployee(employees, reference);
+      checkEmployeeProject(employee, state.project_id);
+      ensure(
+        employee.status === "active" && employee.role_id === roleId,
+        "validation_failed",
+        `员工须为在职的 ${roleId} 角色`,
+      );
+      ensure(
+        eligible(employee),
+        "invariant_violation",
+        "这是外接员工，不能指派给内部常驻身份",
+      );
+      return employee;
+    }
+    const active = employees.filter(
+      (e) =>
+        employeeInProject(e, state.project_id) &&
+        e.status === "active" &&
+        e.role_id === roleId,
+    );
+    const candidates = active.filter(eligible);
+    ensure(
+      !active.length || candidates.length,
+      "invariant_violation",
+      `${noProjectEmployee(roleId)}：该角色的在职员工均为外接员工`,
+    );
+    // Unnamed PM bootstrap predates employee membership.
+    if (roleId === "pm" && !hasScopedRoster(employees)) return;
+    ensure(
+      candidates.length <= 1,
+      "validation_failed",
+      `有多个在职${roleId === "pm" ? " PM " : "主机运维"}员工，请用 --employee 指定`,
+    );
+    if (!candidates.length) allowLegacyUnnamed(employees, roleId);
+    return candidates[0];
+  });
+}
+
 function isExternalEmployee(
-  state: CommandState,
+  state: StaffingState,
   employee_id: EmployeeId,
 ): boolean {
   return (
@@ -61,7 +150,9 @@ export function availableWorkItemEmployees(
 ): readonly Employee[] {
   return (state.employees ?? []).filter(
     (employee) =>
-      employee.status === "active" && !isExternalEmployee(state, employee.id),
+      employeeInProject(employee, state.project_id) &&
+      employee.status === "active" &&
+      !isExternalEmployee(state, employee.id),
   );
 }
 
@@ -180,6 +271,7 @@ export function selectEmployee(
 ): Employee | undefined {
   if (reference !== undefined) {
     const employee = resolveEmployee(d, reference);
+    checkEmployeeProject(employee, d.state.project_id);
     checkEmployeeNotExternal(d, employee.id);
     ensure(
       employee.status === "active",
@@ -194,10 +286,17 @@ export function selectEmployee(
     checkEmployeeSeparation(d, item, employee.id);
     return employee;
   }
-  const active = (d.state.employees ?? []).filter(
-    (e) => e.status === "active" && e.role_id === item.role_id,
+  const employees = d.state.employees ?? [];
+  const active = employees.filter(
+    (e) =>
+      employeeInProject(e, d.state.project_id) &&
+      e.status === "active" &&
+      e.role_id === item.role_id,
   );
-  if (!active.length) return;
+  if (!active.length) {
+    allowLegacyUnnamed(employees, item.role_id);
+    return;
+  }
   const internal = availableWorkItemEmployees(d.state).filter(
     (e) => e.role_id === item.role_id,
   );
@@ -275,7 +374,11 @@ export function employeeAssignmentLoad(
 /** Use the explicit assign validator for each candidate; never duplicate eligibility rules. */
 export function automaticEmployeeSelection(d: CommandDraft, item: WorkItem) {
   const candidates = (d.state.employees ?? [])
-    .filter((employee) => employee.role_id === item.role_id)
+    .filter(
+      (employee) =>
+        employeeInProject(employee, d.state.project_id) &&
+        employee.role_id === item.role_id,
+    )
     .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
     .map((employee) => {
       const checked = attempt(() => selectEmployee(d, item, employee.id));

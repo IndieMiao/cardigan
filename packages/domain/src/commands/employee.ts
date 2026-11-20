@@ -16,6 +16,7 @@ export interface CreateEmployeeInput {
   readonly name: string;
   readonly title: string;
   readonly role_id: string;
+  readonly projects?: Employee["projects"];
   readonly bio?: string;
   readonly avatar?: string | null;
   readonly launch_profile_ref?: string | null;
@@ -23,7 +24,13 @@ export interface CreateEmployeeInput {
 export type UpdateEmployeeInput = Partial<
   Pick<
     Employee,
-    "name" | "title" | "role_id" | "bio" | "avatar" | "launch_profile_ref"
+    | "name"
+    | "title"
+    | "role_id"
+    | "bio"
+    | "avatar"
+    | "launch_profile_ref"
+    | "projects"
   >
 >;
 
@@ -47,6 +54,22 @@ function validate(
   ports: EmployeeCommandPorts,
   checkProfile: boolean,
 ): void {
+  if (employee.projects !== undefined) {
+    ensure(
+      Array.isArray(employee.projects),
+      "validation_failed",
+      "所属项目必须是列表",
+    );
+    for (const id of employee.projects) {
+      field(id, "项目编号", undefined, true);
+      ensure(id === id.trim(), "validation_failed", "项目编号不能含首尾空格");
+    }
+    ensure(
+      new Set(employee.projects).size === employee.projects.length,
+      "validation_failed",
+      "所属项目不能重复",
+    );
+  }
   field(employee.name, "名字", 40, true);
   field(employee.title, "职位", 40, true);
   field(employee.bio, "简介", 200);
@@ -135,6 +158,7 @@ export function createEmployee(
     // Validate before allocating: a rejected command must not consume an ID.
     const employee: Omit<Employee, "id"> = {
       name: input.name,
+      projects: input.projects === undefined ? [] : input.projects,
       title: input.title,
       role_id: input.role_id,
       bio: input.bio ?? "",
@@ -180,6 +204,7 @@ export function updateEmployee(
           "bio",
           "avatar",
           "launch_profile_ref",
+          "projects",
         ].includes(key),
       ),
       "validation_failed",
