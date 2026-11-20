@@ -14,8 +14,9 @@ import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
 
 // C-534 evidence only: one synthetic card whose goal and first comment carry
-// three Markdown tables — a copy of the user's C-517 screenshot table, column
-// alignment syntax with tags/code/links/raw HTML, and a 10-column table.
+// four Markdown tables — a copy of the user's C-517 screenshot table, column
+// alignment syntax with tags/code/links/raw HTML, a 10-column table, and a
+// tag link with a long description (C-534 design review V-2556).
 // No network client, database or production data.
 Date.now = () => Date.parse(NOW);
 const tag = "[C-494](#/p/p-1/cards/C-494)";
@@ -37,7 +38,12 @@ const C534_TABLES = `拆解方案（确认后开卡）
 | 编号 | 标题 | 状态 | 负责人 | 模板 | 依赖 | 预计 | 风险 | 备注 | 链接 |
 |---|---|---|---|---|---|---|---|---|---|
 | ${tag} | 设置页角色流程改用启动配置接口 | 进行中 | 前端工程师 | ui | 卡 1 | 2 天 | 低 | 需要等接口合并后再联调 | [说明](https://example.com/docs) |
-| \`C-495\` | 启动配置读写接口与审计记录 | 待开始 | 后端工程师 | dev | — | 3 天 | 中 | 只限人类登录会话写入 | — |`;
+| \`C-495\` | 启动配置读写接口与审计记录 | 待开始 | 后端工程师 | dev | — | 3 天 | 中 | 只限人类登录会话写入 | — |
+
+| # | 卡 | 依赖 |
+|---|---|---|
+| 1 | [C-494 设置页角色流程改用启动配置接口](#/p/p-1/cards/C-494) | 1 |
+| 2 | 普通文字也很长很长很长的一段说明 | — |`;
 
 const entries = [
   timelineEntry({
