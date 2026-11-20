@@ -1,5 +1,6 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
+import { timeRead } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
@@ -33,7 +34,11 @@ export function readPagedCard(
   )
     throw new HttpRejection(400, "validation_failed", "时间线游标无效");
   return store.uow.read((tx) => {
-    let state = scopedCardState(store, tx, project, [cardId]);
+    const timed = <T>(stage: string, fn: () => T) =>
+      timeRead(options?.recordTiming, stage, fn);
+    let state = timed("sql_state", () =>
+      scopedCardState(store, tx, project, [cardId]),
+    );
     const card = state.cards.find((c) => c.id === cardId);
     if (!card) return undefined;
     const where = ["project_id = ?", "card_id = ?"];
@@ -181,19 +186,33 @@ export function readPagedCard(
         )
         .map((row) => [String(row.id), String(row.card_id) as CardId] as const),
     );
-    return cardDetail(state, cardId, {
-      dependencyState: readCardDependencies(store, tx, project),
-      mergeState: readMergeQueueState(tx, project),
-      ...options,
-      updatedAt,
-      attachmentEntryCards,
-      timelineEntries: entries,
-      conclusionEntries: conclusions,
-      timelineTotal: total,
-      timelineNextCursor:
-        rows.length > limit && last
-          ? encodeCursor(scope, [last.event_seq])
-          : null,
-    });
+    const dependencyState = timed("dependency_sql", () =>
+      readCardDependencies(
+        store,
+        tx,
+        project,
+        new Set(state.cards.map((c) => c.id)),
+      ),
+    );
+    const mergeState = timed("merge_queue_sql", () =>
+      readMergeQueueState(tx, project, { card, state }),
+    );
+    return timed("assemble", () =>
+      cardDetail(state, cardId, {
+        dependencyState,
+        mergeState,
+        ...options,
+        overviewOnly: params.get("section") === "overview",
+        updatedAt,
+        attachmentEntryCards,
+        timelineEntries: entries,
+        conclusionEntries: conclusions,
+        timelineTotal: total,
+        timelineNextCursor:
+          rows.length > limit && last
+            ? encodeCursor(scope, [last.event_seq])
+            : null,
+      }),
+    );
   });
 }

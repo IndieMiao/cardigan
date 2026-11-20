@@ -31,6 +31,7 @@ import {
 } from "@cardigan/domain";
 import { z } from "zod";
 import { ToolError } from "../errors.js";
+import { timeRead } from "../read-timing.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { authorizeCheckLog, CheckLogAccessError } from "./get-check-log.js";
 import { auditReferenceRead, referenceCard } from "./reference-read.js";
@@ -59,6 +60,8 @@ export const getCardTool = defineTool({
     "Return a card with its work items, open decisions, recent deliveries, review matrix and derived fields",
   input: z.object({ card_id: z.string().min(1) }),
   handler: ({ card_id }, context) => {
+    const timed = <T>(stage: string, fn: () => T) =>
+      timeRead(context.recordTiming, stage, fn);
     const { store, identity } = context;
     const cardId = card_id as CardId;
     const read = store.uow.read((tx) => referenceCard(tx, context, cardId));
@@ -73,48 +76,65 @@ export const getCardTool = defineTool({
     const { state, dependency, merge_stage } = store.uow.read((tx) => {
       try {
         const project = identity.actor.project_id;
-        const streams = tx.events.listStreams?.(project);
-        const projectEvents = streams?.get("") ?? [];
+        const projectEvents = timed(
+          "sql_streams",
+          () =>
+            tx.projectMergeEvents?.(project) ??
+            tx.events.listAfter(project, undefined, 0),
+        );
         const queueConfig = projectEvents.findLast(
           (e) =>
             e.actor.kind === "system" && e.type === "merge_queue_configured",
         );
-        // Legacy cards keep their scoped event read. A configured merge queue
-        // also needs the shared cached history to derive ordering across cards.
-        const snapshot: CommandState = {
-          project_id: project,
-          ...(queueConfig?.payload
-            ? {
-                project_settings: {
-                  merge_gate_enabled: true,
-                  merge_queue: queueConfig.payload as unknown as NonNullable<
-                    NonNullable<CommandState["project_settings"]>["merge_queue"]
-                  >,
-                },
-              }
-            : {}),
-          project_preferences: tx.project_preferences?.list(project) ?? [],
-          card_templates: tx.card_templates?.list(project) ?? [],
-          cards: tx.cards.list(project),
-          work_items: tx.work_items.list(project),
-          assignments: tx.assignments.list(project),
-          runs: tx.runs.list(project),
-          deliveries: tx.deliveries.list(project),
-          reviews: tx.reviews.list(project),
-          decisions: tx.decisions.list(project),
-          human_actions: tx.human_actions.list(project),
-          attachments: tx.attachments.list(project),
-          timeline: tx.timeline.list(project),
-          events:
-            queueConfig && streams
-              ? [...streams.values()].flat()
-              : tx.events.listAfter(project, cardId, 0),
-          employees: tx.employees?.list() ?? [],
-          members: tx.members?.list() ?? [],
-          roles: [],
-          machines: [],
-          cursors: [],
-        };
+        const cardEvents = timed("sql_card_events", () =>
+          tx.events.listAfter(project, cardId, 0),
+        );
+        const localEvents = queueConfig
+          ? [...projectEvents, ...cardEvents]
+          : cardEvents;
+        const sources = timed("sql_card_sources", () =>
+          tx.cardSources?.(project, cardId),
+        );
+        const snapshot = timed(
+          "sql_state",
+          (): CommandState => ({
+            project_id: project,
+            ...(queueConfig?.payload
+              ? {
+                  project_settings: {
+                    merge_gate_enabled: true,
+                    merge_queue: queueConfig.payload as unknown as NonNullable<
+                      NonNullable<
+                        CommandState["project_settings"]
+                      >["merge_queue"]
+                    >,
+                  },
+                }
+              : {}),
+            project_preferences: tx.project_preferences?.list(project) ?? [],
+            card_templates: tx.card_templates?.list(project) ?? [],
+            cards: tx.cards.list(project),
+            work_items: tx.work_items.list(project),
+            assignments: tx.assignments.list(project),
+            runs: tx.runs.list(project),
+            deliveries: tx.deliveries.list(project),
+            reviews: tx.reviews.list(project),
+            decisions: tx.decisions.list(project),
+            human_actions: tx.human_actions.list(project),
+            attachments:
+              sources?.attachments ??
+              tx.attachments.list(project).filter((a) => a.card_id === cardId),
+            timeline:
+              sources?.timeline ??
+              tx.timeline.list(project).filter((e) => e.card_id === cardId),
+            events: localEvents,
+            employees: tx.employees?.list() ?? [],
+            members: tx.members?.list() ?? [],
+            roles: [],
+            machines: [],
+            cursors: [],
+          }),
+        );
         const visibleCards = snapshot.cards.filter(
           (c) =>
             cardReadAccess({
@@ -130,30 +150,49 @@ export const getCardTool = defineTool({
         const hasDependencies =
           card.depends_on_cards?.length ||
           visibleCards.some((c) => c.depends_on_cards?.includes(cardId));
+        const visibleIds = new Set(visibleCards.map((c) => c.id));
         const dependency = hasDependencies
-          ? cardDependencyView(
-              {
-                ...snapshot,
-                cards: visibleCards,
-                events: visibleCards.flatMap((c) =>
-                  tx.events
-                    .listAfter(project, c.id, 0)
-                    .filter((e) =>
-                      [
-                        "card_merged",
-                        "card_marked_done",
-                        "review_submitted",
-                        "completion_reviewed",
-                        "delivery_submitted",
-                        "review_reused",
-                      ].includes(e.type),
+          ? timed("dependency", () =>
+              cardDependencyView(
+                {
+                  ...snapshot,
+                  cards: visibleCards,
+                  events:
+                    tx
+                      .dependencyEvents?.(project)
+                      .filter((e) => e.card_id && visibleIds.has(e.card_id)) ??
+                    visibleCards.flatMap((c) =>
+                      tx.events
+                        .listAfter(project, c.id, 0)
+                        .filter((e) =>
+                          [
+                            "card_merged",
+                            "card_marked_done",
+                            "review_submitted",
+                            "completion_reviewed",
+                            "delivery_submitted",
+                            "review_reused",
+                          ].includes(e.type),
+                        ),
                     ),
-                ),
-              },
-              card,
+                },
+                card,
+              ),
             )
           : undefined;
-        const stage = mergeStage(snapshot, card);
+        // Only queue position/window ordering of a merge candidate needs peer streams.
+        const streams =
+          queueConfig && card.status === "awaiting_merge"
+            ? tx.events.listStreams?.(project)
+            : undefined;
+        const stage = timed("merge_stage", () =>
+          mergeStage(
+            streams
+              ? { ...snapshot, events: [...streams.values()].flat() }
+              : snapshot,
+            card,
+          ),
+        );
         const hideBatchEvidence =
           stage?.batch_id &&
           !mergeBatchReadScope(snapshot, read.assignment).canRead(
@@ -164,7 +203,9 @@ export const getCardTool = defineTool({
             ? (({ batch_check: _check, ...safe }) => safe)(stage)
             : stage;
         return {
-          state: referenceReadState(snapshot, read.assignment),
+          state: timed("visibility", () =>
+            referenceReadState(snapshot, read.assignment),
+          ),
           dependency,
           merge_stage: safeStage,
         };
@@ -227,16 +268,18 @@ export const getCardTool = defineTool({
       ? (({ log_ref: _path, ...safe }) => safe)(storedMergeCheck)
       : undefined;
 
-    const attempts = store.uow.read((tx) => {
-      try {
-        return authorizeCheckLog(tx, context, cardId);
-      } catch (error) {
-        if (error instanceof CheckLogAccessError) return [];
-        if (error instanceof ToolError && error.code === "unauthorized")
-          throw new ToolError("unauthorized", "Token 已失效。");
-        throw ToolError.validation("检查日志列表读取失败。");
-      }
-    });
+    const attempts = timed("check_attempts", () =>
+      store.uow.read((tx) => {
+        try {
+          return authorizeCheckLog(tx, context, cardId);
+        } catch (error) {
+          if (error instanceof CheckLogAccessError) return [];
+          if (error instanceof ToolError && error.code === "unauthorized")
+            throw new ToolError("unauthorized", "Token 已失效。");
+          throw ToolError.validation("检查日志列表读取失败。");
+        }
+      }),
+    );
 
     // Typed against CardView so the tool cannot drift from the domain's
     // derived-field types (M1.2b).
@@ -254,25 +297,31 @@ export const getCardTool = defineTool({
         status,
       });
 
-    const shadow = mergeShadowComparisons(
-      {
-        events,
-        decisions: state.decisions,
-      },
-      cardId,
+    const shadow = timed("merge_shadow", () =>
+      mergeShadowComparisons(
+        {
+          events,
+          decisions: state.decisions,
+        },
+        cardId,
+      ),
     );
     auditReferenceRead(context, [cardId], "get_card");
     return publicSourceMergeData({
       ...read.provenance,
-      timeline: state.timeline
-        .filter((entry) => entry.card_id === cardId)
-        .map((entry) => ({
-          ...entry,
-          ...authorView(authors, entry.author),
-        })),
-      attachments: state.attachments
-        .filter((a) => a.card_id === cardId)
-        .map(({ storage_path: _path, ...metadata }) => metadata),
+      timeline: timed("timeline_view", () =>
+        state.timeline
+          .filter((entry) => entry.card_id === cardId)
+          .map((entry) => ({
+            ...entry,
+            ...authorView(authors, entry.author),
+          })),
+      ),
+      attachments: timed("attachment_views", () =>
+        state.attachments
+          .filter((a) => a.card_id === cardId)
+          .map(({ storage_path: _path, ...metadata }) => metadata),
+      ),
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
@@ -327,15 +376,17 @@ export const getCardTool = defineTool({
       // The mapping requires every current Git product, including those older
       // than the recent-delivery window. Expose only the host-owned inventory,
       // never unrelated evidence (logs, transport details, etc.).
-      role_rule_inventories: roleRuleDeliveries(
-        { work_items, deliveries, decisions },
-        { card_id: cardId },
-      ).map((delivery) => ({
-        delivery_id: delivery.id,
-        work_item_id: delivery.work_item_id,
-        subject: delivery.subject,
-        role_rule_inventory: roleRuleInventory(delivery) ?? null,
-      })),
+      role_rule_inventories: timed("role_rule_inventories", () =>
+        roleRuleDeliveries(
+          { work_items, deliveries, decisions },
+          { card_id: cardId },
+        ).map((delivery) => ({
+          delivery_id: delivery.id,
+          work_item_id: delivery.work_item_id,
+          subject: delivery.subject,
+          role_rule_inventory: roleRuleInventory(delivery) ?? null,
+        })),
+      ),
       shared_must_fixes: flowAtLeast(card, 5)
         ? sharedMustFixes(reviews, deliveries, work_items)
         : [],
@@ -343,7 +394,9 @@ export const getCardTool = defineTool({
         ...review,
         ...runAuthorView(authors, review.run_id),
       })),
-      review_matrix: deriveReviewMatrix(deliveries, work_items, reviews),
+      review_matrix: timed("review_matrix", () =>
+        deriveReviewMatrix(deliveries, work_items, reviews),
+      ),
       counts: {
         work_items: work_items.length,
         deliveries: deliveries.length,
