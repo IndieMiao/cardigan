@@ -1061,12 +1061,14 @@ function RoleEditForm({
               source={instructions}
             />
           ) : (
-            <Textarea
-              rows={16}
-              aria-label={ROLE_FIELD_LABELS.instructions}
-              value={instructions}
-              onChange={(e) => setInstructions(e.target.value)}
-            />
+            <label>
+              <Textarea
+                rows={16}
+                aria-label={ROLE_FIELD_LABELS.instructions}
+                value={instructions}
+                onChange={(e) => setInstructions(e.target.value)}
+              />
+            </label>
           )}
         </fieldset>
         <label>

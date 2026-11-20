@@ -179,8 +179,10 @@ try {
         };
       };
       const dialog = [...document.querySelectorAll("[role=dialog]")].at(-1);
-      const content =
-        dialog ?? document.querySelector("[data-settings-content]");
+      const panel = document.querySelector(
+        "[data-settings-content]:not([hidden])",
+      );
+      const content = dialog ?? panel;
       const limit = content
         ? content.getBoundingClientRect().right + 0.5
         : innerWidth;
@@ -211,11 +213,9 @@ try {
         scrollWidth: document.documentElement.scrollWidth,
         innerWidth,
         content: box(content),
-        panelTitle: box(document.querySelector("[data-settings-content] h2")),
+        panelTitle: box(panel?.querySelector("h2")),
         panelActions: [
-          ...document.querySelectorAll(
-            "[data-settings-content] h2 ~ div button",
-          ),
+          ...(panel?.querySelectorAll("h2 ~ div button") ?? []),
         ].map(box),
         drawerTitle: box(dialog?.querySelector("h2")),
         sectionTitle: q("section h3"),
