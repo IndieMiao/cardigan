@@ -610,6 +610,11 @@ try {
         results["employees-blocked"].selects.map((s) => s.disabled),
         [true, false],
       );
+      // Leave through the discard question, so no unload prompt is pending.
+      await click("取消");
+      await until("document.querySelectorAll('[role=dialog]').length === 2");
+      await click("放弃修改");
+      await until("!document.querySelector('[role=dialog]')");
       // Pin one and save: the drawer closes and the page says what changed.
       await employees(theme);
       await row("悟净", employeeReady);
