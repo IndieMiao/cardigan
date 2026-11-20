@@ -1939,13 +1939,15 @@ export interface CardiganClient {
    * hides an action its client lacks.
    */
   /**
-   * Not retried automatically: the server keys neither the check nor the
-   * drain, so a resent request could act twice (a check that just ended is
-   * not joined). After a failure the page reads the machine again instead.
+   * Each click carries its own operation key, but is never resent
+   * automatically: the server does not dedupe by key (a check that just
+   * ended is not joined), so a resend could act twice. After a failure the
+   * page reads the machine back before allowing another click.
    */
   checkMachine?(
     projectId: string,
     machineId: string,
+    idempotencyKey: string,
   ): Promise<{ check: MachineCheckJob }>;
   machineCheck?(
     projectId: string,
@@ -1956,6 +1958,7 @@ export interface CardiganClient {
     projectId: string,
     machineId: string,
     drain: boolean,
+    idempotencyKey: string,
   ): Promise<{ machine_id: string; status: string }>;
   createWorkerWizard?(
     projectId: string,
@@ -2352,11 +2355,12 @@ export class HttpCardiganClient implements CardiganClient {
   checkMachine(
     projectId: string,
     machineId: string,
+    idempotencyKey: string,
   ): Promise<{ check: MachineCheckJob }> {
-    // No idempotency key, so no automatic resend (see the interface).
+    // The key identifies the click; it is never resent (see the interface).
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/check`,
-      { method: "POST", body: "{}" },
+      { method: "POST", body: "{}", idempotencyKey, resend: false },
     );
   }
   machineCheck(
@@ -2372,11 +2376,12 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     machineId: string,
     drain: boolean,
+    idempotencyKey: string,
   ): Promise<{ machine_id: string; status: string }> {
     // Not resent: a late duplicate could undo a later opposite action.
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/${drain ? "drain" : "resume"}`,
-      { method: "POST", body: "{}" },
+      { method: "POST", body: "{}", idempotencyKey, resend: false },
     );
   }
   createWorkerWizard(
@@ -3089,7 +3094,17 @@ export class HttpCardiganClient implements CardiganClient {
 
   private async request<T>(
     path: string,
-    init: { method?: string; body?: string; idempotencyKey?: string } = {},
+    init: {
+      method?: string;
+      body?: string;
+      idempotencyKey?: string;
+      /**
+       * C-511: whether a transport failure may be resent automatically. By
+       * default keyed writes are; an operation the server does not dedupe
+       * sends its key as an identifier only (`resend: false`).
+       */
+      resend?: boolean;
+    } = {},
     observe?: (response: Response) => void,
   ): Promise<T> {
     const method = init.method ?? "GET";
@@ -3110,7 +3125,7 @@ export class HttpCardiganClient implements CardiganClient {
       });
     const { response, lostReply } = await this.sendWithRetry(
       send,
-      isRetryableRequest(method, init.idempotencyKey),
+      init.resend ?? isRetryableRequest(method, init.idempotencyKey),
     );
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {

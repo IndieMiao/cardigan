@@ -10,7 +10,6 @@ import {
   ApiError,
   type CardiganClient,
   describeError,
-  describeWriteError,
   type ExecutionCapacity,
   type MachineBindingView,
   type MachineCheckJob,
@@ -729,6 +728,7 @@ function useMachineActions({
   const [checkRetry, setCheckRetry] = useState<(() => void) | undefined>();
   const [checkMessage, setCheckMessage] = useNotice();
   const [drainError, setDrainError] = useState("");
+  const [drainRetry, setDrainRetry] = useState<(() => void) | undefined>();
   const [drainMessage, setDrainMessage] = useNotice();
   const alive = useRef(true);
   useEffect(() => {
@@ -795,50 +795,168 @@ function useMachineActions({
     return () => window.clearTimeout(timer);
   }, [client, projectId, machineId, checkId, pollMs, tick, finished]);
 
+  /**
+   * After a failed write the outcome is unknown until the machine is read
+   * back (a lost reply may hide a write that took effect). Until then both
+   * actions stay disabled; a failed read-back offers to read again, never
+   * to resend the write.
+   */
+  const [confirming, setConfirming] = useState(false);
+  const confirm = async (
+    settle: (read: MachineView) => void,
+    report: (message: string, retry: () => void) => void,
+  ) => {
+    const read = client.machine;
+    if (!machineId) return;
+    sending.current = true;
+    setConfirming(true);
+    try {
+      const { machine: fresh } = await read.call(client, projectId, machineId);
+      if (!alive.current) return;
+      settle(fresh);
+    } catch (cause) {
+      if (!alive.current) return;
+      report(
+        `未能读回机器状态：${describeError(cause)}`,
+        () => void confirm(settle, report),
+      );
+      return; // still unconfirmed: actions stay disabled
+    } finally {
+      if (alive.current) setConfirming(false);
+    }
+    sending.current = false;
+    changed.current();
+  };
+  const unconfirmed = useRef(false);
+  /** No reply, or a gateway/server error: the write may have taken effect. */
+  const uncertain = (cause: unknown) =>
+    !(cause instanceof ApiError) || cause.status >= 500;
   const start = async () => {
     const post = client.checkMachine;
-    if (!post || !machineId || sending.current || check) return;
+    if (!post || !machineId || sending.current || unconfirmed.current || check)
+      return;
+    const before = recorded?.id;
     sending.current = true;
     setStarting(true);
     setCheckError("");
     setCheckRetry(undefined);
+    let failure: unknown;
     try {
-      const { check: job } = await post.call(client, projectId, machineId);
+      const { check: job } = await post.call(
+        client,
+        projectId,
+        machineId,
+        crypto.randomUUID(),
+      );
       if (!alive.current) return;
       if (job.status === "running") setCheck({ id: job.id, step: job.step });
       else finished(job);
     } catch (cause) {
-      if (!alive.current) return;
-      setCheckError(`未能开始检查：${describeWriteError(cause)}`);
-      // It may have started anyway: the reread machine records it, and a
-      // running record is followed.
-      changed.current();
+      failure = cause;
     } finally {
-      sending.current = false;
       if (alive.current) setStarting(false);
+      if (failure === undefined) sending.current = false;
     }
+    if (failure === undefined || !alive.current) return;
+    if (!uncertain(failure)) {
+      // Refused outright: nothing started.
+      sending.current = false;
+      setCheckError(`未能开始检查：${describeError(failure)}`);
+      changed.current();
+      return;
+    }
+    // The check may have started anyway: read the machine before anything
+    // else may be sent.
+    unconfirmed.current = true;
+    setCheckError(`未能确认检查是否已开始：${describeError(failure)}`);
+    await confirm(
+      (fresh) => {
+        unconfirmed.current = false;
+        const now = fresh.bindings.find(
+          (b) => b.is_current,
+        )?.last_requested_check;
+        setCheckRetry(undefined);
+        if (now && now.id !== before) {
+          // It did start: follow it, or show how it ended.
+          setCheckError("");
+          if (now.status === "running")
+            setCheck({ id: now.id, step: now.step });
+          else
+            finished({
+              id: now.id,
+              project_id: projectId,
+              machine_id: fresh.id,
+              kind: now.kind,
+              status: now.status,
+              step: now.step,
+              started_at: now.checked_at,
+              checked_at: now.checked_at,
+              failed_steps: now.failed_steps,
+            });
+        } else
+          setCheckError(
+            `检查没有开始：${describeError(failure)}，可以再试一次。`,
+          );
+      },
+      (message, again) => {
+        setCheckError(message);
+        setCheckRetry(() => () => {
+          setCheckRetry(undefined);
+          again();
+        });
+      },
+    );
   };
   const drain = async (on: boolean) => {
     const post = client.setMachineDrain;
-    if (!post || !machineId || sending.current) return;
+    if (!post || !machineId || sending.current || unconfirmed.current) return;
+    const target = on ? "draining" : "online";
+    const done = on ? "已排空，不再接收新任务" : "已恢复接收新任务";
+    const what = on ? "排空" : "恢复";
     sending.current = true;
     setDraining(on ? "drain" : "resume");
     setDrainError("");
+    setDrainRetry(undefined);
+    let failure: unknown;
     try {
-      await post.call(client, projectId, machineId, on);
-      if (alive.current)
-        setDrainMessage(on ? "已排空，不再接收新任务" : "已恢复接收新任务");
+      await post.call(client, projectId, machineId, on, crypto.randomUUID());
+      if (alive.current) setDrainMessage(done);
     } catch (cause) {
-      if (alive.current)
-        setDrainError(
-          `${on ? "未能排空" : "未能恢复"}：${describeWriteError(cause)}`,
-        );
+      failure = cause;
     } finally {
-      sending.current = false;
       if (alive.current) setDraining(undefined);
-      // Read again either way: the request may have taken effect.
-      changed.current();
     }
+    if (!alive.current) return;
+    if (failure === undefined || !uncertain(failure)) {
+      sending.current = false;
+      if (failure !== undefined)
+        setDrainError(`未能${what}：${describeError(failure)}`);
+      changed.current();
+      return;
+    }
+    // Read back whether it took effect before another click may be sent.
+    unconfirmed.current = true;
+    setDrainError(`未能确认是否已${what}：${describeError(failure)}`);
+    await confirm(
+      (fresh) => {
+        unconfirmed.current = false;
+        setDrainRetry(undefined);
+        if (fresh.status === target) {
+          setDrainError("");
+          setDrainMessage(done);
+        } else
+          setDrainError(
+            `未能${what}：${describeError(failure)}，可以再试一次。`,
+          );
+      },
+      (message, again) => {
+        setDrainError(message);
+        setDrainRetry(() => () => {
+          setDrainRetry(undefined);
+          again();
+        });
+      },
+    );
   };
   return {
     status: machine?.status,
@@ -846,14 +964,22 @@ function useMachineActions({
     checkable: !!current && !!client.checkMachine,
     drainable: !!client.setMachineDrain,
     check,
-    busy: starting || draining !== undefined,
+    // Also while a failed write's outcome is being (or could not be) read back.
+    busy:
+      starting ||
+      draining !== undefined ||
+      confirming ||
+      (checkRetry !== undefined && !check) ||
+      drainRetry !== undefined,
     start,
     drain,
     checkFeedback: {
-      pending: check !== undefined || starting,
+      pending: check !== undefined || starting || confirming,
       pendingMessage: check
         ? `正在检查：${checkStepLabel(check.step)}…`
-        : "正在开始检查…",
+        : confirming
+          ? "正在读回机器状态…"
+          : "正在开始检查…",
       error: checkError,
       retry: checkRetry,
       message: checkMessage,
@@ -862,6 +988,7 @@ function useMachineActions({
       pending: draining !== undefined,
       pendingMessage: draining === "resume" ? "正在恢复…" : "正在排空…",
       error: drainError,
+      retry: drainRetry,
       message: drainMessage,
     },
   };

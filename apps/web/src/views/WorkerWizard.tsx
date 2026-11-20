@@ -222,6 +222,14 @@ export function WorkerWizardDrawer({
   /** The session this browser holds for the project (also before it loads). */
   const [held, setHeld] = useState(() => storedWizard(projectId));
   /**
+   * The only session a read may still change. A reply for any other id (a
+   * session given up, cancelled or replaced meanwhile) is dropped, so it
+   * cannot clear or replace the current one.
+   */
+  const current = useRef(storedWizard(projectId));
+  /** Previews the server refused as stale: never sent again. */
+  const [rejected, setRejected] = useState<readonly string[]>([]);
+  /**
    * How the last read of `held` went. `failed` keeps the last good content
    * (a passing outage); `refused` (401/403) takes it down until a read is
    * allowed again. Neither offers a new form in place of the held session.
@@ -257,6 +265,7 @@ export function WorkerWizardDrawer({
       if (shownPhase.current === "running" && next?.phase !== "running")
         changed.current();
       shownPhase.current = next?.phase;
+      current.current = next?.id;
       setWizard(next);
       if (next) setHeld(next.id);
       else {
@@ -275,14 +284,14 @@ export function WorkerWizardDrawer({
       if (!get) return;
       try {
         const { wizard: next } = await get.call(client, projectId, id);
-        if (!alive.current) return;
+        if (!alive.current || current.current !== id) return;
         setReadState("ok");
         if (!keep) setError("");
         setRetry(undefined);
         show(next);
         setTick((n) => n + 1);
       } catch (cause) {
-        if (!alive.current) return;
+        if (!alive.current || current.current !== id) return;
         const again = () => () => {
           setError("");
           setRetry(undefined);
@@ -356,10 +365,27 @@ export function WorkerWizardDrawer({
   const step = (action: WorkerWizardAction) => async () => {
     const run = client.workerWizardAction;
     if (!run || !wizard) return undefined;
-    const reply = await run.call(client, projectId, wizard.id, action);
-    // Recorded whether or not this view is still open.
-    if (action.kind === "cancel") rememberWizard(projectId, undefined);
-    return "wizard" in reply ? reply.wizard : undefined;
+    try {
+      const reply = await run.call(client, projectId, wizard.id, action);
+      // Recorded whether or not this view is still open.
+      if (action.kind === "cancel") {
+        rememberWizard(projectId, undefined);
+        if (current.current === wizard.id) current.current = undefined;
+      }
+      return "wizard" in reply ? reply.wizard : undefined;
+    } catch (cause) {
+      // The server's verdict on this preview stands, even with time left on
+      // it: it is not offered for sending again.
+      if (
+        "preview_id" in action &&
+        cause instanceof ApiError &&
+        cause.code === "worker_preview_stale"
+      ) {
+        const id = action.preview_id;
+        setRejected((list) => (list.includes(id) ? list : [...list, id]));
+      }
+      throw cause;
+    }
   };
 
   const submit = (event: FormEvent) => {
@@ -377,8 +403,10 @@ export function WorkerWizardDrawer({
       "preview",
       async () => {
         const { wizard: created } = await create.call(client, projectId, input);
-        // Kept even if the reader left meanwhile: the session exists now.
+        // Kept even if the reader left meanwhile: the session exists now,
+        // and replies about any earlier session no longer apply.
         rememberWizard(projectId, created.id);
+        current.current = created.id;
         // An edit that changed the machine leaves the old session behind on
         // the server (same machine: the server already replaced it).
         if (replaced && replaced !== created.id)
@@ -398,6 +426,7 @@ export function WorkerWizardDrawer({
   /** Give up a held session this browser cannot read now; start afresh. */
   const forget = () => {
     rememberWizard(projectId, undefined);
+    current.current = undefined;
     setHeld(undefined);
     setReadState("ok");
     setError("");
@@ -559,6 +588,7 @@ export function WorkerWizardDrawer({
             </SettingsSection>
             {content.phase === "preview" && content.preview ? (
               <PreviewConfirm
+                rejected={rejected.includes(content.preview.preview_id)}
                 wizard={content}
                 preview={content.preview}
                 busy={busy !== undefined}
@@ -587,6 +617,7 @@ export function WorkerWizardDrawer({
                     wizard={content}
                     busy={busy !== undefined}
                     confirmed={launchConfirmed}
+                    rejected={rejected}
                     onConfirmed={setLaunchConfirmed}
                     onPreview={() =>
                       void act("launch", step({ kind: "launch-preview" }))
@@ -807,10 +838,13 @@ function PreviewConfirm({
   wizard,
   preview,
   busy,
+  rejected,
   onBack,
   onConfirm,
 }: {
   wizard: WorkerWizardView;
+  /** The server refused this preview as stale: only 返回修改 remains. */
+  rejected: boolean;
   preview: NonNullable<WorkerWizardView["preview"]>;
   busy: boolean;
   onBack: () => void;
@@ -831,13 +865,18 @@ function PreviewConfirm({
       ) : (
         <DiffTable label={`${wizard.label} 配置差异`} diff={preview.diff} />
       )}
+      {rejected && (
+        <SettingsWarning>
+          这份预览已失效，请返回修改后重新预览。
+        </SettingsWarning>
+      )}
       <SettingsDialogActions>
         <Button onClick={onBack} disabled={busy}>
           返回修改
         </Button>
         <Button
           variant="primary"
-          disabled={busy}
+          disabled={busy || rejected}
           onClick={() => onConfirm(preview.preview_id)}
         >
           确认写入配置
@@ -985,6 +1024,7 @@ function RemoteLaunch({
   wizard,
   busy,
   confirmed,
+  rejected,
   onConfirmed,
   onPreview,
   onEnable,
@@ -993,6 +1033,8 @@ function RemoteLaunch({
   busy: boolean;
   /** The preview id the reader ticked, if any. */
   confirmed: string | undefined;
+  /** Preview ids the server refused as stale. */
+  rejected: readonly string[];
   onConfirmed: (previewId: string | undefined) => void;
   onPreview: () => void;
   onEnable: (previewId: string) => void;
@@ -1010,7 +1052,8 @@ function RemoteLaunch({
     const timer = window.setTimeout(() => setNow(Date.now()), wait + 50);
     return () => window.clearTimeout(timer);
   }, [expires]);
-  const live = preview && !(expires <= now) ? preview : undefined;
+  const refused = preview ? rejected.includes(preview.preview_id) : false;
+  const live = preview && !(expires <= now) && !refused ? preview : undefined;
   const ticked = live !== undefined && confirmed === live.preview_id;
   return (
     <>
@@ -1019,7 +1062,11 @@ function RemoteLaunch({
           label="远程派发"
           help="开启后，这台机器可以接收本项目派发的任务。只有当前所有者可以开启。"
           warning={
-            preview && !live ? "派发预览已过期，请重新预览。" : undefined
+            !preview || live
+              ? undefined
+              : refused
+                ? "派发预览已失效，请重新预览。"
+                : "派发预览已过期，请重新预览。"
           }
           status={
             <StatusTag

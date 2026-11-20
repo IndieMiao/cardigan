@@ -63,6 +63,7 @@ const input: WorkerWizardInput = {
 function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
   let wizard: WorkerWizardView | undefined;
   let polls = 0;
+  let previews = 0;
   const writes: string[] = [];
   const steps = (blockedAt?: string): WorkerWizardStep[] => {
     const at = blockedAt ? STEPS.indexOf(blockedAt as never) : STEPS.length;
@@ -81,7 +82,8 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
     );
   };
   const preview = (diff: NonNullable<WorkerWizardView["preview"]>["diff"]) => ({
-    preview_id: `pv-${writes.length}-${polls}`,
+    // Like the server, every preview gets a fresh id.
+    preview_id: `pv-${++previews}`,
     expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
     file: "worker-studio-p-1.yaml",
     diff,
@@ -264,7 +266,7 @@ test("nine steps: preview, confirm before writing, fail in place, continue, then
   expect(fake.client.workerWizardAction).toHaveBeenLastCalledWith(
     "p-1",
     expect.any(String),
-    { kind: "confirm", preview_id: "pv-0-0" },
+    { kind: "confirm", preview_id: "pv-1" },
   );
   // All steps listed; the nine onboarding steps are numbered.
   const steps = dialog.getByRole("table", { name: "接入步骤" });
@@ -725,5 +727,104 @@ test("editing the preview to another machine gives up the replaced session", asy
   );
   expect(window.localStorage.getItem("cardigan.worker-wizard.p-1")).toBe(
     "6f1c2a7e-0000-4000-8000-0000000000aa",
+  );
+});
+
+test("V-2540: a late read for a session given up cannot clear or replace the new one", async () => {
+  for (const late of ["404", "ok"] as const) {
+    const fake = backend([]);
+    await heldSession(fake);
+    const old = fake.current() as WorkerWizardView;
+    const pending = Promise.withResolvers<{ wizard: WorkerWizardView }>();
+    fake.client.workerWizard
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockImplementationOnce(() => pending.promise);
+    page(fake.client);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "继续添加 worker" }),
+    );
+    const d = within(await screen.findByRole("dialog"));
+    fireEvent.click(await d.findByRole("button", { name: "重试" }));
+    fireEvent.click(d.getByRole("button", { name: "放弃并重新填写" }));
+    await fill(d);
+    const created: WorkerWizardView = {
+      ...old,
+      id: "6f1c2a7e-0000-4000-8000-0000000000bb",
+      phase: "preview",
+      preview: {
+        preview_id: "new-pv",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        file: "worker-studio-p-1.yaml",
+        diff: [],
+      },
+    };
+    fake.client.createWorkerWizard.mockResolvedValueOnce({ wizard: created });
+    fireEvent.click(d.getByRole("button", { name: "预览配置" }));
+    await d.findByRole("button", { name: "确认写入配置" });
+    // The old session's read answers late (gone, or still there).
+    await act(async () =>
+      late === "404"
+        ? pending.reject(new ApiError(404, "not_found", "旧会话已不存在"))
+        : pending.resolve({ wizard: { ...old, phase: "ready" } }),
+    );
+    expect(window.localStorage.getItem("cardigan.worker-wizard.p-1")).toBe(
+      created.id,
+    );
+    expect(d.getByRole("button", { name: "确认写入配置" })).toBeTruthy();
+    expect(d.queryByRole("form", { name: "worker 接入信息" })).toBeNull();
+    expect(d.queryByRole("button", { name: "开始检查" })).toBeNull();
+    cleanup();
+    window.localStorage.clear();
+  }
+});
+
+test("V-2540: a preview the server refused with time left is not sent again; a new one can be fetched", async () => {
+  const fake = backend(["passed"]);
+  const d = await toPassed(fake);
+  fireEvent.click(d.getByRole("button", { name: "预览开启" }));
+  fireEvent.click(
+    await d.findByRole("checkbox", { name: "我确认开启远程派发" }),
+  );
+  const original = fake.current()?.preview?.preview_id;
+  // A guarded file changed: the server refuses, then returns the same,
+  // unexpired preview on the reread.
+  vi.mocked(fake.client.workerWizardAction).mockRejectedValueOnce(
+    new ApiError(409, "worker_preview_stale", "配置另有改动"),
+  );
+  fireEvent.click(d.getByRole("button", { name: "开启远程派发" }));
+  await d.findByText("派发预览已失效，请重新预览。");
+  expect(fake.current()?.preview?.preview_id).toBe(original);
+  expect(d.queryByRole("checkbox")).toBeNull();
+  expect(d.queryByRole("button", { name: "开启远程派发" })).toBeNull();
+  fireEvent.click(d.getByRole("button", { name: "重新预览" }));
+  const enable = await d.findByRole("button", { name: "开启远程派发" });
+  expect(fake.current()?.preview?.preview_id).not.toBe(original);
+  expect((enable as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("V-2540: a refused config preview cannot be confirmed again; 返回修改 remains", async () => {
+  const fake = backend([]);
+  page(fake.client);
+  fireEvent.click(await screen.findByRole("button", { name: "添加 worker" }));
+  const d = within(await screen.findByRole("dialog"));
+  await fill(d);
+  fireEvent.click(d.getByRole("button", { name: "预览配置" }));
+  const confirm = await d.findByRole("button", { name: "确认写入配置" });
+  vi.mocked(fake.client.workerWizardAction).mockRejectedValueOnce(
+    new ApiError(409, "worker_preview_stale", "文件另有改动"),
+  );
+  fireEvent.click(confirm);
+  await d.findByText("这份预览已失效，请返回修改后重新预览。");
+  expect(
+    (d.getByRole("button", { name: "确认写入配置" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  fireEvent.click(d.getByRole("button", { name: "返回修改" }));
+  fireEvent.click(d.getByRole("button", { name: "预览配置" }));
+  await waitFor(() =>
+    expect(
+      (d.getByRole("button", { name: "确认写入配置" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
   );
 });

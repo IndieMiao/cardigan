@@ -138,7 +138,11 @@ test("立即检查 shows its progress, cannot start twice, and rereads the machi
   fireEvent.click(dialog.getByRole("button", { name: "立即检查" }));
   const running = await dialog.findByRole("button", { name: "检查中…" });
   expect(running.getAttribute("aria-disabled")).toBe("true");
-  expect(c.checkMachine).toHaveBeenCalledWith("p-1", "local");
+  expect(c.checkMachine).toHaveBeenCalledWith(
+    "p-1",
+    "local",
+    expect.any(String),
+  );
   await dialog.findByText("正在检查：SSH…");
   // A second press while it runs starts nothing.
   fireEvent.click(running);
@@ -212,7 +216,12 @@ test("排空 and 恢复 submit at once, report the result and reread list, detai
   const dialog = await openDetail(c);
   const capacityReads = vi.mocked(c.executionCapacity).mock.calls.length;
   fireEvent.click(dialog.getByRole("button", { name: "排空" }));
-  expect(c.setMachineDrain).toHaveBeenCalledWith("p-1", "local", true);
+  expect(c.setMachineDrain).toHaveBeenCalledWith(
+    "p-1",
+    "local",
+    true,
+    expect.any(String),
+  );
   await dialog.findByText("已排空，不再接收新任务");
   // The reread detail is draining now, so the action turns into 恢复.
   const resume = await dialog.findByRole("button", { name: "恢复" });
@@ -220,7 +229,12 @@ test("排空 and 恢复 submit at once, report the result and reread list, detai
     capacityReads,
   );
   fireEvent.click(resume);
-  expect(c.setMachineDrain).toHaveBeenLastCalledWith("p-1", "local", false);
+  expect(c.setMachineDrain).toHaveBeenLastCalledWith(
+    "p-1",
+    "local",
+    false,
+    expect.any(String),
+  );
   await dialog.findByText("已恢复接收新任务");
   await dialog.findByRole("button", { name: "排空" });
 });
@@ -305,15 +319,15 @@ test("a read-only session gets no action, no wizard and a read-only limit", asyn
   ).toBeNull();
 });
 
-test("the machine actions are same-origin JSON posts without a resend key (V-2530)", async () => {
+test("the machine actions are same-origin JSON posts that carry an operation key but are never resent (V-2540)", async () => {
   const fetcher = vi.fn(
     async () => new Response(JSON.stringify({ check: job() })),
   );
   const http = new HttpCardiganClient(fetcher);
-  await http.checkMachine("a b", "mac mini");
+  await http.checkMachine("a b", "mac mini", "k-1");
   await http.machineCheck("a b", "mac mini", "chk 1");
-  await http.setMachineDrain("a b", "mac mini", true);
-  await http.setMachineDrain("a b", "mac mini", false);
+  await http.setMachineDrain("a b", "mac mini", true, "k-2");
+  await http.setMachineDrain("a b", "mac mini", false, "k-3");
   const calls = fetcher.mock.calls as unknown as [string, RequestInit][];
   expect(calls.map(([url, init]) => [url, init.method, init.body])).toEqual([
     ["/api/projects/a%20b/machines/mac%20mini/check", "POST", "{}"],
@@ -329,8 +343,8 @@ test("the machine actions are same-origin JSON posts without a resend key (V-253
     const headers = new Headers(init.headers);
     expect(init.credentials).toBe("same-origin");
     expect(headers.get("authorization")).toBeNull();
-    // The server keys neither action: a key would only enable blind resends.
-    expect(headers.get("idempotency-key")).toBeNull();
+    if (init.method === "POST")
+      expect(headers.get("idempotency-key")).toMatch(/^k-\d$/);
   }
 });
 
@@ -343,8 +357,12 @@ test("V-2530: a check whose reply is lost (503) is sent once; the machine is rer
     });
   });
   const http = new HttpCardiganClient(fetcher);
-  await expect(http.checkMachine("p", "local")).rejects.toBeTruthy();
-  expect(calls).toBe(1);
+  await expect(http.checkMachine("p", "local", "k")).rejects.toBeTruthy();
+  await expect(
+    http.setMachineDrain("p", "local", true, "k2"),
+  ).rejects.toBeTruthy();
+  // Keyed, yet each was sent once: the server does not dedupe them.
+  expect(calls).toBe(2);
   // In the page, the failed start reads the machine again; a check the
   // server did start is then followed instead of started again.
   const local = byId("local");
@@ -381,7 +399,7 @@ test("V-2530: a check whose reply is lost (503) is sent once; the machine is rer
   });
   const dialog = await openDetail(c);
   fireEvent.click(dialog.getByRole("button", { name: "立即检查" }));
-  await dialog.findByText(/未能开始检查/);
+  // The read-back shows it started: it is followed, not started again.
   await dialog.findByRole("button", { name: "检查中…" });
   await waitFor(() =>
     expect(c.machineCheck).toHaveBeenCalledWith("p-1", "local", "chk-2"),
@@ -456,4 +474,111 @@ test("V-2530: merge check counts follow the shared stale state", async () => {
     expect(group()?.textContent).toContain("运行中 11 / 排队 12"),
   );
   expect(group()?.textContent).toContain("上限 3");
+});
+
+test("V-2540: a lost check reply is read back before another click may be sent, without claiming a retry is safe", async () => {
+  const hold = Promise.withResolvers<void>();
+  const local = byId("local");
+  let sent = 0;
+  const c = client({
+    machine: vi.fn(async () => {
+      if (sent) await hold.promise;
+      return { machine: local };
+    }),
+    checkMachine: vi.fn(async () => {
+      sent++;
+      throw new TypeError("fixture lost reply");
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText(/未能确认检查是否已开始/);
+  expect(d.queryByText(/不会重复/)).toBeNull();
+  const button = d.getByRole("button", { name: "立即检查" });
+  expect(button.getAttribute("aria-disabled")).toBe("true");
+  expect(
+    d.getByRole("button", { name: "排空" }).getAttribute("aria-disabled"),
+  ).toBe("true");
+  fireEvent.click(button);
+  fireEvent.click(d.getByRole("button", { name: "排空" }));
+  expect(sent).toBe(1);
+  expect(c.setMachineDrain).not.toHaveBeenCalled();
+  // Read back: nothing started, so another click is allowed again.
+  await act(async () => hold.resolve());
+  await d.findByText(/检查没有开始/);
+  await waitFor(() =>
+    expect(
+      d.getByRole("button", { name: "立即检查" }).getAttribute("aria-disabled"),
+    ).toBeNull(),
+  );
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  expect(sent).toBe(2);
+});
+
+test("V-2540: a lost check reply whose check already ended shows that result", async () => {
+  const local = byId("local");
+  let sent = false;
+  const ended: MachineView = {
+    ...local,
+    bindings: local.bindings.map((b) =>
+      b.is_current
+        ? {
+            ...b,
+            last_requested_check: {
+              id: "chk-new",
+              kind: "machine",
+              status: "failed",
+              step: "finished",
+              checked_at: "2026-01-01T00:00:05.000Z",
+              failed_steps: ["ssh"],
+            },
+          }
+        : b,
+    ),
+  };
+  const c = client({
+    machine: vi.fn(async () => ({ machine: sent ? ended : local })),
+    checkMachine: vi.fn(async () => {
+      sent = true;
+      throw new ApiError(502, "bad_gateway", "lost");
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("检查未通过：SSH");
+  expect(c.checkMachine).toHaveBeenCalledOnce();
+  expect(c.machineCheck).not.toHaveBeenCalled();
+});
+
+test("V-2540: a lost drain reply is confirmed by the read-back; a failed read-back retries the read, not the drain", async () => {
+  const local = byId("local");
+  let applied = false;
+  let failRead = false;
+  const c = client({
+    machine: vi.fn(async () => {
+      if (failRead) {
+        failRead = false;
+        throw new TypeError("read lost");
+      }
+      return {
+        machine: applied ? { ...local, status: "draining" } : local,
+      };
+    }),
+    setMachineDrain: vi.fn(async () => {
+      applied = true;
+      failRead = true;
+      throw new TypeError("reply lost");
+    }),
+  });
+  const d = await openDetail(c);
+  fireEvent.click(d.getByRole("button", { name: "排空" }));
+  await d.findByText(/未能读回机器状态/);
+  // Still unconfirmed: nothing else may be sent.
+  expect(
+    d.getByRole("button", { name: "立即检查" }).getAttribute("aria-disabled"),
+  ).toBe("true");
+  fireEvent.click(d.getByRole("button", { name: "重试" }));
+  await d.findByText("已排空，不再接收新任务");
+  await d.findByRole("button", { name: "恢复" });
+  expect(c.setMachineDrain).toHaveBeenCalledOnce();
 });
