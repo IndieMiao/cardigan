@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -287,13 +287,21 @@ test("v39 seeds ui for flow 5 without rewriting historical cards or existing tem
   }
 });
 
-test("v45 seeds the builtin beside conflicting custom names without editing pinned snapshots", () => {
-  const store = Store.open({ dbPath: ":memory:" });
+test("upgrading from resource leases v45 seeds the builtin beside conflicting custom names without editing pinned snapshots", () => {
+  const migrationsDir = mkdtempSync(join(tmpdir(), "cardigan-story-upgrade-"));
+  for (const { version, name, sql } of listMigrations(
+    defaultMigrationsDir,
+  ).filter((m) => m.version <= 45))
+    writeFileSync(
+      join(migrationsDir, `${String(version).padStart(4, "0")}_${name}.sql`),
+      sql,
+    );
+  const store = Store.open({ dbPath: ":memory:", migrationsDir });
   try {
     for (const id of ["legacy", "clean"])
       expect(store.createProject({ id }).ok).toBe(true);
     const db = store.database;
-    db.prepare("DELETE FROM card_templates WHERE template_id = 'story'").run(); // simulate pre-v45
+    db.prepare("DELETE FROM card_templates WHERE template_id = 'story'").run(); // Projects created by the old host have no builtin story.
     const legacy = {
       ...generalCardTemplate,
       id: "story",
@@ -312,8 +320,17 @@ test("v45 seeds the builtin beside conflicting custom names without editing pinn
         tx.card_templates.put("legacy", t);
     });
     const pinned = { template: "story", template_version: 1 };
+    const upgrade = "0046_story_template.sql";
+    copyFileSync(
+      join(defaultMigrationsDir, upgrade),
+      join(migrationsDir, upgrade),
+    );
+    expect(store.migrate()).toEqual([{ version: 46, name: "story_template" }]);
     for (let pass = 0; pass < 2; pass++) {
-      seedStoryTemplates(db);
+      if (pass === 1) {
+        expect(store.migrate()).toEqual([]);
+        seedStoryTemplates(db);
+      }
       const templates = store.uow.read((tx) =>
         tx.card_templates.list("legacy"),
       );
@@ -333,5 +350,6 @@ test("v45 seeds the builtin beside conflicting custom names without editing pinn
     }
   } finally {
     store.close();
+    rmSync(migrationsDir, { recursive: true, force: true });
   }
 });

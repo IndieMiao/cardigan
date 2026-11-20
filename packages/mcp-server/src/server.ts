@@ -33,6 +33,10 @@ import {
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import {
+  type ReservationOptions,
+  reservationTool,
+} from "./tools/resource-reservation.js";
 import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
 import type { ToolDefinition } from "./tools/types.js";
 
@@ -41,6 +45,7 @@ export interface McpServerOptions
     SupportToolOptions,
     HostOpsToolOptions,
     CheckLogOptions,
+    ReservationOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
@@ -98,12 +103,14 @@ export function serverTools(
     SupportToolOptions &
     HostOpsToolOptions &
     CheckLogOptions &
+    ReservationOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    reservationTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),

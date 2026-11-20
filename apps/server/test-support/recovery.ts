@@ -14,8 +14,8 @@ import { vi } from "vitest";
 import type { DispatcherOptions } from "../src/dispatch.js";
 import { dispatchFixture } from "./dispatch.js";
 
-export function recoveryFixture(machine_id = "local") {
-  const f = dispatchFixture(machine_id),
+export function recoveryFixture(machine_id = "local", migrationsDir?: string) {
+  const f = dispatchFixture(machine_id, "none", "linux", migrationsDir),
     target = f.create();
   f.session(target.assignment);
   const stopped = new Set<string>();

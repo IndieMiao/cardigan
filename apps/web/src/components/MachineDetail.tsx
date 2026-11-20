@@ -129,6 +129,13 @@ export function MachineDetail({
               ))}
             </ul>
           )}
+          {capacity?.lease_details && (
+            <ul className="execution-runs board-list">
+              {capacity.lease_details.map((detail) => (
+                <li key={detail}>{detail}</li>
+              ))}
+            </ul>
+          )}
         </section>
         <section
           className="execution-drawer-section card-section"
