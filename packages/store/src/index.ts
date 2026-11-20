@@ -61,6 +61,7 @@ export {
   ReadOnlyTransactionError,
   type ReadRepositories,
   type ReadRepository,
+  readCardDependencyEvents,
   type SqlValue,
   type TableSpec,
 } from "./repositories.js";

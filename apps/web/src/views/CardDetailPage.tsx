@@ -9,6 +9,7 @@ import {
   ApiError,
   type CardDetail,
   type CardiganClient,
+  type CardPanel,
   type CardReadOptions,
   describeError,
   type PostedComment,
@@ -151,7 +152,14 @@ export function CardDetailPage(props: CardDetailPageProps) {
       const request = ++loadGeneration.current;
       const options = { ...query.current };
       const key = historyKey(projectId, cardId, options);
-      const detail = await client.card(projectId, cardId, options);
+      // Explicit deep links retain the complete anchor window and its lookups.
+      const detail = await client.card(
+        projectId,
+        cardId,
+        client.cardPanel && !options.at
+          ? { ...options, section: "overview" }
+          : options,
+      );
       // Read after the response: an older page may have landed meanwhile.
       const previous =
         history.current?.key === key ? history.current.detail : undefined;
@@ -222,7 +230,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
     const id = JSON.stringify([projectId, cardId, options]);
     let read = inflight.current.get(id);
     if (!read) {
-      const started = client.card(projectId, cardId, options);
+      const started = client.card(
+        projectId,
+        cardId,
+        base.detail.overview ? { ...options, section: "overview" } : options,
+      );
       const settle = () => {
         if (inflight.current.get(id) === started) inflight.current.delete(id);
       };
@@ -338,6 +350,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
         <CardContent
           key={`${projectId}/${cardId}`}
           detail={data}
+          revision={
+            cardRevision ? cardRevision(cardId, affectedCards) : revision
+          }
           client={client}
           projectId={projectId}
           cardId={cardId}
@@ -381,7 +396,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
 }
 
 function CardContent({
-  detail,
+  detail: head,
+  revision,
   client,
   projectId,
   cardId,
@@ -397,6 +413,7 @@ function CardContent({
   anchorReady,
 }: {
   detail: CardDetail;
+  revision: number;
   client: CardiganClient;
   projectId: string;
   cardId: string;
@@ -425,6 +442,7 @@ function CardContent({
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
   const [selectedSection, setSelectedSection] = useState<string>();
+  const [workRevision, setWorkRevision] = useState(0);
   const timelineRoot = useCallback(
     () =>
       inDrawer
@@ -433,6 +451,23 @@ function CardContent({
     [inDrawer],
   );
   const activeSection = selectedSection ?? `card-${cardId}-overview`;
+  const section = activeSection.slice(`card-${cardId}-`.length) as
+    | CardPanel
+    | "overview";
+  const panelLoad = useCallback(
+    async () =>
+      client.cardPanel && section !== "overview"
+        ? client.cardPanel(projectId, cardId, section)
+        : {},
+    [client, section, projectId, cardId],
+  );
+  const panelData = useResource(
+    panelLoad,
+    revision + (section === "work" ? workRevision : 0),
+    !!head.overview && section !== "overview",
+  );
+  const detail = head.overview ? { ...head, ...panelData.data } : head;
+  const panelReady = !head.overview || !!panelData.data;
   useLayoutEffect(() => {
     if (!anchor || !anchorReady) return;
     const target = document.getElementById(anchor);
@@ -510,9 +545,11 @@ function CardContent({
   }, [anchor, anchorReady, filters.type, filters.author, activeSection]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
-  const completion = [...detail.deliveries]
-    .reverse()
-    .find((d) => d.kind === "card_completion" && d.status === "accepted");
+  const completionId =
+    detail.overview?.completion_id ??
+    [...detail.deliveries]
+      .reverse()
+      .find((d) => d.kind === "card_completion" && d.status === "accepted")?.id;
   const sectionId = (name: string) => `card-${cardId}-${name}`;
   const panel = (name: string) => ({
     id: sectionId(name),
@@ -531,23 +568,29 @@ function CardContent({
       q.trigger !== "merge_confirmation" &&
       ["open", "provisional", "snoozed"].includes(q.status),
   );
+  const workCount = detail.overview?.work_count ?? detail.work_items.length;
+  const attachmentCount =
+    detail.overview?.attachment_count ?? detail.attachments.length;
+  const recordCount = head.overview
+    ? head.counts.deliveries + head.counts.reviews
+    : detail.deliveries.length + detail.reviews.length;
   const sections = [
     { id: sectionId("overview"), label: "概览" },
-    ...(detail.work_items.length
+    ...(workCount
       ? [
           {
             id: sectionId("work"),
             label: "工作项",
-            count: detail.work_items.length,
+            count: workCount,
           },
         ]
       : []),
-    ...(detail.deliveries.length || detail.reviews.length
+    ...(recordCount
       ? [
           {
             id: sectionId("records"),
             label: "交付与审核",
-            count: detail.deliveries.length + detail.reviews.length,
+            count: recordCount,
           },
         ]
       : []),
@@ -556,12 +599,12 @@ function CardContent({
       label: "时间线",
       count: detail.counts.timeline,
     },
-    ...(detail.attachments.length
+    ...(attachmentCount
       ? [
           {
             id: sectionId("attachments"),
             label: "附件",
-            count: detail.attachments.length,
+            count: attachmentCount,
           },
         ]
       : []),
@@ -630,6 +673,7 @@ function CardContent({
                 client={client}
                 projectId={projectId}
                 onSaved={reload}
+                revision={revision}
                 showMetadata={false}
               />
             </>
@@ -644,6 +688,15 @@ function CardContent({
           active={activeSection}
           onSelect={setSelectedSection}
         />
+        {head.overview && section !== "overview" && (
+          <RequestFeedback
+            pending={panelData.pending}
+            interactive={false}
+            error={panelData.error}
+            retry={panelData.reload}
+            pendingMessage="正在加载…"
+          />
+        )}
         <section {...panel("overview")}>
           <CardDependencies card={card} projectId={projectId} />
           <CardBatchChecks
@@ -730,19 +783,19 @@ function CardContent({
                 </ul>
               </LongContent>
             </section>
-            {completion && (
+            {completionId && (
               <section aria-label="完成申请">
                 <h3>完成申请</h3>
                 <p>
                   整体完成申请已通过：
                   <IdTag
-                    id={completion.id}
+                    id={completionId}
                     label="完成申请"
                     href={routeHash({
                       kind: "card",
                       projectId,
                       cardId,
-                      anchor: `delivery-${completion.id}`,
+                      anchor: `delivery-${completionId}`,
                     })}
                   />
                 </p>
@@ -757,24 +810,32 @@ function CardContent({
           <CardSource detail={detail} projectId={projectId} />
           <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
         </section>
-        {!!detail.work_items.length && (
+        {!!workCount && (
           <div {...panel("work")}>
-            <CardWorkItems
-              client={client}
-              changed={reload}
-              detail={detail}
-              projectId={projectId}
-              cardId={cardId}
-            />
+            {(!head.overview || (section === "work" && panelReady)) && (
+              <CardWorkItems
+                client={client}
+                changed={() => {
+                  reload();
+                  // The write may finish after a switch to a different panel.
+                  if (head.overview) setWorkRevision((value) => value + 1);
+                }}
+                detail={detail}
+                projectId={projectId}
+                cardId={cardId}
+              />
+            )}
           </div>
         )}
-        {!!(detail.deliveries.length || detail.reviews.length) && (
+        {!!recordCount && (
           <section {...panel("records")}>
-            <CardRecords
-              detail={detail}
-              projectId={projectId}
-              onLocate={onLocate}
-            />
+            {(!head.overview || (section === "records" && panelReady)) && (
+              <CardRecords
+                detail={detail}
+                projectId={projectId}
+                onLocate={onLocate}
+              />
+            )}
           </section>
         )}
         <section
@@ -821,16 +882,18 @@ function CardContent({
             ref={scroll}
             aria-label="时间线记录"
           >
-            <Timeline
-              projectId={projectId}
-              cardId={cardId}
-              entries={detail.timeline}
-              attachments={detail.attachments}
-              detail={detail}
-              typeFilter={filters.type ?? ""}
-              authorFilter={filters.author ?? ""}
-              anchor={anchor}
-            />
+            {(!head.overview || section === "timeline") && (
+              <Timeline
+                projectId={projectId}
+                cardId={cardId}
+                entries={detail.timeline}
+                attachments={detail.attachments}
+                detail={detail}
+                typeFilter={filters.type ?? ""}
+                authorFilter={filters.author ?? ""}
+                anchor={anchor}
+              />
+            )}
             <TimelinePager
               loaded={detail.timeline.length}
               hasMore={
@@ -839,19 +902,21 @@ function CardContent({
                   : detail.timeline_next_cursor !== null
               }
               status={pager}
-              ready={pagerReady}
+              ready={pagerReady && (!head.overview || section === "timeline")}
               scrollRoot={timelineRoot}
               onLoad={loadOlder}
             />
           </section>
         </section>
-        {!!detail.attachments.length && (
+        {!!attachmentCount && (
           <section
             {...panel("attachments")}
             className="card-section"
             aria-label="附件"
           >
-            <AttachmentGrid attachments={detail.attachments} />
+            {(!head.overview || (section === "attachments" && panelReady)) && (
+              <AttachmentGrid attachments={detail.attachments} />
+            )}
           </section>
         )}
       </div>
