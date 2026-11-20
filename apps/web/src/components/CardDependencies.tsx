@@ -12,7 +12,7 @@ import {
   layoutDependencyGraph,
 } from "../dependency-graph.js";
 import { routeHash } from "../route.js";
-import { EmployeeIdentity } from "./EmployeeIdentity.js";
+import { NextOwners } from "./EmployeeIdentity.js";
 import { StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import {
@@ -66,6 +66,30 @@ function reach(start: string, links: ReadonlyMap<string, readonly string[]>) {
   return seen;
 }
 
+/**
+ * Cards that still hold up the open card: the unmet direct prerequisites, then
+ * whatever an open, unmet card among them still waits on. A cancelled or
+ * superseded prerequisite never counts as met, so it keeps holding.
+ */
+function holdingCards(
+  waitingOn: readonly string[],
+  nodes: readonly DependencyCard[],
+  before: ReadonlyMap<string, readonly string[]>,
+) {
+  const cards = new Map(nodes.map((n) => [n.id, n]));
+  const held = new Set<string>();
+  const queue = [...waitingOn];
+  for (let id = queue.pop(); id !== undefined; id = queue.pop()) {
+    const node = cards.get(id);
+    if (held.has(id) || node?.satisfied) continue;
+    held.add(id);
+    // A closed card no longer waits on its own prerequisites.
+    if (node && !["done", "cancelled"].includes(node.status))
+      queue.push(...(before.get(id) ?? []));
+  }
+  return held;
+}
+
 export function CardDependencies({
   card,
   projectId,
@@ -92,11 +116,16 @@ export function CardDependencies({
   const ancestors = reach(card.id, before),
     descendants = reach(card.id, after),
     closed = ["done", "cancelled"].includes(card.status),
-    waiting = new Set(card.dependency.waiting_on);
+    waiting = new Set(card.dependency.waiting_on),
+    holding = holdingCards(
+      closed ? [] : card.dependency.waiting_on,
+      graph.nodes,
+      before,
+    );
   const relationOf = (id: string) => {
     const direct = before.get(card.id)?.includes(id);
     if (direct || ancestors.has(id)) {
-      const blocking = !closed && (direct ? waiting.has(id) : !muted.has(id));
+      const blocking = !closed && (direct ? waiting.has(id) : holding.has(id));
       return `${direct ? "直接" : "间接"}前置，${blocking ? "仍挡着当前卡" : "已不挡"}`;
     }
     if (after.get(card.id)?.includes(id)) return "直接后续";
@@ -201,7 +230,7 @@ function DependencyPeek({
   return (
     <CardPeek aria-label={`卡片 ${node.id}`}>
       <CardPeekHeading>
-        <IdBadge id={node.id} /> {summary?.title ?? node.title}
+        <IdBadge id={node.id} titled={false} /> {summary?.title ?? node.title}
       </CardPeekHeading>
       <CardPeekFacts>
         <CardPeekFact label="状态">
@@ -276,7 +305,6 @@ function PeekSummary({
   const pending = "读取中…";
   const work =
     card && (card.work_items ?? []).filter((w) => ACTIVE_WORK.has(w.status));
-  const owners = card?.produce_owners ?? [];
   return (
     <>
       <CardPeekFact label="优先级">
@@ -290,18 +318,15 @@ function PeekSummary({
         )}
       </CardPeekFact>
       <CardPeekFact label="负责人">
-        {!card
-          ? pending
-          : owners.length
-            ? owners.map((owner, index) => (
-                <EmployeeIdentity
-                  key={owner.employee?.id ?? owner.author ?? index}
-                  {...owner}
-                  showTitle={false}
-                  avatarSize={24}
-                />
-              ))
-            : "无人负责"}
+        {card ? (
+          <NextOwners
+            owners={card.next_owners}
+            empty="无人负责"
+            avatarSize={24}
+          />
+        ) : (
+          pending
+        )}
       </CardPeekFact>
       <CardPeekFact label="工作项">
         {!work ? (

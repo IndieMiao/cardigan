@@ -182,7 +182,11 @@ export function DependencyGraph({
     draw();
     const root = list.current,
       scroller = scroll.current;
-    if (root && scroller) scroller.scrollLeft = openingScroll(root, scroller);
+    if (root && scroller) {
+      const { left, top } = openingScroll(root, scroller);
+      scroller.scrollLeft = left;
+      scroller.scrollTop = top;
+    }
     measureClip();
     if (!root || !scroller || typeof ResizeObserver === "undefined") return;
     // Later resizes keep the reader's scroll.
@@ -276,9 +280,13 @@ export function DependencyGraph({
 /**
  * Opening scroll: the current card centred where possible, but never cut, and
  * its direct prerequisites kept in view before anything downstream. A cut that
- * falls in a column gap is moved left so the hidden column peeks out.
+ * falls in a column gap is moved left so the hidden column peeks out. A graph
+ * taller than its view centres the current card's row.
  */
-function openingScroll(root: HTMLElement, scroller: HTMLElement): number {
+function openingScroll(
+  root: HTMLElement,
+  scroller: HTMLElement,
+): { left: number; top: number } {
   const max = scroller.scrollWidth - scroller.clientWidth;
   const nodes = new Map<string, Box>();
   let current: (Box & { before: readonly string[] }) | undefined;
@@ -288,7 +296,15 @@ function openingScroll(root: HTMLElement, scroller: HTMLElement): number {
     if (element.querySelector("[aria-current]"))
       current = { ...box, before: (element.dataset.before ?? "").split(" ") };
   }
-  if (!current || max <= 0) return 0;
+  if (!current) return { left: 0, top: 0 };
+  const top = Math.max(
+    0,
+    Math.min(
+      scroller.scrollHeight - scroller.clientHeight,
+      current.top + (current.height - scroller.clientHeight) / 2,
+    ),
+  );
+  if (max <= 0) return { left: 0, top };
   // Keep the edge marks off the cards that must stay readable.
   const edge =
     (scroller.parentElement &&
@@ -325,13 +341,14 @@ function openingScroll(root: HTMLElement, scroller: HTMLElement): number {
   const hidden = columns.filter((l) => l + width <= left).at(-1);
   if (left > 0 && !columns.some((l) => l + gap <= left && left < l + width))
     left = Math.max(lowest, hidden === undefined ? 0 : hidden + width - gap);
-  return Math.max(0, Math.min(left, max));
+  return { left: Math.max(0, Math.min(left, max)), top };
 }
 
 /**
  * Mouse and pen press-and-drag pans the graph, from a node or the empty space
  * between them. A press that stays within PAN_SLOP is still a click; a drag
- * swallows its click so it never opens a node. Touch keeps native scrolling,
+ * swallows its click so it never opens a node, even when the graph fits and
+ * there is nothing to pan. Touch keeps native scrolling,
  * and the scrollbar keeps its own drag. Arrow keys pan too.
  */
 function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
@@ -346,6 +363,8 @@ function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
       left: number;
       top: number;
       dragging: boolean;
+      /** A graph that fits still tells a drag from a click; it just won't move. */
+      scrollable: boolean;
     } | null = null;
     let suppressClick = false;
     const stop = () => {
@@ -361,9 +380,7 @@ function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
         pan ||
         event.pointerType === "touch" ||
         !event.isPrimary ||
-        event.button !== 0 ||
-        (view.scrollWidth <= view.clientWidth &&
-          view.scrollHeight <= view.clientHeight)
+        event.button !== 0
       )
         return;
       const rect = view.getBoundingClientRect();
@@ -379,6 +396,9 @@ function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
         left: view.scrollLeft,
         top: view.scrollTop,
         dragging: false,
+        scrollable:
+          view.scrollWidth > view.clientWidth ||
+          view.scrollHeight > view.clientHeight,
       };
     };
     const move = (event: PointerEvent) => {
@@ -393,7 +413,7 @@ function useDragPan(scroller: RefObject<HTMLElement | null>): boolean {
         if (Math.hypot(dx, dy) <= PAN_SLOP) return;
         pan.dragging = true;
         suppressClick = true;
-        setPanning(true);
+        setPanning(pan.scrollable);
         view.setPointerCapture?.(event.pointerId);
         window.getSelection()?.removeAllRanges();
       }

@@ -90,7 +90,7 @@
 | 头像行 | `EmployeeIdentity` / `NextOwners`；常规 32px，看板/紧凑行 24px；头像不重叠，名称和元信息自然折行，空头像沿用首字/系统图形 | 图 1、3、4 |
 | Tooltip | `Tooltip` / 状态专用提示；鼠标悬停和键盘聚焦均可达，Escape 关闭，深底浅字（亮色主题 `#262626` 底 / `#f6f6f6` 字）。完整标题/原因不能只靠省略号丢失；长状态详情使用既有可滚动提示 | 图 5；键盘焦点参考（`reference-focus-1440-light.png`） |
 | 容量详情浮层 | `CapacitySummary` 使用 Popover，背景和文字沿用 `--surface` / `--text`；亮色为白底 `#ffffff`、深字 `#262626`，暗色为 `#222222` 底、`#dddddd` 字。不要按通用 Tooltip 的深底浅字标准验收 | 图 6 |
-| 卡片信息浮层（C-506） | 在当前页查看另一张卡的事实而不跳转时，用 `layout/CardPeekLayout` 的 `CardPeek`（Popover，配色同容量浮层）+ `CardPeekHeading`（编号与完整标题，14px/20px、600，换行不截断）、`CardPeekFacts` / `CardPeekFact`（标签弱化色，13px/20px）、`CardPeekActions`（右对齐 28px 按钮，只有它跳转）。宽 `--ui-menu-max`（窄屏不超过视口减 24px），内边距 12px，超出可用高度时内部滚动；点外部或 Escape 关闭，焦点回到触发控件，同一组触发控件同时只开一个 | 依赖图节点浮层 |
+| 卡片信息浮层（C-506） | 在当前页查看另一张卡的事实而不跳转时，用 `layout/CardPeekLayout` 的 `CardPeek`（Popover，配色同容量浮层）+ `CardPeekHeading`（编号与完整标题，14px/20px、600，换行不截断）、`CardPeekFacts` / `CardPeekFact`（标签弱化色，13px/20px）、`CardPeekActions`（右对齐 28px 按钮，只有它跳转）。宽 `--ui-menu-max`（窄屏不超过视口减 24px），内边距 12px，超出可用高度时内部滚动；点外部或 Escape 关闭，焦点回到触发控件，同一组触发控件同时只开一个；开着时点同组另一个控件直接切换过去，焦点留在新浮层 | 依赖图节点浮层 |
 
 ### 列表型观察页（C-458）
 

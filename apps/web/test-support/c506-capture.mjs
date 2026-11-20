@@ -366,6 +366,116 @@ try {
         await key("Escape", 27);
         await settle();
       }
+      // A graph that fits, and one taller than its view (30 side-by-side
+      // prerequisites): before, the tall one grew the page instead.
+      for (const [name, hash] of [
+        ["short", "#/p/p-1/cards/C-490"],
+        ["tall", "#/p/p-1/cards/C-480"],
+      ]) {
+        await open(
+          hash,
+          "!!document.querySelector('.card-dependencies')",
+          theme,
+        );
+        await shot(`${name}-${tag}.png`);
+        results[name] = {
+          ...(await measureGraph()),
+          scrollY: await run(() => {
+            const s = document.querySelector(".card-dependencies ul")
+              .parentElement.parentElement;
+            return {
+              clientHeight: s.clientHeight,
+              scrollHeight: s.scrollHeight,
+              scrollTop: s.scrollTop,
+            };
+          }),
+        };
+      }
+      if (!baseline) {
+        // Tall: drag on empty space and arrow keys pan vertically in the graph.
+        const view = await run(() => {
+          const s = document.querySelector(".card-dependencies ul")
+            .parentElement.parentElement;
+          const r = s.getBoundingClientRect();
+          return {
+            x: Math.round(r.x + r.width - 40),
+            y: Math.round(r.y + r.height / 2),
+          };
+        });
+        const top = () => evaluate(`${scroller}.scrollTop`);
+        const startTop = await top();
+        await mouse("mouseMoved", view.x, view.y);
+        await mouse("mousePressed", view.x, view.y, 1);
+        await mouse("mouseMoved", view.x, view.y - 60, 1);
+        await mouse("mouseMoved", view.x, view.y - 120, 1);
+        await mouse("mouseReleased", view.x, view.y - 120);
+        await settle();
+        await shot(`tall-dragged-${tag}.png`);
+        const dragged = (await top()) - startTop;
+        await run(() =>
+          document
+            .querySelector('.card-dependencies [data-node="C-500"] button')
+            .focus({ preventScroll: true }),
+        );
+        const keyTop = await top();
+        await key("ArrowDown", 40);
+        results["tall-pan"] = {
+          dragged,
+          arrowDown: (await top()) - keyTop,
+          popover: await run(
+            () => !!document.querySelector("[data-ui=popover]"),
+          ),
+        };
+        // Fits: a 20px drag inside one node is not a click.
+        await open(
+          "#/p/p-1/cards/C-490",
+          "!!document.querySelector('.card-dependencies')",
+          theme,
+        );
+        const fit = await nodeCentre("C-489");
+        await mouse("mouseMoved", fit.x, fit.y);
+        await mouse("mousePressed", fit.x, fit.y, 1);
+        await mouse("mouseMoved", fit.x + 10, fit.y, 1);
+        await mouse("mouseMoved", fit.x + 20, fit.y, 1);
+        await mouse("mouseReleased", fit.x + 20, fit.y);
+        await settle();
+        results["short-drag"] = {
+          popover: await run(
+            () => !!document.querySelector("[data-ui=popover]"),
+          ),
+          selection: await evaluate("String(getSelection())"),
+        };
+        // With one open, a click on another node moves there and stays.
+        await open(
+          "#/p/p-1/cards/C-454",
+          "!!document.querySelector('.card-dependencies')",
+          theme,
+        );
+        const first = await nodeCentre("C-453");
+        await mouse("mouseMoved", first.x, first.y);
+        await mouse("mousePressed", first.x, first.y, 1);
+        await mouse("mouseReleased", first.x, first.y);
+        await until("!!document.querySelector('[data-ui=popover]')");
+        await settle();
+        const second = await nodeCentre("C-451");
+        await mouse("mouseMoved", second.x, second.y);
+        await mouse("mousePressed", second.x, second.y, 1);
+        await delay(100);
+        await mouse("mouseReleased", second.x, second.y);
+        await delay(600);
+        await settle();
+        await shot(`page-switch-${tag}.png`);
+        results["page-switch"] = await run(() => ({
+          open: [...document.querySelectorAll("[data-ui=popover]")].map((p) =>
+            p.getAttribute("aria-label"),
+          ),
+          focusInside: !!document.activeElement?.closest(
+            '[data-ui=popover][aria-label="卡片 C-451"]',
+          ),
+        }));
+        await key("Escape", 27);
+        await settle();
+      }
       // The node hint keeps 标题 · 状态 after a hover.
       if (!baseline) {
         await open(
@@ -432,7 +542,7 @@ try {
   const diffs = {};
   if (before)
     for (const name of Object.keys(shots).filter(
-      (n) => !/-(peek|dragged|hover)-/.test(n),
+      (n) => !/-(peek|dragged|hover|switch)-/.test(n),
     )) {
       const old = (await readFile(resolve(before, name))).toString("base64");
       diffs[name] = await run(
@@ -481,7 +591,7 @@ try {
     fonts:
       "Inter Variable, Noto Sans SC Variable, JetBrains Mono Variable (lockfile @fontsource)",
     fixture:
-      "test-support/c506-fixture.tsx: 2 synthetic cards with graphs of 9 and 15 nodes; popover reads from the same synthetic set (1 synthetic employee, fixed time); not production scale",
+      "test-support/c506-fixture.tsx: 4 synthetic cards with graphs of 9, 15, 31 and 2 nodes; popover reads from the same synthetic set (1 synthetic employee, fixed time); not production scale",
     cases,
     pixelDiffAgainstBefore: before ? diffs : null,
   };
@@ -504,6 +614,11 @@ try {
           false,
           `${label} ${name}: Escape`,
         );
+        assert.equal(
+          results[`${name}-escape`].focus,
+          name === "drawer-long" ? "C-466" : "C-453",
+          `${label} ${name}: focus back on the node`,
+        );
       }
       const drag = results["drawer-long-drag"];
       assert(drag.scrolledBy >= 100, `${label}: drag pans`);
@@ -511,6 +626,16 @@ try {
       assert.equal(drag.cursor, "grabbing", `${label}: grabbing`);
       assert.equal(drag.selection, "", `${label}: no selection`);
       assert.equal(results["drawer-long-keys"].arrowRight, 40, label);
+      const tall = results.tall.scrollY;
+      assert(tall.scrollHeight > tall.clientHeight, `${label}: tall scrolls`);
+      assert(tall.clientHeight <= 500, `${label}: tall view capped`);
+      assert(results["tall-pan"].dragged >= 100, `${label}: tall drag pans`);
+      assert.equal(results["tall-pan"].arrowDown, 40, `${label}: ArrowDown`);
+      assert.equal(results["tall-pan"].popover, false, label);
+      assert.equal(results["short-drag"].popover, false, `${label}: fits drag`);
+      assert.equal(results["short-drag"].selection, "", label);
+      assert.deepEqual(results["page-switch"].open, ["卡片 C-451"], label);
+      assert(results["page-switch"].focusInside, `${label}: switch focus`);
     }
 } finally {
   await browser?.close();

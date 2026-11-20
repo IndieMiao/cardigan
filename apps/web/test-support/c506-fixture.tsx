@@ -13,7 +13,9 @@ import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
 
 // C-506: synthetic dependency graphs only; no network client or database.
-// C-454 a 9-card fork/merge graph, C-470 a 15-card chain wider than the view.
+// C-454 a 9-card fork/merge graph, C-470 a 15-card chain wider than the view,
+// C-480 30 side-by-side prerequisites, taller than the view, C-490 a pair
+// that fits.
 // Popover reads answer from the same synthetic set: one employee, fixed time.
 Date.now = () => new Date(NOW).getTime();
 const titles: Record<string, string> = {
@@ -52,6 +54,7 @@ const edges = (...pairs: string[]) =>
     return { from, to };
   });
 const chain = Array.from({ length: 15 }, (_, i) => `C-${461 + i}`);
+const side = Array.from({ length: 30 }, (_, i) => `C-${500 + i}`);
 const graphs: Record<
   string,
   { graph: DependencyGraph; waiting_on: string[]; critical_path_length: number }
@@ -92,6 +95,28 @@ const graphs: Record<
     waiting_on: ["C-469"],
     critical_path_length: 6,
   },
+  "C-480": {
+    graph: {
+      nodes: [
+        ...side.map((id, i) => node(id, { title: `并排前置 ${i + 1}` })),
+        node("C-480", { title: "汇总 30 张并排前置" }),
+      ],
+      edges: edges(...side.map((id) => `${id}>C-480`)),
+    },
+    waiting_on: side,
+    critical_path_length: 2,
+  },
+  "C-490": {
+    graph: {
+      nodes: [
+        node("C-489", { title: "短链前置" }),
+        node("C-490", { title: "短链当前" }),
+      ],
+      edges: edges("C-489>C-490"),
+    },
+    waiting_on: ["C-489"],
+    critical_path_length: 2,
+  },
 };
 const cards = Object.keys(graphs).map((id) => {
   const self = graphs[id]?.graph.nodes.find((n) => n.id === id);
@@ -131,6 +156,10 @@ const summary = (id: string): CardListItem => {
     updated_at: "2025-12-31T08:30:00.000Z",
     waiting_on: [],
     why: "",
+    next_owners:
+      open && n?.status !== "backlog"
+        ? [{ kind: "assignment", ref: "A-7", ...employee }]
+        : [],
     produce_owners: open && n?.status !== "backlog" ? [employee] : [],
     work_items: open
       ? [

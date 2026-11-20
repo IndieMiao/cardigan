@@ -6,10 +6,13 @@ import styles from "./CardPeekLayout.module.css";
 /**
  * A card's facts in a popover next to the control that opened it; the page
  * stays where it is. Place inside a `Popover` root; Radix keeps it in the
- * viewport, Escape and an outside press close it.
+ * viewport, Escape and an outside press close it. Closing gives focus back to
+ * the trigger only when it has nowhere else to go: opening another peek from
+ * the same group must keep focus there, not pull it back and dismiss it.
  */
 export function CardPeek({
   className,
+  onCloseAutoFocus,
   ...props
 }: ComponentProps<typeof PopoverContent>) {
   return (
@@ -19,6 +22,11 @@ export function CardPeek({
       sideOffset={4}
       collisionPadding={12}
       {...props}
+      onCloseAutoFocus={(event) => {
+        onCloseAutoFocus?.(event);
+        const focused = document.activeElement;
+        if (focused && focused !== document.body) event.preventDefault();
+      }}
       className={cn(styles.panel, className)}
     />
   );

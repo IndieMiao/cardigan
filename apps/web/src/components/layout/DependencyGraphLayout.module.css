@@ -33,11 +33,12 @@
   .clipEnd::after {
     visibility: visible;
   }
-  /* Long or wide chains scroll here; the drawer and page never widen. */
+  /* Long, wide or tall graphs scroll here; the drawer and page never widen. */
   .scroll {
     /* Contribute no min-content width, so flex/grid ancestors stay put. */
     contain: inline-size;
-    overflow-x: auto;
+    overflow: auto;
+    max-block-size: 50vh;
     padding-block: var(--ui-space-1);
     /* Dragging pans the view; it must not select node text. */
     user-select: none;
