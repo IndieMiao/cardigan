@@ -321,6 +321,7 @@ try {
       }
       if (!baseline) {
         // Models list.
+        await open("/#/p/p-1/settings", settings, theme);
         await tab("模型");
         await until(
           "!!document.querySelector('table[aria-label=启动配置] tbody tr')",
