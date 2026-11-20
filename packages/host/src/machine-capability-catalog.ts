@@ -1,25 +1,29 @@
 import { dirname, join } from "node:path";
 import { getHarnessAdapter, HARNESSES } from "@cardigan/roles";
+import {
+  type CapabilityCommand,
+  chromiumSearch,
+  VERSION_PATTERN,
+} from "./chromium-search.js";
 import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import { readOnboardingYaml } from "./worker-onboarding-config.js";
 
 export interface CapabilityDefinition {
   readonly key: string;
   readonly os: readonly ("linux" | "darwin")[];
-  readonly check: readonly string[];
-  readonly version?: readonly string[];
+  readonly check: CapabilityCommand;
+  readonly version?: CapabilityCommand;
   readonly parseVersion: (output: string) => string | null;
   readonly acceptsOutput?: (output: string) => boolean;
 }
+const versionRegex = new RegExp(VERSION_PATTERN, "u");
 /** Never persist a banner, account name, credential, or arbitrary command output. */
 export function parseCapabilityVersion(output: string): string | null {
-  return (
-    /(?:^|[^\w.])v?(\d{1,6}(?:\.\d{1,6}){1,3})(?!\d)/u.exec(output)?.[1] ?? null
-  );
+  return versionRegex.exec(output)?.[1] ?? null;
 }
 function tool(
   key: string,
-  command: readonly string[],
+  command: CapabilityCommand,
   os: CapabilityDefinition["os"] = ["linux", "darwin"],
 ): CapabilityDefinition {
   return {
@@ -29,6 +33,9 @@ function tool(
     version: command,
     parseVersion: parseCapabilityVersion,
   };
+}
+function chromiumCapability(os: string, browsersPath?: string) {
+  return tool("browser.chromium", chromiumSearch(os, browsersPath));
 }
 export const BUILTIN_MACHINE_CAPABILITIES: readonly CapabilityDefinition[] = [
   ...HARNESSES.map((harness) => {
@@ -78,11 +85,7 @@ export const BUILTIN_MACHINE_CAPABILITIES: readonly CapabilityDefinition[] = [
   tool("docker", ["docker", "version", "--format", "{{.Server.Version}}"]),
   tool("node", ["node", "--version"]),
   tool("python", ["python3", "--version"]),
-  tool("browser.chromium", [
-    "/bin/sh",
-    "-c",
-    'for bin in chromium chromium-browser google-chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome "$HOME"/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium; do if command -v "$bin" >/dev/null 2>&1; then exec "$bin" --version; fi; done; exit 1',
-  ]),
+  chromiumCapability(process.platform),
 ];
 const invalid = (): never => {
   throw new Error("Machine capability configuration invalid");
@@ -107,8 +110,18 @@ function command(value: unknown): readonly string[] {
 }
 export function parseMachineCapabilityCatalog(
   value: unknown,
+  browsersPath?: string,
+  os: string = process.platform,
 ): readonly CapabilityDefinition[] {
-  if (value === undefined) return BUILTIN_MACHINE_CAPABILITIES;
+  const builtins =
+    browsersPath || os !== process.platform
+      ? BUILTIN_MACHINE_CAPABILITIES.map((entry) =>
+          entry.key === "browser.chromium"
+            ? chromiumCapability(os, browsersPath)
+            : entry,
+        )
+      : BUILTIN_MACHINE_CAPABILITIES;
+  if (value === undefined) return builtins;
   const raw = object(value);
   if (
     raw.version !== 1 ||
@@ -118,7 +131,7 @@ export function parseMachineCapabilityCatalog(
   const custom = Object.entries(object(raw.capabilities));
   if (custom.length > 64) return invalid();
   return [
-    ...BUILTIN_MACHINE_CAPABILITIES,
+    ...builtins,
     ...custom.map(([key, value]) => {
       if (
         !/^[a-z][a-z0-9.-]{0,63}$/u.test(key) ||
@@ -152,16 +165,20 @@ export function parseMachineCapabilityCatalog(
 /** Host-owned 0600 file under the private configuration directory, never project YAML. */
 export function loadMachineCapabilityCatalog(
   env: NodeJS.ProcessEnv = process.env,
+  browsersPath?: string,
+  os: string = process.platform,
 ) {
   try {
     return parseMachineCapabilityCatalog(
       readOnboardingYaml(
         join(dirname(runtimeWorkersPath(env)), "machine-capabilities.yaml"),
       ),
+      browsersPath,
+      os,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return BUILTIN_MACHINE_CAPABILITIES;
+      return parseMachineCapabilityCatalog(undefined, browsersPath, os);
     throw new Error("Machine capability configuration invalid");
   }
 }

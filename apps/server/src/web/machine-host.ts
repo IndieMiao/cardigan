@@ -13,6 +13,7 @@ import {
   refreshWorkerObservations,
   runtimeWorkersPath,
   WORKER_STEPS,
+  type WorkerProbeRunner,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -25,7 +26,15 @@ export interface BindingSummary {
   session: string;
   path_entries: number;
 }
+export interface WizardHost {
+  root: string;
+  dataDir: string;
+  env: NodeJS.ProcessEnv;
+  probe?: WorkerProbeRunner;
+  refresh?: typeof refreshWorkerObservations;
+}
 export interface MachineHost {
+  readonly wizard?: WizardHost;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -51,11 +60,13 @@ export function machineHost(
   execution: ExecutionConfig,
   session: string,
   env: NodeJS.ProcessEnv,
+  browsersPath: () => string | undefined = () => undefined,
 ): MachineHost {
   const file = runtimeWorkersPath(env),
     root = dirname(file),
     dataDir = execution.dataDir;
   return {
+    wizard: { root, dataDir, env },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);
       return (project, machine) => {
@@ -111,7 +122,16 @@ export function machineHost(
       if (kind === "machine") {
         progress("runtime");
         const result = await observeRegisteredMachine(
-          { store, project, machine, env, signal, progress, observationId },
+          {
+            store,
+            project,
+            machine,
+            env,
+            signal,
+            progress,
+            observationId,
+            browsersPath,
+          },
           async () => {
             const runtime = await RuntimeTargets.create({
               store,
@@ -172,6 +192,7 @@ export function machineHost(
       if (passed) progress("capabilities");
       await refreshWorkerObservations(store, config.worker, passed, env, {
         signal,
+        browsersPath,
       });
       return {
         status: passed ? "passed" : "failed",
