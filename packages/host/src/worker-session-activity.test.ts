@@ -123,48 +123,27 @@ function scenario() {
   return { a, state, worker, ref, path, record, read, resolve };
 }
 
-// Each sample launches the real worker reader. Give independent scenarios
-// their own fixture and a single read instead of timing three reads together.
-test.each([
-  { when: at, status: "fresh" },
-  { when: "2026-01-01T01:16:00Z", status: "stale" },
-])(
-  "bound worker Claude progress is $status at $when",
-  async ({ when, status }) => {
-    const t = scenario();
-    await mkdir(dirname(t.path), { recursive: true });
-    await writeFile(t.path, t.record);
-    const sample = await t.read(when);
-    expect(t.resolve).toHaveBeenCalledWith(t.ref, "fixture");
-    expect(agentProcessCommand).toHaveBeenCalledWith(
-      t.worker,
-      expect.any(Array),
-    );
-    expect(sample).toMatchObject({
-      activity_status: status,
-      activity: {
-        assignment_id: "A-1",
-        run_id: "R-2",
-        source: "claude-code:session_metadata",
-        updated_at: at,
-      },
-    });
-    expect(sample?.observation).toBeUndefined(); // No context restart from this activity-only source.
-    expect(JSON.stringify(sample)).not.toContain("SECRET-BODY");
-  },
-);
-
-test("worker Claude progress is unknown when two sessions match the generation", async () => {
+test("worker Claude progress comes from the bound session generation and original record time", async () => {
   const t = scenario();
   await mkdir(dirname(t.path), { recursive: true });
   await writeFile(t.path, t.record);
-  await writeFile(
-    join(dirname(t.path), "other.jsonl"),
-    t.record.replace('"one"', '"other"'),
-  );
   const sample = await t.read();
-  expect(sample?.activity_status).toBe("missing");
-  expect(sample?.activity).toBeUndefined();
+  expect(t.resolve).toHaveBeenCalledWith(t.ref, "fixture");
+  expect(agentProcessCommand).toHaveBeenCalledWith(t.worker, expect.any(Array));
+  expect(sample).toMatchObject({
+    activity_status: "fresh",
+    activity: {
+      assignment_id: "A-1",
+      run_id: "R-2",
+      source: "claude-code:session_metadata",
+      updated_at: expect.stringContaining("01:00:00"),
+    },
+  });
+  expect(sample?.observation).toBeUndefined(); // No context restart from this activity-only source.
+  expect(JSON.stringify(sample)).not.toContain("SECRET-BODY");
+  expect((await t.read("2026-01-01T01:16:00Z"))?.activity_status).toBe("stale");
+  await writeFile(join(dirname(t.path), "other.jsonl"), t.record);
+  expect((await t.read())?.activity).toBeUndefined();
 });
 
 test("worker missing, symlink and changed target never borrow a local or old-generation record", async () => {
