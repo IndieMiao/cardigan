@@ -572,3 +572,44 @@ test("owner transfers across projects only after all bindings and runs end; repl
     h.store.uow.read((tx) => tx.assignments.get(other, owned.id)),
   ).toMatchObject({ employee_id: employee.id, role_id: "coder" });
 });
+
+test("clearing an override on transfer cannot inherit a disabled project's profile", async () => {
+  expect((await post({ ...input, launch_profile_ref: "fixture" })).status).toBe(
+    200,
+  );
+  h.store.createProject({ id: "other" });
+  h.store.uow.run((tx) => {
+    const reviewer = defaultRoleDefinition("reviewer", {
+      harness: "codex",
+      launch_profile_ref: "fixture",
+    });
+    tx.roles.put(
+      "p-test",
+      roleDocument({ ...reviewer, version: 1, status: "inactive" }),
+    );
+    tx.roles.put(
+      "other",
+      roleDocument({
+        ...reviewer,
+        version: 1,
+        status: "active",
+        launch_profile_ref: "removed",
+      }),
+    );
+  });
+  const audit = () => h.store.uow.read((tx) => tx.global_events.listAfter(0));
+  const before = { employees: employees(), audit: audit() };
+  const response = await call(h.port, `${path}/E-1/update`, {
+    method: "POST",
+    cookie,
+    body: JSON.stringify({ role_id: "reviewer", launch_profile_ref: null }),
+    headers: {
+      origin: `http://${h.hostHeader}`,
+      "content-type": "application/json",
+      "idempotency-key": "clear-on-transfer",
+    },
+  });
+  expect(response.status).toBe(400);
+  expect(response.json).toMatchObject({ error: { code: "validation_failed" } });
+  expect({ employees: employees(), audit: audit() }).toEqual(before);
+});

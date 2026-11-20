@@ -105,27 +105,33 @@ function checkInheritedProfile(
 ) {
   const role = getRoleVersion(tx, c.project_id, roleId);
   const profiles = c.launchProfiles?.() ?? [];
-  // A transferred employee may not have an enabled role in the URL's project.
-  if (globalEmployee && (!role || role.status === "inactive")) {
-    if (
-      c.store.listProjects().some(({ id }) => {
-        const other =
-          id === c.project_id ? undefined : getRoleVersion(tx, id, roleId);
-        return (
-          other &&
-          other.status !== "inactive" &&
-          profiles.includes(other.launch_profile_ref)
-        );
-      })
-    )
-      return;
-  }
-  if (!role || !profiles.includes(role.launch_profile_ref))
+  if (role && role.status !== "inactive") {
+    if (profiles.includes(role.launch_profile_ref)) return;
     throw new HttpRejection(
       400,
       "validation_failed",
-      `员工角色 ${roleId} 的启动配置 ${role?.launch_profile_ref ?? ""} 不存在，请选用已有配置`,
+      `员工角色 ${roleId} 的启动配置 ${role.launch_profile_ref} 不存在，请选用已有配置`,
     );
+  }
+  // Without an enabled local role, only an enabled role elsewhere can supply the profile.
+  if (
+    globalEmployee &&
+    c.store.listProjects().some(({ id }) => {
+      if (id === c.project_id) return false;
+      const other = getRoleVersion(tx, id, roleId);
+      return (
+        other &&
+        other.status !== "inactive" &&
+        profiles.includes(other.launch_profile_ref)
+      );
+    })
+  )
+    return;
+  throw new HttpRejection(
+    400,
+    "validation_failed",
+    `员工角色 ${roleId} 没有可继承的启动配置，请选用已有配置`,
+  );
 }
 
 /** Only owner sessions reach this transport; the global domain command audits human writes. */
