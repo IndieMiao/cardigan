@@ -1,4 +1,8 @@
-import type { LaunchConfig, ResolvedProfile } from "@cardigan/roles";
+import {
+  getHarnessAdapter,
+  type LaunchConfig,
+  type ResolvedProfile,
+} from "@cardigan/roles";
 
 class ResponseLimit extends Error {}
 
@@ -20,26 +24,8 @@ export async function probeModel(
   };
   if (anthropic) headers["anthropic-version"] = "2023-06-01";
   const refs = Object.keys(p.secret_env);
-  const envKey =
-    resolved.profile.harness === "codex"
-      ? p.codex?.env_key
-      : resolved.profile.harness === "pi"
-        ? p.pi?.env_key
-        : undefined;
-  const candidates =
-    resolved.profile.harness === "claude-code"
-      ? refs.filter(
-          (name) =>
-            name === "ANTHROPIC_API_KEY" || name === "ANTHROPIC_AUTH_TOKEN",
-        )
-      : refs;
-  const key = envKey ?? (candidates.length === 1 ? candidates[0] : undefined);
-  if (
-    refs.length &&
-    (!key ||
-      !p.secret_env[key] ||
-      (p.codex?.requires_openai_auth && resolved.profile.harness === "codex"))
-  )
+  const key = getHarnessAdapter(resolved.profile.harness).probeCredential(p);
+  if (refs.length && (!key || !p.secret_env[key]))
     throw new Error("无法确定该接入点的检查凭据");
   if (key) {
     if (url.protocol !== "https:")

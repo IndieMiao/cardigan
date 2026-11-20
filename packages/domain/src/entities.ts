@@ -1,4 +1,5 @@
 import type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
+import type { Harness } from "./harness.js";
 import type {
   AssignmentId,
   AttachmentId,
@@ -649,7 +650,7 @@ export interface Run {
    * C-106: the harness the Run's session was launched with, snapshotted with
    * `model`; absent on legacy runs and wherever the host did not record it.
    */
-  readonly harness?: "claude-code" | "codex" | "pi";
+  readonly harness?: Harness;
   /**
    * C-106: the reasoning effort in effect at launch, when the launch profile
    * states it unambiguously; absent when unknown.

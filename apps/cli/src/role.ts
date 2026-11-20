@@ -20,8 +20,8 @@ import {
   convertLegacyRole,
   DEFAULT_ROLE_LAUNCH,
   defaultRoleDefinition,
-  type Harness,
   isDefaultRoleId,
+  isHarness,
 } from "@cardigan/roles";
 import {
   getRoleVersion,
@@ -338,14 +338,11 @@ export async function runRoleCommand(
             )
               source = defaultRoleDefinition(id, recommended);
             else {
-              if (
-                !["claude-code", "codex", "pi"].includes(flags.harness ?? "") ||
-                !flags["launch-profile"]
-              )
+              if (!isHarness(flags.harness) || !flags["launch-profile"])
                 fail("从默认角色包复制需要 --harness 和 --launch-profile");
               source = defaultRoleDefinition(id, {
-                harness: flags.harness as Harness,
-                launch_profile_ref: flags["launch-profile"] as string,
+                harness: flags.harness,
+                launch_profile_ref: flags["launch-profile"],
               });
             }
           } else {

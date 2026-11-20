@@ -1,3 +1,4 @@
+import { HARNESSES } from "@cardigan/domain";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -381,13 +382,11 @@ function NewRoleForm({
                     value={harness}
                     onValueChange={(e) => setHarness(e)}
                   >
-                    {(list?.harnesses ?? ["claude-code", "codex", "pi"]).map(
-                      (h) => (
-                        <option key={h} value={h}>
-                          {h}
-                        </option>
-                      ),
-                    )}
+                    {(list?.harnesses ?? HARNESSES).map((h) => (
+                      <option key={h} value={h}>
+                        {h}
+                      </option>
+                    ))}
                   </SelectControl>
                 </label>
                 <label>

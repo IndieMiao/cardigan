@@ -1,22 +1,36 @@
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   type Employee,
   employeeDisplayName,
   employeeTextError,
 } from "@cardigan/domain";
+import { getHarnessAdapter } from "./adapters/registry.js";
+import {
+  BROWSER_BOUNDARY_RULE,
+  BROWSER_CAPABILITY,
+  BROWSER_MCP_ARGS,
+  BROWSER_MCP_SERVER_NAME,
+  BROWSER_ROLES,
+  type BrowserServer,
+  type CompileAssignmentInput,
+  type CompiledAssignmentLaunch,
+  LAUNCH_SCRIPT_NAME,
+  MCP_SERVER_NAME,
+  SECRETS_FILE_NAME,
+  START_FILE_NAME,
+  TOKEN_FILE_NAME,
+} from "./assignment-types.js";
 import {
   type CompiledFile,
   type CompiledLaunch,
-  compileLaunch,
+  compileResolvedLaunch,
 } from "./compile.js";
-import type { Harness } from "./harness.js";
-import { makePiContextUsageExtension } from "./pi-context-usage.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
   BrowserLaunchDefinition,
-  LaunchConfig,
   LaunchProfileDefinition,
 } from "./schema.js";
+import { resolveProfile } from "./schema.js";
 import { testWorkerLimit } from "./test-worker-limit.js";
 
 /**
@@ -32,162 +46,7 @@ import { testWorkerLimit } from "./test-worker-limit.js";
  * employee text validation is shared with the domain edit commands.
  */
 
-export const MCP_SERVER_NAME = "card";
-export const TOKEN_ENV_VAR = "MCP_TOKEN";
-/** The token file the wrapper reads and removes before starting the CLI. */
-export const TOKEN_FILE_NAME = "token";
-export const LAUNCH_SCRIPT_NAME = "launch.sh";
-/** Provider credentials for one launch; sourced and deleted by `launch.sh`. */
-export const SECRETS_FILE_NAME = "secrets.env";
-/**
- * The host writes this sentinel after `dispatchRun` commits; `launch.sh` waits
- * for it before starting the CLI. Without it a fast Agent can call the MCP
- * endpoint while its Run is still `queued`, and the "first tool call
- * acknowledges the Run" hook would have nothing to acknowledge (M2 §4 step 5–8).
- */
-export const START_FILE_NAME = "start";
-
-/**
- * P2a-14 ⑧: role capability that adds the host's local headless browser as a
- * second, stdio-only MCP server. It travels with the role version, so a role
- * gets the browser only after `role upgrade --from-default` brings the rules
- * that come with it (Core Prompt: never open the production Workbench).
- */
-export const BROWSER_CAPABILITY = "browser";
-export const BROWSER_MCP_SERVER_NAME = "playwright";
-/** Harness allow-list entry for every tool of the browser server. */
-export const BROWSER_TOOL_PATTERN = `mcp__${BROWSER_MCP_SERVER_NAME}__*`;
-/** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
-export const BROWSER_ROLES = [
-  "frontend_engineer",
-  "ui_ux_designer",
-  "design_director",
-  "independent_reviewer",
-] as const;
-
-/**
- * P2a-14 ⑧: the local browser's boundary. A role rule, not a network
- * restriction (ADR 0006 decision 6): the Agent already has a shell, and the
- * real boundaries are the Workbench password and the Card MCP token.
- */
-export const BROWSER_BOUNDARY_RULE = `有浏览器工具（\`${BROWSER_TOOL_PATTERN}\`）时，被测页面只能是你自己起的本地 dev server（验证方在主机准备的可写构建目录，产出方在当前 worktree）；不得打开生产 Workbench，不得导航到 127.0.0.1:7781 或其它已知 Workbench 端口，也不在浏览器里登录任何账号。没有浏览器工具时如实写未核，不声称看过页面。`;
-
-/** Fixed arguments; the host config cannot add to or override them. */
-export const BROWSER_MCP_ARGS = [
-  "--headless",
-  "--isolated",
-  "--browser",
-  "chromium",
-] as const;
-
-export interface AssignmentRoleInput {
-  readonly role_id: string;
-  readonly harness: Harness;
-  /** Name of the launch profile in `launch.yaml` (§10.2). */
-  readonly launch_profile: string;
-  /** Full Core Prompt; §6.3's protocol must be part of it. */
-  readonly core_prompt?: string;
-  readonly instructions?: string;
-  /** Card MCP tools this role may call; the CLI allow-list is derived from it. */
-  readonly allowed_tools: readonly string[];
-  /** `none` roles (PM) run in the run directory instead of a worktree. */
-  readonly worktree: "none" | "write" | "readonly";
-  /** Role capabilities; `browser` asks for the local browser server. */
-  readonly capabilities?: readonly string[];
-}
-
-export interface AssignmentIdentity {
-  readonly assignment_id: string;
-  readonly run_id: string;
-  readonly card_id?: string;
-  readonly work_item_id?: string;
-  readonly project_id?: string;
-}
-
-export interface AssignmentMcpEndpoint {
-  /** Card MCP streamable HTTP endpoint, e.g. `http://127.0.0.1:3004/mcp`. */
-  readonly url: string;
-  readonly server_name?: string;
-}
-
-export interface CompileAssignmentInput {
-  readonly assignment: AssignmentIdentity;
-  /** Employee profiles select the CLI as well as its model/provider. */
-  readonly employee?: {
-    readonly launch_profile_ref: string | null;
-    readonly identity?: Pick<Employee, "name" | "title" | "bio">;
-  };
-  readonly role: AssignmentRoleInput;
-  /** Whole launch config; the profile is looked up by `role.launch_profile`. */
-  readonly launch: LaunchConfig;
-  readonly mcp: AssignmentMcpEndpoint;
-  /** `<CARDIGAN_DATA_DIR>/runs/<assignment_id>/`; outside the worktree. */
-  readonly run_dir: string;
-  /** Where the CLI starts: the worktree, or the run directory for `none`. */
-  readonly work_dir: string;
-  /**
-   * C-235: the host-verified canonical (realpath) form of a worktree
-   * `work_dir`, i.e. the exact key pi 1.4 looks up in `trust.json`
-   * (`canonicalizePath(resolvePath(cwd))`). Set only when the worktree leaf
-   * itself is not a symlink; without it pi gets no pre-trust (fail closed).
-   * The compiler cannot check the filesystem, so only the host may set it,
-   * and only from `piTrustedWorktreePath(work_dir)` in `@cardigan/host`.
-   */
-  readonly work_dir_real?: string;
-  /** Host-selected base clone containing the worktree's common .git directory. */
-  readonly repository_root?: string;
-  /** P2a-3: a readonly verifier's writable build checkout (outside the worktree). */
-  readonly build_dir?: string;
-  /** First message the agent receives (a bell-shaped prompt, M2 §4 step 7). */
-  readonly first_prompt: string;
-  /** Values from `secrets.env`, keyed by secret name. */
-  readonly secrets: Readonly<Record<string, string>>;
-  /** CPU niceness increment for the Agent and its children; defaults to 10. */
-  readonly agent_nice?: number;
-  /** Host policy for local employee sessions, never a project setting. */
-  readonly test_max_workers?: number;
-  /** Employee self-tests must not start real hc or end-to-end scenarios. */
-  readonly agent_local_tests?: boolean;
-  /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
-  readonly worker_test_lock?: { path: string; python: string; helper: string };
-  /** Trusted worker wrapper; material and persistent session homes are separate. */
-  readonly worker_launch?: {
-    readonly command: readonly string[];
-    readonly session_dir: string;
-  };
-}
-
-export interface CompiledAssignmentLaunch {
-  readonly harness: Harness;
-  readonly role_id: string;
-  readonly profile: string;
-  /** Command `launch.sh` starts, e.g. `claude`. */
-  readonly command: string;
-  readonly args: readonly string[];
-  /**
-   * Non-secret environment for the CLI. Provider credentials are NOT here (see
-   * `secret_env`); the MCP token is added by `launch.sh` at runtime.
-   */
-  readonly env: Readonly<Record<string, string>>;
-  /**
-   * Provider credentials taken from `secrets.env`. They are written only to the
-   * run directory's `secrets.env` (0600), which `launch.sh` sources and deletes
-   * before starting the CLI. Callers must not print them, log them, or copy
-   * them anywhere else (§10.2, §14).
-   */
-  readonly secret_env: Readonly<Record<string, string>>;
-  /** Everything the host writes, including `launch.sh`. */
-  readonly files: readonly CompiledFile[];
-  /** The wrapper the runtime starts. */
-  readonly launch_script: string;
-  /** Token file the wrapper consumes; the host creates it right before starting. */
-  readonly token_file: string;
-  /** `mcp__card__whoami` style names, for the harness allow-list. */
-  readonly mcp_tool_names: readonly string[];
-  /** Whether the local browser MCP server was configured for this launch. */
-  readonly browser: boolean;
-}
-
+export * from "./assignment-types.js";
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
@@ -223,23 +82,20 @@ export function compileAssignmentLaunch(
 
   const profile =
     input.employee?.launch_profile_ref ?? input.role.launch_profile;
-  const base = compileLaunch({
-    config: input.launch,
-    profile,
-    secrets: input.secrets,
-    runtimeDir: input.run_dir,
-    instanceId: "assignment",
-    // Remote publication already creates an exclusive home per generation.
-    // A local run_dir is reused across runs: never put a generated model
-    // registry in the native Pi home (which can hold user-maintained config).
-    piRegistryDir: input.worker_launch
-      ? join(input.run_dir, "pi")
-      : join(
-          input.run_dir,
-          "pi",
-          `launch-${encodeURIComponent(input.assignment.run_id)}`,
-        ),
-  });
+  const resolved = resolveProfile(input.launch, profile);
+  const adapter = getHarnessAdapter(resolved.profile.harness);
+  const registryDir = adapter.registryDir?.(input);
+  const base = compileResolvedLaunch(
+    {
+      config: input.launch,
+      profile,
+      secrets: input.secrets,
+      runtimeDir: input.run_dir,
+      instanceId: "assignment",
+      ...(registryDir === undefined ? {} : { piRegistryDir: registryDir }),
+    },
+    resolved,
+  );
 
   if (
     !input.employee?.launch_profile_ref &&
@@ -301,172 +157,19 @@ export function compileAssignmentLaunch(
     harnessEnv.npm_config_package_import_method = "copy";
   }
 
-  switch (harness) {
-    case "claude-code":
-      // §M2.4: strict MCP config, explicit Card tool allow-list, Core Prompt file.
-      harnessFiles.push({
-        path: join(input.run_dir, "mcp.json"),
-        content: `${JSON.stringify(
-          {
-            mcpServers: {
-              [serverName]: {
-                type: "http",
-                url: input.mcp.url,
-                headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
-              },
-              ...(browser === undefined
-                ? {}
-                : {
-                    [BROWSER_MCP_SERVER_NAME]: {
-                      type: "stdio",
-                      command: browser.command,
-                      args: browser.args,
-                      env: browser.env,
-                    },
-                  }),
-            },
-          },
-          null,
-          2,
-        )}\n`,
-        mode: 0o600,
-      });
-      harnessArgs.push(
-        "--strict-mcp-config",
-        "--mcp-config",
-        join(input.run_dir, "mcp.json"),
-        "--append-system-prompt-file",
-        coreFile,
-      );
-      if (toolNames.length > 0 || browser !== undefined) {
-        harnessArgs.push(
-          "--allowedTools",
-          [
-            ...toolNames,
-            ...(browser === undefined ? [] : [BROWSER_TOOL_PATTERN]),
-          ].join(","),
-        );
-      }
-      // Agents never update themselves mid-run.
-      harnessEnv.DISABLE_AUTOUPDATER = "1";
-      harnessEnv.CLAUDE_CONFIG_DIR = join(sessionDir, "claude");
-      break;
-
-    case "codex":
-      // Codex reads config.toml from CODEX_HOME; the file holds no credentials,
-      // only the environment variable name.
-      harnessFiles.push({
-        path: join(input.run_dir, "codex", "config.toml"),
-        content: codexConfig(
-          serverName,
-          input.mcp.url,
-          input.role.allowed_tools,
-          coreFile,
-          input.worker_launch && input.role.worktree === "none"
-            ? []
-            : [
-                input.work_dir,
-                ...(input.repository_root ? [input.repository_root] : []),
-                ...(input.build_dir ? [input.build_dir] : []),
-              ],
-          browser,
-        ),
-        mode: 0o600,
-      });
-      harnessEnv.CODEX_HOME = join(sessionDir, "codex");
-      break;
-
-    case "pi": {
-      const nativeHome = join(sessionDir, "pi");
-      const localInlineHome =
-        !input.worker_launch && base.files.length > 0
-          ? base.env.PI_CODING_AGENT_DIR
-          : undefined;
-      const materialDir = localInlineHome ?? join(input.run_dir, "pi");
-      if (
-        localInlineHome &&
-        base.env.PI_CODING_AGENT_SESSION_DIR === undefined
-      ) {
-        // Pi's default transcript location, independent of the disposable registry.
-        const cwd = input.work_dir_real ?? input.work_dir;
-        const key = `--${cwd.replace(/^[/\\]/u, "").replace(/[/\\:]/gu, "-")}--`;
-        harnessEnv.PI_CODING_AGENT_SESSION_DIR = join(
-          nativeHome,
-          "sessions",
-          key,
-        );
-      }
-      // Keep mcp.json in the isolated PI_CODING_AGENT_DIR: putting it under
-      // the worktree's .pi/ triggers project trust prompts that block unattended
-      // terminals. Pi takes the prompt as a path (verified in 0.4 §3).
-      harnessFiles.push({
-        path: join(materialDir, "mcp.json"),
-        content: `${JSON.stringify(
-          {
-            mcpServers: {
-              [serverName]: {
-                url: input.mcp.url,
-                // Declare Card tools to the model without a codemode search.
-                exposure: "direct",
-                headers: { Authorization: `Bearer \${${TOKEN_ENV_VAR}}` },
-              },
-              ...(browser === undefined
-                ? {}
-                : {
-                    [BROWSER_MCP_SERVER_NAME]: {
-                      command: browser.command,
-                      args: browser.args,
-                      env: browser.env,
-                      exposure: "direct",
-                    },
-                  }),
-            },
-          },
-          null,
-          2,
-        )}\n`,
-        mode: 0o600,
-      });
-      harnessFiles.push({
-        path: join(materialDir, "extensions", "cardigan-context-usage.js"),
-        content: makePiContextUsageExtension(
-          localInlineHome ? nativeHome : undefined,
-        ),
-        mode: 0o600,
-      });
-      // C-211: pre-trust exactly the folder pi starts in, the worktree the
-      // host created for this Assignment, so a tracked .pi/settings.json does
-      // not stop the unattended terminal at "Trust project folder?". The
-      // saved decision lives in this run's own PI_CODING_AGENT_DIR (pi 1.4
-      // `<agent-dir>/trust.json`, canonical path -> true): one exact path, no
-      // parent folder, no pattern, and no change to `defaultProjectTrust`.
-      // C-235: the key is the host-verified real path, because pi looks up
-      // `realpath(cwd)`; no verified path means no pre-trust.
-      if (
-        input.work_dir_real !== undefined &&
-        isAbsolute(input.work_dir_real) &&
-        resolve(input.work_dir_real) === input.work_dir_real &&
-        input.work_dir_real !== resolve(input.run_dir) &&
-        resolve(input.work_dir) !== resolve(input.run_dir)
-      )
-        harnessFiles.push({
-          path: join(materialDir, "trust.json"),
-          content: `${JSON.stringify({ [input.work_dir_real]: true }, null, 2)}\n`,
-          mode: 0o600,
-        });
-      harnessEnv.PI_CODING_AGENT_DIR = localInlineHome ?? nativeHome;
-      harnessArgs.push("--append-system-prompt", coreFile);
-      break;
-    }
-  }
-
-  // Claude's --allowedTools is variadic. Terminate options so it cannot consume
-  // the positional first message (verified with the interactive 2.1.318 CLI).
-  const args = [
-    ...base.args,
-    ...harnessArgs,
-    ...(harness === "claude-code" ? ["--"] : []),
-  ];
+  adapter.configureAssignment({
+    input,
+    base,
+    sessionDir,
+    coreFile,
+    serverName,
+    browser,
+    toolNames,
+    harnessEnv,
+    harnessArgs,
+    harnessFiles,
+  });
+  const args = [...base.args, ...harnessArgs];
   const command = base.command;
 
   // Provider credentials never travel in `env` or in a long-lived file: they go
@@ -494,7 +197,7 @@ export function compileAssignmentLaunch(
     }
   }
   const strippedBaseFiles = base.files.map((file) => {
-    if (secretKeys.size === 0 && harness !== "claude-code") return file;
+    if (secretKeys.size === 0 && !adapter.assignmentSettings) return file;
     try {
       const parsed = JSON.parse(file.content) as {
         env?: Record<string, string>;
@@ -507,7 +210,7 @@ export function compileAssignmentLaunch(
         ...file,
         // D7: the per-launch --settings file also overrides an existing Claude
         // config without editing its session history or remembered files.
-        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...(harness === "claude-code" ? { autoMemoryEnabled: false } : {}) }, null, 2)}\n`,
+        content: `${JSON.stringify({ ...parsed, env: keptEnv, ...adapter.assignmentSettings }, null, 2)}\n`,
       };
     } catch {
       return file;
@@ -594,14 +297,7 @@ export function compileAssignmentLaunch(
               command,
               args,
               env,
-              ...(harness === "claude-code"
-                ? {
-                    claude: {
-                      configDir: join(input.run_dir, "claude"),
-                      workDir: input.work_dir,
-                    },
-                  }
-                : {}),
+              localSetup: adapter.localSetup?.(input, shellQuote) ?? "",
             }),
         mode: 0o700,
       },
@@ -611,12 +307,6 @@ export function compileAssignmentLaunch(
     mcp_tool_names: toolNames,
     browser: browser !== undefined,
   };
-}
-
-interface BrowserServer {
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly env: Readonly<Record<string, string>>;
 }
 
 /**
@@ -664,64 +354,8 @@ function withTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`;
 }
 
-/**
- * `config.toml` for Codex: the Card server with an env-var token reference and
- * per-tool approval, plus the Core Prompt as the model instruction file.
- * `model_instructions_file` replaces Codex's own instructions, so the Core
- * Prompt carries the full protocol (§M2.4).
- */
-function codexConfig(
-  serverName: string,
-  url: string,
-  tools: readonly string[],
-  coreFile: string,
-  trustedPaths: readonly string[],
-  browser: BrowserServer | undefined,
-): string {
-  const lines = [
-    `model_instructions_file = ${JSON.stringify(coreFile)}`,
-    "",
-    "[features]",
-    "shell_tool = true",
-    "",
-    `[mcp_servers.${serverName}]`,
-    `url = ${JSON.stringify(url)}`,
-    `bearer_token_env_var = ${JSON.stringify(TOKEN_ENV_VAR)}`,
-    "",
-  ];
-  for (const tool of tools) {
-    lines.push(
-      `[mcp_servers.${serverName}.tools.${tool}]`,
-      'approval_mode = "approve"',
-      "",
-    );
-  }
-  if (browser !== undefined) {
-    // Codex 0.161: one approval mode for every tool of the local browser.
-    lines.push(
-      `[mcp_servers.${BROWSER_MCP_SERVER_NAME}]`,
-      `command = ${JSON.stringify(browser.command)}`,
-      `args = [${browser.args.map((arg) => JSON.stringify(arg)).join(", ")}]`,
-      'default_tools_approval_mode = "approve"',
-      "",
-      `[mcp_servers.${BROWSER_MCP_SERVER_NAME}.env]`,
-      ...Object.entries(browser.env).map(
-        ([name, value]) => `${name} = ${JSON.stringify(value)}`,
-      ),
-      "",
-    );
-  }
-  // Codex 0.161 resolves a linked worktree's project root through its common dir.
-  // Never trust the worktrees/repos parent or inherit the host user's config.
-  for (const path of new Set(trustedPaths)) {
-    lines.push(
-      `[projects.${JSON.stringify(path)}]`,
-      'trust_level = "trusted"',
-      "",
-    );
-  }
-  return `${lines.join("\n")}`;
-}
+const shellQuote = (value: string): string =>
+  `'${value.replaceAll("'", `'\\''`)}'`;
 
 /**
  * The wrapper the runtime starts. It reads the token file, deletes it, exports
@@ -737,39 +371,13 @@ function launchScriptContent(options: {
   readonly command: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
-  readonly claude?: { readonly configDir: string; readonly workDir: string };
+  readonly localSetup: string;
 }): string {
-  const quote = (value: string): string =>
-    `'${value.replaceAll("'", `'\\''`)}'`;
+  const quote = shellQuote;
   const exports = Object.entries(options.env)
     .map(([name, value]) => `export ${name}=${quote(value)}`)
     .join("\n");
   const args = options.args.map(quote).join(" ");
-  // Run as the actual CLI user: agent-ssh must not inherit a host-owned 0700 leaf.
-  const claudeConfig =
-    options.claude === undefined
-      ? ""
-      : `# Session state belongs to this Assignment, not to the user's home.
-claude_config_dir=${quote(options.claude.configDir)}
-if [ ! -e "$claude_config_dir" ] && [ ! -L "$claude_config_dir" ]; then
-  (umask 077; mkdir -m 700 -- "$claude_config_dir")
-fi
-if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$claude_config_dir" ]; then
-  echo "cardigan: Claude config directory must be a directory owned by the running user, not a symlink" >&2
-  exit 78
-fi
-# The extra leading zero clears inherited setgid on shared run directories.
-chmod 00700 -- "$claude_config_dir"
-# Claude Code 2.1.318 stores onboarding/trust in .claude.json, but theme and
-# bypass confirmation in settings.json. Seed fresh state as the runtime user;
-# noclobber prevents replacing a file created concurrently (or a symlink).
-if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
-  if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
-    (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ theme: "dark", skipDangerousModePermissionPrompt: true, autoMemoryEnabled: false }))} > "$claude_config_dir/settings.json")
-  fi
-  (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.318", projects: { [options.claude.workDir]: { hasTrustDialogAccepted: true } } }))} > "$claude_config_dir/.claude.json")
-fi
-`;
   const credentials =
     options.secretsFile === undefined
       ? ""
@@ -828,14 +436,13 @@ while [ ! -f "$start_file" ]; do
   waited=$((waited + 1))
 done
 rm -f "$start_file"
-${claudeConfig}exec nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
+${options.localSetup}exec nice -n ${options.agentNice} ${quote(options.command)}${args ? ` ${args}` : ""} "$first_message"
 `;
 }
 
 /** `NAME='value'` lines, safe to source; the file is deleted by launch.sh. */
 function secretsFileContent(secrets: Readonly<Record<string, string>>): string {
-  const quote = (value: string): string =>
-    `'${value.replaceAll("'", `'\\''`)}'`;
+  const quote = shellQuote;
   return `${Object.entries(secrets)
     .map(([name, value]) => `${name}=${quote(value)}`)
     .join("\n")}\n`;

@@ -1,5 +1,5 @@
-import type { RuntimeResult } from "@cardigan/domain";
-import { HARNESS_BINARY, type Harness } from "@cardigan/roles";
+import type { AgentBinary, RuntimeResult } from "@cardigan/domain";
+import { getHarnessAdapter, HARNESSES, type Harness } from "@cardigan/roles";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { HostLaunchError, messageOf } from "./errors.js";
 
@@ -13,10 +13,10 @@ import { HostLaunchError, messageOf } from "./errors.js";
  * and the server uses `execFile`.
  */
 
-export type AgentBinary = "claude" | "codex" | "pi";
+export type { AgentBinary } from "@cardigan/domain";
 
 export function harnessBinary(harness: Harness): AgentBinary {
-  return HARNESS_BINARY[harness] as AgentBinary;
+  return getHarnessAdapter(harness).binary;
 }
 
 export type CaptureAgent = (
@@ -28,15 +28,22 @@ export interface AgentCliVersionSource {
   readonly execution: ExecutionConfig;
   /** Present on the real runtime adapter; required in `agent-ssh` mode. */
   readonly captureAgent?: CaptureAgent | undefined;
-  readonly captureLocal: (binary: AgentBinary) => Promise<string>;
+  readonly captureLocal: (
+    binary: AgentBinary,
+    args: readonly string[],
+  ) => Promise<string>;
 }
 
 export async function agentCliVersion(
   source: AgentCliVersionSource,
   binary: AgentBinary,
 ): Promise<string> {
+  const adapter = HARNESSES.map(getHarnessAdapter).find(
+    (a) => a.binary === binary,
+  );
+  if (!adapter) throw new HostLaunchError("cli version", "未知的 Agent CLI");
   if (source.execution.mode === "local")
-    return await source.captureLocal(binary);
+    return await source.captureLocal(binary, adapter.versionArgs);
 
   if (source.captureAgent === undefined) {
     throw new HostLaunchError(
@@ -46,7 +53,7 @@ export async function agentCliVersion(
   }
   let captured: RuntimeResult<string>;
   try {
-    captured = await source.captureAgent(binary, ["--version"]);
+    captured = await source.captureAgent(binary, adapter.versionArgs);
   } catch (error) {
     throw new HostLaunchError("cli version", messageOf(error), {
       cause: error,

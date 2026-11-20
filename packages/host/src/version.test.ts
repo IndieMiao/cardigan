@@ -24,7 +24,7 @@ describe("agentCliVersion (M2 plan §4 step 2)", () => {
       harnessBinary("codex"),
     );
     expect(version).toBe("codex 1.2.3");
-    expect(captureLocal).toHaveBeenCalledWith("codex");
+    expect(captureLocal).toHaveBeenCalledWith("codex", ["--version"]);
     expect(captureAgent).not.toHaveBeenCalled();
   });
 
@@ -71,3 +71,33 @@ describe("agentCliVersion (M2 plan §4 step 2)", () => {
     ).rejects.toThrow(/runtime_unavailable/);
   });
 });
+
+test.each([
+  ["claude-code", "claude"],
+  ["codex", "codex"],
+  ["pi", "pi"],
+] as const)(
+  "%s probes the registered binary and argv on both execution paths",
+  async (harness, binary) => {
+    expect(harnessBinary(harness)).toBe(binary);
+    const captureLocal = vi.fn(async () => "local fixture");
+    const captureAgent = vi.fn(async () => ({
+      ok: true as const,
+      value: "agent fixture\nextra",
+    }));
+    expect(
+      await agentCliVersion(
+        { execution: local, captureLocal, captureAgent },
+        binary,
+      ),
+    ).toBe("local fixture");
+    expect(captureLocal).toHaveBeenCalledWith(binary, ["--version"]);
+    expect(
+      await agentCliVersion(
+        { execution: agentSsh, captureLocal, captureAgent },
+        binary,
+      ),
+    ).toBe("agent fixture");
+    expect(captureAgent).toHaveBeenCalledWith(binary, ["--version"]);
+  },
+);

@@ -1,4 +1,5 @@
 import type { Assignment, Event } from "./entities.js";
+import type { AgentBinary } from "./harness.js";
 import type { AssignmentId } from "./ids.js";
 import {
   contextUsageThresholds,
@@ -6,7 +7,7 @@ import {
 } from "./preferences.js";
 
 export interface ContextUsage {
-  readonly agent: "claude" | "codex" | "pi";
+  readonly agent: AgentBinary;
   readonly session_id: string;
   readonly transcript_path: string | null;
   readonly cwd: string;

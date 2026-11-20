@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type Role, type ToolName, toolNames } from "@cardigan/domain";
-import type { Harness } from "@cardigan/roles";
+import { HARNESSES, type Harness } from "@cardigan/roles";
 import { parse as parseYaml } from "yaml";
 import { CliError, EXIT } from "./errors.js";
 
@@ -28,7 +28,6 @@ export interface RoleFile {
 }
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/;
-const HARNESSES: readonly Harness[] = ["claude-code", "codex", "pi"];
 
 function fail(message: string, details: string[] = []): never {
   throw new CliError(message, EXIT.usage, details);

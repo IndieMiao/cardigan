@@ -452,6 +452,13 @@ test("all Runtime operations route to the configured agent machine using support
     ["exec", "--on", "cardigan-agent", "--", "git", "status"],
     1234,
   );
+  const denied = await runtime.captureAgent("unregistered" as never, [
+    "--version",
+  ]);
+  expect(denied).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
   value(await runtime.captureAgent("pi", ["--version"]));
   expect(client.exec).toHaveBeenLastCalledWith([
     "exec",
