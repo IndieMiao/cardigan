@@ -1,11 +1,14 @@
 import { expect, test } from "vitest";
 import type { Actor, Assignment, HumanAction } from "../entities.js";
 import {
+  acknowledgeRun,
   cancelHumanAction,
   completeHumanAction,
+  dispatchRun,
   listNeedsYou,
   notices,
   postComment,
+  queueRun,
   refreshCancelledHumanActions,
   requestDecision,
   requestDeploymentAction,
@@ -982,7 +985,12 @@ test("system evidence-wait request can be completed by its human-designated exte
 function historicalReport(
   executor: "host_ops" | "fallback" | "external" | "team" = "host_ops",
   link: "action" | "request" | "handoff" | "comment" = "action",
-  options: { moveToOffice?: "before" | "after"; poster?: Actor } = {},
+  options: {
+    moveToOffice?: "before" | "after";
+    poster?: Actor;
+    readback?: string;
+    dispatch?: "immediate" | "manual" | "unrelated";
+  } = {},
 ) {
   const f = diagnosticOwners();
   const state = {
@@ -999,7 +1007,8 @@ function historicalReport(
       },
     ],
   };
-  const io = ports();
+  let tick = Date.parse(now);
+  const io = { ...ports(), clock: { now: () => new Date(tick).toISOString() } };
   const source = value(
     requestHumanAction(
       state,
@@ -1008,7 +1017,7 @@ function historicalReport(
         card_id: id("card", 1),
         instructions: "Read the installed version",
         why_human: "Host check",
-        expected_return: "Readback",
+        expected_return: "Installed version number",
         blocked_work_items: [],
       },
       io,
@@ -1023,6 +1032,10 @@ function historicalReport(
       human,
       {
         ...f.params,
+        expected_return: "Installed version number",
+        ...(options.dispatch === "manual"
+          ? { ready_when: { kind: "manual" as const } }
+          : {}),
         human_action_id: action.id,
         ...(executor === "external"
           ? {
@@ -1040,7 +1053,87 @@ function historicalReport(
     ),
   );
   const assigned = required(hand.timeline[0]);
-  const routed = apply(requested, hand);
+  let routed = apply(requested, hand);
+  if (options.dispatch) {
+    let trigger = required(hand.events[0]);
+    if (options.dispatch === "manual") {
+      const released = value(
+        triageHumanAction(
+          routed,
+          owner,
+          {
+            human_action_id: action.id,
+            disposition: "release",
+            rationale: "Host is ready",
+          },
+          io,
+        ),
+      );
+      routed = apply(routed, released);
+      trigger = required(released.events[0]);
+      expect(trigger.payload).toMatchObject({
+        released: true,
+        disposition: "host",
+        human_action_id: action.id,
+      });
+    } else if (options.dispatch === "unrelated") {
+      const note = value(
+        postComment(
+          routed,
+          human,
+          { card_id: request.card_id, body: `Reminder for ${action.id}` },
+          io,
+        ),
+      );
+      routed = apply(routed, note);
+      trigger = required(note.events[0]);
+    }
+    const system = { kind: "system" as const, project_id: routed.project_id };
+    const queued = value(
+      queueRun(
+        routed,
+        system,
+        {
+          assignment_id: f.host.id,
+          trigger_event_id: trigger.id,
+          kind: "followup",
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        io,
+      ),
+    );
+    routed = apply(routed, queued);
+    const dispatched = value(
+      dispatchRun(
+        routed,
+        system,
+        {
+          run_id: queued.data.id,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "fixture-host",
+            agent_name: "host_ops",
+          },
+        },
+        io,
+      ),
+    );
+    routed = apply(routed, dispatched);
+    tick += 1000;
+    const started = value(
+      acknowledgeRun(
+        routed,
+        actor(5, "host_ops"),
+        { run_id: queued.data.id },
+        io,
+      ),
+    );
+    expect(started.data.trigger_event_id).toBe(trigger.id);
+    routed = apply(routed, started);
+    tick += 1000;
+  }
   const other = value(
     postComment(
       routed,
@@ -1073,7 +1166,8 @@ function historicalReport(
       : executor === "external"
         ? actor(7, "pm")
         : actor(5, "host_ops");
-  const quote = "I verified that the running version is 7.2.";
+  const quote =
+    options.readback ?? "I verified that the running version is 7.2.";
   const body = link === "action" ? `${action.id}: ${quote}` : quote;
   const posted = value(
     postComment(
@@ -1371,4 +1465,58 @@ test("a same-card release does not replace the handoff and a timeline link is no
       timeline: old.timeline.filter((t) => t.id !== assigned.id),
     }).ok,
   ).toBe(false);
+});
+
+test.each([
+  ["immediate", true],
+  ["manual", true],
+  ["unrelated", false],
+] as const)("historical team dispatch: %s", (dispatch, valid) => {
+  const { old, finish } = historicalReport("team", "handoff", { dispatch });
+  expect(finish(old).ok).toBe(valid);
+});
+
+test.each(["Version: 7.2.1", "7.2.1", "7.2"])(
+  "literal version readback: %s",
+  (readback) => {
+    const { old, finish, attestation, request } = historicalReport(
+      "host_ops",
+      "handoff",
+      { readback },
+    );
+    const result = value(finish(old));
+    expect(
+      result.events.find((e) => e.type === "legacy_host_result_verified")
+        ?.payload,
+    ).toMatchObject({
+      request: request.id,
+      result_quote: readback,
+      verification: attestation.verification,
+    });
+  },
+);
+
+test("literal readback cannot substitute punctuation, citation, a progress fragment or a missing independent check", () => {
+  for (const [body, quote] of [
+    ["...", "..."],
+    ["C-1#123", "123"],
+    ["H-123", "H-123"],
+    ["Will check 7.2.1 later", "7.2.1"],
+    ["7.2.1", "7.2"],
+    ["7.2.1", "7.2.0"],
+  ]) {
+    const { old, finish, attestation } = historicalReport(
+      "host_ops",
+      "handoff",
+      { readback: body! },
+    );
+    expect(finish(old, { ...attestation, result_quote: quote! }).ok).toBe(
+      false,
+    );
+  }
+  const { old, finish, attestation } = historicalReport("host_ops", "handoff", {
+    readback: "7.2.1",
+  });
+  for (const verification of ["", "...", "C-1#123", "7.2.1"])
+    expect(finish(old, { ...attestation, verification }).ok).toBe(false);
 });
