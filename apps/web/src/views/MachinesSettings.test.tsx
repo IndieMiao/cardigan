@@ -98,7 +98,16 @@ test("settings navigation lists 机器 right after 员工 and keeps 并发与容
     within(nav)
       .getAllByRole("button")
       .map((b) => b.textContent),
-  ).toEqual(["偏好", "并发与容量", "授权", "角色", "卡片模板", "员工", "机器"]);
+  ).toEqual([
+    "偏好",
+    "并发与容量",
+    "授权",
+    "飞书绑定",
+    "角色",
+    "卡片模板",
+    "员工",
+    "机器",
+  ]);
 });
 
 test("the list shows name, platform, status, heartbeat, running/limit and the latest check, read only", async () => {

@@ -1536,7 +1536,14 @@ export interface RoleCopyInput {
       };
 }
 
+export interface FeishuBindingView {
+  state: string;
+  bound: boolean;
+  code?: string;
+  expires?: number;
+}
 export interface CardiganClient {
+  feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** In-memory only, scoped to the currently validated login. */
   cachedCards?(
     projectId: string,
@@ -1903,6 +1910,12 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  feishuBinding(action?: "code" | "unbind") {
+    return this.request<FeishuBindingView>(
+      "/api/me/feishu",
+      action ? { method: "POST", body: JSON.stringify({ action }) } : {},
+    );
   }
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");
@@ -2912,6 +2925,8 @@ export function describeError(error: unknown): string {
     if (error.status === 401) return "会话已失效，请重新登录。";
     if (error.status === 429) return "尝试次数太多，请稍后再试。";
     if (error.status === 403) {
+      if (error.code === "owner_required")
+        return webErrorMessage(error.message);
       if (["origin_required", "origin_rejected"].includes(error.code))
         return "请求被拒绝（来源校验未通过）。";
       if (["unauthorized", "forbidden_tool"].includes(error.code))
