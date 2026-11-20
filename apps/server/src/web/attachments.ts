@@ -3,6 +3,7 @@ import type { AttachmentId, ProjectId } from "@cardigan/domain";
 import {
   ATTACHMENT_EXTENSIONS,
   fileAttachmentStore,
+  sendArtifact,
 } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { INLINE_MIME_TYPES } from "./read.js";
@@ -48,6 +49,16 @@ export async function serveAttachment(
   );
   if (attachment === undefined) {
     return false;
+  }
+  if (attachment.streamed_artifact) {
+    if (attachment.streamed_artifact.expired) return false;
+    await sendArtifact(
+      context.dataDir,
+      attachment,
+      res,
+      context.req.method === "HEAD",
+    );
+    return true;
   }
   const blob = await fileAttachmentStore(context.dataDir).get(
     attachment.sha256,
