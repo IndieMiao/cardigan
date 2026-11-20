@@ -226,6 +226,12 @@ test("author request runs the full configured checks through D1, persists redact
     "utf8",
   );
   expect(log).toContain("src/example.test.ts");
+  expect(x.check().summary).toContain("src/example.test.ts > case");
+  expect(
+    x.f
+      .state()
+      .timeline.find((t) => t.body.startsWith("作者预检查结束：failed"))?.body,
+  ).toContain("src/example.test.ts > case");
   expect(log).not.toContain("synthetic-secret-value");
   expect(log).not.toContain("/secret/private/path");
   expect(

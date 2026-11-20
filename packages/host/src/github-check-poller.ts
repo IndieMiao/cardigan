@@ -1,10 +1,16 @@
-import type { CheckRequest } from "./check-executor.js";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  type CheckRequest,
+  FailureLogError,
+  type OpenFailureLog,
+} from "./check-executor.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
 import { githubCheckScope } from "./github-check-scope.js";
 import {
   type GithubClient,
   GithubExecutorError,
   type GithubJob,
+  GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
 import { githubDeadline } from "./github-deadline.js";
@@ -95,6 +101,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       >;
       now?: () => number;
       onError?: (error: GithubExecutorError) => void;
+      waitForLogRetry?: (ms: number, signal?: AbortSignal) => Promise<void>;
       pollIntervalMs?: number;
       queueWaitMs?: number;
     },
@@ -151,7 +158,15 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     return state.result.then((result) => {
       if (state.terminal && result.status === "passed")
         this.pending.delete(run.run_id);
-      return result;
+      return result.status === "passed"
+        ? result
+        : {
+            ...result,
+            logSource: {
+              url: state.external.html_url,
+              ...(state.failedJob ? { jobId: state.failedJob } : {}),
+            },
+          };
     });
   }
   async cancel(run: ExternalGithubRun): Promise<void> {
@@ -173,12 +188,42 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     });
     return state.cancelWork;
   }
-  async fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined> {
+  async fetchFailureLog(
+    run: ExternalGithubRun,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const state = this.state(run);
     if (state.terminal) this.pending.delete(run.run_id);
-    return state.failedJob === undefined
-      ? undefined
-      : this.options.client.jobLog(state.failedJob);
+    if (!state.failedJob) {
+      // Cancellations have no failed job and never require diagnostics.
+      if (state.identity.conclusion === "cancelled") return;
+      throw new FailureLogError("job_unavailable");
+    }
+    for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
+      try {
+        await this.options.client.jobLog(state.failedJob, open, signal);
+        return;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof GithubRetryLater)
+          throw new FailureLogError("rate_limited");
+        if (
+          error instanceof GithubExecutorError &&
+          (error.category === "auth" || error.category === "security")
+        )
+          throw new FailureLogError(error.category);
+        if (attempt === 2)
+          throw new FailureLogError(
+            error instanceof GithubNotFoundError ? "not_found" : "api",
+          );
+        const ms = 1000 * 2 ** attempt;
+        if (this.options.waitForLogRetry)
+          await this.options.waitForLogRetry(ms, signal);
+        else await delay(ms, undefined, { signal });
+      }
+    }
   }
 
   tick(): Promise<void> {
@@ -384,6 +429,8 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     const failedJob = jobs.find(
       (job) =>
         job &&
+        Number.isSafeInteger(job.id) &&
+        job.id > 0 &&
         job.run_id === run.id &&
         job.run_attempt === 1 &&
         job.head_sha === run.head_sha &&

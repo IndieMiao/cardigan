@@ -188,7 +188,7 @@ test.each(["dispatch", "poll"])(
       }),
       poll: vi.fn(async () => poll),
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: vi.fn(async () => "FAIL late"),
+      fetchFailureLog: vi.fn(async () => {}),
     };
     const onReady = vi.fn(),
       onVerifiedCheckout = vi.fn(),

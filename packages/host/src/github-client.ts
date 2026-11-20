@@ -2,11 +2,13 @@ import { createPrivateKey, sign } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, relative } from "node:path";
-import { CheckExecutorUnavailable } from "./check-executor.js";
+import {
+  CheckExecutorUnavailable,
+  type OpenFailureLog,
+} from "./check-executor.js";
 import { githubDeadline } from "./github-deadline.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
-import { CHECK_OUTPUT_LIMIT } from "./merge-gate-log.js";
 import { secureCredentialFile } from "./merge-push-config.js";
 
 export type GithubFailureCategory =
@@ -544,7 +546,11 @@ export class GithubClient {
       signal,
     );
   }
-  async jobLog(id: number): Promise<string> {
+  async jobLog(
+    id: number,
+    open: OpenFailureLog,
+    parent?: AbortSignal,
+  ): Promise<void> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
     try {
@@ -584,27 +590,34 @@ export class GithubClient {
           });
         }
         signal.throwIfAborted();
+        if (response.status === 404) throw new GithubNotFoundError();
+        if (response.status === 401) throw new GithubExecutorError("auth");
         if (!response.ok || !response.body)
           throw new GithubExecutorError("api");
         const reader = response.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let size = 0;
+        const write = open(),
+          decoder = new TextDecoder();
+        let received = false;
         try {
           while (true) {
             const part = await reader.read();
             signal.throwIfAborted();
             if (part.done) break;
-            size += part.value.length;
-            if (size > CHECK_OUTPUT_LIMIT) throw new GithubExecutorError("api");
-            chunks.push(part.value);
+            if (part.value.length) received = true;
+            write(decoder.decode(part.value, { stream: true }));
           }
+          if (!received) throw new GithubNotFoundError();
+          write(decoder.decode());
         } finally {
           await reader.cancel();
         }
-        return Buffer.concat(chunks).toString("utf8");
-      });
+      }, parent);
     } catch (error) {
-      if (error instanceof GithubRetryLater) throw error;
+      if (
+        error instanceof GithubRetryLater ||
+        error instanceof GithubExecutorError
+      )
+        throw error;
       throw new GithubExecutorError("api");
     }
   }

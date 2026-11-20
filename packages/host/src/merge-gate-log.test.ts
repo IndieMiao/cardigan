@@ -110,7 +110,7 @@ test("logs redact configured values across chunks and retained edges before writ
     createMergeCheckLog({ dataDir, project: "p", attempt: "attempt-1" }),
   ).rejects.toMatchObject({ code: "EEXIST" });
 });
-test("failure summaries take error lines from the last 40 lines, stay within 20 lines and redact metadata", async () => {
+test("failure summaries include early findings, stay within 20 lines and redact metadata", async () => {
   const dataDir = await fixture(),
     secret = "example-sensitive-token";
   const log = await createMergeCheckLog({
@@ -136,7 +136,7 @@ test("failure summaries take error lines from the last 40 lines, stay within 20 
   });
   expect(result.summary.split("\n").length).toBeLessThanOrEqual(20);
   expect(result.summary).toContain("退出码 1");
-  expect(result.summary).not.toContain("too old");
+  expect(result.summary).toContain("FAIL too old");
   expect(JSON.stringify(result)).not.toContain(secret);
   const text = await readFile(
     join(dataDir, "merge-gate/logs/p", result.log_ref),
@@ -221,7 +221,7 @@ test("short env values do not corrupt output; the eight-byte boundary and multib
   expect(text).toContain(
     "FAIL a command returned 1\nabcdefg\n[REDACTED]\n[REDACTED]\n",
   );
-  expect(result.summary).toContain("FAIL a command returned 1");
+  expect(result.summary).not.toContain("command returned 1");
   expect(text).not.toContain("abcdefgh");
   expect(text).not.toContain("中文值");
 });
@@ -633,5 +633,97 @@ test.each([
     expect(validPrecheckSummary(diagnostic)).toBe(true);
     expect(diagnostic).toContain("[EACCES]");
     expect(diagnostic).not.toContain(message);
+  },
+);
+
+test("C-529: a failure in the discarded middle of a streamed job is on page one, with bounded redacted findings", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "streamed",
+    failureExcerptBytes: 4096,
+    env: { DEMO: "synthetic-multiline\nsecond-private-value", SHORT: "tiny" },
+  });
+  const noise = ".".repeat(64 * 1024);
+  for (let i = 0; i < 20; i++) log.append("test", noise);
+  log.append("test", "\n");
+  for (let n = 1; n <= 7; n++)
+    log.append(
+      "test",
+      `2026-11-20T12:00:00.000Z \x1b[31mFAIL\x1b[0m src/中文.test.ts > case ${n}\n`,
+    );
+  log.append("test", "AssertionError: tiny second-pri");
+  log.append(
+    "test",
+    'vate-value CUSTOM="private phrase"\nTest Files 1 failed | 10 passed (11)\nTests 7 failed | 42 passed (49)\n##[error]process failed\n',
+  );
+  for (let i = 0; i < 20; i++) log.append("test", noise);
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed" }],
+    cleanup_errors: [],
+  });
+  for (const value of [
+    "src/中文.test.ts > case 5",
+    "另有 2 个失败用例",
+    "AssertionError:",
+    "Test Files 1 failed",
+    "Tests 7 failed",
+    "##[error]process failed",
+  ])
+    expect(result.summary).toContain(value);
+  for (const value of [
+    "case 6",
+    "case 7",
+    "private phrase",
+    "second-private",
+    "tiny",
+  ])
+    expect(result.summary).not.toContain(value);
+  const body = await readFile(
+    join(dataDir, "merge-gate/logs/p", result.log_ref),
+    "utf8",
+  );
+  expect(body.slice(0, 4096)).toContain(result.summary);
+  expect(body.slice(body.indexOf("=== test ==="))).not.toContain("case 1");
+});
+
+test.each([
+  [
+    "tsc",
+    "src/app.ts(4,2): error TS2322: Type 'string' is not assignable",
+    "error TS2322",
+  ],
+  [
+    "biome",
+    "src/app.ts:4:2 lint/correctness/noUnusedVariables  FIXABLE",
+    "lint/correctness/noUnusedVariables",
+  ],
+  [
+    "eslint",
+    "src/app.ts\n  4:2  error  Unexpected any  no-explicit-any",
+    "src/app.ts 4:2  error",
+  ],
+  [
+    "playwright",
+    "1) [chromium] › e2e/login.spec.ts:3:1 › keeps session\nError: expected dashboard",
+    "login.spec.ts:3:1 › keeps session",
+  ],
+])(
+  "C-529: projects %s failures including an unterminated final line",
+  async (attempt, text, expected) => {
+    const log = await createMergeCheckLog({
+      dataDir: await fixture(),
+      project: "p",
+      attempt,
+    });
+    log.append(attempt, text);
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: attempt, status: "failed" }],
+      cleanup_errors: [],
+    });
+    expect(result.summary).toContain(expected);
   },
 );

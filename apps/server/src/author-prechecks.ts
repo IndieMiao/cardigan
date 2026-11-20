@@ -684,6 +684,7 @@ export class AuthorPrechecks {
               binding,
               target,
             ),
+          resetFailureLog: (name) => log?.resetOutput(name),
           onOutput: (name, text) => log?.append(name, text),
         },
         (error) => this.options.onError(error),

@@ -8,6 +8,7 @@ import {
 import {
   GithubExecutorError,
   type GithubJob,
+  GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
 import {
@@ -78,11 +79,13 @@ function setup(count = 10) {
     run: vi.fn(async (id: number) => identity(id)),
     jobs: vi.fn(async (id: number) => [job(id)]),
     cancel: vi.fn(async (_id: number) => {}),
-    jobLog: vi.fn(
-      async (_id: number) => "FAIL synthetic test\nError expected true\n",
+    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
+      open()("FAIL synthetic test\nError expected true\n"),
     ),
   };
+  const waitForLogRetry = vi.fn(async (_ms: number) => {});
   const poller = new GithubCheckPoller({
+    waitForLogRetry,
     client: client as never,
     now: () => now,
   });
@@ -91,6 +94,7 @@ function setup(count = 10) {
     poller.register(external(run.id), request, run, finished);
   return {
     poller,
+    waitForLogRetry,
     client,
     finished,
     advance: (ms = 20_000) => {
@@ -287,8 +291,11 @@ test.each(["failure", "timed_out", "skipped"])(
           ? "not_run"
           : "timed_out",
     );
-    expect(await f.poller.fetchFailureLog(external(1))).toContain("FAIL");
-    expect(f.client.jobLog).toHaveBeenCalledWith(1001);
+    const write = vi.fn(),
+      open = () => write;
+    await f.poller.fetchFailureLog(external(1), open);
+    expect(write.mock.calls[0]?.[0]).toContain("FAIL");
+    expect(f.client.jobLog).toHaveBeenCalledWith(1001, open, undefined);
   },
 );
 test("D4: shared hourly budget refunds 304, counts details, and enforces Retry-After seconds/date", () => {
@@ -404,9 +411,9 @@ test("D4: log rate limiting cannot delay or replace a verified failed result", a
   expect((await result).status).toBe("failed");
   expect(f.finished).toHaveBeenCalledOnce();
   expect(f.client.jobLog).not.toHaveBeenCalled();
-  await expect(f.poller.fetchFailureLog(external(1))).rejects.toBeInstanceOf(
-    GithubRetryLater,
-  );
+  await expect(
+    f.poller.fetchFailureLog(external(1), () => vi.fn()),
+  ).rejects.toMatchObject({ category: "rate_limited" });
 });
 
 test.each(["security", "api"] as const)(
@@ -792,3 +799,56 @@ test("V-2081: 304 for a list skipped during backoff cannot certify an older term
   expect(f.client.jobs).toHaveBeenCalledOnce();
   expect(f.client.cancel).not.toHaveBeenCalled();
 });
+
+test.each([true, false])(
+  "C-529: retry only the bound job log after a partial download and delayed availability (recovered=%s)",
+  async (recovered) => {
+    const f = setup(1);
+    f.complete();
+    const j = job(1);
+    f.client.jobs.mockResolvedValueOnce([
+      {
+        ...j,
+        conclusion: "failure",
+        steps: j.steps.map((s) =>
+          s.name === "test" ? { ...s, conclusion: "failure" } : s,
+        ),
+      },
+    ]);
+    f.client.jobLog
+      .mockImplementationOnce(async (_id, open) => {
+        open()("partial");
+        throw new Error("synthetic transport");
+      })
+      .mockRejectedValueOnce(new GithubNotFoundError());
+    if (!recovered)
+      f.client.jobLog.mockRejectedValueOnce(new GithubNotFoundError());
+    const terminal = f.poller.poll(external(1));
+    await f.poller.tick();
+    expect(await terminal).toMatchObject({
+      status: "failed",
+      logSource: { url: external(1).html_url, jobId: j.id },
+    });
+    let text = "";
+    const fetchLog = f.poller.fetchFailureLog(external(1), () => {
+      text = "";
+      return (chunk) => {
+        text += chunk;
+      };
+    });
+    if (recovered) {
+      await fetchLog;
+      expect(text).toMatch(/^FAIL/u);
+    } else
+      await expect(fetchLog).rejects.toMatchObject({ category: "not_found" });
+    expect(f.waitForLogRetry.mock.calls.map(([ms]) => ms)).toEqual([
+      1000, 2000,
+    ]);
+    expect(f.client.jobLog.mock.calls.map(([id]) => id)).toEqual([
+      j.id,
+      j.id,
+      j.id,
+    ]);
+    expect(f.finished).toHaveBeenCalledOnce();
+  },
+);

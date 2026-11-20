@@ -2632,8 +2632,8 @@ test.each([
         };
       }),
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: vi.fn(
-        async () => "FAIL synthetic token=synthetic-secret",
+      fetchFailureLog: vi.fn(async (_handle, open) =>
+        open()("FAIL example.test.ts > synthetic token=synthetic-secret"),
       ),
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -2658,7 +2658,13 @@ test.each([
     if (status === "executor_unreachable")
       expect(check()?.status).toBe("queued");
     if (status === "failed") {
-      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      expect(check()?.summary).toContain(
+        "FAIL example.test.ts > synthetic token=[REDACTED]",
+      );
+      expect(
+        f.state().timeline.find((t) => t.body.startsWith("合并检查 failed"))
+          ?.body,
+      ).toContain("example.test.ts > synthetic token=[REDACTED]");
       const contents = await readFile(
         join(
           f.dataDir,
@@ -2775,9 +2781,9 @@ test.each(["timed_out", "executor_unreachable"] as const)(
       },
       poll: async () => terminal,
       cancel: vi.fn(async () => {}),
-      fetchFailureLog: () => {
+      fetchFailureLog: (_handle, open) => {
         started.resolve(required(input));
-        return download.promise;
+        return download.promise.then(open());
       },
     };
     const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
@@ -3179,9 +3185,10 @@ test.each([
         },
       ]),
       cancel: vi.fn(async () => {}),
-      jobLog: vi.fn(
-        async () =>
+      jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
+        open()(
           "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+        ),
       ),
     };
     const pushCheckCandidate = vi.fn(async () => ({
@@ -3873,7 +3880,9 @@ async function reworkGithubFixture(
       },
     ]),
     cancel: vi.fn(async () => {}),
-    jobLog: vi.fn(async () => options.log ?? "FAIL synthetic\n"),
+    jobLog: vi.fn(async (_id: number, open: () => (text: string) => void) =>
+      open()(options.log ?? "FAIL synthetic\n"),
+    ),
   };
   const git = {
     ...c.git,
@@ -3921,6 +3930,44 @@ test.each(["sk-learn", "ghp_x", "-----END RSA PRIVATE KEY-----"])(
     expect(c.errors).not.toHaveBeenCalled();
   },
 );
+
+test("C-529: failed log acquisition persists only its fixed category and bound job link without replacing the execution result", async () => {
+  const h = await reworkGithubFixture();
+  const { GithubExecutorError } = await import("@cardigan/host");
+  const err = new GithubExecutorError("auth");
+  err.diagnostic = "do-not-record-provider-detail";
+  h.client.jobLog.mockRejectedValueOnce(err);
+  const gate = h.create();
+  try {
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    const check = required(h.check());
+    expect(check.status).toBe("failed");
+    expect(check.summary).toContain(
+      "日志获取失败（auth）：https://github.com/fixture/project/actions/runs/123/job/456",
+    );
+    expect(check.summary).not.toContain("do-not-record-provider-detail");
+    expect(check.infra_flaky).not.toBe(true);
+    const log = await readFile(
+      join(
+        h.f.dataDir,
+        "merge-gate/logs",
+        h.f.project_id,
+        required(check.log_ref),
+      ),
+      "utf8",
+    );
+    expect(log.slice(0, 1024)).toContain(check.summary);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
 
 test.each(["markers", "controls", "clipped"])(
   "D4 rework: GitHub %s diagnostics cannot strand a trusted failed attempt",

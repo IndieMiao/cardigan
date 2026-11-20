@@ -50,6 +50,16 @@ export interface CheckoutResult {
   readonly cleanup_errors: readonly string[];
   readonly reason?: string;
   readonly manual_attention?: boolean;
+  /** Trusted GitHub binding, independent of candidate output and signed storage URLs. */
+  readonly logSource?: { readonly url: string; readonly jobId?: number };
+  readonly logFailure?:
+    | "not_found"
+    | "api"
+    | "auth"
+    | "security"
+    | "rate_limited"
+    | "job_unavailable"
+    | "timeout_or_cancel";
 }
 export interface CheckoutInput {
   readonly execution: ExecutionConfig;

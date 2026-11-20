@@ -35,11 +35,19 @@ export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly hostSignal?: AbortSignal;
   /** Trusted provider progress; never candidate output. */
   readonly onProgress?: (summary: string) => void;
+  readonly resetFailureLog?: (name: string) => void;
   readonly onExecutionStarted?: () => void;
 }
 /** Provider-private state is held by the executor, never by domain events. */
 export interface CheckHandle {
   readonly id: string;
+}
+/** Each download attempt starts a fresh stream; partial logs must not be spliced. */
+export type OpenFailureLog = () => (text: string) => void;
+export class FailureLogError extends Error {
+  constructor(readonly category: NonNullable<CheckoutResult["logFailure"]>) {
+    super(category);
+  }
 }
 export interface CheckExecutor {
   /** Additional startup budget; execution gets its original deadline on start. */
@@ -49,7 +57,11 @@ export interface CheckExecutor {
   poll(handle: CheckHandle): Promise<CheckoutResult>;
   cancel(handle: CheckHandle): Promise<void>;
   /** Raw private output; consumers must use the host log redactor. */
-  fetchFailureLog(handle: CheckHandle): Promise<string | undefined>;
+  fetchFailureLog(
+    handle: CheckHandle,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 /** Provider-independent deadline, cancellation and late-callback fence. */
@@ -79,8 +91,9 @@ export async function runCheckExecutor(
       request,
       async (input) => {
         let executing = true;
+        const { resetFailureLog, ...dispatchInput } = input;
         const handle = await executor.dispatch({
-          ...input,
+          ...dispatchInput,
           onProgress: (summary) => {
             if (executing && !closed && !input.signal?.aborted)
               input.onProgress?.(summary);
@@ -135,22 +148,40 @@ export async function runCheckExecutor(
           if (input.signal?.aborted || closed) return terminal;
           polled = terminal;
           if (terminal.status !== "passed") {
+            const name =
+              terminal.checks.find(
+                (step) =>
+                  !["passed", "not_run", "skipped"].includes(step.status),
+              )?.name ?? "executor";
+            const signal =
+              request.hostSignal && input.signal
+                ? AbortSignal.any([input.signal, request.hostSignal])
+                : input.signal;
             try {
-              const failure = await executor.fetchFailureLog(handle);
-              if (!closed && !input.signal?.aborted && failure !== undefined)
-                input.onOutput?.(
-                  terminal.checks.find(
-                    (step) =>
-                      !["passed", "not_run", "skipped"].includes(step.status),
-                  )?.name ?? "executor",
-                  failure,
-                );
-            } catch {
-              if (!closed && !input.signal?.aborted)
+              await executor.fetchFailureLog(
+                handle,
+                () => {
+                  if (!closed && !signal?.aborted) resetFailureLog?.(name);
+                  return (text) => {
+                    if (!closed && !signal?.aborted)
+                      input.onOutput?.(name, text);
+                  };
+                },
+                signal,
+              );
+            } catch (error) {
+              const category = signal?.aborted
+                ? "timeout_or_cancel"
+                : error instanceof FailureLogError
+                  ? error.category
+                  : "api";
+              if (terminal.logSource)
+                polled = { ...terminal, logFailure: category };
+              if (!closed && !signal?.aborted)
                 diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
             }
           }
-          return terminal;
+          return polled;
         } finally {
           executing = false;
           input.signal?.removeEventListener("abort", cancel);
@@ -163,7 +194,9 @@ export async function runCheckExecutor(
     // result. A stuck download is bounded by the same deadline as execution.
     if (polled && result !== polled) {
       diagnostic("检查失败日志获取超时或取消，保留原执行结果与清理提示");
-      return polled;
+      return polled.logSource
+        ? { ...polled, logFailure: "timeout_or_cancel" }
+        : polled;
     }
     return result;
   } catch (error) {

@@ -99,9 +99,13 @@ test("server reader port returns only host-redacted synthetic credentials throug
     "unit",
     `FAIL example\n${secret}\nAuthorization: Bearer fictional-bearer\napi_key=fictional-key\n甲🙂乙`,
   );
-  await writer.finish({
+  writer.append(
+    "unit",
+    `\n${". ".repeat(36_000)}\nFAIL example.test.ts > 甲🙂乙\nAssertionError: ${secret} was rejected\nTests 1 failed`,
+  );
+  const saved = await writer.finish({
     status: "failed",
-    checks: [],
+    checks: [{ name: "unit", status: "failed", exit_code: 1 }],
     cleanup_errors: [],
   } as never);
   const store = Store.open({ dataDir: dir });
@@ -179,7 +183,12 @@ test("server reader port returns only host-redacted synthetic credentials throug
       "/ignored",
     ])
       expect(result.text).not.toContain(value);
-    expect(result.text).toContain("甲🙂乙");
+    expect(result.text).toContain(saved.summary);
+    expect(result.text.indexOf(saved.summary)).toBeLessThan(
+      result.text.indexOf("=== unit ==="),
+    );
+    expect(result.text).toContain("FAIL example.test.ts > 甲🙂乙");
+    expect(result.text).toContain("Tests 1 failed");
     expect(result.text).toContain("[REDACTED]");
   } finally {
     store.close();
