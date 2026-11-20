@@ -1,11 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type CatalogEntry,
   catalogCache,
   catalogEntries,
+  type LaunchConfig,
   prepareLaunchConfig,
 } from "@cardigan/roles";
 
@@ -93,16 +92,25 @@ export function parseCachedLaunchConfig(config: unknown, dir: string) {
   );
 }
 
-export async function loadModelLaunchConfig(
+interface CatalogOptions {
+  fetch?: typeof fetch;
+  now?: () => Date;
+}
+interface StagedConfig {
+  config: LaunchConfig;
+  /** Bounded public projection. Staging confers no filesystem write capability. */
+  catalog?: string;
+}
+
+/** Validation may fetch fresh public metadata, but cannot replace the shared cache.
+ * The installer publishes the staged projection only after committing to this candidate. */
+export async function stageModelLaunchConfig(
   config: unknown,
   dir: string,
-  options: {
-    fetch?: typeof fetch;
-    now?: () => Date;
-  } = {},
-) {
+  options: CatalogOptions = {},
+): Promise<StagedConfig> {
   const parsed = prepareLaunchConfig(config);
-  if (!parsed.catalogPolicy) return parsed.resolve();
+  if (!parsed.catalogPolicy) return { config: parsed.resolve() };
   const {
     max_age_ms = DAY_MS,
     cache_max_bytes = DEFAULT_CACHE_BYTES,
@@ -113,7 +121,7 @@ export async function loadModelLaunchConfig(
   const now = options.now?.() ?? new Date();
   const age = now.getTime() - Date.parse(cache?.fetched_at ?? "");
   if (cache && age >= 0 && age < max_age_ms)
-    return parsed.resolve(cache.entries);
+    return { config: parsed.resolve(cache.entries) };
 
   let projection: ReturnType<typeof projectCache>;
   try {
@@ -141,19 +149,10 @@ export async function loadModelLaunchConfig(
       cache,
     );
   } catch {
-    return parsed.resolve(cache?.entries);
+    return { config: parsed.resolve(cache?.entries) };
   }
 
   // A real removal or an unsupported effort is a configuration error, not a network failure.
   const resolved = parsed.resolve(projection.entries);
-  const tmp = join(dir, `.${CACHE}.${randomUUID()}`);
-  try {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeFile(tmp, projection.text, { flag: "wx", mode: 0o600 });
-    await rename(tmp, join(dir, CACHE));
-  } catch {
-    // A read-only disk need not prevent using a successful public lookup.
-    await rm(tmp, { force: true }).catch(() => {});
-  }
-  return resolved;
+  return { config: resolved, catalog: projection.text };
 }

@@ -24,6 +24,7 @@ import {
   assign,
   createCard,
   occupiedRunSlots,
+  providerAdmission,
   type Role,
   stoppedByHuman,
 } from "@cardigan/domain";
@@ -1108,6 +1109,47 @@ describe("C-154 standing PM session restart", () => {
     runtime,
     dataDir,
     ...(restart_session ? { restart_session } : {}),
+  });
+
+  test("C-499: resuming a suspended PM during provider cooldown leaves one dispatchable queued Run", async () => {
+    const pm = standingOps();
+    const retryAt = new Date(Date.now() + 300_000).toISOString();
+    store.uow.run((tx) => {
+      tx.assignments.put(project_id, { ...pm, status: "suspended" });
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id),
+        type: "provider_start_failed",
+        actor: { kind: "system", project_id },
+        payload: {
+          profile: "pi-agent",
+          failures: 2,
+          retry_at: retryAt,
+          cooldown_ms: 300_000,
+        },
+        created_at: new Date().toISOString(),
+      });
+    });
+    const runtime = new FakeRuntime();
+    await expect(startAssignment(options(runtime))).rejects.toThrow(
+      "模型服务不可用，保留执行排队等待",
+    );
+    expect(runtime.provisions).toHaveLength(0);
+    const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(state.assignments.find((a) => a.id === pm.id)?.status).toBe(
+      "active",
+    );
+    expect(state.runs).toHaveLength(1);
+    expect(state.runs[0]).toMatchObject({
+      assignment_id: pm.id,
+      status: "queued",
+      queue_reason: "provider_unavailable",
+      launch_profile_ref: "pi-agent",
+    });
+    expect(state.events.map((e) => e.type)).not.toContain("assignment_paused");
+    expect(
+      providerAdmission(state, "pi-agent", retryAt, () => false),
+    ).toMatchObject({ at: retryAt });
   });
 
   test("restart closes the old terminal, retires its token and keeps the PM on duty", async () => {
