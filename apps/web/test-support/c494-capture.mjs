@@ -396,6 +396,17 @@ try {
           "[...document.querySelectorAll('[role=dialog]')].some((d) => d.textContent.includes('放弃未应用的修改'))",
         );
       });
+      await scene("role-created", width, theme, async () => {
+        await roles();
+        await press("新建角色");
+        await until("!!document.querySelector('[role=dialog] form')");
+        await type("新角色编号", "proofreader");
+        await press("创建角色");
+        await until(
+          "[...document.querySelectorAll('[role=dialog] button')].some((b) => b.textContent === '加进模板')",
+        );
+        await run(() => document.activeElement?.blur?.());
+      });
       await scene("template-preview", width, theme, async () => {
         await roles();
         await press("新建角色");

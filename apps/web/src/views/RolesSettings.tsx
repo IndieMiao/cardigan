@@ -670,25 +670,38 @@ function RoleDetail({
       actions={
         data && !editing ? (
           <>
-            {afterCreate?.newEmployee && (
-              <Button onClick={afterCreate.newEmployee}>
-                {employeeCopy.afterRole}
-              </Button>
+            {/* Right after creating, the next steps take the place of export
+                and deactivate so the header stays on one line at 390px. */}
+            {afterCreate ? (
+              <>
+                {afterCreate.newEmployee && (
+                  <Button onClick={afterCreate.newEmployee}>
+                    {employeeCopy.afterRole}
+                  </Button>
+                )}
+                <Button
+                  aria-haspopup="dialog"
+                  onClick={() => afterCreate.addToTemplate(data.role)}
+                >
+                  加进模板
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  disabled={exporting}
+                  onClick={() => void exportMarkdown()}
+                >
+                  导出 Markdown
+                </Button>
+                <Button
+                  disabled={write.busy}
+                  onClick={() => void toggleActive()}
+                >
+                  {data.role.status === "active" ? "停用" : "启用"}
+                </Button>
+              </>
             )}
-            {afterCreate && (
-              <Button
-                aria-haspopup="dialog"
-                onClick={() => afterCreate.addToTemplate(data.role)}
-              >
-                加进模板
-              </Button>
-            )}
-            <Button disabled={exporting} onClick={() => void exportMarkdown()}>
-              导出 Markdown
-            </Button>
-            <Button disabled={write.busy} onClick={() => void toggleActive()}>
-              {data.role.status === "active" ? "停用" : "启用"}
-            </Button>
             <Button
               variant="primary"
               disabled={write.busy}

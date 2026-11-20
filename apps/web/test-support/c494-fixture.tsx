@@ -146,8 +146,21 @@ const client = fakeClient({
   copyRole: async () => proofreader,
   role: async (projectId, roleId) =>
     roleId === "proofreader"
-      ? { ...(await base.role(projectId, "coder")), role: proofreader }
+      ? {
+          ...(await base.role(projectId, "coder")),
+          role: proofreader,
+          previous: null,
+        }
       : base.role(projectId, roleId),
+  roleHistory: async (projectId, roleId) => {
+    const history = await settingsPanels.roleHistory?.(projectId, roleId);
+    if (!history || roleId !== "proofreader") return history as never;
+    const [first] = history.versions.slice(-1);
+    return {
+      ...history,
+      versions: first ? [{ ...first, role: proofreader }] : [],
+    };
+  },
   exportRole: async () => ({ markdown: exported }),
   previewRoleDocument: async (_p, markdown) => preview(markdown),
   applyRoleDocument: async (_p, markdown) => preview(markdown),
