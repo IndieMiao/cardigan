@@ -22,6 +22,7 @@ import {
   matchMentionCandidates,
   mentionQuery,
   orderMentionCandidates,
+  typedMention,
 } from "./CommentBox.js";
 
 afterEach(cleanup);
@@ -72,11 +73,20 @@ function setup(
   act(() => input.focus());
   const type = (value: string) =>
     fireEvent.change(input, { target: { value } });
+  /** Change the text with the caret left at `caret`, as typing there does. */
+  const typeAt = (value: string, caret: number) => {
+    Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )?.set?.call(input, value);
+    input.setSelectionRange(caret, caret);
+    fireEvent.input(input);
+  };
   const names = () =>
     screen
       .queryAllByRole("option")
       .map((o) => o.querySelector(".ui-suggestion-label")?.textContent);
-  return { input, type, names, reads, posted };
+  return { input, type, typeAt, names, reads, posted };
 }
 
 test("the placeholder names employees instead of roles or Assignments", () => {
@@ -110,19 +120,36 @@ test("typing @ reads the card's candidates and lists avatar, name and title, car
 });
 
 test("every new @ re-reads, so employees who joined, left or were renamed show up on the same card", async () => {
-  let roster = EMPLOYEES;
-  const { input, type, names, reads } = setup(async () => ({
-    employees: roster,
-  }));
+  let roster: Promise<{ employees: MentionCandidate[] }> = Promise.resolve({
+    employees: EMPLOYEES,
+  });
+  const { input, type, names, reads, posted } = setup(() => roster);
   type("@");
   await waitFor(() => expect(names()).toHaveLength(5));
   fireEvent.keyDown(input, { key: "Escape" });
-  roster = [person("E-6", "王姐", "运营"), person("E-7", "Ann", "测试")];
-  type("@ @");
-  // The previous list stays up while the new read is under way.
-  expect(names()).toHaveLength(5);
-  await waitFor(() => expect(names()).toEqual(["王姐", "Ann"]));
+  type("@ 现在");
+  let answer: (value: { employees: MentionCandidate[] }) => void = () => {};
+  roster = new Promise((resolve) => {
+    answer = resolve;
+  });
+  type("@ 现在 @B");
   expect(reads).toEqual(["C-1", "C-1"]);
+  // Until the new read answers, the old names cannot be chosen.
+  expect(screen.getByRole("listbox").textContent).toBe("正在加载员工…");
+  expect(names()).toEqual([]);
+  expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(true);
+  expect(input.value).toBe("@ 现在 @B");
+  await act(async () =>
+    answer({
+      employees: [person("E-6", "王姐", "运营"), person("E-7", "Ann", "测试")],
+    }),
+  );
+  // Bob has left: nothing matches, and he can no longer be posted.
+  expect(screen.queryByRole("listbox")).toBeNull();
+  type("@ 现在 @B @");
+  await waitFor(() => expect(names()).toEqual(["王姐", "Ann"]));
+  expect(reads).toEqual(["C-1", "C-1", "C-1"]);
+  expect(posted).toEqual([]);
 });
 
 test("typed characters filter by name, ignoring case; no match closes the list", async () => {
@@ -189,7 +216,7 @@ test("Escape closes the list until a new @, and hand-typed @role / @A-n are left
   type("@s");
   expect(screen.queryByRole("listbox")).toBeNull();
   type("@s @");
-  expect(names()).toHaveLength(5);
+  await waitFor(() => expect(names()).toHaveLength(5));
   // Without matching employees, Enter is a plain newline for the text.
   type("x @reviewer");
   const enter = fireEvent.keyDown(input, { key: "Enter" });
@@ -237,7 +264,20 @@ test("a name with spaces keeps filtering; a finished mention lets the text go on
   expect(screen.queryByRole("listbox")).toBeNull();
   expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(true);
   type("@Mary Jane 你好 @Bob S");
-  expect(names()).toEqual(["Bob Smith"]);
+  await waitFor(() => expect(names()).toEqual(["Bob Smith"]));
+});
+
+test("a new @ typed before existing text inserts the name and keeps that text", async () => {
+  const { input, type, typeAt, names } = setup();
+  type("附件 README.md");
+  act(() => input.setSelectionRange(3, 3));
+  fireEvent.select(input);
+  typeAt("附件 @README.md", 4);
+  typeAt("附件 @BREADME.md", 5);
+  await waitFor(() => expect(names()).toEqual(["Bob", "bobby"]));
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(input.value).toBe("附件 @Bob README.md");
+  expect(input.selectionStart).toBe("附件 @Bob ".length);
 });
 
 test("choosing with the caret inside an existing mention replaces the whole name", async () => {
@@ -299,20 +339,38 @@ test("mentionQuery lets a query hold spaces only while it matches a name", () =>
   expect(mentionQuery("@bob ", 5, roster)).toBeUndefined();
 });
 
-test("mentionQuery ends the replaced text after a name or Latin word under the caret", () => {
+test("mentionQuery replaces a spelled name inside an existing mention, and nothing after a new @", () => {
   const roster = [
     person("E-2", "薛宝钗", "前端工程师"),
     person("E-3", "Bob", "测试"),
   ];
-  // A name the text already spells, Han or Latin.
+  // The caret moved into an existing mention: the name the text spells.
   expect(mentionQuery("@薛宝钗请看", 3, roster)?.end).toBe(4);
   expect(mentionQuery("@Bob，你好", 2, roster)?.end).toBe(4);
-  // An unknown Latin word: up to its end.
-  expect(mentionQuery("@Bobx ok", 2, roster)?.end).toBe(5);
-  // A known name must end the Latin word to count.
-  expect(mentionQuery("@Bobx ok", 1, roster)?.end).toBe(1);
-  // Running Han text without a known name: only up to the caret.
-  expect(mentionQuery("请@看", 2, roster)?.end).toBe(2);
+  // Inside any other word nothing is offered (`@Bobx` does not spell Bob).
+  expect(mentionQuery("@Bobx ok", 2, roster)).toBeUndefined();
+  expect(mentionQuery("@Bobx ok", 1, roster)).toBeUndefined();
+  expect(mentionQuery("请@看", 2, roster)).toBeUndefined();
+  // An `@` typed before existing text never replaces it, name or word.
+  const typedAt = (start: number, keep: number) => ({ start, keep });
+  expect(mentionQuery("@BREADME.md", 2, roster, typedAt(0, 2))?.end).toBe(2);
+  expect(mentionQuery("@Bob 请看", 1, roster, typedAt(0, 1))?.end).toBe(1);
+  expect(mentionQuery("请@看", 2, roster, typedAt(1, 2))?.end).toBe(2);
+  // What was typed after that `@` is still replaced in full.
+  expect(mentionQuery("@Bob 请看", 2, roster, typedAt(0, 7))?.end).toBe(4);
+  expect(mentionQuery("@Bobx ok", 2, roster, typedAt(0, 8))?.end).toBe(5);
+  expect(mentionQuery("@BobREADME", 2, roster, typedAt(0, 4))?.end).toBe(4);
+});
+
+test("typedMention notices an @ inserted in front of existing text", () => {
+  expect(typedMention("附件 README.md", "附件 @README.md", 3)).toEqual({
+    start: 3,
+    keep: 4,
+  });
+  expect(typedMention("", "@Bob 请看", 0)).toEqual({ start: 0, keep: 7 });
+  // Deleting, or an `@` that was already there, is not a typed `@`.
+  expect(typedMention("@Bob x", "@Bob ", 0)).toBeUndefined();
+  expect(typedMention("@Bob", "x@Bob", 1)).toBeUndefined();
 });
 
 test("candidates order card people first, then by name; filtering keeps that order", () => {

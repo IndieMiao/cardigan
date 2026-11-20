@@ -11,7 +11,7 @@ import "../src/components/ui/theme.css";
 // active employees, 3 of them on this card; library avatars for 7, initials
 // for 2. `?roster=long` adds 31 more (long names and titles, names with
 // spaces), 40 in all; `window.__c514Roster` replaces the roster for the next
-// read. No backend, no production data.
+// read, and `window.__c514Gate` holds reads until it resolves. No backend, no production data.
 Date.now = () => new Date(NOW).getTime();
 const person = (
   id: string,
@@ -62,6 +62,7 @@ declare global {
   interface Window {
     __c514Roster?: MentionCandidate[];
     __c514Reads?: number;
+    __c514Gate?: Promise<void>;
   }
 }
 const cards = [
@@ -94,7 +95,9 @@ const client = fakeClient({
   },
   mentionCandidates: async () => {
     window.__c514Reads = (window.__c514Reads ?? 0) + 1;
-    return { employees: window.__c514Roster ?? employees };
+    const roster = window.__c514Roster ?? employees;
+    await window.__c514Gate;
+    return { employees: roster };
   },
 });
 const root = document.getElementById("root");

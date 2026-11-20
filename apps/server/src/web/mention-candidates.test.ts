@@ -151,6 +151,24 @@ test("C-514 mention candidates list active employees by public profile and mark 
   ).toContainEqual(expect.objectContaining({ id: "E-3", related: false }));
 });
 
+test("C-514 mention candidates only offer employees of this project (C-495)", async () => {
+  seed();
+  h.store.uow.run((tx) => {
+    tx.employees.put(employee(2, { projects: [project] }));
+    tx.employees.put(employee(5, { projects: ["p-other" as ProjectId] }));
+    tx.employees.put(
+      employee(7, { projects: ["p-other" as ProjectId, project] }),
+    );
+  });
+  const cookie = await h.login("mention-test-password");
+  const response = await call(h.port, path, { cookie });
+  expect(
+    (response.json as { employees: { id: string }[] }).employees.map(
+      (e) => e.id,
+    ),
+  ).toEqual(["E-1", "E-2", "E-3", "E-4", "E-7"]);
+});
+
 test("C-514 mention candidates need a session, a known card and GET; the log route hides identifiers", async () => {
   seed();
   expect((await call(h.port, path)).status).toBe(401);

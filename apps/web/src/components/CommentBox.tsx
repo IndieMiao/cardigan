@@ -87,6 +87,9 @@ export function CommentBox({
   const [cursor, setCursor] = useState<number>();
   // Escape closes the list for the `@` it was opened at, until a new `@`.
   const [dismissedAt, setDismissedAt] = useState<number>();
+  // An `@` typed in front of existing text (from `keep` on), as opposed to the
+  // caret moved into an old one: choosing a name never replaces that text.
+  const [typed, setTyped] = useState<TypedMention>();
   const [active, setActive] = useState(0);
   const [candidates, setCandidates] = useState<{
     readonly cardId: string;
@@ -147,8 +150,11 @@ export function CommentBox({
     () => orderMentionCandidates(loaded?.employees ?? []),
     [loaded],
   );
+  const occurrence = cursor === undefined ? undefined : mentionAt(body, cursor);
   const mention =
-    cursor === undefined ? undefined : mentionQuery(body, cursor, ordered);
+    cursor === undefined
+      ? undefined
+      : mentionQuery(body, cursor, ordered, typed);
   const matches = mention ? matchMentionCandidates(ordered, mention.query) : [];
   const suggesting =
     expanded &&
@@ -165,15 +171,11 @@ export function CommentBox({
   const optionId = (index: number) => `${listId}-option-${index}`;
 
   // Read at every new `@`, so joiners, leavers and renames show up without
-  // leaving the card; the previous list stays up meanwhile. Typing within one
-  // `@` reads nothing.
+  // leaving the card. Only this read's names can be chosen: the previous list
+  // is dropped meanwhile. Typing within one `@` reads nothing.
   function loadCandidates(): void {
     const read = ++candidateRead.current;
-    setCandidates((previous) =>
-      previous?.cardId === cardId && previous.employees
-        ? { cardId, employees: previous.employees }
-        : { cardId },
-    );
+    setCandidates({ cardId });
     client.mentionCandidates(projectId, cardId).then(
       ({ employees }) => {
         if (read === candidateRead.current)
@@ -198,16 +200,37 @@ export function CommentBox({
       ?.scrollIntoView?.({ block: "nearest" });
   });
 
-  /** Recompute the `@query` before the caret after typing or moving it. */
-  function trackMention(field: HTMLTextAreaElement): void {
-    const next = mentionQuery(field.value, field.selectionStart, ordered);
-    if (next?.start !== mention?.start) {
-      if (next) loadCandidates();
+  /**
+   * Recompute the `@query` before the caret after typing (`previous` is the
+   * text before the change) or moving it.
+   */
+  function trackMention(field: HTMLTextAreaElement, previous?: string): void {
+    const { value, selectionStart } = field;
+    const start = mentionAt(value, selectionStart);
+    if (start !== occurrence) {
+      if (start !== undefined) loadCandidates();
       setDismissedAt(undefined);
+      setTyped(
+        start !== undefined && previous !== undefined
+          ? typedMention(previous, value, start)
+          : undefined,
+      );
+    } else if (typed && previous !== undefined) {
+      // Typing before the kept text moves it; editing the kept text ends it.
+      let same = 0;
+      while (same < previous.length && previous[same] === value[same]) same++;
+      setTyped(
+        same <= typed.keep && value.endsWith(previous.slice(typed.keep))
+          ? { ...typed, keep: typed.keep + value.length - previous.length }
+          : undefined,
+      );
     }
-    if (next?.start !== mention?.start || next?.query !== mention?.query)
+    if (
+      start !== occurrence ||
+      value.slice(0, selectionStart) !== body.slice(0, cursor)
+    )
       setActive(0);
-    setCursor(field.selectionStart);
+    setCursor(selectionStart);
   }
 
   function choose(candidate: MentionCandidate): void {
@@ -216,7 +239,8 @@ export function CommentBox({
     const next = insertMention(body, mention, candidate.name);
     caret.current = next.caret;
     setBody(next.body);
-    setCursor(undefined);
+    // The finished `@<name> ` offers nothing more; staying on it reads nothing.
+    setCursor(next.caret);
     textarea.current?.focus();
   }
 
@@ -399,7 +423,7 @@ export function CommentBox({
                 setError(undefined);
               } else startDraft();
               setBody(value);
-              trackMention(event.target);
+              trackMention(event.target, body);
             }}
             onSelect={(event) => trackMention(event.currentTarget)}
             onKeyDown={onKeyDown}
@@ -523,22 +547,60 @@ export interface MentionQuery {
   readonly end: number;
 }
 
+export interface TypedMention {
+  /** Index of an `@` the user typed (the insertion began there). */
+  readonly start: number;
+  /** Where the text that followed the insertion point begins now. */
+  readonly keep: number;
+}
+
+/** The `@` at `start`, if this change inserted it in front of existing text. */
+export function typedMention(
+  previous: string,
+  value: string,
+  start: number,
+): TypedMention | undefined {
+  const grown = value.length - previous.length;
+  return grown > 0 &&
+    value[start] === "@" &&
+    value.slice(0, start) === previous.slice(0, start) &&
+    value.slice(start + grown) === previous.slice(start)
+    ? { start, keep: start + grown }
+    : undefined;
+}
+
+/**
+ * Where the `@` the caret is in starts, whatever the candidates: the last `@`
+ * on the caret's line, not inside an e-mail and not followed by a space.
+ */
+export function mentionAt(text: string, caret: number): number | undefined {
+  const before = text.slice(0, caret);
+  const start = before.lastIndexOf("@");
+  if (start < 0 || /[A-Za-z0-9._%+-]/u.test(before[start - 1] ?? ""))
+    return undefined;
+  return /^\s|[\n\r\u2028\u2029]/u.test(before.slice(start + 1))
+    ? undefined
+    : start;
+}
+
 /**
  * The `@query` being typed right before the caret; never inside an e-mail.
  * The query may hold spaces while it still matches a candidate's name (as in
  * `Mary Jane`); a full name followed by a space is a finished mention.
+ * A chosen name replaces the candidate name the text spells, or the rest of
+ * the Latin word, but never the text that was there before a typed `@`. With
+ * the caret moved into an old mention whose name the text does not spell,
+ * nothing is offered, so no text is cut.
  */
 export function mentionQuery(
   text: string,
   caret: number,
   candidates: readonly MentionCandidate[] = [],
+  typed?: TypedMention,
 ): MentionQuery | undefined {
-  const before = text.slice(0, caret);
-  const start = before.lastIndexOf("@");
-  if (start < 0 || /[A-Za-z0-9._%+-]/u.test(before[start - 1] ?? ""))
-    return undefined;
-  const query = before.slice(start + 1);
-  if (/^\s|[\n\r\u2028\u2029]/u.test(query)) return undefined;
+  const start = mentionAt(text, caret);
+  if (start === undefined) return undefined;
+  const query = text.slice(start + 1, caret);
   if (/\s/u.test(query)) {
     const key = query.toLowerCase();
     const names = candidates.map((c) => c.name.toLowerCase());
@@ -548,16 +610,23 @@ export function mentionQuery(
     )
       return undefined;
   }
-  return { start, query, end: mentionEnd(text, start, caret, candidates) };
+  const spelled = spelledEnd(text, start, caret, candidates);
+  if (typed?.start === start && caret <= typed.keep) {
+    let end = Math.min(spelled, typed.keep);
+    if (end === caret && /[A-Za-z0-9_-]$/u.test(query))
+      end = Math.min(
+        typed.keep,
+        caret + (/^[A-Za-z0-9_-]*/u.exec(text.slice(caret))?.[0].length ?? 0),
+      );
+    return { start, query, end };
+  }
+  if (spelled === caret && /^[\p{L}\p{N}\p{M}_-]/u.test(text.slice(caret)))
+    return undefined;
+  return { start, query, end: spelled };
 }
 
-/**
- * With the caret inside an existing mention, a chosen name replaces all of it,
- * so no old tail is left behind: the longest candidate name the text already
- * spells, or else the rest of a Latin word. Han text has no spaces, so beyond
- * a known name only the text before the caret is replaced.
- */
-function mentionEnd(
+/** The end of the longest candidate name spelled after the `@`, if past the caret. */
+function spelledEnd(
   text: string,
   start: number,
   caret: number,
@@ -565,8 +634,6 @@ function mentionEnd(
 ): number {
   const word = /^[A-Za-z0-9_-]*/u;
   let end = caret;
-  if (/[A-Za-z0-9_-]$/u.test(text.slice(start + 1, caret)))
-    end += word.exec(text.slice(caret))?.[0].length ?? 0;
   for (const { name } of candidates) {
     const after = start + 1 + name.length;
     const spelled = text.slice(start + 1, after);

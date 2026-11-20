@@ -1,8 +1,9 @@
-import type {
-  Assignment,
-  CardId,
-  EmployeeId,
-  ProjectId,
+import {
+  type Assignment,
+  type CardId,
+  type EmployeeId,
+  employeeInProject,
+  type ProjectId,
 } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { webAvatarPath } from "./read.js";
@@ -17,7 +18,8 @@ export interface MentionCandidate {
 }
 
 /**
- * `@` suggestions for one card's comment box: active employees by public
+ * `@` suggestions for one card's comment box: the project's active employees
+ * (C-495; no project list keeps an employee in every project) by public
  * profile only. Routing stays with the server's `@<employee name>` parsing;
  * this read only tells the box who to offer and who belongs to the card.
  */
@@ -59,7 +61,11 @@ export function readMentionCandidates(
     return {
       employees: tx.employees
         .list()
-        .filter((employee) => employee.status === "active")
+        .filter(
+          (employee) =>
+            employee.status === "active" &&
+            employeeInProject(employee, project_id),
+        )
         .map((employee) => ({
           id: employee.id,
           name: employee.name,

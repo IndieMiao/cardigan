@@ -2,7 +2,8 @@
 // open list at 1440/390/320 × light/dark and measures whether a long title
 // still shortens the name; then checks in the browser that Escape does not
 // carry over to the next comment, a new `@` re-reads the roster, a name with
-// spaces keeps filtering and choosing inside an existing mention replaces it.
+// spaces keeps filtering, choosing inside an existing mention replaces it, a
+// new `@` before a word keeps the word and a pending read offers no old names.
 // CHROMIUM_PATH=<chrome> node apps/web/test-support/c514-rework.mjs <new output dir>
 // C514_BASELINE_REF=<git ref> serves that ref's list for before shots (no
 // behaviour checks).
@@ -315,6 +316,47 @@ try {
         "document.querySelector('.comment-input').selectionStart",
       ),
     };
+
+    // 5. A new `@` typed in front of an existing word keeps that word.
+    await focusBox();
+    await type("附件 README.md");
+    for (let i = 0; i < 9; i++) await key("ArrowLeft", "ArrowLeft", 37);
+    await type("@B");
+    await until("document.querySelectorAll('[role=option]').length > 0");
+    const before = await options();
+    await shot("check-before-word-1440-light.png");
+    await key("Enter", "Enter", 13);
+    checks.beforeWord = { before, value: await value() };
+
+    // 6. While a new read is under way, the previous names cannot be chosen.
+    await key("Escape", "Escape", 27);
+    await run(() => {
+      window.__c514Roster = [
+        { id: "E-7", name: "Ann", title: "测试", avatar: null, related: false },
+      ];
+      window.__c514Gate = new Promise((resolve) => {
+        window.__c514Open = resolve;
+      });
+    });
+    await focusBox();
+    await type("现在 @B");
+    const pending = {
+      options: await options(),
+      status: await evaluate(
+        "document.querySelector('.ui-suggestions [role=status]')?.textContent ?? null",
+      ),
+    };
+    await shot("check-pending-1440-light.png");
+    await key("Enter", "Enter", 13);
+    pending.valueAfterEnter = await value();
+    await run(() => window.__c514Open());
+    await settle();
+    pending.afterRead = await options();
+    checks.pending = pending;
+    await run(() => {
+      delete window.__c514Roster;
+      delete window.__c514Gate;
+    });
   }
 
   assert.deepEqual(browser.errors, []);
@@ -364,6 +406,13 @@ try {
     assert.deepEqual(checks.spaces.afterText, []);
     assert.equal(checks.inside.value, "@Bob 请看");
     assert.equal(checks.inside.caret, "@Bob ".length);
+    assert.equal(checks.beforeWord.before[0], "Bob");
+    assert.equal(checks.beforeWord.value, "附件 @Bob README.md");
+    assert.deepEqual(checks.pending.options, []);
+    assert.equal(checks.pending.status, "正在加载员工…");
+    // Raw CDP key events type no newline; what matters is that no name went in.
+    assert.equal(checks.pending.valueAfterEnter.trimEnd(), "现在 @B");
+    assert.deepEqual(checks.pending.afterRead, []);
   }
 } finally {
   await browser?.close();
