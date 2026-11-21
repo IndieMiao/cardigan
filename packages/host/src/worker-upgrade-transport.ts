@@ -13,7 +13,6 @@ import {
   requireHostDirectory,
 } from "./deployment-config.js";
 import { helpers, workerHelperDigests } from "./worker-helper-release.js";
-import { workerJournalId } from "./worker-onboarding.js";
 import { readWorkerPrivateFile } from "./worker-onboarding-config.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -22,19 +21,6 @@ const invalid = (): never => {
   throw new Error("worker_upgrade_unavailable");
 };
 
-// The enrollment key is never put into runtime config, a runtime ref, CLI output or a Run.
-export function upgradeIdentity(
-  configRoot: string,
-  project: string,
-  machine: string,
-) {
-  workerJournalId(project, machine);
-  // Length prefix keeps the tuple unambiguous even when both IDs contain separators.
-  return join(
-    configRoot,
-    `upgrade-${machine.length}-${machine}-${project}.key`,
-  );
-}
 function deployment(dataDir: string) {
   return JSON.parse(
     readWorkerPrivateFile(

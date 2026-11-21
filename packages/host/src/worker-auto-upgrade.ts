@@ -1,4 +1,3 @@
-import { lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -15,6 +14,7 @@ import {
   parseWorkerOnboarding,
   readOnboardingYaml,
 } from "./worker-onboarding-config.js";
+import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   finishUpgrade,
   upgradeHold,
@@ -24,7 +24,6 @@ import {
 import {
   installRelease,
   promotionPending,
-  upgradeIdentity,
 } from "./worker-upgrade-transport.js";
 
 type Check = { blockers: readonly string[]; launch_enabled: boolean };
@@ -77,9 +76,9 @@ export async function patrolHelperUpgrade(
     // Drift after a verified install needs investigation, not another root write.
     if (!initial.blockers.some(helperMismatch)) return initial;
   }
-  const identity = upgradeIdentity(root, project, machine);
+  const identity = enrolledUpgradeIdentity(root, project, machine);
   // Missing enrollment never enables SSH. Malformed/private-file failures may not authorize it either.
-  if (!lstatSync(identity, { throwIfNoEntry: false })) {
+  if (!identity) {
     if (
       wasHeld &&
       previous.release_key !== key &&

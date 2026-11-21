@@ -8,7 +8,10 @@ import {
   observationFingerprint,
   workerHelperDigests,
 } from "./worker-helper-release.js";
-import { notifyWorkerMaintenance } from "./worker-maintenance.js";
+import {
+  notifyWorkerMaintenance,
+  retireManualUpgrade,
+} from "./worker-maintenance.js";
 
 export const upgradeHold = "worker_helper_upgrade_unverified";
 export const upgradeKey = (fingerprint: string | undefined) =>
@@ -107,7 +110,7 @@ export function settleUpgradeCheck(
     job.kind === "machine"
   ) {
     const evidence: InstallEvidence = JSON.parse(String(row.pending_final));
-    if (evidence.job === job.id)
+    if (evidence.job === job.id) {
       finishUpgrade(
         store,
         tx,
@@ -118,6 +121,11 @@ export function settleUpgradeCheck(
         evidence,
         passed,
       );
+      if (passed && binding)
+        retireManualUpgrade(tx, project, machine, binding, {
+          now: () => job.checked_at,
+        });
+    }
     return;
   }
   if (!passed) return;

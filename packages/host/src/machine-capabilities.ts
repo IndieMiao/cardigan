@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 import type { ActionCommand, Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
@@ -21,12 +22,14 @@ import {
   type CapabilityProbe,
   probeMachineCapability,
 } from "./machine-capability-probe.js";
+import { runtimeWorkersPath } from "./runtime-workers-config.js";
 import {
   helperMismatch,
   observationFingerprint,
 } from "./worker-helper-release.js";
 import { notifyHelperMismatch } from "./worker-maintenance.js";
 import { stageWorkerUpgrade } from "./worker-upgrade.js";
+import { manualWorkerUpgradeAllowed } from "./worker-upgrade-enrollment.js";
 
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
 export { observationFingerprint } from "./worker-helper-release.js";
@@ -206,7 +209,19 @@ export async function refreshMachineObservations(
     observedBrowserDigest,
   );
   const mismatch = health.blockers.find(helperMismatch);
-  if (recorded && machine !== "local" && mismatch && checkedTarget) {
+  const manualAllowed = () =>
+    manualWorkerUpgradeAllowed(
+      dirname(runtimeWorkersPath(options.env)),
+      project,
+      machine,
+    );
+  if (
+    recorded &&
+    machine !== "local" &&
+    mismatch &&
+    checkedTarget &&
+    manualAllowed()
+  ) {
     const { execution } = checkedTarget;
     const pinned = execution.target;
     const bound =
@@ -245,7 +260,10 @@ export async function refreshMachineObservations(
         machine,
         now(),
       );
-      if (current.health?.evidence_ref === `machine-observation:${observation}`)
+      if (
+        current.health?.evidence_ref === `machine-observation:${observation}` &&
+        manualAllowed()
+      )
         notifyHelperMismatch(tx, project, machine, { now }, mismatch, fields);
     });
   }

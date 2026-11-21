@@ -8,6 +8,7 @@ import {
   recordDeploymentStop,
   recordHelperUpgradeChecks,
   requestDeploymentAction,
+  retireVerifiedHelperAction,
 } from "./deployment.js";
 
 test("deployment controls are human-only and bind exact versions without forging merge evidence", () => {
@@ -561,4 +562,67 @@ test("a new helper generation cancels only the previous open notice for that exa
   expect(
     state.human_actions.filter((h) => h.status === "open").map((h) => h.id),
   ).toEqual([neighbor, current]);
+});
+
+test("only verified system evidence retires the matching open manual helper action, without reporting it done", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system", project_id: state.project_id } as const;
+  const target = {
+    machine_id: "remote",
+    binding: "pinned",
+    key: helperKey("remote"),
+  };
+  const request = value(
+    requestDeploymentAction(
+      state,
+      system,
+      {
+        ...target,
+        reason: "worker_maintenance",
+        instructions: "manual upgrade",
+        helper_upgrade: {
+          machine_id: target.machine_id,
+          binding: target.binding,
+        },
+      },
+      io,
+    ),
+  );
+  state = apply(state, request);
+  for (const caller of [
+    human,
+    actor(5, "host_ops"),
+    { ...system, project_id: "other" },
+  ])
+    expect(retireVerifiedHelperAction(state, caller, target, io).ok).toBe(
+      false,
+    );
+  for (const different of [
+    { key: helperKey("remote", "b") },
+    { machine_id: "neighbor" },
+    { binding: "other" },
+  ])
+    expect(
+      value(
+        retireVerifiedHelperAction(
+          state,
+          system,
+          { ...target, ...different },
+          io,
+        ),
+      ).events,
+    ).toEqual([]);
+  const result = value(retireVerifiedHelperAction(state, system, target, io));
+  expect(result.events.map((e) => e.type)).toEqual(["human_action_cancelled"]);
+  state = apply(state, result);
+  expect(
+    state.human_actions.find((a) => a.id === request.data.id),
+  ).toMatchObject({
+    status: "cancelled",
+    cancellation: { by: "system", source: "worker_helper_superseded" },
+  });
+  expect(
+    value(retireVerifiedHelperAction(state, system, target, io)).events,
+  ).toEqual([]);
 });

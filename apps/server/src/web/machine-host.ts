@@ -5,6 +5,7 @@ import {
   type CheckResult,
   loadRuntimeWorkers,
   MachineCheckJournal,
+  manualWorkerUpgradeAllowed,
   matchesWorkerPlatform,
   observeRegisteredMachine,
   onboardWorker,
@@ -38,7 +39,11 @@ export interface WizardHost {
 }
 export interface MachineHost {
   readonly wizard?: WizardHost;
-  bindingFingerprint?(project: string, machine: Machine): string | undefined;
+  bindingFingerprint?(
+    project: string,
+    machine: Machine,
+    purpose?: "manual-upgrade",
+  ): string | undefined;
   upgradeCommand?(project: string, machine: Machine): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
@@ -71,7 +76,16 @@ export function machineHost(
   const file = runtimeWorkersPath(env),
     root = dirname(file),
     dataDir = execution.dataDir;
-  function boundWorker(project: string, machine: Machine) {
+  function boundWorker(
+    project: string,
+    machine: Machine,
+    purpose?: "manual-upgrade",
+  ) {
+    if (
+      purpose === "manual-upgrade" &&
+      !manualWorkerUpgradeAllowed(root, project, machine.id)
+    )
+      return undefined;
     const worker = loadRuntimeWorkers(dataDir, file).find(
       (w) => w.machine_id === machine.id && w.project_id === project,
     );
@@ -85,12 +99,12 @@ export function machineHost(
   }
   return {
     wizard: { root, dataDir, env },
-    bindingFingerprint(project, machine) {
-      const worker = boundWorker(project, machine);
+    bindingFingerprint(project, machine, purpose) {
+      const worker = boundWorker(project, machine, purpose);
       return worker && runtimeTargetBinding(worker).fingerprint;
     },
     upgradeCommand(project, machine) {
-      const worker = boundWorker(project, machine);
+      const worker = boundWorker(project, machine, "manual-upgrade");
       if (worker?.execution.mode !== "agent-ssh") return undefined;
       // Derive the expected command from this process's release. Never stage on read.
       return upgradeMaterials(

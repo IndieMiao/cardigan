@@ -22,16 +22,14 @@ import {
   helpers,
   workerHelperDigests,
 } from "./worker-helper-release.js";
+import { upgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   upgradeHeld,
   upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
-import {
-  signedHelperBundle,
-  upgradeIdentity,
-} from "./worker-upgrade-transport.js";
+import { signedHelperBundle } from "./worker-upgrade-transport.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
 
 const project = "sample",
@@ -130,6 +128,7 @@ function setup(os = "linux") {
           project,
           machine,
           observationId: job.id,
+          env: options.env,
           stageUpgrade,
           target: () => ({
             machine: registered,
@@ -226,6 +225,17 @@ test.each(["linux", "macos"])(
     expect(f.adapters.install).toHaveBeenCalledBefore(f.adapters.workerCheck);
     expect(f.adapters.workerCheck).toHaveBeenCalledBefore(f.options.check);
     expect(f.isHeld()).toBe(false);
+    expect(f.actions()).toEqual([
+      expect.objectContaining({
+        status: "cancelled",
+        cancellation: {
+          source: "worker_helper_superseded",
+          by: "system",
+          at: expect.any(String),
+          reason: expect.any(String),
+        },
+      }),
+    ]);
     expect(f.stageUpgrade).toHaveBeenCalledOnce();
     const events = f.store.uow.read((tx) =>
       tx.events.listAfter(project, undefined, 0),
@@ -242,6 +252,34 @@ test.each(["linux", "macos"])(
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
   },
 );
+test("drained enrolled worker waits for patrol without offering a manual install", async () => {
+  const f = setup();
+  f.enroll();
+  const paused = {
+    blockers: [digestMismatch, "machine_not_ready"],
+    launch_enabled: false,
+  };
+  expect(await f.run(paused)).toEqual(paused);
+  expect(f.stageUpgrade).not.toHaveBeenCalled();
+  expect(f.actions()).toEqual([]);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(await f.run()).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.actions()).toEqual([]);
+});
+
+test("enrollment during manual staging cannot publish its stale command", async () => {
+  const f = setup();
+  f.stageUpgrade.mockImplementationOnce(async () => {
+    f.enroll();
+    return f.terminal;
+  });
+  expect(await f.run()).toEqual(mismatch);
+  expect(f.stageUpgrade).toHaveBeenCalledOnce();
+  expect(f.actions()).toEqual([]);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+});
+
 test.each(["install", "worker_check", "machine_check"])(
   "failure at %s remains held across patrols, manual recovery cannot skip either check",
   async (stage) => {
