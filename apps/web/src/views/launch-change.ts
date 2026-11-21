@@ -85,9 +85,9 @@ export const secretValueProblem = (value: string) =>
 export const sharedKeyProblem = (key: string, providers: readonly string[]) =>
   `密钥键 ${key} 也被 Provider ${providers.join("、")} 使用，不能在这里改写或清除，请改用独立的键。`;
 
-/** V-2713: replacing or clearing an existing key cannot ride along with other edits. */
+/** Clearing a key commits by itself; it cannot ride along with other edits. */
 export const MIXED_SECRETS =
-  "替换或清除已有密钥要单独保存，请先撤销其它修改，或分两次保存。";
+  "清除密钥要单独保存，请先撤销其它修改，或分两次保存。";
 
 /** What went wrong with a preview, confirmation or check, for display in place. */
 export type LaunchProblem =
@@ -119,6 +119,9 @@ const FIELD_MESSAGES: Record<string, Record<string, string>> = {
   },
   secrets: { default: "密钥未通过校验，没有写入，请重新输入。" },
   secrets_mixed: { default: MIXED_SECRETS },
+  secret_pending: {
+    default: "这个密钥键正由另一次保存写入，暂时不能选用，请稍后刷新。",
+  },
   env: { default: "这个变量不能在页面修改，请在主机上修改。" },
   base_url: {
     edit_provider:

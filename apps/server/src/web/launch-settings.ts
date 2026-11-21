@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   launchRevision,
@@ -44,7 +44,10 @@ import {
   stale,
 } from "./launch-settings-file.js";
 import {
-  installSecrets,
+  addSecrets,
+  auditStatus,
+  clearSecrets,
+  pendingKeys,
   planKeys,
   plannedSecrets,
   readSecretsText,
@@ -53,7 +56,6 @@ import {
   secretValues,
   settleSecretIntents,
   settleSecrets,
-  withdrawSecrets,
 } from "./launch-settings-secrets.js";
 
 const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -129,7 +131,8 @@ export class LaunchSettings {
     // anything reads it. Bookkeeping only (the files are not touched); a
     // failure here is retried by the next settings read.
     try {
-      settleSecretIntents(store);
+      withLaunchSnapshot(store, dir, dataDir, () => undefined);
+      settleSecretIntents(store, dir);
     } catch {
       /* retried before the next read */
     }
@@ -138,8 +141,10 @@ export class LaunchSettings {
     return snapshot(this.dir, launchRevision(this.store));
   }
   private file() {
-    // V-2708: an interrupted secrets.env write is applied or undone first.
-    settleSecretIntents(this.store);
+    // Q-1094: the host settles its YAML receipts first; then each pending
+    // secrets.env write is judged from those receipts and the files.
+    withLaunchSnapshot(this.store, this.dir, this.dataDir, () => undefined);
+    settleSecretIntents(this.store, this.dir);
     return withLaunchSnapshot(this.store, this.dir, this.dataDir, (fence) => ({
       ...readLaunchSettings(this.dir, this.dataDir, fence.revision),
       fence,
@@ -225,7 +230,11 @@ export class LaunchSettings {
       profiles,
       providers,
       models: publicFields(config.models ?? {}, secrets, true),
-      secret_keys: publicFields(Object.keys(secrets), secrets),
+      // Keys a pending write is adding cannot be chosen yet (V-2719).
+      secret_keys: publicFields(
+        Object.keys(secrets).filter((k) => !pendingKeys(this.store).has(k)),
+        secrets,
+      ),
     };
   }
   private guardDelete(
@@ -263,15 +272,25 @@ export class LaunchSettings {
       f = this.file();
     if (version !== f.version) throw stale();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { diff, text, raw, plan } = candidate(f, change);
+    const id = randomUUID();
+    const { diff, text, raw, plan, keyMap } = candidate(f, change, {
+      operation: id,
+      pending: pendingKeys(this.store),
+    });
     let next: LaunchConfig;
     try {
       next = parseCachedLaunchConfig(raw, this.dataDir);
     } catch {
       throw invalid();
     }
-    this.checkSecrets(f, next, plannedSecrets(f.secrets, plan));
-    const id = randomUUID();
+    this.checkSecrets(
+      f,
+      next,
+      plannedSecrets(f.secrets, {
+        set: Object.values(keyMap),
+        clear: plan.clear ?? [],
+      }),
+    );
     if (this.previews.size >= 256)
       this.previews.delete(this.previews.keys().next().value ?? "");
     this.previews.set(id, { change, version, owner, after: digest(text) });
@@ -307,14 +326,26 @@ export class LaunchSettings {
             "此幂等键已用于其它预览",
           );
         if (receipt.installed) return true;
-        if (!allowUnsettled) throw stale();
+        // Q-1094: a reserved but uninstalled receipt is not proof either way.
+        if (!allowUnsettled) throw writeUnknown();
       }
       return false;
     };
     const success = { ok: true, preview_id: id };
     // A settled receipt is scoped to this session and request; later disk edits cannot undo it.
     if (replay(true)) return success;
-    const f = this.file();
+    let f: ReturnType<LaunchSettings["file"]>;
+    try {
+      f = this.file();
+    } catch (error) {
+      // This request's own publication is reserved but unsettled and the host
+      // cannot settle it now (e.g. launch.yaml was edited meanwhile).
+      const own = this.store.database
+        .prepare("SELECT installed FROM launch_web_changes WHERE request_key=?")
+        .get(requestKey);
+      if (own && !own.installed) throw writeUnknown();
+      throw error;
+    }
     const path = realpathSync(f.path);
     if (replay(false)) return success;
     const pending = this.previews.get(id);
@@ -326,8 +357,16 @@ export class LaunchSettings {
     )
       throw stale();
     const { change } = pending;
+    // Q-1094: a confirmation of this preview whose outcome is not proved yet
+    // is reported as such, whatever is sent now.
+    const recorded = auditStatus(this.store, id);
+    if (recorded === "pending" || recorded === "unconfirmed")
+      throw writeUnknown();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { text, raw, yaml, plan } = candidate(f, change);
+    const { text, raw, yaml, plan, keyMap, superseded } = candidate(f, change, {
+      operation: id,
+      pending: pendingKeys(this.store),
+    });
     // Values for exactly the keys the confirmed preview names, nothing else.
     const values = parsed.data.secrets ?? {};
     const { set, clear } = planKeys(plan);
@@ -342,7 +381,15 @@ export class LaunchSettings {
           throw invalid();
         })
       : { config: f.config, catalog: undefined };
-    const secrets = plannedSecrets(f.secrets, plan, values);
+    // Values arrive under the keys the form named; they go to the fresh keys.
+    const finalValues = Object.fromEntries(
+      Object.entries(values).map(([k, v]) => [keyMap[k] ?? k, v]),
+    );
+    const secrets = plannedSecrets(
+      f.secrets,
+      { set: Object.keys(finalValues), clear },
+      finalValues,
+    );
     this.checkSecrets(f, staged.config, secrets);
     const actor = authorize().member_id ?? "human";
     if (replay(false)) return success; // a concurrent identical request finished during preflight
@@ -366,51 +413,56 @@ export class LaunchSettings {
           new Date().toISOString(),
           installed ? 1 : 0,
         );
-    // C-549: secrets.env first. V-2713: with a YAML step it only gains
-    // brand-new keys (see `candidate`), so the old YAML never reads them; a
-    // failed YAML step takes exactly those keys back. Whether the write took
-    // effect is read from its marker line (see `installSecrets`).
-    let files: string | undefined;
-    const unsettled = () => {
-      // Renamed but not recorded: with a YAML step, take the new keys back.
-      if (yaml)
-        try {
-          withdrawSecrets(this.store, this.dir, id, values);
-          return writeFailed();
-        } catch {
-          /* still unknown */
-        }
-      return writeUnknown();
+    // Q-1094 / Q-1095: one commit point per confirmation. A value goes to a
+    // brand-new key first (nothing already in secrets.env changes), then the
+    // YAML rename commits; only the host's receipt proves it. Clearing keys
+    // (never with a YAML change) commits by the secrets.env rename.
+    const now = new Date().toISOString();
+    const audit = (keys: readonly string[], action: "set" | "clear") => {
+      const row = this.store.database.prepare(
+        "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at,status) VALUES(?,?,?,?,?,'pending')",
+      );
+      for (const k of keys) row.run(id, k, action, actor, now);
     };
-    if (set.length || clear.length) {
-      const now = new Date().toISOString();
+    const unsettled = (error: unknown) => {
+      if (error instanceof HttpRejection) return error;
+      if (error instanceof SecretsUnsettled) return writeUnknown();
+      return writeFailed();
+    };
+    let files: string | undefined;
+    if (set.length) {
       try {
-        files = installSecrets(this.store, this.dir, this.dataDir, f.fence, {
+        files = addSecrets(this.store, this.dir, this.dataDir, f.fence, {
           operation: id,
           original: readSecretsText(this.dir),
-          values,
-          clear,
-          yaml,
+          values: finalValues,
+          superseded,
+          yamlBefore: f.original,
+          reserve: () => audit(Object.keys(finalValues), "set"),
+        });
+      } catch (error) {
+        throw unsettled(error);
+      }
+    } else if (clear.length) {
+      try {
+        clearSecrets(this.store, this.dir, this.dataDir, f.fence, {
+          operation: id,
+          original: readSecretsText(this.dir),
+          keys: clear,
           reserve: () => {
-            const journal = this.store.database.prepare(
-              "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
-            );
-            for (const k of set) journal.run(id, k, "set", actor, now);
-            for (const k of clear) journal.run(id, k, "clear", actor, now);
-            if (!yaml) receipt(false);
+            audit(clear, "clear");
+            receipt(false);
           },
         });
       } catch (error) {
-        if (error instanceof HttpRejection) throw error;
-        if (error instanceof SecretsUnsettled) throw unsettled();
-        throw writeFailed();
+        throw unsettled(error);
       }
     }
     if (yaml) {
       const suffix = randomUUID(),
         temp = `${path}.${suffix}.tmp`,
         opts = { flag: "wx", mode: 0o600 };
-      let revision: number;
+      let revision: number | undefined;
       try {
         // V-2708: only our own secrets.env rename may differ from the
         // previewed snapshot. The catalog, the revision and every other file
@@ -439,41 +491,46 @@ export class LaunchSettings {
           },
         );
       } catch (error) {
-        // V-2713: our YAML is in place but not recorded. The next read
-        // settles its receipt; the same confirmation then answers ok.
-        let installed = false;
-        try {
-          installed = readFileSync(path, "utf8") === text;
-        } catch {
-          /* unreadable: not ours */
-        }
-        if (installed) throw writeUnknown();
         if (files !== undefined) {
+          // Decided by the receipt and the files, never by guessing.
+          let outcome: string;
           try {
-            withdrawSecrets(this.store, this.dir, id, values);
+            outcome = settleSecrets(this.store, this.dir, id);
           } catch {
             throw writeUnknown();
           }
-          if (error instanceof HttpRejection) throw error;
-          // Another writer changed the launch files between the two steps.
-          if (error instanceof LaunchConfigError) throw stale();
-          throw writeFailed();
+          if (outcome === "failed") {
+            if (error instanceof HttpRejection) throw error;
+            // Another writer changed the launch files between the two steps.
+            if (error instanceof LaunchConfigError) throw stale();
+            throw writeFailed();
+          }
+          if (outcome !== "applied") throw writeUnknown();
+        } else {
+          const own = this.store.database
+            .prepare(
+              "SELECT installed FROM launch_web_changes WHERE operation=?",
+            )
+            .get(id);
+          if (own && !own.installed) throw writeUnknown();
+          if (!own?.installed) {
+            if (error instanceof HttpRejection) throw error;
+            if (this.snapshot() !== version) throw stale();
+            throw error;
+          }
         }
-        if (error instanceof HttpRejection) throw error;
-        if (this.snapshot() !== version) throw stale();
-        throw error;
       } finally {
         rmSync(temp, { force: true });
       }
-      // The YAML is installed, so its new keys stand; if this cannot record
-      // that now, the next read settles the intent the same way.
+      // Committed: close the write (the superseded keys go once unused).
       if (files !== undefined)
         try {
-          settleSecrets(this.store, id);
+          settleSecrets(this.store, this.dir, id);
         } catch {
-          /* settled as applied by the next read */
+          /* the next settle closes it the same way */
         }
-      this.adopt({ config: staged.config, secrets, revision });
+      if (revision !== undefined)
+        this.adopt({ config: staged.config, secrets, revision });
     }
     this.previews.delete(id);
     return success;

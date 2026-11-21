@@ -101,8 +101,20 @@ const SECRET_DIFF = "secrets.";
 /** A diff value that exists but is not shown (see `privateEnv`). */
 export const HIDDEN = Object.freeze({ hidden: true });
 
-export function candidate(file: SettingsFile, change: Change) {
+export function candidate(
+  file: SettingsFile,
+  change: Change,
+  /**
+   * Q-1094: the confirmation's operation names fresh keys deterministically
+   * (preview and confirm agree); `pending` keys belong to writes not yet
+   * known to be in effect and cannot be referenced.
+   */
+  opts: { operation?: string; pending?: ReadonlySet<string> } = {},
+) {
   const { doc, config, secrets } = file;
+  const pending = opts.pending ?? new Set<string>();
+  const keyMap: Record<string, string> = {};
+  const superseded: string[] = [];
   const providerOp =
     change.op === "edit_provider" ||
     change.op === "create_provider" ||
@@ -220,6 +232,9 @@ export function candidate(file: SettingsFile, change: Change) {
             !(Object.hasOwn(secrets, key) || plan.set.includes(key)))
         )
           throw invalid("secret_env");
+        // V-2719: a key another confirmation is still writing cannot be used.
+        if (key !== null && pending.has(key) && !plan.set.includes(key))
+          throw invalid("secret_pending");
         set(["secret_env", env], key);
       }
       // Only keys this Provider references after the change can be written
@@ -266,10 +281,44 @@ export function candidate(file: SettingsFile, change: Change) {
           (clearing && !isSet)
         )
           throw invalid("secrets");
+        if (clearing)
+          diff.push({
+            field: `${SECRET_DIFF}${key}`,
+            before: isSet ? "set" : "unset",
+            after: "unset",
+          });
+      }
+      // Q-1094: a value is only ever written to a brand-new key; a key that
+      // exists, is referenced anywhere or is still pending gets a fresh name,
+      // and this Provider's references move to it. The YAML rename is then
+      // the single commit point, and the old launch.yaml never reads it.
+      const inUse = (key: string) =>
+        Object.hasOwn(secrets, key) ||
+        pending.has(key) ||
+        Object.values(config.providers).some((p) =>
+          Object.values(p.secret_env).includes(key),
+        );
+      const suffix = (opts.operation ?? "")
+        .replace(/[^0-9a-f]/giu, "")
+        .slice(0, 8)
+        .toUpperCase();
+      for (const key of plan.set) {
+        let final = key;
+        if (inUse(key)) {
+          final = `${key.slice(0, 119)}_${suffix}`;
+          if (!suffix || inUse(final)) throw invalid("secrets");
+        }
+        keyMap[key] = final;
+        if (final !== key) {
+          const refs = doc.toJS()?.providers?.[change.name]?.secret_env ?? {};
+          for (const [env, ref] of Object.entries(refs))
+            if (ref === key) set(["secret_env", env], final);
+          if (previous.has(key)) superseded.push(key);
+        }
         diff.push({
-          field: `${SECRET_DIFF}${key}`,
-          before: isSet ? "set" : "unset",
-          after: plan.set.includes(key) ? "new" : "unset",
+          field: `${SECRET_DIFF}${final}`,
+          before: "unset",
+          after: "new",
         });
       }
       break;
@@ -288,23 +337,8 @@ export function candidate(file: SettingsFile, change: Change) {
     }
   }
   const yaml = diff.some((d) => !d.field.startsWith(SECRET_DIFF));
-  // V-2713: with a launch.yaml change, secrets.env may only gain brand-new
-  // keys that nothing reads yet. Then a failed or interrupted YAML step can
-  // never put a new value under the old YAML, and taking the keys back cannot
-  // touch anything already in use. Replacing or clearing a key is its own
-  // secrets-only save.
-  if (
-    yaml &&
-    (plan.clear.length > 0 ||
-      plan.set.some(
-        (key) =>
-          Object.hasOwn(secrets, key) ||
-          Object.values(config.providers).some((p) =>
-            Object.values(p.secret_env).includes(key),
-          ),
-      ))
-  )
-    throw invalid("secrets_mixed");
+  // Clearing commits by the secrets.env rename; it is its own save.
+  if (yaml && plan.clear.length > 0) throw invalid("secrets_mixed");
   if (!diff.length) throw invalid();
   // Field paths contain protocol literals; only their dynamic components and
   // displayed values can contain private configuration data.
@@ -314,7 +348,15 @@ export function candidate(file: SettingsFile, change: Change) {
         JSON.stringify(value) !== JSON.stringify(publicFields(value, secrets))
       )
         throw invalid();
-  return { diff, text: doc.toString(), raw: doc.toJS(), yaml, plan };
+  return {
+    diff,
+    text: doc.toString(),
+    raw: doc.toJS(),
+    yaml,
+    plan,
+    keyMap,
+    superseded,
+  };
 }
 
 /** Profiles and model aliases that name this Provider. */

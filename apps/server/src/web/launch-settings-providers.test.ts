@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdtempSync,
@@ -20,7 +19,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
 import { loadLaunchFiles } from "../host.js";
 import { liveLaunch } from "../live-launch.js";
-import { installSecrets } from "./launch-settings-secrets.js";
+import { addSecrets, settleSecrets } from "./launch-settings-secrets.js";
 
 // C-549: Providers are created, edited and deleted from the Web, and
 // secrets.env is write-only. Injected failures exercise both rollbacks.
@@ -174,6 +173,10 @@ afterEach(async () => {
   rmSync(dir, { force: true, recursive: true });
 });
 
+const rows = (sql: string) => h.store.database.prepare(sql).all();
+const leftovers = () =>
+  readdirSync(dir).filter((n) => n.endsWith(".tmp") || n.endsWith(".bak"));
+
 test("a new Provider with env and a write-only secret installs both files; no value ever leaves", async () => {
   const logs = [
     vi.spyOn(console, "log"),
@@ -226,10 +229,7 @@ test("a new Provider with env and a write-only secret installs both files; no va
   // Replays settle without a second write or a value.
   expect((await confirm(data, { RELAY_TOKEN: fresh }, "two")).status).toBe(200);
   const written = readFileSync(secretsFile(), "utf8");
-  // V-2713: the write names its operation in a marker line (no value).
-  expect(written).toBe(
-    `${secretsText}# cardigan-write ${data.preview_id}\nRELAY_TOKEN=${fresh}\n`,
-  );
+  expect(written).toBe(`${secretsText}RELAY_TOKEN=${fresh}\n`);
   expect(statSync(secretsFile()).mode & 0o777).toBe(0o600);
   expect(readFileSync(file, "utf8")).toContain("# keep my comment");
   expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
@@ -310,7 +310,7 @@ test("only a human session reaches the secret write; a Bearer token is refused b
   ).toEqual([]);
 });
 
-test("replace and clear secrets: a key a profile needs cannot be cleared; a secret-only write keeps the YAML", async () => {
+test("replacing a value writes a fresh key and moves the reference; the old key goes once unused; clearing is its own save", async () => {
   // Clearing what profile a needs is refused at preview.
   expect(
     (
@@ -339,44 +339,44 @@ test("replace and clear secrets: a key a profile needs cannot be cleared; a secr
     fields: {},
     secrets: { set: ["KEY"] },
   });
+  const next = `KEY_${data.preview_id.replaceAll("-", "").slice(0, 8).toUpperCase()}`;
   expect(data.diff).toEqual([
-    { field: "secrets.KEY", before: "set", after: "new" },
+    {
+      field: "providers.gateway.secret_env.ANTHROPIC_API_KEY",
+      before: "KEY",
+      after: next,
+    },
+    { field: `secrets.${next}`, before: "unset", after: "new" },
   ]);
+  // The form still sends the value under the key it named.
   const ok = await confirm(data, { KEY: fresh });
   expect(ok.status, ok.body).toBe(200);
-  expect(readFileSync(file, "utf8")).toBe(config);
+  expect(readFileSync(file, "utf8")).toContain(`ANTHROPIC_API_KEY: ${next}`);
+  // The superseded key is unused now and goes; nothing else changes.
   expect(readFileSync(secretsFile(), "utf8")).toBe(
-    `# operator note\nOTHER=other-private-value\n# cardigan-write ${data.preview_id}\nKEY=${fresh}\n`,
+    `# operator note\nOTHER=other-private-value\n${next}=${fresh}\n`,
   );
-  expect((await live.refresh()).secrets.KEY).toBe(fresh);
+  const loaded = await live.refresh();
+  expect(loaded.secrets[next]).toBe(fresh);
+  expect(rows("SELECT key,action,status FROM launch_secret_changes")).toEqual([
+    { key: next, action: "set", status: "applied" },
+  ]);
   expect(
-    h.store.database
-      .prepare("SELECT action,target,installed FROM launch_web_changes")
-      .all(),
+    rows("SELECT action,target,installed FROM launch_web_changes"),
   ).toEqual([{ action: "edit_provider", target: "gateway", installed: 1 }]);
-  // Unused once the reference moves: the same change can clear it.
-  await reread();
-  // Clearing a key the old YAML still needs would break a crash between the renames.
-  expect(
-    (
-      await preview({
-        op: "edit_provider",
-        name: "gateway",
-        fields: { secret_env: { ANTHROPIC_API_KEY: "OTHER" } },
-        secrets: { clear: ["KEY"] },
-      })
-    ).status,
-  ).toBe(400);
+  const view = (await reread()).providers[0];
+  expect(view.secrets).toMatchObject([
+    { env: "ANTHROPIC_API_KEY", key: next, set: true },
+  ]);
+  expect(Date.parse(view.secrets[0].updated_at)).not.toBeNaN();
+  // A plain YAML change with env edits.
   const remap = await confirmation({
     op: "edit_provider",
     name: "gateway",
-    fields: {
-      secret_env: { ANTHROPIC_API_KEY: "OTHER" },
-      env: { PLAIN_MODEL: null, EXTRA_FLAG: "1" },
-    },
+    fields: { env: { PLAIN_MODEL: null, EXTRA_FLAG: "1" } },
   });
   expect((await confirm(remap, undefined, "four")).status).toBe(200);
-  // A key no profile needs can be cleared; the line goes, the audit keeps the name.
+  // A key no profile needs can be cleared, alone; the audit keeps the name.
   await reread();
   const spare = await confirmation({
     op: "create_provider",
@@ -402,19 +402,17 @@ test("replace and clear secrets: a key a profile needs cannot be cleared; a secr
   expect((await confirm(cleared, undefined, "six")).status).toBe(200);
   expect(readFileSync(secretsFile(), "utf8")).not.toContain("SPARE");
   expect(
-    h.store.database
-      .prepare("SELECT key,action FROM launch_secret_changes ORDER BY id")
-      .all(),
+    rows("SELECT key,action,status FROM launch_secret_changes ORDER BY id"),
   ).toEqual([
-    { key: "KEY", action: "set" },
-    { key: "SPARE", action: "set" },
-    { key: "SPARE", action: "clear" },
+    { key: next, action: "set", status: "applied" },
+    { key: "SPARE", action: "set", status: "applied" },
+    { key: "SPARE", action: "clear", status: "applied" },
   ]);
-  const view = (await reread()).providers[0];
-  expect(view.env).toEqual([
+  expect((await reread()).providers[0].env).toEqual([
     { name: "PRIVATE_ENV", value: null },
     { name: "EXTRA_FLAG", value: "1" },
   ]);
+  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
 });
 
 test("a referenced Provider cannot be deleted and the refusal names its users; an unused one can", async () => {
@@ -474,9 +472,11 @@ test("a failed YAML install puts secrets.env back; a failed secrets write leaves
   expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
   expect(statSync(secretsFile()).mode & 0o777).toBe(0o600);
   expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
-  expect(
-    h.store.database.prepare("SELECT * FROM launch_secret_changes").all(),
-  ).toEqual([]);
+  // Audit rows are never deleted: the outcome is recorded instead.
+  expect(rows("SELECT key,status FROM launch_secret_changes")).toEqual([
+    { key: "RELAY_TOKEN", status: "not_applied" },
+  ]);
+  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
   expect(exposed(failed.body)).not.toContain(fresh);
 
   faults.publish = false;
@@ -493,6 +493,10 @@ test("a failed YAML install puts secrets.env back; a failed secrets write leaves
       .prepare("SELECT * FROM launch_web_changes WHERE installed=1")
       .all(),
   ).toEqual([]);
+  expect(rows("SELECT status FROM launch_secret_changes")).toEqual([
+    { status: "not_applied" },
+    { status: "not_applied" },
+  ]);
   expect(exposed(refused.body)).not.toContain(fresh);
 });
 
@@ -558,10 +562,6 @@ test("a Provider probe lists models once with its own credential and records the
     ),
   ).not.toContain(secret);
 });
-
-const rows = (sql: string) => h.store.database.prepare(sql).all();
-const leftovers = () =>
-  readdirSync(dir).filter((n) => n.endsWith(".tmp") || n.endsWith(".bak"));
 
 test("a hidden env value never comes back: not in the read, not in any preview diff", async () => {
   const removed = await confirmation({
@@ -633,122 +633,163 @@ test("a hidden env value never comes back: not in the read, not in any preview d
   }
 });
 
-test("an audit or commit failure around the secrets rename never leaves a half-applied write", async () => {
+test("an audit failure writes nothing; a receipt that fails after the YAML rename (with a comment appended) keeps every key and answers unknown", async () => {
   const change = {
     op: "edit_provider",
     name: "gateway",
     fields: {},
     secrets: { set: ["KEY"] },
   };
-  // The audit rows are committed with the intent, before the rename.
+  // The audit rows are committed with the intent, before any rename.
   h.store.database.exec(
     "CREATE TEMP TRIGGER fail_audit BEFORE INSERT ON launch_secret_changes BEGIN SELECT RAISE(ABORT, 'fixture'); END",
   );
   const audit = await confirm(await confirmation(change), { KEY: fresh });
   expect(audit.json).toMatchObject({ error: { code: "write_failed" } });
   expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect(readFileSync(file, "utf8")).toBe(config);
   expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
   expect(rows("SELECT * FROM launch_web_changes")).toEqual([]);
   expect(leftovers()).toEqual([]);
   h.store.database.exec("DROP TRIGGER fail_audit");
 
-  // The commit after the rename fails, and so does settling it at once: the
-  // outcome is reported as unknown, never as "nothing written".
-  h.store.database.exec(
-    "CREATE TEMP TRIGGER fail_commit BEFORE UPDATE ON launch_web_changes BEGIN SELECT RAISE(ABORT, 'fixture'); END",
-  );
+  // V-2717:1: the YAML is renamed, someone appends a comment, and the
+  // receipt cannot be recorded. Nothing proves either outcome: no key goes.
   await reread();
   const data = await confirmation(change);
+  const next = `KEY_${data.preview_id.replaceAll("-", "").slice(0, 8).toUpperCase()}`;
+  h.store.database.function("fixture_comment", () => {
+    writeFileSync(file, `${readFileSync(file, "utf8")}# later note\n`);
+    return 0;
+  });
+  h.store.database.exec(
+    "CREATE TEMP TRIGGER fail_receipt BEFORE UPDATE ON launch_web_changes BEGIN SELECT fixture_comment(); SELECT RAISE(ABORT, 'fixture'); END",
+  );
   const unknown = await confirm(data, { KEY: fresh }, "two");
   expect(unknown.json).toMatchObject({ error: { code: "write_unsettled" } });
-  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${fresh}`);
-  expect(rows("SELECT operation FROM launch_secret_intents")).toHaveLength(1);
-  h.store.database.exec("DROP TRIGGER fail_commit");
-  // The next read settles it from the files: applied, with its audit row.
-  await reread();
-  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
-  expect(rows("SELECT key,action FROM launch_secret_changes")).toEqual([
-    { key: "KEY", action: "set" },
+  h.store.database.exec("DROP TRIGGER fail_receipt");
+  const yaml = readFileSync(file, "utf8");
+  expect(yaml).toContain(`ANTHROPIC_API_KEY: ${next}`);
+  // Both the key the installed YAML needs and the superseded one stay.
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).toContain(`${next}=${fresh}`);
+  expect(text).toContain(`KEY=${secret}`);
+  expect(rows("SELECT status FROM launch_secret_changes")).toEqual([
+    { status: "pending" },
   ]);
-  expect(rows("SELECT installed FROM launch_web_changes")).toEqual([
-    { installed: 1 },
-  ]);
-  // The same confirmation replayed is answered from the receipt.
-  expect((await confirm(data, undefined, "two")).status).toBe(200);
+  expect(rows("SELECT * FROM launch_secret_intents")).toHaveLength(1);
+  // The same confirmation replayed is still unconfirmed, never a failure.
+  expect((await confirm(data, undefined, "two")).json).toMatchObject({
+    error: { code: "write_unsettled" },
+  });
   expect(exposed(unknown.body)).not.toContain(fresh);
 });
 
-test("a crash between the two steps leaves only unused new keys; bookkeeping follows the marker, never the file", async () => {
-  // A YAML change may only add brand-new keys: the old YAML never reads them.
-  const candidate = config.replace(
-    "ANTHROPIC_API_KEY: KEY",
-    "ANTHROPIC_API_KEY: NEXT",
-  );
-  const crash = (operation: string, rename: boolean) => {
+test("interrupted between the two renames: the old YAML reads the same secrets; a proved failure removes the unused new key", async () => {
+  const crash = (operation: string) => {
     const fence = withLaunchSnapshot(h.store, dir, h.dataDir, (f) => f);
-    if (!rename) faults.secretsRename = true;
-    try {
-      installSecrets(h.store, dir, h.dataDir, fence, {
-        operation,
-        original: secretsText,
-        values: { NEXT: fresh },
-        clear: [],
-        yaml: true,
-        reserve: () =>
-          h.store.database
-            .prepare(
-              "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
-            )
-            .run(operation, "NEXT", "set", "human", new Date().toISOString()),
-      });
-    } catch {
-      // the rename fault: nothing in place
-    } finally {
-      faults.secretsRename = false;
-    }
+    addSecrets(h.store, dir, h.dataDir, fence, {
+      operation,
+      original: readFileSync(secretsFile(), "utf8"),
+      values: { NEXT: fresh },
+      superseded: ["KEY"],
+      yamlBefore: readFileSync(file, "utf8"),
+      reserve: () =>
+        h.store.database
+          .prepare(
+            "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
+          )
+          .run(operation, "NEXT", "set", "human", new Date().toISOString()),
+    });
     // The process dies here: no YAML step, no settling.
   };
-  // Renamed, then the process died. The host reads the old YAML and the
-  // new, unused key: the same running configuration as before.
-  crash("crashed-after-rename", true);
+  crash("crashed-before-yaml");
+  // The host may start first: the old YAML with exactly the old secrets.
   const loaded = await loadLaunchFiles(dir, () => {}, h.dataDir, h.store);
   expect(loaded.config.providers.gateway?.secret_env).toEqual({
     ANTHROPIC_API_KEY: "KEY",
   });
   expect(loaded.secrets.KEY).toBe(secret);
-  // Another writer appends a key meanwhile; settling never edits the file.
+  // Another writer appends a key meanwhile.
   writeFileSync(
     secretsFile(),
     `${readFileSync(secretsFile(), "utf8")}LATER=1\n`,
   );
-  const before = readFileSync(secretsFile(), "utf8");
+  // No receipt and launch.yaml exactly as it started: proved not committed.
   await reread();
-  expect(readFileSync(secretsFile(), "utf8")).toBe(before);
-  expect(rows("SELECT key FROM launch_secret_changes")).toEqual([
-    { key: "NEXT" },
+  expect(readFileSync(secretsFile(), "utf8")).toBe(`${secretsText}LATER=1\n`);
+  expect(rows("SELECT key,status FROM launch_secret_changes")).toEqual([
+    { key: "NEXT", status: "not_applied" },
   ]);
   expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
-  // The YAML can now reference the written key without retyping it.
-  const later = await confirmation({
-    op: "edit_provider",
-    name: "gateway",
-    fields: { secret_env: { ANTHROPIC_API_KEY: "NEXT" } },
-  });
-  expect((await confirm(later)).status).toBe(200);
-  expect(readFileSync(file, "utf8")).toBe(candidate);
 
-  // Never renamed: no marker, so its audit rows go; the file is untouched.
-  h.store.database.exec("DELETE FROM launch_secret_changes");
-  const untouched = readFileSync(secretsFile(), "utf8");
-  crash("crashed-before-rename", false);
+  // launch.yaml changed meanwhile and there is no receipt: not provable.
+  // The audit says so; the unused new key may still go, never a used one.
+  crash("crashed-then-edited");
+  writeFileSync(file, config.replace("name: Fixture", "name: Edited"));
   await reread();
-  expect(readFileSync(secretsFile(), "utf8")).toBe(untouched);
-  expect(rows("SELECT * FROM launch_secret_changes")).toEqual([]);
-  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
-  expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  expect(readFileSync(secretsFile(), "utf8")).not.toContain("NEXT=");
+  expect(
+    rows(
+      "SELECT status FROM launch_secret_changes WHERE operation='crashed-then-edited'",
+    ),
+  ).toEqual([{ status: "unconfirmed" }]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${secret}`);
 });
 
-test("two writers on different keys: the YAML step is stale, only this write's new key is taken back", async () => {
+test("a clear interrupted before or after its rename is judged by its temp file and the keys; otherwise unconfirmed", async () => {
+  const intent = (operation: string, temp: string) => {
+    h.store.database
+      .prepare(
+        "INSERT INTO launch_secret_intents(operation,kind,path,temp_path,keys,old_keys,yaml_before,created_at) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        operation,
+        "clear",
+        realpathSync(secretsFile()),
+        temp,
+        JSON.stringify(["OTHER"]),
+        "[]",
+        null,
+        new Date().toISOString(),
+      );
+    h.store.database
+      .prepare(
+        "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
+      )
+      .run(operation, "OTHER", "clear", "human", new Date().toISOString());
+  };
+  // Temp file still there: the rename never happened.
+  const temp = join(dir, "secrets.env.fixture.tmp");
+  writeFileSync(temp, "# fixture\n", { mode: 0o600 });
+  intent("before-rename", temp);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect(readdirSync(dir)).not.toContain("secrets.env.fixture.tmp");
+  // Temp gone but the key is still there: cannot be attributed, unconfirmed.
+  intent("cannot-tell", join(dir, "secrets.env.gone.tmp"));
+  await reread();
+  // Temp gone and the key gone: committed.
+  writeFileSync(
+    secretsFile(),
+    readFileSync(secretsFile(), "utf8").replace(
+      "OTHER=other-private-value\n",
+      "",
+    ),
+  );
+  intent("after-rename", join(dir, "secrets.env.moved.tmp"));
+  await reread();
+  expect(
+    rows("SELECT operation,status FROM launch_secret_changes ORDER BY id"),
+  ).toEqual([
+    { operation: "before-rename", status: "not_applied" },
+    { operation: "cannot-tell", status: "unconfirmed" },
+    { operation: "after-rename", status: "applied" },
+  ]);
+  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
+});
+
+test("two writers on different keys: the YAML step is proved not to have happened, only this write's unused new key goes", async () => {
   const data = await confirmation({
     op: "edit_provider",
     name: "gateway",
@@ -766,31 +807,113 @@ test("two writers on different keys: the YAML step is stale, only this write's n
   expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
   expect(readFileSync(file, "utf8")).toBe(config);
   expect(readFileSync(secretsFile(), "utf8")).toBe(`${secretsText}LATER=1\n`);
-  expect(rows("SELECT * FROM launch_secret_changes")).toEqual([]);
+  expect(rows("SELECT status FROM launch_secret_changes")).toEqual([
+    { status: "not_applied" },
+  ]);
   expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
-  expect(rows("SELECT * FROM launch_web_changes WHERE installed=1")).toEqual(
-    [],
-  );
   expect((await live.refresh()).config.providers.gateway?.secret_env).toEqual({
     ANTHROPIC_API_KEY: "KEY",
   });
   expect(exposed(refused.body)).not.toContain(fresh);
 });
 
-test("replacing or clearing a key in use is its own save, never mixed with a YAML change", async () => {
-  for (const secrets of [{ set: ["KEY"] }, { clear: ["OTHER"] }]) {
-    const mixed = await preview({
-      op: "edit_provider",
-      name: "gateway",
-      fields: { name: "Renamed", secret_env: { EXTRA: "OTHER" } },
-      secrets,
-    });
-    expect(mixed.json).toMatchObject({
-      error: { code: "validation_failed", details: { field: "secrets_mixed" } },
-    });
-  }
-  // A key already in secrets.env (even unused) is not brand new either.
-  const unused = await preview({
+test("a key another confirmation is still writing cannot be chosen or referenced; if referenced anyway it is never removed", async () => {
+  const fence = withLaunchSnapshot(h.store, dir, h.dataDir, (f) => f);
+  addSecrets(h.store, dir, h.dataDir, fence, {
+    operation: "writer-a",
+    original: secretsText,
+    values: { NEXT: fresh },
+    superseded: [],
+    yamlBefore: config,
+    reserve: () =>
+      // A's YAML publication is reserved but not settled: its outcome is open.
+      h.store.database
+        .prepare(
+          "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at,installed) VALUES(?,?,?,?,?,?,?,0)",
+        )
+        .run(
+          "writer-a",
+          "fixture",
+          "0",
+          "edit_provider",
+          "gateway",
+          "human",
+          new Date().toISOString(),
+        ),
+  });
+  const view = await reread();
+  expect(view.secret_keys).not.toContain("NEXT");
+  const refused = await preview({
+    op: "edit_provider",
+    name: "gateway",
+    fields: { secret_env: { ANTHROPIC_API_KEY: "NEXT" } },
+  });
+  expect(refused.json).toMatchObject({
+    error: { details: { field: "secret_pending" } },
+  });
+  // Someone references it by hand; then A turns out not provable.
+  writeFileSync(
+    file,
+    config.replace("ANTHROPIC_API_KEY: KEY", "ANTHROPIC_API_KEY: NEXT"),
+  );
+  h.store.database.exec(
+    "DELETE FROM launch_web_changes WHERE operation='writer-a'",
+  );
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`NEXT=${fresh}`);
+  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
+  expect((await live.refresh()).secrets.NEXT).toBe(fresh);
+});
+
+test("cleanup never removes keys while launch.yaml cannot be read; it retries later", async () => {
+  const fence = withLaunchSnapshot(h.store, dir, h.dataDir, (f) => f);
+  addSecrets(h.store, dir, h.dataDir, fence, {
+    operation: "writer-b",
+    original: secretsText,
+    values: { NEXT: fresh },
+    superseded: [],
+    yamlBefore: config,
+    reserve: () => {},
+  });
+  writeFileSync(file, "providers: [unclosed\n");
+  expect(settleSecrets(h.store, dir, "writer-b")).toBe("unconfirmed");
+  expect(readFileSync(secretsFile(), "utf8")).toContain("NEXT=");
+  expect(rows("SELECT resolved FROM launch_secret_intents")).toEqual([
+    { resolved: "unconfirmed" },
+  ]);
+  writeFileSync(file, config);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
+});
+
+test("replacing a value can ride with other edits; clearing cannot", async () => {
+  const mixed = await preview({
+    op: "edit_provider",
+    name: "gateway",
+    fields: { name: "Renamed", secret_env: { EXTRA: "OTHER" } },
+    secrets: { clear: ["OTHER"] },
+  });
+  expect(mixed.json).toMatchObject({
+    error: { code: "validation_failed", details: { field: "secrets_mixed" } },
+  });
+  const data = await confirmation({
+    op: "edit_provider",
+    name: "gateway",
+    fields: { name: "Renamed" },
+    secrets: { set: ["KEY"] },
+  });
+  expect((await confirm(data, { KEY: fresh })).status).toBe(200);
+  const loaded = await live.refresh();
+  expect(loaded.config.providers.gateway?.name).toBe("Renamed");
+  expect(
+    loaded.secrets[
+      loaded.config.providers.gateway?.secret_env.ANTHROPIC_API_KEY ?? ""
+    ],
+  ).toBe(fresh);
+  // An existing (even unused) key is never overwritten: a fresh one is used.
+  await reread();
+  const unused = await confirmation({
     op: "create_provider",
     name: "relay",
     fields: {
@@ -799,10 +922,10 @@ test("replacing or clearing a key in use is its own save, never mixed with a YAM
     },
     secrets: { set: ["OTHER"] },
   });
-  expect(unused.json).toMatchObject({
-    error: { details: { field: "secrets_mixed" } },
-  });
-  expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect((await confirm(unused, { OTHER: fresh }, "two")).status).toBe(200);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(
+    "OTHER=other-private-value",
+  );
 });
 
 test("an installed YAML whose receipt is not recorded answers unknown, and the same confirmation then answers ok", async () => {
@@ -836,15 +959,27 @@ test("an installed YAML whose receipt is not recorded answers unknown, and the s
   expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
 });
 
-test("a secrets-only write stopped before its rename is never answered as saved, even if undoing it first fails", async () => {
+test("a clear stopped before its rename is never answered as saved, even if recording that first fails", async () => {
+  const spare = await confirmation({
+    op: "create_provider",
+    name: "spare",
+    fields: {
+      harness: "codex",
+      base_url: "https://spare.example.invalid",
+      secret_env: { OPENAI_API_KEY: "SPARE" },
+    },
+    secrets: { set: ["SPARE"] },
+  });
+  expect((await confirm(spare, { SPARE: fresh })).status).toBe(200);
+  await reread();
   const data = await confirmation({
     op: "edit_provider",
-    name: "gateway",
+    name: "spare",
     fields: {},
-    secrets: { set: ["KEY"] },
+    secrets: { clear: ["SPARE"] },
   });
   // Between the intent and the rename another writer appends a key (the
-  // rename step then refuses), and the first undo fails.
+  // rename step then refuses), and recording that outcome fails once.
   h.store.database.function("fixture_append", () => {
     writeFileSync(
       secretsFile(),
@@ -856,19 +991,23 @@ test("a secrets-only write stopped before its rename is never answered as saved,
     "CREATE TEMP TRIGGER interleave AFTER INSERT ON launch_secret_changes BEGIN SELECT fixture_append(); END",
   );
   h.store.database.exec(
-    "CREATE TEMP TRIGGER obstruct BEFORE DELETE ON launch_secret_changes BEGIN SELECT RAISE(ABORT, 'fixture'); END",
+    "CREATE TEMP TRIGGER obstruct BEFORE UPDATE ON launch_secret_changes BEGIN SELECT RAISE(ABORT, 'fixture'); END",
   );
-  const first = await confirm(data, { KEY: fresh });
+  const first = await confirm(data, undefined, "two");
   expect(first.json).toMatchObject({ error: { code: "write_unsettled" } });
   h.store.database.exec("DROP TRIGGER interleave");
   h.store.database.exec("DROP TRIGGER obstruct");
-  expect(readFileSync(secretsFile(), "utf8")).toBe(`${secretsText}LATER=1\n`);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`SPARE=${fresh}`);
+  // The temp file is still there, proving the rename never happened.
   await reread();
-  expect(rows("SELECT * FROM launch_secret_changes")).toEqual([]);
-  expect(rows("SELECT * FROM launch_web_changes")).toEqual([]);
+  expect(
+    rows(
+      `SELECT status FROM launch_secret_changes WHERE operation='${data.preview_id}'`,
+    ),
+  ).toEqual([{ status: "not_applied" }]);
   expect(rows("SELECT * FROM launch_secret_intents")).toEqual([]);
-  // Replaying the same confirmation is not a success.
-  expect((await confirm(data)).status).not.toBe(200);
+  expect(leftovers().filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  expect((await confirm(data, undefined, "two")).status).not.toBe(200);
 });
 
 test("a write to a key another Provider also reads is refused and names who reads it", async () => {

@@ -521,19 +521,14 @@ try {
       await scene("provider-created", measureDrawer);
 
       if (!baseline) {
-        // V-2713: filling a key in use does not ride along with another edit.
+        // Clearing a key commits by itself: it does not ride along with another edit.
         await models(theme);
         await toProviders();
-        await provider("relay");
+        await provider("anthropic");
         await click("编辑");
         await until("!!document.querySelector('[role=dialog] form input')");
-        await fillIn(null, "名称", "Relay 2");
-        await clickIn("密钥变量 ANTHROPIC_AUTH_TOKEN", "填写");
-        await fillIn(
-          "密钥变量 ANTHROPIC_AUTH_TOKEN",
-          "新密钥 RELAY_TOKEN",
-          FAKE,
-        );
+        await fillIn(null, "名称", "Anthropic 2");
+        await clickIn("密钥变量 ANTHROPIC_API_KEY", "清除");
         await until(
           "[...document.querySelectorAll('[role=dialog] [role=alert]')].some((a) => a.textContent.includes('要单独保存'))",
         );

@@ -1,5 +1,12 @@
-import { randomUUID } from "node:crypto";
-import { realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   assertLaunchFence,
@@ -8,6 +15,7 @@ import {
 } from "@cardigan/host";
 import { parseSecretsText } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
+import { parseDocument } from "yaml";
 import { z } from "zod";
 import { invalid, readPrivateText, stale } from "./launch-settings-file.js";
 
@@ -69,39 +77,25 @@ export function readSecretsText(dir: string) {
   }
 }
 
-const MARKER = "# cardigan-write ";
-const markerOf = (operation: string) => `${MARKER}${operation}`;
-/** Whether secrets.env currently carries this operation's marker line. */
-const marked = (text: string | null, operation: string) =>
-  (text ?? "").split(/\r?\n/u).some((l) => l.trim() === markerOf(operation));
-
 /**
  * Remove every line of a changed key (comments and other keys stay as they
  * are), then append the new values. The result must parse back to exactly the
  * intended map, otherwise nothing is written.
- *
- * V-2713: a write also carries one comment line naming its operation. Marker
- * lines of operations no longer pending (`keep`) are dropped.
  */
 export function updateSecretsText(
   original: string | null,
   values: Readonly<Record<string, string>>,
   clear: readonly string[],
-  /** `operation` adds its marker; markers not in `keep` are dropped. */
-  marker?: { operation?: string; keep: ReadonlySet<string> },
 ) {
   const before = original === null ? {} : parseSecretsText(original);
   const touched = new Set([...Object.keys(values), ...clear]);
   const lines = (original ?? "").split(/\r?\n/u).filter((line) => {
     const trimmed = line.trim();
-    if (trimmed.startsWith(MARKER))
-      return !!marker?.keep.has(trimmed.slice(MARKER.length));
     if (!trimmed || trimmed.startsWith("#")) return true;
     const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
     return !touched.has(key);
   });
   while (lines.length && lines.at(-1) === "") lines.pop();
-  if (marker?.operation) lines.push(markerOf(marker.operation));
   for (const [key, value] of Object.entries(values))
     lines.push(`${key}=${value}`);
   const text = lines.length ? `${lines.join("\n")}\n` : "";
@@ -116,13 +110,198 @@ export function updateSecretsText(
   return text;
 }
 
-const pendingOperations = (store: Store) =>
-  new Set(
-    store.database
-      .prepare("SELECT operation FROM launch_secret_intents")
-      .all()
-      .map((r) => String(r.operation)),
+/*
+ * Q-1094 / Q-1095: one commit point per confirmation.
+ *
+ * - Writing a value only ever adds a brand-new key to secrets.env; the
+ *   Provider's reference moves to it in launch.yaml. The YAML rename is the
+ *   commit point and only the host's publication receipt proves success.
+ * - Clearing keys (no YAML change) commits by the secrets.env rename.
+ *
+ * Outcomes: applied (proved), failed (proved not to have happened), or
+ * unconfirmed (anything else). Audit rows are never deleted; their status
+ * follows the outcome. Keys are only ever removed when nothing in the
+ * current launch.yaml references them, checked under the store's write lock.
+ */
+type Intent = {
+  operation: string;
+  kind: "write" | "clear";
+  path: string;
+  temp_path: string;
+  keys: string[];
+  old_keys: string[];
+  yaml_before: string | null;
+  resolved: Outcome | null;
+};
+export type Outcome = "applied" | "failed" | "unconfirmed" | "pending";
+
+const sha256 = (text: string) =>
+  createHash("sha256").update(text).digest("hex");
+const exists = (path: string) => statSync(path, { throwIfNoEntry: false });
+
+function intents(store: Store, operation?: string): Intent[] {
+  const rows = operation
+    ? store.database
+        .prepare("SELECT * FROM launch_secret_intents WHERE operation=?")
+        .all(operation)
+    : store.database.prepare("SELECT * FROM launch_secret_intents").all();
+  return rows.map((r) => ({
+    operation: String(r.operation),
+    kind: r.kind === "clear" ? "clear" : "write",
+    path: String(r.path),
+    temp_path: String(r.temp_path),
+    keys: JSON.parse(String(r.keys)) as string[],
+    old_keys: JSON.parse(String(r.old_keys)) as string[],
+    yaml_before: r.yaml_before === null ? null : String(r.yaml_before),
+    resolved: r.resolved === null ? null : (String(r.resolved) as Outcome),
+  }));
+}
+
+/** New keys of writes not yet known to be in effect: nobody may reference them. */
+export function pendingKeys(store: Store) {
+  return new Set(
+    intents(store)
+      .filter((i) => i.kind === "write" && i.resolved !== "applied")
+      .flatMap((i) => i.keys),
   );
+}
+
+/** Every secrets.env key the current launch.yaml references; `null` if unreadable. */
+function referencedKeys(dir: string): Set<string> | null {
+  try {
+    const doc = parseDocument(
+      readFileSync(join(realpathSync(dir), "launch.yaml"), "utf8"),
+      { prettyErrors: false },
+    );
+    if (doc.errors.length) return null;
+    const providers = (doc.toJS() as { providers?: unknown })?.providers;
+    const keys = new Set<string>();
+    if (providers && typeof providers === "object")
+      for (const p of Object.values(providers as Record<string, unknown>)) {
+        const env = (p as { secret_env?: unknown } | null)?.secret_env;
+        if (env && typeof env === "object")
+          for (const v of Object.values(env as Record<string, unknown>))
+            if (typeof v === "string") keys.add(v);
+      }
+    return keys;
+  } catch {
+    return null;
+  }
+}
+
+const setAudit = (store: Store, operation: string, status: string) =>
+  store.database
+    .prepare("UPDATE launch_secret_changes SET status=? WHERE operation=?")
+    .run(status, operation);
+
+/**
+ * Close one intent with its outcome (under the write lock). Keys this outcome
+ * makes removable go only if nothing references them now; when that cannot be
+ * read, the intent stays (resolved) and the next settle retries.
+ */
+function close(store: Store, dir: string, intent: Intent, outcome: Outcome) {
+  if (outcome === "pending") return;
+  setAudit(
+    store,
+    intent.operation,
+    outcome === "applied"
+      ? "applied"
+      : outcome === "failed"
+        ? "not_applied"
+        : "unconfirmed",
+  );
+  if (intent.kind === "clear") {
+    if (outcome === "applied")
+      store.database
+        .prepare("UPDATE launch_web_changes SET installed=1 WHERE operation=?")
+        .run(intent.operation);
+    else if (outcome === "failed")
+      store.database
+        .prepare(
+          "DELETE FROM launch_web_changes WHERE operation=? AND installed=0",
+        )
+        .run(intent.operation);
+    store.database
+      .prepare("DELETE FROM launch_secret_intents WHERE operation=?")
+      .run(intent.operation);
+    return;
+  }
+  // A write: the superseded keys after success, its own new keys otherwise.
+  const candidates = outcome === "applied" ? intent.old_keys : intent.keys;
+  const referenced = referencedKeys(dir);
+  if (candidates.length && referenced === null) {
+    store.database
+      .prepare("UPDATE launch_secret_intents SET resolved=? WHERE operation=?")
+      .run(outcome, intent.operation);
+    return;
+  }
+  store.database
+    .prepare("DELETE FROM launch_secret_intents WHERE operation=?")
+    .run(intent.operation);
+  const reserved = pendingKeys(store);
+  const original = readSecretsText(dir);
+  const present = original === null ? {} : parseSecretsText(original);
+  const removable = candidates.filter(
+    (k) => Object.hasOwn(present, k) && !referenced?.has(k) && !reserved.has(k),
+  );
+  if (removable.length)
+    replaceFile(secretsPath(dir), updateSecretsText(original, {}, removable));
+}
+
+/** What the files and receipts prove about one intent right now. */
+function judge(store: Store, dir: string, intent: Intent): Outcome {
+  if (intent.resolved) return intent.resolved;
+  if (intent.kind === "clear") {
+    // The rename moves the temp file away, and it is only ever deleted after
+    // the outcome is recorded: still there, the rename never happened.
+    if (exists(intent.temp_path)) return "failed";
+    const text = readSecretsText(dir);
+    const present = text === null ? {} : parseSecretsText(text);
+    return intent.keys.every((k) => !Object.hasOwn(present, k))
+      ? "applied"
+      : "unconfirmed";
+  }
+  const receipt = store.database
+    .prepare("SELECT installed FROM launch_web_changes WHERE operation=?")
+    .get(intent.operation);
+  if (receipt?.installed) return "applied";
+  if (receipt) return "pending";
+  // No receipt is not proof by itself; launch.yaml still being exactly the
+  // text this write started from is.
+  try {
+    const yaml = readFileSync(join(realpathSync(dir), "launch.yaml"), "utf8");
+    if (intent.yaml_before !== null && sha256(yaml) === intent.yaml_before)
+      return "failed";
+  } catch {
+    /* unreadable: not proof either way */
+  }
+  return "unconfirmed";
+}
+
+/** Settle one operation now; returns its outcome. */
+export function settleSecrets(
+  store: Store,
+  dir: string,
+  operation: string,
+): Outcome | "none" {
+  return store.uow.run(() => {
+    const [intent] = intents(store, operation);
+    if (!intent) return "none";
+    const outcome = judge(store, dir, intent);
+    close(store, dir, intent, outcome);
+    if (outcome !== "pending" && intent.kind === "write")
+      rmSync(intent.temp_path, { force: true });
+    if (outcome === "failed" && intent.kind === "clear")
+      rmSync(intent.temp_path, { force: true });
+    return outcome;
+  });
+}
+
+/** Settle whatever earlier confirmations left (start-up, reads, confirmations). */
+export function settleSecretIntents(store: Store, dir: string) {
+  for (const { operation } of intents(store))
+    settleSecrets(store, dir, operation);
+}
 
 function replaceFile(path: string, text: string) {
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -134,40 +313,36 @@ function replaceFile(path: string, text: string) {
   }
 }
 
-export interface SecretsWrite {
+/** The outcome is not proved yet; the next settle decides (or keeps it). */
+export class SecretsUnsettled extends Error {}
+
+interface Step {
   readonly operation: string;
   readonly original: string | null;
-  readonly values: Readonly<Record<string, string>>;
-  readonly clear: readonly string[];
-  /** A launch.yaml step follows (only brand-new keys, see `candidate`). */
-  readonly yaml: boolean;
-  /** Rows committed with the intent, before the rename (audit, receipt). */
+  /** Rows committed with the intent, before any rename (audit, receipt). */
   readonly reserve: () => void;
 }
 
 /**
- * V-2713: atomically replace secrets.env (0600, the old file kept next to it
- * as a backup). The new file carries a marker line naming this operation, and
- * an intent row (operation and path only; nothing derived from a value) is
- * committed with the audit rows before the rename. Whether the write took
- * effect is then read from the file itself: marker present ⇔ in effect.
- * Settling only fixes bookkeeping (audit rows, receipt); it never edits
- * secrets.env, so it cannot overwrite anyone else's change.
- *
- * Returns the launch files stamp right after the rename, taken under the same
- * write lock: the YAML step must match it exactly.
+ * One atomic secrets.env replacement with its intent committed first. Before
+ * the rename a failure is proved (recorded as failed, then the temp file
+ * goes); after it, the caller decides. Returns the launch files stamp taken
+ * right after the rename under the same lock.
  */
-export function installSecrets(
+function replaceSecrets(
   store: Store,
   dir: string,
   dataDir: string,
   fence: LaunchFence,
-  write: SecretsWrite,
+  step: Step,
+  intent: Omit<Intent, "operation" | "path" | "temp_path" | "resolved">,
+  text: string,
+  afterRename: () => void,
 ): string {
   const path = secretsPath(dir),
     suffix = randomUUID(),
     temp = `${path}.${suffix}.tmp`,
-    backup = write.original === null ? null : `${path}.${suffix}.bak`,
+    backup = `${path}.${suffix}.bak`,
     opts = { flag: "wx", mode: 0o600 } as const;
   const current = () => {
     try {
@@ -175,163 +350,138 @@ export function installSecrets(
     } catch {
       throw stale();
     }
-    if (readSecretsText(dir) !== write.original) throw stale();
+    if (readSecretsText(dir) !== step.original) throw stale();
   };
-  let reserved = false;
+  writeFileSync(temp, text, opts);
+  let reserved = false,
+    renamed = false;
   try {
-    const text = updateSecretsText(write.original, write.values, write.clear, {
-      operation: write.operation,
-      keep: pendingOperations(store),
-    });
-    if (backup !== null) writeFileSync(backup, write.original ?? "", opts);
-    writeFileSync(temp, text, opts);
     store.uow.run(() => {
       current();
       store.database
         .prepare(
-          "INSERT INTO launch_secret_intents(operation,path,temp_path,yaml,created_at) VALUES(?,?,?,?,?)",
+          "INSERT INTO launch_secret_intents(operation,kind,path,temp_path,keys,old_keys,yaml_before,created_at) VALUES(?,?,?,?,?,?,?,?)",
         )
         .run(
-          write.operation,
+          step.operation,
+          intent.kind,
           path,
           temp,
-          write.yaml ? 1 : 0,
+          JSON.stringify(intent.keys),
+          JSON.stringify(intent.old_keys),
+          intent.yaml_before,
           new Date().toISOString(),
         );
-      write.reserve();
+      step.reserve();
     });
     reserved = true;
     return store.uow.run(() => {
       current();
-      // Another process may have settled this intent meanwhile.
-      if (
-        !store.database
-          .prepare("SELECT 1 FROM launch_secret_intents WHERE operation=?")
-          .get(write.operation)
-      )
-        throw stale();
+      if (!intents(store, step.operation).length) throw stale();
+      if (step.original !== null) writeFileSync(backup, step.original, opts);
       renameSync(temp, path);
+      renamed = true;
       const files = launchFilesStamp(dir);
-      if (!write.yaml) settleIntent(store, write.operation);
+      afterRename();
       return files;
     });
   } catch (error) {
-    let outcome: Outcome | undefined;
-    if (reserved)
-      try {
-        outcome = settleSecrets(store, write.operation);
-      } catch {
-        throw new SecretsUnsettled();
-      }
-    if (outcome === "applied") {
-      // Renamed (the marker is in the file) but the commit failed.
-      if (!write.yaml) return launchFilesStamp(dir);
-      throw new SecretsUnsettled();
+    if (!reserved) {
+      rmSync(temp, { force: true });
+      throw error;
     }
-    throw error;
-  } finally {
-    rmSync(temp, { force: true });
-    if (!reserved && backup !== null) rmSync(backup, { force: true });
+    if (!renamed) {
+      // Proved: the rename never happened. Record that, then drop the temp.
+      try {
+        store.uow.run(() => {
+          const [own] = intents(store, step.operation);
+          if (own) close(store, dir, own, "failed");
+        });
+      } catch {
+        throw new SecretsUnsettled(); // the temp file stays as the proof
+      }
+      rmSync(temp, { force: true });
+      rmSync(backup, { force: true });
+      throw error;
+    }
+    throw new SecretsUnsettled();
   }
-}
-
-type Outcome = "applied" | "undone" | "none";
-/**
- * Settle one intent from the marker (under the store's write lock): present,
- * the write is in effect and its audit rows stay (a secrets-only write also
- * gets its receipt); absent, it never took effect (or was taken back) and its
- * audit rows and pending receipt go. The file is never touched here.
- */
-function settleIntent(store: Store, operation: string): Outcome {
-  const row = store.database
-    .prepare("SELECT * FROM launch_secret_intents WHERE operation=?")
-    .get(operation);
-  if (!row) return "none";
-  let text: string | null = null;
-  try {
-    text = readPrivateText(String(row.path));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const applied = marked(text, operation);
-  if (applied) {
-    if (!row.yaml)
-      store.database
-        .prepare("UPDATE launch_web_changes SET installed=1 WHERE operation=?")
-        .run(operation);
-  } else {
-    store.database
-      .prepare("DELETE FROM launch_secret_changes WHERE operation=?")
-      .run(operation);
-    if (!row.yaml)
-      store.database
-        .prepare(
-          "DELETE FROM launch_web_changes WHERE operation=? AND installed=0",
-        )
-        .run(operation);
-  }
-  rmSync(String(row.temp_path), { force: true });
-  store.database
-    .prepare("DELETE FROM launch_secret_intents WHERE operation=?")
-    .run(operation);
-  return applied ? "applied" : "undone";
-}
-
-/** Settle one operation now. */
-export function settleSecrets(store: Store, operation: string): Outcome {
-  return store.uow.run(() => settleIntent(store, operation));
 }
 
 /**
- * The YAML step of a write that added brand-new keys failed: take back exactly
- * those keys, and only while they still hold the values this operation wrote.
- * Everything else in secrets.env (another writer's keys, edits) stays. The
- * marker goes too, so a later settle drops the audit rows of what was removed.
+ * Add brand-new keys (absent and unreferenced) ahead of a YAML publication.
+ * Nothing already in secrets.env changes, so the old launch.yaml reads exactly
+ * the same secrets whatever happens next.
  */
-export function withdrawSecrets(
+export function addSecrets(
   store: Store,
   dir: string,
-  operation: string,
-  values: Readonly<Record<string, string>>,
+  dataDir: string,
+  fence: LaunchFence,
+  step: Step & {
+    readonly values: Readonly<Record<string, string>>;
+    readonly superseded: readonly string[];
+    readonly yamlBefore: string;
+  },
 ) {
-  store.uow.run(() => {
-    const original = readSecretsText(dir);
-    if (!marked(original, operation)) {
-      settleIntent(store, operation);
-      return;
-    }
-    const before = original === null ? {} : parseSecretsText(original);
-    const ours = Object.keys(values).filter((k) => before[k] === values[k]);
-    const keep = pendingOperations(store);
-    keep.delete(operation);
-    replaceFile(
-      secretsPath(dir),
-      updateSecretsText(original, {}, ours, { keep }),
-    );
-    const audit = store.database.prepare(
-      "DELETE FROM launch_secret_changes WHERE operation=? AND key=?",
-    );
-    for (const key of ours) audit.run(operation, key);
-    store.database
-      .prepare("DELETE FROM launch_secret_intents WHERE operation=?")
-      .run(operation);
-  });
+  const before = step.original === null ? {} : parseSecretsText(step.original);
+  if (Object.keys(step.values).some((k) => Object.hasOwn(before, k)))
+    throw stale();
+  return replaceSecrets(
+    store,
+    dir,
+    dataDir,
+    fence,
+    step,
+    {
+      kind: "write",
+      keys: Object.keys(step.values),
+      old_keys: [...step.superseded],
+      yaml_before: sha256(step.yamlBefore),
+    },
+    updateSecretsText(step.original, step.values, []),
+    () => {},
+  );
 }
 
-/** The intent could not be settled now; the next read settles it. */
-export class SecretsUnsettled extends Error {}
+/** Remove keys with no YAML change; the secrets.env rename is the commit. */
+export function clearSecrets(
+  store: Store,
+  dir: string,
+  dataDir: string,
+  fence: LaunchFence,
+  step: Step & { readonly keys: readonly string[] },
+) {
+  replaceSecrets(
+    store,
+    dir,
+    dataDir,
+    fence,
+    step,
+    { kind: "clear", keys: [...step.keys], old_keys: [], yaml_before: null },
+    updateSecretsText(step.original, {}, step.keys),
+    () => {
+      const [own] = intents(store, step.operation);
+      if (own) close(store, dir, own, "applied");
+    },
+  );
+}
 
-/** Settle whatever an interrupted confirmation left behind (reads, start-up). */
-export function settleSecretIntents(store: Store) {
-  for (const operation of pendingOperations(store))
-    settleSecrets(store, operation);
+/** The recorded state of a confirmation without a settled receipt. */
+export function auditStatus(store: Store, operation: string) {
+  const row = store.database
+    .prepare(
+      "SELECT status FROM launch_secret_changes WHERE operation=? LIMIT 1",
+    )
+    .get(operation);
+  return row ? String(row.status) : null;
 }
 
 /** When each key was last written from the Web; keys set by hand have none. */
 export function secretTimes(store: Store) {
   const rows = store.database
     .prepare(
-      "SELECT key, MAX(created_at) AS at FROM launch_secret_changes GROUP BY key",
+      "SELECT key, MAX(created_at) AS at FROM launch_secret_changes WHERE status='applied' GROUP BY key",
     )
     .all();
   return new Map(rows.map((r) => [String(r.key), String(r.at)]));

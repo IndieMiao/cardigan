@@ -279,7 +279,7 @@ test("a failed write keeps the form but empties every secret input", async () =>
   expect(document.body.innerHTML).not.toContain(FAKE);
 });
 
-test("filling a key in use rides with no other edit: it is its own save", async () => {
+test("filling a key in use can ride with other edits; the server picks a fresh key", async () => {
   const api = harness();
   const table = await openModels(api.client);
   fireEvent.click(within(table).getByRole("button", { name: "relay" }));
@@ -295,23 +295,17 @@ test("filling a key in use rides with no other edit: it is its own save", async 
   fireEvent.change(password(group)[0] as HTMLInputElement, {
     target: { value: FAKE },
   });
-  expect(within(d).getByRole("alert").textContent).toContain(
-    "替换或清除已有密钥要单独保存",
-  );
-  expect(
-    within(d)
-      .getByRole("button", { name: "预览修改" })
-      .hasAttribute("disabled"),
-  ).toBe(true);
-  fireEvent.change(field(d, "名称"), { target: { value: "Relay" } });
   click(d, "预览修改");
   await within(d).findByRole("form", { name: "确认编辑 Provider" });
   expect(api.previewLaunchChange.mock.lastCall?.[1]).toEqual({
     op: "edit_provider",
     name: "relay",
-    fields: {},
+    fields: { name: "Relay 2" },
     secrets: { set: ["RELAY_TOKEN"] },
   });
+  expect(JSON.stringify(api.previewLaunchChange.mock.calls)).not.toContain(
+    FAKE,
+  );
 });
 
 test("replace and clear send key names only; leaving with a typed secret asks first", async () => {
@@ -330,9 +324,9 @@ test("replace and clear send key names only; leaving with a typed secret asks fi
   });
   expect(hidden.textContent).toContain("已隐藏");
   click(hidden, "移除");
-  // V-2713: a clear does not ride along with another edit.
+  // A clear does not ride along with another edit.
   expect(within(d).getByRole("alert").textContent).toContain(
-    "替换或清除已有密钥要单独保存",
+    "清除密钥要单独保存",
   );
   click(
     within(d).getByRole("group", {
@@ -628,4 +622,57 @@ test("a hidden value in a diff is shown as hidden", async () => {
   expect(confirm.textContent).toContain(
     "环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN已隐藏 → 未设置",
   );
+});
+
+test("the preview names the fresh key and the moved reference; a pending key is refused in place", async () => {
+  const api = harness({
+    previewLaunchChange: vi.fn(async (version: string) => ({
+      version,
+      preview_id: PREVIEW,
+      diff: [
+        {
+          field: "providers.relay.secret_env.ANTHROPIC_AUTH_TOKEN",
+          before: "RELAY_TOKEN",
+          after: "RELAY_TOKEN_22222222",
+        },
+        {
+          field: "secrets.RELAY_TOKEN_22222222",
+          before: "unset",
+          after: "new",
+        },
+      ],
+    })),
+  });
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  click(d, "编辑");
+  const group = within(d).getByRole("group", {
+    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  });
+  click(group, "填写");
+  fireEvent.change(password(group)[0] as HTMLInputElement, {
+    target: { value: FAKE },
+  });
+  click(d, "预览修改");
+  const confirm = await within(d).findByRole("form", {
+    name: "确认编辑 Provider",
+  });
+  expect(confirm.textContent).toContain(
+    "密钥引用 ANTHROPIC_AUTH_TOKENRELAY_TOKEN → RELAY_TOKEN_22222222",
+  );
+  expect(confirm.textContent).toContain(
+    "密钥 RELAY_TOKEN_22222222未设置 → 写入新密钥",
+  );
+  expect(confirm.textContent).not.toContain(FAKE);
+  click(d, "返回修改");
+  api.client.previewLaunchChange = vi.fn().mockRejectedValue(
+    new ApiError(400, "validation_failed", "x", false, {
+      field: "secret_pending",
+    }),
+  );
+  click(d, "预览修改");
+  expect(
+    await within(d).findByText(/正由另一次保存写入，暂时不能选用/u),
+  ).toBeTruthy();
 });

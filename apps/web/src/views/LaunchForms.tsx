@@ -1211,19 +1211,9 @@ export function ProviderForm({
   }
   if (Object.keys(env).length) fields.env = env;
   if (Object.keys(secretEnv).length) fields.secret_env = secretEnv;
-  // V-2713: with any other change, secrets.env may only gain brand-new keys;
-  // replacing or clearing a key already there or in use is its own save.
-  const inUse = (key: string) =>
-    keys.includes(key) ||
-    settings.providers.some(
-      (p) =>
-        p.secrets?.some((s) => s.key === key) ||
-        Object.values(p.secret_env ?? {}).includes(key),
-    );
-  if (
-    (creating || Object.keys(fields).length > 0) &&
-    (clear.length > 0 || set.some(inUse))
-  )
+  // Q-1094: a value always goes to a fresh key, so it can ride with other
+  // edits; clearing commits by itself and is its own save.
+  if ((creating || Object.keys(fields).length > 0) && clear.length > 0)
     problems.secrets ??= MIXED_SECRETS;
   const plan = {
     ...(set.length ? { set } : {}),
@@ -1277,6 +1267,7 @@ export function ProviderForm({
         "secret_env",
         "secrets",
         "secrets_mixed",
+        "secret_pending",
         "env",
       ]}
       reviewFacts={
@@ -1313,6 +1304,7 @@ export function ProviderForm({
               problems.secrets ??
               (server?.field === "secrets" ||
               server?.field === "secrets_mixed" ||
+              server?.field === "secret_pending" ||
               server?.field === "secret_env" ||
               server?.field === "env"
                 ? server.message
