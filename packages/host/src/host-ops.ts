@@ -35,6 +35,7 @@ import {
   type SessionActivity,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
+  workerInspectionTarget,
 } from "@cardigan/domain";
 import {
   type HostOpsToolOptions,
@@ -216,28 +217,29 @@ export class HostOpsService {
     const actor = context.identity.actor,
       project = actor.project_id;
     const { store, workerExecution } = this.options;
-    const { status, assignment, run, current } = store.uow.run((tx) => {
-      const effect = unwrap(
-        admitWorkerInspection(
-          loadCommandState(tx, project),
-          actor,
-          request,
-          {
-            clock: this.clock,
-            ids: tx.ids,
-          },
-          this.options.workerInspectionIntervalMs,
-        ),
-      );
-      persistEffect(tx, project, effect);
-      return effect.data;
-    });
+    const { status, assignment, run, current, platform, harness } =
+      store.uow.run((tx) => {
+        const effect = unwrap(
+          admitWorkerInspection(
+            loadCommandState(tx, project),
+            actor,
+            request,
+            {
+              clock: this.clock,
+              ids: tx.ids,
+            },
+            this.options.workerInspectionIntervalMs,
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return effect.data;
+      });
     if (status === "rate_limited")
       throw new ToolError(
         "illegal_transition",
         "Worker inspection rate limited; retry later",
       );
-    if (status !== "admitted" || !assignment)
+    if (status !== "admitted" || !assignment || !platform)
       throw new ToolError(
         "not_found",
         "Worker inspection target does not match",
@@ -261,21 +263,26 @@ export class HostOpsService {
       assignment,
       run,
       current,
+      platform,
+      harness,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {
-      unwrap(
-        checkHostOpsAccess(
-          loadCommandState(tx, project),
-          actor,
-          "host_ops_inspect_worker",
-        ),
-      );
-      return tx.assignments.get(project, assignment.id);
+      const state = loadCommandState(tx, project);
+      unwrap(checkHostOpsAccess(state, actor, "host_ops_inspect_worker"));
+      return workerInspectionTarget(state, request);
     });
     if (
-      fresh?.machine_id !== assignment.machine_id ||
-      JSON.stringify(fresh.runtime_ref) !==
+      fresh.assignment?.machine_id !== assignment.machine_id ||
+      fresh.assignment.external ||
+      fresh.platform !== platform ||
+      fresh.harness !== harness ||
+      fresh.current !== current ||
+      fresh.run?.id !== run?.id ||
+      fresh.run?.status !== run?.status ||
+      JSON.stringify(fresh.run?.launch_publication) !==
+        JSON.stringify(run?.launch_publication) ||
+      JSON.stringify(fresh.assignment.runtime_ref) !==
         JSON.stringify(assignment.runtime_ref) ||
       resolve().target?.fingerprint !== execution.target?.fingerprint
     )

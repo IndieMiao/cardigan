@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import {
   type Assignment,
   createHostOpsAssignment,
+  formatId,
   HOST_OPS_ROLE_TOOLS,
   type Run,
   type Runtime,
@@ -49,7 +50,7 @@ function worker(machine: string) {
     target,
   };
   const a = { id: "A-1", machine_id: machine, runtime_ref: null } as Assignment;
-  return { execution, a };
+  return { execution, a, target };
 }
 const sha = createHash("sha256")
   .update(
@@ -77,13 +78,24 @@ test.each(["local", "remote-worker"])(
         `let data='';process.stdin.on('data',s=>data+=s).on('end',()=>{const p=JSON.parse(data); if(p.assignment!=='A-1'||p.project!=='fixture'||p.root!=='/worker'||data.includes('/private/'))process.exit(3);console.log(JSON.stringify(${JSON.stringify({ ...reply, secrets: "do not copy" })}))})`,
       ),
     );
-    const result = await inspectWorker(execution, project, a, undefined, true);
-    expect(agentProcessCommand).toHaveBeenLastCalledWith(execution, [
-      "/usr/bin/python3",
-      "-IB",
-      "-c",
-      expect.stringContaining("terminal.read"),
-    ]);
+    const result = await inspectWorker(
+      execution,
+      project,
+      a,
+      undefined,
+      true,
+      "linux",
+    );
+    expect(agentProcessCommand).toHaveBeenLastCalledWith(
+      execution,
+      [
+        "/usr/bin/python3",
+        "-IB",
+        "-c",
+        expect.stringContaining("terminal.read"),
+      ],
+      { workerRuntimeDir: true },
+    );
     expect(result.helpers.map((x) => x.matches_release)).toEqual([
       true,
       false,
@@ -101,7 +113,7 @@ test("unreachable SSH, malformed, secret-bearing and oversized responses have on
   ]) {
     vi.mocked(agentProcessCommand).mockResolvedValueOnce(transport(code));
     await expect(
-      inspectWorker(execution, project, a, undefined, true),
+      inspectWorker(execution, project, a, undefined, true, "linux"),
     ).rejects.toThrow(
       /^Worker unreachable or read-only diagnostics unavailable$/u,
     );
@@ -118,6 +130,7 @@ test("unisolated local mode, external assignment, historical target drift and ad
         a,
         undefined,
         true,
+        "linux",
       ),
     () =>
       inspectWorker(
@@ -126,6 +139,7 @@ test("unisolated local mode, external assignment, historical target drift and ad
         a,
         undefined,
         true,
+        "linux",
       ),
     () =>
       inspectWorker(
@@ -134,8 +148,9 @@ test("unisolated local mode, external assignment, historical target drift and ad
         { ...a, external: true },
         undefined,
         true,
+        "linux",
       ),
-    () => inspectWorker(execution, "other", a, undefined, true),
+    () => inspectWorker(execution, "other", a, undefined, true, "linux"),
     () =>
       inspectWorker(
         execution,
@@ -147,11 +162,63 @@ test("unisolated local mode, external assignment, historical target drift and ad
           },
         } as Run,
         false,
+        "linux",
       ),
   ])
     await expect(fn()).rejects.toThrow();
   expect(agentProcessCommand).not.toHaveBeenCalled();
 });
+test.each([
+  ["queued", false, false],
+  ["cancelled", false, false],
+  ["dispatched", true, false],
+  ["running", true, true],
+  ["acked", true, true],
+] as const)(
+  "local %s Run only receives the resident session with proof",
+  async (status, current, live) => {
+    const { execution, a, target } = worker("local");
+    const generation = "cad0f00d-aaaa-4bbb-8000-aaaaaaaaaaaa";
+    const owner = {
+      ...a,
+      runtime_ref: {
+        target,
+        runtime_machine: "binding",
+        machine_id: "local",
+        terminal_ref: "binding/t2",
+        agent_name: "agent",
+        launch_generation: { run_id: unwrap(formatId("run", 1)), generation },
+      },
+    };
+    const run = {
+      id: "R-9",
+      status,
+      recovery_runtime: owner.runtime_ref,
+    } as Run;
+    const expected = {
+      live,
+      generation: live ? generation : null,
+      launch_run: live ? "R-1" : null,
+      terminal: live ? "t2" : null,
+      local: true,
+    };
+    vi.mocked(agentProcessCommand).mockResolvedValueOnce(
+      transport(
+        `let s='';process.stdin.on('data',x=>s+=x).on('end',()=>{const p=JSON.parse(s);if(!Object.entries(${JSON.stringify(expected)}).every(([k,v])=>p[k]===v))process.exit(2);console.log(JSON.stringify(${JSON.stringify(reply)}))})`,
+      ),
+    );
+    const result = await inspectWorker(
+      execution,
+      project,
+      owner,
+      run,
+      current,
+      "linux",
+    );
+    expect(result.session_launch_run_id).toBe(expected.launch_run);
+    expect(result.processes).toEqual(live ? [] : null);
+  },
+);
 test("collector: synthetic hc socket, generation, transcript, truncated command and redaction boundaries", () => {
   execFileSync(
     "/usr/bin/python3",

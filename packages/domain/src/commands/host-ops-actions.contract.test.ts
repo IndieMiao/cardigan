@@ -940,3 +940,35 @@ test("worker inspection is a project-scoped audited read, with a durable ten-sec
   ])
     expect(admitWorkerInspection(state, denied, p, ports()).ok).toBe(false);
 });
+
+test("inspection selects the unique occupant rather than a later queued Run", () => {
+  const s = base();
+  const [running] = s.runs;
+  if (!running) throw new Error("missing fixture Run");
+  const queued = { ...running, id: id("run", 9), status: "queued" as const };
+  for (const runs of [
+    [running, queued],
+    [queued, running],
+  ]) {
+    const state = { ...s, runs };
+    const p = { machine_id: "local", assignment_id: running.assignment_id };
+    expect(
+      value(admitWorkerInspection(state, caller, p, ports())).data,
+    ).toMatchObject({ run: running, current: true });
+    expect(
+      value(
+        admitWorkerInspection(
+          state,
+          caller,
+          { ...p, run_id: queued.id },
+          ports(),
+        ),
+      ).data,
+    ).toMatchObject({ run: queued, current: false });
+    expect(
+      value(
+        admitWorkerInspection({ ...state, runs: [queued] }, caller, p, ports()),
+      ).data,
+    ).toMatchObject({ run: undefined, current: true });
+  }
+});

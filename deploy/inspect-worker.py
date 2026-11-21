@@ -5,6 +5,7 @@ import hashlib
 import itertools
 import json
 import os
+import platform
 import pwd
 import re
 import signal
@@ -43,10 +44,16 @@ def read(fd, name, limit, tail=False):
         st = os.fstat(f.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (not tail and st.st_size > limit):
             raise ValueError()
-        if tail and st.st_size > limit:
+        if not tail:
+            return f.read(limit)
+        truncated = st.st_size > limit
+        if truncated:
             f.seek(-limit, os.SEEK_END)
-            f.readline(limit)
-        return f.read(limit)
+            f.readline(limit)  # first line may be partial
+        data = f.read(limit)
+        if os.fstat(f.fileno()).st_mtime_ns != st.st_mtime_ns:
+            raise ValueError()
+        return data, truncated
 
 
 def log_events(path):
@@ -60,9 +67,11 @@ def log_events(path):
         with os.scandir(fd) as entries:
             for entry in entries:
                 if budget <= 0:
-                    break
+                    raise ValueError()
                 budget -= 1
-                if depth and entry.is_dir(follow_symlinks=False):
+                if entry.is_dir(follow_symlinks=False):
+                    if not depth:
+                        raise ValueError()
                     child = os.open(entry.name, DIR, dir_fd=fd)
                     try:
                         visit(child, depth - 1)
@@ -79,7 +88,8 @@ def log_events(path):
             visit(folder, 4)
         result = []
         if newest:
-            for line in reversed(read(newest[1], newest[2], 131072, True).splitlines()):
+            data, truncated = read(newest[1], newest[2], 131072, True)
+            for line in reversed(data.splitlines()):
                 try:
                     item = json.loads(line)
                     kind, stamp = item['type'], item['timestamp']
@@ -89,7 +99,11 @@ def log_events(path):
                     continue
                 if len(result) == 8:
                     break
+            if truncated and len(result) < 8:
+                return None
         return result[::-1]
+    except (OSError, ValueError):
+        return None
     finally:
         if newest:
             os.close(newest[1])
@@ -105,8 +119,24 @@ def screen(text):
     return result
 
 
-def terminals(home, session, labels, pinned):
-    path = Path(home, '.local/state/herdr-core', session, session + '.sock')
+def socket_path(home, session, system):
+    if system == 'linux':
+        # The fixed SSH probe has a clean environment: the Linux user-runtime
+        # directory is /run/user/<uid>. hc also honors a private XDG runtime.
+        runtime = Path(os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}')
+        if runtime.is_dir():
+            st = runtime.lstat()
+            if runtime.resolve() != runtime or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                raise ValueError()
+            return runtime / 'herdr-core' / (session + '.sock')
+        # With no per-user runtime hc falls back to its private session state.
+    elif system != 'darwin':
+        raise ValueError()
+    return Path(home, '.local/state/herdr-core', session, session + '.sock')
+
+
+def terminals(home, session, labels, pinned, system):
+    path = socket_path(home, session, system)
     st = path.lstat()
     if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid() or path.resolve() != path:
         raise ValueError()
@@ -136,16 +166,28 @@ def terminals(home, session, labels, pinned):
                 if (not re.fullmatch(r't[0-9a-z]{1,12}', address) or (pinned and address != pinned)
                         or not all(t['labels'].get(k) == v for k, v in labels.items())):
                     continue
-                tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
-                rows = []
-                if t['state'] == 'live':
-                    for pid in {t.get('pid'), (t.get('foreground') or {}).get('pid')}:
-                        if type(pid) is int and pid > 0:
-                            rows.extend(process(pid))
-                after = rpc('terminal.get', dict(terminal=address))
-                if any(after.get(k) != t.get(k) for k in ('address', 'labels', 'created_ms', 'pid')):
+                def same_terminal(other):
+                    return all(other.get(k) == t.get(k) for k in ('address', 'labels', 'created_ms', 'pid', 'state'))
+                def pids(term):
+                    return {p for p in (term.get('pid'), (term.get('foreground') or {}).get('pid'))
+                            if type(p) is int and p > 0 and term['state'] == 'live'}
+                def observe(pid):
+                    return native['identity'](session, pid, address, os.getpgid(pid))
+                before = {p: optional(lambda: observe(p)) for p in pids(t)}
+                # Bracket attribution with a native birth identity on both sides.
+                # The first confirmation occurs *after* recording process births.
+                confirmed = rpc('terminal.get', dict(terminal=address)) if before else t
+                if not same_terminal(confirmed):
                     continue
-                processes.extend(rows)
+                tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
+                rows = {p: optional(lambda: process(p)) for p in pids(confirmed) & before.keys()
+                        if before[p] and before[p]['uid'] == os.getuid()}
+                after = rpc('terminal.get', dict(terminal=address))
+                if not same_terminal(after):
+                    continue
+                for p in pids(after) & rows.keys():
+                    if rows[p] and optional(lambda: observe(p)) == before[p]:
+                        processes.extend(rows[p])
                 activity = (after.get('status') or {}).get('state')
                 result.append(dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail))
                 if len(result) == 4:
@@ -182,21 +224,25 @@ def main(c):
         raise ValueError()
     if user.pw_name in ('root', 'ciadmin') or grp.getgrgid(user.pw_gid).gr_name in ('root', 'sudo', 'admin', 'wheel', 'docker'):
         raise ValueError()
-    native['isolation_groups'](user, native['process_groups']())
     project, assignment, generation = c['project'], c['assignment'], c['generation']
+    if platform.system().lower() != c['platform'] or user.pw_gid != c['gid']:
+        raise ValueError()
+    native['project_account'](dict(account=c['user'], uid=os.getuid(), home=user.pw_dir,
+                                   root=c['root'], project=project))
     base = Path(c['root'], 'runs', project, assignment)
-    session_dir = base / 'sessions' / generation if generation else base
+    published = generation and not c['local']
+    session_dir = base / 'sessions' / generation if published else base
     labels = dict(cardigan='1', project=project, assignment=assignment)
     if c['launch_run']:
         labels['run'] = c['launch_run']
     if generation:
         labels['generation'] = generation
-    hc = optional(lambda: terminals(user.pw_dir, c['session'], labels, c['terminal']))
+    hc = optional(lambda: terminals(user.pw_dir, c['session'], labels, c['terminal'], c['platform'])) if c['live'] else None
     # The CLI can outlive a missing core. Independently identify only its
     # journaled pid (boot + birth + uid + process group), before AND after ps.
     processes = hc[1] if hc else None
     saved = c['process']
-    if saved and saved['machine'] == c['target'] and saved['terminal'] == generation and saved['uid'] == os.getuid():
+    if c['live'] and saved and saved['machine'] == c['target'] and saved['terminal'] == generation and saved['uid'] == os.getuid():
         def observed():
             return native['identity'](saved['machine'], saved['pid'], generation, saved['process_group'])
         if observed() == saved:
@@ -210,9 +256,9 @@ def main(c):
             if identity != dict(version=1, project=project, assignment=assignment, run=c['launch_run'], generation=generation, target=c['target']):
                 raise ValueError()
             return [k for k in MARKS if optional(lambda: stat.S_ISREG(os.stat(k, dir_fd=d, follow_symlinks=False).st_mode))]
-    marks = optional(markers) if generation else None
+    marks = optional(markers) if published else None
     logs = {'codex': 'codex/sessions', 'claude-code': 'claude/projects', 'pi': 'pi/sessions'}.get(c['harness'])
-    events = optional(lambda: log_events(session_dir / logs)) if logs and (marks or c['legacy']) else None
+    events = optional(lambda: log_events(session_dir / logs)) if c['live'] and logs and (marks or (c['local'] and hc and hc[0])) else None
     def digest(path):
         with directory(Path(path).parent) as fd:
             return hashlib.sha256(read(fd, Path(path).name, 2*1024*1024)).hexdigest()
