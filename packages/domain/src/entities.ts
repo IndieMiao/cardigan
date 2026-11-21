@@ -85,6 +85,7 @@ export const toolNames = [
   "triage_human_action",
   "complete_host_action",
   "host_ops_read_diagnostics",
+  "host_ops_inspect_worker",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
