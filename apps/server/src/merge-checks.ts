@@ -100,6 +100,7 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
+import { recordCheckFlakes } from "./check-flake-ledger.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
   CandidatePushNotStarted,
@@ -1877,6 +1878,16 @@ export class MergeChecks {
         ? await log.finish(
             result,
             executedOn?.type === "github" ? bound : undefined,
+            bound
+              ? recordCheckFlakes(
+                  this.options.store,
+                  task.project.project_id as ProjectId,
+                  task.plan.card_id,
+                  check.attempt_id,
+                  this.options.clock.now(),
+                  result.recovered,
+                )
+              : undefined,
           )
         : {
             ...result,

@@ -71,6 +71,7 @@ describe("real-hc test prerequisite", () => {
       writeFileSync(
         join(root, "package.json"),
         JSON.stringify({
+          packageManager: manifest.packageManager,
           scripts: { "test:e2e": manifest.scripts["test:e2e"] },
         }),
       );

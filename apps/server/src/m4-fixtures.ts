@@ -137,6 +137,8 @@ export function m4Fixture(
     readonly clock?: Clock;
     /** Share a real database for cross-project scheduling tests. */
     readonly dataDir?: string;
+    /** Single-connection tests that do not exercise on-disk recovery. */
+    readonly memoryDatabase?: boolean;
     readonly reviewer_worktree?: "none" | "readonly";
     readonly pm_worktree?: "none" | "readonly";
   } = {},
@@ -148,7 +150,11 @@ export function m4Fixture(
   const clock: Clock = options.clock ?? {
     now: () => new Date(time).toISOString(),
   };
-  const store = Store.open({ dataDir, clock });
+  const store = Store.open({
+    dataDir,
+    clock,
+    ...(options.memoryDatabase ? { dbPath: ":memory:" } : {}),
+  });
   store.createProject({ id: project_id, name: "M4 fixture" });
   const role = (
     role_id: string,
