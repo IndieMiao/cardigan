@@ -48,7 +48,8 @@ export function storyGraph(
     title: story.title,
     status: story.status,
     ...(story.resolution ? { resolution: story.resolution } : {}),
-    satisfied: false,
+    // The story is no one's prerequisite here: show its real state, never 待核.
+    satisfied: story.status === "done",
   };
   const nodes: DependencyCard[] = [
     self,

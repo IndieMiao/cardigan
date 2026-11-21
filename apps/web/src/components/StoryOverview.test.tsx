@@ -349,3 +349,212 @@ test("an ordinary card keeps its goal section and shows no story frame", async (
     expect(screen.queryByRole("region", { name })).toBeNull();
   expect(cards).not.toHaveBeenCalled();
 });
+
+const listPage = (cards: CardListItem[]) => ({
+  project_id: "p-1",
+  filter: "all" as const,
+  cards,
+  counts: { total: cards.length, needs_me: 0, agent: 0 },
+});
+const nodeText = (id: string) =>
+  document.querySelector(`section[aria-label="子卡进度"] [data-node="${id}"]`)
+    ?.textContent ?? "";
+
+test("a child's own event refreshes the open story; an unrelated card's does not", async () => {
+  let status: CardStatus = "in_progress";
+  let events: string[] = [];
+  const card = vi.fn(async () =>
+    storyDetail({
+      children: children.map((c) => (c.id === "C-3" ? { ...c, status } : c)),
+    }),
+  );
+  const client = fakeClient({ card, cards: async () => listPage(rows) });
+  // Like useProjectStream: count the events of the card or any related card.
+  const props = () => ({
+    client,
+    projectId: "p-1",
+    cardId: "C-1",
+    cardRevision: (id: string, related: readonly string[]) =>
+      events.filter((e) => e === id || related.includes(e)).length,
+  });
+  const { rerender } = render(<CardDetailPage {...props()} />);
+  await waitFor(() => expect(nodeText("C-3")).toContain("进行中"));
+  expect(card).toHaveBeenCalledTimes(1);
+
+  events = ["C-99"];
+  rerender(<CardDetailPage {...props()} />);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(card).toHaveBeenCalledTimes(1);
+
+  status = "review";
+  events = ["C-99", "C-3"];
+  rerender(<CardDetailPage {...props()} />);
+  await waitFor(() => expect(nodeText("C-3")).toContain("审核中"));
+  expect(card).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("审核中 1")).toBeTruthy();
+});
+
+test("a summary outside the loaded timeline is read by its anchor alone", async () => {
+  const head = storyDetail(
+    { story: { discussion_rounds: 0, summary_entry_id: "C-1#9" } },
+    {
+      timeline: [timelineEntry({ id: "C-1#99", event_seq: 99 })],
+      counts: { timeline: 99, deliveries: 0, reviews: 0, open_decisions: 0 },
+    },
+  );
+  const card = vi.fn(
+    async (_p: string, _id: string, options?: { at?: string }) =>
+      options?.at === "entry-C-1#9"
+        ? {
+            ...head,
+            timeline: [
+              timelineEntry({
+                id: "C-1#9",
+                event_seq: 9,
+                author_display: "林黛玉",
+                body: "子卡都已结束，与原话一致。",
+              }),
+            ],
+          }
+        : head,
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({ card, cards: async () => listPage(rows) })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  await within(summary).findByText("子卡都已结束，与原话一致。");
+  expect(within(summary).getByText("林黛玉")).toBeTruthy();
+  expect(card).toHaveBeenCalledWith("p-1", "C-1", {
+    at: "entry-C-1#9",
+    limit: 1,
+  });
+  // The page's own timeline read keeps its window; the reader is not moved.
+  expect(card.mock.calls[0]?.[2]).toEqual({ limit: 20 });
+  expect(window.location.hash).toBe("");
+});
+
+test("a failed summary read says so and retries", async () => {
+  let fail = true;
+  const head = storyDetail(
+    { story: { discussion_rounds: 0, summary_entry_id: "C-1#9" } },
+    { timeline: [] },
+  );
+  const card = vi.fn(
+    async (_p: string, _id: string, options?: { at?: string }) => {
+      if (!options?.at) return head;
+      if (fail) throw new Error("网络断开");
+      return {
+        ...head,
+        timeline: [
+          timelineEntry({ id: "C-1#9", event_seq: 9, body: "总结正文" }),
+        ],
+      };
+    },
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({ card, cards: async () => listPage(rows) })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  expect((await within(summary).findByRole("alert")).textContent).toContain(
+    "读取总结失败",
+  );
+  fail = false;
+  fireEvent.click(within(summary).getByRole("button", { name: "重试" }));
+  await within(summary).findByText("总结正文");
+  expect(within(summary).queryByRole("alert")).toBeNull();
+});
+
+test("refresh failures of attachments and child links keep the last result and offer a retry", async () => {
+  let fail = false;
+  const detail = {
+    ...storyDetail(),
+    overview: {
+      work_count: 0,
+      completed_work_count: 0,
+      verifiers: [],
+      attachment_count: 1,
+      waiting_delivery: [],
+      conclusion_reviews: [],
+    },
+  };
+  const cardPanel = vi.fn(async () => {
+    if (fail) throw new Error("附件服务断开");
+    return { attachments: [attachment({})] };
+  });
+  const cards = vi.fn(async () => {
+    if (fail) throw new Error("列表服务断开");
+    return listPage(rows);
+  });
+  const client = fakeClient({ card: async () => detail, cardPanel, cards });
+  const { rerender } = render(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={0}
+    />,
+  );
+  const request = await screen.findByRole("region", { name: "原始需求" });
+  const progress = screen.getByRole("region", { name: "子卡进度" });
+  await waitFor(() =>
+    expect(request.querySelector("#attachment-F-1")).not.toBeNull(),
+  );
+  await waitFor(() =>
+    expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull(),
+  );
+
+  fail = true;
+  rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  expect((await within(request).findByRole("alert")).textContent).toContain(
+    "读取附件失败：附件服务断开",
+  );
+  expect((await within(progress).findByRole("alert")).textContent).toContain(
+    "读取子卡依赖失败：列表服务断开",
+  );
+  // The last good result stays on screen beside the error.
+  expect(request.querySelector("#attachment-F-1")).not.toBeNull();
+  expect(progress.querySelector('[data-edge="C-3>C-4"]')).not.toBeNull();
+
+  fail = false;
+  fireEvent.click(within(request).getByRole("button", { name: "重试" }));
+  fireEvent.click(within(progress).getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(within(request).queryByRole("alert")).toBeNull());
+  await waitFor(() => expect(within(progress).queryByRole("alert")).toBeNull());
+  expect(cardPanel).toHaveBeenCalledTimes(3);
+  expect(cards).toHaveBeenCalledTimes(3);
+});
+
+test("a story the person marked done shows 已完成 on its node, never 待核", async () => {
+  const kids = children.map((c) => ({ ...c, status: "done" as const }));
+  const detail = storyDetail({ children: kids, summary: true });
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => ({
+          ...detail,
+          card: { ...detail.card, status: "done", resolution: "done" },
+        }),
+        cards: async () => listPage(rows),
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  await waitFor(() => expect(nodeText("C-1")).toContain("已完成"));
+  expect(nodeText("C-1")).not.toContain("待核");
+});

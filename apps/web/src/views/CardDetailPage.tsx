@@ -305,6 +305,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...(data.card.dependency?.graph?.nodes ?? []).map(
               (card) => card.id,
             ),
+            // A story's progress and graph follow its children's own events.
+            ...(data.card.story_progress?.children ?? []).map(
+              (card) => card.id,
+            ),
           ]),
       ),
     ].sort();

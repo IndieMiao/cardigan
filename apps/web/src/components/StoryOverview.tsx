@@ -99,8 +99,10 @@ export function StoryOverview({
       <StoryDiscussionFacts detail={detail} onShowTimeline={onShowTimeline} />
       <StorySummary
         detail={detail}
+        client={client}
         projectId={projectId}
         cardId={cardId}
+        revision={revision}
         onLocate={onLocate}
       />
     </>
@@ -116,18 +118,21 @@ export type StoryAttachmentsState = {
 
 function StoryAttachments({ state }: { state: StoryAttachmentsState }) {
   if (!state.count) return <EmptyState>没有附件</EmptyState>;
-  if (state.attachments)
-    return <AttachmentGrid attachments={state.attachments} />;
-  if (state.error)
-    return (
-      <p>
-        <span role="alert">读取附件失败：{state.error}</span>{" "}
-        <Button variant="secondary" onClick={state.retry}>
-          重试
-        </Button>
-      </p>
-    );
-  return <Skeleton />;
+  return (
+    <>
+      {state.error && (
+        <RetryLine
+          message={`读取附件失败：${state.error}`}
+          {...(state.retry ? { retry: state.retry } : {})}
+        />
+      )}
+      {state.attachments ? (
+        <AttachmentGrid attachments={state.attachments} />
+      ) : (
+        !state.error && <Skeleton />
+      )}
+    </>
+  );
 }
 
 /**
@@ -218,13 +223,11 @@ function StoryChildren({
               图中除需求卡外都是它的子卡。虚线从需求卡连到最先开始的子卡；带箭头的实线是子卡之间的依赖，箭头指向后做的卡。
             </DependencyGraphHelp>
           </DependencyGraphFacts>
-          {rows.error && !rows.data && (
-            <DependencyGraphFacts>
-              <span role="alert">读取子卡依赖失败：{rows.error}</span>
-              <Button variant="secondary" onClick={rows.reload}>
-                重试
-              </Button>
-            </DependencyGraphFacts>
+          {rows.error && (
+            <RetryLine
+              message={`读取子卡依赖失败：${rows.error}`}
+              retry={rows.reload}
+            />
           )}
           {rows.data || rows.error ? (
             <StoryChildGraph
@@ -382,20 +385,36 @@ function StoryDiscussionFacts({
 
 function StorySummary({
   detail,
+  client,
   projectId,
   cardId,
+  revision,
   onLocate,
 }: {
   detail: CardDetail;
+  client: CardiganClient;
   projectId: string;
   cardId: string;
+  revision: number;
   onLocate: ((anchor: string) => void) | undefined;
 }) {
   const id = detail.card.story?.summary_entry_id;
-  const entry = id
+  const anchor = `entry-${id}`;
+  const loaded = id
     ? detail.timeline.find((e) => e.id === id && !e.retracted)
     : undefined;
-  const anchor = `entry-${id}`;
+  // An older summary sits outside the loaded timeline window: read just that
+  // entry by its anchor, apart from the page's own timeline and position.
+  const load = useCallback(async () => {
+    const read = await client.card(projectId, cardId, {
+      at: anchor,
+      limit: 1,
+      ...(client.cardPanel ? { section: "overview" as const } : {}),
+    });
+    return read.timeline.find((e) => e.id === id && !e.retracted) ?? null;
+  }, [client, projectId, cardId, anchor, id]);
+  const read = useResource(load, revision, !!id && !loaded);
+  const entry = loaded ?? read.data ?? undefined;
   return (
     <section className="card-purpose" aria-label="对照总结">
       <h2>对照总结</h2>
@@ -426,9 +445,37 @@ function StorySummary({
               </a>
             </span>
           </DependencyGraphFacts>
-          {entry && <Markdown body={entry.body} />}
+          {!loaded && read.error && (
+            <RetryLine
+              message={`读取总结失败：${read.error}`}
+              retry={read.reload}
+            />
+          )}
+          {entry ? (
+            <Markdown body={entry.body} />
+          ) : (
+            !read.error && read.pending && <Skeleton />
+          )}
         </>
       )}
     </section>
+  );
+}
+
+/** A failed read: what failed and a retry, beside whatever was shown before. */
+function RetryLine({
+  message,
+  retry,
+}: {
+  message: string;
+  retry?: () => void;
+}) {
+  return (
+    <DependencyGraphFacts>
+      <span role="alert">{message}</span>
+      <Button variant="secondary" onClick={retry}>
+        重试
+      </Button>
+    </DependencyGraphFacts>
   );
 }
