@@ -788,6 +788,7 @@ function CardContent({
               revision={revision}
               onLocate={onLocate}
               onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
+              onSaved={reload}
             />
           ) : (
             <section className="card-purpose" aria-label="目标和验收标准">

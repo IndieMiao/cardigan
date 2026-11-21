@@ -86,6 +86,7 @@ export const toolNames = [
   "triage_human_action",
   "complete_host_action",
   "host_ops_read_diagnostics",
+  "host_ops_inspect_worker",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
@@ -161,6 +162,13 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly parent_card_id?: CardId;
+  /** C-503: the story proposal version and child number this card was opened from. */
+  readonly story_source?: {
+    readonly card_id: CardId;
+    readonly version: number;
+    readonly entry_id: TimelineEntryId;
+    readonly number: number;
+  };
   /** Stamped only for the built-in story workflow, not existing custom templates. */
   readonly story?: StoryState;
   readonly related_cards: readonly CardId[];

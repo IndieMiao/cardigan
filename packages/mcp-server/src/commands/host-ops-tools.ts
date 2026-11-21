@@ -1,4 +1,7 @@
-import type { HostOpsExecutionTool } from "@cardigan/domain";
+import type {
+  HostOpsExecutionTool,
+  WorkerInspectionRequest,
+} from "@cardigan/domain";
 import { z } from "zod";
 import { ToolError } from "../errors.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
@@ -7,6 +10,10 @@ import { id, idempotency_key } from "./schemas.js";
 /** Host implementation is injected; MCP never imports host/CLI or touches terminals. */
 export interface HostOpsToolOptions {
   readonly hostOps?: {
+    inspectWorker(
+      context: ToolContext,
+      request: WorkerInspectionRequest,
+    ): Promise<unknown> | unknown;
     read(context: ToolContext, project?: string): unknown;
     execute(
       context: ToolContext,
@@ -31,6 +38,20 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
   };
   const reason = z.string().trim().min(1);
   return [
+    defineTool({
+      name: "host_ops_inspect_worker",
+      description:
+        "Inspect a numbered session on its registered worker, read-only. Returns bounded, redacted evidence only.",
+      input: z.strictObject({
+        machine_id: z
+          .string()
+          .max(64)
+          .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u),
+        assignment_id: id("assignment"),
+        run_id: id("run").optional(),
+      }),
+      handler: (p, c) => host().inspectWorker(c, p),
+    }),
     defineTool({
       name: "host_ops_read_diagnostics",
       description: "Read project session health and pending host operations.",

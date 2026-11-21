@@ -270,7 +270,6 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
   );
   const wakeOptions = vi.mocked(runtime.wake).mock.calls[0]?.[2];
   expect(wakeOptions).toEqual({
-    if_idle: true,
     before_send: expect.any(Function),
   });
   expect(f.state().runs).toHaveLength(2);
@@ -323,6 +322,63 @@ test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
     });
   },
 );
+
+test("guard waits survive restart and hand only overdue notes to host ops", async () => {
+  const ops = standingSession("host_ops");
+  const run = f.session(target.assignment, false);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "blocked", observed_seq: 3 },
+  });
+  const tick = () =>
+    new Dispatcher({ ...options, dispatchTimeoutMs: 1000 }).tick();
+  comment("old");
+  await tick();
+  const old = ownNotes().find((n) => n.kind === "comment");
+  if (!old) throw Error("missing unread comment");
+  const facts = (type: string) =>
+    f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === type &&
+          (e.payload as { run_id: string }).run_id === run.id,
+      );
+  expect(facts("bell_wake_deferred")).toMatchObject([
+    {
+      card_id: target.card.id,
+      payload: {
+        reason: "continuing_turn",
+        assignment_id: target.assignment.id,
+        activity_source: "alive/blocked",
+        notification_ids: [old.id],
+      },
+    },
+  ]);
+  f.advance(999);
+  comment("new");
+  await tick();
+  expect(facts("bell_wake_escalated")).toHaveLength(0);
+  f.advance(1);
+  await tick();
+  await tick();
+  expect(ownNotes().find((n) => n.id === old.id)?.status).toBe(
+    "needs_attention",
+  );
+  expect(
+    ownNotes().find((n) => n.id !== old.id && n.kind === "comment")?.status,
+  ).toBe("pending");
+  const alerts = facts("bell_wake_escalated");
+  expect(alerts).toMatchObject([
+    {
+      payload: { notification_ids: [old.id], activity_source: "alive/blocked" },
+    },
+  ]);
+  expect(
+    f.store.listNotifications({ project_id: f.project, assignment_id: ops.id }),
+  ).toContainEqual(expect.objectContaining({ event_id: alerts[0]?.id }));
+  expect(runtime.release).not.toHaveBeenCalled();
+});
 
 test.each(["codex", "claude-code"] as const)(
   "C-475: a no-OSC %s Run that never finishes hands its unread note to a followup only after confirmed exit",
@@ -1798,7 +1854,12 @@ test("a prequeued Run sorts by its original trigger, not by the later notificati
   expect(readRunQueue(f.store)[0]?.project_id).toBe(other.project);
 });
 
-test("C-255: a standing decision records the old Run ending before the next dispatch without an extra bell", async () => {
+test("C-255: a standing decision records the old Run ending before the next dispatch without an extra bell", () =>
+  checkStandingDecision(false));
+test("a guarded first send after a standing decision starts its refusal deadline in the slot", () =>
+  checkStandingDecision(true));
+
+async function checkStandingDecision(refuses: boolean) {
   const extra = f.create();
   const { work_item_id: _workItem, ...base } = extra.assignment;
   const pm: Assignment = {
@@ -1891,16 +1952,49 @@ test("C-255: a standing decision records the old Run ending before the next disp
   const original = f.state().runs.find((r) => r.id === previous.id);
   await dispatcher.tick();
   expect(runtime.wake).not.toHaveBeenCalled(); // blocking_decision returned, CLI still working.
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "bell_wake_deferred",
+      payload: expect.objectContaining({
+        run_id: previous.id,
+        reason: "system_finished_turn",
+        activity_source: "alive/working",
+      }),
+    }),
+  );
   vi.mocked(runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "done", observed_seq: 2 },
   });
+  if (refuses)
+    vi.mocked(runtime.wake).mockResolvedValueOnce({
+      ok: true,
+      value: { sent: false, withdrawn: true },
+    });
   await dispatcher.tick();
   const next = f
     .state()
     .runs.find((r) => r.assignment_id === pm.id && r.id !== previous.id);
   expect(next?.status).toBe("dispatched");
+  expect(vi.mocked(runtime.wake).mock.calls[0]?.[2]?.observed_guard).toEqual({
+    state: "done",
+  });
   expect(runtime.wake).toHaveBeenCalledTimes(1);
+  if (refuses) {
+    expect(next?.bell_delivery?.refused_attempt_id).toBeTruthy();
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "bell_wake_deferred",
+        created_at: f.clock.now(),
+        payload: expect.objectContaining({
+          run_id: next?.id,
+          reason: "first_write_guard",
+          activity_source: "alive/done (send withdrawn)",
+        }),
+      }),
+    );
+    return;
+  }
   expect(endings()).toHaveLength(1);
   expect(f.state().runs.find((r) => r.id === previous.id)).toEqual(original);
   expect(() =>
@@ -1922,7 +2016,7 @@ test("C-255: a standing decision records the old Run ending before the next disp
   await dispatcher.tick();
   expect(runtime.wake).toHaveBeenCalledTimes(1);
   expect(f.state().runs.find((r) => r.id === next?.id)).toEqual(next);
-});
+}
 
 function standingSession(role_id: string, standing_mode?: "office" | "ops") {
   const extra = f.create();
@@ -1942,6 +2036,94 @@ function standingSession(role_id: string, standing_mode?: "office" | "ops") {
   f.session(owner);
   return owner;
 }
+
+test.each(["pm", "host_ops"])(
+  "standing %s: wake after an explicit finish and hand off a later no-Run stall",
+  async (role) => {
+    const owner = standingSession(role, role === "pm" ? "ops" : undefined);
+    const ops = role === "pm" ? standingSession("host_ops") : undefined;
+    const notify = () => {
+      const entry = comment();
+      const event = f
+        .state()
+        .events.find(
+          (e) => e.card_id === target.card.id && e.seq === entry.event_seq,
+        );
+      if (!event) throw Error("missing fixture comment");
+      return f.store.recordNotification({
+        project_id: f.project,
+        event_id: event.id,
+        card_id: event.card_id,
+        seq: event.seq,
+        kind: "comment",
+        recipient: { kind: "assignment", assignment_id: owner.id },
+      }).notification;
+    };
+    let probeFails = false;
+    vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+      ok: true,
+      value: {
+        process:
+          probeFails && ref.terminal_ref === f.refFor(owner).terminal_ref
+            ? "unknown"
+            : "alive",
+        agent: "blocked",
+        observed_seq: 1,
+      },
+    }));
+    const tick = () =>
+      new Dispatcher({ ...options, dispatchTimeoutMs: 1000 }).tick();
+    const ready = notify();
+    await tick();
+    const read = (id: string) =>
+      f.store.listNotifications({ project_id: f.project, ids: [id] })[0];
+    expect(read(ready.id)?.status).toBe("belled");
+    const run = read(ready.id)?.run_id;
+    if (!run) throw Error("missing standing followup");
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: run }, p),
+      f.actorFor(owner),
+    );
+    finish(owner);
+    probeFails = true;
+    const waiting = notify();
+    await tick();
+    f.advance(999);
+    await tick();
+    expect(read(waiting.id)?.status).toBe("pending");
+    f.advance(1);
+    await tick();
+    await tick();
+    expect(read(waiting.id)?.status).toBe("needs_attention");
+    const alerts = f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "standing_inbox_stalled" &&
+          (e.payload as { assignment_id: string }).assignment_id === owner.id,
+      );
+    expect(alerts).toMatchObject([
+      {
+        payload: {
+          reason: "pending_without_run",
+          notification_ids: [waiting.id],
+        },
+      },
+    ]);
+    expect(f.store.listNotifications({ project_id: f.project })).toContainEqual(
+      expect.objectContaining({
+        event_id: alerts[0]?.id,
+        recipient: ops
+          ? { kind: "assignment", assignment_id: ops.id }
+          : { kind: "needs_you" },
+      }),
+    );
+    expect(runtime.release).not.toHaveBeenCalledWith(
+      f.refFor(owner),
+      expect.anything(),
+    );
+  },
+);
 
 test.each([
   ["pm", "office", 0],

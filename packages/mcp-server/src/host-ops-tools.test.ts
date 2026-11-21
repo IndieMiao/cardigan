@@ -10,6 +10,7 @@ import { acceptingVerifierFor, NOW, project_id } from "./test-support.js";
 
 let store: Store, server: RunningServer;
 const clients: Client[] = [];
+const inspectWorker = vi.fn(() => ({}));
 const read = vi.fn(() => ({ runs: [] }));
 const execute = vi.fn(() => ({ status: "pending" }));
 beforeEach(async () => {
@@ -21,7 +22,7 @@ beforeEach(async () => {
     port: 0,
     deliveryVerifier: acceptingVerifierFor,
     log: memoryLogger().log,
-    hostOps: { read, execute },
+    hostOps: { read, execute, inspectWorker },
     acknowledgeRuns: false,
   });
 });
@@ -70,6 +71,7 @@ async function client(
   return { c, assignment };
 }
 const args = {
+  host_ops_inspect_worker: { machine_id: "local", assignment_id: "A-2" },
   host_ops_read_diagnostics: {},
   host_ops_restart_assignment: { assignment_id: "A-2", reason: "Recover" },
   host_ops_cancel_run: { run_id: "R-1", reason: "Stop" },
@@ -77,7 +79,7 @@ const args = {
   host_ops_restart_standing_pm: { assignment_id: "A-3", reason: "Refresh" },
 };
 
-test("all five tools register and dispatch only the authenticated host_ops identity", async () => {
+test("all host tools register and dispatch only the authenticated host_ops identity", async () => {
   const { c } = await client();
   expect((await c.listTools()).tools.map((t) => t.name).sort()).toEqual(
     [...HOST_OPS_TOOLS].sort(),
@@ -85,7 +87,10 @@ test("all five tools register and dispatch only the authenticated host_ops ident
   for (const name of HOST_OPS_TOOLS) {
     const result = await c.callTool({
       name,
-      arguments: { ...args[name], idempotency_key: name },
+      arguments:
+        name === "host_ops_inspect_worker"
+          ? args[name]
+          : { ...args[name], idempotency_key: name },
     });
     expect(result.isError).not.toBe(true);
   }
@@ -131,7 +136,10 @@ test("PM cannot guess operational tools even with malformed legacy token metadat
       (
         await c.callTool({
           name,
-          arguments: { ...args[name], idempotency_key: name },
+          arguments:
+            name === "host_ops_inspect_worker"
+              ? args[name]
+              : { ...args[name], idempotency_key: name },
         })
       ).isError,
     ).toBe(true);
@@ -204,4 +212,24 @@ test("callers cannot supply upstream probe evidence or a recovery incident", asy
       idempotency_key: "untrusted-evidence",
     },
   );
+});
+
+test.each([
+  { path: "/tmp" },
+  { command: "ps" },
+  { machine_id: "../other" },
+  { assignment_id: "A-1/suffix" },
+  { run_id: "R-1;ls" },
+])("worker inspection rejects untrusted selectors %j", async (override) => {
+  const { c } = await client();
+  inspectWorker.mockClear();
+  expect(
+    (
+      await c.callTool({
+        name: "host_ops_inspect_worker",
+        arguments: { ...args.host_ops_inspect_worker, ...override },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(inspectWorker).not.toHaveBeenCalled();
 });
