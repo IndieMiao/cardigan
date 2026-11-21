@@ -342,7 +342,8 @@ export function SettingsMarkdown({
 
 /**
  * A question asked above a drawer before an action (`--ui-layer-confirm`).
- * Closing it (Esc, overlay) is the safe answer, `onCancel`.
+ * Closing it (Esc, overlay) is the safe answer, `onCancel`. Focus goes back
+ * to what opened it, or to `fallbackFocus` when that is gone.
  */
 export function SettingsConfirmDialog({
   open,
@@ -354,6 +355,7 @@ export function SettingsConfirmDialog({
   destructive = false,
   onCancel,
   onConfirm,
+  fallbackFocus,
 }: {
   open: boolean;
   title: string;
@@ -365,7 +367,9 @@ export function SettingsConfirmDialog({
   destructive?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  fallbackFocus?: () => HTMLElement | null;
 }) {
+  const opener = useRef<HTMLElement | null>(null);
   return (
     <Dialog
       open={open}
@@ -376,6 +380,20 @@ export function SettingsConfirmDialog({
       <DialogContent
         className={cn(styles.dialog, styles.confirm)}
         overlayClassName={styles.confirm}
+        onOpenAutoFocus={() => {
+          // Still the control that opened it: focus moves in after this.
+          opener.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const target = opener.current?.isConnected
+            ? opener.current
+            : fallbackFocus?.();
+          target?.focus();
+        }}
       >
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription className={describe ? undefined : "visually-hidden"}>

@@ -241,7 +241,7 @@ try {
       // Lost check reply.
       await click("[role=dialog]", "立即检查");
       await until(
-        baseline ? has("检查没有开始") : has("上次检查请求结果未知："),
+        baseline ? has("检查没有开始") : has("上次检查请求结果未知"),
       );
       await scene("lost-check");
       if (!baseline) {
