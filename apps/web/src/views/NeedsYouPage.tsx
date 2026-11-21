@@ -1650,6 +1650,33 @@ function HumanAction({
       )}
       <section className="needs-steps" aria-label={`${item.id} 步骤`}>
         <Markdown body={item.instructions} />
+        {item.terminal && (
+          <>
+            <p>执行目标：{item.terminal.target}</p>
+            <p>登录方式：{item.terminal.login}</p>
+            <CopyCommand
+              block
+              label="执行命令"
+              command={item.terminal.command}
+            />
+            <p>预期输出：{item.terminal.expected_output}</p>
+            <p>失败处理：{item.terminal.on_failure}</p>
+          </>
+        )}
+        {item.helper_checks && (
+          <dl aria-label="升级核验结果">
+            {(["worker", "machine"] as const).map((kind) => (
+              <div key={kind}>
+                <dt>{kind} check</dt>
+                <dd>
+                  {item.helper_checks?.[kind].status === "passed"
+                    ? "通过"
+                    : `未通过：${item.helper_checks?.[kind].failed_steps.join("、")}`}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
       </section>
       <details className="needs-context">
         <summary>说明与回传要求</summary>

@@ -66,8 +66,14 @@ export function completeActionDraft(
     text: string;
     attachments?: readonly string[];
   },
+  helperVerified = false,
 ) {
   const action = d.get("human_actions", p.human_action_id);
+  ensure(
+    !action.helper_upgrade || helperVerified,
+    "illegal_transition",
+    "请在 Needs You 确认并通过两项机器核验",
+  );
   ensure(
     !remoteExitAction(d.state, action.id) || d.actor.kind === "human",
     "unauthorized",

@@ -1,10 +1,12 @@
 import { expect, test } from "vitest";
+import { completeHumanAction, triageHumanAction } from "./coordination.js";
 import {
   controlDeployment,
   currentDeploymentPin,
   reconcileSupervisorNotice,
   recordDeployment,
   recordDeploymentStop,
+  recordHelperUpgradeChecks,
   requestDeploymentAction,
 } from "./deployment.js";
 
@@ -354,4 +356,74 @@ test("only system reconciles supervisor notices; a verified notice stays unique 
   expect(
     value(reconcileSupervisorNotice(state, system, input, io)).events,
   ).toEqual([]);
+});
+
+// Terminal text is presentation, never evidence that the privileged work succeeded.
+test("helper maintenance keeps a failed check open and rejects all ordinary completion routes", () => {
+  let state = fixture();
+  const io = ports();
+  const input = {
+    key: "worker-helper:test",
+    reason: "worker_maintenance" as const,
+    instructions: "prepared",
+    helper_upgrade: { machine_id: "remote", binding: "trusted" },
+  };
+  const effect = value(
+    requestDeploymentAction(
+      state,
+      { kind: "system", project_id: state.project_id },
+      input,
+      io,
+    ),
+  );
+  state = apply(state, effect);
+  const p = { human_action_id: effect.data.id, text: "installed" };
+  expect(completeHumanAction(state, human, p, io).ok).toBe(false);
+  expect(
+    triageHumanAction(
+      state,
+      human,
+      {
+        human_action_id: p.human_action_id,
+        disposition: "done",
+        rationale: "reported done",
+      },
+      io,
+    ).ok,
+  ).toBe(false);
+  const passed = { status: "passed", failed_steps: [] } as const;
+  const failed = { status: "failed", failed_steps: ["runtime"] } as const;
+  const check = {
+    ...p,
+    binding: "trusted",
+    checks: { worker: passed, machine: failed },
+  };
+  expect(recordHelperUpgradeChecks(state, actor(4, "pm"), check, io).ok).toBe(
+    false,
+  );
+  expect(
+    recordHelperUpgradeChecks(state, human, { ...check, binding: "other" }, io)
+      .ok,
+  ).toBe(false);
+  const attempt = value(recordHelperUpgradeChecks(state, human, check, io));
+  expect(attempt.data).toMatchObject({
+    status: "open",
+    helper_checks: check.checks,
+  });
+  state = apply(state, attempt);
+  expect(completeHumanAction(state, human, p, io).ok).toBe(false);
+  expect(
+    value(
+      recordHelperUpgradeChecks(
+        state,
+        human,
+        { ...check, checks: { worker: passed, machine: passed } },
+        io,
+      ),
+    ).data,
+  ).toMatchObject({
+    status: "done",
+    result: { text: "installed" },
+    helper_checks: { worker: passed, machine: passed },
+  });
 });

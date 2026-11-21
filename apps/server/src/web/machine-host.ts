@@ -11,6 +11,7 @@ import {
   RuntimeTargets,
   readOnboardingYaml,
   refreshWorkerObservations,
+  runtimeTargetBinding,
   runtimeWorkersPath,
   WORKER_STEPS,
   type WorkerProbeRunner,
@@ -35,6 +36,7 @@ export interface WizardHost {
 }
 export interface MachineHost {
   readonly wizard?: WizardHost;
+  bindingFingerprint?(project: string, machine: string): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -67,6 +69,12 @@ export function machineHost(
     dataDir = execution.dataDir;
   return {
     wizard: { root, dataDir, env },
+    bindingFingerprint(project, machine) {
+      const worker = loadRuntimeWorkers(dataDir, file).find(
+        (w) => w.machine_id === machine && w.project_id === project,
+      );
+      return worker && runtimeTargetBinding(worker).fingerprint;
+    },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);
       return (project, machine) => {
@@ -144,7 +152,12 @@ export function machineHost(
           },
         );
         return {
-          status: result.health?.status === "passed" ? "passed" : "failed",
+          status:
+            result.health?.status === "passed" &&
+            result.health.evidence_ref ===
+              `machine-observation:${observationId}`
+              ? "passed"
+              : "failed",
           failed_steps: result.health?.blockers ?? ["observation"],
         };
       }

@@ -702,6 +702,7 @@ async function serveProjectRoute(
   if (
     await serveWrite(
       {
+        checks: context.checks,
         req,
         res,
         store,

@@ -587,16 +587,47 @@ test.each([
         tx.machines.put("a", remote);
         return remote;
       });
+      const terminal = {
+        target: machine.id,
+        login: "admin",
+        command: "fixture",
+        expected_output: "OK",
+        on_failure: "stop",
+      };
       const options = {
         store,
         project: "a",
         machine: machine.id,
+        stageUpgrade: vi
+          .fn()
+          .mockRejectedValueOnce(new Error("secret"))
+          .mockResolvedValue(terminal),
         target: () => ({
           machine,
-          execution: { mode: "local" as const, dataDir: "/fixture" },
+          execution: {
+            mode: "agent-ssh" as const,
+            dataDir: "/fixture",
+            agentRoot: "/fixture/worker",
+            machine: machine.id,
+            gid: 123,
+            identityFile: "/test/identity",
+            knownHostsFile: "/test/hosts",
+            target: {
+              project_id: "a",
+              machine_id: machine.id,
+              session: "fixture",
+              generation: "1",
+              fingerprint: "pinned",
+            },
+          },
         }),
         check: async () => ({ blockers, launch_enabled: false }),
       };
+      await refreshMachineObservations(options);
+      const first = store.uow.read((tx) => tx.human_actions.list("a"))[0];
+      expect(first?.terminal).toBeUndefined();
+      expect(first?.instructions).toContain("暂存失败");
+      expect(first?.instructions).not.toContain("secret");
       for (let i = 0; i < 2; i++)
         expect(
           (await refreshMachineObservations(options)).health,
@@ -611,6 +642,11 @@ test.each([
         triage: "host",
         host_operator: "host_ops",
         blocked_work_items: [],
+      });
+      expect(actions[0]).toMatchObject({
+        id: first?.id,
+        terminal,
+        helper_upgrade: { machine_id: machine.id, binding: "pinned" },
       });
       for (const [name, sha] of Object.entries(workerHelperDigests()))
         expect(actions[0]?.instructions).toContain(`${sha}  ${name}`);

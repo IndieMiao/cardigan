@@ -36,6 +36,7 @@ import {
   type RolePatch,
   recheckMerge,
   recordDecision,
+  recordHelperUpgradeChecks,
   rollbackRole,
   runLimitMaximumMessage,
   type SystemReminderPolicy,
@@ -245,7 +246,9 @@ const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
   body: text.optional(),
 });
-const action = z.object({ text, attachments: z.array(text).optional() });
+const action = z
+  .object({ text, attachments: z.array(text).optional() })
+  .strict();
 const attachment = z.object({
   file: z.string().max(MAX_ATTACHMENT_BASE64),
   mime: text,
@@ -302,6 +305,7 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly checks?: import("./machine-checks.js").MachineChecks;
   readonly roleLaunchConfig?:
     | (() => import("@cardigan/roles").LaunchConfig | undefined)
     | undefined;
@@ -1523,9 +1527,50 @@ export async function serveWrite(
       );
     } else {
       const p = defined(parsed(action, body));
-      output = run(context, (s, a, ports) =>
-        completeHumanAction(s, a, { ...p, human_action_id }, ports),
+      const stored = c.store.uow.read((tx) =>
+        tx.human_actions.get(c.project_id, human_action_id),
       );
+      const upgrade = stored?.helper_upgrade;
+      if (stored?.status === "open" && upgrade) {
+        if (c.req.headers.authorization !== undefined)
+          throw new HttpRejection(403, "unauthorized", "仅限人类登录会话");
+        const authorizeCheck = (tx: StoreTransactionContext) => {
+          const session = c.authorize(),
+            member = activeOwner(tx.members.list());
+          if (
+            !member ||
+            !session ||
+            typeof session !== "object" ||
+            !("member_id" in session) ||
+            session.member_id !== member.id
+          )
+            throw new HttpRejection(
+              403,
+              "unauthorized",
+              "需要有效的人成员身份",
+            );
+          return member.id;
+        };
+        if (!c.checks)
+          throw new HttpRejection(503, "unavailable", "检查服务不可用");
+        const checks = await c.checks.verifyHelper(
+          c.project_id,
+          upgrade.machine_id,
+          upgrade.binding,
+          authorizeCheck,
+        );
+        output = run(context, (s, a, ports) =>
+          recordHelperUpgradeChecks(
+            s,
+            a,
+            { ...p, human_action_id, binding: upgrade.binding, checks },
+            ports,
+          ),
+        );
+      } else
+        output = run(context, (s, a, ports) =>
+          completeHumanAction(s, a, { ...p, human_action_id }, ports),
+        );
     }
   }
   sendJson(c.res, 200, output);

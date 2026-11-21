@@ -1126,7 +1126,19 @@ export interface ReadyRelease {
   readonly by: Author;
   readonly reason: string;
 }
+export type ActionCommand = {
+  readonly target: string;
+  readonly login: string;
+  readonly command: string;
+  readonly expected_output: string;
+  readonly on_failure: string;
+};
+export interface HelperCheckResult {
+  readonly status: "passed" | "failed";
+  readonly failed_steps: readonly string[];
+}
 export interface HumanActionHandoff {
+  readonly terminal?: ActionCommand;
   readonly title: string;
   /** C-212: one plain line saying what the reader has to do. */
   readonly todo?: string;
@@ -1139,6 +1151,17 @@ export interface HumanActionHandoff {
   readonly rewritten_at: Timestamp;
 }
 export interface HumanAction {
+  readonly terminal?: ActionCommand;
+  /** Host-authored only. Never derive a check target from display text. */
+  readonly helper_upgrade?: {
+    readonly machine_id: MachineId;
+    readonly binding: string;
+  };
+  readonly helper_checks?: {
+    readonly worker: HelperCheckResult;
+    readonly machine: HelperCheckResult;
+    readonly at: Timestamp;
+  };
   readonly id: HumanActionId;
   readonly key: HumanActionId;
   readonly card_id?: CardId;

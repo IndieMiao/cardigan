@@ -357,3 +357,92 @@ test("active runs use the work item's card, then their own trigger's card, other
     store.close();
   }
 });
+
+test("a helper action only closes after fresh worker and machine checks; retries never trust submitted checks", async () => {
+  let broken = true;
+  const check = vi.fn<MachineHost["check"]>(async (_p, _m, kind) =>
+    kind === "worker" && broken
+      ? { status: "failed", failed_steps: ["directories"] }
+      : { status: "passed", failed_steps: [] },
+  );
+  const f = await m5Cross({
+    machineHost: {
+      check,
+      bindings: () => () => null,
+      bindingFingerprint: () => "pinned",
+      workerRecord: () => null,
+    },
+  });
+  try {
+    const project = f.project.project_id;
+    const id = f.store().uow.run((tx) => {
+      const local = tx.machines.get(project, "local");
+      if (!local) throw new Error("missing fixture");
+      tx.machines.put(project, {
+        ...local,
+        id: "remote",
+        label: "Remote",
+        herdr_machine: "remote",
+      });
+      const id = tx.ids.next(project, "human_action");
+      tx.human_actions.put(project, {
+        id,
+        key: id,
+        status: "open",
+        requested_by: "system",
+        instructions: "Install",
+        why_human: "Administrator",
+        expected_return: "Result",
+        blocked_work_items: [],
+        triage: "host",
+        helper_upgrade: { machine_id: "remote", binding: "pinned" },
+      });
+      return id;
+    });
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const submit = (key: string, body: unknown) =>
+      f.call(f.projectPath(`/human-actions/${id}/complete`), {
+        method: "POST",
+        headers: { "idempotency-key": key },
+        body,
+      });
+    expect(
+      (
+        await submit("forged", {
+          text: "installed",
+          checks: { worker: "passed" },
+        })
+      ).status,
+    ).toBe(400);
+    const attempt = () => submit("failed", { text: "installed" });
+    expect((await attempt()).json).toMatchObject({
+      status: "open",
+      helper_checks: {
+        worker: { status: "failed", failed_steps: ["directories"] },
+        machine: { status: "passed" },
+      },
+    });
+    await attempt();
+    expect(check.mock.calls.map((c) => c.slice(0, 3))).toEqual([
+      [project, "remote", "worker"],
+      [project, "remote", "machine"],
+    ]);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      human_actions: expect.arrayContaining([
+        expect.objectContaining({ id, helper_checks: expect.anything() }),
+      ]),
+    });
+    broken = false;
+    expect((await submit("retry", { text: "repaired" })).json).toMatchObject({
+      status: "done",
+      helper_checks: {
+        worker: { status: "passed" },
+        machine: { status: "passed" },
+      },
+    });
+    expect(check).toHaveBeenCalledTimes(4);
+  } finally {
+    await f.close();
+  }
+});

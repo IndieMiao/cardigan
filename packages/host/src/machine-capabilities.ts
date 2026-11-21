@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Machine } from "@cardigan/domain";
+import type { ActionCommand, Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
   acceptedBrowserDigest,
@@ -21,13 +21,13 @@ import {
   type CapabilityProbe,
   probeMachineCapability,
 } from "./machine-capability-probe.js";
-
 import {
   helperMismatch,
   workerHelperDigests,
   workerPublicationProtocol,
 } from "./worker-helper-release.js";
 import { notifyHelperMismatch } from "./worker-maintenance.js";
+import { stageWorkerUpgrade } from "./worker-upgrade.js";
 
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
 /** Capability evidence identifies the probed platform as well as the private runtime binding.
@@ -54,6 +54,7 @@ interface ObservationTarget {
   readonly machine: Machine;
 }
 export interface MachineObservationOptions {
+  readonly stageUpgrade?: typeof stageWorkerUpgrade;
   readonly store: Store;
   readonly project: string;
   readonly machine: string;
@@ -94,6 +95,7 @@ export async function refreshMachineObservations(
   let capabilities: MachineCapability[] = [];
   let observedBrowserDigest: string | null | undefined;
   let targetFingerprint: string | undefined;
+  let checkedTarget: ObservationTarget | undefined;
   try {
     const target = await options.target();
     const binding = JSON.stringify([
@@ -194,6 +196,7 @@ export async function refreshMachineObservations(
       ])
     )
       throw new Error("Machine target changed");
+    checkedTarget = current;
     if (health.status === "passed")
       targetFingerprint = observationFingerprint(
         target.execution.target?.fingerprint,
@@ -221,7 +224,42 @@ export async function refreshMachineObservations(
     observedBrowserDigest,
   );
   const mismatch = health.blockers.find(helperMismatch);
-  if (recorded && machine !== "local" && mismatch)
+  if (recorded && machine !== "local" && mismatch && checkedTarget) {
+    const { execution } = checkedTarget;
+    const pinned = execution.target;
+    const bound =
+      pinned &&
+      pinned.machine_id === machine &&
+      pinned.project_id === project &&
+      execution.mode === "agent-ssh";
+    let terminal: ActionCommand | undefined;
+    if (bound) {
+      try {
+        terminal = await (options.stageUpgrade ?? stageWorkerUpgrade)(
+          execution,
+          checkedTarget.machine.os,
+          options.signal,
+        );
+      } catch {
+        /* Never surface raw SSH diagnostics or advertise unstaged files. */
+      }
+      if (
+        (await options.target()).execution.target?.fingerprint !==
+        pinned.fingerprint
+      )
+        return readMachineObservations(store, project, machine, now());
+    }
+    const fields = {
+      ...(bound
+        ? {
+            helper_upgrade: {
+              machine_id: machine,
+              binding: pinned.fingerprint,
+            },
+          }
+        : {}),
+      ...(terminal ? { terminal } : {}),
+    };
     store.uow.run((tx) => {
       const current = readMachineObservationsInTransaction(
         store,
@@ -230,7 +268,8 @@ export async function refreshMachineObservations(
         now(),
       );
       if (current.health?.evidence_ref === `machine-observation:${observation}`)
-        notifyHelperMismatch(tx, project, machine, { now }, mismatch);
+        notifyHelperMismatch(tx, project, machine, { now }, mismatch, fields);
     });
+  }
   return readMachineObservations(store, project, machine, now());
 }

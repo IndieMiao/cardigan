@@ -41,6 +41,19 @@ import { executeCommand } from "./execute.js";
 import { entryId, id, idempotency_key, plainSummary } from "./schemas.js";
 
 const text = z.string().min(1);
+const terminal = z
+  .object({
+    target: text,
+    login: text,
+    command: text,
+    expected_output: text,
+    on_failure: text,
+  })
+  .strict()
+  .optional()
+  .describe(
+    "需要人在终端执行操作时填写；command 为原样复制的完整命令，不含凭据。",
+  );
 const subject = z.object({
   kind: z.enum(["git_head", "artifact_sha256", "doc_version"]),
   value: text,
@@ -377,6 +390,7 @@ const schemas = {
     why_human: text.optional(),
     expected_outcome: text.optional(),
     instructions: text.optional(),
+    terminal,
     expected_return: text.optional(),
   },
   record_decision: {
@@ -401,6 +415,7 @@ const schemas = {
       ),
     ready_when: readyWhen(true),
     card_id: id("card"),
+    terminal,
     instructions: text,
     why_human: text,
     expected_return: text,
