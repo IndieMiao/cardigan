@@ -230,7 +230,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
  * Store — never SQL text, parameters or row contents.
  */
 export interface StoreObserver {
-  /** Whole UnitOfWork, including the state build and domain logic it runs. */
+  /** Whole UnitOfWork; a guarded promotion reports its contiguous read and write phases separately. */
   transaction?(kind: "run" | "read", durationMs: number): void;
   /** A command-state cache miss rebuilt inside a UnitOfWork. */
   stateBuild?(durationMs: number): void;
@@ -466,11 +466,73 @@ export class Store {
     };
   }
 
+  /** Recheck a single external-evidence-dependent write in a pinned read snapshot.
+   * No callback, await or lock wait between the final check and promotion. A WAL
+   * conflict discards the plan; an unchanged DB cannot mask a revoked trust port. */
+  tryGuardedWrite(
+    revision: () => string,
+    expected: string,
+    guard: (
+      trust: ReadRepositories["test_review_trust"],
+    ) => ((tx: StoreTransactionContext) => void) | undefined,
+  ): string | undefined {
+    if (this.#inTransaction)
+      throw new Error("nested UnitOfWork is not supported");
+    const db = this.#db;
+    const observer = this.#observer;
+    const start = performance.now();
+    let promoteAt: number | undefined;
+    let handedOff = false;
+    db.exec("BEGIN DEFERRED");
+    this.#inTransaction = true;
+    try {
+      // Pin before invoking caller code, even if the revision is cached.
+      db.prepare("SELECT version FROM schema_version LIMIT 1").get();
+      if (revision() !== expected) return;
+      const timeout = Number(db.prepare("PRAGMA busy_timeout").get()?.timeout);
+      const trust = this.#testReviewTrust;
+      const append = guard(trust);
+      if (!append || trust !== this.#testReviewTrust) return expected;
+      promoteAt = performance.now();
+      try {
+        db.exec("PRAGMA busy_timeout = 0");
+        // Obtain the writer lock without mutating a row or running a trigger.
+        db.exec("UPDATE projects SET name = name WHERE 0");
+      } catch (error) {
+        if (isSqliteBusy(error)) return;
+        throw error;
+      } finally {
+        db.exec(`PRAGMA busy_timeout = ${timeout}`);
+      }
+      handedOff = true;
+      return this.#writeAndCommit((tx) => {
+        append(tx);
+        return revision();
+      });
+    } finally {
+      if (!handedOff) {
+        db.exec("ROLLBACK");
+        this.#inTransaction = false;
+      }
+      // Report both phases after the transaction, never between check and write.
+      const end = performance.now();
+      observer?.transaction?.("read", (promoteAt ?? end) - start);
+      if (promoteAt !== undefined)
+        observer?.transaction?.("run", end - promoteAt);
+    }
+  }
+
   #run<T>(operation: (transaction: StoreTransactionContext) => T): T {
     if (this.#inTransaction) {
       throw new Error("nested UnitOfWork is not supported");
     }
     this.#db.exec("BEGIN IMMEDIATE");
+    return this.#writeAndCommit(operation);
+  }
+
+  #writeAndCommit<T>(
+    operation: (transaction: StoreTransactionContext) => T,
+  ): T {
     this.#inTransaction = true;
     let active = true;
     const events = this.#commandEvents.transaction(this.#db);
@@ -1151,6 +1213,16 @@ export class Store {
   }
 }
 
+function isSqliteBusy(error: unknown) {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "errcode" in error &&
+    typeof error.errcode === "number" &&
+    (error.errcode & 0xff) === 5
+  );
+}
+
 /** WAL lock upgrades may return SQLITE_BUSY without invoking SQLite's busy handler. */
 function enableWal(db: DatabaseSync): void {
   const deadline = performance.now() + 5000;
@@ -1169,15 +1241,7 @@ function enableWal(db: DatabaseSync): void {
         return;
       } catch (error) {
         const remaining = Math.floor(deadline - performance.now());
-        if (
-          !error ||
-          typeof error !== "object" ||
-          !("errcode" in error) ||
-          typeof error.errcode !== "number" ||
-          (error.errcode & 0xff) !== 5 ||
-          remaining <= 0
-        )
-          throw error;
+        if (!isSqliteBusy(error) || remaining <= 0) throw error;
         // Sleep rather than spin, and keep all retries inside the original wait budget.
         Atomics.wait(pause, 0, 0, Math.min(20, remaining));
         const nextWait = Math.floor(deadline - performance.now());

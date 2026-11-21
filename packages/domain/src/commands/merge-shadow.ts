@@ -442,7 +442,7 @@ function planShadow(
   };
 }
 
-/** Caller fences the DB revision; the append also checks live evidence before allocating IDs. */
+/** The host must fence the DB revision and consume any live-evidence guard before appending. */
 export function prepareMergeShadow(
   state: CommandState,
   actor: Actor,
@@ -454,21 +454,21 @@ export function prepareMergeShadow(
     p,
     proofReads,
   );
-  return (
-    emit &&
-    ((ports: CommandPorts, trust: CommandState["test_review_trust"]) =>
-      command(state, actor, "record_merge_shadow", ports, (draft) => {
-        // The DB revision cannot see a revoked host lease. Replay only the
-        // external reads used by this prediction, against the writer's port.
-        if (
-          proofReads.every(
-            ({ proof, current }) =>
-              testReviewProofCurrent(trust, proof) === current,
-          )
-        )
-          emit(draft);
-      }))
-  );
+  if (!emit) return;
+  const append = (ports: CommandPorts) =>
+    command(state, actor, "record_merge_shadow", ports, emit);
+  if (!proofReads.length) return { append };
+  return {
+    // Called in the consuming transaction's read phase, immediately before
+    // promoting its pinned snapshot. Never run host Git or policy IO under a write lock.
+    whenCurrent: (trust: CommandState["test_review_trust"]) =>
+      proofReads.every(
+        ({ proof, current }) =>
+          testReviewProofCurrent(trust, proof) === current,
+      )
+        ? append
+        : undefined,
+  };
 }
 
 /** Atomic command for callers already holding a fresh state. */

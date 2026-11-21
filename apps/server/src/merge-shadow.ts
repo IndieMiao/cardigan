@@ -1,5 +1,7 @@
 import {
   type Clock,
+  type CommandEffect,
+  type CommandPorts,
   currentPreMergeVersions,
   type DecisionId,
   eventsForDecision,
@@ -7,10 +9,11 @@ import {
   type ProjectId,
   prepareMergeShadow,
   projectPreferences,
+  type Result,
   validMergeShadowPolicy,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import type { Store, StoreTransactionContext } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import {
   applyMaintenancePlan,
@@ -129,24 +132,28 @@ export class MergeShadowObserver {
         for (const q of fresh.decisions) {
           if (!evidence.has(q.id)) continue;
           const paths = evidence.get(q.id);
-          const emit = prepareMergeShadow(
+          const plan = prepareMergeShadow(
             fresh,
             { kind: "system", project_id: project },
             { decision_id: q.id, ...(paths ? { paths } : {}) },
           );
-          if (emit)
-            writes.push((tx) =>
+          if (!plan) continue;
+          const persist =
+            (append: (ports: CommandPorts) => Result<CommandEffect<unknown>>) =>
+            (tx: StoreTransactionContext) =>
               persistEffect(
                 tx,
                 project,
-                unwrap(
-                  emit(
-                    { clock: this.clock, ids: tx.ids },
-                    tx.test_review_trust,
-                  ),
-                ),
-              ),
-            );
+                unwrap(append({ clock: this.clock, ids: tx.ids })),
+              );
+          if (plan.append) writes.push(persist(plan.append));
+          else
+            writes.push({
+              whenCurrent: (trust) => {
+                const append = plan.whenCurrent(trust);
+                return append && persist(append);
+              },
+            });
         }
         return writes;
       });

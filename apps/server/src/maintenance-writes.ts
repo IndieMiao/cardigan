@@ -5,7 +5,14 @@ import type {
   StoreTransactionContext,
 } from "@cardigan/store";
 
-export type MaintenanceWrite = (tx: StoreTransactionContext) => void;
+type Append = (tx: StoreTransactionContext) => void;
+export type MaintenanceWrite =
+  | Append
+  | {
+      whenCurrent: (
+        trust: ReadRepositories["test_review_trust"],
+      ) => Append | undefined;
+    };
 
 /** Prepare from one consistent snapshot. Each short transaction checks its
  * predecessor's committed revision; a concurrent edit leaves the rest for next tick. */
@@ -33,8 +40,22 @@ export function applyMaintenancePlan(
   }));
   let expected = version;
   const batchSize = 16;
-  for (let start = 0; start < writes.length; start += batchSize) {
-    const batch = writes.slice(start, start + batchSize);
+  for (let start = 0; start < writes.length; ) {
+    const first = writes[start++];
+    if (!first) break;
+    if (typeof first !== "function") {
+      const next = store.tryGuardedWrite(revision, expected, first.whenCurrent);
+      if (next === undefined) return;
+      expected = next;
+      continue;
+    }
+    const batch = [first];
+    while (batch.length < batchSize) {
+      const next = writes[start];
+      if (typeof next !== "function") break;
+      batch.push(next);
+      start++;
+    }
     const next = store.uow.run((tx) => {
       if (revision() !== expected) return;
       for (const write of batch) write(tx);

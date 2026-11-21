@@ -258,7 +258,7 @@ test("C-553: a prepared audit is system-only, appends no business changes and de
   const input = { decision_id: f.q.id, paths: f.paths };
   expect(() => prepareMergeShadow(f.state, human, input)).toThrow();
   const append = required(prepareMergeShadow(f.state, system, input));
-  const effect = value(append(f.io, f.state.test_review_trust));
+  const effect = value(required(append.append)(f.io));
   expect(effect.events.map((e) => e.type)).toEqual([
     "system_merge_shadow_recorded",
   ]);
@@ -312,34 +312,36 @@ test("C-553: a prepared shadow cannot outlive its incremental review evidence", 
   const input = { decision_id: q.id };
   const blocker = "增量复核的隔离证据已失效，须完整复核";
   expect(evaluateMergeShadow(state, q).pm_blockers).not.toContain(blocker);
-  const pending = required(prepareMergeShadow(state, system, input));
+  const pending = required(
+    prepareMergeShadow(state, system, input)?.whenCurrent,
+  );
   const checked: unknown[] = [];
   const live = value(
-    pending(f.io, {
-      ...f.trust,
-      isCurrent: (binding) => {
-        checked.push(binding);
-        return f.trust.isCurrent(binding);
-      },
-    }),
+    required(
+      pending({
+        ...f.trust,
+        isCurrent: (binding) => {
+          checked.push(binding);
+          return f.trust.isCurrent(binding);
+        },
+      }),
+    )(f.io),
   );
   expect(checked).toEqual([proof]);
   expect(live.events[0]?.payload).toEqual(evaluateMergeShadow(state, q));
   // Replacing the writer's port, or revoking a lease on the same port, needs no DB mutation.
-  expect(value(pending(f.io, undefined)).events).toEqual([]);
+  expect(pending(undefined)).toBeUndefined();
   f.revoke();
-  const stale = value(pending(f.io, f.trust));
-  expect(stale.events).toEqual([]);
-  expect(stale.timeline).toEqual([]);
-  const next = required(prepareMergeShadow(state, system, input));
+  expect(pending(f.trust)).toBeUndefined();
+  const next = required(prepareMergeShadow(state, system, input)?.whenCurrent);
   // A previously negative read must also be rechecked if the writer can attest it now.
-  expect(
-    value(next(f.io, { ...f.trust, isCurrent: () => true })).events,
-  ).toEqual([]);
-  expect(value(next(f.io, f.trust)).events[0]?.payload).toMatchObject({
-    would_confirm: false,
-    pm_blockers: expect.arrayContaining([blocker]),
-  });
+  expect(next({ ...f.trust, isCurrent: () => true })).toBeUndefined();
+  expect(value(required(next(f.trust))(f.io)).events[0]?.payload).toMatchObject(
+    {
+      would_confirm: false,
+      pm_blockers: expect.arrayContaining([blocker]),
+    },
+  );
 });
 
 test.each(Array.from({ length: 16 }, (_, i) => i + 1))(
