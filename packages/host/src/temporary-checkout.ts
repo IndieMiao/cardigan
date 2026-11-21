@@ -21,6 +21,7 @@ import {
 } from "@cardigan/runtime-herdr";
 import { AFFECTED_PACKAGE_DIR } from "./change-scope.js";
 import { checkEnvironment } from "./check-environment.js";
+import type { CheckFlakeId } from "./check-flake-cases.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
@@ -54,6 +55,8 @@ export interface CheckoutResult {
   readonly logSource?: { readonly url: string; readonly jobId?: number };
   /** Non-business failure from the validated baseline workflow step list. */
   readonly failedGithubStep?: string;
+  readonly caseTimeoutsManaged?: boolean;
+  readonly recovered?: readonly CheckFlakeId[];
   readonly logAttributionIncomplete?: boolean;
   readonly logFailure?:
     | "not_found"
