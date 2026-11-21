@@ -15,9 +15,17 @@ import {
   refreshTargetWait,
   runCapacitySnapshot,
 } from "@cardigan/host";
+import {
+  authenticate,
+  createMcpServer,
+  getUpdatesTool,
+  unwrap,
+} from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { Dispatcher } from "./dispatch.js";
@@ -191,6 +199,42 @@ test("host launch rejects a held queued Run before runtime or credential side ef
   }
 });
 
+/** Read on the bell stream through MCP so the original send window is actually receipted. */
+async function readPmCard(
+  f: ReturnType<typeof recoveryFixture>,
+  pm: ReturnType<typeof f.pm>,
+  card_id: typeof f.target.card.id,
+) {
+  const token = f.store.issueToken({
+    project_id: f.project,
+    assignment_id: pm.id,
+    role: { role_version: pm.role_version, allowed_tools: ["get_updates"] },
+  }).token;
+  const server = createMcpServer({
+    store: f.store,
+    identity: unwrap(authenticate(f.store, token)),
+    tools: [getUpdatesTool],
+    log: () => {},
+  });
+  const client = new Client({ name: "fixture", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(left);
+    await client.connect(right);
+    expect(
+      (
+        await client.callTool({
+          name: "get_updates",
+          arguments: { card_id },
+        })
+      ).isError,
+    ).not.toBe(true);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
 test("a standing PM retains held queued work while dispatching another card, then resumes the original Run", async () => {
   const f = recoveryFixture();
   try {
@@ -203,6 +247,7 @@ test("a standing PM retains held queued work while dispatching another card, the
           ([ref]) => ref.terminal_ref === f.refFor(pm).terminal_ref,
         );
     const second = f.create();
+    const third = f.create();
     f.skipEvents();
     const comment = (card_id: typeof f.target.card.id) =>
       f.apply((s, a, p) =>
@@ -240,6 +285,11 @@ test("a standing PM retains held queued work while dispatching another card, the
       updateCard(s, a, { card_id: f.target.card.id, hold }, p),
     );
     comment(second.card.id);
+    vi.mocked(f.runtime.wake).mockImplementation(async (_ref, _bell, gates) =>
+      gates?.before_send?.()
+        ? { ok: true, value: { sent: true } }
+        : { ok: true, value: { sent: false, withdrawn: true } },
+    );
     const dispatcher = new Dispatcher(f.options);
     await dispatcher.tick();
     const current = f
@@ -263,6 +313,62 @@ test("a standing PM retains held queued work while dispatching another card, the
       (s, a, p) => acknowledgeRun(s, a, { run_id: current.id }, p),
       f.actorFor(pm),
     );
+    // A is runnable again, but the next B comment belongs to the existing B Run.
+    for (const card of [second.card, f.target.card]) {
+      const stream = { project_id: f.project, card_id: card.id };
+      expect(
+        f.store.ackEvents({
+          ...stream,
+          assignment_id: pm.id,
+          up_to_seq: f.store.getUpdates(stream).latest_seq,
+        }).ok,
+      ).toBe(true);
+    }
+    const seq = comment(second.card.id).event_seq;
+    const unrelated = comment(third.card.id).event_seq;
+    const row = (card = second.card.id, sequence = seq) =>
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: pm.id })
+        .find((n) => n.card_id === card && n.seq === sequence);
+    const at = (id: typeof queued.id) =>
+      f.state().runs.find((r) => r.id === id);
+    const waiting = at(queued.id);
+    const runIds = () =>
+      f
+        .state()
+        .runs.filter((r) => r.assignment_id === pm.id)
+        .map((r) => r.id);
+    const originalRuns = runIds();
+    await dispatcher.tick(); // Business start and cursor ACK are not an application-level bell receipt.
+    expect(row()?.status).toBe("pending");
+    expect(pmWakes()).toHaveLength(1);
+    await readPmCard(f, pm, second.card.id);
+    const receipt = at(current.id)?.bell_delivery;
+    expect(receipt?.card_id).toBe(second.card.id);
+    expect(receipt?.received_at).toBeDefined();
+    f.working.add(f.refFor(pm).terminal_ref);
+    await dispatcher.tick();
+    expect(pmWakes()).toHaveLength(1);
+    expect(row()?.status).toBe("pending");
+    f.working.delete(f.refFor(pm).terminal_ref);
+    await dispatcher.tick();
+    await dispatcher.tick();
+    expect(pmWakes()).toHaveLength(2);
+    expect(pmWakes()[1]?.[1]).toContain(
+      `card=${second.card.id} asg=${pm.id} run=${current.id} `,
+    );
+    expect(row()).toMatchObject({
+      status: "belled",
+      run_id: current.id,
+      attempts: 1,
+    });
+    expect(at(current.id)?.bell_delivery).toEqual(receipt);
+    expect(at(queued.id)).toEqual(waiting);
+    expect(runIds()).toEqual(originalRuns);
+    expect(row(third.card.id, unrelated)).toMatchObject({
+      status: "pending",
+      attempts: 0,
+    });
     f.apply(
       (s, a, p) =>
         finishRun(
@@ -281,7 +387,11 @@ test("a standing PM retains held queued work while dispatching another card, the
     expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
       "dispatched",
     );
-    expect(pmWakes()).toHaveLength(2);
+    expect(pmWakes()).toHaveLength(3);
+    expect(pmWakes()[2]?.[1]).toContain(
+      `card=${f.target.card.id} asg=${pm.id} run=${queued.id} `,
+    );
+    expect(at(queued.id)?.bell_delivery?.card_id).toBe(f.target.card.id);
   } finally {
     f.close();
   }

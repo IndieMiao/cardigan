@@ -120,6 +120,53 @@ export function beginAutomaticContextRestart(
   });
 }
 
+/** Existing supervisor may replace only its local, idle, managed patrol. No agent tool grants this authority. */
+export function beginStalledPatrolRestart(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    assignment_id: HostOpsExecution["assignment_id"];
+    cause_id: string;
+    snapshot: NonNullable<HostOpsExecution["snapshot"]>;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const a = d.get("assignments", p.assignment_id);
+    ensure(
+      a.scope === "standing" &&
+        a.role_id === "host_ops" &&
+        a.status === "active" &&
+        !a.external &&
+        a.machine_id === "local" &&
+        !a.worktree_path &&
+        !a.runtime_ref?.worktree_path,
+      "illegal_transition",
+      "只能自动恢复无工作树的在岗主机运维",
+    );
+    ensure(
+      !pendingHostOpsActions(state.events).some((p) =>
+        state.events.some(
+          (e) =>
+            e.id === p.action_id &&
+            e.actor.kind === "assignment" &&
+            e.actor.assignment_id === a.id,
+        ),
+      ),
+      "illegal_transition",
+      "主机运维还有未结操作",
+    );
+    text(p.cause_id, "cause_id");
+    return beginHostOpsActionInDraft(d, {
+      tool: "host_ops_restart_assignment",
+      target_id: a.id,
+      reason: "主机运维通知积压，系统在空闲时换会话。",
+      dispatch_stall_id: p.cause_id,
+      snapshot: p.snapshot,
+    });
+  });
+}
+
 function recordResult(
   d: CommandDraft,
   actionId: HostOpsExecution["action_id"],
@@ -132,8 +179,9 @@ function recordResult(
     ) ?? d.events.find((e) => e.id === actionId);
   if (
     !intent ||
-    (intent.payload as { automatic_context_restart?: boolean })
-      .automatic_context_restart !== true ||
+    ((intent.payload as { automatic_context_restart?: boolean })
+      .automatic_context_restart !== true &&
+      !(intent.payload as { dispatch_stall_id?: string }).dispatch_stall_id) ||
     d.state.events.some(
       (e) =>
         e.type === "context_session_restart_result" &&
@@ -143,11 +191,7 @@ function recordResult(
     return;
   const action = intent.payload as unknown as HostOpsExecution;
   const usage = action.context_usage;
-  ensure(
-    usage,
-    "invariant_violation",
-    "Automatic restart requires context usage",
-  );
+
   const finished = d.state.events.find(
     (e) =>
       e.type === "host_ops_action_finished" &&
@@ -163,7 +207,9 @@ function recordResult(
     result = "succeeded";
     reason = "新会话已开始执行。";
   } else if (result === "succeeded") return;
-  const body = `主机运维 ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${Math.round((100 - usage.used_percentage) * 10) / 10}%。${reason}`;
+  const body = !usage
+    ? `派发积压 ${action.assignment_id} 换会话${result === "succeeded" ? "成功" : "失败"}：${reason}`
+    : `主机运维 ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${Math.round((100 - usage.used_percentage) * 10) / 10}%。${reason}`;
   const humanId =
     result === "failed"
       ? d.ids.next(d.state.project_id, "human_action")
@@ -200,7 +246,10 @@ function recordResult(
     {
       action_id: actionId,
       assignment_id: action.assignment_id,
-      context_usage: { ...usage },
+      ...(usage ? { context_usage: { ...usage } } : {}),
+      ...(action.dispatch_stall_id
+        ? { dispatch_stall_id: action.dispatch_stall_id }
+        : {}),
       result,
       reason,
       body,

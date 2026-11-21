@@ -254,6 +254,26 @@ function waitNotices(f: ReturnType<typeof setup>) {
     .filter((n) => notices.some((e) => e.id === n.event_id));
 }
 
+test("retirement alone guards an author-ended turn: report the refusal once and leave its Run queued", async () => {
+  const logs = vi.spyOn(console, "info").mockImplementation(() => {});
+  const { f, queued } = await recoveredWaitingRun();
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "unknown", observed_seq: 2 },
+  });
+  await f.dispatcher.tick();
+  f.advance(1);
+  await f.dispatcher.tick();
+  const refused = logs.mock.calls.filter(([line]) =>
+    String(line).includes("reason=wake_guard:alive/unknown"),
+  );
+  expect(refused).toHaveLength(1);
+  expect(refused[0]?.[0]).toContain("age_ms=");
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
 test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
   const { f, queued, retire, owner, token } = await recoveredWaitingRun();
   vi.mocked(f.runtime.status).mockResolvedValueOnce({
