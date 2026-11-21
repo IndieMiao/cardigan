@@ -702,6 +702,7 @@ async function serveProjectRoute(
   if (
     await serveWrite(
       {
+        checks: context.checks,
         req,
         res,
         store,
@@ -1007,6 +1008,7 @@ async function serveProjectRoute(
         ]),
         now,
         context.runtimeUnknownGraceMs,
+        (project, machine) => context.checks.currentBinding(project, machine),
       ),
     });
     return;
@@ -1059,6 +1061,8 @@ async function serveProjectRoute(
         context.hcSession,
         context.runtimeUnknownGraceMs,
         (section ?? undefined) as NeedsYouSection | undefined,
+        (project, machine, binding) =>
+          context.checks.currentUpgradeCommand(project, machine, binding),
       ),
     });
     return;

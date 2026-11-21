@@ -38,6 +38,7 @@ import type { RoleRuleBasis } from "../role-rule.js";
 import { storyProgress, storyTerminal } from "../story.js";
 import type { StoryDiscussion } from "../story-discussion.js";
 import type { ResumeCondition } from "../work-wait.js";
+import { workerHelperAction } from "../worker-helper-action.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
@@ -1513,12 +1514,27 @@ const readinessOf = (d: CommandDraft) => ({
   deliveries: d.list("deliveries"),
   work_items: d.list("work_items"),
 });
+function validateTerminal(terminal: HumanAction["terminal"]) {
+  if (!terminal) return;
+  for (const key of [
+    "target",
+    "login",
+    "command",
+    "expected_output",
+    "on_failure",
+  ] as const)
+    text(terminal[key], key);
+}
 export function requestHumanAction(
   state: CommandState,
   actor: Actor,
   p: Pick<
     HumanAction,
-    "instructions" | "why_human" | "expected_return" | "blocked_work_items"
+    | "instructions"
+    | "why_human"
+    | "expected_return"
+    | "blocked_work_items"
+    | "terminal"
   > & {
     card_id: CardId;
     due?: string;
@@ -1539,6 +1555,7 @@ export function requestHumanAction(
     text(p.instructions, "instructions");
     text(p.why_human, "why_human");
     text(p.expected_return, "expected_return");
+    validateTerminal(p.terminal);
     const items = [...new Set(p.blocked_work_items)].map((id) => d.work(id));
     ensure(
       items.every((w) => w.card_id === p.card_id),
@@ -1589,6 +1606,7 @@ export function requestHumanAction(
       key: id,
       card_id: p.card_id,
       requested_by: d.author,
+      ...(p.terminal ? { terminal: p.terminal } : {}),
       ...(p.category ? { category: p.category } : {}),
       instructions: p.instructions,
       why_human: p.why_human,
@@ -1721,6 +1739,7 @@ export function triageHumanAction(
   p: {
     human_action_id: HumanActionId;
     disposition: "done" | "host" | "human" | "release";
+    terminal?: NonNullable<HumanAction["terminal"]>;
     rationale: string;
     ordinary_host_basis?: OrdinaryHostBasis;
     legacy_host_result?: LegacyHostResult;
@@ -1963,7 +1982,14 @@ export function triageHumanAction(
           true,
         )
       : action.ready_when;
+    validateTerminal(p.terminal);
+    ensure(
+      !p.terminal || !workerHelperAction(d.state, action),
+      "validation_failed",
+      "系统升级命令不能改写",
+    );
     const handoff = {
+      ...(p.terminal ? { terminal: p.terminal } : {}),
       title: p.title.trim(),
       ...(p.todo ? { todo: p.todo.trim() } : {}),
       summary: p.summary,

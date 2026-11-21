@@ -1,4 +1,8 @@
-import { type Clock, requestDeploymentAction } from "@cardigan/domain";
+import {
+  type Clock,
+  type HumanAction,
+  requestDeploymentAction,
+} from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { workerHelperDigests } from "./worker-helper-release.js";
@@ -9,6 +13,7 @@ function notify(
   clock: Clock,
   key: string,
   instructions: string,
+  fields: Pick<HumanAction, "terminal" | "helper_upgrade"> = {},
 ) {
   persistEffect(
     tx,
@@ -17,7 +22,7 @@ function notify(
       requestDeploymentAction(
         loadCommandState(tx, project),
         { kind: "system", project_id: project },
-        { key, reason: "worker_maintenance", instructions },
+        { key, reason: "worker_maintenance", instructions, ...fields },
         { ids: tx.ids, clock },
       ),
     ),
@@ -29,6 +34,7 @@ export function notifyHelperMismatch(
   machine: string,
   clock: Clock,
   reason: string,
+  fields: Pick<HumanAction, "terminal" | "helper_upgrade">,
 ) {
   const digests = workerHelperDigests();
   notify(
@@ -36,11 +42,12 @@ export function notifyHelperMismatch(
     project,
     clock,
     `worker-helper:${machine}:${Object.values(digests).join(":")}`,
-    `机器 ${machine}：${reason}。请主机运维协调管理员从当前控制主机 release 的 deploy 取以下文件，逐一核验 SHA-256，按对应平台 worker 安装文档以 root 替换私有配置指定的 helper，保持属主和权限，然后重新运行 machine check。\n${Object.entries(
+    `机器 ${machine}：${reason}。${fields.terminal ? "暂存已就绪。请先暂停派发、确认无活跃任务，再登录目标机执行下方命令。" : "发行材料暂存失败，没有可执行命令。请主机运维核对 worker 连接；下次巡检会重试。"}\n${Object.entries(
       digests,
     )
       .map(([name, sha]) => `${sha}  ${name}`)
       .join("\n")}`,
+    fields,
   );
 }
 // Called in the publication transition transaction, once per generation outcome.

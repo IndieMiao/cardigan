@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AssignmentId, ProjectId } from "@cardigan/domain";
+import type { AssignmentId, HumanActionId, ProjectId } from "@cardigan/domain";
 import { RepositoryLockTimeoutError } from "@cardigan/git-service";
 import type { Store } from "@cardigan/store";
 import { acquireRepositoryFlock } from "./repository-lock.js";
@@ -19,11 +19,29 @@ export async function tryHostOpsLock(
   assignment: AssignmentId,
   scope: "host-ops" | "launch" = "host-ops",
 ): Promise<(() => Promise<void>) | undefined> {
-  if (
-    !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project) ||
-    !/^A-[1-9][0-9]*$/u.test(assignment)
-  )
-    throw new Error("Invalid host operation lock identity");
+  if (!/^A-[1-9][0-9]*$/u.test(assignment))
+    throw new Error("Invalid assignment id");
+  return tryScopedLock(store, project, assignment, scope);
+}
+
+export function tryHelperConfirmationLock(
+  store: Store,
+  project: ProjectId,
+  action: HumanActionId,
+) {
+  if (!/^H-[1-9][0-9]*$/u.test(action))
+    throw new Error("Invalid human action id");
+  return tryScopedLock(store, project, action, "helper-confirm");
+}
+
+async function tryScopedLock(
+  store: Store,
+  project: ProjectId,
+  id: string,
+  scope: "host-ops" | "launch" | "helper-confirm",
+) {
+  if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project))
+    throw new Error("Invalid project id");
   const main = store.database
     .prepare("PRAGMA database_list")
     .all()
@@ -33,14 +51,14 @@ export async function tryHostOpsLock(
       ? await realpath(main.file)
       : undefined;
   const path = database
-    ? join(dirname(database), "locks", `${scope}-${project}-${assignment}.lock`)
+    ? join(dirname(database), "locks", `${scope}-${project}-${id}.lock`)
     : undefined;
   let held = path ? heldFiles : heldMemory.get(store.database);
   if (!held) {
     held = new Set();
     heldMemory.set(store.database, held);
   }
-  const key = path ?? JSON.stringify([scope, project, assignment]);
+  const key = path ?? JSON.stringify([scope, project, id]);
   if (held.has(key)) return undefined;
   held.add(key);
   let release: (() => Promise<void>) | undefined;
