@@ -1,6 +1,7 @@
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
+export * from "./bell-receipt.js";
 export * from "./card-dependencies.js";
 export * from "./card-derived.js";
 export {
@@ -259,6 +260,7 @@ export { sharedMustFixes } from "./shared-findings.js";
 export {
   repairWakeTarget,
   resumableReviewWithdrawal,
+  reviewReceiptTargetCurrent,
   reviewRunWakeDisposition,
   reviewWakeBlocked,
 } from "./shared-review-wake.js";

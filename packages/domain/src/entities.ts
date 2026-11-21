@@ -561,6 +561,24 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** This Run's first bell, not a business ACK or an inbox cursor. Never inherit on recovery. */
+  readonly bell_delivery?: {
+    readonly run_id: RunId;
+    readonly card_id?: CardId;
+    readonly session_ref?: string;
+    readonly review_target?: {
+      readonly delivery_id: DeliveryId;
+      readonly target_sha: string;
+    };
+    readonly received_at?: Timestamp;
+    readonly sent_at?: Timestamp;
+    readonly runtime_ref?: RuntimeRef;
+    readonly retry_at?: Timestamp;
+    /** Positive non-delivery, valid only for this exact first-write attempt. */
+    readonly refused_attempt_id?: string;
+    readonly idle_check_at?: Timestamp;
+    readonly escalated_at?: Timestamp;
+  };
   readonly failure_reason?: "provider_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;

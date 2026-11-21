@@ -175,8 +175,19 @@ for (const entry of ["initial", "retry", "host reuse"] as const) {
         await Promise.all(holders);
         const outcome = await sending;
         expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
-        expect(f.latest()).toEqual(run);
         if (change === "unchanged") {
+          expect(f.latest()).toEqual({
+            ...run,
+            bell_delivery: {
+              run_id: run.id,
+              card_id: f.target.card.id,
+              ...(f.target.assignment.session_ref
+                ? { session_ref: f.target.assignment.session_ref }
+                : {}),
+              runtime_ref: f.refFor(f.target.assignment),
+              sent_at: f.clock.now(),
+            },
+          });
           expect(outcome).not.toHaveProperty("error");
           expect(actualSend).toHaveBeenCalledOnce();
           expect(
@@ -185,6 +196,7 @@ for (const entry of ["initial", "retry", "host reuse"] as const) {
           await new Dispatcher(f.options).tick();
           expect(actualSend).toHaveBeenCalledOnce();
         } else {
+          expect(f.latest()).toEqual(run);
           if (entry === "host reuse")
             expect(outcome).toMatchObject({
               error: expect.any(RunWakeWithdrawn),
