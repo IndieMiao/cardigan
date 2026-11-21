@@ -8,10 +8,7 @@ import {
   matchesWorkerPlatform,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
-import {
-  helperMismatch,
-  workerHelperDigests,
-} from "./worker-helper-release.js";
+import { helperMismatch } from "./worker-helper-release.js";
 import { notifyWorkerMaintenance } from "./worker-maintenance.js";
 import { onboardWorker } from "./worker-onboarding.js";
 import {
@@ -19,6 +16,7 @@ import {
   readOnboardingYaml,
 } from "./worker-onboarding-config.js";
 import {
+  finishUpgrade,
   upgradeHold,
   upgradeKey,
   upgradeState,
@@ -36,6 +34,7 @@ const held: Check = { blockers: [upgradeHold], launch_enabled: false };
 export async function patrolHelperUpgrade(
   options: {
     store: Store;
+    job: string;
     project: string;
     machine: string;
     execution: ExecutionConfig;
@@ -59,56 +58,58 @@ export async function patrolHelperUpgrade(
   if (initial.blockers.includes("machine_not_ready")) return initial;
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
-  const now = () => new Date().toISOString();
+
   let stage = "configuration";
   const start = Date.now();
   let before: Record<string, string> = {};
-  const finish = (passed: boolean) =>
-    store.uow.run((tx) => {
-      const changed = store.database
-        .prepare(
-          "UPDATE worker_helper_upgrades SET state=? WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
-        )
-        .run(passed ? "verified" : "failed", project, machine, key);
-      if (changed.changes !== 1) throw new Error("worker_upgrade_stale");
-      tx.events.append(project, {
-        id: tx.ids.nextEventId(),
-        seq: tx.ids.nextEventSequence(project),
-        type: passed
-          ? "worker_helper_upgrade_verified"
-          : "worker_helper_upgrade_failed",
-        actor: { kind: "system", project_id: project },
-        created_at: now(),
-        payload: {
-          machine_id: machine,
-          stage,
-          duration_ms: Date.now() - start,
-          before,
-          expected: { ...workerHelperDigests() },
-        },
-      });
-      if (!passed)
-        notifyWorkerMaintenance(
-          tx,
-          project,
-          { now },
-          `worker-upgrade:${machine}:${key}`,
-          `机器 ${machine} 的 helper 自动升级未获验证（${stage}），已保持停派，本版本不会再次自动安装。请主机运维检查发行签名、受限入口及 worker / machine check，再按接入文档恢复。`,
-        );
-    });
+  const evidence = () => ({ before, start, job: options.job });
+  const fail = () =>
+    store.uow.run((tx) =>
+      finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
+    );
   if (previous?.release_key === key) {
     if (previous.state === "installing") {
       stage = "interrupted";
-      finish(false);
+      fail();
     }
+    if (previous.state === "worker_checked") return initial;
     if (previous.state !== "verified") return held;
     // Drift after a verified install needs investigation, not another root write.
     if (!initial.blockers.some(helperMismatch)) return initial;
   }
   const identity = upgradeIdentity(root, project, machine);
   // Missing enrollment never enables SSH. Malformed/private-file failures may not authorize it either.
-  if (!lstatSync(identity, { throwIfNoEntry: false }))
-    return wasHeld ? held : initial;
+  if (!lstatSync(identity, { throwIfNoEntry: false })) {
+    if (
+      wasHeld &&
+      previous.release_key !== key &&
+      execution.target &&
+      options.bindingCurrent()
+    ) {
+      // The patrol holds the machine job. Do not carry any worker proof across keys.
+      store.uow.run((tx) => {
+        store.database
+          .prepare(
+            "UPDATE worker_helper_upgrades SET release_key=?,state='failed',pending_final=NULL WHERE project_id=? AND machine_id=? AND release_key=? AND state!='verified'",
+          )
+          .run(key, project, machine, String(previous.release_key));
+        if (previous.state === "installing")
+          notifyWorkerMaintenance(
+            tx,
+            project,
+            { now: () => new Date().toISOString() },
+            `worker-upgrade:${machine}:${key}`,
+            `机器 ${machine} 的升级中断且已退出自动更新。请按当前版本人工恢复并顺序运行 worker check、machine check。`,
+          );
+      });
+    }
+    return wasHeld
+      ? { ...held, blockers: [...initial.blockers, upgradeHold] }
+      : initial;
+  }
+  const needsInstall = initial.blockers.some(helperMismatch);
+  if (!needsInstall && initial.blockers.length)
+    return { ...held, blockers: [...initial.blockers, upgradeHold] };
   try {
     if (adapters.promotionPending(execution.dataDir)) return held;
   } catch {
@@ -125,7 +126,7 @@ export async function patrolHelperUpgrade(
       return false;
     store.database
       .prepare(
-        "INSERT INTO worker_helper_upgrades VALUES (?,?,?,'installing') ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state='installing'",
+        "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES (?,?,?,'installing') ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state='installing',pending_final=NULL",
       )
       .run(project, machine, key);
     return true;
@@ -152,8 +153,10 @@ export async function patrolHelperUpgrade(
     )
       throw new Error();
     signal?.throwIfAborted();
-    stage = "install";
-    before = await adapters.install(execution, project, identity, signal);
+    if (needsInstall) {
+      stage = "install";
+      before = await adapters.install(execution, project, identity, signal);
+    }
     stage = "worker_check";
     if (
       !options.bindingCurrent() ||
@@ -180,10 +183,17 @@ export async function patrolHelperUpgrade(
     const result = await options.check();
     if (result.blockers.length || !options.bindingCurrent()) throw new Error();
     signal?.throwIfAborted();
-    finish(true);
+    // Outer capability probes, the final binding fence and journal completion still have to pass.
+    store.uow.run(() =>
+      store.database
+        .prepare(
+          "UPDATE worker_helper_upgrades SET pending_final=? WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+        )
+        .run(JSON.stringify(evidence()), project, machine, key),
+    );
     return result;
   } catch {
-    finish(false);
+    fail();
     return held;
   }
 }

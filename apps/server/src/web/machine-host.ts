@@ -191,7 +191,7 @@ export function machineHost(
       });
       if (passed) progress("capabilities");
       await refreshWorkerObservations(store, config.worker, passed, env, {
-        fullWorkerCheck: true,
+        fullWorkerCheckId: observationId,
         signal,
         browsersPath,
       });

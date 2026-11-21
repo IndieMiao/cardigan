@@ -53,9 +53,10 @@ import {
 import { workerReadiness } from "./worker-readiness.js";
 import { patrolHelperUpgrade } from "./worker-upgrade.js";
 import {
-  manualMachineChecked,
   upgradeHeld,
   upgradeHold,
+  upgradeKey,
+  upgradeState,
 } from "./worker-upgrade-gate.js";
 
 type TargetState = Pick<ReadRepositories, "machines" | "assignments">;
@@ -499,13 +500,24 @@ export class RuntimeTargets implements Runtime {
   check(
     project: ProjectId,
     machine_id: string,
+    forObservation = false,
   ): Promise<RuntimeResult<MachineCheck>> {
     return this.rawMachineCheck(project, machine_id).then((result) => {
       if (
         result.ok &&
         machine_id !== "local" &&
         upgradeHeld(this.options.store, project, machine_id)
-      )
+      ) {
+        const row = upgradeState(this.options.store, project, machine_id);
+        if (
+          forObservation &&
+          row?.state === "worker_checked" &&
+          row.release_key ===
+            upgradeKey(
+              this.resolve(project, machine_id).execution.target?.fingerprint,
+            )
+        )
+          return result;
         return {
           ...result,
           value: {
@@ -514,6 +526,7 @@ export class RuntimeTargets implements Runtime {
             launch_enabled: false,
           },
         };
+      }
       return result;
     });
   }
@@ -551,17 +564,6 @@ export class RuntimeTargets implements Runtime {
           return rejected("target_changed");
         if (!["online", "degraded"].includes(current.machine.status))
           blockers = [...blockers, "machine_not_ready"];
-        if (
-          machine_id !== "local" &&
-          !blockers.length &&
-          upgradeHeld(this.options.store, project, machine_id)
-        )
-          manualMachineChecked(
-            this.options.store,
-            project,
-            machine_id,
-            target.execution.target?.fingerprint,
-          );
         return {
           ok: true,
           value: {
@@ -595,7 +597,7 @@ export class RuntimeTargets implements Runtime {
       },
       () => this,
       "patrol",
-      async () => {
+      async (job) => {
         const execution = this.resolve(project, machine).execution;
         const check = async () => {
           const result = await this.rawMachineCheck(project, machine);
@@ -609,6 +611,7 @@ export class RuntimeTargets implements Runtime {
             project,
             machine,
             execution,
+            job,
             env: this.options.env,
             signal: overrides.signal,
             bindingCurrent: () =>
@@ -953,7 +956,7 @@ export class RuntimeTargets implements Runtime {
 export function observeRegisteredMachine(
   options: Omit<MachineObservationOptions, "target" | "check">,
   create: () => Promise<RuntimeTargets> | RuntimeTargets,
-  patrolCheck?: MachineObservationOptions["check"],
+  patrolCheck?: (job: string) => ReturnType<MachineObservationOptions["check"]>,
 ) {
   const { project, machine } = options;
   let runtime: RuntimeTargets | undefined;
@@ -961,21 +964,21 @@ export function observeRegisteredMachine(
   return refreshMachineObservations({
     ...options,
     target: async () => (await ready()).resolve(project, machine),
-    check:
-      patrolCheck ??
-      (async () => {
-        const checked = await (await ready()).check(project, machine);
-        return checked.ok
-          ? checked.value
-          : { blockers: [checked.error.code], launch_enabled: false };
-      }),
+    check: async () => {
+      if (patrolCheck && options.observationId)
+        return patrolCheck(options.observationId);
+      const checked = await (await ready()).check(project, machine, true);
+      return checked.ok
+        ? checked.value
+        : { blockers: [checked.error.code], launch_enabled: false };
+    },
   });
 }
 export async function checkRegisteredMachine(
   options: Parameters<typeof observeRegisteredMachine>[0],
   create: Parameters<typeof observeRegisteredMachine>[1],
   source: "cli" | "patrol" = "cli",
-  patrolCheck?: MachineObservationOptions["check"],
+  patrolCheck?: (job: string) => ReturnType<MachineObservationOptions["check"]>,
 ) {
   const journal = new MachineCheckJournal(options.store);
   for (;;) {

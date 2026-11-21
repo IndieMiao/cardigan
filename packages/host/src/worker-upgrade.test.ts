@@ -10,8 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Machine } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { refreshMachineObservations } from "./machine-capabilities.js";
+import { MachineCheckJournal } from "./machine-check-journal.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   digestMismatch,
@@ -20,10 +23,10 @@ import {
 } from "./worker-helper-release.js";
 import { patrolHelperUpgrade } from "./worker-upgrade.js";
 import {
-  manualMachineChecked,
-  manualWorkerChecked,
   upgradeHeld,
   upgradeHold,
+  upgradeKey,
+  upgradeState,
 } from "./worker-upgrade-gate.js";
 import {
   signedHelperBundle,
@@ -89,14 +92,102 @@ function setup(os = "linux") {
     }),
     promotionPending: () => false,
   };
-  const run = (initial: typeof mismatch = mismatch) =>
-    patrolHelperUpgrade(options, initial, adapters);
+  const journal = new MachineCheckJournal(store);
+  const registered: Machine = {
+    id: machine,
+    herdr_machine: machine,
+    label: "fixture",
+    os: os === "macos" ? "darwin" : os,
+    arch: "arm64",
+    tags: [],
+    max_assignments: 1,
+    status: "online",
+    last_seen: new Date().toISOString(),
+  };
+  store.uow.run((tx) => tx.machines.put(project, registered));
+  const finalize = async (
+    kind: "machine" | "worker",
+    binding: string,
+    raw: (
+      id: string,
+    ) => Promise<{ blockers: readonly string[]; launch_enabled: boolean }>,
+    outerOK = true,
+  ) => {
+    const { job } = journal.claim(project, machine, kind, "cli");
+    const r = await journal.execute(
+      job,
+      async () =>
+        refreshMachineObservations({
+          store,
+          project,
+          machine,
+          observationId: job.id,
+          target: () => ({
+            machine: registered,
+            execution: {
+              ...options.execution,
+              target: { ...target, fingerprint: binding },
+            },
+          }),
+          check: () => raw(job.id),
+          catalog: () => {
+            if (!outerOK) throw new Error("probe interrupted");
+            return [];
+          },
+        }),
+      (v) => ({
+        status: v.health?.available ? "passed" : "failed",
+        failed_steps: [],
+      }),
+    );
+    return {
+      blockers: r.health?.blockers ?? ["failed"],
+      launch_enabled: r.health?.launch_enabled ?? false,
+    };
+  };
+  const run = (
+    initial: typeof mismatch = mismatch,
+    outerOK = true,
+    binding = target.fingerprint,
+  ) =>
+    finalize(
+      "machine",
+      binding,
+      (job) =>
+        patrolHelperUpgrade(
+          {
+            ...options,
+            execution: {
+              ...options.execution,
+              target: { ...target, fingerprint: binding },
+            },
+            job,
+          },
+          initial,
+          adapters,
+        ),
+      outerOK,
+    );
+  const manual = (
+    kind: "worker" | "machine",
+    binding = target.fingerprint,
+    ok = true,
+    outerOK = true,
+  ) =>
+    finalize(
+      kind,
+      binding,
+      async () => (ok ? pass : { blockers: ["tools"], launch_enabled: false }),
+      outerOK,
+    );
   const enroll = () =>
     writeFileSync(upgradeIdentity(root, project, machine), "synthetic", {
       mode: 0o600,
     });
   return {
     run,
+    manual,
+    journal,
     options,
     adapters,
     enroll,
@@ -150,15 +241,101 @@ test.each(["install", "worker_check", "machine_check"])(
     expect(f.actions()[0]?.instructions).toContain(stage);
     expect(f.actions()[0]?.instructions).not.toContain("private-fixture");
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
-    manualMachineChecked(f.store, project, machine, f.target.fingerprint);
+    await f.manual("machine");
     expect(f.isHeld()).toBe(true);
-    manualWorkerChecked(f.store, project, machine, f.target.fingerprint);
-    manualMachineChecked(f.store, project, machine, "different");
+    await f.manual("worker");
+    await f.manual("machine", "different");
     expect(f.isHeld()).toBe(true);
-    manualMachineChecked(f.store, project, machine, f.target.fingerprint);
+    await f.manual("machine");
     expect(f.isHeld()).toBe(false);
   },
 );
+test.each(["failed", "installing", "worker_checked"])(
+  "revoked enrollment: %s is held until both checks on the new key",
+  async (state) => {
+    const f = setup();
+    f.enroll();
+    f.adapters.install.mockRejectedValueOnce(new Error());
+    await f.run();
+    if (state === "installing")
+      f.store.database
+        .prepare("UPDATE worker_helper_upgrades SET state='installing'")
+        .run();
+    if (state === "worker_checked") await f.manual("worker");
+    rmSync(upgradeIdentity(f.options.execution.dataDir, project, machine));
+    const binding = "new-binding";
+    await f.run(pass, true, binding);
+    expect(upgradeState(f.store, project, machine)).toMatchObject({
+      release_key: upgradeKey(binding),
+      state: "failed",
+    });
+    await f.manual("worker");
+    await f.manual("machine", binding);
+    expect(f.isHeld()).toBe(true);
+    await f.manual("worker", binding);
+    await f.manual("machine");
+    expect(f.isHeld()).toBe(true);
+    await f.manual("machine", binding);
+    expect(f.isHeld()).toBe(false);
+    expect(f.adapters.install).toHaveBeenCalledTimes(1);
+  },
+);
+test("neither automatic nor manual recovery releases on a failed final observation", async () => {
+  const f = setup();
+  f.enroll();
+  await f.run(mismatch, false);
+  expect(f.isHeld()).toBe(true);
+  expect(f.actions()[0]?.instructions).toContain("machine_check");
+  expect(
+    f.store.uow
+      .read((tx) => tx.events.listAfter(project, undefined, 0))
+      .some((e) => e.type === "worker_helper_upgrade_verified"),
+  ).toBe(false);
+  await f.manual("worker");
+  await f.manual("machine", f.target.fingerprint, true, false);
+  expect(f.isHeld()).toBe(true);
+  await f.manual("machine");
+  expect(f.isHeld()).toBe(false);
+});
+test("failed and interrupted worker checks supersede earlier success", async () => {
+  const f = setup();
+  f.enroll();
+  f.adapters.install.mockRejectedValueOnce(new Error());
+  await f.run();
+  await f.manual("worker");
+  await f.manual("worker", f.target.fingerprint, false);
+  await f.manual("machine");
+  expect(f.isHeld()).toBe(true);
+  await f.manual("worker");
+  const { job } = f.journal.claim(project, machine, "worker", "web");
+  await expect(
+    f.journal.execute(
+      job,
+      async () => {
+        throw new Error("aborted");
+      },
+      () => ({ status: "passed", failed_steps: [] }),
+    ),
+  ).rejects.toThrow();
+  await f.manual("machine");
+  expect(f.isHeld()).toBe(true);
+});
+test("new release without positive mismatch evidence never writes helpers", async () => {
+  const f = setup();
+  f.enroll();
+  f.adapters.install.mockRejectedValueOnce(new Error());
+  await f.run();
+  f.store.database
+    .prepare("UPDATE worker_helper_upgrades SET release_key='old'")
+    .run();
+  await f.run({ blockers: ["connection failed"], launch_enabled: false });
+  expect(f.isHeld()).toBe(true);
+  expect(f.adapters.workerCheck).not.toHaveBeenCalled();
+  await f.run(pass);
+  expect(f.isHeld()).toBe(false);
+  expect(f.adapters.install).toHaveBeenCalledTimes(1);
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+});
 test("changing binding before installation cannot use the enrolled key", async () => {
   const f = setup();
   f.enroll();

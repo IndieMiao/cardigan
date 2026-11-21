@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
@@ -24,31 +24,13 @@ import {
 
 import {
   helperMismatch,
-  workerHelperDigests,
-  workerPublicationProtocol,
+  observationFingerprint,
 } from "./worker-helper-release.js";
 import { notifyHelperMismatch } from "./worker-maintenance.js";
 
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
-/** Capability evidence identifies the probed platform as well as the private runtime binding.
- * Keep this separate from the persisted runtime_ref fingerprint used to address live terminals. */
-export function observationFingerprint(
-  binding: string | undefined,
-  platform: Pick<Machine, "os" | "arch">,
-) {
-  if (!binding) return undefined;
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        binding,
-        platform.os,
-        platform.arch,
-        workerPublicationProtocol,
-        workerHelperDigests(),
-      ]),
-    )
-    .digest("hex");
-}
+export { observationFingerprint } from "./worker-helper-release.js";
+
 interface ObservationTarget {
   readonly execution: ExecutionConfig;
   readonly machine: Machine;

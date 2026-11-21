@@ -298,16 +298,25 @@ Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新�
 
 ### 可选：为已登记的 Mac 接入受限 helper 升级
 
-默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对管理员安装的 `/opt/cardigan/deploy` 来自已部署发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
+默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对接入包来自已部署的已审发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
 
 ```sh
 sh deploy/enroll-helper-controller.sh prepare example worker-a
 ```
 
-Mac 管理员运行下面第一条，粘贴 prepare 输出的 SSH 公钥和 PEM 公钥两段，以 Ctrl-D 结束；对照控制主机终端核实两个指纹。脚本创建无密码凭据的隐藏系统账号及独占组，不开启图形登录、不加入 admin、wheel 或 worker 组；HOME、公钥和入口由 root 持有。确认本机 SSH 策略只允许此受限公钥，没有其它登录入口。sudo 授权只应有一个固定的无参数命令；脚本拒绝已有账号、文件或已有 sudo 授权。异常时不要强行覆盖或激活。
+Mac 管理员使用本次新建、受 root 保护的发行目录（不更新或使用旧 `/opt/cardigan/deploy`）。`BUNDLE` 为管理员收到的包，`EXPECTED` 为经独立通道核对的整包 SHA-256；包内保留 `deploy/` 层级。先执行：
 
 ```sh
-sudo /bin/sh /opt/cardigan/deploy/enroll-helper-worker.sh
+KIT=$(sudo mktemp -d /opt/cardigan-enroll.XXXXXXXX) &&
+  sudo install -m 0400 "$BUNDLE" "$KIT/release.tar" &&
+  got=$(sudo shasum -a 256 "$KIT/release.tar") && [ "${got%% *}" = "$EXPECTED" ] &&
+  sudo tar --no-same-owner -xf "$KIT/release.tar" -C "$KIT"
+```
+
+任一步失败即停；使用同一 `KIT`，不从历史目录挑选脚本。Mac 管理员运行下面第一条，粘贴 prepare 输出的 SSH 公钥和 PEM 公钥两段，以 Ctrl-D 结束；对照控制主机终端核实两个指纹。脚本创建无密码凭据的隐藏系统账号及独占组，不开启图形登录、不加入 admin、wheel 或 worker 组；HOME、公钥和入口由 root 持有。确认本机 SSH 策略只允许此受限公钥，没有其它登录入口。sudo 授权只应有一个固定的无参数命令；脚本拒绝已有账号、文件或已有 sudo 授权。异常时不要强行覆盖或激活。
+
+```sh
+sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh"
 sudo -n -l -U cardigan_updater
 ```
 

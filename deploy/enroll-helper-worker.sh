@@ -15,14 +15,34 @@ esac
 # Refuse existing accounts/paths and unsafe ancestors. Never adopt or repair them.
 ! id "$u" >/dev/null 2>&1 || exit 1
 for p in "$home" "$b" "$policy"; do [ ! -e "$p" ] && [ ! -L "$p" ] || exit 1; done
-/usr/bin/python3 -IB - "$src" "$b" "$home" "$policy" <<'PY'
-import os, pathlib, stat, sys
-for entry in (sys.argv[1], *(pathlib.Path(p).parent for p in sys.argv[2:])):
-    path = pathlib.Path(entry)
-    for parent in (path, *path.parents):
-        s = parent.lstat()
-        if not stat.S_ISDIR(s.st_mode) or s.st_uid or s.st_mode & 0o022: sys.exit('unsafe directory')
+# Embedded in the independently authenticated bootstrap; never load an unchecked sibling.
+# Reject granting/unknown ACLs (including Linux defaults) and links. Darwin system ancestors can have deny-only ACLs.
+guard() {
+/usr/bin/python3 -IB - "$@" <<'PY'
+import os, platform, re, stat, subprocess, sys
+from pathlib import Path
+
+def safe_acl(path):
+    if platform.system() == 'Linux':
+        return not any(k.startswith('system.posix_acl_') for k in os.listxattr(path, follow_symlinks=False))
+    if platform.system() != 'Darwin': return False
+    lines = subprocess.check_output(['/bin/ls', '-lden', str(path)], env={'LC_ALL':'C'}).splitlines()
+    if not lines: return False
+    if len(lines) == 1: return b'+' not in lines[0].split(None, 1)[0]
+    return all(re.fullmatch(rb'\s*\d+: \S+ deny [a-z_,]+', line) for line in lines[1:])
+
+for arg in sys.argv[1:]:
+    kind, value = arg.split(':', 1)
+    path = Path(value)
+    if not path.is_absolute() or '..' in path.parts: sys.exit('unsafe bootstrap path')
+    for p in (*reversed(path.parents), path):
+        s = p.lstat()
+        good_type = stat.S_ISREG(s.st_mode) and s.st_nlink == 1 if p == path and kind == 'f' else stat.S_ISDIR(s.st_mode)
+        if not good_type or s.st_uid or s.st_mode & 0o022 or not safe_acl(p): sys.exit('unsafe bootstrap permissions')
 PY
+}
+guard "d:$(dirname "$b")" "d:$(dirname "$home")" "d:$(dirname "$policy")" "f:$config" \
+  "f:$src/enroll-helper-worker.sh" "f:$src/$entry" "f:$src/upgrade-worker-helpers.py" "f:$src/install-macos-worker.py" "f:$src/worker-primitives.py"
 install -d -o root -g "$group" -m 0700 "$b" "$b/state"
 # The public enrollment consists of one OpenSSH line followed by a PEM public key.
 IFS=' ' read -r algorithm blob comment
@@ -56,8 +76,14 @@ install -d -o root -g "$group" -m 0755 "$home" "$home/.ssh"
 printf 'restrict,command="/usr/bin/sudo -n -- %s/upgrade" %s %s\n' "$b" "$algorithm" "$blob" > "$home/.ssh/authorized_keys"
 chmod 0644 "$home/.ssh/authorized_keys"
 printf '%s ALL=(root) NOPASSWD: NOSETENV: %s/upgrade ""\n' "$u" "$b" > "$b/policy"
-visudo -cf "$b/policy"
-install -o root -g "$group" -m 0440 "$b/policy" "$policy"
+guard "d:$b/state" "f:$b/upgrade" "f:$b/upgrade-worker-helpers.py" "f:$b/install-macos-worker.py" "f:$b/worker-primitives.py" \
+  "f:$b/signer.pub" "f:$b/transport.pub" "f:$home/.ssh/authorized_keys" "f:$b/policy"
+# Check the staged rule on its destination filesystem before the grant exists.
+staged=$(mktemp "$policy.XXXXXXXX")
+install -o root -g "$group" -m 0440 "$b/policy" "$staged"
+guard "f:$staged"
+visudo -cf "$staged"
+ln "$staged" "$policy" && rm "$staged" || exit 1
 visudo -c
 sudo -n -l -U "$u" "$b/upgrade"
 if sudo -n -l -U "$u" /bin/sh || sudo -n -l -U "$u" "$b/upgrade" unexpected; then exit 1; fi

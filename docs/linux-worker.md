@@ -353,10 +353,19 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
    sh deploy/enroll-helper-controller.sh prepare example worker-a
    ```
 
-2. 在 worker 确认 `/opt/cardigan/deploy` 是这次经独立核对的、整条路径受 root 保护的发行目录，`/etc/cardigan/worker.json` 是正确项目配置。执行下列命令，从控制主机终端粘贴上一步标准输出的**公钥两段**（SSH 一行及完整 PEM），按 Ctrl-D；核对两端显示的指纹。不要发送私钥。脚本创建无密码凭据的专用系统账号，root 持有 HOME、公钥和强制 SSH 命令；sudoers 仅允许固定入口、零参数，不授予 shell 和额外 sudo。
+2. worker 管理员确认 `/etc/cardigan/worker.json` 属于本项目。使用本轮新建的 root 私有发行目录，不更新或执行旧 `/opt/cardigan/deploy`。管理员从控制主机**实际部署并已审核**的提交打包 `deploy` 下的接入脚本、两台的入口和固定检查器，包内保留 `deploy/` 层级；通过独立可信通道核对包的 SHA-256。以 `BUNDLE` 指向收到的包，`EXPECTED` 为独立核对的整包 SHA-256。每条以 `&&` 相连，失败停止；`KIT` 始终使用本次创建的确切目录，不用通配符。不要对已存在的安装路径覆盖或补权限。
 
    ```sh
-   sudo /bin/sh /opt/cardigan/deploy/enroll-helper-worker.sh
+   KIT=$(sudo mktemp -d /opt/cardigan-enroll.XXXXXXXX) &&
+     sudo install -m 0400 "$BUNDLE" "$KIT/release.tar" &&
+     got=$(sudo sha256sum "$KIT/release.tar") && [ "${got%% *}" = "$EXPECTED" ] &&
+     sudo tar --no-same-owner -xf "$KIT/release.tar" -C "$KIT"
+   ```
+
+   包内 `deploy/` 及其中的文件须为 root 持有、不可被其它账号写入，接入脚本在安装授权前还会检查祖先目录、扩展 ACL 和实际安装结果。执行下列命令，从控制主机终端粘贴上一步标准输出的**公钥两段**（SSH 一行及完整 PEM），按 Ctrl-D；核对两端显示的指纹。不要发送私钥。脚本创建无密码凭据的专用系统账号，root 持有 HOME、公钥和强制 SSH 命令；sudoers 仅允许固定入口、零参数，不授予 shell 和额外 sudo。
+
+   ```sh
+   sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh"
    sudo -n -l -U cardigan_updater
    ```
 
@@ -371,3 +380,5 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
    激活本身不重启机器、不使检查变绿。已有摘要不符时，等下一次后台巡检，再执行这两条只读复查。首次和后续巡检均不从工作树取文件：只签发当前进程与部署记录一致的已部署提交中的三个 blob；root 只接收限长的标准输入，独立验签、核对文件名与 SHA-256，并拒绝旧请求。旧文件保存在 root 私有的 `/opt/cardigan-helper-upgrade/state/backup-<毫秒时间戳>`。安装器检查代码与基础实现固定在首次安装的 root 目录中，绝不执行上传的代码。bootstrap 本身的升级仍须管理员审核安装。
 
 升级失败会保持停派：同一绑定、同一组摘要不会再自动安装。按运维待办查出失败阶段；部分替换时按备份整体还原或人工安装当前可信版本，然后顺序执行上面两条检查。仅 worker check 成功不能解锁；同一绑定的 machine check 也须通过，且不覆盖人工 drain 或关闭派发。未完成的初始化不原地重跑：保留已有账号、文件和备份，让管理员检查冲突。撤销接入时先停用该专用身份，再由管理员移除对应受限授权，勿改 worker 的既有连接。
+
+撤销接入并遇到新部署或绑定变更时，下一轮巡检将旧停派记录转到当前版本，不执行安装，不沿用旧检查证据。按当前发行版人工修复后，在同一绑定依次运行 `worker check`、`machine check`；以两项检查正式完成的结果为准。新的 worker 检查一旦开始，之前的 worker 通过结果即失效。

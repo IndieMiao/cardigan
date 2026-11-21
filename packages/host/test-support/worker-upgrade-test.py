@@ -1,5 +1,8 @@
 """Exercise the wire format and root write policy without real accounts or sudo."""
 import base64
+import sys
+import stat
+from types import SimpleNamespace
 import json
 import os
 from pathlib import Path
@@ -76,6 +79,57 @@ class EntryTest(unittest.TestCase):
             self.assertEqual(result[n], api['digest'](old))
             self.assertEqual((backup / n).read_bytes(), old)
             self.assertEqual((target / n).read_bytes(), self.files[n])
+
+    def bootstrap_guard(self, name, args, metadata, platform='Linux', acl_path=None):
+        source = (DEPLOY / name).read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        paths = []
+        def lookup(p):
+            paths.append(str(p))
+            uid, mode, links = metadata[str(p)]
+            return SimpleNamespace(st_uid=uid, st_mode=mode, st_nlink=links)
+        def mac_acl(argv, **kwargs):
+            return b'drwx------ root' + (b'\n 0: user:fixture allow write' if argv[-1] == acl_path else b'\n 0: group:everyone deny delete')
+        with (patch.object(sys,'argv',['-', *args]), patch.object(Path,'lstat',lookup),
+              patch.object(os,'geteuid',return_value=1001), patch.object(os,'listxattr',side_effect=lambda p, **_: ['system.posix_acl_default'] if str(p)==acl_path else []),
+              patch('platform.system',return_value=platform), patch.object(subprocess,'check_output',side_effect=mac_acl)):
+            exec(compile(source, name, 'exec'), {})
+        return paths
+
+    def test_root_bootstrap_denies_effective_writers_before_authorization(self):
+        script = 'enroll-helper-worker.sh'
+        doc = (DEPLOY/script).read_text()
+        self.assertLess(doc.index('guard "f:$staged"'),doc.index('ln "$staged" "$policy"'))
+        self.assertLess(doc.index('guard "d:$b/state"'),doc.index('guard "f:$staged"'))
+        data = {'/':(0,0o40755,2),'/opt':(0,0o40755,2),'/opt/entry':(0,0o100500,1)}
+        for platform in ('Linux','Darwin'):
+            self.bootstrap_guard(script,['f:/opt/entry'],data,platform)
+            for p in data:
+                with self.subTest(os=platform,path=p), self.assertRaises(SystemExit):
+                    self.bootstrap_guard(script,['f:/opt/entry'],data,platform,p)
+        for bad in [(0,0o100520,1),(1001,0o100500,1),(0,stat.S_IFLNK|0o777,1),(0,0o100500,2)]:
+            with self.assertRaises(SystemExit):
+                self.bootstrap_guard(script,['f:/opt/entry'],dict(data, **{'/opt/entry':bad}))
+
+    def test_controller_validates_all_existing_material_before_key_tools(self):
+        script='enroll-helper-controller.sh'; src=(DEPLOY/script).read_text()
+        self.assertLess(src.index("<<'PY'"), src.index('openssl genpkey'))
+        args=['/config','identity']; data={'/':(0,0o40755,2),'/config':(1001,0o40700,2)}
+        for suffix in ('','.pending','.pending.pub','.signer.pem'):
+            data['/config/identity'+suffix]=(1001,0o100600,1)
+        self.bootstrap_guard(script,args,data)
+        for p, facts in [('/config',(1001,0o40755,2)),('/config',(0,0o40700,2)),('/',(0,0o40777,2)),('/config/identity.pending',(1001,0o100644,1)),('/config/identity.signer.pem',(1001,stat.S_IFLNK|0o777,1)),('/config/identity.pending.pub',(1001,0o100644,2))]:
+            with self.subTest(path=p), self.assertRaises(SystemExit):
+                self.bootstrap_guard(script,args,dict(data, **{p:facts}))
+        with self.assertRaises(SystemExit): self.bootstrap_guard(script,args,data,acl_path='/config')
+
+    def test_timeout_discards_only_its_own_staging_directory(self):
+        target = self.root / 'libexec'; target.mkdir()
+        backup = self.root / 'backup'; backup.mkdir()
+        def timeout(*_): api['timed_out'](None, None)
+        with patch.dict(api['update'].__globals__, {'read_installed':lambda *_:b'old'}), patch.object(os,'fchown'), patch.object(os,'replace',side_effect=timeout):
+            with self.assertRaises(TimeoutError): api['update'](self.files,target,os.getgid(),backup,lambda _:True,lambda _:None)
+        self.assertEqual(list(target.iterdir()),[])
+        self.assertTrue(all((backup/n).read_bytes()==b'old' for n in NAMES))
 
     def test_caller_boundary_and_fixed_policy(self):
         for uid, user in [(501, 'worker'), (501,'cardigan_updater'), (0,'worker'), (0,'agent')]:

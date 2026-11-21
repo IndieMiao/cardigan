@@ -100,10 +100,15 @@ def verify_release(state, public_key, manifest, signature):
                        capture_output=True, timeout=5, check=True)
 
 
+def timed_out(_signal, _frame):
+    raise TimeoutError('upgrade_timeout')
+
+
 def main():
     require(len(sys.argv) == 1 and os.geteuid() == 0 and os.environ.get('SUDO_USER') == USER)
     os.chdir('/')
     os.umask(0o077)
+    signal.signal(signal.SIGALRM, timed_out)
     signal.alarm(90)
     native = runpy.run_path(str(BOOT / 'worker-primitives.py'))
     installer = runpy.run_path(str(BOOT / 'install-macos-worker.py'))
