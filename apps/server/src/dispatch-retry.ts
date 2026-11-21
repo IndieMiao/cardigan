@@ -734,7 +734,7 @@ export async function retryDispatchedRuns(
         recover,
         reconcile,
         readmit,
-        refusedClaim,
+        noSendYet,
         refusedNotes: refusedClaim ? last.notification_ids : [],
         legacyRetry: legacy === "unsent",
         withdrawn,
@@ -832,12 +832,13 @@ export async function retryDispatchedRuns(
       .status(observed.a.runtime_ref)
       .catch(() => undefined);
     const guard = status?.ok ? idleWakeGuard(status.value) : undefined;
-    if (!guard && !observed.refusedClaim) continue;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
       if (
         !current?.retry ||
+        // Only a proven non-write needs a guard deadline in place of ACK recovery.
+        (!guard && !current.noSendYet) ||
         current.recover ||
         JSON.stringify(current.a.runtime_ref) !==
           JSON.stringify(observed.a.runtime_ref) ||
