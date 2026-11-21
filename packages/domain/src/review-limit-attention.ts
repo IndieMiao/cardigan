@@ -1,6 +1,12 @@
 import type { CommandState } from "./commands/core.js";
 import { CommandDraft } from "./commands/core.js";
 import { currentReviewTarget, reviewRound } from "./commands/review-round.js";
+import {
+  eventsForDecision,
+  eventsForWorkItem,
+  eventsOfType,
+  resumeEventsForItem,
+} from "./event-index.js";
 import { flowAtLeast } from "./flow.js";
 import type { CardId, DecisionId, EventId, WorkItemId } from "./ids.js";
 import { parseId } from "./ids.js";
@@ -49,7 +55,10 @@ export function reviewLimitAttention(
     ) {
       const target = currentReviewTarget(draft, item);
       const round = reviewRound(draft, item);
-      const wait = state.events.findLast(
+      const wait = eventsForWorkItem(
+        eventsOfType(state.events, "review_limit_auto_raise_exhausted"),
+        item.id,
+      ).findLast(
         (e) =>
           e.actor.kind === "system" &&
           e.card_id === item.card_id &&
@@ -91,7 +100,7 @@ export function reviewLimitAttention(
     const resolvedAt = decision.resolution.at;
     const waited = Date.parse(now) - Date.parse(resolvedAt);
     if (!Number.isFinite(waited) || waited <= 10 * 60_000) return [];
-    const resolved = state.events.findLast(
+    const resolved = eventsForDecision(state.events, decision.id).findLast(
       (e) =>
         e.card_id === item.card_id &&
         e.type === "decision_resolved" &&
@@ -102,7 +111,7 @@ export function reviewLimitAttention(
     );
     // Do not flag an old resolution after a successful resume and a new wait.
     if (
-      state.events.some(
+      resumeEventsForItem(state.events, item.id).some(
         (e) =>
           e.card_id === item.card_id &&
           (resolved

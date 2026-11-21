@@ -13,15 +13,28 @@ import {
   mergeClassificationView,
   mergeShadowComparisons,
   postComment,
+  prepareDelivery,
+  prepareMergeShadow,
   recordDecision,
   recordMergeCheck,
   recordMergeShadow,
   resolveDelegatedDecision,
   setProjectPreferences,
+  submitDelivery,
+  submitReview,
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { apply, assignment, human, id, role, value } from "./test-fixtures.js";
+import {
+  actor,
+  apply,
+  assignment,
+  human,
+  id,
+  role,
+  value,
+} from "./test-fixtures.js";
+import { testReviewFixture } from "./test-review/test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const { work_item_id: _work, ...base } = assignment(900, "pm");
@@ -238,6 +251,97 @@ test("C-238: all 16 conditions can pass, but the only effect is a system audit; 
     prediction: { would_confirm: true },
     actual: { status: "open", decider: "role:pm", resolution: null },
   });
+});
+
+test("C-553: a prepared audit is system-only, appends no business changes and deduplicates on replay", async () => {
+  const f = await fixture();
+  const input = { decision_id: f.q.id, paths: f.paths };
+  expect(() => prepareMergeShadow(f.state, human, input)).toThrow();
+  const append = required(prepareMergeShadow(f.state, system, input));
+  const effect = value(required(append.append)(f.io));
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "system_merge_shadow_recorded",
+  ]);
+  expect(effect.events[0]?.payload).toEqual(
+    evaluateMergeShadow(f.state, f.q, f.paths),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.timeline).toHaveLength(1);
+  expect(
+    prepareMergeShadow(apply(f.state, effect), system, input),
+  ).toBeUndefined();
+});
+
+test("C-553: a prepared shadow cannot outlive its incremental review evidence", async () => {
+  const f = await testReviewFixture(3);
+  const product = (await f.deliver()).data;
+  f.start();
+  const proof = required(f.commit(f.review()).data.test_review);
+  const request = {
+    ...f.params(product.subject.value),
+    kind: "card_completion" as const,
+    requested_verifiers: [id("work_item", 3)],
+    plain_summary: { changed: "更新测试", impact: "验证更新", risk: "无" },
+  };
+  const receipt = value(
+    await prepareDelivery(f.state, actor(), request, f.verifier),
+  );
+  const completion = f.commit(
+    submitDelivery(f.state, actor(), request, receipt, f.io),
+  ).data;
+  f.commit(
+    submitReview(
+      f.state,
+      actor(3, "pm"),
+      {
+        delivery_id: completion.id,
+        target_sha: completion.subject.value,
+        kind: "product",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  f.commit(
+    setProjectPreferences(f.state, human, { system_merge_shadow: true }, f.io),
+  );
+  const state = f.state;
+  const q = required(
+    state.decisions.find((q) => q.trigger === "merge_confirmation"),
+  );
+  const input = { decision_id: q.id };
+  const blocker = "增量复核的隔离证据已失效，须完整复核";
+  expect(evaluateMergeShadow(state, q).pm_blockers).not.toContain(blocker);
+  const pending = required(
+    prepareMergeShadow(state, system, input)?.whenCurrent,
+  );
+  const checked: unknown[] = [];
+  const live = value(
+    required(
+      pending({
+        ...f.trust,
+        isCurrent: (binding) => {
+          checked.push(binding);
+          return f.trust.isCurrent(binding);
+        },
+      }),
+    )(f.io),
+  );
+  expect(checked).toEqual([proof]);
+  expect(live.events[0]?.payload).toEqual(evaluateMergeShadow(state, q));
+  // Replacing the writer's port, or revoking a lease on the same port, needs no DB mutation.
+  expect(pending(undefined)).toBeUndefined();
+  f.revoke();
+  expect(pending(f.trust)).toBeUndefined();
+  const next = required(prepareMergeShadow(state, system, input)?.whenCurrent);
+  // A previously negative read must also be rechecked if the writer can attest it now.
+  expect(next({ ...f.trust, isCurrent: () => true })).toBeUndefined();
+  expect(value(required(next(f.trust))(f.io)).events[0]?.payload).toMatchObject(
+    {
+      would_confirm: false,
+      pm_blockers: expect.arrayContaining([blocker]),
+    },
+  );
 });
 
 test.each(Array.from({ length: 16 }, (_, i) => i + 1))(

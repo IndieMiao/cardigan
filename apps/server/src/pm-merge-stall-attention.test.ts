@@ -9,7 +9,6 @@ import {
   resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { readAttention } from "@cardigan/host";
-import { loadCommandState } from "@cardigan/mcp-server";
 import { moveNotification, recordNotification } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
@@ -73,13 +72,8 @@ test("obsolete merge stalls resolve every live status while retaining settled hi
                       : "needs_attention",
           });
       }
-      escalatePmMergeStalls(
-        tx,
-        f.store,
-        loadCommandState(tx, f.project),
-        f.clock.now(),
-      );
     });
+    escalatePmMergeStalls(f.store, f.project, f.clock.now());
     const notes = f.store.listNotifications({ project_id: f.project });
     for (const status of statuses)
       expect(notes.find((n) => n.kind === status)?.status).toBe(
@@ -264,12 +258,9 @@ test("the escalation honours the suppression extension point", () => {
   const { f, options } = pmHeldMerge();
   try {
     f.advance(2 * 60 * minute);
-    const state = f.state();
-    f.store.uow.run((tx) =>
-      escalatePmMergeStalls(tx, options.store, state, f.clock.now(), {
-        suppressed: () => true,
-      }),
-    );
+    escalatePmMergeStalls(options.store, f.project, f.clock.now(), {
+      suppressed: () => true,
+    });
     expect(
       f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
     ).toEqual([]);
@@ -366,6 +357,50 @@ test("C-180: a real PM hold suppresses an existing alert, survives dispatcher re
     expect(
       f.state().events.filter((e) => e.type === PM_MERGE_STALL_KIND),
     ).toHaveLength(2);
+  } finally {
+    f.close();
+  }
+});
+
+test("C-553: an inbox-only ACK between projection and cleanup is not overwritten", () => {
+  const { f, decision } = pmHeldMerge();
+  try {
+    f.advance(2 * 60 * minute);
+    const sweep = () =>
+      escalatePmMergeStalls(f.store, f.project, f.clock.now());
+    sweep();
+    f.store.uow.run((tx) =>
+      tx.decisions.put(f.project, { ...decision, status: "resolved" }),
+    );
+    const notes = f.store
+      .listNotifications({ project_id: f.project })
+      .filter((n) => n.kind === "escalation");
+    const ops = notes.find((n) => n.recipient.kind === "pm_ops");
+    if (!ops) throw new Error("Missing Ops notification");
+    f.store.observe({
+      transaction(kind) {
+        if (kind !== "read") return;
+        f.store.observe(undefined);
+        f.store.uow.run(() =>
+          moveNotification(f.store.database, {
+            project_id: f.project,
+            id: ops.id,
+            event: "ack",
+            at: f.clock.now(),
+          }),
+        );
+      },
+    });
+    sweep();
+    const statuses = () =>
+      f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => n.kind === "escalation")
+        .map((n) => n.status)
+        .sort();
+    expect(statuses()).toEqual(["acked", "needs_attention"]);
+    sweep();
+    expect(statuses()).toEqual(["acked", "resolved"]);
   } finally {
     f.close();
   }

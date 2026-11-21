@@ -1,4 +1,5 @@
 import type { Delivery, WorkItem } from "../entities.js";
+import { cardEventsOfType } from "../event-index.js";
 import type { AssignmentId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
 import { employeeConflicts } from "./employee-assignment.js";
@@ -101,7 +102,10 @@ export function reviewReuseContext(
   ]);
   return canonical({
     version: 1,
-    review_epoch: [...d.state.events, ...d.events]
+    review_epoch: [
+      ...cardEventsOfType(d.state.events, card.id, "merge_changes_requested"),
+      ...d.events,
+    ]
       .filter(
         (e) =>
           e.card_id === card.id &&

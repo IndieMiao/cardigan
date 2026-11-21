@@ -1,4 +1,5 @@
 import type { Event, MergeCheckView } from "./entities.js";
+import { eventsForCompletion } from "./event-index.js";
 import type { CardId, DeliveryId, MergeBatchId, ProjectId } from "./ids.js";
 
 export interface MergeBatchMember {
@@ -205,7 +206,7 @@ export function passedCardCheck(
   card: CardId,
   completion: DeliveryId,
 ) {
-  return events
+  return eventsForCompletion(events, completion)
     .filter(
       (e) =>
         e.card_id === card &&
