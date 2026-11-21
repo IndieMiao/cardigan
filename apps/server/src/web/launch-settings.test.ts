@@ -149,8 +149,12 @@ test("only cookie-authenticated humans may read/write; views are offline, allowl
   expect((await get("/profiles")).json).toEqual({ profiles: ["a", "b"] });
   const read = await get();
   expect(read.body).not.toMatch(
-    /fixture-value-private|other-private-value|hidden-argument|PRIVATE_ENV|hidden-inline/,
+    /fixture-value-private|other-private-value|hidden-argument|hidden-inline/,
   );
+  // C-549: env names are editable; a credential-like name keeps its value hidden.
+  expect(JSON.parse(read.body).providers[0].env).toEqual([
+    { name: "PRIVATE_ENV", value: null },
+  ]);
   expect(JSON.parse(read.body).profiles[0]).toMatchObject({
     model_alias: "primary",
     model_id: "first",

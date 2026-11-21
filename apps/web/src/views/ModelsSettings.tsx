@@ -6,6 +6,7 @@ import {
   type LaunchProfileCheck,
   type LaunchProfileReference,
   type LaunchProfileView,
+  type LaunchProviderView,
   type LaunchSettingsView,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
@@ -37,10 +38,13 @@ import {
   AliasForm,
   CopyProfileForm,
   DeleteProfileForm,
+  DeleteProviderForm,
   type EditorContext,
   type LaunchFormState,
   ProfileForm,
   ProviderForm,
+  providerSecrets,
+  SecretStatus,
 } from "./LaunchForms.js";
 import {
   checkLabel,
@@ -79,7 +83,8 @@ export function ModelsSettings({
   );
   const data = settings.data;
   const profile = data && open && locate(data.profiles, open);
-  const running = data?.profiles.some(
+  // V-2708: a running Provider probe keeps the poll going like a profile check.
+  const running = [...(data?.profiles ?? []), ...(data?.providers ?? [])].some(
     (p) => p.last_check?.status === "running",
   );
   // Check areas waiting for a check the host just accepted (Q-1052).
@@ -122,123 +127,249 @@ export function ModelsSettings({
     setMessage(note);
     settings.reload();
   };
+  // C-549: Providers, opened by row (ids may be masked alike, like names).
+  const [openProvider, setOpenProvider] = useState<{
+    index: number;
+    id: string;
+  }>();
+  const [creatingProvider, setCreatingProvider] = useState(false);
+  const newProvider = useRef<HTMLButtonElement>(null);
+  const providerFocus = useDrawerReturnFocus(
+    openProvider !== undefined || creatingProvider,
+    () => newProvider.current,
+  );
+  const provider = data && openProvider && locateProvider(data, openProvider);
   return (
-    <SettingsPanel
-      id="models"
-      tabIndex={-1}
-      title="模型"
-      titleId="models-title"
-      actions={
-        <Button
-          ref={newProfile}
-          variant="primary"
-          aria-haspopup="dialog"
-          disabled={!data}
-          onClick={() => {
-            remember();
-            setMessage("");
-            setCreating(true);
-          }}
-        >
-          新建启动配置
-        </Button>
-      }
-    >
-      <RequestFeedback message={message} />
-      <RequestFeedback
-        pending={settings.pending}
-        interactive={settings.interactive}
-        error={settings.error}
-        retry={settings.reload}
-        pendingMessage="正在加载启动配置…"
-      />
-      {data && data.profiles.length === 0 && (
-        <EmptyState>没有启动配置</EmptyState>
-      )}
-      {data && data.profiles.length > 0 && (
-        <SettingsTable aria-label="启动配置">
-          <TableHeader>
-            <TableRow>
-              <TableHead>配置</TableHead>
-              <TableHead>Harness</TableHead>
-              <TableHead>模型</TableHead>
-              <TableHead>参数</TableHead>
-              <TableHead>密钥</TableHead>
-              <TableHead>引用</TableHead>
-              <TableHead>最近检查</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {data.profiles.map((p, index) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: names are not unique once redacted; the response order is the identity.
-              <TableRow key={index}>
-                <DataTableCell data-record="lead">
-                  <Button
-                    variant="link"
-                    aria-haspopup="dialog"
-                    onClick={() => {
-                      remember();
-                      setMessage("");
-                      setOpen({ index, name: p.name });
-                    }}
-                  >
-                    {p.name}
-                  </Button>
-                </DataTableCell>
-                <DataTableCell nowrap data-label="Harness">
-                  {p.harness}
-                </DataTableCell>
-                <DataTableCell data-label="模型">
-                  <ModelName profile={p} />
-                </DataTableCell>
-                <DataTableCell data-label="参数">
-                  {parameterSummary(p.parameters)}
-                </DataTableCell>
-                <DataTableCell nowrap data-label="密钥">
-                  {secretSummary(p.secrets)}
-                </DataTableCell>
-                <DataTableCell nowrap data-label="引用">
-                  {p.references.length}
-                </DataTableCell>
-                <DataTableCell nowrap data-record="aside">
-                  <CheckStatus check={p.last_check} />
-                </DataTableCell>
+    <>
+      <SettingsPanel
+        id="models"
+        tabIndex={-1}
+        title="模型"
+        titleId="models-title"
+        actions={
+          <Button
+            ref={newProfile}
+            variant="primary"
+            aria-haspopup="dialog"
+            disabled={!data}
+            onClick={() => {
+              remember();
+              setMessage("");
+              setCreating(true);
+            }}
+          >
+            新建启动配置
+          </Button>
+        }
+      >
+        <RequestFeedback message={message} />
+        <RequestFeedback
+          pending={settings.pending}
+          interactive={settings.interactive}
+          error={settings.error}
+          retry={settings.reload}
+          pendingMessage="正在加载启动配置…"
+        />
+        {data && data.profiles.length === 0 && (
+          <EmptyState>没有启动配置</EmptyState>
+        )}
+        {data && data.profiles.length > 0 && (
+          <SettingsTable aria-label="启动配置">
+            <TableHeader>
+              <TableRow>
+                <TableHead>配置</TableHead>
+                <TableHead>Harness</TableHead>
+                <TableHead>模型</TableHead>
+                <TableHead>参数</TableHead>
+                <TableHead>密钥</TableHead>
+                <TableHead>引用</TableHead>
+                <TableHead>最近检查</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </SettingsTable>
-      )}
-      {data && profile && (
-        <ProfileDetail
-          client={client}
-          settings={data}
-          profile={profile}
-          projectId={projectId}
-          reread={read}
-          follow={follow}
-          onSaved={saved}
-          onDeleted={(note) => {
-            setOpen(undefined);
-            saved(note);
-          }}
-          onClose={() => setOpen(undefined)}
-        />
-      )}
-      {data && creating && (
-        <NewProfile
-          client={client}
-          settings={data}
-          reread={read}
-          onSaved={(note) => {
-            setCreating(false);
-            saved(note);
-          }}
-          onClose={() => setCreating(false)}
-        />
-      )}
-    </SettingsPanel>
+            </TableHeader>
+            <TableBody>
+              {data.profiles.map((p, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: names are not unique once redacted; the response order is the identity.
+                <TableRow key={index}>
+                  <DataTableCell data-record="lead">
+                    <Button
+                      variant="link"
+                      aria-haspopup="dialog"
+                      onClick={() => {
+                        remember();
+                        setMessage("");
+                        setOpen({ index, name: p.name });
+                      }}
+                    >
+                      {p.name}
+                    </Button>
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="Harness">
+                    {p.harness}
+                  </DataTableCell>
+                  <DataTableCell data-label="模型">
+                    <ModelName profile={p} />
+                  </DataTableCell>
+                  <DataTableCell data-label="参数">
+                    {parameterSummary(p.parameters)}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="密钥">
+                    {secretSummary(p.secrets)}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="引用">
+                    {p.references.length}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-record="aside">
+                    <CheckStatus check={p.last_check} />
+                  </DataTableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </SettingsTable>
+        )}
+        {data && profile && (
+          <ProfileDetail
+            client={client}
+            settings={data}
+            profile={profile}
+            projectId={projectId}
+            reread={read}
+            follow={follow}
+            onSaved={saved}
+            onDeleted={(note) => {
+              setOpen(undefined);
+              saved(note);
+            }}
+            onClose={() => setOpen(undefined)}
+          />
+        )}
+        {data && creating && (
+          <NewProfile
+            client={client}
+            settings={data}
+            reread={read}
+            onSaved={(note) => {
+              setCreating(false);
+              saved(note);
+            }}
+            onClose={() => setCreating(false)}
+          />
+        )}
+      </SettingsPanel>
+      <SettingsPanel
+        id="providers"
+        title="Provider"
+        titleId="providers-title"
+        actions={
+          <Button
+            ref={newProvider}
+            variant="primary"
+            aria-haspopup="dialog"
+            disabled={!data}
+            onClick={() => {
+              providerFocus.remember();
+              setMessage("");
+              setCreatingProvider(true);
+            }}
+          >
+            新建 Provider
+          </Button>
+        }
+      >
+        {data && data.providers.length === 0 && (
+          <EmptyState>没有 Provider</EmptyState>
+        )}
+        {data && data.providers.length > 0 && (
+          <SettingsTable aria-label="Provider">
+            <TableHeader>
+              <TableRow>
+                <TableHead>ID</TableHead>
+                <TableHead>名称</TableHead>
+                <TableHead>Harness</TableHead>
+                <TableHead>端点</TableHead>
+                <TableHead>引用</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.providers.map((p, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: ids are not unique once redacted; the response order is the identity.
+                <TableRow key={index}>
+                  <DataTableCell data-record="lead">
+                    <Button
+                      variant="link"
+                      aria-haspopup="dialog"
+                      onClick={() => {
+                        providerFocus.remember();
+                        setMessage("");
+                        setOpenProvider({ index, id: p.id });
+                      }}
+                    >
+                      {p.id}
+                    </Button>
+                  </DataTableCell>
+                  <DataTableCell data-label="名称">{p.name}</DataTableCell>
+                  <DataTableCell nowrap data-label="Harness">
+                    {p.harness ?? "—"}
+                  </DataTableCell>
+                  <DataTableCell data-label="端点">
+                    {p.base_url ? <code>{p.base_url}</code> : "—"}
+                  </DataTableCell>
+                  <DataTableCell nowrap data-label="引用">
+                    {providerUses(data, p.id)}
+                  </DataTableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </SettingsTable>
+        )}
+        {data && provider && (
+          <ProviderDetail
+            client={client}
+            settings={data}
+            provider={provider}
+            reread={read}
+            follow={follow}
+            onSaved={saved}
+            onDeleted={(note) => {
+              setOpenProvider(undefined);
+              saved(note);
+            }}
+            onClose={() => setOpenProvider(undefined)}
+          />
+        )}
+        {data && creatingProvider && (
+          <NewProvider
+            client={client}
+            settings={data}
+            reread={read}
+            onSaved={saved}
+            onCreated={(id) => {
+              setCreatingProvider(false);
+              // Open the new Provider by id once the read lists it (to probe it).
+              setOpenProvider({ index: -1, id });
+            }}
+            onClose={() => setCreatingProvider(false)}
+          />
+        )}
+      </SettingsPanel>
+    </>
   );
 }
+
+/** The opened Provider after a new read: same position and id, else the only one by that id. */
+function locateProvider(
+  settings: LaunchSettingsView,
+  open: { index: number; id: string },
+) {
+  const { providers } = settings;
+  if (providers[open.index]?.id === open.id) return providers[open.index];
+  const named = providers.filter((p) => p.id === open.id);
+  return named.length === 1 ? named[0] : undefined;
+}
+
+/** How many profiles use a Provider (older reads: counted from the profiles). */
+const providerUses = (settings: LaunchSettingsView, id: string) =>
+  settings.providers.find((p) => p.id === id)?.profiles?.length ??
+  settings.profiles.filter((p) => p.provider === id).length;
 
 /**
  * C-516 / Q-1052: every read of the launch settings on this page goes through
@@ -393,6 +524,204 @@ function NewProfile({
     >
       <CardDetailLayout className="card-page-drawer">
         <ProfileForm context={context} />
+        {drawer.dialog}
+      </CardDetailLayout>
+    </Drawer>
+  );
+}
+
+function NewProvider({
+  client,
+  settings,
+  reread,
+  onSaved,
+  onCreated,
+  onClose,
+}: {
+  client: CardiganClient;
+  settings: LaunchSettingsView;
+  reread: () => Promise<LaunchSettingsView>;
+  onSaved: (message: string) => void;
+  onCreated: (id: string) => void;
+  onClose: () => void;
+}) {
+  const drawer = useFormDrawer();
+  const context: EditorContext = {
+    client,
+    settings,
+    reread,
+    onSaved,
+    onCancel: () => drawer.leave(onClose),
+    onState: drawer.onState,
+  };
+  return (
+    <Drawer
+      className={settingsDrawerClassName}
+      open
+      onOpenChange={(next) => !next && drawer.leave(onClose)}
+      title="新建 Provider"
+      description="新建 Provider"
+      initialFocus="close"
+    >
+      <CardDetailLayout className="card-page-drawer">
+        <ProviderForm context={context} onCreated={onCreated} />
+        {drawer.dialog}
+      </CardDetailLayout>
+    </Drawer>
+  );
+}
+
+function ProviderDetail({
+  client,
+  settings,
+  provider,
+  reread,
+  follow,
+  onSaved,
+  onDeleted,
+  onClose,
+}: {
+  client: CardiganClient;
+  settings: LaunchSettingsView;
+  provider: LaunchProviderView;
+  reread: () => Promise<LaunchSettingsView>;
+  follow: (who: string, on: boolean) => void;
+  onSaved: (message: string) => void;
+  onDeleted: (message: string) => void;
+  onClose: () => void;
+}) {
+  const [mode, setMode] = useState<"view" | "edit" | "delete">("view");
+  const drawer = useFormDrawer();
+  const view = () => {
+    drawer.reset();
+    setMode("view");
+  };
+  const context: EditorContext = {
+    client,
+    settings,
+    reread,
+    onSaved: (note) => {
+      if (mode === "delete") onDeleted(note);
+      else {
+        view();
+        onSaved(note);
+      }
+    },
+    onCancel: () => drawer.leave(view),
+    onState: drawer.onState,
+  };
+  const env = provider.env ?? [];
+  const secrets = providerSecrets(provider, settings.secret_keys ?? []);
+  const profiles =
+    provider.profiles ??
+    settings.profiles
+      .filter((p) => p.provider === provider.id)
+      .map((p) => p.name);
+  const models = provider.models ?? [];
+  return (
+    <Drawer
+      className={settingsDrawerClassName}
+      open
+      onOpenChange={(next) => !next && drawer.leave(onClose)}
+      title={provider.name}
+      description={`Provider ${provider.id} 详情`}
+      initialFocus="close"
+      actions={
+        mode === "view" ? (
+          <>
+            <Button onClick={() => setMode("delete")}>删除</Button>
+            <Button variant="primary" onClick={() => setMode("edit")}>
+              编辑
+            </Button>
+          </>
+        ) : undefined
+      }
+    >
+      <CardDetailLayout
+        className="card-page-drawer"
+        aria-label={`Provider ${provider.id}`}
+      >
+        {mode === "edit" && (
+          <ProviderForm context={context} provider={provider} />
+        )}
+        {mode === "delete" && (
+          <DeleteProviderForm context={context} provider={provider} />
+        )}
+        {mode === "view" && (
+          <>
+            <SettingsSection title="配置">
+              <SettingsFacts>
+                <SettingsFact label="ID">
+                  <code>{provider.id}</code>
+                </SettingsFact>
+                <SettingsFact label="名称">{provider.name}</SettingsFact>
+                <SettingsFact label="Harness">
+                  {provider.harness ?? "—"}
+                </SettingsFact>
+                <SettingsFact label="协议">{provider.api ?? "—"}</SettingsFact>
+                <SettingsFact label="端点">
+                  {provider.base_url ? <code>{provider.base_url}</code> : "—"}
+                </SettingsFact>
+              </SettingsFacts>
+            </SettingsSection>
+            <SettingsSection title="环境变量">
+              {env.length === 0 ? (
+                <EmptyState>没有环境变量</EmptyState>
+              ) : (
+                <SettingsFacts>
+                  {env.map((v) => (
+                    <SettingsFact key={v.name} label={<code>{v.name}</code>}>
+                      {v.value === null ? (
+                        "已隐藏"
+                      ) : v.value === "" ? (
+                        "—"
+                      ) : (
+                        <code>{v.value}</code>
+                      )}
+                    </SettingsFact>
+                  ))}
+                </SettingsFacts>
+              )}
+            </SettingsSection>
+            <SettingsSection title="密钥">
+              {secrets.length === 0 ? (
+                <EmptyState>不需要密钥</EmptyState>
+              ) : (
+                <SettingsFacts>
+                  {secrets.map((secret) => (
+                    <SettingsFact
+                      key={secret.env}
+                      label={<code>{secret.env}</code>}
+                    >
+                      <code>{secret.key}</code> <SecretStatus secret={secret} />
+                    </SettingsFact>
+                  ))}
+                </SettingsFacts>
+              )}
+            </SettingsSection>
+            <Checks
+              settings={settings}
+              title="在线探测"
+              modes={["online"]}
+              lastCheck={provider.last_check ?? null}
+              start={() =>
+                client.startProviderCheck(settings.version, provider.id)
+              }
+              reread={reread}
+              follow={follow}
+            />
+            <SettingsSection title="使用者">
+              {profiles.length + models.length === 0 ? (
+                <EmptyState>没有启动配置或模型别名使用</EmptyState>
+              ) : (
+                <SettingsFacts>
+                  <SettingsFact label="启动配置">{list(profiles)}</SettingsFact>
+                  <SettingsFact label="模型别名">{list(models)}</SettingsFact>
+                </SettingsFacts>
+              )}
+            </SettingsSection>
+          </>
+        )}
         {drawer.dialog}
       </CardDetailLayout>
     </Drawer>
@@ -626,9 +955,11 @@ function ProfileDetail({
               )}
             </SettingsSection>
             <Checks
-              client={client}
               settings={settings}
-              profile={profile}
+              lastCheck={profile.last_check}
+              start={(mode) =>
+                client.startLaunchCheck(settings.version, profile.name, mode)
+              }
               reread={reread}
               follow={follow}
             />
@@ -653,15 +984,21 @@ function ProfileDetail({
  * calls inference, so a passed online check is reported as “已列出模型”.
  */
 function Checks({
-  client,
   settings,
-  profile,
+  lastCheck,
+  start: begin,
+  modes = ["metadata", "online"],
+  title = "检查",
   reread,
   follow,
 }: {
-  client: CardiganClient;
   settings: LaunchSettingsView;
-  profile: LaunchProfileView;
+  lastCheck: LaunchProfileCheck | null;
+  /** Ask the host to start one check of this profile or Provider. */
+  start: (mode: LaunchProfileCheck["mode"]) => Promise<{ id: string }>;
+  /** C-549: a Provider is only probed online. */
+  modes?: readonly LaunchProfileCheck["mode"][];
+  title?: string;
   /** The page's ordered reader (Q-1052). */
   reread: () => Promise<LaunchSettingsView>;
   /** Ask the page's poll to keep reading while this area waits. */
@@ -684,12 +1021,12 @@ function Checks({
     readonly mode: LaunchProfileCheck["mode"];
     readonly before: string | null;
   }>();
-  const shown = profile.last_check?.id ?? null;
+  const shown = lastCheck?.id ?? null;
   const waiting = accepted !== undefined && shown === accepted.before;
   useEffect(() => {
     if (accepted && shown !== accepted.before) setAccepted(undefined);
   }, [accepted, shown]);
-  const running = waiting || profile.last_check?.status === "running";
+  const running = waiting || lastCheck?.status === "running";
   const busy = starting !== undefined || running;
   // Until the check appears the page's one poll keeps reading (GET only).
   const who = useId();
@@ -705,11 +1042,7 @@ function Checks({
     setStarting(mode);
     setProblem(undefined);
     try {
-      const check = await client.startLaunchCheck(
-        settings.version,
-        profile.name,
-        mode,
-      );
+      const check = await begin(mode);
       if (alive.current) setAccepted({ id: check.id, mode, before: shown });
     } catch (error) {
       if (alive.current) setProblem(launchProblem(error, "check"));
@@ -721,7 +1054,7 @@ function Checks({
     }
   };
   return (
-    <SettingsSection title="检查">
+    <SettingsSection title={title}>
       {waiting ? (
         <SettingsFacts>
           <SettingsFact label="结果">
@@ -742,8 +1075,8 @@ function Checks({
             {checkModeLabel(accepted.mode)}
           </SettingsFact>
         </SettingsFacts>
-      ) : profile.last_check ? (
-        <LastCheck check={profile.last_check} />
+      ) : lastCheck ? (
+        <LastCheck check={lastCheck} />
       ) : (
         <EmptyState>未检查</EmptyState>
       )}
@@ -768,28 +1101,32 @@ function Checks({
                 </Button>
               </SettingsDialogActions>
             </>
-          ) : problem.kind === "in_use" ? null : (
+          ) : "message" in problem ? (
             problem.message
-          )}
+          ) : null}
         </SettingsWarning>
       )}
       <SettingsDialogActions>
         {/* While busy the buttons stay focusable (aria-disabled) so keyboard
             users keep their place; `start` ignores the click. */}
-        <Button
-          aria-disabled={busy || undefined}
-          data-disabled={busy ? "" : undefined}
-          onClick={() => void start("metadata")}
-        >
-          {starting === "metadata" ? "正在开始…" : "本地检查"}
-        </Button>
-        <Button
-          aria-disabled={busy || undefined}
-          data-disabled={busy ? "" : undefined}
-          onClick={() => void start("online")}
-        >
-          {starting === "online" ? "正在开始…" : "在线探测"}
-        </Button>
+        {modes.includes("metadata") && (
+          <Button
+            aria-disabled={busy || undefined}
+            data-disabled={busy ? "" : undefined}
+            onClick={() => void start("metadata")}
+          >
+            {starting === "metadata" ? "正在开始…" : "本地检查"}
+          </Button>
+        )}
+        {modes.includes("online") && (
+          <Button
+            aria-disabled={busy || undefined}
+            data-disabled={busy ? "" : undefined}
+            onClick={() => void start("online")}
+          >
+            {starting === "online" ? "正在开始…" : "在线探测"}
+          </Button>
+        )}
       </SettingsDialogActions>
     </SettingsSection>
   );
