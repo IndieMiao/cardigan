@@ -3,6 +3,7 @@ import { mergeContext } from "./commands/merge.js";
 import { mergeConfirmationSnoozed } from "./commands/merge-snooze.js";
 import { projectPreferences } from "./commands/preferences.js";
 import type { Decision, Event } from "./entities.js";
+import { eventsForCompletion, eventsForDecision } from "./event-index.js";
 import type { CardId, DecisionId, DeliveryId } from "./ids.js";
 import { mergeConfirmStallAfterMinutes } from "./preferences.js";
 
@@ -42,7 +43,7 @@ function readyAt(
   card: CardId,
   completion: DeliveryId,
 ): string | undefined {
-  const latest = events
+  const latest = eventsForCompletion(events, completion)
     .filter(
       (e) =>
         e.card_id === card &&
@@ -63,7 +64,7 @@ function readyAt(
 
 /** The latest state change of the decision (request, handoff, resume …). */
 function decisionChangedAt(state: CommandState, q: Decision) {
-  return state.events
+  return eventsForDecision(state.events, q.id)
     .filter(
       (e) =>
         e.type !== PM_MERGE_STALL_KIND &&

@@ -1,5 +1,6 @@
 import * as crypto from "node:crypto";
 import type { Card, Decision, Event } from "./entities.js";
+import { cardEventsOfType, eventsForDecision } from "./event-index.js";
 
 type SourceCard = Pick<Card, "id" | "source"> &
   Partial<Pick<Card, "project_id">>;
@@ -27,15 +28,13 @@ export function sourceMergeBasis(
         source.status,
         source.resolution,
         source.superseded_by,
-        events
-          .filter(
-            (e) =>
-              (e.card_id === card.id &&
-                ["card_updated", "delivery_submitted"].includes(e.type)) ||
-              (e.type.startsWith("decision_") &&
-                (e.payload as { decision_id?: unknown } | null)?.decision_id ===
-                  source.id),
-          )
+        [
+          ...cardEventsOfType(events, card.id, "card_updated"),
+          ...cardEventsOfType(events, card.id, "delivery_submitted"),
+          ...eventsForDecision(events, source.id).filter((e) =>
+            e.type.startsWith("decision_"),
+          ),
+        ]
           .map((e) => e.id)
           .sort(),
       ]),
@@ -57,7 +56,11 @@ export function sourceMergeConfirmation(
   )
     return undefined;
   const basis = sourceMergeBasis(card, source, events);
-  return events.findLast((e) => {
+  return cardEventsOfType(
+    events,
+    card.id,
+    "source_merge_unrelated_confirmed",
+  ).findLast((e) => {
     const p = e.payload as {
       source_decision_id?: unknown;
       source_basis?: unknown;

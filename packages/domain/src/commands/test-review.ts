@@ -217,10 +217,28 @@ export function testReviewForAssignment(
   return incrementalTestReview(d, item, target);
 }
 
+/** External facts read in addition to the versioned command state. */
+export interface TestReviewProofRead {
+  readonly proof: TestReviewBinding;
+  readonly current: boolean;
+}
+
+export function testReviewProofCurrent(
+  trust: CommandState["test_review_trust"],
+  proof: TestReviewBinding,
+) {
+  try {
+    return trust?.isCurrent(proof) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** An incremental pass cannot authorize completion/publication after source revocation. */
 export function testReviewPassValid(
   state: CommandState,
   review: Review,
+  proofReads?: TestReviewProofRead[],
 ): boolean {
   if (!review.test_review) return true;
   const proof = review.test_review;
@@ -248,17 +266,16 @@ export function testReviewPassValid(
     reviewReuseContext(d, delivery, item, proof.assignment_id) !== proof.context
   )
     return false;
-  try {
-    return state.test_review_trust?.isCurrent(proof) === true;
-  } catch {
-    return false;
-  }
+  const current = testReviewProofCurrent(state.test_review_trust, proof);
+  proofReads?.push({ proof, current });
+  return current;
 }
 
 /** Only the effective latest conclusion for each verifier can block publication. */
 export function invalidTestReviewPasses(
   state: CommandState,
   targets: readonly Delivery[],
+  proofReads?: TestReviewProofRead[],
 ): readonly Review[] {
   return targets.flatMap((target) => {
     const latestReviews = new Map<string, Review>();
@@ -271,7 +288,7 @@ export function invalidTestReviewPasses(
         latestReviews.set(r.work_item_id, r);
     }
     return [...latestReviews.values()].filter(
-      (r) => r.test_review && !testReviewPassValid(state, r),
+      (r) => r.test_review && !testReviewPassValid(state, r, proofReads),
     );
   });
 }

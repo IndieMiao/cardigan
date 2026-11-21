@@ -1,4 +1,5 @@
 import type { Event } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import {
   type DelegationCategory,
   decisionDelegation,
@@ -11,7 +12,7 @@ export function categoryAuthorization(
   events: readonly Event[],
   category: DelegationCategory,
 ) {
-  return events.findLast((e) => {
+  return eventsOfType(events, "project_preferences_updated").findLast((e) => {
     const p = e.payload as {
       preference?: string;
       old_value?: Record<string, unknown>;
