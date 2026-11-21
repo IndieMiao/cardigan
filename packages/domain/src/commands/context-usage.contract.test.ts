@@ -1,6 +1,8 @@
 import { expect, test } from "vitest";
 import {
   type ContextObservation,
+  contextGenerationStart,
+  contextObservationCurrent,
   contextUsageLevel,
 } from "../context-usage.js";
 import type { Actor, Assignment } from "../entities.js";
@@ -427,4 +429,31 @@ test("context restart binds current session, rechecks preferences, clears resume
       ports(),
     ).ok,
   ).toBe(false);
+});
+
+test("a reader's generation floor has the same inclusive boundary as observation ownership", () => {
+  const a = assignment(1),
+    u = usage();
+  const cut = "2026-01-01T00:00:10.000Z",
+    later = "2026-01-01T00:00:11.000Z";
+  const event = {
+    id: ports().ids.nextEventId(),
+    seq: 1,
+    type: "session_replaced",
+    actor: system,
+    payload: { assignment_id: a.id },
+    created_at: cut,
+  };
+  const events = [
+    event,
+    { ...event, seq: 2, created_at: later, payload: { assignment_id: ops.id } },
+  ];
+  expect(contextGenerationStart(a, [])).toBe(Date.parse(a.created_at));
+  expect(contextGenerationStart(a, events)).toBe(Date.parse(cut));
+  expect(contextObservationCurrent(a, { ...u, updated_at: now }, events)).toBe(
+    false,
+  );
+  expect(contextObservationCurrent(a, { ...u, updated_at: cut }, events)).toBe(
+    true,
+  );
 });

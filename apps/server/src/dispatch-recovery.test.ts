@@ -1,6 +1,7 @@
 import { acknowledgeRun } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { stalledCache } from "../test-support/dispatch.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { Dispatcher } from "./dispatch.js";
 
@@ -110,7 +111,8 @@ test("C-56 failure on an already completed Run resolves obsolete attention", asy
 test("§3.3 watchdog uses every MCP activity, keeps the Run running and deduplicates across connections", async () => {
   f.session(f.target.assignment, false);
   f.skipEvents();
-  const d = new Dispatcher(f.options);
+  const options = { ...f.options, harnessActivity: stalledCache(f.state()) };
+  const d = new Dispatcher(options);
   f.advance(14 * 60000);
   await d.tick();
   expect(alerts()).toEqual([]);
@@ -132,7 +134,7 @@ test("§3.3 watchdog uses every MCP activity, keeps the Run running and deduplic
   expect(alerts()).toHaveLength(1);
   const reopened = Store.open({ dataDir: f.dataDir });
   try {
-    await new Dispatcher({ ...f.options, store: reopened }).tick();
+    await new Dispatcher({ ...options, store: reopened }).tick();
   } finally {
     reopened.close();
   }
@@ -142,10 +144,16 @@ test("§3.3 watchdog uses every MCP activity, keeps the Run running and deduplic
 
 test("§3.3 watchdog grace is configurable, uses the new Run start and ignores completed Runs", async () => {
   f.advance(60000);
-  const d = new Dispatcher({ ...f.options, inactivityGraceMs: 100 });
+  let harnessActivity = stalledCache(f.state());
+  const d = new Dispatcher({
+    ...f.options,
+    inactivityGraceMs: 100,
+    harnessActivity: (project, id) => harnessActivity(project, id),
+  });
   await d.tick();
   expect(alerts()).toEqual([]);
   f.session(f.target.assignment, false);
+  harnessActivity = stalledCache(f.state());
   f.skipEvents();
   f.advance(99);
   await d.tick();
@@ -203,6 +211,7 @@ test("disabling inactive cancellation keeps the watchdog active", async () => {
     ...f.options,
     inactivityGraceMs: 100,
     inactiveCancelAfterMs: null,
+    harnessActivity: stalledCache(f.state()),
   });
   f.advance(2 * 60 * 60_000);
   await d.tick();

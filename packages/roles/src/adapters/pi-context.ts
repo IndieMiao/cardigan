@@ -8,6 +8,7 @@ import {
   object,
   parseActivityMetadata,
   records,
+  transcriptWrite,
 } from "./context.js";
 export async function readPiContext(
   input: ContextReadInput,
@@ -21,14 +22,16 @@ export async function readPiContext(
         Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
         Number(measured(a)) - Number(measured(b)),
     )[0];
-  return { usage, activity: await readPiActivity(input) };
+  return { usage, ...(await readPiActivity(input)) };
 }
 async function readPiActivity({
   root,
   files,
   readParts,
   onReadFailure,
-}: ContextReadInput): Promise<ActivityMetadata | undefined> {
+}: ContextReadInput): Promise<
+  Pick<ContextReading, "activity" | "fileActivity"> | undefined
+> {
   // Select by creation filename, never by a late write's mtime or cache-provided path.
   let failed = false;
   const fail = () => {
@@ -68,7 +71,7 @@ async function readPiActivity({
         return;
       last = sample;
     }
-    return last;
+    return { activity: last, fileActivity: transcriptWrite(meta, parts.mtime) };
   } catch {
     fail();
     return;

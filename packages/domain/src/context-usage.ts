@@ -88,7 +88,15 @@ export function contextObservationCurrent(
     return false;
   const session = a.runtime_ref?.agent_session_id ?? a.session_ref;
   if (session && session !== usage.session_id) return false;
-  const replaced = events
+  return Date.parse(usage.updated_at) >= contextGenerationStart(a, events);
+}
+
+/** Earliest attributable observation for the current assignment generation (epoch ms). */
+export function contextGenerationStart(
+  a: Assignment,
+  events: readonly Event[],
+) {
+  return events
     .filter(
       (e) =>
         [
@@ -103,5 +111,4 @@ export function contextObservationCurrent(
       (latest, e) => Math.max(latest, Date.parse(e.created_at)),
       Date.parse(a.created_at),
     );
-  return Date.parse(usage.updated_at) >= replaced;
 }

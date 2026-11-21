@@ -33,6 +33,7 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { beginBellAttempt, Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { stalledCache } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
@@ -820,10 +821,14 @@ test("C-56 a failed wake backs off and retries without a second Run", async () =
   );
 });
 
-test("§3.3 the watchdog escalates a running Run with no MCP activity for 15 minutes", async () => {
+test("§3.3 the watchdog escalates a running Run with neither MCP nor transcript activity for 15 minutes", async () => {
   const runtime = fakeRuntime();
   withRun(f, f.coder, "running");
-  const d = dispatcher(f, runtime);
+  const d = dispatcher(f, runtime, {
+    harnessActivity: stalledCache(
+      f.store.uow.read((tx) => loadCommandState(tx, project)),
+    ),
+  });
 
   f.advance(14 * 60_000);
   await d.tick();

@@ -32,12 +32,6 @@ interface ReaperOptions {
     assignment: Assignment["id"],
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   onError?: (error: unknown) => void;
-  onUnknown?: (
-    project: ProjectId,
-    assignment: Assignment,
-    run: Run,
-    inspection: HarnessActivityInspection,
-  ) => void;
   harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -130,8 +124,6 @@ export class InactiveRunReaper {
       if (this.closed) return;
       if (row?.status === "stale" || row?.status === "fresh")
         inspected = row.activity;
-      else
-        this.options.onUnknown?.(project, a, run, row ?? { status: "missing" });
     };
     const needsInspection =
       run.harness === "claude-code" || a.machine_id !== "local";
