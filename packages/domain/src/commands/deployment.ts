@@ -206,7 +206,7 @@ export function recordHelperUpgradeChecks(
     human_action_id: HumanActionId;
     text: string;
     attachments?: readonly string[];
-    binding: string;
+    binding: string | null;
     checks: Omit<NonNullable<HumanAction["helper_checks"]>, "at">;
   },
   ports: CommandPorts,
@@ -221,6 +221,13 @@ export function recordHelperUpgradeChecks(
         action.status === "open",
       "illegal_transition",
       "待办或检查目标已变化",
+    );
+    ensure(
+      !!p.binding ||
+        (p.checks.worker.status === "failed" &&
+          p.checks.machine.status === "failed"),
+      "validation_failed",
+      "机器未绑定，不能记录核验通过",
     );
     const helper_checks = { ...p.checks, at: d.now };
     const updated = { ...action, helper_checks };

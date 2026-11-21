@@ -151,14 +151,13 @@ export function machineHost(
             return runtime.value;
           },
         );
+        if (
+          result.health?.evidence_ref !== `machine-observation:${observationId}`
+        )
+          return { status: "failed", failed_steps: ["observation"] };
         return {
-          status:
-            result.health?.status === "passed" &&
-            result.health.evidence_ref ===
-              `machine-observation:${observationId}`
-              ? "passed"
-              : "failed",
-          failed_steps: result.health?.blockers ?? ["observation"],
+          status: result.health.status === "passed" ? "passed" : "failed",
+          failed_steps: result.health.blockers,
         };
       }
 

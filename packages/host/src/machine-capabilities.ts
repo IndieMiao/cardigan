@@ -250,14 +250,10 @@ export async function refreshMachineObservations(
         return readMachineObservations(store, project, machine, now());
     }
     const fields = {
-      ...(bound
-        ? {
-            helper_upgrade: {
-              machine_id: machine,
-              binding: pinned.fingerprint,
-            },
-          }
-        : {}),
+      helper_upgrade: {
+        machine_id: machine,
+        binding: bound ? pinned.fingerprint : null,
+      },
       ...(terminal ? { terminal } : {}),
     };
     store.uow.run((tx) => {

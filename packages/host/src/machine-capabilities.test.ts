@@ -650,6 +650,22 @@ test.each([
       });
       for (const [name, sha] of Object.entries(workerHelperDigests()))
         expect(actions[0]?.instructions).toContain(`${sha}  ${name}`);
+      const target = options.target();
+      const { target: _removed, ...unbound } = target.execution;
+      await refreshMachineObservations({
+        ...options,
+        target: () => ({ machine, execution: unbound }),
+      });
+      const unboundAction = store.uow.read((tx) =>
+        tx.human_actions.list("a"),
+      )[0];
+      expect(unboundAction).toMatchObject({
+        id: first?.id,
+        status: "open",
+        helper_upgrade: { machine_id: machine.id, binding: null },
+      });
+      expect(unboundAction?.terminal).toBeUndefined();
+      expect(options.stageUpgrade).toHaveBeenCalledTimes(3);
     } finally {
       store.close();
     }

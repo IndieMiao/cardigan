@@ -427,3 +427,51 @@ test("helper maintenance keeps a failed check open and rejects all ordinary comp
     helper_checks: { worker: passed, machine: passed },
   });
 });
+
+test("an unbound worker notice can record an unavailable check but never complete", () => {
+  const io = ports();
+  let state = fixture();
+  const opened = value(
+    requestDeploymentAction(
+      state,
+      { kind: "system", project_id: state.project_id },
+      {
+        key: "worker-helper:remote",
+        reason: "worker_maintenance",
+        instructions: "binding unavailable",
+        helper_upgrade: { machine_id: "remote", binding: null },
+      },
+      io,
+    ),
+  );
+  state = apply(state, opened);
+  const p = {
+    human_action_id: opened.data.id,
+    text: "installed",
+    binding: null,
+  };
+  const passed = { status: "passed", failed_steps: [] } as const;
+  const failed = { status: "failed", failed_steps: ["binding"] } as const;
+  expect(completeHumanAction(state, human, p, io).ok).toBe(false);
+  expect(
+    recordHelperUpgradeChecks(
+      state,
+      human,
+      { ...p, checks: { worker: passed, machine: passed } },
+      io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    value(
+      recordHelperUpgradeChecks(
+        state,
+        human,
+        { ...p, checks: { worker: failed, machine: failed } },
+        io,
+      ),
+    ).data,
+  ).toMatchObject({
+    status: "open",
+    helper_checks: { worker: failed, machine: failed },
+  });
+});

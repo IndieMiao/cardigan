@@ -99,7 +99,7 @@ export class MachineChecks extends MachineCheckJournal {
   async verifyHelper(
     project: string,
     machine: string,
-    binding: string,
+    binding: string | null,
     authorize: (tx: StoreTransactionContext) => string,
   ) {
     this.store.uow.run(authorize);
@@ -166,6 +166,11 @@ export class MachineChecks extends MachineCheckJournal {
       }
     };
     const verify = async () => {
+      if (!binding)
+        return {
+          worker: failed("未确认机器绑定"),
+          machine: failed("未确认机器绑定"),
+        };
       const worker = await run("worker");
       const machineResult = await run("machine");
       try {

@@ -1163,7 +1163,8 @@ export interface HumanAction {
   /** Host-authored only. Never derive a check target from display text. */
   readonly helper_upgrade?: {
     readonly machine_id: MachineId;
-    readonly binding: string;
+    /** Null until the host has a matching project/worker binding. */
+    readonly binding: string | null;
   };
   readonly helper_checks?: {
     readonly worker: HelperCheckResult;

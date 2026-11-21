@@ -1576,7 +1576,9 @@ export function needsYou(
       id: action.id,
       card_id: action.card_id ?? null,
       instructions: action.handoff?.instructions ?? action.instructions,
-      terminal: action.handoff?.terminal ?? action.terminal,
+      terminal: action.helper_upgrade
+        ? action.terminal
+        : (action.handoff?.terminal ?? action.terminal),
       helper_checks: action.helper_checks,
       ...(action.handoff
         ? {
