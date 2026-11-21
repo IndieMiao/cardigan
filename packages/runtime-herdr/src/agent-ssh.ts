@@ -153,6 +153,7 @@ export function agentCoreCommand(config: AgentConfig, session: string): string {
 export async function agentProcessCommand(
   config: AgentConfig,
   args: readonly string[],
+  options?: { readonly workerRuntimeDir: true },
 ) {
   await checkAgentFiles(config);
   return {
@@ -163,9 +164,15 @@ export async function agentProcessCommand(
       "-o",
       "ServerAliveCountMax=3",
       ...sshArguments(config),
-      ["env", "-i", `PATH=${config.path ?? AGENT_PATH}`, ...args]
-        .map(shellQuote)
-        .join(" "),
+      [
+        ...["env", "-i", `PATH=${config.path ?? AGENT_PATH}`].map(shellQuote),
+        // This one variable comes from the selected worker login (not the
+        // controller). Keep it one literal env argument, even if empty.
+        ...(options?.workerRuntimeDir
+          ? ['"XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"']
+          : []),
+        ...args.map(shellQuote),
+      ].join(" "),
     ],
   };
 }

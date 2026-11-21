@@ -33,6 +33,7 @@ import {
   subject,
   value,
 } from "./test-fixtures.js";
+import { admitWorkerInspection } from "./worker-inspection.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -941,4 +942,80 @@ test("hold during an in-flight restart allows exit settlement without queueing n
   expect(
     apply(held, settled).runs.find((r) => r.id === id("run", 1))?.status,
   ).toBe("cancelled");
+});
+
+test("worker inspection is a project-scoped audited read, with a durable ten-second admission window", () => {
+  const state = base();
+  const p = {
+    machine_id: "local",
+    assignment_id: id("assignment", 1),
+    run_id: id("run", 1),
+  };
+  const request = (s: CommandState, input = p, at = now) =>
+    value(
+      admitWorkerInspection(s, caller, input, {
+        ...ports(),
+        clock: { now: () => at },
+      }),
+    );
+  const first = request(state);
+  expect(first.data.status).toBe("admitted");
+  expect(first.events).toHaveLength(1);
+  expect(first.events[0]).toMatchObject({
+    type: "worker_inspection_requested",
+    card_id: id("card", 1),
+    actor: caller,
+    created_at: now,
+    payload: { ...p, status: "admitted" },
+  });
+  const updated = apply(state, first);
+  expect(request(updated).data.status).toBe("rate_limited");
+  expect(
+    request(updated, p, new Date(Date.parse(now) + 10_000).toISOString()).data
+      .status,
+  ).toBe("admitted");
+  for (const input of [
+    { ...p, machine_id: "other" },
+    { ...p, run_id: id("run", 2) },
+  ])
+    expect(request(state, input).data.status).toBe("target_mismatch");
+  for (const denied of [
+    human,
+    actor(4, "pm"),
+    { ...caller, allowed_tools: [] },
+    { ...caller, project_id: "other" },
+  ])
+    expect(admitWorkerInspection(state, denied, p, ports()).ok).toBe(false);
+});
+
+test("inspection selects the unique occupant rather than a later queued Run", () => {
+  const s = base();
+  const [running] = s.runs;
+  if (!running) throw new Error("missing fixture Run");
+  const queued = { ...running, id: id("run", 9), status: "queued" as const };
+  for (const runs of [
+    [running, queued],
+    [queued, running],
+  ]) {
+    const state = { ...s, runs };
+    const p = { machine_id: "local", assignment_id: running.assignment_id };
+    expect(
+      value(admitWorkerInspection(state, caller, p, ports())).data,
+    ).toMatchObject({ run: running, current: true });
+    expect(
+      value(
+        admitWorkerInspection(
+          state,
+          caller,
+          { ...p, run_id: queued.id },
+          ports(),
+        ),
+      ).data,
+    ).toMatchObject({ run: queued, current: false });
+    expect(
+      value(
+        admitWorkerInspection({ ...state, runs: [queued] }, caller, p, ports()),
+      ).data,
+    ).toMatchObject({ run: undefined, current: true });
+  }
 });
