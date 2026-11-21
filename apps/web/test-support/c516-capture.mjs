@@ -164,6 +164,27 @@ try {
       text,
       scope,
     );
+  /** A real pointer click (CDP mouse events) on the top dialog's button `text`. */
+  const mouse = async (text) => {
+    const at = await run((text) => {
+      const dialogs = [...document.querySelectorAll("[role=dialog]")];
+      const root = dialogs.at(-1) ?? document;
+      const b = [...root.querySelectorAll("button")].find(
+        (x) => x.textContent.trim() === text,
+      );
+      if (!b) throw new Error(`Missing button: ${text}`);
+      const r = b.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, text);
+    for (const type of ["mousePressed", "mouseReleased"])
+      await send("Input.dispatchMouseEvent", {
+        type,
+        x: at.x,
+        y: at.y,
+        button: "left",
+        clickCount: 1,
+      });
+  };
   /** Type into the drawer field whose label starts with `label`. */
   const fill = (label, value) =>
     run(
@@ -506,6 +527,38 @@ try {
       await scene("models-discard", measureDrawer);
       await click("继续编辑");
       await until("document.querySelectorAll('[role=dialog]').length === 1");
+
+      // V-2577: one real click on "刷新并重新预览" shows the new diff and
+      // waits; it never confirms it as well (the mocks answer at once).
+      await models(theme, "?confirm=stale");
+      await row("claude-opus");
+      await click("编辑");
+      await until("!!document.querySelector('[role=dialog] form input')");
+      await fill("推理强度", "low");
+      await click("预览修改");
+      await until("!!document.querySelector('[role=dialog] dd [data-op]')");
+      await click("确认保存");
+      await until("!!document.querySelector('[role=dialog] [role=alert]')");
+      await mouse("刷新并重新预览");
+      await delay(800);
+      await scene("models-stale-refreshed", measureDrawer);
+      assert(
+        results["models-stale-refreshed"].buttons.includes("确认保存"),
+        "refresh must stop on the new diff",
+      );
+      assert(
+        !(await evaluate(
+          "[...document.querySelectorAll('.request-feedback')].some((t) => t.textContent.includes('已保存启动配置'))",
+        )),
+        "refresh must not save",
+      );
+      // Leave through the discard question (the real click armed the unload prompt).
+      await click("返回修改");
+      await until("!!document.querySelector('[role=dialog] form input')");
+      await click("取消");
+      await until("document.querySelectorAll('[role=dialog]').length === 2");
+      await click("放弃修改");
+      await until("document.querySelectorAll('[role=dialog]').length <= 1");
 
       // A referenced profile cannot be deleted.
       await models(theme);

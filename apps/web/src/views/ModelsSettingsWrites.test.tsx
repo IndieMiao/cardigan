@@ -1404,3 +1404,37 @@ test("V-2571: when nothing newer can be read the refresh stays as the retry and 
   expect(api.previewLaunchChange.mock.calls.map((a) => a[0])).toEqual([V1, V2]);
   expect(confirm).toHaveBeenCalledTimes(1);
 });
+
+// V-2577 (孙权): a refresh that answers at once must not also confirm.
+test("V-2577: one click on 刷新并重新预览 shows the new diff and waits for its own confirmation", async () => {
+  let current = launchSettingsFixture;
+  const confirmLaunchChange = vi
+    .fn()
+    .mockRejectedValueOnce(new ApiError(409, "stale_snapshot", "stale"))
+    .mockResolvedValue(undefined);
+  const api = harness({
+    launchSettings: vi.fn(async () => current),
+    confirmLaunchChange,
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  fireEvent.click(within(d).getByRole("button", { name: "编辑" }));
+  fireEvent.change(field(d, "推理强度"), { target: { value: "low" } });
+  fireEvent.click(within(d).getByRole("button", { name: "预览修改" }));
+  fireEvent.click(await within(d).findByRole("button", { name: "确认保存" }));
+  const refresh = await within(d).findByRole("button", {
+    name: "刷新并重新预览",
+  });
+  current = { ...current, version: V2 };
+  // The click's default action is cancelled (fireEvent returns false) …
+  expect(fireEvent.click(refresh)).toBe(false);
+  const confirm = await within(d).findByRole("button", { name: "确认保存" });
+  // … and the new confirm button is a different element, not the refresh one.
+  expect(confirm).not.toBe(refresh);
+  expect(refresh.isConnected).toBe(false);
+  expect(api.previewLaunchChange.mock.lastCall?.[0]).toBe(V2);
+  expect(confirmLaunchChange).toHaveBeenCalledTimes(1);
+  // Only a separate click confirms the new preview.
+  fireEvent.click(confirm);
+  await waitFor(() => expect(confirmLaunchChange).toHaveBeenCalledTimes(2));
+});

@@ -261,11 +261,19 @@ function LaunchEditor({
   );
   // A stale snapshot: the main action becomes reading it again and previewing anew.
   const pending = editor.preview?.change ?? change;
+  // V-2577: the refresh and the form's submit button take the same spot. A
+  // distinct key keeps them separate elements, and the click's default action
+  // is cancelled, so a refresh that answers at once can never also submit
+  // (confirm) the new preview; that needs its own click.
   const refresh = general?.kind === "stale" && pending && (
     <Button
+      key="refresh"
       variant="primary"
       disabled={editor.busy}
-      onClick={() => void editor.refresh(pending)}
+      onClick={(event) => {
+        event.preventDefault();
+        void editor.refresh(pending);
+      }}
     >
       刷新并重新预览
     </Button>
@@ -295,6 +303,7 @@ function LaunchEditor({
             </Button>
             {refresh || (
               <Button
+                key="confirm"
                 type="submit"
                 variant={destructive ? "destructive" : "primary"}
                 disabled={editor.busy || inUse}
@@ -326,6 +335,7 @@ function LaunchEditor({
         </Button>
         {refresh || (
           <Button
+            key="preview"
             type="submit"
             variant="primary"
             disabled={editor.busy || change === undefined || inUse}
