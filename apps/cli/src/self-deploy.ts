@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   DeploymentController,
+  DeploymentDiskMonitor,
   DeploymentServerUnavailable,
   loadDeploymentConfig,
   NodeDeploymentDriver,
@@ -132,6 +133,11 @@ export async function runSelfDeployCommand(
     });
     unlock = await driver.initialize();
     const controller = new DeploymentController(driver);
+    const disk = new DeploymentDiskMonitor(
+      store,
+      dataDir,
+      config.disk_low_percent,
+    );
     const stop = new AbortController();
     const signal = () => stop.abort();
     io.signals.on("SIGTERM", signal);
@@ -139,7 +145,17 @@ export async function runSelfDeployCommand(
     try {
       while (!stop.signal.aborted) {
         try {
+          await disk.poll();
+        } catch {
+          io.stderr("本次磁盘空间检查未完成，保留上次观测状态");
+        }
+        try {
           await controller.tick();
+          try {
+            await driver.maintainDisk();
+          } catch {
+            io.stderr("本次磁盘回收未完成，请核对清单和主机审计");
+          }
         } catch (error) {
           if (error instanceof DeploymentServerUnavailable) throw error;
           io.stderr("主机自动部署本轮未完成，请核对部署记录和主机配置");
