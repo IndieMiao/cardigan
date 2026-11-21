@@ -698,7 +698,7 @@ test("the receiver's explicit deadline also covers a peer withholding the header
   receiving.stdin.write("{");
   try {
     expect(await finished).toBe(1);
-    expect(diagnostic).toBe("worker_publication_rejected\n");
+    expect(diagnostic).toBe("worker_timeout\n");
   } finally {
     receiving.kill("SIGKILL");
   }
@@ -859,3 +859,18 @@ async function checkNativeSession(harnessName: string, changed = false) {
     child.kill("SIGKILL");
   }
 }
+
+test("unknown filenames are rejected with a fixed stderr class before touching the namespace", () => {
+  const packet = request("publish"),
+    end = packet.indexOf(10);
+  const header = JSON.parse(packet.subarray(0, end).toString());
+  header.files[0].name = "private-unknown-file";
+  const result = spawnSync("python3", ["-IB", helper, JSON.stringify(policy)], {
+    input: Buffer.from(`${JSON.stringify(header)}\n`),
+    encoding: "utf8",
+    timeout: 4000,
+  });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toBe("worker_filename_rejected\n");
+  expect(result.stdout).toBe("");
+});

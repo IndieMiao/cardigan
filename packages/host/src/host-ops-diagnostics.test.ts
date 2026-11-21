@@ -20,6 +20,11 @@ import { expect, test, vi } from "vitest";
 import { writeDeploymentRecord } from "./deployment-audit.js";
 import { HostOpsService } from "./host-ops.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
+import { workerHelperDigests } from "./worker-helper-release.js";
+import {
+  notifyHelperMismatch,
+  workerPreparationOutcome,
+} from "./worker-maintenance.js";
 
 test("host ops returns deployment and upstream diagnostics together and revalidates access after IO", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "cg-host-ops-diagnostics-"));
@@ -124,8 +129,37 @@ test("host ops returns deployment and upstream diagnostics together and revalida
       (t) => t.name === "host_ops_read_diagnostics",
     );
     if (!read) throw new Error("Missing diagnostics tool");
+    store.uow.run((tx) => {
+      notifyHelperMismatch(
+        tx,
+        project,
+        "worker-a",
+        clock,
+        "worker helper 与当前部署的 SHA-256 不一致",
+      );
+      workerPreparationOutcome(
+        store,
+        tx,
+        project,
+        "worker-b",
+        "binding",
+        clock,
+        "worker_disk_error",
+        { failures: 1, duration_ms: 1000 },
+      );
+    });
     const view = await read.handler(read.input.parse({}), context);
     expect(view).toMatchObject({
+      worker_maintenance: expect.arrayContaining([
+        ...Object.entries(workerHelperDigests()).map(([name, digest]) =>
+          expect.objectContaining({
+            instructions: expect.stringContaining(`${digest}  ${name}`),
+          }),
+        ),
+        expect.objectContaining({
+          instructions: expect.stringContaining("worker_disk_error"),
+        }),
+      ]),
       runtime_calls: {
         active: 2,
         queued: 3,
