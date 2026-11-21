@@ -146,6 +146,16 @@ test("a new Provider is checked in place, previewed without the secret and confi
   const d = await screen.findByRole("dialog", { name: "新建 Provider" });
   const preview = within(d).getByRole("button", { name: "预览修改" });
   const id = field(d, "ID");
+  // V-2709: the ID field names the ID, not the separate name field.
+  expect(
+    document.getElementById(id.getAttribute("aria-describedby") ?? "")
+      ?.textContent,
+  ).toContain("请填写 ID。");
+  fireEvent.change(id, { target: { value: "Bad ID" } });
+  expect(
+    document.getElementById(id.getAttribute("aria-describedby") ?? "")
+      ?.textContent,
+  ).toContain("ID 只能用小写字母");
   fireEvent.change(id, { target: { value: "anthropic" } });
   expect(id.getAttribute("aria-invalid")).toBe("true");
   expect(
@@ -240,6 +250,8 @@ test("a failed write keeps the form but empties every secret input", async () =>
   });
   expect(group.textContent).toContain("未设置");
   click(group, "填写");
+  // V-2709: undoing a first value says so (not "replace").
+  expect(within(group).getByRole("button", { name: "撤销填写" })).toBeTruthy();
   fireEvent.change(password(group)[0] as HTMLInputElement, {
     target: { value: FAKE },
   });

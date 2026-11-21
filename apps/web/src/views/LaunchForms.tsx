@@ -36,6 +36,7 @@ import {
   diffValue,
   envNameProblem,
   envValueProblem,
+  idProblem,
   type LaunchProblem,
   launchProblem,
   nameProblem,
@@ -1105,7 +1106,7 @@ export function ProviderForm({
   const taken = creating && settings.providers.some((p) => p.id === id);
   const problems: Record<string, string | undefined> = {
     id: creating
-      ? (nameProblem(id) ??
+      ? (idProblem(id) ??
         (taken ? "已有同一 ID 的 Provider，换一个 ID。" : undefined))
       : undefined,
     name: creating && draft.name === "" ? undefined : textProblem(draft.name),
@@ -1518,9 +1519,7 @@ function ProviderFields({
           return (
             <fieldset key={`secret:${row.env}`}>
               <legend>密钥变量 {row.env}</legend>
-              <SettingsDiff op="remove">
-                将移除（secrets.env 中的值保留）
-              </SettingsDiff>
+              <SettingsDiff op="remove">将移除</SettingsDiff>
               <SettingsDialogActions>
                 <Button onClick={() => editSecret(row.env, undefined)}>
                   撤销移除
@@ -1584,7 +1583,11 @@ function ProviderFields({
                     editSecret(row.env, { ...edit, mode: undefined });
                   }}
                 >
-                  {edit.mode === "clear" ? "撤销清除" : "撤销替换"}
+                  {edit.mode === "clear"
+                    ? "撤销清除"
+                    : row.set
+                      ? "撤销替换"
+                      : "撤销填写"}
                 </Button>
               ) : (
                 <>

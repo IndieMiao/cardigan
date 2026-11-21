@@ -313,7 +313,7 @@ export function ModelsSettings({
                   <DataTableCell data-label="端点">
                     {p.base_url ? <code>{p.base_url}</code> : "—"}
                   </DataTableCell>
-                  <DataTableCell nowrap data-record="aside">
+                  <DataTableCell nowrap data-label="引用">
                     {providerUses(data, p.id)}
                   </DataTableCell>
                 </TableRow>

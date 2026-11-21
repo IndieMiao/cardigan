@@ -20,6 +20,13 @@ export const nameProblem = (value: string) =>
     : value.length > 64 || !NAME.test(value)
       ? "只能用小写字母、数字、点、下划线和短横线，以字母或数字开头，最多 64 个字符。"
       : undefined;
+/** V-2709: a new Provider's ID (the form also has a separate name field). */
+export const idProblem = (value: string) =>
+  value === ""
+    ? "请填写 ID。"
+    : value.length > 64 || !NAME.test(value)
+      ? "ID 只能用小写字母、数字、点、下划线和短横线，以字母或数字开头，最多 64 个字符。"
+      : undefined;
 /** Optional identifiers (effort, provider flag): empty clears the value. */
 export const optionalNameProblem = (value: string) =>
   value === "" ? undefined : nameProblem(value);
