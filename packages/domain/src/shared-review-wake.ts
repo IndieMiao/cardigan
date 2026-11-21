@@ -120,6 +120,7 @@ export function reviewRunWakeDisposition(
   run: Run,
 ) {
   if (owner.scope !== "work_item" || run.started_at) return;
+  if (!boundReceiptTargetCurrent(state, owner, run)) return "obsolete";
   return reviewWakeDisposition(
     state,
     originalRunTrigger(state, run),
@@ -131,6 +132,23 @@ export function reviewRunWakeDisposition(
 /** A transport replay can follow run_started. Keep the original review target
  * authoritative even though ordinary Run-start guards no longer apply. */
 export function reviewReceiptTargetCurrent(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  return (
+    boundReceiptTargetCurrent(state, owner, run) &&
+    (owner.scope !== "work_item" ||
+      !reviewWakeDisposition(
+        state,
+        originalRunTrigger(state, run),
+        owner.work_item_id,
+        true,
+      ))
+  );
+}
+
+function boundReceiptTargetCurrent(
   state: CommandState,
   owner: Assignment,
   run: Run,
@@ -147,13 +165,7 @@ export function reviewReceiptTargetCurrent(
     )
       return false;
   }
-  if (owner.scope !== "work_item") return true;
-  return !reviewWakeDisposition(
-    state,
-    originalRunTrigger(state, run),
-    owner.work_item_id,
-    true,
-  );
+  return true;
 }
 
 /** Bind a host withdrawal to the immutable trigger, not just the current SHA. */

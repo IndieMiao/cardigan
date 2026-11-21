@@ -297,6 +297,7 @@ export {
   armBellReceipt,
   confirmBellWrite,
   RunWakeWithdrawn,
+  recordWakeRefusal,
   wakeIsCurrent,
 } from "./wake-guard.js";
 export {

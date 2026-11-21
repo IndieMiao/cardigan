@@ -1,0 +1,124 @@
+import type { Runtime } from "@cardigan/domain";
+import { armBellReceipt, confirmBellWrite } from "@cardigan/host";
+import { expect, onTestFinished, test, vi } from "vitest";
+import { recoveryFixture } from "../test-support/recovery.js";
+import { sharedRepairStore } from "../test-support/shared-repair.js";
+import { Dispatcher } from "./dispatch.js";
+
+test("a proven guard refusal preserves the first write across the dispatch timeout and restart", async () => {
+  const f = recoveryFixture();
+  onTestFinished(f.close);
+  let busy = false,
+    refuseNext = true;
+  vi.mocked(f.runtime.status).mockImplementation(async () => ({
+    ok: true,
+    value: {
+      process: "alive",
+      agent: busy ? "working" : "done",
+      observed_seq: 2,
+    },
+  }));
+  const writes: string[] = [];
+  vi.mocked(f.runtime.wake).mockImplementation(async (_, text, opts) => {
+    if (refuseNext) {
+      busy = true;
+      refuseNext = false;
+    }
+    if (busy || !opts?.before_send?.())
+      return { ok: true, value: { sent: false, withdrawn: true } };
+    writes.push(text);
+    return { ok: true, value: { sent: true } };
+  });
+  const opts = { ...f.options, dispatchTimeoutMs: 1000 };
+  f.comment();
+  await new Dispatcher(opts).tick();
+  const id = f.latest().id;
+  expect(f.latest().bell_delivery?.refused_attempt_id).toBeTruthy();
+  f.advance(1001);
+  await new Dispatcher(opts).tick();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(writes).toHaveLength(0);
+  busy = false;
+  await new Dispatcher(opts).tick();
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toContain(`run=${id}`);
+  expect(f.latest().bell_delivery).toMatchObject({ sent_at: f.clock.now() });
+  expect(f.latest().bell_delivery?.retry_at).toBeUndefined();
+});
+
+test("the cold publication boundary pins ordinary rework; supersession retires it without replay", async () => {
+  const f = await sharedRepairStore();
+  const initial = f.read();
+  const owner = initial.assignments.find((a) => a.id === f.owner);
+  const review = initial.events.findLast((e) => e.type === "review_submitted");
+  if (!owner?.runtime_ref || !review) throw Error("missing review context");
+  let exited = false;
+  const opts = {
+    store: f.store,
+    clock: f.clock,
+    dispatchTimeoutMs: 1000,
+    runtime: {
+      status: vi.fn(async () => ({
+        ok: true,
+        value: {
+          process: exited ? "exited" : "alive",
+          agent: "idle",
+          observed_seq: 1,
+        },
+      })),
+      wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
+      release: vi.fn(async () => {
+        exited = true;
+        return { ok: true as const, value: undefined };
+      }),
+      interrupt: vi.fn(),
+      provision: vi.fn(),
+      resume_or_replace: vi.fn(),
+      human_entry: vi.fn(),
+    } satisfies Runtime,
+    snapshot: async () => ({ model: "fixture", agent_cli_version: "1" }),
+    startRun: vi.fn(),
+  };
+  await new Dispatcher(opts).tick();
+  const run = f
+    .read()
+    .runs.find(
+      (r) =>
+        r.assignment_id === f.owner &&
+        r.kind === "rework" &&
+        r.status === "dispatched",
+    );
+  if (!run) throw Error("missing dispatched repair");
+  // A cold launch has no live BellAttempt binding to pass into this boundary.
+  expect(
+    armBellReceipt(
+      f.store,
+      f.project,
+      run.id,
+      owner.runtime_ref,
+      review.card_id,
+    ),
+  ).toBe(true);
+  confirmBellWrite(f.store, f.project, run.id, f.clock.now());
+  expect(
+    f.read().runs.find((r) => r.id === run.id)?.bell_delivery?.review_target,
+  ).toEqual({ delivery_id: f.target.id, target_sha: f.target.subject.value });
+  f.store.uow.run((tx) =>
+    tx.deliveries.put(f.project, { ...f.target, status: "superseded" }),
+  );
+  expect(armBellReceipt(f.store, f.project, run.id, owner.runtime_ref)).toBe(
+    false,
+  );
+  const count = opts.runtime.wake.mock.calls.length;
+  f.advance(1001);
+  await new Dispatcher(opts).tick();
+  expect(opts.runtime.wake).toHaveBeenCalledTimes(count);
+  expect(f.read().runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  expect(
+    f
+      .read()
+      .runs.filter(
+        (r) => r.recovery_policy?.root_run_id === run.id && r.id !== run.id,
+      ),
+  ).toEqual([]);
+});

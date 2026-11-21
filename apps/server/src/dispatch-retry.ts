@@ -42,6 +42,7 @@ import {
   failAutomaticContextRun,
   type HarnessActivityInspection,
   type MachineLeases,
+  recordWakeRefusal,
   refreshTargetWait,
   testReviewRunPrompt,
   tryHostOpsLock,
@@ -57,7 +58,6 @@ import {
   recordNotification,
   type Store,
   type StoreTransactionContext,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -577,7 +577,16 @@ export async function retryDispatchedRuns(
         (run.status !== "dispatched" &&
           !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
         run.started_at ||
-        (run.bell_delivery?.run_id === run.id && !!run.bell_delivery.sent_at) ||
+        // Give a confirmed send to the receipt monitor. After handoff, allow the
+        // original timeout policy a fresh window; obsolete targets only retire.
+        (run.bell_delivery?.run_id === run.id &&
+          run.bell_delivery.sent_at &&
+          a &&
+          reviewRunWakeDisposition(state, a, run) !== "obsolete" &&
+          (!run.bell_delivery.escalated_at ||
+            Date.parse(clock.now()) -
+              Date.parse(run.bell_delivery.escalated_at) <
+              policy.timeoutMs)) ||
         run.dispatch_stop ||
         run.inactivity_stop ||
         stoppedByHuman(state.events, candidate.assignment_id) ||
@@ -622,6 +631,13 @@ export async function retryDispatchedRuns(
         state.decisions.some(
           (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
         );
+      const refusedFirstWrite =
+        !shared &&
+        !disposition &&
+        !run.bell_delivery?.sent_at &&
+        last?.outcome === "failed" &&
+        (run.bell_delivery?.refused_attempt_id === last.id ||
+          (sameTarget && binding?.refused_at && !binding.sending_at));
       // Keep every receipt for audit. A positive refusal for this shared target
       // neither spends nor resets the ordinary failure budget since the last send.
       let failures = 0;
@@ -648,6 +664,7 @@ export async function retryDispatchedRuns(
       // A wait finishing is not a send. Only an actual boundary (or a legacy
       // result) starts the restored ack window. Clear failures still back off.
       const noSendYet =
+        refusedFirstWrite ||
         withdrawn ||
         legacy === "unsent" ||
         (!reconcile &&
@@ -689,7 +706,9 @@ export async function retryDispatchedRuns(
           (!noSendYet || readmit) &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-          (!unconfirmed && failures >= policy.maxRetries + 1));
+          (!refusedFirstWrite &&
+            !unconfirmed &&
+            failures >= policy.maxRetries + 1));
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
@@ -713,7 +732,9 @@ export async function retryDispatchedRuns(
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
-          (withdrawn || ((retry || resourceWait) && !unconfirmed)) &&
+          (withdrawn ||
+            refusedFirstWrite ||
+            ((retry || resourceWait) && !unconfirmed)) &&
           !unreadable &&
           (!binding || sameTarget) &&
           !disposition,
@@ -988,9 +1009,7 @@ export async function retryDispatchedRuns(
           },
         );
         if (result.ok && result.value.withdrawn) {
-          store.uow.run(() =>
-            settleWakeWithdrawal(store.database, job.attempt, clock.now()),
-          );
+          recordWakeRefusal(store, job.attempt, job.a, clock.now());
           continue;
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake)

@@ -20,11 +20,13 @@ export function matchesBellReceipt(
         args.card_id === bell.card_id;
 }
 
+/** Only an open receipt window owns dispatch. A late receipt can still be recorded. */
 export function unreceivedBell(run: Run) {
   const bell = run.bell_delivery;
   return bell?.run_id === run.id &&
     bell.sent_at &&
     !bell.received_at &&
+    !bell.escalated_at &&
     (run.status === "running" || run.status === "dispatched")
     ? bell
     : undefined;

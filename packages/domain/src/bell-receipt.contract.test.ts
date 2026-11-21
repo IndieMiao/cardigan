@@ -30,6 +30,14 @@ test("business ACK is not a bell receipt; a completed or successor Run cannot in
     },
   };
   expect(unreceivedBell(run)).toBeDefined();
+  const escalated = {
+    ...run,
+    bell_delivery: { ...run.bell_delivery, escalated_at: f.io.clock.now() },
+  };
+  expect(unreceivedBell(escalated)).toBeUndefined();
+  expect(matchesBellReceipt(escalated, "heartbeat", { run_id: run.id })).toBe(
+    true,
+  );
   for (const tool of ["get_updates", "ack_events"]) {
     expect(matchesBellReceipt(run, tool, { card_id: card })).toBe(true);
     expect(matchesBellReceipt(run, tool, {})).toBe(false);

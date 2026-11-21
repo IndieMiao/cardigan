@@ -75,6 +75,7 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
+  recordWakeRefusal,
   redactFailureLine,
   runCapacitySnapshot,
   settleTestReviewLimits,
@@ -103,7 +104,6 @@ import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -1135,12 +1135,11 @@ export class Dispatcher {
           ),
         );
         if (result.ok && result.value.withdrawn) {
-          this.options.store.uow.run(() =>
-            settleWakeWithdrawal(
-              this.options.store.database,
-              job.attempt,
-              this.clock.now(),
-            ),
+          recordWakeRefusal(
+            this.options.store,
+            job.attempt,
+            job.assignment,
+            this.clock.now(),
           );
           return;
         }

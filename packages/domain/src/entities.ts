@@ -567,6 +567,8 @@ export interface Run {
     readonly sent_at?: Timestamp;
     readonly runtime_ref?: RuntimeRef;
     readonly retry_at?: Timestamp;
+    /** Positive non-delivery, valid only for this exact first-write attempt. */
+    readonly refused_attempt_id?: string;
     readonly idle_check_at?: Timestamp;
     readonly escalated_at?: Timestamp;
   };

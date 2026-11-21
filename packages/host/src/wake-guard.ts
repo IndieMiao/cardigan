@@ -8,10 +8,18 @@ import {
   type RunId,
   type RuntimeRef,
   recoveryTargetCurrent,
+  repairWakeTarget,
+  reviewReceiptTargetCurrent,
   reviewRunWakeDisposition,
   stoppedByHuman,
 } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import { loadCommandState } from "@cardigan/mcp-server";
+import {
+  type BellAttempt,
+  finishBellAttempt,
+  type Store,
+  settleWakeWithdrawal,
+} from "@cardigan/store";
 import { HostLaunchError } from "./errors.js";
 
 /** Shared by first delivery, C-56 retry and explicit live-session reuse.
@@ -76,10 +84,32 @@ export function armBellReceipt(
       return false;
     const pending =
       run.bell_delivery?.run_id === run.id ? run.bell_delivery : undefined;
+    if (run.kind === "rework") {
+      const state = loadCommandState(tx, project);
+      const target = repairWakeTarget(state, run);
+      review ??=
+        pending?.review_target ??
+        (target && {
+          delivery_id: target.id,
+          target_sha: target.subject.value,
+        });
+      if (
+        !reviewReceiptTargetCurrent(state, owner, {
+          ...run,
+          bell_delivery: {
+            ...pending,
+            run_id: runId,
+            ...(review ? { review_target: review } : {}),
+          },
+        })
+      )
+        return false;
+    }
     tx.runs.put(project, {
       ...run,
       bell_delivery: {
-        ...(pending ?? (card ? { card_id: card } : {})),
+        ...(card ? { card_id: card } : {}),
+        ...pending,
         run_id: runId,
         ...(review
           ? {
@@ -94,6 +124,39 @@ export function armBellReceipt(
       },
     });
     return true;
+  });
+}
+
+/** A positive refusal of an ordinary first write is not an ambiguous failure.
+ * Tie the evidence to the exact settled claim: later failures cannot reuse it. */
+export function recordWakeRefusal(
+  store: Store,
+  attempt: BellAttempt,
+  expected: Assignment,
+  at: string,
+) {
+  const project = attempt.project_id;
+  store.uow.run((tx) => {
+    const run = tx.runs.get(project, attempt.run_id);
+    if (
+      !attempt.review_wake &&
+      run?.status === "dispatched" &&
+      !run.started_at &&
+      !run.bell_delivery?.sent_at &&
+      !run.dispatch_stop &&
+      !run.inactivity_stop &&
+      wakeIsCurrent(loadCommandState(tx, project), expected, run.id) &&
+      finishBellAttempt(store.database, project, attempt.id, "failed", at)
+    ) {
+      tx.runs.put(project, {
+        ...run,
+        bell_delivery: {
+          ...run.bell_delivery,
+          run_id: run.id,
+          refused_attempt_id: attempt.id,
+        },
+      });
+    } else settleWakeWithdrawal(store.database, attempt, at);
   });
 }
 

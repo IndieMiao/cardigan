@@ -43,7 +43,6 @@ export async function checkBellReceipts(
   const due = (run: Run) => {
     const bell = unreceivedBell(run);
     return bell?.sent_at &&
-      !bell.escalated_at &&
       Date.parse(clock.now()) -
         Date.parse(bell.retry_at ?? bell.idle_check_at ?? bell.sent_at) >=
         timeoutMs
@@ -124,7 +123,10 @@ export async function checkBellReceipts(
       const scope = (s: CommandState) =>
         testReviewRunPrompt(s, owner.id, original.id);
       const review = store.uow.read((tx) => scope(load(tx, project)));
+      // A running Run does not publish a new start. Its original resource
+      // grant still has to pass startBlocked inside the write boundary.
       const gated =
+        original.status === "dispatched" &&
         leases &&
         (leases.configured(project, owner.machine_id) ||
           leases.hasProbeTarget(project, original));
@@ -170,7 +172,7 @@ export async function checkBellReceipts(
       );
       // The transport can fail before even reaching its send-slot callback. Do
       // not tight-loop a broken adapter or turn a late receipt into an alarm.
-      if (!result.ok)
+      if (!result.ok || !result.value.sent)
         store.uow.run((tx) => {
           const s = load(tx, project),
             run = current(s);
@@ -185,8 +187,10 @@ export async function checkBellReceipts(
             run_id: run.id,
             card_id: bell.card_id,
             type: "bell_receipt_missing",
-            reason: "retry_transport_unavailable",
-            activity_source: `${owner.machine_id}: ${terminal} (${result.error.code})`,
+            reason: result.ok
+              ? "retry_withdrawn"
+              : "retry_transport_unavailable",
+            activity_source: `${owner.machine_id}: ${terminal}${result.ok ? "" : ` (${result.error.code})`}`,
             audience: alertAudience(owner, s, options.standing),
           });
         });

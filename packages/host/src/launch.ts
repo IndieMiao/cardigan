@@ -64,7 +64,6 @@ import {
   finishBellAttempt,
   getRoleVersion,
   type Store,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -114,6 +113,7 @@ import {
   armBellReceipt,
   confirmBellWrite,
   RunWakeWithdrawn,
+  recordWakeRefusal,
   wakeIsCurrent,
 } from "./wake-guard.js";
 import {
@@ -915,10 +915,8 @@ async function launch(
         );
         if (result.ok && result.value.withdrawn) {
           const refused = attempt;
-          if (refused?.review_wake)
-            host.store.uow.run(() =>
-              settleWakeWithdrawal(host.store.database, refused, clock.now()),
-            );
+          if (refused)
+            recordWakeRefusal(host.store, refused, assignment, clock.now());
           if (targetDeferred) throw new RunTargetDeferred();
           throw new RunWakeWithdrawn();
         }
