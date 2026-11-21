@@ -63,6 +63,7 @@ import {
   storyProgress,
   suggestionView,
   verificationActivity,
+  workerHelperAction,
 } from "@cardigan/domain";
 import { type ProjectMergeGate, previewPorts } from "@cardigan/host";
 import {
@@ -1531,6 +1532,11 @@ export function needsYou(
   hcSession?: string,
   runtimeUnknownGraceMs?: number,
   section?: NeedsYouSection,
+  currentUpgradeCommand?: (
+    project: string,
+    machine: Machine,
+    binding: string,
+  ) => string | undefined,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1566,6 +1572,22 @@ export function needsYou(
       state.timeline,
       (entry) => entry.human_action_id === action.id,
     );
+    const helper = workerHelperAction(state, action);
+    const machine =
+      helper && state.machines?.find((m) => m.id === helper.machine_id);
+    const terminal = !helper
+      ? (action.handoff?.terminal ?? action.terminal)
+      : machine &&
+          action.status === "open" &&
+          action.helper_upgrade?.binding &&
+          action.terminal &&
+          currentUpgradeCommand?.(
+            state.project_id,
+            machine,
+            action.helper_upgrade.binding,
+          ) === action.terminal.command
+        ? action.terminal
+        : undefined;
     return {
       ...webAuthorView(
         state,
@@ -1575,10 +1597,17 @@ export function needsYou(
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
-      instructions: action.handoff?.instructions ?? action.instructions,
+      instructions:
+        helper && action.terminal && !terminal
+          ? "当前升级命令不可用，请主机运维重新核对目标和发行材料。"
+          : (action.handoff?.instructions ?? action.instructions),
+      terminal,
+      helper_checks: action.helper_checks,
       ...(action.handoff
         ? {
-            handoff: action.handoff,
+            handoff: helper
+              ? { ...action.handoff, terminal: undefined }
+              : action.handoff,
             original_request: {
               instructions: action.instructions,
               why_human: action.why_human,

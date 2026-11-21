@@ -136,6 +136,7 @@ test("host ops returns deployment and upstream diagnostics together and revalida
         "worker-a",
         clock,
         "worker helper 与当前部署的 SHA-256 不一致",
+        { helper_upgrade: { machine_id: "worker-a", binding: "a".repeat(64) } },
       );
       workerPreparationOutcome(
         store,

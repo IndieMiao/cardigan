@@ -1731,6 +1731,13 @@ test.each([true, undefined])(
     const action = await ok<HumanAction>(caller, "request_human_action", {
       card_id: card.id,
       instructions: "Rotate the deploy credential",
+      terminal: {
+        target: "test",
+        login: "admin",
+        command: "check",
+        expected_output: "OK",
+        on_failure: "stop",
+      },
       why_human: "Only a person holds the credential",
       expected_return: "Rotated",
       blocked_work_items: [],
@@ -1746,6 +1753,13 @@ test.each([true, undefined])(
         .listAfter(project, card.id, 0)
         .find((e) => e.type === "human_action_requested"),
     );
+    expect(stored?.terminal).toEqual({
+      target: "test",
+      login: "admin",
+      command: "check",
+      expected_output: "OK",
+      on_failure: "stop",
+    });
     if (blocks_merge) {
       expect(action.blocks_merge).toBe(true);
       expect(stored?.blocks_merge).toBe(true);

@@ -37,6 +37,7 @@ import {
   type RolePatch,
   recheckMerge,
   recordDecision,
+  recordHelperUpgradeChecks,
   rollbackRole,
   runLimitMaximumMessage,
   type SystemReminderPolicy,
@@ -51,6 +52,7 @@ import {
   updateRole,
   updateWorkItem,
   uploadAttachment,
+  workerHelperAction,
 } from "@cardigan/domain";
 import {
   applyRoleDocument,
@@ -246,7 +248,9 @@ const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
   body: text.optional(),
 });
-const action = z.object({ text, attachments: z.array(text).optional() });
+const action = z
+  .object({ text, attachments: z.array(text).optional() })
+  .strict();
 const attachment = z.object({
   file: z.string().max(MAX_ATTACHMENT_BASE64),
   mime: text,
@@ -303,6 +307,7 @@ function must<T>(result: Result<T>): T {
   return result.value;
 }
 export interface WriteContext {
+  readonly checks?: import("./machine-checks.js").MachineChecks;
   readonly roleLaunchConfig?:
     | (() => import("@cardigan/roles").LaunchConfig | undefined)
     | undefined;
@@ -1178,18 +1183,22 @@ export async function serveWrite(
           },
         }),
   };
-  if (context.idempotency) {
-    const missing = Symbol("uncached request");
+  const missing = Symbol("uncached request");
+  const replay = () => {
+    if (!context.idempotency) return missing;
     try {
-      // A replay needs no file IO or command validation against newer state.
-      const cached = execute(context, () => {
+      return execute<unknown>(context, () => {
         throw missing;
       });
-      sendJson(c.res, 200, cached);
-      return true;
     } catch (error) {
       if (error !== missing) throw error;
+      return missing;
     }
+  };
+  const cached = replay();
+  if (cached !== missing) {
+    sendJson(c.res, 200, cached);
+    return true;
   }
   let output: unknown;
   if (group === "cards") {
@@ -1540,9 +1549,101 @@ export async function serveWrite(
       );
     } else {
       const p = defined(parsed(action, body));
-      output = run(context, (s, a, ports) =>
-        completeHumanAction(s, a, { ...p, human_action_id }, ports),
-      );
+      const readUpgrade = () =>
+        c.store.uow.read((tx) => {
+          const stored = tx.human_actions.get(c.project_id, human_action_id);
+          if (stored?.status !== "open" || stored.requested_by !== "system")
+            return undefined;
+          const target = workerHelperAction(
+            loadCommandState(tx, c.project_id),
+            stored,
+          );
+          if (!target) return undefined;
+          const machine =
+            target.machine_id &&
+            tx.machines.get(c.project_id, target.machine_id);
+          const binding = stored.helper_upgrade
+            ? stored.helper_upgrade.binding
+            : (machine && c.checks?.currentBinding(c.project_id, machine)) ||
+              null;
+          return { machine_id: target.machine_id, binding };
+        });
+      if (readUpgrade()) {
+        if (c.req.headers.authorization !== undefined)
+          throw new HttpRejection(403, "unauthorized", "仅限人类登录会话");
+        const authorizeCheck = (tx: StoreTransactionContext) => {
+          const session = c.authorize(),
+            member = activeOwner(tx.members.list());
+          if (
+            !member ||
+            !session ||
+            typeof session !== "object" ||
+            !("member_id" in session) ||
+            session.member_id !== member.id
+          )
+            throw new HttpRejection(
+              403,
+              "unauthorized",
+              "需要有效的人成员身份",
+            );
+          return member.id;
+        };
+        if (!c.checks)
+          throw new HttpRejection(503, "unavailable", "检查服务不可用");
+        const service = c.checks;
+        output = await service.withHelperConfirmation(
+          c.project_id,
+          human_action_id,
+          async () => {
+            c.store.uow.run(authorizeCheck);
+            const cached = replay();
+            if (cached !== missing) return cached;
+            const upgrade = readUpgrade();
+            if (!upgrade)
+              throw new HttpRejection(
+                409,
+                "illegal_transition",
+                "升级待办已变化",
+              );
+            const checks = await service.verifyHelper(
+              c.project_id,
+              upgrade.machine_id,
+              upgrade.binding,
+              authorizeCheck,
+            );
+            return run(context, (s, a, ports) => {
+              const registered = s.machines?.find(
+                (m) => m.id === upgrade.machine_id,
+              );
+              const current = c.checks?.currentBinding(
+                c.project_id,
+                registered,
+              );
+              const changed = {
+                status: "failed",
+                failed_steps: ["无法确认当前机器绑定"],
+              } as const;
+              return recordHelperUpgradeChecks(
+                s,
+                a,
+                {
+                  ...p,
+                  human_action_id,
+                  ...upgrade,
+                  checks:
+                    current === upgrade.binding
+                      ? checks
+                      : { worker: changed, machine: changed },
+                },
+                ports,
+              );
+            });
+          },
+        );
+      } else
+        output = run(context, (s, a, ports) =>
+          completeHumanAction(s, a, { ...p, human_action_id }, ports),
+        );
     }
   }
   sendJson(c.res, 200, output);

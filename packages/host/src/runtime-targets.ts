@@ -36,7 +36,10 @@ import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
-import { MachineCheckJournal } from "./machine-check-journal.js";
+import {
+  type CheckResult,
+  MachineCheckJournal,
+} from "./machine-check-journal.js";
 import { targetProbe } from "./resource-probe.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
@@ -67,6 +70,8 @@ interface Target {
   readonly machine: Machine;
 }
 export interface MachineCheck {
+  /** Observed at the same instant as machine_not_ready; never dispatch authority. */
+  readonly draining?: true;
   readonly machine_id: string;
   readonly blockers: readonly string[];
   readonly launch_enabled: boolean;
@@ -521,6 +526,9 @@ export class RuntimeTargets implements Runtime {
           ok: true,
           value: {
             machine_id,
+            ...(current.machine.status === "draining"
+              ? { draining: true as const }
+              : {}),
             blockers,
             launch_enabled:
               blockers.length === 0 && this.launchAllowed(project, machine_id),
@@ -881,23 +889,59 @@ export class RuntimeTargets implements Runtime {
 
 /** Construct the target inside the observation fence: invalid private configuration must
  * revoke stale health/capabilities just like a failed probe. Used by CLI, Web and patrol. */
-export function observeRegisteredMachine(
-  options: Omit<MachineObservationOptions, "target" | "check">,
+export async function observeRegisteredMachine(
+  options: Omit<MachineObservationOptions, "target" | "check"> & {
+    helperConfirmation?: { binding: string };
+  },
   create: () => Promise<RuntimeTargets> | RuntimeTargets,
 ) {
   const { project, machine } = options;
   let runtime: RuntimeTargets | undefined;
   const ready = async () => (runtime ??= await create());
-  return refreshMachineObservations({
+  let draining = false;
+  const result = await refreshMachineObservations({
     ...options,
-    target: async () => (await ready()).resolve(project, machine),
+    target: async () => {
+      const target = (await ready()).resolve(project, machine);
+      if (
+        options.helperConfirmation &&
+        target.execution.target?.fingerprint !==
+          options.helperConfirmation.binding
+      )
+        throw new Error("Machine target changed");
+      return target;
+    },
     check: async () => {
       const checked = await (await ready()).check(project, machine);
+      draining = checked.ok && checked.value.draining === true;
       return checked.ok
-        ? checked.value
+        ? {
+            blockers: checked.value.blockers,
+            launch_enabled: checked.value.launch_enabled,
+          }
         : { blockers: [checked.error.code], launch_enabled: false };
     },
   });
+  // Never publish maintenance success as normal health or dispatch evidence. Only
+  // the confirmation that owns this exact observation can ignore a dispatch pause.
+  let maintenance: CheckResult | undefined;
+  if (
+    options.helperConfirmation &&
+    options.observationId &&
+    draining &&
+    result.health?.evidence_ref ===
+      `machine-observation:${options.observationId}` &&
+    result.health.blockers.includes("machine_not_ready")
+  ) {
+    const failed_steps = result.health.blockers.filter(
+      (s) => s !== "machine_not_ready",
+    );
+    maintenance = {
+      status: failed_steps.length ? "failed" : "passed",
+      failed_steps,
+    };
+  }
+  return { ...result, ...(maintenance ? { maintenance } : {}) };
 }
 export async function checkRegisteredMachine(
   options: Parameters<typeof observeRegisteredMachine>[0],
