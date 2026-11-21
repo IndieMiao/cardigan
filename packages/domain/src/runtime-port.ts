@@ -72,6 +72,12 @@ export interface Runtime {
     ref: RuntimeRef,
     identity: RetirementIdentity,
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
+  /** Read-only local kernel check for an already queued Run whose core is gone.
+   * A missing socket alone never proves the original terminal process exited. */
+  confirm_local_exit?(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+  ): Promise<RuntimeResult<boolean>>;
   /** Optional host-only idle retirement. Never escalates beyond HUP/TERM. */
   retire_idle?(
     ref: RuntimeRef,
@@ -79,7 +85,15 @@ export interface Runtime {
       readonly hangup_ms: number;
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
-    },
+    } & (
+        | { readonly system_finished_turn?: never }
+        | {
+            /** One owner-bound TERM; recheck workspace inside the signal slot,
+             * then terminal identity/activity, then synchronous authority. */
+            readonly system_finished_turn: true;
+            readonly workspace_preflight: () => Promise<boolean>;
+          }
+      ),
   ): Promise<RuntimeResult<IdleRetirementResult>>;
   provision(
     assignment: Assignment,

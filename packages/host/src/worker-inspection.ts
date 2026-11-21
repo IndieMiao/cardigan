@@ -16,10 +16,12 @@ const names = [
 ] as const;
 const release = (name: string) =>
   readFile(new URL(`../../../deploy/${name}`, import.meta.url));
-const unavailable = () =>
-  new ToolError(
+class WorkerInspectionError extends ToolError {}
+const unavailable = (reason: string) =>
+  new WorkerInspectionError(
     "illegal_transition",
-    "Worker unreachable or read-only diagnostics unavailable",
+    `Worker inspection unavailable: ${reason}`,
+    { reason },
   );
 
 /** The same isolated worker account path is used for loopback and remote machines.
@@ -34,15 +36,13 @@ export async function inspectWorker(
   harness = run?.harness,
 ) {
   const target = execution.target;
-  if (
-    execution.mode !== "agent-ssh" ||
-    !target ||
-    target.project_id !== project ||
-    target.machine_id !== a.machine_id ||
-    a.external ||
-    ["root", "ciadmin"].includes(execution.user ?? "agent")
-  )
-    throw unavailable();
+  if (execution.mode !== "agent-ssh")
+    throw unavailable("isolated_worker_transport_required");
+  if (!target) throw unavailable("worker_binding_missing");
+  if (target.project_id !== project || target.machine_id !== a.machine_id)
+    throw unavailable("worker_binding_mismatch");
+  if (a.external || ["root", "ciadmin"].includes(execution.user ?? "agent"))
+    throw unavailable("worker_identity_not_allowed");
   const pub = run?.launch_publication;
   // Dispatch writes the Assignment ref, but a preparation failure can be
   // recorded as dispatched without ever waking that terminal. A matching
@@ -96,7 +96,7 @@ export async function inspectWorker(
             ? terminal
             : `${execution.machine}/${terminal}`)))
   )
-    throw unavailable();
+    throw unavailable("invalid_probe_identity");
   const live = current && (!!ref || !!pub);
   const payload = {
     project,
@@ -120,8 +120,13 @@ export async function inspectWorker(
       `${execution.agentRoot}/libexec/worker-primitives.py`,
     ],
   };
+  let stage = "collector_release_unreadable";
   try {
-    const source = await release("inspect-worker.py");
+    const [source, primitives] = await Promise.all([
+      release("inspect-worker.py"),
+      release("worker-primitives.py"),
+    ]);
+    stage = "worker_transport_configuration";
     const command = await agentProcessCommand(
       execution,
       [
@@ -130,7 +135,7 @@ export async function inspectWorker(
           "/usr/bin/python3",
         "-IB",
         "-c",
-        `native = {"__name__":"worker_native"}\nexec(${JSON.stringify((await release("worker-primitives.py")).toString())}, native)\n${source}`,
+        `native = {"__name__":"worker_native"}\nexec(${JSON.stringify(primitives.toString())}, native)\n${source}`,
       ],
       platform === "linux" ? { workerRuntimeDir: true } : undefined,
     );
@@ -145,12 +150,30 @@ export async function inspectWorker(
           killSignal: "SIGKILL",
           maxBuffer: 32768,
         },
-        (error, text) => (error ? reject(unavailable()) : resolve(text)),
+        (error, text) => {
+          if (!error) return resolve(text);
+          // Never reflect command, hostname, paths, stderr or malformed output.
+          const reason =
+            error.code === 255
+              ? "ssh_connection_failed"
+              : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+                ? "response_too_large"
+                : error.killed
+                  ? "collector_timeout"
+                  : error.code === "ENOENT"
+                    ? "transport_binary_missing"
+                    : `collector_exit_${typeof error.code === "number" ? error.code : "failed"}`;
+          reject(unavailable(reason));
+        },
       );
-      child.stdin?.on("error", () => reject(unavailable()));
+      child.stdin?.on("error", () =>
+        reject(unavailable("collector_input_closed")),
+      );
       child.stdin?.end(JSON.stringify(payload));
     });
+    stage = "invalid_collector_response";
     const evidence = workerEvidence.parse(JSON.parse(output));
+    stage = "collector_release_unreadable";
     return {
       ...evidence,
       session_launch_run_id: launchRun ?? null,
@@ -168,7 +191,8 @@ export async function inspectWorker(
         })),
       ),
     };
-  } catch {
-    throw unavailable();
+  } catch (error) {
+    if (error instanceof WorkerInspectionError) throw error;
+    throw unavailable(stage);
   }
 }

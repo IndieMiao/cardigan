@@ -1198,7 +1198,9 @@ async function launch(
         : [];
     if (!boundary.length) enterAdapter();
     const provisioned =
-      input.replacement && input.replacement.reason !== "launch_profile_changed"
+      input.replacement &&
+      !input.replacement.previous_exit_confirmed &&
+      input.replacement.reason !== "launch_profile_changed"
         ? await runtime.resume_or_replace(
             input.replacement.previous,
             launchDesc,

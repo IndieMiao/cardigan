@@ -10,7 +10,7 @@ import {
   contextUsageLevel,
 } from "../context-usage.js";
 import type { Actor, Run } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HOST_OPS_TOOLS,
   type HostOpsExecution,
@@ -219,6 +219,13 @@ export function beginHostOpsActionInDraft(
     "Automatic restarts are system-only",
   );
   const { assignment: a, run } = target(d, p);
+  const cause = eventById(state.events, p.dispatch_stall_id);
+  const turn =
+    cause?.type === "bell_turn_recovery_due" &&
+    cause.actor.kind === "system" &&
+    (cause.payload as { assignment_id: string }).assignment_id === a.id
+      ? (cause.payload as { run_id: string }).run_id
+      : undefined;
   if (p.dispatch_stall_id) {
     ensure(
       p.tool !== "host_ops_cancel_run" &&
@@ -233,10 +240,12 @@ export function beginHostOpsActionInDraft(
         const prior = e.payload as {
           assignment_id?: string;
           dispatch_stall_id?: string;
+          system_finished_run_id?: string;
         };
         return (
           prior.assignment_id === a.id &&
-          prior.dispatch_stall_id === p.dispatch_stall_id
+          (prior.dispatch_stall_id === p.dispatch_stall_id ||
+            (!!turn && prior.system_finished_run_id === turn))
         );
       }),
       "illegal_transition",
@@ -287,6 +296,7 @@ export function beginHostOpsActionInDraft(
   }
   const payload = {
     execution: true,
+    ...(turn ? { system_finished_run_id: turn } : {}),
     ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
     ...(p.upstream_incident_id
@@ -720,6 +730,7 @@ export function withdrawUnstartedStallRestart(
   actor: Actor,
   actionId: HostOpsExecution["action_id"],
   ports: CommandPorts,
+  reason?: string,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -740,6 +751,7 @@ export function withdrawUnstartedStallRestart(
       action_id: actionId,
       assignment_id: action.assignment_id,
       result: "withdrawn_stall_changed",
+      ...(reason ? { reason } : {}),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
   });
