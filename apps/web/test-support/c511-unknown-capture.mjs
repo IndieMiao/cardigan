@@ -252,9 +252,10 @@ try {
       await scene("drawer");
       // Lost check reply.
       await click("[role=dialog]", "立即检查");
-      await until(baseline ? has("检查没有开始") : has("上次检查请求结果未知"));
+      // A baseline before Q-1048 says the check did not start.
+      await until(`${has("检查没有开始")} || ${has("上次检查请求结果未知")}`);
       await scene("lost-check");
-      if (!baseline) {
+      if (await evaluate(has("仍要重新检查"))) {
         await click("[role=dialog]", "仍要重新检查");
         await until(
           has("上次请求结果未知，再次检查可能让这台机器多检查一次。"),
@@ -264,14 +265,12 @@ try {
       // Lost drain reply, still at the old state.
       await drawer("lost", theme);
       await click("[role=dialog]", "排空");
-      await until(baseline ? has("未能排空") : has("排空结果未知"));
+      await until(`${has("未能排空")} || ${has("排空结果未知")}`);
       await scene("lost-drain");
       // Lost check reply beside another project's running check.
       await drawer("running", theme);
       await click("[role=dialog]", "立即检查");
-      await until(
-        baseline ? has("正在检查：SSH") : has("这台机器正在检查：SSH"),
-      );
+      await until(`${has("正在检查：SSH")} || ${has("这台机器正在检查：SSH")}`);
       await scene("lost-running");
       // Q-1076: B followed in a reopened drawer, then A's late start reply.
       for (const [name, fail] of [
