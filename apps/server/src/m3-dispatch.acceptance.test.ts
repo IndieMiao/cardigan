@@ -705,18 +705,37 @@ test("§3.3 no resend while the harness is working on its unfinished Run", async
     ok: true,
     value: { process: "alive", agent: "working", observed_seq: 2 },
   });
-  withRun(f, f.coder, "running");
+  const run = withRun(f, f.coder, "running");
   comment(f);
   f.route();
   const d = dispatcher(f, runtime);
   await d.tick();
-  const commentNote = () => f.notes().find((note) => note.kind === "comment");
-  const attempts = commentNote()?.attempts;
-  f.advance(30 * 60_000);
+  const commentNote = () =>
+    f
+      .notes()
+      .find(
+        (note) =>
+          note.kind === "comment" &&
+          note.recipient.assignment_id === f.coder.id,
+      );
+  const note = commentNote();
+  if (!note) throw new Error("missing coder comment");
+  f.advance(10 * 60_000 - 1);
   await d.tick();
-  // The comment notification was never (re)sent while the harness was working.
-  expect(commentNote()?.attempts).toBe(attempts);
-  expect(commentNote()?.status).toBe("pending");
+  expect(commentNote()).toMatchObject({
+    id: note.id,
+    attempts: 0,
+    status: "pending",
+  });
+  // C-546: the deadline transfers the unread comment, not the running turn.
+  f.advance(1);
+  await d.tick();
+  expect(commentNote()).toMatchObject({
+    id: note.id,
+    attempts: 0,
+    status: "needs_attention",
+  });
+  expect(f.runs(f.coder)).toMatchObject([{ id: run.id, status: "running" }]);
   expect(runtime.wake).not.toHaveBeenCalled();
 });
 
