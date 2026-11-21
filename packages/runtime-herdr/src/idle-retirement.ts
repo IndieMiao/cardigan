@@ -2,12 +2,13 @@
  * This helper has no fallback signal and never reads or returns terminal content.
  */
 export const idleRetirementHelper = String.raw`
-import json, os, pathlib, signal, sys
+import errno, json, os, pathlib, signal, sys
 try:
     mode, raw_pid, terminal = sys.argv[1:4]
     pid = int(raw_pid)
-    if pid <= 1 or not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
-        raise ValueError()
+    if pid <= 1: sys.exit(2)
+    if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+        sys.exit(20)
     fd = os.pidfd_open(pid)
     try:
         root = pathlib.Path('/proc') / str(pid)
@@ -17,19 +18,26 @@ try:
         start = fields[19]
         boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         marker = b'HC_TERMINAL_ID=' + terminal.encode()
-        if uid != os.getuid() or marker not in (root / 'environ').read_bytes().split(b'\0') or fields[0] == 'Z':
-            raise ValueError()
+        if uid != os.getuid(): sys.exit(21)
+        if fields[0] == 'Z': sys.exit(23)
+        if marker not in (root / 'environ').read_bytes().split(b'\0'): sys.exit(22)
         identity = {'pid': pid, 'uid': uid, 'start': start, 'boot': boot}
         if mode == 'probe':
             print(json.dumps(identity))
         elif mode in ('HUP', 'TERM'):
             if identity != json.loads(sys.argv[4]):
-                raise ValueError()
+                sys.exit(24)
             signal.pidfd_send_signal(fd, signal.SIGHUP if mode == 'HUP' else signal.SIGTERM)
         else:
             raise ValueError()
     finally:
         os.close(fd)
+except PermissionError:
+    sys.exit(21)
+except (FileNotFoundError, ProcessLookupError):
+    sys.exit(23)
+except OSError as e:
+    sys.exit(20 if e.errno == errno.ENOSYS else 2)
 except Exception:
     sys.exit(2)
 `;

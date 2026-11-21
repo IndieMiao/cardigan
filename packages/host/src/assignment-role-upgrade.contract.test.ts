@@ -350,75 +350,76 @@ test.each(["unknown", "idle", "done", "error", "working", "blocked"] as const)(
       assignment_id: owner.id,
       role: { role_version: 1, allowed_tools: ["get_card"] },
     });
+    let now = f.clock.now();
     let finished = false;
+    let assignment = owner.id;
+    const terminal = () => ({
+      address: owner.runtime_ref!.terminal_ref,
+      state: finished ? "finished" : "live",
+      status: agent === "unknown" ? null : { state: agent },
+      keep: true,
+      labels: { project: human.project_id, assignment },
+    });
     const client = {
       available: async () => true,
       exec: vi.fn(async (args: readonly string[]) =>
         args[0] === "--version"
           ? `hc ${HC_RELEASE.version}`
-          : JSON.stringify({
-              address: "t1",
-              state: finished ? "finished" : "live",
-              status: agent === "unknown" ? null : { state: agent },
-            }),
+          : JSON.stringify(terminal()),
       ),
       async *lines() {
-        yield JSON.stringify({
-          seq: 100,
-          terminals: [
-            {
-              address: "t1",
-              state: finished ? "finished" : "live",
-              status: agent === "unknown" ? null : { state: agent },
-            },
-          ],
-        });
+        yield JSON.stringify({ seq: 100, terminals: [terminal()] });
       },
     };
     const created = await HerdrRuntime.create({ client, session: "fixture" });
     if (!created.ok) throw new Error(created.error.message);
+    const tick = () =>
+      upgradeIdleAssignmentRoles(f.store, human.project_id, created.value, {
+        now: () => now,
+      });
+    const current = () =>
+      f.store.uow.read((tx) => tx.assignments.get(human.project_id, owner.id))!;
+    const retry = () => {
+      const at = current().idle_retirement?.retry_at;
+      if (!at) throw new Error("Missing retirement retry time");
+      expect(Date.parse(at)).toBeGreaterThan(Date.parse(now));
+      now = at;
+      return tick();
+    };
     try {
-      await upgradeIdleAssignmentRoles(
-        f.store,
-        human.project_id,
-        created.value,
-        f.clock,
-      );
+      client.exec.mockClear();
+      await tick();
+      expect(client.exec.mock.calls.map(([args]) => args[0])).toEqual(["get"]);
       expect(f.store.verifyToken(token.token)).toBeTruthy();
-      expect(
-        f.store.uow.read((tx) =>
-          tx.assignments.get(human.project_id, owner.id),
-        ),
-      ).toMatchObject({ role_version: 1, runtime_ref: owner.runtime_ref });
-      expect(
-        f.store.uow.read(
-          (tx) => tx.assignments.get(human.project_id, owner.id)?.role_upgrade,
-        ),
-      ).toBeUndefined();
-      expect(
-        client.exec.mock.calls.every(
-          ([args]) => !["kill", "rm"].includes(args[0]!),
-        ),
-      ).toBe(true);
-      // Only actual process exit permits the default-policy transition.
+      expect(current()).toMatchObject({
+        role_version: 1,
+        runtime_ref: owner.runtime_ref,
+        idle_retirement: {
+          phase: "waiting",
+          evidence: { reason: "kept_terminal" },
+        },
+      });
+      expect(current().role_upgrade).toBeUndefined();
+
+      // Neither an early tick nor another owner's finished terminal proves exit.
       finished = true;
-      await upgradeIdleAssignmentRoles(
-        f.store,
-        human.project_id,
-        created.value,
-        f.clock,
-      );
+      client.exec.mockClear();
+      await tick();
+      expect(client.exec).not.toHaveBeenCalled();
+      expect(f.store.verifyToken(token.token)).toBeTruthy();
+      assignment = "A-2";
+      await retry();
+      expect(f.store.verifyToken(token.token)).toBeTruthy();
+      expect(current().runtime_ref).toEqual(owner.runtime_ref);
+
+      assignment = owner.id;
+      await retry();
       expect(f.store.verifyToken(token.token)).toBeUndefined();
-      expect(
-        f.store.uow.read((tx) =>
-          tx.assignments.get(human.project_id, owner.id),
-        ),
-      ).toMatchObject({ role_version: 2, runtime_ref: null });
-      expect(
-        client.exec.mock.calls.every(
-          ([args]) => !["kill", "rm"].includes(args[0]!),
-        ),
-      ).toBe(true);
+      expect(current()).toMatchObject({ role_version: 2, runtime_ref: null });
+      expect(client.exec.mock.calls.map(([args]) => args[0])).toEqual([
+        "get",
+        "get",
+      ]);
     } finally {
       f.store.close();
     }

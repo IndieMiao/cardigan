@@ -138,3 +138,29 @@ test("working processes and other harnesses do not trigger Codex screen matching
   ).toBe(false);
   expect(confirmationVisible(`${screen}\nTask resumed`)).toBe(false);
 });
+
+test("C-541: output comparison ignores spinner time and never exports screen/argv; a replaced terminal is unknown", async () => {
+  const f = await fixture();
+  const original = f.client.exec;
+  let changed = false,
+    replace = false;
+  f.client.exec = async (args) => {
+    if (args[0] !== "read") return original(args);
+    if (replace)
+      f.set({ labels: { ...f.terminal.labels, run: "replacement" } });
+    return `PRIVATE-SCREEN\n✻ Working… (${changed ? "2" : "1"}m • esc to interrupt)`;
+  };
+  const read = () =>
+    f.runtime.terminalActivity(
+      ref,
+      identity.project_id,
+      identity.assignment_id,
+    );
+  const first = await read();
+  changed = true;
+  expect(first.ok).toBe(true);
+  expect(await read()).toEqual(first);
+  expect(JSON.stringify(first)).not.toContain("PRIVATE-SCREEN");
+  replace = true;
+  expect((await read()).ok).toBe(false);
+});

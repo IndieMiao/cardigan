@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
+import { terminalSnapshot } from "./terminal-activity.js";
 
 export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
@@ -25,7 +26,10 @@ export * from "./worker-primitives.js";
 import { join } from "node:path";
 import type {
   Assignment,
+  IdleRetirementResult,
   Machine,
+  RetirementEvidence,
+  RetirementIdentity,
   Role,
   Runtime,
   RuntimeError,
@@ -150,6 +154,7 @@ type Terminal = {
   labels?: Record<string, string>;
   status?: { state: string } | null;
   pid?: number | null;
+  foreground?: Parameters<typeof terminalSnapshot>[1];
   created_ms?: number;
   keep?: boolean;
 };
@@ -486,7 +491,7 @@ export class HerdrRuntime implements Runtime {
             doorbell,
           ],
           options?.before_send ?? (() => true),
-          (guard || options?.resource_preflight) &&
+          (guard || options?.retirement_owner || options?.resource_preflight) &&
             (async (raw) => {
               try {
                 if (
@@ -494,18 +499,25 @@ export class HerdrRuntime implements Runtime {
                   !(await options.resource_preflight())
                 )
                   return false;
-                if (!guard) return true;
+                if (!guard && !options?.retirement_owner) return true;
                 // Read through the reserved slot, not the queue (capacity may be one).
                 const terminalState = async () => {
                   const t: Terminal = JSON.parse(
                     await raw.exec(["get", ref.terminal_ref, "--json"]),
                   );
-                  this.checkTerminal(ref, t);
+                  if (options?.retirement_owner)
+                    this.checkRetirementTerminal(
+                      ref,
+                      options.retirement_owner,
+                      t,
+                    );
+                  else this.checkTerminal(ref, t);
                   return t.address === ref.terminal_ref && t.state === "live"
                     ? (t.status?.state ?? "unknown")
                     : undefined;
                 };
                 const before = await terminalState();
+                if (!guard) return before === "idle";
                 if (guard.state === "done") return before === "done";
                 if (before !== "unknown" && before !== "idle") return false;
                 // A transcript end is a hint, not a condition hc can enforce.
@@ -649,6 +661,52 @@ export class HerdrRuntime implements Runtime {
         this.statusRequests.delete(key);
     });
     return request;
+  }
+  async terminalActivity(
+    ref: RuntimeRef,
+    project: string,
+    assignment: string,
+  ): Promise<RuntimeResult<ReturnType<typeof terminalSnapshot>>> {
+    try {
+      this.checkRef(ref);
+      const get = async () => {
+        const t: Terminal = await this.json(["get", ref.terminal_ref]);
+        this.checkTerminal(ref, t);
+        if (
+          t.address !== ref.terminal_ref ||
+          t.state !== "live" ||
+          t.labels?.project !== project ||
+          t.labels.assignment !== assignment
+        )
+          throw new Error();
+        return t;
+      };
+      const before = await get();
+      const screen = await this.client.exec([
+        "read",
+        ref.terminal_ref,
+        "--lines",
+        "0",
+      ]);
+      const after = await get();
+      if (
+        JSON.stringify(before.labels) !== JSON.stringify(after.labels) ||
+        before.created_ms !== after.created_ms
+      )
+        throw new Error();
+      return {
+        ok: true as const,
+        value: terminalSnapshot(screen, after.foreground),
+      };
+    } catch {
+      return {
+        ok: false as const,
+        error: {
+          code: "runtime_unavailable" as const,
+          message: "终端活动不可用",
+        },
+      };
+    }
   }
   async interaction(
     ref: RuntimeRef,
@@ -806,42 +864,87 @@ export class HerdrRuntime implements Runtime {
     });
   }
 
+  private checkRetirementTerminal(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+    terminal: Terminal,
+  ) {
+    this.checkTerminal(ref, terminal);
+    if (
+      terminal.address !== ref.terminal_ref ||
+      terminal.labels?.project !== identity.project_id ||
+      terminal.labels?.assignment !== identity.assignment_id ||
+      (!ref.launch_generation && terminal.labels.generation !== undefined)
+    )
+      fail("runtime_conflict", "Idle terminal identity changed");
+  }
+  observe_retirement(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+  ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
+    return result(async () => {
+      this.checkRef(ref);
+      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      this.checkRetirementTerminal(ref, identity, terminal);
+      return terminal.state === "finished"
+        ? "exited"
+        : terminal.state === "live"
+          ? "alive"
+          : "unknown";
+    });
+  }
   async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
-  ) {
+  ): Promise<RuntimeResult<IdleRetirementResult>> {
     let attempted = false;
-    const retired = await result(async () => {
+    let stage: RetirementEvidence["stage"] = "target";
+    let reason: RetirementEvidence["reason"] = "hc_failed";
+    let state: RetirementEvidence["terminal_state"];
+    const failure = (
+      outcome: "uncertain" | "timeout" | "withdrawn",
+      why: RetirementEvidence["reason"],
+      details: Partial<RetirementEvidence> = {},
+    ): RuntimeResult<IdleRetirementResult> => ({
+      ok: true,
+      value: {
+        outcome,
+        evidence: {
+          stage,
+          reason: why,
+          ...(state ? { terminal_state: state } : {}),
+          ...details,
+        },
+      },
+    });
+    const exited = { ok: true, value: { outcome: "exited" } } as const;
+    try {
       this.checkRef(ref);
       for (const ms of [options.hangup_ms, options.terminate_ms])
         if (!Number.isSafeInteger(ms) || ms < 1 || ms > 30_000)
           fail("invalid_launch", "Invalid idle retirement timeout");
+      stage = "get";
       const first: Terminal = await this.json(["get", ref.terminal_ref]);
       const check = (terminal: Terminal) => {
-        this.checkTerminal(ref, terminal);
-        if (
-          terminal.labels?.project !== options.project_id ||
-          terminal.labels?.assignment !== options.assignment_id ||
-          terminal.address !== first.address ||
-          terminal.created_ms !== first.created_ms
-        )
+        state =
+          terminal.state === "live" || terminal.state === "finished"
+            ? terminal.state
+            : "other";
+        this.checkRetirementTerminal(ref, options, terminal);
+        if (terminal.created_ms !== first.created_ms)
           fail("runtime_conflict", "Idle terminal identity changed");
       };
       check(first);
-      if (first.state === "finished") return { exited: true };
+      if (first.state === "finished") return exited;
       // A kept terminal can replace a signalled program with a shell. Do not
       // silently change that policy or mistake the shell for the retired CLI.
-      if (
-        first.keep ||
-        first.state !== "live" ||
-        !Number.isSafeInteger(first.pid) ||
-        (first.pid ?? 0) <= 1 ||
-        !Number.isSafeInteger(first.created_ms)
-      )
-        fail(
-          "runtime_conflict",
-          "Idle terminal process identity is unavailable",
-        );
+      if (first.keep) return failure("withdrawn", "kept_terminal");
+      if (first.state !== "live")
+        return failure("withdrawn", "terminal_not_live");
+      if (!Number.isSafeInteger(first.pid) || (first.pid ?? 0) <= 1)
+        return failure("withdrawn", "missing_pid");
+      if (!Number.isSafeInteger(first.created_ms))
+        return failure("withdrawn", "missing_creation_time");
       const address = ref.terminal_ref.split("/").at(-1)!;
       const exec = (mode: string, identity?: string) => [
         "exec",
@@ -858,15 +961,20 @@ export class HerdrRuntime implements Runtime {
         address,
         ...(identity ? [identity] : []),
       ];
-      const identity = JSON.parse(await this.client.exec(exec("probe")));
+      stage = "probe";
+      const raw = await this.client.exec(exec("probe"));
+      reason = "probe_invalid";
+      const identity = JSON.parse(raw);
       if (
         identity.pid !== first.pid ||
         typeof identity.start !== "string" ||
         typeof identity.boot !== "string" ||
         !Number.isSafeInteger(identity.uid)
       )
-        fail("runtime_conflict", "Idle process observation is invalid");
+        return failure("withdrawn", "probe_invalid");
+      reason = "hc_failed";
       const inspect = async () => {
+        stage = "confirm";
         const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
         check(terminal);
         if (terminal.state === "finished") return true;
@@ -887,14 +995,14 @@ export class HerdrRuntime implements Runtime {
         } while (Date.now() < until);
         return inspect();
       };
-      let signalled = false;
       this.invalidateStatus(ref);
       try {
         for (const [mode, budget] of [
           ["HUP", options.hangup_ms],
           ["TERM", options.terminate_ms],
         ] as const) {
-          if (await inspect()) return { exited: true };
+          if (await inspect()) return exited;
+          stage = mode;
           // The queue's guard runs after all waits and immediately before IO.
           if (
             !(await this.client.execIfCurrent(
@@ -906,21 +1014,49 @@ export class HerdrRuntime implements Runtime {
               },
             ))
           )
-            return {
-              exited: false,
-              ...(!signalled ? { withdrawn: true } : {}),
-            };
-          signalled = true;
-          if (await wait(budget)) return { exited: true };
+            return failure(
+              attempted ? "uncertain" : "withdrawn",
+              "guard_changed",
+            );
+          if (await wait(budget)) return exited;
         }
-        return { exited: false };
+        return failure("timeout", "still_live");
       } finally {
         this.invalidateStatus(ref);
       }
-    });
-    return !retired.ok && !attempted
-      ? { ok: true as const, value: { exited: false, withdrawn: true } }
-      : retired;
+    } catch (error) {
+      const err = error instanceof RuntimeFailure ? error : undefined;
+      const code = err?.detail?.exit_code;
+      const helperReasons: Partial<
+        Record<number, RetirementEvidence["reason"]>
+      > = {
+        2: "probe_invalid",
+        20: "pidfd_unavailable",
+        21: "permission_denied",
+        22: "marker_mismatch",
+        23: "process_gone",
+        24: "identity_changed",
+      };
+      const helper = stage === "probe" || stage === "HUP" || stage === "TERM";
+      const why =
+        helper && code !== undefined
+          ? (helperReasons[code] ?? reason)
+          : !err?.hcKind &&
+              (err?.code === "runtime_conflict" ||
+                err?.code === "invalid_launch")
+            ? "identity_changed"
+            : reason;
+      return failure(attempted ? "uncertain" : "withdrawn", why, {
+        ...(err ? { runtime_code: err.code } : {}),
+        ...(err?.hcKind ? { hc_kind: err.hcKind } : {}),
+        ...(code !== undefined &&
+        Number.isInteger(code) &&
+        code >= 0 &&
+        code <= 255
+          ? { exit_code: code }
+          : {}),
+      });
+    }
   }
 }
 

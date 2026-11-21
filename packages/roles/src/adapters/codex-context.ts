@@ -9,6 +9,7 @@ import {
   parseActivityMetadata,
   parseContextCache,
   records,
+  transcriptWrite,
 } from "./context.js";
 /** The last token_count's last_token_usage is current context; total_token_usage is cumulative. */
 export function parseCodexContext(
@@ -71,6 +72,15 @@ export async function readCodexContext({
     if (!parts) onReadFailure();
     return parts
       ? {
+          fileActivity: transcriptWrite(
+            object(
+              parts.head
+                .split("\n")
+                .map(json)
+                .find((v) => v?.type === "session_meta")?.payload,
+            ),
+            parts.mtime,
+          ),
           usage: parseCodexContext(
             parts.head,
             parts.tail,

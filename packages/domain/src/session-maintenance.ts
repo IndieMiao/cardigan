@@ -4,6 +4,10 @@ import { stoppedByHuman } from "./commands/stop.js";
 import type { Assignment } from "./entities.js";
 import { eventsOfType } from "./event-index.js";
 import { hostOpsPending } from "./host-ops.js";
+import {
+  canonicalSessionFacts,
+  retirementOwnsSession,
+} from "./retirement-session.js";
 import { runsOf } from "./run-index.js";
 
 import {
@@ -12,18 +16,8 @@ import {
   type SessionMaintenanceView,
 } from "./session-maintenance-types.js";
 
+export { retirementOwnsSession } from "./retirement-session.js";
 export * from "./session-maintenance-types.js";
-
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, child]) => [key, canonical(child)]),
-    );
-  return value;
-}
 
 function relatedOwners(state: CommandState, a: Assignment) {
   return state.assignments.filter(
@@ -41,7 +35,7 @@ export function sessionMaintenanceIdentity(
   a: Assignment,
 ): string {
   return JSON.stringify(
-    canonical({
+    canonicalSessionFacts({
       project: state.project_id,
       id: a.id,
       item: a.work_item_id,
@@ -65,7 +59,7 @@ export function sessionMaintenanceBasis(
   const owners = relatedOwners(state, a);
   const runs = owners.flatMap((owner) => runsOf(state.runs, owner.id));
   return JSON.stringify(
-    canonical({
+    canonicalSessionFacts({
       project: state.project_id,
       id: a.id,
       role: a.role_id,
@@ -177,8 +171,7 @@ export function sessionMaintenanceCandidate(
     return excluded("recent_activity");
   if (
     a.idle_retirement?.phase === "waiting" &&
-    JSON.stringify(a.idle_retirement.runtime_ref) ===
-      JSON.stringify(a.runtime_ref) &&
+    retirementOwnsSession(a) &&
     Date.parse(a.idle_retirement.retry_at ?? "") > at
   )
     return excluded(

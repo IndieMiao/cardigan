@@ -21,6 +21,21 @@ export async function readClaudeContext({
       onReadFailure();
       return undefined;
     }
+    const fg = object(event?.foreground);
+    const start = parseActivityMetadata(fg?.start);
+    const foreground =
+      fg &&
+      typeof fg.command === "string" &&
+      [
+        "Bash",
+        "node web.mjs",
+        "python -m http.server",
+        "dev server",
+        "vite",
+      ].includes(fg.command) &&
+      start
+        ? { command: fg.command, start }
+        : undefined;
     return event && typeof event.path === "string"
       ? {
           usage: parseClaudeTranscript(
@@ -28,6 +43,8 @@ export async function readClaudeContext({
             event.path,
             claudeContextWindow(expandClaudeModel(model, providerEnv)),
           ),
+          fileActivity: parseActivityMetadata(event.file_activity),
+          foreground,
           activity: parseActivityMetadata(event.activity),
           startupFailure: parseActivityMetadata(
             object(event.activity)?.startup_failure,
