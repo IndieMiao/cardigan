@@ -33,6 +33,7 @@ test("missing is disabled; private config and secret files load without persisti
       enabled: true,
       channels: { fake: { credential: "SYNTHETIC_SECRET" } },
       policy: {
+        max_per_minute: 10,
         timeout_ms: 10000,
         max_attempts: 3,
         retry_delays_ms: [30000, 60000],
@@ -56,6 +57,7 @@ test("world-readable configs and symlinks are rejected before parse", () => {
 });
 test.each([
   "policy: { timeout_ms: 0 }",
+  "policy: { max_per_minute: 0 }",
   "policy: { max_attempts: 2 }",
   "policy: { retry_delays_ms: [30, -1] }",
   "quiet_hours: { enabled: true, start: '22:00', end: '08:00' }",

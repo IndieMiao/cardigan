@@ -19,10 +19,11 @@ interface ExtChannel {
   binding_attempts_per_minute?: number;
   pending_limit?: number;
 }
+export const defaultMaxPerMinute = 10;
 export interface ExtMessageConfig {
   readonly enabled: boolean;
   readonly workbench_url: string;
-  readonly policy: ExtMessagePolicy;
+  readonly policy: ExtMessagePolicy & { readonly max_per_minute?: number };
   readonly channels: Readonly<Record<string, ExtChannel>>;
   readonly quiet_hours?: {
     readonly timezone: string;
@@ -125,7 +126,8 @@ export function loadExtMessageConfig(
       policyRaw.retry_delays_ms ?? EXT_MESSAGE_DEFAULTS.retry_delays_ms;
     if (!Array.isArray(delays) || delays.length !== max_attempts - 1)
       return invalid();
-    const policy: ExtMessagePolicy = {
+    const policy: ExtMessageConfig["policy"] = {
+      max_per_minute: integer(policyRaw.max_per_minute, defaultMaxPerMinute),
       timeout_ms: integer(
         policyRaw.timeout_ms,
         EXT_MESSAGE_DEFAULTS.timeout_ms,

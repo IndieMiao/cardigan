@@ -127,7 +127,7 @@ export function groupExtMessage(
     `UPDATE ext_message_outbox SET digest_id = ?
     WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ?
     AND status = 'pending' AND attempts = 0 AND lease_id IS NULL
-    AND (digest_id IS NULL OR digest_id = 'queued')`,
+    AND (digest_id IS NULL OR digest_id IN ('queued', 'rate:queued'))`,
   ).run(digest, ...key(row));
 }
 export function listExtMessages(
@@ -192,5 +192,19 @@ export function settleExtMessage(
     WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND lease_id IS ?`,
     ).run(status, error, now, next, ...key(row), row.attempts, row.lease_id)
       .changes === 1
+  );
+}
+
+/** Fence channel-wide summary membership even if another project/sender was not projected. */
+export function pendingExtGroupSize(
+  db: DatabaseSync,
+  channel: string,
+  digest: string,
+) {
+  return Number(
+    prepare(
+      db,
+      "SELECT COUNT(*) AS n FROM ext_message_outbox WHERE channel=? AND digest_id=? AND status='pending'",
+    ).get(channel, digest)?.n,
   );
 }
