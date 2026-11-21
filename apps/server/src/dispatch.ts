@@ -54,7 +54,6 @@ import {
   stoppedByHuman,
   trackRetirementDispatch,
   unreadableCommentTrigger,
-  unreceivedBell,
 } from "@cardigan/domain";
 import {
   armBellReceipt,
@@ -114,8 +113,10 @@ import {
   CANDIDATE_FEED,
   type Candidate,
   CandidateIndex,
+  type InboxTarget,
+  inboxTarget,
   notificationBlocked,
-  queuedStreamMismatch,
+  sameInboxTarget,
 } from "./candidate-index.js";
 import {
   DECISION_FOLLOWUP_FEED,
@@ -462,11 +463,7 @@ export class Dispatcher {
             this.state(c.project),
           )) {
             if (this.closing) break;
-            await this.deliver(
-              candidate.project,
-              candidate.notes,
-              candidate.assignment,
-            );
+            await this.deliver(candidate);
             this.checkStandingInbox(candidate);
           }
         });
@@ -815,15 +812,20 @@ export class Dispatcher {
       ? "unfinished_run"
       : undefined;
   }
-  private async deliver(
-    project: ProjectId,
-    notes: readonly Notification[],
-    expected: Assignment,
-  ) {
+  private async deliver({
+    project,
+    notes,
+    assignment: expected,
+    target: candidateTarget,
+  }: Candidate) {
     const state = profileSpanSync("deliver.state", () => this.state(project));
     const a = state.assignments.find((a) => a.id === expected.id);
     const note = notes[0];
-    const queued = a && this.queued(state, a);
+    const target = a && inboxTarget(state, a, notes);
+    const queued =
+      target && !("reason" in target) && target.mode === "queued"
+        ? target.run
+        : undefined;
     const skip = (reason: string) =>
       this.skips.record(
         project,
@@ -833,9 +835,10 @@ export class Dispatcher {
         reason,
       );
     if (this.closing) return skip("shutting_down");
-    if (!a) return skip("assignment_missing");
-    if (queuedStreamMismatch(state, a, queued, notes))
-      return skip("queued_stream_mismatch");
+    if (!a || !target) return skip("assignment_missing");
+    if ("reason" in target) return skip(target.reason);
+    if (a.scope === "standing" && !sameInboxTarget(candidateTarget, target))
+      return skip("inbox_target_changed");
     if (queued) this.queuedRunPatrol.evaluated(queued, this.clock.now());
     if (a.status === "released") {
       this.reject(project, notes, a, "assignment_released");
@@ -843,16 +846,7 @@ export class Dispatcher {
     }
     // A finished harness turn is not a finished business Run. Only new inbox
     // work can continue it; never turn queued-only work into a second launch.
-    const running =
-      notes.length && a.runtime_ref
-        ? runsOf(state.runs, a.id).find((r) => r.status === "running")
-        : undefined;
-    const continuing =
-      running && notes.every((n) => !n.run_id || n.run_id === running.id)
-        ? running
-        : undefined;
-    // A pending inbox note cannot become a second, unmetered initial wake.
-    if (running && unreceivedBell(running)) return skip("bell_unreceived");
+    const continuing = target.mode === "continue" ? target.run : undefined;
     if (a.external) return skip("external");
     if (a.status !== "active") return skip("assignment_inactive");
     const busy = this.busy(state, a, continuing?.id);
@@ -1113,7 +1107,7 @@ export class Dispatcher {
           sessionCatalog,
           inspection,
           guardedTurn?.turn.id,
-          continuing,
+          target,
           skip,
         ),
       );
@@ -1633,7 +1627,7 @@ export class Dispatcher {
     catalog: string | undefined,
     inspection: ResourceAdmission | undefined,
     guardedTurn: RunId | undefined,
-    continuing: Run | undefined,
+    expectedTarget: InboxTarget,
     skip: (reason: string) => undefined,
   ): Job | undefined {
     const { store } = this.options;
@@ -1648,6 +1642,8 @@ export class Dispatcher {
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
         return skip("assignment_changed");
+      const continuing =
+        expectedTarget.mode === "continue" ? expectedTarget.run : undefined;
       if (
         continuing &&
         (a.session_ref !== expected.session_ref ||
@@ -1658,10 +1654,7 @@ export class Dispatcher {
           ))
       )
         return skip("continuation_changed");
-      const waiting = this.queued(state, a);
-      // The runnable queue may have changed during snapshot/runtime I/O.
-      if (queuedStreamMismatch(state, a, waiting, notes))
-        return skip("queued_stream_mismatch");
+      const waiting = continuing ? undefined : this.queued(state, a);
       if (
         !assignmentDependenciesAllowStart(state, a) ||
         assignmentCardHeld(a, state, waiting?.trigger_event_id) ||
@@ -1746,6 +1739,12 @@ export class Dispatcher {
               pmNotificationState(state, n) === "obsolete"
             ),
         );
+      if (a.scope === "standing") {
+        const target = inboxTarget(state, a, ready);
+        if ("reason" in target) return skip(target.reason);
+        if (!sameInboxTarget(expectedTarget, target))
+          return skip("inbox_target_changed");
+      }
       const previous = continuing
         ? undefined
         : previousInboxTurn(state, a, ready);

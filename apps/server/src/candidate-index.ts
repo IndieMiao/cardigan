@@ -17,11 +17,14 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
+  queuedRun,
   type Run,
   reviewWakeBlocked,
   runById,
   runnableQueuedRun,
+  runsOf,
   unreadableCommentTrigger,
+  unreceivedBell,
   type WorkItem,
 } from "@cardigan/domain";
 import type { ChangeCursor, ChangeSet } from "@cardigan/store";
@@ -45,16 +48,71 @@ export function notificationBlocked(
   );
 }
 
-/** Standing recipients share an inbox across streams, not a queued Run across streams. */
-export function queuedStreamMismatch(
+export type InboxTarget =
+  | { mode: "continue" | "queued"; run: Run }
+  | { mode: "inbox"; run?: undefined };
+
+/** Select the Run the bell will address, before applying start-only gates. */
+export function inboxTarget(
   state: CommandState,
-  assignment: Assignment,
-  queued: Run | undefined,
+  owner: Assignment,
   notes: readonly Notification[],
+): InboxTarget | { reason: string } {
+  const queued = runnableQueuedRun(owner, state);
+  const running = runsOf(state.runs, owner.id).find(
+    (r) => r.status === "running",
+  );
+  const canContinue =
+    running &&
+    owner.runtime_ref &&
+    notes.length > 0 &&
+    notes.every((n) => !n.run_id || n.run_id === running.id);
+  if (
+    running &&
+    owner.scope === "standing" &&
+    queuedRun(state.runs, owner.id)
+  ) {
+    // Even a held queue can become runnable while another turn is in progress.
+    // Only its own receipted stream can continue that live turn; all starts wait.
+    if (!canContinue) return { reason: "unfinished_run" };
+    const bell = running.bell_delivery;
+    if (bell?.run_id !== running.id || !bell.received_at)
+      return { reason: "bell_unreceived" };
+    if (
+      !bell.runtime_ref ||
+      JSON.stringify(bell.runtime_ref) !== JSON.stringify(owner.runtime_ref)
+    )
+      return { reason: "continuation_changed" };
+    if (!notes.every((n) => n.card_id === bell.card_id))
+      return { reason: "continuation_stream_mismatch" };
+  }
+  if (running && notes.length && owner.runtime_ref && unreceivedBell(running))
+    return { reason: "bell_unreceived" };
+  if (canContinue) return { mode: "continue", run: running };
+  if (!queued) return { mode: "inbox" };
+  if (owner.scope === "standing" && notes.length) {
+    if (!eventById(state.events, queued.trigger_event_id))
+      return { reason: "trigger_missing" };
+    const card = assignmentCardId(owner, state, queued.trigger_event_id);
+    if (
+      notes.some(
+        (n) => n.card_id !== card || (n.run_id && n.run_id !== queued.id),
+      )
+    )
+      return { reason: "queued_stream_mismatch" };
+  }
+  return { mode: "queued", run: queued };
+}
+
+export function sameInboxTarget(
+  left: InboxTarget,
+  right: InboxTarget,
 ): boolean {
-  if (assignment.scope !== "standing" || !queued || !notes.length) return false;
-  const card = assignmentCardId(assignment, state, queued.trigger_event_id);
-  return notes.some((n) => n.card_id !== card);
+  return (
+    left.mode === right.mode &&
+    left.run?.id === right.run?.id &&
+    left.run?.trigger_event_id === right.run?.trigger_event_id
+  );
 }
 
 export interface Candidate {
@@ -62,6 +120,7 @@ export interface Candidate {
   notes: Notification[];
   assignment: Assignment;
   order: DispatchOrder;
+  target: InboxTarget;
 }
 
 /**
@@ -601,33 +660,29 @@ function candidateResult(
   notes: Notification[],
   skip: (why: string) => void,
 ): Result {
-  const none = { candidate: undefined, volatile: false };
   const omit = (reason: string) => {
     skip(reason);
-    return none;
+    return { candidate: undefined, volatile: reason === "trigger_missing" };
   };
   if (!assignmentDependenciesAllowStart(state, assignment))
     return omit("dependencies");
   if (assignmentCardHeld(assignment, state)) return omit("card_held");
   if (!hasRunTarget(assignment, state)) return omit("no_target");
-  const queued = runnableQueuedRun(assignment, state);
+  const target = inboxTarget(state, assignment, notes);
+  if ("reason" in target) return omit(target.reason);
+  const queued = target.mode === "queued" ? target.run : undefined;
   if (queued && unreadableCommentTrigger(state, queued))
     return omit("unreadable_trigger");
   const cause = notes.find((n) => !n.run_id) ?? notes[0];
   const trigger = queued?.trigger_event_id ?? cause?.event_id;
   if (assignmentCardHeld(assignment, state, trigger)) return omit("card_held");
   const event = eventById(state.events, trigger);
-  if (!event) {
-    skip("trigger_missing");
-    return { candidate: undefined, volatile: true };
-  }
-  // A different stream must not suppress the queued-only capacity retry below.
-  if (queuedStreamMismatch(state, assignment, queued, notes))
-    return omit("queued_stream_mismatch");
+  if (!event) return omit("trigger_missing");
   const candidate: Candidate = {
     project,
     notes,
     assignment,
+    target,
     order: {
       ...dispatchTier(
         state,

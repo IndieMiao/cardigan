@@ -477,7 +477,12 @@ test.each([
   },
 );
 
-test("a standing stream is rechecked when its queue changes during launch preparation", async () => {
+test.each([false, true])(
+  "a standing stream is rechecked when its queue changes during launch preparation (same stream: %s)",
+  checkQueueChanged,
+);
+
+async function checkQueueChanged(sameStream: boolean) {
   const f = setup();
   const pm = f.pm();
   const notice = f.event("fixture_project_notice", {}, pm);
@@ -486,7 +491,12 @@ test("a standing stream is rechecked when its queue changes during launch prepar
     snapshot: async (a, project) => {
       const snapshot = await f.options.snapshot(a, project);
       if (a.id === pm.id) {
-        const source = f.event("fixture_card_notice", {}, pm, f.target.card.id);
+        const source = f.event(
+          "fixture_queue_notice",
+          {},
+          pm,
+          sameStream ? undefined : f.target.card.id,
+        );
         f.apply((state, actor, ports) =>
           queueRun(
             state,
@@ -516,7 +526,7 @@ test("a standing stream is rechecked when its queue changes during launch prepar
   } finally {
     await dispatcher.close();
   }
-});
+}
 
 test.each([false, true])(
   "patrol supervisor recovers its own overdue bell once, including after dispatch handoff=%s",
