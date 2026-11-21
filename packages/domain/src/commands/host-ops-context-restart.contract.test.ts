@@ -13,6 +13,7 @@ import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
 import {
   automaticContextRestartReady,
   beginAutomaticContextRestart,
+  beginStalledPatrolRestart,
   recordAutomaticContextRestartResult,
 } from "./host-ops-context-restart.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
@@ -355,4 +356,43 @@ test("new-session queue is not success; dispatch records replacement, actual sta
   expect(success.changes.some((c) => c.collection === "human_actions")).toBe(
     false,
   );
+});
+
+test("only the system may replace a stalled patrol, once per cause and never with unfinished work", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const begin = (
+    state: CommandState,
+    who: Parameters<typeof beginStalledPatrolRestart>[1] = system,
+  ) => beginStalledPatrolRestart(state, who, params, f.io);
+  expect(begin(f.state, human).ok).toBe(false);
+  expect(begin(f.state, actor(10, "host_ops")).ok).toBe(false);
+  const busy = apply(
+    f.state,
+    value(
+      queueRun(f.state, system, { assignment_id: f.ops.id, ...snapshot }, f.io),
+    ),
+  );
+  expect(begin(busy).ok).toBe(false);
+  expect(
+    begin({
+      ...f.state,
+      assignments: f.state.assignments.map((a) =>
+        a.id === f.ops.id ? { ...a, worktree_path: "unverified" } : a,
+      ),
+    }).ok,
+  ).toBe(false);
+  const effect = value(begin(f.state));
+  const pending = apply(f.state, effect);
+  expect(begin(pending).ok).toBe(false);
+  const finished = value(
+    finishHostOpsAction(pending, system, effect.data.action_id, f.io),
+  );
+  expect(finished.data.run?.status).toBe("queued");
+  expect(finished.data.assignment_id).toBe(f.ops.id);
+  expect(
+    finished.changes.find(
+      (c) => c.collection === "assignments" && c.entity.id === f.ops.id,
+    )?.entity,
+  ).not.toHaveProperty("session_ref");
 });

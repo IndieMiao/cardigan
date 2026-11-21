@@ -41,6 +41,7 @@ export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
+  readonly dispatch_stall_id?: string;
   readonly tool: HostOpsExecutionTool;
   readonly context_usage?: ContextObservation;
   readonly context_stale_after_ms?: number;
@@ -212,6 +213,30 @@ export function beginHostOpsActionInDraft(
     "Automatic restarts are system-only",
   );
   const { assignment: a, run } = target(d, p);
+  if (p.dispatch_stall_id) {
+    ensure(
+      p.tool !== "host_ops_cancel_run" &&
+        !run &&
+        !a.idle_retirement &&
+        !d.state.runs.some((r) => r.assignment_id === a.id && unfinished(r)),
+      "illegal_transition",
+      "派发积压已改变或指派不空闲",
+    );
+    ensure(
+      !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
+        const prior = e.payload as {
+          assignment_id?: string;
+          dispatch_stall_id?: string;
+        };
+        return (
+          prior.assignment_id === a.id &&
+          prior.dispatch_stall_id === p.dispatch_stall_id
+        );
+      }),
+      "illegal_transition",
+      "此积压已请求过换会话",
+    );
+  }
   if (p.upstream_incident_id)
     ensure(
       !state.events.some(
@@ -256,6 +281,7 @@ export function beginHostOpsActionInDraft(
   }
   const payload = {
     execution: true,
+    ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
     ...(p.upstream_incident_id
       ? { upstream_incident_id: p.upstream_incident_id }
@@ -335,7 +361,9 @@ export function finishHostOpsAction(
         ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
         : a.runtime_state;
     d.put("assignments", {
-      ...(action.tool === "host_ops_restart_standing_pm" || action.context_usage
+      ...(action.tool === "host_ops_restart_standing_pm" ||
+      action.context_usage ||
+      action.dispatch_stall_id
         ? rest
         : a),
       runtime_ref: null,
@@ -662,4 +690,35 @@ export function requestExitConfirmationInDraft(
     { type: "human_action", body: p.instructions, human_action_id: id },
   );
   return { human_action_id: id, created: true };
+}
+
+/** Evidence changed before a stall recovery touched the terminal. Drop only this intent; never release a stop already in flight. */
+export function withdrawUnstartedStallRestart(
+  state: CommandState,
+  actor: Actor,
+  actionId: HostOpsExecution["action_id"],
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === actionId,
+    );
+    if (
+      !action?.dispatch_stall_id ||
+      eventsOfType(state.events, "host_ops_action_deferred").some((e) => {
+        const p = e.payload as { action_id: string; reason: string };
+        return (
+          p.action_id === actionId &&
+          p.reason === "automatic_context_stop_started"
+        );
+      })
+    )
+      return;
+    return d.emit("host_ops_action_finished", undefined, {
+      action_id: actionId,
+      assignment_id: action.assignment_id,
+      result: "withdrawn_stall_changed",
+      body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
+    });
+  });
 }

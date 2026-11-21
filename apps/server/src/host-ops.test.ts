@@ -192,6 +192,7 @@ test("C-137: diagnostics stay within P2a-10 categories and omit Needs You decisi
     [
       "actions",
       "attention",
+      "dispatch_stalls",
       "context_thresholds",
       "escalated",
       "findings",

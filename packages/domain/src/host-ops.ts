@@ -76,6 +76,7 @@ export interface HostOpsExecution {
   readonly upstream_incident_id?: Event["id"];
   readonly context_usage?: ContextObservation;
   readonly automatic_context_restart?: boolean;
+  readonly dispatch_stall_id?: string;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
@@ -189,8 +190,10 @@ export function automaticContextActionForRun(
         .filter(
           (e) =>
             e.type === "host_ops_action_taken" &&
-            (e.payload as { automatic_context_restart?: boolean })
-              .automatic_context_restart &&
+            ((e.payload as { automatic_context_restart?: boolean })
+              .automatic_context_restart ||
+              (e.payload as { dispatch_stall_id?: string })
+                .dispatch_stall_id) &&
             !results.has(e.id),
         )
         .map((e) => [

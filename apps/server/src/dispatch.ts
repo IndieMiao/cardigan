@@ -140,6 +140,7 @@ import {
   UNSETTLED_NOTIFICATION_STATUSES,
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
+import { DispatchSkips } from "./dispatch-skips.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
@@ -298,6 +299,7 @@ export class Dispatcher {
   private readonly dispatchTimeoutMs: number;
   private readonly deliveryRetryBaseMs: number;
   private readonly inactive: InactiveRunReaper;
+  private readonly skips: DispatchSkips;
   private readonly queuedRunPatrol: QueuedRunPatrol;
   private readonly inactivityAlerts: InactivityAlerts;
   /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
@@ -312,6 +314,7 @@ export class Dispatcher {
   constructor(readonly options: DispatcherOptions) {
     this.queuedRunPatrol = new QueuedRunPatrol(options);
     this.clock = options.clock ?? dispatcherClock;
+    this.skips = new DispatchSkips(() => this.clock.now());
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
     this.retryBaseMs = options.retryBaseMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 4;
@@ -748,7 +751,10 @@ export class Dispatcher {
     const { store } = this.options;
     // C-244: maintained across passes from the Store's row change feed; only
     // what depends on a changed row is evaluated again (CandidateIndex).
-    this.candidateIndex ??= new CandidateIndex(this.options.standing);
+    this.candidateIndex ??= new CandidateIndex(
+      this.options.standing,
+      (p, a, id, at, why) => this.skips.record(p, a, id, at, why),
+    );
     const index = this.candidateIndex;
     return store.uow.read((tx) =>
       index.candidates(project, {
@@ -784,11 +790,12 @@ export class Dispatcher {
     return runnableQueuedRun(a, state);
   }
   private busy(state: CommandState, a: Assignment, continuing?: RunId) {
-    if (a.role_upgrade || a.idle_retirement?.phase === "stopping") return true;
-    if (hostOpsPending(state.events, a.id)) return true;
+    if (a.role_upgrade) return "role_upgrade";
+    if (a.idle_retirement?.phase === "stopping") return "idle_retirement";
+    if (hostOpsPending(state.events, a.id)) return "host_operation";
     // C-211: a stopped Assignment waits for the human's start; its bells stay
     // pending and no session is woken, replaced or started for it.
-    if (stoppedByHuman(state.events, a.id)) return true;
+    if (stoppedByHuman(state.events, a.id)) return "human_stopped";
     const queued = this.queued(state, a);
     // C-244: keyed per Run snapshot; same as scanning runs for `a`.
     return runsOf(state.runs, a.id).some(
@@ -801,18 +808,29 @@ export class Dispatcher {
           r.id !== continuing &&
           r.id !== queued?.id &&
           !standingRunDormant(a, r)),
-    );
+    )
+      ? "unfinished_run"
+      : undefined;
   }
   private async deliver(
     project: ProjectId,
     notes: readonly Notification[],
     expected: Assignment,
   ) {
-    if (this.closing) return;
     const state = profileSpanSync("deliver.state", () => this.state(project));
     const a = state.assignments.find((a) => a.id === expected.id);
-    if (!a) return;
-    const queued = this.queued(state, a);
+    const note = notes[0];
+    const queued = a && this.queued(state, a);
+    const skip = (reason: string) =>
+      this.skips.record(
+        project,
+        expected.id,
+        note?.id ?? queued?.id ?? expected.id,
+        note?.created_at ?? queued?.queue_entered_at ?? expected.created_at,
+        reason,
+      );
+    if (this.closing) return skip("shutting_down");
+    if (!a) return skip("assignment_missing");
     if (queued) this.queuedRunPatrol.evaluated(queued, this.clock.now());
     if (a.status === "released") {
       this.reject(project, notes, a, "assignment_released");
@@ -829,18 +847,17 @@ export class Dispatcher {
         ? running
         : undefined;
     // A pending inbox note cannot become a second, unmetered initial wake.
-    if (running && unreceivedBell(running)) return;
-    if (
-      a.external ||
-      a.status !== "active" ||
-      this.busy(state, a, continuing?.id) ||
-      !assignmentDependenciesAllowStart(state, a) ||
-      assignmentCardHeld(a, state) ||
-      !hasRunTarget(a, state)
-    )
-      return;
+    if (running && unreceivedBell(running)) return skip("bell_unreceived");
+    if (a.external) return skip("external");
+    if (a.status !== "active") return skip("assignment_inactive");
+    const busy = this.busy(state, a, continuing?.id);
+    if (busy) return skip(busy);
+    if (!assignmentDependenciesAllowStart(state, a))
+      return skip("dependencies");
+    if (assignmentCardHeld(a, state)) return skip("card_held");
+    if (!hasRunTarget(a, state)) return skip("no_target");
     if (a.snapshot_retry && a.snapshot_retry.ready_at > this.clock.now())
-      return;
+      return skip("snapshot_backoff");
     // A previously enqueued Run already has its snapshot. Skip remote IO while
     // it cannot compete; the authoritative check remains inside claim().
     if (
@@ -850,7 +867,7 @@ export class Dispatcher {
         this.availableResources(tx, state, a, queued),
       )
     )
-      return;
+      return skip("concurrency_limit");
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
@@ -861,16 +878,16 @@ export class Dispatcher {
       );
       if (observed?.ok && observed.value.process === "alive") {
         guard = idleWakeGuard(observed.value);
-        if (!guard) return; // A server-side finish never proves the CLI turn has ended.
-      } else if (continuing) return;
+        if (!guard) return skip(`wake_guard:${observed.value.agent}`); // A server-side finish never proves the CLI turn has ended.
+      } else if (continuing) return skip("continuation_not_alive");
       if (!observed) {
         this.waitForRuntime(project, a);
-        return;
+        return skip("runtime_unavailable");
       }
       if (observed.ok) {
         if (observed.value.process === "unknown") {
           this.waitForRuntime(project, a);
-          return;
+          return skip("process_unknown");
         }
         live = observed.value.process === "alive";
       } else if (
@@ -883,7 +900,7 @@ export class Dispatcher {
         };
       } else {
         this.waitForRuntime(project, a);
-        return;
+        return skip("runtime_unavailable");
       }
     }
     const prior = state.runs
@@ -942,7 +959,7 @@ export class Dispatcher {
         snapshot = prior;
       } else snapshot = await this.options.snapshot(a, project);
     } catch (error) {
-      if (this.closing) return;
+      if (this.closing) return skip("shutting_down");
       const versionProbe =
         error instanceof HostLaunchError && error.step === "cli version";
       const cause = versionProbe ? error.cause : error;
@@ -983,12 +1000,12 @@ export class Dispatcher {
     // A reused session keeps the catalog it listed; a new one lists this deploy's.
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
-    if (this.closing) return;
+    if (this.closing) return skip("shutting_down");
     const inspection =
       !continuing && this.options.leases?.configured(project, a.machine_id)
         ? await this.options.leases?.inspect(project, a)
         : undefined;
-    if (this.closing) return;
+    if (this.closing) return skip("shutting_down");
     let job: Job | undefined;
     try {
       job = profileSpanSync("deliver.claim", () =>
@@ -1001,6 +1018,7 @@ export class Dispatcher {
           sessionCatalog,
           inspection,
           continuing,
+          skip,
         ),
       );
     } catch (error) {
@@ -1065,9 +1083,10 @@ export class Dispatcher {
           !continuing &&
           deferIfTargetWait(this.options.store, job.attempt, this.clock)
         ) {
-          return;
+          return skip("target_wait");
         }
-        if (this.withdrawOnClose(job, queued?.queue_reason)) return;
+        if (this.withdrawOnClose(job, queued?.queue_reason))
+          return skip("shutting_down");
         if (preflight && !(await preflight())) {
           this.options.store.uow.run(() =>
             withdrawBellAttempt(
@@ -1076,10 +1095,10 @@ export class Dispatcher {
               job.attempt.id,
             ),
           );
-          return;
+          return skip("machine_preflight");
         }
         if (!profileSpanSync("deliver.activate", () => this.activate(job)))
-          return;
+          return skip("activation_changed");
         const scope = () =>
           job.assignment.role_id === "independent_reviewer"
             ? this.options.store.uow.read((tx) =>
@@ -1137,7 +1156,7 @@ export class Dispatcher {
             job.assignment,
             this.clock.now(),
           );
-          return;
+          return skip("wake_guard_changed");
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake) {
           const unsent = job.attempt;
@@ -1198,7 +1217,7 @@ export class Dispatcher {
           actual?.status === "queued" &&
           deferIfTargetWait(this.options.store, job.attempt, this.clock)
         ) {
-          return;
+          return skip("target_wait");
         }
         reason = "startup_did_not_dispatch";
       }
@@ -1208,19 +1227,19 @@ export class Dispatcher {
         error instanceof RunPreflightDeferred &&
         this.deferPreflight(job, queued?.queue_reason)
       )
-        return;
+        return skip("preflight_wait");
       if (error instanceof RunPreparationDeferred) {
         const attempt = job.attempt;
         this.options.store.uow.run(() =>
           withdrawBellAttempt(this.options.store.database, project, attempt.id),
         );
-        return;
+        return skip("preparation_wait");
       }
       // Only pre-delivery waits can withdraw an intent. A failed wake is still
       // ambiguous and must retain its attempt and normal retry semantics.
       if (stage !== "wake" && error instanceof RunTargetDeferred) {
         deferTargetAttempt(this.options.store, job.attempt, this.clock);
-        return;
+        return skip("target_wait");
       }
       if (
         stage !== "wake" &&
@@ -1231,7 +1250,8 @@ export class Dispatcher {
         deferIfTargetWait(this.options.store, job.attempt, this.clock)
       )
         return;
-      if (live && stage !== "wake" && !this.activate(job)) return;
+      if (live && stage !== "wake" && !this.activate(job))
+        return skip("claim_changed");
       ({ reason, failure } = deliveryFailure(stage, error));
     } finally {
       await unlockWake?.();
@@ -1362,7 +1382,8 @@ export class Dispatcher {
     live: boolean,
     catalog: string | undefined,
     inspection: ResourceAdmission | undefined,
-    continuing?: Run,
+    continuing: Run | undefined,
+    skip: (reason: string) => undefined,
   ): Job | undefined {
     const { store } = this.options;
     return store.uow.run((tx) => {
@@ -1374,7 +1395,7 @@ export class Dispatcher {
         !sameRef(a, expected) ||
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
-        return;
+        return skip("assignment_changed");
       if (
         continuing &&
         (a.session_ref !== expected.session_ref ||
@@ -1384,7 +1405,7 @@ export class Dispatcher {
             (r) => r.id === continuing.id && r.status === "running",
           ))
       )
-        return;
+        return skip("continuation_changed");
       if (
         !assignmentDependenciesAllowStart(state, a) ||
         assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
@@ -1393,7 +1414,7 @@ export class Dispatcher {
             state.cards.some((c) => c.id === n.card_id && !!c.hold),
           ))
       )
-        return;
+        return skip("dependency_or_hold");
       // A delivery may have been superseded while runtime/snapshot IO was in flight.
       // Keep notifications pending without allocating a Run or a bell attempt.
       if (!hasRunTarget(a, state)) {
@@ -1411,7 +1432,7 @@ export class Dispatcher {
               ),
             ),
           );
-        return;
+        return skip("target_changed");
       }
       if (
         a.scope === "standing" &&
@@ -1447,7 +1468,7 @@ export class Dispatcher {
             (first.notes.length !== notes.length ||
               first.notes.some((n) => !notes.some((old) => old.id === n.id)))
           )
-            return;
+            return skip("pm_priority");
         }
       }
       const requested = new Set(notes.map((n) => n.id));
@@ -1482,7 +1503,7 @@ export class Dispatcher {
         (continuing && !ready.length) ||
         this.busy(state, a, continuing?.id)
       )
-        return;
+        return skip("notification_not_ready");
       if (
         unfinishedBellAttempts(store.database, project).some(
           (r) =>
@@ -1490,9 +1511,9 @@ export class Dispatcher {
             r.notification_ids.some((id) => requested.has(id)),
         )
       )
-        return;
+        return skip("bell_claimed");
       const cause = ready.find((n) => !n.run_id) ?? ready[0];
-      if (!cause && !waiting) return;
+      if (!cause && !waiting) return skip("no_pending_work");
       let run =
         continuing ??
         this.queued(state, a) ??
@@ -1532,14 +1553,15 @@ export class Dispatcher {
         run = effect.data;
         state = this.loadState(tx, project);
       }
-      if (!run) return;
+      if (!run) return skip("run_missing");
       if (
         run.preparation_retry &&
         Date.parse(this.clock.now()) <
           Date.parse(run.preparation_retry.ready_at)
       )
-        return;
-      if (unreadableCommentTrigger(state, run)) return;
+        return skip("preparation_backoff");
+      if (unreadableCommentTrigger(state, run))
+        return skip("unreadable_trigger");
       if (run.status === "queued") {
         const profile =
           snapshot.launch_profile_ref ??
@@ -1559,7 +1581,7 @@ export class Dispatcher {
               ...run,
               queue_reason: "provider_unavailable",
             });
-          return;
+          return skip("provider_unavailable");
         }
         const leases = this.options.leases;
         const keysNeeded = assignmentResourceKeys(tx, project, a);
@@ -1586,7 +1608,7 @@ export class Dispatcher {
             );
           if (run.queue_reason !== "concurrency_limit")
             tx.runs.put(project, { ...run, queue_reason: "concurrency_limit" });
-          return;
+          return skip(blocked ? "machine_admission" : "concurrency_limit");
         }
         // A pending launch is reserved by its BellAttempt until dispatchRun
         // commits. It must no longer appear as a capacity wait in read views.

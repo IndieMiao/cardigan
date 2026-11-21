@@ -236,7 +236,16 @@ export class CandidateIndex {
   readonly #projects = new Map<ProjectId, ProjectCache>();
   lastStats: CandidatePassStats | undefined;
 
-  constructor(private readonly standing: StandingResolver | undefined) {}
+  constructor(
+    private readonly standing: StandingResolver | undefined,
+    private readonly skipped?: (
+      project: ProjectId,
+      owner: AssignmentId | undefined,
+      id: string,
+      at: string,
+      reason: string,
+    ) => void,
+  ) {}
 
   candidates(project: ProjectId, source: CandidateSource): Candidate[] {
     try {
@@ -418,7 +427,17 @@ export class CandidateIndex {
     let evaluated = 0;
     const evaluate = (assignment: Assignment, notes: Notification[]) => {
       evaluated++;
-      return candidateResult(project, state, assignment, notes);
+      return candidateResult(project, state, assignment, notes, (why) => {
+        const n = notes[0];
+        const q = runnableQueuedRun(assignment, state);
+        this.skipped?.(
+          project,
+          assignment.id,
+          n?.id ?? q?.id ?? assignment.id,
+          n?.created_at ?? q?.queue_entered_at ?? assignment.created_at,
+          why,
+        );
+      });
     };
     const reusable = (hit: Result | undefined, owner: AssignmentId) =>
       hit !== undefined && !hit.volatile && !isDirty(owner);
@@ -441,16 +460,27 @@ export class CandidateIndex {
     };
     const groups = new Map<string, Notification[]>();
     for (const n of cache.ordered) {
-      if (cache.claimed.has(n.id)) continue;
+      if (n.recipient.kind === "needs_you") continue;
       const { owner, blocked } = infoOf(n);
-      if (!owner || blocked) continue;
+      const skip = (why: string) =>
+        this.skipped?.(project, owner, n.id, n.created_at, why);
+      if (cache.claimed.has(n.id)) {
+        skip("notification_claimed");
+        continue;
+      }
+      if (!owner || blocked) {
+        skip(!owner ? "missing_recipient" : "notification_blocked");
+        continue;
+      }
       if (
         assignmentIndex(state.assignments).first.get(owner)?.scope ===
           "standing" &&
         n.card_id &&
         cardIndex(state.cards).get(n.card_id)?.hold
-      )
+      ) {
+        skip("card_held");
         continue;
+      }
       const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       const group = groups.get(key);
       if (group) group.push(n);
@@ -478,7 +508,18 @@ export class CandidateIndex {
         | undefined;
       const assignment =
         owner === undefined ? undefined : assignments.get(owner);
-      if (!owner || !assignment) continue;
+      if (!owner || !assignment) {
+        const n = notes[0];
+        if (n)
+          this.skipped?.(
+            project,
+            owner,
+            n.id,
+            n.created_at,
+            "missing_assignment",
+          );
+        continue;
+      }
       const sig = notes
         .map((n) => `${n.id}\0${n.event_id}\0${n.run_id ?? ""}`)
         .join("\n");
@@ -544,21 +585,28 @@ function candidateResult(
   state: CommandState,
   assignment: Assignment,
   notes: Notification[],
+  skip: (why: string) => void,
 ): Result {
   const none = { candidate: undefined, volatile: false };
-  if (
-    !assignmentDependenciesAllowStart(state, assignment) ||
-    assignmentCardHeld(assignment, state) ||
-    !hasRunTarget(assignment, state)
-  )
+  const omit = (reason: string) => {
+    skip(reason);
     return none;
+  };
+  if (!assignmentDependenciesAllowStart(state, assignment))
+    return omit("dependencies");
+  if (assignmentCardHeld(assignment, state)) return omit("card_held");
+  if (!hasRunTarget(assignment, state)) return omit("no_target");
   const queued = runnableQueuedRun(assignment, state);
-  if (queued && unreadableCommentTrigger(state, queued)) return none;
+  if (queued && unreadableCommentTrigger(state, queued))
+    return omit("unreadable_trigger");
   const cause = notes.find((n) => !n.run_id) ?? notes[0];
   const trigger = queued?.trigger_event_id ?? cause?.event_id;
-  if (assignmentCardHeld(assignment, state, trigger)) return none;
+  if (assignmentCardHeld(assignment, state, trigger)) return omit("card_held");
   const event = eventById(state.events, trigger);
-  if (!event) return { candidate: undefined, volatile: true };
+  if (!event) {
+    skip("trigger_missing");
+    return { candidate: undefined, volatile: true };
+  }
   const candidate: Candidate = {
     project,
     notes,
