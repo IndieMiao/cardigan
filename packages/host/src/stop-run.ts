@@ -1,10 +1,13 @@
 import type {
   AssignmentId,
   ProjectId,
+  RetirementIdentity,
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
+
+import { idleRetirementPolicy } from "./idle-session-retirement.js";
 
 const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
   result?.ok
@@ -40,6 +43,43 @@ export async function stopRunRuntime(
   return exited(await observe())
     ? ("exited" as const)
     : ("unconfirmed" as const);
+}
+
+/** System-ended bells never use address-based release, even for cleanup. A
+ * previously started stop may only read exit evidence; no second signal. */
+export async function stopSystemTurn(
+  runtime: Runtime,
+  ref: RuntimeRef | null,
+  owner: RetirementIdentity,
+  alreadyStopping: boolean,
+  beforeSignal: () => boolean,
+) {
+  if (!ref) return "terminal_binding_changed";
+  const confirmed = async () => {
+    const exact = await runtime
+      .observe_retirement?.(ref, owner)
+      .catch(() => undefined);
+    return exact?.ok
+      ? exact.value === "exited"
+      : exact?.error.code === "runtime_not_found";
+  };
+  if (alreadyStopping)
+    return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
+  if (!runtime.retire_idle) return "unsupported";
+  const { hangup_ms, terminate_ms } = idleRetirementPolicy();
+  const result = await runtime
+    .retire_idle(ref, {
+      ...owner,
+      hangup_ms,
+      terminate_ms,
+      system_finished_turn: true,
+      before_signal: beforeSignal,
+    })
+    .catch(() => undefined);
+  if (result?.ok && result.value.outcome === "withdrawn")
+    return result.value.evidence.reason;
+  if (await confirmed()) return "exited";
+  return "terminal_exit_unconfirmed";
 }
 
 /** Call in the same transaction as cancellation, only after proving terminal exit. */

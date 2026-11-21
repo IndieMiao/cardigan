@@ -973,9 +973,7 @@ export class HerdrRuntime implements Runtime {
       )
         return failure("withdrawn", "probe_invalid");
       reason = "hc_failed";
-      const inspect = async () => {
-        stage = "confirm";
-        const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      const hasExited = (terminal: Terminal) => {
         check(terminal);
         if (terminal.state === "finished") return true;
         if (
@@ -985,6 +983,10 @@ export class HerdrRuntime implements Runtime {
         )
           fail("runtime_conflict", "Idle terminal process changed");
         return false;
+      };
+      const inspect = async () => {
+        stage = "confirm";
+        return hasExited(await this.json(["get", ref.terminal_ref]));
       };
       const wait = async (ms: number) => {
         const until = Date.now() + ms;
@@ -1001,8 +1003,10 @@ export class HerdrRuntime implements Runtime {
           ["HUP", options.hangup_ms],
           ["TERM", options.terminate_ms],
         ] as const) {
+          if (options.system_finished_turn && mode === "HUP") continue;
           if (await inspect()) return exited;
           stage = mode;
+          let refused: RetirementEvidence["reason"] = "guard_changed";
           // The queue's guard runs after all waits and immediately before IO.
           if (
             !(await this.client.execIfCurrent(
@@ -1012,12 +1016,31 @@ export class HerdrRuntime implements Runtime {
                 attempted = true;
                 return true;
               },
+              options.system_finished_turn
+                ? async (raw) => {
+                    // Inside the acquired signal slot. Even if the address is reused
+                    // after this read, the helper can only signal the probed pidfd.
+                    const target: Terminal = JSON.parse(
+                      await raw.exec(["get", ref.terminal_ref, "--json"]),
+                    );
+                    if (hasExited(target)) {
+                      refused = "terminal_not_live";
+                      return false;
+                    }
+                    if (
+                      !["idle", "done", "unknown"].includes(
+                        target.status?.state ?? "unknown",
+                      )
+                    ) {
+                      refused = "terminal_busy";
+                      return false;
+                    }
+                    return true;
+                  }
+                : undefined,
             ))
           )
-            return failure(
-              attempted ? "uncertain" : "withdrawn",
-              "guard_changed",
-            );
+            return failure(attempted ? "uncertain" : "withdrawn", refused);
           if (await wait(budget)) return exited;
         }
         return failure("timeout", "still_live");

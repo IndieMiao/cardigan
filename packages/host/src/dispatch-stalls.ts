@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type Assignment,
   assignmentCardHeld,
@@ -15,9 +16,15 @@ import {
   runById,
   runsOf,
   stoppedByHuman,
+  systemEndedTurn,
 } from "@cardigan/domain";
 import type { standingResolver } from "@cardigan/store";
 
+export function turnSessionKey(a: Assignment) {
+  return createHash("sha256")
+    .update(JSON.stringify([a.session_ref, a.runtime_ref]))
+    .digest("hex");
+}
 export function dispatchStallMs() {
   const value = Number(process.env.CARDIGAN_DISPATCH_STALL_MS ?? 600_000);
   if (!Number.isSafeInteger(value) || value <= 0)
@@ -36,6 +43,7 @@ export interface DispatchStall {
   cause_id: string;
   review_trigger_id?: Event["id"];
   handoff_event_id?: Event["id"];
+  system_finished_run_id?: string;
   age_ms: number;
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
@@ -46,7 +54,11 @@ export function dispatchHandoffs(state: CommandState) {
   // A durable dispatch handoff retires the original bell, not the incident. Never
   // use unrelated needs_attention rows (e.g. retry exhaustion) to stop a session.
   const handoffs = new Map<string, { owner: string; event: Event }>();
-  for (const type of ["standing_inbox_stalled", "bell_wake_escalated"]) {
+  for (const type of [
+    "standing_inbox_stalled",
+    "bell_wake_escalated",
+    "bell_turn_recovery_due",
+  ]) {
     for (const event of eventsOfType(state.events, type)) {
       const p = event.payload as {
         assignment_id: string;
@@ -137,8 +149,13 @@ export function dispatchStallCauses(
   ) {
     const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
+    const due =
+      handoff?.type === "bell_turn_recovery_due" ? handoff : undefined;
+    const binding = due?.payload as
+      | { run_id: string; session_key: string }
+      | undefined;
     if (
-      !(age >= threshold) ||
+      (!due && !(age >= threshold)) ||
       !a ||
       at < a.created_at ||
       a.status !== "active" ||
@@ -158,7 +175,22 @@ export function dispatchStallCauses(
       (acked.get(`${a.id}/${sourceCard ?? ""}`) ?? -1) >= seq
     )
       return;
+    const runs = runsOf(state.runs, a.id);
+    const unfinished = runs.some(
+      (r) =>
+        !["completed", "cancelled", "failed"].includes(r.status) ||
+        r.dispatch_stop ||
+        r.inactivity_stop,
+    );
+    if (unfinished && !due) return;
     const blocked = (() => {
+      if (unfinished) return "unfinished_run";
+      if (
+        binding &&
+        (binding.session_key !== turnSessionKey(a) ||
+          systemEndedTurn(state, a)?.id !== binding.run_id)
+      )
+        return "turn_binding_changed";
       if (stoppedByHuman(state.events, a.id)) return "human_stopped";
       if (a.role_upgrade || a.idle_retirement) return "session_maintenance";
       const parent = card && cards.get(card);
@@ -189,16 +221,6 @@ export function dispatchStallCauses(
       (kind === "resume_not_dispatched" || kind === "owner_not_woken")
     )
       return;
-    const runs = runsOf(state.runs, a.id);
-    if (
-      runs.some(
-        (r) =>
-          !["completed", "cancelled", "failed"].includes(r.status) ||
-          r.dispatch_stop ||
-          r.inactivity_stop,
-      )
-    )
-      return;
     if (
       (kind === "owner_not_woken" || kind === "resume_not_dispatched") &&
       (latestQueue.get(a.id) ?? "") >= at
@@ -208,7 +230,8 @@ export function dispatchStallCauses(
       kind,
       assignment_id: a.id,
       card_id: card ?? null,
-      cause_id: cause,
+      cause_id: due?.id ?? cause,
+      ...(binding ? { system_finished_run_id: binding.run_id } : {}),
       ...(handoff ? { handoff_event_id: handoff.id } : {}),
       ...(trigger &&
       (trigger.type === "review_submitted" ||
@@ -239,8 +262,14 @@ export function dispatchStallCauses(
           : logicalOwner(n.recipient.kind);
     const a = owner && assignments.get(owner);
     if (!a) continue;
+    const entry = handoffs.get(n.id);
     const handoff =
-      n.status === "needs_attention" ? handoffs.get(n.id) : undefined;
+      n.status === "needs_attention" ||
+      (n.status === "pending" &&
+        entry?.event.type === "bell_turn_recovery_due" &&
+        entry.owner === a.id)
+        ? entry
+        : undefined;
     if (
       n.status === "needs_attention" &&
       (!handoff ||

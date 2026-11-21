@@ -1,6 +1,7 @@
 import {
   type Assignment,
   beginStalledPatrolRestart,
+  beginSystemTurnRestart,
   type Clock,
   type CommandState,
   eventById,
@@ -18,6 +19,7 @@ import {
   standingResolver,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { recoveryPm } from "./automatic-context-restart.js";
 import {
   type DispatchStall,
   dispatchHandoffs,
@@ -64,7 +66,14 @@ export class StallPatrol {
     );
   }
   private survey(state: CommandState) {
-    const causes = this.causes(state);
+    const all = this.causes(state);
+    const turns = all.filter((s) => s.system_finished_run_id);
+    // Don't let a generic backlog row mask the exact expired bell or issue
+    // a second recovery for a related resume instruction.
+    const owners = new Set(turns.map((s) => s.assignment_id));
+    const causes = all.filter(
+      (s) => s.system_finished_run_id || !owners.has(s.assignment_id),
+    );
     const consumed = new Set(
       eventsOfType(state.events, "host_ops_action_taken").map(
         (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
@@ -78,6 +87,7 @@ export class StallPatrol {
     for (const [key, s] of actionable) rows.set(key, s);
     return {
       rows: [...rows.values()],
+      turns,
       actionable: new Set(actionable.values()),
     };
   }
@@ -87,13 +97,24 @@ export class StallPatrol {
     )
       return;
     // An in-flight action must recheck its exact cause, even after it is marked consumed.
-    return this.causes(state).find(
+    const causes = this.causes(state).filter((s) => s.assignment_id === id);
+    const hasTurn = causes.some((s) => s.system_finished_run_id);
+    return causes.find(
       (s) =>
-        s.assignment_id === id && s.cause_id === cause && !s.restart_blocked,
+        (!hasTurn || s.system_finished_run_id) &&
+        s.cause_id === cause &&
+        !s.restart_blocked,
     );
   }
-  async evidence(state: CommandState, a: Assignment) {
-    return stallEvidence(state, a, this.runtime, this.execution(), this.signal);
+  async evidence(state: CommandState, a: Assignment, stall?: DispatchStall) {
+    return stallEvidence(
+      state,
+      a,
+      this.runtime,
+      this.execution(),
+      this.signal,
+      !!stall?.system_finished_run_id,
+    );
   }
   async diagnostics(project: ProjectId) {
     const state = this.store.uow.read((tx) => loadCommandState(tx, project));
@@ -106,7 +127,7 @@ export class StallPatrol {
     for (const s of rows) {
       const a = state.assignments.find((a) => a.id === s.assignment_id);
       if (!a) continue;
-      const view = evidence.get(a.id) ?? (await this.evidence(state, a));
+      const view = evidence.get(a.id) ?? (await this.evidence(state, a, s));
       evidence.set(a.id, view);
       result.push({
         ...s,
@@ -123,7 +144,7 @@ export class StallPatrol {
   private publish(project: ProjectId) {
     return this.store.uow.run((tx) => {
       const state = loadCommandState(tx, project);
-      const { rows, actionable } = this.survey(state);
+      const { rows, actionable, turns } = this.survey(state);
       const patrol = state.assignments.find(
         (a) =>
           a.scope === "standing" &&
@@ -140,7 +161,7 @@ export class StallPatrol {
         ),
       );
       for (const stall of rows) {
-        if (sent.has(key(stall))) continue;
+        if (stall.system_finished_run_id || sent.has(key(stall))) continue;
         const event = {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(project),
@@ -168,7 +189,89 @@ export class StallPatrol {
               : { kind: "pm_office" },
         });
       }
-      return { state, actionable, patrol };
+      return { state, actionable, patrol, turns };
+    });
+  }
+  private async recoverTurn(
+    state: CommandState,
+    stall: DispatchStall,
+    snapshot: (
+      a: Assignment,
+      p: ProjectId,
+    ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
+  ) {
+    const project = state.project_id;
+    const a = state.assignments.find((a) => a.id === stall.assignment_id);
+    const handled = (s: CommandState) =>
+      ["host_ops_action_taken", "bell_turn_recovery_failed"].some((type) =>
+        eventsOfType(s.events, type).some(
+          (e) =>
+            (e.payload as { system_finished_run_id?: string })
+              .system_finished_run_id === stall.system_finished_run_id,
+        ),
+      );
+    if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
+    const view = await this.evidence(state, a, stall);
+    let reason =
+      stall.restart_blocked ?? (!view.can_restart ? "unsafe_evidence" : null);
+    let launch: HostOpsExecution["snapshot"];
+    if (!reason) {
+      try {
+        launch = await snapshot(a, project);
+      } catch {
+        reason = "launch_snapshot_unavailable";
+      }
+    }
+    if (this.signal.aborted) return;
+    this.store.uow.run((tx) => {
+      const fresh = loadCommandState(tx, project);
+      if (handled(fresh) || hostOpsPending(fresh.events, a.id)) return;
+      const row = this.causes(fresh).find(
+        (s) => s.cause_id === stall.cause_id && s.assignment_id === a.id,
+      );
+      if (!row) return; // Original notification already delivered or acknowledged.
+      reason = row.restart_blocked ?? reason;
+      if (unfinishedBellAttempts(this.store.database, project, a.id).length)
+        reason = "bell_in_flight";
+      if (
+        JSON.stringify(fresh.assignments.find((v) => v.id === a.id)) !==
+        JSON.stringify(a)
+      )
+        reason = "assignment_changed";
+      if (!reason && launch) {
+        const effect = beginSystemTurnRestart(
+          fresh,
+          { kind: "system", project_id: project },
+          { assignment_id: a.id, cause_id: stall.cause_id, snapshot: launch },
+          { clock: this.clock, ids: tx.ids },
+        );
+        if (effect.ok) {
+          persistEffect(tx, project, effect.value);
+          return;
+        }
+        reason = effect.error.message;
+      }
+      const event = {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project, stall.card_id ?? undefined),
+        ...(stall.card_id ? { card_id: stall.card_id } : {}),
+        actor: { kind: "system" as const, project_id: project },
+        type: "bell_turn_recovery_failed",
+        created_at: this.clock.now(),
+        payload: { ...row, ...view, can_restart: false, reason },
+      };
+      tx.events.append(project, event);
+      recordNotification(this.store.database, {
+        project_id: project,
+        event_id: event.id,
+        card_id: stall.card_id ?? undefined,
+        seq: event.seq,
+        at: event.created_at,
+        recipient: {
+          kind: recoveryPm(a),
+        },
+        kind: "run_attention",
+      });
     });
   }
   async tick(
@@ -178,10 +281,26 @@ export class StallPatrol {
       p: ProjectId,
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
-    const { state, actionable, patrol } = this.publish(project);
+    const { state, actionable, patrol, turns } = this.publish(project);
+    const seen = new Set<string>();
+    for (const stall of turns.sort(
+      (a, b) => Number(!!a.restart_blocked) - Number(!!b.restart_blocked),
+    )) {
+      if (
+        !stall.system_finished_run_id ||
+        seen.has(stall.system_finished_run_id) ||
+        this.signal.aborted
+      )
+        continue;
+      seen.add(stall.system_finished_run_id);
+      await this.recoverTurn(state, stall, snapshot);
+    }
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
     const own = [...actionable].find(
-      (s) => s.assignment_id === patrol.id && s.kind === "standing_backlog",
+      (s) =>
+        s.assignment_id === patrol.id &&
+        s.kind === "standing_backlog" &&
+        !s.system_finished_run_id,
     );
     if (!own) return;
     if (
