@@ -8,17 +8,14 @@ CREATE TABLE launch_secret_changes (
   created_at TEXT NOT NULL
 );
 CREATE INDEX launch_secret_changes_by_key ON launch_secret_changes(key, created_at DESC);
--- V-2708: a secrets.env write in flight. Files are named by inode, launch.yaml
--- by text hash; nothing derived from secrets.env content is stored. Settled
--- (applied or undone) from the files before every launch settings read.
+-- V-2713: a secrets.env write in flight: the operation, the file and its
+-- temp file. Whether it took effect is read from the operation's marker line
+-- in secrets.env; nothing derived from a value is stored. Settled (audit and
+-- receipt only, never the file) at start-up and before every settings read.
 CREATE TABLE launch_secret_intents (
   operation TEXT PRIMARY KEY,
   path TEXT NOT NULL,
   temp_path TEXT NOT NULL,
-  after_id TEXT NOT NULL,
-  after_stamp TEXT,
-  backup_path TEXT,
-  yaml_path TEXT,
-  yaml_after TEXT,
+  yaml INTEGER NOT NULL CHECK (yaml IN (0, 1)),
   created_at TEXT NOT NULL
 );

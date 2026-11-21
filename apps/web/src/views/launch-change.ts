@@ -85,6 +85,10 @@ export const secretValueProblem = (value: string) =>
 export const sharedKeyProblem = (key: string, providers: readonly string[]) =>
   `密钥键 ${key} 也被 Provider ${providers.join("、")} 使用，不能在这里改写或清除，请改用独立的键。`;
 
+/** V-2713: replacing or clearing an existing key cannot ride along with other edits. */
+export const MIXED_SECRETS =
+  "替换或清除已有密钥要单独保存，请先撤销其它修改，或分两次保存。";
+
 /** What went wrong with a preview, confirmation or check, for display in place. */
 export type LaunchProblem =
   | { readonly kind: "field"; readonly field: string; readonly message: string }
@@ -114,6 +118,7 @@ const FIELD_MESSAGES: Record<string, Record<string, string>> = {
     default: "密钥键名须是 secrets.env 中已有的键，或这次填写了密钥的键。",
   },
   secrets: { default: "密钥未通过校验，没有写入，请重新输入。" },
+  secrets_mixed: { default: MIXED_SECRETS },
   env: { default: "这个变量不能在页面修改，请在主机上修改。" },
   base_url: {
     edit_provider:
@@ -173,7 +178,10 @@ export function launchProblem(error: unknown, op: string): LaunchProblem {
     if (error.code === "write_failed")
       return { kind: "form", message: "写入失败，已恢复原文件，没有改动。" };
     if (error.code === "write_unsettled")
-      return { kind: "form", message: UNSETTLED };
+      return {
+        kind: "form",
+        message: "写入结果暂未确认，请刷新后查看是否已保存。",
+      };
     if (error.code === "secret_shared" && typeof details.key === "string")
       return {
         kind: "form",

@@ -520,15 +520,46 @@ try {
       await delay(300);
       await scene("provider-created", measureDrawer);
 
+      if (!baseline) {
+        // V-2713: filling a key in use does not ride along with another edit.
+        await models(theme);
+        await toProviders();
+        await provider("relay");
+        await click("编辑");
+        await until("!!document.querySelector('[role=dialog] form input')");
+        await fillIn(null, "名称", "Relay 2");
+        await clickIn("密钥变量 ANTHROPIC_AUTH_TOKEN", "填写");
+        await fillIn(
+          "密钥变量 ANTHROPIC_AUTH_TOKEN",
+          "新密钥 RELAY_TOKEN",
+          FAKE,
+        );
+        await until(
+          "[...document.querySelectorAll('[role=dialog] [role=alert]')].some((a) => a.textContent.includes('要单独保存'))",
+        );
+        await run(() =>
+          document
+            .querySelector("[role=dialog] [role=alert]")
+            ?.scrollIntoView({ block: "center" }),
+        );
+        await scene("provider-mixed-secrets", measureDrawer);
+        await click("取消");
+        await until("document.querySelectorAll('[role=dialog]').length === 2");
+        await click("放弃修改");
+        await until("document.querySelectorAll('[role=dialog]').length <= 1");
+      }
+
       // A failed write: the form stays, the secret input is emptied.
       await models(theme, "?confirm=fail");
-      await toProviders();
-      await provider("relay");
-      await click("编辑");
+      await click("新建 Provider", "page");
       await until("!!document.querySelector('[role=dialog] form input')");
-      await fillIn(null, "名称", "Relay 2");
-      await clickIn("密钥变量 ANTHROPIC_AUTH_TOKEN", "填写");
-      await fillIn("密钥变量 ANTHROPIC_AUTH_TOKEN", "新密钥 RELAY_TOKEN", FAKE);
+      await delay(300);
+      await fillIn(null, "ID", "gateway");
+      await fillIn(null, "名称", "Gateway");
+      await fillIn(null, "端点", "https://gateway.example.test");
+      await click("添加密钥变量");
+      await fillIn("新密钥变量", "变量名", "ANTHROPIC_AUTH_TOKEN");
+      await fillIn("新密钥变量", "密钥", FAKE);
       await click("预览修改");
       await until("!!document.querySelector('[role=dialog] dd [data-op]')");
       await click("确认保存");
@@ -619,8 +650,7 @@ try {
       await click("编辑");
       await until("!!document.querySelector('[role=dialog] form input')");
       await clickIn("密钥变量 ANTHROPIC_API_KEY", "清除");
-      await clickIn("环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN", "移除");
-      await scrollTo({ tag: "legend", text: "环境变量" });
+      await scrollTo({ tag: "legend", text: "密钥变量" });
       await scene("provider-edit-clear", measureDrawer);
       await click("预览修改");
       await until("!!document.querySelector('[role=dialog] dd [data-op]')");
@@ -635,6 +665,24 @@ try {
       await until("document.querySelectorAll('[role=dialog]').length === 2");
       await click("放弃修改");
       await until("document.querySelectorAll('[role=dialog]').length <= 1");
+
+      if (!baseline) {
+        // V-2708: removing a hidden variable shows its status, never its value.
+        await models(theme);
+        await toProviders();
+        await provider("anthropic");
+        await click("编辑");
+        await until("!!document.querySelector('[role=dialog] form input')");
+        await clickIn("环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN", "移除");
+        await click("预览修改");
+        await until("!!document.querySelector('[role=dialog] dd [data-op]')");
+        await scene("provider-hidden-review", measureDrawer);
+        await click("返回修改");
+        await click("取消");
+        await until("document.querySelectorAll('[role=dialog]').length === 2");
+        await click("放弃修改");
+        await until("document.querySelectorAll('[role=dialog]').length <= 1");
+      }
 
       // In use: no delete; the users are listed.
       await models(theme);

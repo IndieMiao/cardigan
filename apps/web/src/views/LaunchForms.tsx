@@ -39,6 +39,7 @@ import {
   idProblem,
   type LaunchProblem,
   launchProblem,
+  MIXED_SECRETS,
   nameProblem,
   optionalNameProblem,
   permissionProblem,
@@ -1210,6 +1211,20 @@ export function ProviderForm({
   }
   if (Object.keys(env).length) fields.env = env;
   if (Object.keys(secretEnv).length) fields.secret_env = secretEnv;
+  // V-2713: with any other change, secrets.env may only gain brand-new keys;
+  // replacing or clearing a key already there or in use is its own save.
+  const inUse = (key: string) =>
+    keys.includes(key) ||
+    settings.providers.some(
+      (p) =>
+        p.secrets?.some((s) => s.key === key) ||
+        Object.values(p.secret_env ?? {}).includes(key),
+    );
+  if (
+    (creating || Object.keys(fields).length > 0) &&
+    (clear.length > 0 || set.some(inUse))
+  )
+    problems.secrets ??= MIXED_SECRETS;
   const plan = {
     ...(set.length ? { set } : {}),
     ...(clear.length ? { clear } : {}),
@@ -1261,6 +1276,7 @@ export function ProviderForm({
         "base_url",
         "secret_env",
         "secrets",
+        "secrets_mixed",
         "env",
       ]}
       reviewFacts={
@@ -1296,6 +1312,7 @@ export function ProviderForm({
             secrets:
               problems.secrets ??
               (server?.field === "secrets" ||
+              server?.field === "secrets_mixed" ||
               server?.field === "secret_env" ||
               server?.field === "env"
                 ? server.message

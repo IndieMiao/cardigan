@@ -288,6 +288,23 @@ export function candidate(file: SettingsFile, change: Change) {
     }
   }
   const yaml = diff.some((d) => !d.field.startsWith(SECRET_DIFF));
+  // V-2713: with a launch.yaml change, secrets.env may only gain brand-new
+  // keys that nothing reads yet. Then a failed or interrupted YAML step can
+  // never put a new value under the old YAML, and taking the keys back cannot
+  // touch anything already in use. Replacing or clearing a key is its own
+  // secrets-only save.
+  if (
+    yaml &&
+    (plan.clear.length > 0 ||
+      plan.set.some(
+        (key) =>
+          Object.hasOwn(secrets, key) ||
+          Object.values(config.providers).some((p) =>
+            Object.values(p.secret_env).includes(key),
+          ),
+      ))
+  )
+    throw invalid("secrets_mixed");
   if (!diff.length) throw invalid();
   // Field paths contain protocol literals; only their dynamic components and
   // displayed values can contain private configuration data.

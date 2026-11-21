@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   launchRevision,
@@ -53,7 +53,7 @@ import {
   secretValues,
   settleSecretIntents,
   settleSecrets,
-  updateSecretsText,
+  withdrawSecrets,
 } from "./launch-settings-secrets.js";
 
 const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -125,6 +125,14 @@ export class LaunchSettings {
     private readonly adopt: (generation: LaunchGeneration) => void,
   ) {
     this.checks = new ProfileChecks(store, () => this.snapshot());
+    // V-2713: settle what an interrupted confirmation left behind before
+    // anything reads it. Bookkeeping only (the files are not touched); a
+    // failure here is retried by the next settings read.
+    try {
+      settleSecretIntents(store);
+    } catch {
+      /* retried before the next read */
+    }
   }
   private snapshot() {
     return snapshot(this.dir, launchRevision(this.store));
@@ -358,22 +366,31 @@ export class LaunchSettings {
           new Date().toISOString(),
           installed ? 1 : 0,
         );
-    // C-549: secrets.env first. Every key the YAML can need is already there
-    // (both the old and the new YAML were checked against the new secrets).
-    // V-2708: the write is recorded as an intent before its rename and
-    // settled from the files: it stands only with its YAML installed, and a
-    // crash or failure anywhere in between undoes it (see `installSecrets`).
+    // C-549: secrets.env first. V-2713: with a YAML step it only gains
+    // brand-new keys (see `candidate`), so the old YAML never reads them; a
+    // failed YAML step takes exactly those keys back. Whether the write took
+    // effect is read from its marker line (see `installSecrets`).
     let files: string | undefined;
+    const unsettled = () => {
+      // Renamed but not recorded: with a YAML step, take the new keys back.
+      if (yaml)
+        try {
+          withdrawSecrets(this.store, this.dir, id, values);
+          return writeFailed();
+        } catch {
+          /* still unknown */
+        }
+      return writeUnknown();
+    };
     if (set.length || clear.length) {
-      const original = readSecretsText(this.dir);
-      const next = updateSecretsText(original, values, clear);
       const now = new Date().toISOString();
       try {
         files = installSecrets(this.store, this.dir, this.dataDir, f.fence, {
           operation: id,
-          original,
-          text: next,
-          yaml: yaml ? { path, after: digest(text) } : null,
+          original: readSecretsText(this.dir),
+          values,
+          clear,
+          yaml,
           reserve: () => {
             const journal = this.store.database.prepare(
               "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
@@ -385,7 +402,7 @@ export class LaunchSettings {
         });
       } catch (error) {
         if (error instanceof HttpRejection) throw error;
-        if (error instanceof SecretsUnsettled) throw writeUnknown();
+        if (error instanceof SecretsUnsettled) throw unsettled();
         throw writeFailed();
       }
     }
@@ -422,14 +439,21 @@ export class LaunchSettings {
           },
         );
       } catch (error) {
-        let outcome = "none";
-        if (files !== undefined)
+        // V-2713: our YAML is in place but not recorded. The next read
+        // settles its receipt; the same confirmation then answers ok.
+        let installed = false;
+        try {
+          installed = readFileSync(path, "utf8") === text;
+        } catch {
+          /* unreadable: not ours */
+        }
+        if (installed) throw writeUnknown();
+        if (files !== undefined) {
           try {
-            outcome = settleSecrets(this.store, id);
+            withdrawSecrets(this.store, this.dir, id, values);
           } catch {
             throw writeUnknown();
           }
-        if (outcome === "undone") {
           if (error instanceof HttpRejection) throw error;
           // Another writer changed the launch files between the two steps.
           if (error instanceof LaunchConfigError) throw stale();
@@ -441,7 +465,7 @@ export class LaunchSettings {
       } finally {
         rmSync(temp, { force: true });
       }
-      // The YAML is installed, so its secrets stand; if this cannot record
+      // The YAML is installed, so its new keys stand; if this cannot record
       // that now, the next read settles the intent the same way.
       if (files !== undefined)
         try {

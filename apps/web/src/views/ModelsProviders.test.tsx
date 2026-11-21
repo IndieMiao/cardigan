@@ -240,29 +240,24 @@ test("a failed write keeps the form but empties every secret input", async () =>
       .fn()
       .mockRejectedValue(new ApiError(500, "write_failed", "写入失败", false)),
   });
-  const table = await openModels(api.client);
-  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
-  const d = await screen.findByRole("dialog", { name: "Relay" });
-  click(d, "编辑");
-  fireEvent.change(field(d, "名称"), { target: { value: "Relay 2" } });
-  const group = within(d).getByRole("group", {
-    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  await openModels(api.client);
+  click(document.body, "新建 Provider");
+  const d = await screen.findByRole("dialog", { name: "新建 Provider" });
+  fireEvent.change(field(d, "ID"), { target: { value: "gateway" } });
+  fireEvent.change(field(d, "名称"), { target: { value: "Gateway" } });
+  fireEvent.change(field(d, "端点"), {
+    target: { value: "https://gateway.example.test" },
   });
-  expect(group.textContent).toContain("未设置");
-  click(group, "填写");
-  // V-2709: undoing a first value says so (not "replace").
-  expect(within(group).getByRole("button", { name: "撤销填写" })).toBeTruthy();
-  fireEvent.change(password(group)[0] as HTMLInputElement, {
+  click(d, "添加密钥变量");
+  const secret = within(d).getByRole("group", { name: "新密钥变量" });
+  fireEvent.change(field(secret, "变量名"), {
+    target: { value: "ANTHROPIC_AUTH_TOKEN" },
+  });
+  fireEvent.change(password(secret)[0] as HTMLInputElement, {
     target: { value: FAKE },
   });
   click(d, "预览修改");
-  await within(d).findByRole("form", { name: "确认编辑 Provider" });
-  expect(api.previewLaunchChange.mock.lastCall?.[1]).toEqual({
-    op: "edit_provider",
-    name: "relay",
-    fields: { name: "Relay 2" },
-    secrets: { set: ["RELAY_TOKEN"] },
-  });
+  await within(d).findByRole("form", { name: "确认新建 Provider" });
   click(d, "确认保存");
   const alerts = await within(d).findAllByRole("alert");
   expect(alerts.map((a) => a.textContent).join()).toContain(
@@ -271,9 +266,9 @@ test("a failed write keeps the form but empties every secret input", async () =>
   expect(alerts.map((a) => a.textContent).join()).toContain(
     "密钥没有写入，输入框已清空，请重新输入",
   );
-  expect((field(d, "名称") as HTMLInputElement).value).toBe("Relay 2");
+  expect((field(d, "名称") as HTMLInputElement).value).toBe("Gateway");
   const emptied = password(
-    within(d).getByRole("group", { name: "密钥变量 ANTHROPIC_AUTH_TOKEN" }),
+    within(d).getByRole("group", { name: "新密钥变量" }),
   );
   expect(emptied.map((i) => i.value)).toEqual([""]);
   expect(
@@ -281,6 +276,42 @@ test("a failed write keeps the form but empties every secret input", async () =>
       .getByRole("button", { name: "预览修改" })
       .hasAttribute("disabled"),
   ).toBe(true);
+  expect(document.body.innerHTML).not.toContain(FAKE);
+});
+
+test("filling a key in use rides with no other edit: it is its own save", async () => {
+  const api = harness();
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  click(d, "编辑");
+  fireEvent.change(field(d, "名称"), { target: { value: "Relay 2" } });
+  const group = within(d).getByRole("group", {
+    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  });
+  click(group, "填写");
+  // V-2709: undoing a first value says so (not "replace").
+  expect(within(group).getByRole("button", { name: "撤销填写" })).toBeTruthy();
+  fireEvent.change(password(group)[0] as HTMLInputElement, {
+    target: { value: FAKE },
+  });
+  expect(within(d).getByRole("alert").textContent).toContain(
+    "替换或清除已有密钥要单独保存",
+  );
+  expect(
+    within(d)
+      .getByRole("button", { name: "预览修改" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  fireEvent.change(field(d, "名称"), { target: { value: "Relay" } });
+  click(d, "预览修改");
+  await within(d).findByRole("form", { name: "确认编辑 Provider" });
+  expect(api.previewLaunchChange.mock.lastCall?.[1]).toEqual({
+    op: "edit_provider",
+    name: "relay",
+    fields: {},
+    secrets: { set: ["RELAY_TOKEN"] },
+  });
 });
 
 test("replace and clear send key names only; leaving with a typed secret asks first", async () => {
@@ -299,12 +330,22 @@ test("replace and clear send key names only; leaving with a typed secret asks fi
   });
   expect(hidden.textContent).toContain("已隐藏");
   click(hidden, "移除");
+  // V-2713: a clear does not ride along with another edit.
+  expect(within(d).getByRole("alert").textContent).toContain(
+    "替换或清除已有密钥要单独保存",
+  );
+  click(
+    within(d).getByRole("group", {
+      name: "环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN",
+    }),
+    "撤销移除",
+  );
   click(d, "预览修改");
   await within(d).findByRole("form", { name: "确认编辑 Provider" });
   expect(api.previewLaunchChange.mock.lastCall?.[1]).toEqual({
     op: "edit_provider",
     name: "anthropic",
-    fields: { env: { ANTHROPIC_CUSTOM_HEADERS_TOKEN: null } },
+    fields: {},
     secrets: { clear: ["ANTHROPIC_API_KEY"] },
   });
   click(d, "返回修改");
