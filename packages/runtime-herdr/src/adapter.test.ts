@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -216,6 +218,103 @@ test("bound local provisioning may start a missing core while probes stay read-o
     "run",
   ]);
 });
+test.skipIf(process.platform !== "linux")(
+  "only a matching launch receipt, absent core socket and extinct local process/group prove exit",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "local-exit-"));
+    directories.push(dir);
+    const socketPath = join(dir, "core.sock"),
+      owner = { project_id: "fixture", assignment_id: assignment.id };
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    const ended = once(child, "exit");
+    try {
+      await once(child, "spawn");
+      const client = stub();
+      vi.mocked(client.exec).mockImplementation(async (args) =>
+        args[0] === "--version"
+          ? `hc ${HC_RELEASE.version}`
+          : JSON.stringify({
+              address: "t1",
+              labels: launch.labels,
+              state: "live",
+              keep: false,
+              pid: child.pid,
+            }),
+      );
+      const runtime = value(
+        await HerdrRuntime.create({
+          client,
+          socketPath,
+          execution: { mode: "local", dataDir: dir },
+        }),
+      );
+      const bound = value(
+        await runtime.provision(assignment, role, machine, launch),
+      );
+      expect(bound.local_process_receipt).toBeTruthy();
+      vi.mocked(client.exec).mockClear();
+      client.available = async () => false;
+      expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(false);
+      child.stdin.end();
+      await ended;
+      expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(true);
+      // The leader is gone, but another member of its process group may remain.
+      const probe = vi
+        .spyOn(process, "kill")
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        })
+        .mockReturnValueOnce(true);
+      try {
+        expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(
+          false,
+        );
+        expect(probe.mock.calls).toEqual([
+          [child.pid, 0],
+          [-(child.pid ?? 0), 0],
+        ]);
+      } finally {
+        probe.mockRestore();
+      }
+      expect(
+        value(
+          await runtime.confirm_local_exit(bound, {
+            ...owner,
+            assignment_id: "A-2",
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        value(
+          await runtime.confirm_local_exit(
+            { ...bound, local_process_receipt: "stale" },
+            owner,
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        value(
+          await runtime.confirm_local_exit(
+            {
+              ...bound,
+              launch_generation: { run_id: "R-99", generation: "other" },
+            },
+            owner,
+          ),
+        ),
+      ).toBe(false);
+      await writeFile(socketPath, "not a socket");
+      expect(value(await runtime.confirm_local_exit(bound, owner))).toBe(false);
+      expect(client.exec).not.toHaveBeenCalled(); // Even a positive check cannot bootstrap a core.
+    } finally {
+      child.stdin.end();
+      await ended;
+    }
+  },
+);
 test.each([false, true])(
   "M5.6 replacement can recreate a missing core without probing it into existence (bound=%s)",
   async (bound) => {

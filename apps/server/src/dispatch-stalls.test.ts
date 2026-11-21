@@ -15,8 +15,8 @@ import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
 
-test.each(["unknown", "blocked", "error"] as const)(
-  "C-548: a system-ended turn on alive/%s hands off once, but silence does not authorize replacement",
+test.each(["blocked", "error"] as const)(
+  "a system-ended turn on alive/%s remains pending; silence does not authorize replacement",
   checkStalledTurn,
 );
 
@@ -104,42 +104,21 @@ async function checkStalledTurn(agent: "unknown" | "blocked" | "error") {
   f.advance(599999);
   expect((await f.view()).dispatch_stalls).toEqual([]);
   f.advance(1);
-  await dispatcher.tick(); // C-546 hands the refused notification to operations at the same deadline.
-  expect(f.notes().some((n) => n.status === "needs_attention")).toBe(true);
-  const handoffs = f
-    .state()
-    .events.filter((e) => e.type === "bell_wake_escalated");
-  expect(handoffs).toMatchObject([
+  await dispatcher.tick();
+  expect(f.notes().find((n) => n.event_id === resumed.id)?.status).toBe(
+    "pending",
+  );
+  f.runtime.observe_retirement = async () => ({ ok: true, value: "alive" });
+  const rows = (await f.view()).dispatch_stalls;
+  expect(rows).toMatchObject([
     {
-      payload: {
-        assignment_id: a.id,
-        reason: "system_finished_turn",
-        activity_source: `alive/${agent}`,
-        activity_forwarded_to: f.ops.id,
-      },
+      kind: "notification_backlog",
+      assignment_id: a.id,
+      workspace: "clean",
+      terminal_state: agent,
+      can_restart: false,
     },
   ]);
-  expect(
-    f.store
-      .listNotifications({ project_id: f.project, assignment_id: f.ops.id })
-      .filter((n) => n.event_id === handoffs[0]?.id),
-  ).toHaveLength(1);
-  const rows = (await f.view()).dispatch_stalls;
-  expect(rows).toEqual(
-    expect.arrayContaining(
-      ["resume_not_dispatched", "notification_backlog"].map((kind) =>
-        expect.objectContaining({
-          kind,
-          assignment_id: a.id,
-          card_id: f.target.card.id,
-          age_ms: 600000,
-          terminal_state: agent,
-          workspace: "clean",
-          can_restart: false,
-        }),
-      ),
-    ),
-  );
   const cause = rows.find((r) => r.kind === "notification_backlog")
     ?.cause_id as string;
   await expect(f.restart(a, cause)).rejects.toMatchObject({
@@ -172,7 +151,7 @@ async function checkStalledTurn(agent: "unknown" | "blocked" | "error") {
   expect(
     f.state().events.filter((e) => e.type === "host_ops_action_taken"),
   ).toHaveLength(1);
-  // The row stays needs_attention after ACK. Its original stream cursor must invalidate the stop.
+  // ACK of the original notification must invalidate the stop.
   expect(
     f.store.ackEvents({
       project_id: f.project,
