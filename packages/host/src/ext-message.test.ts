@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +20,10 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { card, project_id } from "../../store/src/test-support.js";
 import { ExtMessageSender, sendExtMessage } from "./ext-message.js";
-import type { ExtMessageConfig } from "./ext-message-config.js";
+import {
+  type ExtMessageConfig,
+  loadExtMessageConfig,
+} from "./ext-message-config.js";
 
 let dir: string;
 let store: Store;
@@ -75,20 +78,14 @@ beforeEach(() => {
     channels: { fake: { enabled: true, credential: "SYNTHETIC_SECRET" } },
   };
   fake = new FakeAdapter();
-  store.uow.run((tx) => {
-    tx.cards.put(project_id, card());
-    tx.human_actions.put(project_id, action);
-    tx.events.append(project_id, {
-      id: tx.ids.nextEventId(),
-      card_id: "C-1",
-      seq: tx.ids.nextEventSequence(project_id, "C-1"),
-      type: "human_action_requested",
-      actor: { kind: "human", project_id },
-      payload: { human_action_id: "H-1" },
-      created_at: now,
-    });
-  });
+  store.uow.run((tx) => tx.cards.put(project_id, card()));
 });
+// Mature-channel tests publish their first fact *after* activation.
+const startChannel = () => {
+  sender().recordStatus();
+  addAction(1);
+};
+
 afterEach(() => {
   vi.useRealTimers();
   store.close();
@@ -103,6 +100,7 @@ test("success is audited, deduplicated across restart, and disabled config leave
   expect(rows()).toEqual([]);
   const first = sender();
   first.recordStatus();
+  addAction(1);
   await first.tick();
   expect(rows()).toMatchObject([{ status: "sent", attempts: 1 }]);
   expect(events().filter((e) => e.type === "ext_message_sent")).toHaveLength(1);
@@ -120,6 +118,7 @@ test("success is audited, deduplicated across restart, and disabled config leave
   expect(persisted).not.toContain("PRIVATE");
 });
 test("retry at 30 and 60 seconds, three attempts total, one final notice with no recursion", async () => {
+  startChannel();
   fake.result = "retryable";
   await sender().tick();
   expect(rows()).toMatchObject([
@@ -152,6 +151,7 @@ test("retry at 30 and 60 seconds, three attempts total, one final notice with no
   );
 });
 test("permanent errors stop immediately; raw thrown errors are reduced to unknown", async () => {
+  startChannel();
   fake.result = "permanent";
   await sender().tick();
   advance(100000);
@@ -172,6 +172,7 @@ test("permanent errors stop immediately; raw thrown errors are reduced to unknow
   ).toBe("unknown");
 });
 test("first enable ignores handled history, but audits an already queued item that was handled", async () => {
+  startChannel();
   const [prior] = store.uow.read((tx) =>
     extMessageItems(loadCommandState(tx, project_id), project_id),
   );
@@ -190,6 +191,7 @@ test("first enable ignores handled history, but audits an already queued item th
   );
 });
 test("sensitive item reaches adapter with only project, generic prompt and link", async () => {
+  startChannel();
   store.uow.run((tx) => tx.cards.put(project_id, card({ sensitive: true })));
   await sender().tick();
   expect(fake.messages[0]).toEqual({
@@ -199,6 +201,7 @@ test("sensitive item reaches adapter with only project, generic prompt and link"
   });
 });
 test("crash after reserving an attempt consumes its budget and waits before recovery", async () => {
+  startChannel();
   store.uow.run((tx) => {
     const item = extMessageItems(
       loadCommandState(tx, project_id),
@@ -227,6 +230,7 @@ test("crash after reserving an attempt consumes its budget and waits before reco
   expect(rows()).toMatchObject([{ status: "sent", attempts: 2 }]);
 });
 test("third crashed attempt finalizes once with a Workbench notice", async () => {
+  startChannel();
   store.uow.run((tx) =>
     projectExtMessage(
       store.database,
@@ -265,6 +269,7 @@ test("timeout aborts, another channel succeeds independently, concurrent senders
     ...config,
     channels: { ...config.channels, second: { enabled: true } },
   };
+  startChannel();
   const options = { adapters: { fake: () => slow, second: () => fake } };
   const a = sender(options).tick();
   await vi.advanceTimersByTimeAsync(0);
@@ -283,6 +288,11 @@ test("timeout aborts, another channel succeeds independently, concurrent senders
   });
 });
 test("deferred and quiet items wait, then handled items skip; absent adapter fails safely", async () => {
+  config = {
+    ...config,
+    quiet_hours: { timezone: "UTC", start: "23:00", end: "08:00" },
+  };
+  startChannel();
   store.uow.run((tx) =>
     tx.human_actions.put(project_id, {
       ...action,
@@ -292,10 +302,6 @@ test("deferred and quiet items wait, then handled items skip; absent adapter fai
   await sender().tick();
   expect(fake.messages).toEqual([]);
   store.uow.run((tx) => tx.human_actions.put(project_id, action));
-  config = {
-    ...config,
-    quiet_hours: { timezone: "UTC", start: "23:00", end: "08:00" },
-  };
   await sender().tick();
   expect(rows()[0]?.attempts).toBe(0);
   advance(8 * 3600000);
@@ -306,6 +312,7 @@ test("deferred and quiet items wait, then handled items skip; absent adapter fai
 });
 
 test("remote success followed by local commit failure rolls back audit and recovers within the same budget", async () => {
+  startChannel();
   store.database.exec(
     `CREATE TRIGGER fail_sent BEFORE INSERT ON events WHEN NEW.type = 'ext_message_sent' BEGIN SELECT RAISE(ABORT, 'simulated commit failure'); END`,
   );
@@ -325,6 +332,7 @@ test("remote success followed by local commit failure rolls back audit and recov
 });
 
 test("late result cannot overwrite the successor's result after a lease expires", async () => {
+  startChannel();
   let resolve: (result: "sent") => void = () => {};
   const old = sender({
     adapters: {
@@ -356,6 +364,7 @@ test.each(["sent", "commit_failure", "timeout"] as const)(
       ...config,
       channels: { first: { enabled: true }, second: { enabled: true } },
     };
+    startChannel();
     store.database.exec(`CREATE TRIGGER fail_channel_sent BEFORE INSERT ON events
       WHEN NEW.type = 'ext_message_sent' AND json_extract(NEW.doc, '$.payload.channel') = 'first'
       BEGIN SELECT RAISE(ABORT, 'first result commit failure'); END`);
@@ -452,23 +461,438 @@ const quiet = () => {
     quiet_hours: { timezone: "UTC", start: "23:00", end: "08:00" },
   };
 };
-const addAction = (n: number) =>
+const addAction = (n: number, project: string = project_id) =>
   store.uow.run((tx) => {
     const id = `H-${n}` as HumanAction["id"];
-    tx.human_actions.put(project_id, { ...action, id, key: id });
-    tx.events.append(project_id, {
+    tx.human_actions.put(project, { ...action, id, key: id });
+    tx.events.append(project, {
       id: tx.ids.nextEventId(),
       card_id: "C-1",
-      seq: tx.ids.nextEventSequence(project_id, "C-1"),
+      seq: tx.ids.nextEventSequence(project, "C-1"),
       type: "human_action_requested",
-      actor: { kind: "human", project_id },
+      actor: { kind: "human", project_id: project },
       payload: { human_action_id: id },
       created_at: now,
     });
   });
 
+test("first enable excludes 700 unread notices and 200 open actions, including queued/failed history", async () => {
+  for (let n = 1; n <= 200; n++) addAction(n);
+  store.uow.run((tx) => {
+    for (let i = 0; i < 700; i++)
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id),
+        type: "host_role_upgraded",
+        actor: { kind: "system", project_id },
+        created_at: now,
+        payload: {},
+      });
+    const history = extMessageItems(
+      loadCommandState(tx, project_id),
+      project_id,
+    );
+    expect(
+      history.filter((i) => i.kind === "notice" && !i.handled),
+    ).toHaveLength(700);
+    expect(
+      history.filter((i) => i.kind === "human_action" && i.ready && !i.handled),
+    ).toHaveLength(200);
+    for (const item of history.slice(0, 2))
+      projectExtMessage(store.database, item, "fake", now);
+    store.database
+      .prepare(
+        "UPDATE ext_message_outbox SET status='failed',attempts=3,last_error='retryable' WHERE item_id=?",
+      )
+      .run(history[0]!.item_id);
+  });
+  const active = sender();
+  active.recordStatus();
+  await active.tick();
+  expect(fake.messages).toEqual([]);
+  expect(rows().map((r) => r.status)).toEqual(["skipped", "skipped"]);
+  expect(
+    events().filter((e) => e.type === "ext_message_history_invalidated"),
+  ).toMatchObject([{ payload: { channel: "fake", count: 2 } }]);
+  addAction(201); // Same wall-clock instant, later commit.
+  await sender().tick();
+  await sender().tick();
+  expect(fake.messages).toMatchObject([{ item: "H-201" }]);
+  const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+  expect(notices(state).filter((n) => !n.read)).toHaveLength(700);
+  expect(state.human_actions.filter((h) => h.status === "open")).toHaveLength(
+    201,
+  );
+});
+
+test.each([
+  "total switch",
+  "channel switch",
+  "credential change",
+  "policy change",
+])("%s starts a new epoch and fences the old sender", async (change) => {
+  const old = sender();
+  old.recordStatus();
+  addAction(1);
+  fake.result = "retryable";
+  await old.tick();
+  expect(rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
+  if (change.endsWith("switch")) {
+    const disabled =
+      change === "total switch"
+        ? { ...config, enabled: false }
+        : { ...config, channels: { fake: { enabled: false } } };
+    sender({
+      configuration: { status: "loaded", config: disabled },
+    }).recordStatus();
+  } else if (change === "credential change")
+    config = {
+      ...config,
+      channels: {
+        fake: { enabled: true, credential: "SYNTHETIC_REPLACEMENT" },
+      },
+    };
+  else config = { ...config, policy: { ...config.policy, max_per_minute: 2 } };
+  addAction(2);
+  advance(60_000);
+  const active = sender();
+  active.recordStatus();
+  addAction(3);
+  fake.result = "sent";
+  await old.tick();
+  expect(fake.messages).toHaveLength(1);
+  await active.tick();
+  expect(rows()).toMatchObject([
+    { item_id: "H-1", status: "skipped", attempts: 1 },
+    { item_id: "H-3", status: "sent" },
+  ]);
+  expect(fake.messages.map((m) => "item" in m && m.item)).toEqual([
+    "H-1",
+    "H-3",
+  ]);
+});
+
+test.each([11, 80])(
+  "recovering quota does not split a partially projected burst (%i initially)",
+  async (initial) => {
+    const total = initial === 11 ? 50 : 80;
+    const active = sender();
+    active.recordStatus();
+    for (let n = 1; n <= initial; n++) addAction(n);
+    await active.tick();
+    advance(1000);
+    for (let n = initial + 1; n <= total; n++) addAction(n);
+    expect(fake.messages).toHaveLength(10);
+    store.close();
+    store = Store.open({ dataDir: dir });
+    advance(59_000);
+    await sender().tick();
+    expect(fake.messages).toHaveLength(10);
+    await sender().tick();
+    advance(60_000);
+    await sender().tick();
+    expect(fake.messages.slice(10)).toEqual([
+      { title: `${total - 10} 条待处理`, url: config.workbench_url },
+    ]);
+    expect(rows().filter((r) => r.status === "sent")).toHaveLength(total);
+  },
+);
+
+test("later arrivals and restarts cannot starve a partial rate summary", async () => {
+  const active = sender();
+  active.recordStatus();
+  for (let n = 1; n <= 80; n++) addAction(n);
+  await active.tick();
+  advance(60_000);
+  await active.tick();
+  expect(fake.messages).toHaveLength(10);
+  for (let n = 81; n <= 120; n++) addAction(n);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  await sender().tick();
+  expect(fake.messages.slice(10)).toEqual([
+    { title: "70 条待处理", url: config.workbench_url },
+  ]);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(80);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(20);
+});
+
+test("reformatting a loaded webhook credential preserves retry and offline work but rotation does not", async () => {
+  const path = join(dir, "sender.yaml"),
+    secret = join(dir, "sender.json");
+  const webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/fixture";
+  writeFileSync(
+    path,
+    `enabled: true\nworkbench_url: ${config.workbench_url}\nchannels: { lark: { enabled: true, credential_file: sender.json } }`,
+    { mode: 0o600 },
+  );
+  writeFileSync(secret, JSON.stringify({ webhook, secret: "fixture" }), {
+    mode: 0o600,
+  });
+  const start = () =>
+    sender({
+      configuration: loadExtMessageConfig(path),
+      adapters: { lark: () => fake },
+    });
+  const initial = start();
+  initial.recordStatus();
+  addAction(1);
+  fake.result = "retryable";
+  await initial.tick();
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(30_000);
+  writeFileSync(
+    secret,
+    JSON.stringify({ secret: "fixture", ignored: true, webhook }, null, 2),
+  );
+  fake.result = "sent";
+  await start().tick();
+  expect(rows()).toMatchObject([
+    { item_id: "H-1", status: "sent", attempts: 2 },
+    { item_id: "H-2", status: "sent", attempts: 1 },
+  ]);
+  addAction(3);
+  writeFileSync(secret, JSON.stringify({ webhook, secret: "rotated" }));
+  await start().tick();
+  expect(fake.messages).toHaveLength(3);
+  addAction(4);
+  await start().tick();
+  expect(fake.messages.at(-1)).toMatchObject({ item: "H-4" });
+});
+
+// Inject elapsed time between the durable claim and the synchronous adapter invocation.
+const afterClaim = (f: () => void) =>
+  store.observe({
+    transaction(kind) {
+      if (kind === "run" && rows().some((r) => r.lease_id)) {
+        store.observe(undefined);
+        f();
+      }
+    },
+  });
+test("a delayed dispatch occupies a rolling slot through the actual adapter call", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 1 } };
+  startChannel();
+  const sentAt: number[] = [];
+  const start = () =>
+    sender({
+      adapters: {
+        fake: () => ({
+          async send() {
+            sentAt.push(Date.parse(now));
+            return "sent";
+          },
+        }),
+      },
+    });
+  afterClaim(() => advance(100));
+  await start().tick();
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(59_900);
+  await start().tick();
+  expect(sentAt).toHaveLength(1);
+  advance(100);
+  await start().tick();
+  expect(sentAt[1]! - sentAt[0]!).toBe(60_000);
+});
+
+test("an unknown dispatch after a crash holds its slot through the last possible call plus 60s", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1, timeout_ms: 120_000 },
+  };
+  startChannel();
+  afterClaim(() => {
+    throw new Error("crash after claim");
+  });
+  await expect(sender().tick()).rejects.toThrow("crash after claim");
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  advance(119_999);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  advance(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+});
+
+test("a paused sender drops an expired unsent lease instead of sending outside its reservation", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 1 } };
+  startChannel();
+  afterClaim(() => advance(70_000));
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  expect(rows()).toMatchObject([
+    { attempts: 0, status: "pending", lease_id: null },
+  ]);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+});
+
+test.each(["claim", "dispatch"])(
+  "entering quiet hours at %s preserves the overflow without spending a slot",
+  async (edge) => {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: 1 },
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+    };
+    startChannel();
+    addAction(2);
+    addAction(3);
+    await sender().tick();
+    advance(119_999);
+    const claims = () =>
+      store.database
+        .prepare("SELECT COUNT(*) AS n FROM ext_message_attempts WHERE at>=?")
+        .get(Date.parse(now) - 5)?.n;
+    if (edge === "dispatch") afterClaim(() => advance(1));
+    // Move time only when the claim samples the clock under the writer lock.
+    let enterQuietOnClaim = false;
+    const active = sender({
+      clock: {
+        now: () => {
+          if (enterQuietOnClaim && store.database.isTransaction) {
+            enterQuietOnClaim = false;
+            advance(1);
+          }
+          return now;
+        },
+      },
+    });
+    active.recordStatus();
+    enterQuietOnClaim = edge === "claim";
+    await active.tick();
+    expect(fake.messages).toHaveLength(1);
+    expect(claims()).toBe(0);
+    expect(rows().filter((r) => r.status === "pending")).toMatchObject([
+      { attempts: 0, digest_id: "rate:queued" },
+      { attempts: 0, digest_id: "rate:queued" },
+    ]);
+    advance(60_000);
+    await active.tick();
+    expect(fake.messages.slice(1)).toEqual([
+      { title: "2 条待处理", url: config.workbench_url },
+    ]);
+  },
+);
+
+test("50 new items share one rolling channel budget across projects, ticks, senders and restart", async () => {
+  const other = "other-project";
+  store.createProject({ id: other, name: "Other" });
+  store.uow.run((tx) => tx.cards.put(other, card()));
+  const active = sender();
+  active.recordStatus();
+  // Cross a wall-clock minute boundary while the rolling window is still full.
+  advance(59_900);
+  for (let n = 1; n <= 40; n++) addAction(n);
+  for (let n = 1; n <= 10; n++) addAction(n, other);
+  await Promise.all([active.tick(), sender().tick()]);
+  advance(100);
+  await active.tick();
+  expect(fake.messages).toHaveLength(10);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(59_899);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(10);
+  advance(1);
+  await sender().tick();
+  expect(fake.messages.slice(10)).toEqual([
+    { title: "40 条待处理", url: config.workbench_url },
+  ]);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(50);
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(11);
+});
+
+test("a configured one-slot channel counts retry attempts and its count-only summary; quiet hours still suppress delivery", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    quiet_hours: { timezone: "UTC", start: "00:01", end: "00:02" },
+  };
+  startChannel();
+  fake.result = "retryable";
+  await sender().tick();
+  addAction(2);
+  addAction(3);
+  advance(30_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  fake.result = "sent";
+  advance(30_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  advance(60_000);
+  await sender().tick();
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages.slice(1)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ item: "H-1" }),
+      { title: "2 条待处理", url: config.workbench_url },
+    ]),
+  );
+  expect(rows().map((r) => r.status)).toEqual(["sent", "sent", "sent"]);
+});
+
+test("a failed overflow summary retries in its original group and drops handled members", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 1 } };
+  startChannel();
+  addAction(2);
+  addAction(3);
+  await sender().tick();
+  fake.result = "retryable";
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages[1]).toEqual({
+    title: "2 条待处理",
+    url: config.workbench_url,
+  });
+  const frozen = rows().find((r) => r.item_id === "H-2")!.digest_id;
+  expect(frozen).toMatch(/^rate:/);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, {
+      ...action,
+      id: "H-2",
+      key: "H-2",
+      status: "done",
+    }),
+  );
+  fake.result = "sent";
+  advance(30_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  advance(30_000);
+  await sender().tick();
+  expect(fake.messages.slice(2)).toEqual([
+    { title: "1 条待处理", url: config.workbench_url },
+  ]);
+  expect(rows().find((r) => r.item_id === "H-3")).toMatchObject({
+    digest_id: frozen,
+    attempts: 2,
+    status: "sent",
+  });
+});
+
 test("quiet digest survives restart, removes handled items, rechecks sensitivity, and truncates once", async () => {
   quiet();
+  startChannel();
   for (let n = 2; n <= 23; n++) addAction(n);
   await sender().tick();
   expect(fake.messages).toHaveLength(0);
@@ -502,6 +926,7 @@ test("quiet digest survives restart, removes handled items, rechecks sensitivity
 
 test("restart after quiet hours projects unscanned source events into one digest", async () => {
   quiet();
+  startChannel();
   addAction(2);
   advance(8 * 3600000);
   // Both source events happened while quiet, even though no sender was running then.
@@ -519,6 +944,7 @@ test("restart after quiet hours projects unscanned source events into one digest
 
 test("recovery spanning two projection batches sends one quiet digest and does not hold ordinary messages", async () => {
   quiet();
+  startChannel();
   // Insert one ordinary item amongst 33 quiet-hour members. None has been projected yet.
   advance(8 * 3600000);
   addAction(2);
@@ -543,6 +969,7 @@ test("recovery spanning two projection batches sends one quiet digest and does n
 
 const startQuietBacklog = (count: number) => {
   quiet();
+  startChannel();
   store.uow.run((tx) =>
     tx.human_actions.put(project_id, { ...action, status: "done" }),
   );
@@ -631,6 +1058,7 @@ test("an awake projection cannot overwrite a quiet scan committed by a concurren
 
 test("digest retries preserve the approved budget and membership across restart and local commit failure", async () => {
   quiet();
+  startChannel();
   addAction(2);
   await sender().tick();
   advance(8 * 3600000);
@@ -671,6 +1099,7 @@ test("digest retries preserve the approved budget and membership across restart 
 
 test("a digest is claimed atomically by concurrent senders and retry drops newly handled members", async () => {
   quiet();
+  startChannel();
   addAction(2);
   await sender().tick();
   advance(8 * 3600000);
@@ -702,6 +1131,7 @@ test("a digest is claimed atomically by concurrent senders and retry drops newly
 });
 
 test("a concurrent write after projection invalidates the batch; next tick uses fresh sensitivity", async () => {
+  startChannel();
   const other = Store.open({ dataDir: dir });
   try {
     const active = sender();
@@ -726,6 +1156,7 @@ test("a concurrent write after projection invalidates the batch; next tick uses 
 });
 
 test("an external edit during send is not mistaken for our settlement audit", async () => {
+  startChannel();
   addAction(2);
   const active = sender({
     adapters: {
@@ -748,12 +1179,14 @@ test("an external edit during send is not mistaken for our settlement audit", as
 });
 
 test.each([false, true])(
-  "production-size first enable bounds computation, replay writes and writer lock time (quiet overflow: %s)",
+  "production-size live backlog bounds computation, replay writes and writer lock time (quiet overflow: %s)",
   async (quietOverflow) => {
+    config = { ...config, policy: { ...config.policy, max_per_minute: 100 } };
     if (quietOverflow) {
       quiet();
       now = "2026-01-01T22:00:00.000Z";
     }
+    startChannel();
     // Keep the creation facts at the end of the stream ordering (a worst-case linear find).
     store.uow.run((tx) => {
       store.database
