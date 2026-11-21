@@ -25,6 +25,7 @@ import {
   refreshRunTargetWait,
   repairWakeTarget,
   resumableReviewWithdrawal,
+  retirementOwnsSession,
   retireObsoleteQueuedRun,
   retireRecoveryQueuedRun,
   reviewRunWakeDisposition,
@@ -1001,6 +1002,14 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             ...guard,
+            ...(retirementOwnsSession(job.a)
+              ? {
+                  retirement_owner: {
+                    project_id: project,
+                    assignment_id: job.a.id,
+                  },
+                }
+              : {}),
             ...(preflight ? { resource_preflight: preflight } : {}),
             before_send: () => {
               if (

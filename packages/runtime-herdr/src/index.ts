@@ -489,7 +489,7 @@ export class HerdrRuntime implements Runtime {
             doorbell,
           ],
           options?.before_send ?? (() => true),
-          (guard || options?.resource_preflight) &&
+          (guard || options?.retirement_owner || options?.resource_preflight) &&
             (async (raw) => {
               try {
                 if (
@@ -497,18 +497,25 @@ export class HerdrRuntime implements Runtime {
                   !(await options.resource_preflight())
                 )
                   return false;
-                if (!guard) return true;
+                if (!guard && !options?.retirement_owner) return true;
                 // Read through the reserved slot, not the queue (capacity may be one).
                 const terminalState = async () => {
                   const t: Terminal = JSON.parse(
                     await raw.exec(["get", ref.terminal_ref, "--json"]),
                   );
-                  this.checkTerminal(ref, t);
+                  if (options?.retirement_owner)
+                    this.checkRetirementTerminal(
+                      ref,
+                      options.retirement_owner,
+                      t,
+                    );
+                  else this.checkTerminal(ref, t);
                   return t.address === ref.terminal_ref && t.state === "live"
                     ? (t.status?.state ?? "unknown")
                     : undefined;
                 };
                 const before = await terminalState();
+                if (!guard) return before === "idle";
                 if (guard.state === "done") return before === "done";
                 if (before !== "unknown" && before !== "idle") return false;
                 // A transcript end is a hint, not a condition hc can enforce.

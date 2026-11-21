@@ -36,6 +36,8 @@ export interface RuntimeLaunchRecovery {
   ): Promise<RuntimeResult<RuntimeRef>>;
 }
 export interface RuntimeWakeOptions {
+  /** A retirement-held ref must still belong to this owner at the send slot. */
+  readonly retirement_owner?: RetirementIdentity;
   readonly if_idle?: boolean;
   /** For exact states hc cannot compare with --if. Re-read after the send slot is held.
    * Unknown requires additional positive evidence from this exact harness turn. */

@@ -413,6 +413,7 @@ test.each(["host-ops", "launch"] as const)(
       await f.tick();
       expect(retire).toHaveBeenCalledOnce();
       expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+      expect(f.state().assignments[0]?.idle_retirement?.phase).toBe("waiting");
       expect(f.state().assignments[0]?.runtime_ref).toEqual(f.a.runtime_ref);
     } finally {
       f.store.close();
@@ -507,57 +508,76 @@ test("lost acknowledgements preserve the fence; restart only observes exit and n
   }
 });
 
-test("no pidfd: recheck exit without signalling, keep the session usable and resolve only its notice", async () => {
-  const f = setup(":memory:", 2);
-  const evidence = {
-    stage: "probe",
-    reason: "pidfd_unavailable",
-    terminal_state: "live",
-    exit_code: 20,
-  };
-  const retire = vi.fn(async () => ({
-    ok: true,
-    value: { outcome: "withdrawn", evidence },
-  }));
-  Object.assign(f.runtime, { retire_idle: retire });
-  try {
-    for (const minute of [0, 1, 3, 7]) {
-      f.setTime(`2030-01-01T02:0${minute}:00Z`);
-      await f.tick();
-    }
-    expect(retire).toHaveBeenCalledOnce();
-    expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
-    expect(f.runtime.status).not.toHaveBeenCalled();
-    expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
-      phase: "waiting",
-      evidence,
-    });
-    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
-    expect(
-      f
-        .state()
-        .events.filter((e) => e.type === "session_maintenance_attention"),
-    ).toMatchObject([
-      { payload: { evidence, notice: expect.stringContaining("只复查退出") } },
-    ]);
-    expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
-      { status: "pending" },
-    ]);
-    f.runtime.observe_retirement.mockResolvedValue({
+test.each(["alive", "runtime_conflict"] as const)(
+  "no pidfd: %s recheck retains credentials and gives ownership-safe guidance until exit",
+  async (observation) => {
+    const f = setup(":memory:", 2);
+    const evidence = {
+      stage: "probe",
+      reason: "pidfd_unavailable",
+      terminal_state: "live",
+      exit_code: 20,
+    };
+    const retire = vi.fn(async () => ({
       ok: true,
-      value: "exited",
-    });
-    f.setTime("2030-01-01T02:12:00Z");
-    await f.tick();
-    expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
-      { status: "resolved" },
-    ]);
-    expect(f.store.verifyToken(f.token.token)).toBeUndefined();
-    expect(retire).toHaveBeenCalledOnce();
-  } finally {
-    f.store.close();
-  }
-});
+      value: { outcome: "withdrawn", evidence },
+    }));
+    Object.assign(f.runtime, { retire_idle: retire });
+    if (observation === "runtime_conflict")
+      f.runtime.observe_retirement.mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_conflict", message: "owner changed" },
+      });
+    try {
+      for (const minute of [0, 1, 3, 7]) {
+        f.setTime(`2030-01-01T02:0${minute}:00Z`);
+        await f.tick();
+      }
+      expect(retire).toHaveBeenCalledOnce();
+      expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
+      expect(f.runtime.status).not.toHaveBeenCalled();
+      expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
+        phase: "waiting",
+        evidence,
+      });
+      expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+      expect(
+        f
+          .state()
+          .events.filter((e) => e.type === "session_maintenance_attention"),
+      ).toMatchObject([
+        {
+          payload: { evidence, notice: expect.stringContaining("只复查退出") },
+        },
+      ]);
+      const notice = f
+        .state()
+        .events.find((e) => e.type === "session_maintenance_attention")
+        ?.payload.notice;
+      expect(notice).toContain("只读核对终端地址、项目、指派和启动代次");
+      if (observation === "runtime_conflict") {
+        expect(notice).toContain("runtime_conflict");
+        expect(notice).not.toContain("cardigan assignment stop");
+      }
+      expect(
+        f.store.listNotifications({ project_id: f.project }),
+      ).toMatchObject([{ status: "pending" }]);
+      f.runtime.observe_retirement.mockResolvedValue({
+        ok: true,
+        value: "exited",
+      });
+      f.setTime("2030-01-01T02:12:00Z");
+      await f.tick();
+      expect(
+        f.store.listNotifications({ project_id: f.project }),
+      ).toMatchObject([{ status: "resolved" }]);
+      expect(f.store.verifyToken(f.token.token)).toBeUndefined();
+      expect(retire).toHaveBeenCalledOnce();
+    } finally {
+      f.store.close();
+    }
+  },
+);
 
 test("a published role waits for retirement of the same ref; neither missing status nor another session can revoke its token", async () => {
   const f = setup(":memory:", 1);

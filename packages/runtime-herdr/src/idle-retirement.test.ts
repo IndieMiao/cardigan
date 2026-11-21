@@ -55,6 +55,23 @@ const options = () => ({
   terminate_ms: 1,
   before_signal: () => true,
 });
+test("legacy retirement-held wake rechecks live ownership inside the send slot", async () => {
+  const f = adapter(),
+    runtime = await f.create();
+  const guard = { if_idle: true, retirement_owner: options() };
+  Object.assign(f.terminal, { status: { state: "idle" } });
+  expect(value(await runtime.observe_retirement(ref, options()))).toBe("alive");
+  f.terminal.labels.assignment = "A-2";
+  expect(value(await runtime.wake(ref, "bell", guard))).toEqual({
+    sent: false,
+    withdrawn: true,
+  });
+  expect(
+    vi.mocked(f.client.exec).mock.calls.some(([args]) => args[0] === "send"),
+  ).toBe(false);
+  f.terminal.labels.assignment = "A-1";
+  expect(value(await runtime.wake(ref, "bell", guard))).toEqual({ sent: true });
+});
 test.each(["HUP", "TERM", undefined])(
   "retirement uses only HUP/TERM; finish after %s",
   async (finishAfter) => {

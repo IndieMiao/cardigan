@@ -44,6 +44,7 @@ import {
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
+  retirementOwnsSession,
   reviewRunWakeDisposition,
   runnableQueuedRun,
   runsOf,
@@ -67,6 +68,7 @@ import {
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   type MachineLeases,
+  observeRetirementForDispatch,
   type ReadProjectQuota,
   type ReadResourceLimits,
   type ResourceAccess,
@@ -854,11 +856,32 @@ export class Dispatcher {
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
+    const retirementHeld = retirementOwnsSession(a);
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
+      if (
+        retirementHeld &&
+        (await observeRetirementForDispatch(
+          this.options.store,
+          project,
+          a,
+          this.options.runtime,
+          this.clock,
+        )) !== "alive"
+      ) {
+        this.waitForRuntime(project, a);
+        return; // A confirmed exit cleared the ref; claim a fresh launch next tick.
+      }
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
+      if (
+        retirementHeld &&
+        (!observed?.ok || observed.value.process !== "alive")
+      ) {
+        this.waitForRuntime(project, a);
+        return; // Missing, conflicting or exited generic status is not exit proof.
+      }
       if (observed?.ok && observed.value.process === "alive") {
         guard = idleWakeGuard(observed.value);
         if (!guard) return; // A server-side finish never proves the CLI turn has ended.
@@ -980,6 +1003,10 @@ export class Dispatcher {
       live = false;
       replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
     }
+    if (retirementHeld && !live) {
+      this.waitForRuntime(project, a);
+      return; // Catalog/profile/lease changes cannot force-release a held reference.
+    }
     // A reused session keeps the catalog it listed; a new one lists this deploy's.
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
@@ -1098,6 +1125,14 @@ export class Dispatcher {
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
               ...guard,
+              ...(retirementHeld
+                ? {
+                    retirement_owner: {
+                      project_id: project,
+                      assignment_id: a.id,
+                    },
+                  }
+                : {}),
               ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
@@ -1372,6 +1407,7 @@ export class Dispatcher {
         a?.status !== "active" ||
         a.external ||
         !sameRef(a, expected) ||
+        retirementOwnsSession(a) !== retirementOwnsSession(expected) ||
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
         return;

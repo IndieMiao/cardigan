@@ -62,6 +62,7 @@ export {
 } from "./commands/human-action-lifecycle.js";
 export {
   beginIdleSessionRetirement,
+  confirmWaitingRetirementExit,
   settleIdleSessionRetirement,
 } from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";

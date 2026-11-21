@@ -1,17 +1,24 @@
 import {
   type Assignment,
+  type AssignmentId,
   beginIdleSessionRetirement,
   type Clock,
+  confirmWaitingRetirementExit,
   type ProjectId,
   type RetirementEvidence,
   type RetirementSettlement,
   type Runtime,
+  retirementOwnsSession,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
   stoppedByHuman,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import { recordNotification, type Store } from "@cardigan/store";
+import {
+  recordNotification,
+  type Store,
+  type StoreTransactionContext,
+} from "@cardigan/store";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import type { sessionMaintenanceScan } from "./session-maintenance.js";
 
@@ -38,6 +45,66 @@ export function idleRetirementPolicy() {
   if (policy.retry_max_ms < policy.retry_ms)
     throw new Error("Invalid idle retirement retry range");
   return policy;
+}
+
+function revokeRetiredTokens(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  id: AssignmentId,
+) {
+  for (const token of tx.tokensForAssignment(project, id))
+    if (token.revoked_at === null && !tx.revokeToken(token.id))
+      throw new Error("Failed to revoke retired session token");
+}
+
+/** A pending Run may reuse this session, but only retirement can clear it.
+ * Read under the same locks as maintenance; close only the exact waiting ref. */
+export async function observeRetirementForDispatch(
+  store: Store,
+  project: ProjectId,
+  a: Assignment,
+  runtime: Runtime,
+  clock: Clock,
+) {
+  const ref = a.runtime_ref;
+  if (!ref || !runtime.observe_retirement) return "unknown";
+  const unlock = await tryHostOpsLock(store, project, a.id);
+  if (!unlock) return "unknown";
+  try {
+    const unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+    if (!unlockLaunch) return "unknown";
+    try {
+      const current = store.uow.read((tx) => tx.assignments.get(project, a.id));
+      if (
+        current?.idle_retirement?.phase !== "waiting" ||
+        !retirementOwnsSession(current) ||
+        JSON.stringify(current.runtime_ref) !== JSON.stringify(ref)
+      )
+        return "unknown";
+      const observed = await runtime
+        .observe_retirement(ref, { project_id: project, assignment_id: a.id })
+        .catch(() => undefined);
+      if (!observed?.ok || observed.value !== "exited")
+        return observed?.ok ? observed.value : "unknown";
+      return store.uow.run((tx) => {
+        const effect = confirmWaitingRetirementExit(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          a.id,
+          ref,
+          { ids: tx.ids, clock },
+        );
+        if (!effect.ok) return "unknown"; // Stale proof or a Run already started.
+        persistEffect(tx, project, effect.value);
+        revokeRetiredTokens(tx, project, a.id);
+        return "exited";
+      });
+    } finally {
+      await unlockLaunch();
+    }
+  } finally {
+    await unlock();
+  }
 }
 
 /** Shares both existing lock domains with attach/stop and launch/wake. */
@@ -216,9 +283,7 @@ export async function retireIdleSessions(
         );
         persistEffect(tx, project, effect);
         if (effect.events.some((e) => e.type === "session_replaced"))
-          for (const token of tx.tokensForAssignment(project, a.id))
-            if (token.revoked_at === null && !tx.revokeToken(token.id))
-              throw new Error("Failed to revoke retired session token");
+          revokeRetiredTokens(tx, project, a.id);
         for (const event of effect.events.filter(
           (e) => e.type === "session_maintenance_attention",
         ))

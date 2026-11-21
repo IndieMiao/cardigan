@@ -183,7 +183,7 @@ test("idle retirement defers bells and the next legal wake starts exactly one re
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
 
-test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
+async function recoveredWaitingRun() {
   const f = setup(false),
     owner = f.owner(),
     system = { kind: "system" as const, project_id: f.project };
@@ -242,17 +242,84 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
   });
   await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
   expect(f.owner().idle_retirement).toMatchObject({ phase: "waiting" });
+  return { f, queued, retire, owner, token };
+}
+
+test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
+  const { f, queued, retire, owner, token } = await recoveredWaitingRun();
+  vi.mocked(f.runtime.status).mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_not_found", message: "snapshot gap" },
+  });
+  await f.dispatcher.tick();
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
   await f.dispatcher.tick();
   await f.dispatcher.tick();
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
     "dispatched",
   );
   expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(
+    vi.mocked(f.runtime.wake).mock.calls[0]?.[2]?.retirement_owner,
+  ).toEqual({ project_id: f.project, assignment_id: owner.id });
   expect(f.startRun).not.toHaveBeenCalled();
   expect(retire).toHaveBeenCalledOnce();
   expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
   expect(f.store.verifyToken(token.token)).toBeTruthy();
 });
+
+test.each([
+  "runtime_not_found",
+  "runtime_unavailable",
+  "exited",
+  "owner_conflict",
+] as const)(
+  "retirement-held Run with %s waits for exact exit before one fresh launch",
+  async (missing) => {
+    const { f, queued, retire, owner, token } = await recoveredWaitingRun();
+    if (missing === "owner_conflict")
+      vi.mocked(f.runtime.observe_retirement!).mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_conflict", message: "owner changed" },
+      });
+    else if (missing === "exited")
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: true,
+        value: { process: "exited", agent: "done", observed_seq: 2 },
+      });
+    else
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: false,
+        error: { code: missing, message: "missing snapshot" },
+      });
+    await f.dispatcher.tick();
+    await f.dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === queued)).toMatchObject({
+      status: "queued",
+      queue_reason: "runtime_unavailable",
+    });
+    expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+    expect(f.store.verifyToken(token.token)).toBeTruthy();
+    expect(f.startRun).not.toHaveBeenCalled();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.runtime.wake).not.toHaveBeenCalled();
+    vi.mocked(f.runtime.observe_retirement!).mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
+    await f.dispatcher.tick();
+    expect(f.owner().runtime_ref).toBeNull();
+    expect(f.store.verifyToken(token.token)).toBeUndefined();
+    await f.dispatcher.tick();
+    await f.dispatcher.tick();
+    expect(retire).toHaveBeenCalledOnce();
+    expect(f.startRun).toHaveBeenCalledOnce();
+    expect(f.startRun.mock.calls[0]?.[0].run.id).toBe(queued);
+    expect(f.startRun.mock.calls[0]?.[0].replacement).toBeUndefined();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  },
+);
 
 test.each(["triage", "legacy", "complete", "cancel"] as const)(
   "upgraded human-action recovery via %s dispatches once even when the follow-up is deferred",

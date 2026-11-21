@@ -8,6 +8,7 @@ import {
 import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
+  confirmWaitingRetirementExit,
   settleIdleSessionRetirement,
 } from "./idle-session-retirement.js";
 import { queueRun } from "./launch.js";
@@ -157,6 +158,27 @@ test("retirement fences launch without revoking identity; only trusted exit clea
     evidence,
   });
   expect(refused.data.runtime_ref).toEqual(a.runtime_ref);
+  const waiting = apply(pending, refused);
+  const oldRef = a.runtime_ref!;
+  expect(
+    confirmWaitingRetirementExit(
+      waiting,
+      system,
+      a.id,
+      { ...oldRef, terminal_ref: "other" },
+      io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    confirmWaitingRetirementExit(pending, system, a.id, oldRef, io).ok,
+  ).toBe(false);
+  expect(
+    confirmWaitingRetirementExit(waiting, actor(), a.id, oldRef, io).ok,
+  ).toBe(false);
+  expect(
+    value(confirmWaitingRetirementExit(waiting, system, a.id, oldRef, io)).data
+      .runtime_ref,
+  ).toBeNull();
   expect(unknown.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.idle_retirement?.phase).toBe("stopping");
   // Even if a signal attempt reported the same platform error as a read-only probe,

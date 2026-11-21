@@ -1,4 +1,4 @@
-import type { Actor, Assignment } from "../entities.js";
+import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import type { AssignmentId } from "../ids.js";
 import {
   type RetirementSettlement,
@@ -11,6 +11,7 @@ import {
 } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
 import {
+  type CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -75,6 +76,64 @@ export function beginIdleSessionRetirement(
   });
 }
 
+function finishRetirement(d: CommandDraft, state: CommandState, a: Assignment) {
+  // A resumption may enqueue during shutdown, but the fence prevents dispatch.
+  // Preserve that queued Run and its original launch snapshot for the new session.
+  ensure(
+    !state.runs.some(
+      (r) =>
+        r.assignment_id === a.id &&
+        !["queued", "completed", "failed", "cancelled"].includes(r.status),
+    ),
+    "illegal_transition",
+    "Retiring Assignment has new work",
+  );
+  const { idle_retirement: _retirement, session_ref: _session, ...rest } = a;
+  const next: Assignment = {
+    ...rest,
+    runtime_ref: null,
+    runtime_state: ["unknown", "lost"].includes(a.runtime_state)
+      ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
+      : a.runtime_state === "running"
+        ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
+        : a.runtime_state,
+  };
+  d.put("assignments", next);
+  d.emit("session_replaced", d.work(a.work_item_id!).card_id, {
+    assignment_id: a.id,
+    reason: "idle_session_retired",
+    handoff: "空闲会话已回收；保留身份、工作区和分支，下次合法唤醒创建新会话。",
+  });
+  return next;
+}
+
+/** A queued Run prevents a new idle claim. Dispatch may present positive exit
+ * evidence, but only for this exact waiting ref, never for an in-flight stop. */
+export function confirmWaitingRetirementExit(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  observedRef: RuntimeRef,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may confirm retirement",
+    );
+    const a = d.get("assignments", id);
+    ensure(
+      a.idle_retirement?.phase === "waiting" &&
+        retirementOwnsSession(a) &&
+        JSON.stringify(a.runtime_ref) === JSON.stringify(observedRef),
+      "illegal_transition",
+      "Waiting retirement changed",
+    );
+    return finishRetirement(d, state, a);
+  });
+}
+
 /** Host evidence only. Unknown outcomes retain the launch fence across restarts. */
 export function settleIdleSessionRetirement(
   state: CommandState,
@@ -92,7 +151,7 @@ export function settleIdleSessionRetirement(
     );
     const a = d.get("assignments", id),
       pending = a.idle_retirement;
-    if (!pending || pending.phase !== "stopping") return a;
+    if (pending?.phase !== "stopping") return a;
     ensure(
       retirementOwnsSession(a) ||
         (a.runtime_ref === null && stoppedByHuman(state.events, a.id)),
@@ -126,43 +185,20 @@ export function settleIdleSessionRetirement(
         evidence: result.evidence,
         retry,
       });
-      if (!retry) {
+      // A first claim explicitly withdrawn by the business guard never owned an
+      // uncertain target. Do not drop an existing obligation (or an identity
+      // failure) just because work arrived during the last probe.
+      if (
+        !retry &&
+        pending.failures === 0 &&
+        result.evidence.reason === "guard_changed"
+      ) {
         const next: Assignment = identity;
         d.put("assignments", next);
         return next;
       }
     }
-    if (result.outcome === "exited") {
-      // A resumption may enqueue during shutdown, but the fence prevents dispatch.
-      // Preserve that queued Run and its original launch snapshot for the new session.
-      ensure(
-        !state.runs.some(
-          (r) =>
-            r.assignment_id === id &&
-            !["queued", "completed", "failed", "cancelled"].includes(r.status),
-        ),
-        "illegal_transition",
-        "Retiring Assignment has new work",
-      );
-      const { session_ref: _session, ...rest } = identity;
-      const next: Assignment = {
-        ...rest,
-        runtime_ref: null,
-        runtime_state: ["unknown", "lost"].includes(a.runtime_state)
-          ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
-          : a.runtime_state === "running"
-            ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
-            : a.runtime_state,
-      };
-      d.put("assignments", next);
-      d.emit("session_replaced", card, {
-        assignment_id: id,
-        reason: "idle_session_retired",
-        handoff:
-          "空闲会话已回收；保留身份、工作区和分支，下次合法唤醒创建新会话。",
-      });
-      return next;
-    }
+    if (result.outcome === "exited") return finishRetirement(d, state, a);
     const { evidence } = result;
     const outcome =
       result.outcome === "withdrawn" || result.outcome === "observing"
@@ -200,6 +236,20 @@ export function settleIdleSessionRetirement(
         outcome === "uncertain" || retirementObserveOnly(evidence)
           ? "只复查退出，不重发信号"
           : "系统退避重试";
+      // The stop CLI cannot authenticate the owner of a legacy terminal address.
+      // Even a previously verified address must be checked again by the operator.
+      const verifiedLive =
+        (evidence.observation === "alive" &&
+          outcome === "unavailable" &&
+          retirementObserveOnly(evidence)) ||
+        (outcome === "timeout" &&
+          evidence.reason === "still_live" &&
+          evidence.terminal_state === "live");
+      const verifyOwner =
+        "请主机操作员用 hc get 只读核对终端地址、项目、指派和启动代次；无法确认归属时保留会话和凭据，不执行停止";
+      const guidance = verifiedLive
+        ? `${verifyOwner}。仅在归属吻合且确认可中断工作后执行 cardigan assignment stop ${id} --project ${state.project_id}，核对退出结果`
+        : verifyOwner;
       d.emit("session_maintenance_attention", card, {
         assignment_id: id,
         reason:
@@ -209,7 +259,7 @@ export function settleIdleSessionRetirement(
               ? "retirement_unavailable"
               : "retirement_timeout",
         evidence,
-        notice: `${id}（${a.machine_id}）空闲会话保留，凭据未撤销：${retirementReasons[evidence.reason]}（${facts}）。${nextStep}；若要停止，请主机操作员确认可中断工作后执行 cardigan assignment stop ${id} --project ${state.project_id}，核对退出结果；不自动重启。`,
+        notice: `${id}（${a.machine_id}）空闲会话保留，凭据未撤销：${retirementReasons[evidence.reason]}（${facts}）。${nextStep}；${guidance}；不自动重启。`,
       });
     }
     return next;
