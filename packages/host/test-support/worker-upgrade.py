@@ -1,5 +1,6 @@
 """Synthetic filesystem and mocked ownership/installer only; never run sudo or touch a real worker."""
 from pathlib import Path
+import hashlib
 import runpy
 import tarfile
 import tempfile
@@ -26,8 +27,8 @@ class UpgradeTest(unittest.TestCase):
             (self.lib / n).write_text('old-' + n)
         (self.release / 'extra').write_text('new-release')
         (self.live / 'previous').write_text('leave-intact')
-        self.cfg = {'rev': 'c' * 40, 'manifest': {p.name: digest(p) for p in self.release.iterdir()}}
-        self.backup = self.root / ('deploy.bak-' + 'c' * 12)
+        self.cfg = {'project': 'sample', 'rev': 'c' * 40, 'manifest': {p.name: digest(p) for p in self.release.iterdir()}}
+        self.backup = self.root / ('deploy.bak-' + 'c' * 12 + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
         self.calls = []
         for command in ('os.chown', 'os.fchown'):
             m = mock.patch(command)
@@ -65,6 +66,19 @@ class UpgradeTest(unittest.TestCase):
             self.assertEqual((self.lib / (n + '.bak-' + 'c' * 12)).read_text(), 'old-' + n)
         with self.assertRaisesRegex(ValueError, 'existing_deploy_backup'):
             self.run_upgrade('darwin')
+
+    def test_same_release_second_binding_keeps_first_backup(self):
+        self.run_upgrade('darwin')
+        self.cfg['project'] = 'other'
+        other = self.root / 'other-lib'; other.mkdir()
+        for name in names:
+            (other / name).write_text('old-other')
+        upgrade(self.work, self.release, self.live, other, 124, self.cfg, digest, lambda _: None)
+        self.assertEqual(len(list(self.root.glob('deploy.bak-*'))), 2)
+        self.assertEqual((self.backup / 'previous').read_text(), 'leave-intact')
+        for n in names:
+            self.assertEqual((other / n).read_text(), 'new-' + n)
+            self.assertEqual((self.lib / (n + '.bak-' + 'c' * 12)).read_text(), 'old-' + n)
 
     def test_installer_check_fails(self):
         with self.assertRaisesRegex(ValueError, 'check_failed'):

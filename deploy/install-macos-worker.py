@@ -47,6 +47,41 @@ def trusted_json(path, mode=0o600):
         os.close(parent)
 
 
+CONFIG_DIR = {'Darwin': Path('/Library/Cardigan'), 'Linux': Path('/etc/cardigan')}
+PROJECT = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]*')
+
+
+def binding_config(path):
+    cfg = trusted_json(path)
+    project = cfg['project']
+    require(isinstance(project, str) and PROJECT.fullmatch(project))
+    if path.name.startswith('worker-'):
+        require(path.name == f'worker-{project}.json')
+    return cfg
+
+
+def binding_inventory(system):
+    directory = CONFIG_DIR[system]
+    protected(directory)
+    for path in sorted(directory.iterdir()):
+        if path.name != 'worker.json' and not re.fullmatch(r'worker-[A-Za-z0-9_][A-Za-z0-9._-]*\.json', path.name):
+            continue
+        try:
+            cfg = binding_config(path)
+        except (ValueError, KeyError, TypeError, OSError, RecursionError):
+            cfg = None
+        yield path, cfg
+
+
+def select_binding(inventory, project):
+    # Reserve even a malformed named config's filename. Never fall back to a
+    # legacy binding of the same name when the requested config is ambiguous.
+    matches = [(path, cfg) for path, cfg in inventory
+               if path.name == f'worker-{project}.json' or cfg and cfg['project'] == project]
+    require(len(matches) == 1 and matches[0][1] is not None)
+    return matches[0]
+
+
 def directories(account, root):
     project = trusted_json(root / '.cardigan-worker')['project']
     require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', project) is not None)
@@ -174,7 +209,9 @@ def apply(account, root):
 
 def main(system='Darwin'):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True)
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument('--config')
+    target.add_argument('--project')
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument('--dry-run', action='store_true')
     modes.add_argument('--check', action='store_true')
@@ -186,12 +223,36 @@ def main(system='Darwin'):
                                     'create private worker directories', 'install protected helper and lock inodes'],
                           'manual': ['account', 'signed-app', 'tools', 'ssh', 'tcc', 'login']}))
         return
-    config = trusted_json(Path(args.config))
+    if args.config:
+        path = Path(args.config)
+        config = binding_config(path)
+        if path.parent == CONFIG_DIR[system] and (path.name == 'worker.json' or path.name.startswith('worker-')):
+            select_binding(binding_inventory(system), config['project'])
+        install_binding(config, system, args.apply)
+    elif args.project:
+        _, config = select_binding(binding_inventory(system), args.project)
+        install_binding(config, system, args.apply)
+    else:
+        require(args.check)  # No implicit bulk write.
+        inventory = list(binding_inventory(system))
+        failed = not inventory
+        for path, cfg in inventory:
+            try:
+                require(cfg is not None)
+                select_binding(inventory, cfg['project'])
+                install_binding(cfg, system, False)
+            except Exception:
+                print(json.dumps({'config': path.name, 'installation': 'failed'}))
+                failed = True
+        require(not failed)
+
+
+def install_binding(config, system, apply_changes):
     require(type(config.get('timeout_ms')) is int and 0 < config['timeout_ms'] <= 2147483647)
     account, root = preflight(config, system)
-    if args.apply:
+    if apply_changes:
         apply(account, root)
-    print(json.dumps({'installation': 'checked' if args.check else 'applied', 'uid': account.pw_uid,
+    print(json.dumps({'project': config['project'], 'installation': 'applied' if apply_changes else 'checked', 'uid': account.pw_uid,
                       'capabilities_verified': False, 'remote_enabled': False}))
 
 

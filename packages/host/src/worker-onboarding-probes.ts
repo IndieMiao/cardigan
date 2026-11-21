@@ -253,8 +253,7 @@ export const WORKER_NEXT_ACTION: Record<WorkerProbe, string> = {
   ssh: "在控制主机核对专用私钥和已从可信渠道确认的 Ed25519 host key；不要关闭 StrictHostKeyChecking。",
   account:
     "在 worker 上按 docs/linux-worker.md 核对专用账号、UID/GID、HOME、架构及 sudo 拒绝证据；查询失败或需要密码时由管理员核对策略。",
-  directories:
-    "在 worker 上执行：sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --apply",
+  directories: "按本项目的安装配置检查 worker 目录。",
   tools:
     "在 worker 上按 docs/linux-worker.md 安装固定版本 hc、Node、pnpm、Git 和 Python。",
   helpers:
@@ -270,6 +269,11 @@ export function workerNextAction(
   config: WorkerOnboardingConfig,
 ): string {
   const e = config.worker.execution;
+  if (step === "directories") {
+    const guide = config.worker.os === "darwin" ? "macos" : "linux";
+    const installer = `sudo /usr/bin/python3 -IB /opt/cardigan/deploy/install-${guide}-worker.py --project ${config.worker.project_id}`;
+    return `${installer} --check && ${installer} --apply`;
+  }
   if (step === "helpers") {
     const guide = config.worker.os === "darwin" ? "macos" : "linux";
     return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;

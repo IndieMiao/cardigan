@@ -1,5 +1,7 @@
 """Exercise the wire format and root write policy without real accounts or sudo."""
 import base64
+import contextlib
+import io
 import sys
 import stat
 from types import SimpleNamespace
@@ -69,7 +71,7 @@ class EntryTest(unittest.TestCase):
         # Substitute ownership only; actual filesystem operations, modes, nofollow and checks remain.
         original = os.fstat
         def root_stat(fd):
-            fields = list(original(fd)); fields[4] = 0
+            fields = list(original(fd)); fields[4:6] = [0, os.getgid()]
             return os.stat_result(fields)
         checks = []
         with patch.object(os, 'fstat', root_stat), patch.object(os, 'fchown'):
@@ -79,6 +81,49 @@ class EntryTest(unittest.TestCase):
             self.assertEqual(result[n], api['digest'](old))
             self.assertEqual((backup / n).read_bytes(), old)
             self.assertEqual((target / n).read_bytes(), self.files[n])
+
+    def test_inventory_checks_all_but_writes_only_one_binding(self):
+        m = runpy.run_path(str(DEPLOY / 'install-macos-worker.py'))
+        registry = m['main'].__globals__
+        (self.root / 'worker.json').write_text('{"project":"one", "uid":1, "timeout_ms":10}')
+        other = self.root / 'worker-two.json'
+        other.write_text('{"project":"two", "uid":2, "timeout_ms":10}')
+        def read(path): return json.loads(path.read_bytes())
+        def preflight(cfg, system): return SimpleNamespace(pw_uid=cfg['uid']), self.root / cfg['project']
+        def invoke(system, *args):
+            with patch.object(sys, 'argv', ['installer', *args]): m['main'](system)
+        for system in ('Darwin', 'Linux'):
+            with patch.dict(registry, CONFIG_DIR={system:self.root}, protected=lambda _: None,
+                            trusted_json=read, preflight=preflight), patch.dict(registry, apply=unittest.mock.Mock()):
+                log = io.StringIO()
+                with contextlib.redirect_stdout(log):
+                    invoke(system, '--check')
+                    self.assertEqual({json.loads(l)['project'] for l in log.getvalue().splitlines()}, {'one','two'})
+                    with self.assertRaises(ValueError): invoke(system, '--apply')
+                    bad = self.root / 'worker-broken.json'; bad.write_text('{')
+                    with self.assertRaises(ValueError): invoke(system, '--check')
+                    reports = [json.loads(l) for l in log.getvalue().splitlines()[2:]]
+                    self.assertEqual([r.get('config') for r in reports if r['installation']=='failed'], [bad.name])
+                    self.assertEqual({r['project'] for r in reports if 'project' in r}, {'one','two'})
+                    invoke(system, '--project', 'two', '--apply')
+                    self.assertEqual(registry['apply'].call_args.args[1], self.root / 'two')
+                    bad.unlink()
+                    duplicate = self.root / 'worker-one.json'; duplicate.write_text('{"project":"one"}')
+                    with self.assertRaises(ValueError): invoke(system, '--project', 'one', '--apply')
+                    duplicate.write_text('{"project":"two"}')  # No fallback to worker.json.
+                    with self.assertRaises(ValueError): invoke(system, '--project', 'one', '--apply')
+                    registry['apply'].assert_called_once()
+                    duplicate.unlink()
+
+    def test_project_principal_and_signed_target_cannot_be_substituted(self):
+        legacy = api['LEGACY']
+        tag = api['digest'](b'sample')[:20]
+        boot = legacy.with_name(legacy.name + '-' + tag)
+        self.assertEqual(api['enrollment'](legacy, 'first'), 'cardigan_updater')
+        self.assertEqual(api['enrollment'](boot, 'sample'), 'cgu_' + tag)
+        with self.assertRaises(ValueError): api['enrollment'](boot, 'first')
+        with self.assertRaises(ValueError):
+            api['unpack'](json.dumps(self.bundle).encode(), 'first', lambda *_: None, 100, 0)
 
     def bootstrap_guard(self, name, args, metadata, platform='Linux', acl_path=None):
         source = (DEPLOY / name).read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
@@ -90,7 +135,7 @@ class EntryTest(unittest.TestCase):
         def mac_acl(argv, **kwargs):
             return b'drwx------ root' + (b'\n 0: user:fixture allow write' if argv[-1] == acl_path else b'\n 0: group:everyone deny delete')
         with (patch.object(sys,'argv',['-', *args]), patch.object(Path,'lstat',lookup),
-              patch.object(os,'geteuid',return_value=1001), patch.object(os,'listxattr',side_effect=lambda p, **_: ['system.posix_acl_default'] if str(p)==acl_path else []),
+              patch.object(os,'geteuid',return_value=1001), patch.object(os,'listxattr',create=True,side_effect=lambda p, **_: ['system.posix_acl_default'] if str(p)==acl_path else []),
               patch('platform.system',return_value=platform), patch.object(subprocess,'check_output',side_effect=mac_acl)):
             exec(compile(source, name, 'exec'), {})
         return paths

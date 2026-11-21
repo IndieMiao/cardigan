@@ -75,8 +75,10 @@ def upgrade_files(work, release, live, lib, gid, b, installed, run_installer):
     # The caller holds the protected installation-directory lock. Never overwrite a
     # previous backup; a partially completed upgrade needs an operator, not a retry.
     tag = b['rev'][:12]
-    backup = live.with_name('deploy.bak-' + tag)
-    pending = live.with_name('deploy.new-' + tag)
+    # The release directory is shared; keep a distinct restore point per binding.
+    deploy_tag = tag + '-' + hashlib.sha256(b['project'].encode()).hexdigest()[:20]
+    backup = live.with_name('deploy.bak-' + deploy_tag)
+    pending = live.with_name('deploy.new-' + deploy_tag)
     require(not os.path.lexists(backup) and not os.path.lexists(pending), 'existing_deploy_backup_or_stage')
     mac = b['os'] == 'darwin'
     manifest = b['manifest']
@@ -133,8 +135,7 @@ def upgrade(encoded):
     installer = runpy.run_path(str(release / 'install-macos-worker.py'))
     native = runpy.run_path(str(release / 'worker-primitives.py'))
     live = Path('/opt/cardigan/deploy')
-    config_path = Path('/Library/Cardigan/worker.json' if mac else '/etc/cardigan/worker.json')
-    cfg = installer['trusted_json'](config_path)
+    config_path, cfg = installer['select_binding'](installer['binding_inventory'](platform.system()), b['project'])
     account = pwd.getpwnam(cfg['account'])
     require(cfg['project'] == b['project'] and cfg['root'] == b['root'] and
             cfg['account'] == b['account'] and cfg['uid'] == account.pw_uid > 0 and

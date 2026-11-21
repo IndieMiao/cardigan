@@ -129,6 +129,7 @@ export function workerWizardForm(
       Number(gid),
       home,
       work,
+      project,
     ),
   };
 }
@@ -140,9 +141,10 @@ function targetCommands(
   gid: number,
   home: string,
   work: string,
+  project: string,
 ) {
   const py = mac ? "/opt/homebrew/bin/python3" : "/usr/bin/python3";
-  const install = `sudo ${py} /opt/cardigan/deploy/install-${mac ? "macos" : "linux"}-worker.py --config ${mac ? "/Library/Cardigan" : "/etc/cardigan"}/worker.json`;
+  const install = `sudo ${py} /opt/cardigan/deploy/install-${mac ? "macos" : "linux"}-worker.py --project ${project}`;
   return {
     account: mac
       ? [
