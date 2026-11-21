@@ -21,6 +21,10 @@ class CollectorTest(unittest.TestCase):
     def hc_fixture(self, system, change=None):
         labels = dict(cardigan='1', project='test', assignment='A-1', run='R-8')
         t = dict(labels=labels, address='t2', state='live', pid=None, created_ms=15, foreground={'pid':42})
+        if change == 'no_candidates':
+            t.update(state='finished', foreground=None)
+        elif change == 'partial':
+            t['pid'] = 43
         snapshots = [t, {**t, **({'foreground':{'pid':43}} if change == 'foreground' else
                                 {'state':'finished'} if change == 'exit' else {})}]
         with tempfile.TemporaryDirectory() as raw, socket.socket(socket.AF_UNIX) as server, contextlib.ExitStack() as stack:
@@ -47,20 +51,31 @@ class CollectorTest(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, XDG_RUNTIME_DIR=str(root)))
             stack.enter_context(patch('os.getpgid',return_value=42))
             birth = dict(uid=os.getuid(),start=100)
-            observations = [birth, dict(birth,start=101) if change == 'birth' else birth]
-            stack.enter_context(patch.dict(probe['terminals'].__globals__,native={'identity': lambda *x: observations.pop(0)},
-                                           process=lambda p:[{'pid':p}]))
+            def sample(p):
+                if change in ('unavailable', 'partial') and p == 42:
+                    raise OSError('synthetic unavailable sample')
+                return [{'pid':p}]
+            def identity(_, pid, *args):
+                if change == 'unverified':
+                    return None
+                return dict(birth, start=101 if change == 'birth' and sampler.called else 100)
+            sampler = MagicMock(side_effect=sample)
+            stack.enter_context(patch.dict(probe['terminals'].__globals__, native={'identity': identity}, process=sampler))
             rows,pids = probe['terminals'](root,'s',labels,None,system)
             thread.join(2); self.assertFalse(thread.is_alive())
-            self.assertEqual([m for m,_ in requests],['hello','terminal.list','terminal.get','terminal.read','terminal.get'])
-            self.assertEqual(requests[3][1],{'terminal':'t2','lines':0})
+            methods = ['hello','terminal.list'] + ([] if change == 'no_candidates' else ['terminal.get'])
+            self.assertEqual([m for m,_ in requests], methods + ['terminal.read','terminal.get'])
+            self.assertEqual(requests[-2][1],{'terminal':'t2','lines':0})
             if change != 'exit':
                 self.assertEqual(rows[0]['screen'],['[redacted]']*11+['working'])
-            self.assertEqual(pids, [] if change else [{'pid':42}])
+            expected = {None: [{'pid':42}], 'partial': [{'pid':43}], 'no_candidates': []}
+            self.assertEqual(pids, expected.get(change))
+            if change == 'unavailable':
+                sampler.assert_called_once_with(42)
 
     def test_hc_fixed_protocol_and_birth_fence(self):
         for system in ['linux','darwin']:
-            for change in [None,'foreground','exit','birth']:
+            for change in [None,'foreground','exit','birth','unavailable','unverified','partial','no_candidates']:
                 with self.subTest(system=system,change=change): self.hc_fixture(system,change)
 
     def test_transcript_metadata_no_links(self):
@@ -110,15 +125,51 @@ class CollectorTest(unittest.TestCase):
                 self.assertEqual(evidence['events'],[dict(type='response_item',time='2026-01-01T00:00:00Z')]); self.assertNotIn('private',json.dumps(evidence))
                 wrong=probe['main'](dict(conf,target='changed'));self.assertIsNone(wrong['markers']);self.assertIsNone(wrong['events'])
 
-                # Local launch UUID is an hc label only. Local CLI home is the
-                # Assignment root, not the remote generations/sessions layout.
-                local_logs=base/'codex/sessions'; local_logs.mkdir(parents=True)
-                (local_logs/'local.jsonl').write_text(json.dumps(dict(type='assistant',timestamp='2026-01-01T00:00:00Z')))
-                uid='cad0f00d-aaaa-4bbb-8000-aaaaaaaaaaaa'
-                with patch.dict(probe['main'].__globals__,terminals=MagicMock(return_value=([{'address':'t2'}],[]))):
-                    local=probe['main'](dict(conf,local=True,terminal='t2',generation=uid))
-                    self.assertIsNone(local['markers']); self.assertEqual(local['events'][0]['type'],'assistant')
-                    self.assertEqual(probe['main'].__globals__['terminals'].call_args.args[2]['generation'],uid)
+                # Journal fallback also distinguishes an unreadable saved PID
+                # from an hc observation with no candidates.
+                saved = dict(machine='pin', terminal=generation, uid=3333, pid=42, process_group=42, start='one')
+                no_sample = MagicMock(side_effect=OSError('synthetic unavailable sample'))
+                primitives = dict(project_account=lambda _: None, identity=lambda *args: saved)
+                with patch.dict(probe['main'].__globals__, native=primitives, terminals=lambda *args: ([], []), process=no_sample):
+                    self.assertEqual(probe['main'](conf)['processes'], [])
+                    self.assertIsNone(probe['main'](dict(conf, process=saved))['processes'])
+                    no_sample.assert_called_once_with(42)
+
+    def test_local_replacement_does_not_inherit_assignment_log(self):
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            root = Path(raw).resolve()
+            replacement = 'cad0f00d-aaaa-4bbb-8000-aaaaaaaaaaaa'
+            user = SimpleNamespace(pw_name='worker', pw_gid=3333, pw_dir=root)
+            for name in ('getuid', 'geteuid', 'getegid'):
+                stack.enter_context(patch('os.' + name, return_value=3333))
+            stack.enter_context(patch('platform.system', return_value='Linux'))
+            stack.enter_context(patch('pwd.getpwuid', return_value=user))
+            stack.enter_context(patch('grp.getgrgid', return_value=SimpleNamespace(gr_name='worker')))
+            conf = dict(root=str(root), project='fixture', assignment='A-1', local=True, generation=replacement,
+                        launch_run='R-2', terminal='t2', session='s', target='pin', user='worker', gid=3333,
+                        harness='codex', live=True, platform='linux', helpers=[], process=None)
+            terminals = [{'address': 't2', 'state': 'live', 'screen': ['idle']}]
+            processes = [dict(pid=42, elapsed='00:03', cpu=0.5, command='codex')]
+            def observe(home, session, labels, pinned, system):
+                self.assertEqual(labels, dict(cardigan='1', project='fixture', assignment='A-1', run='R-2', generation=replacement))
+                self.assertEqual(pinned, 't2')
+                return terminals, processes
+            stack.enter_context(patch.dict(probe['main'].__globals__, native={'project_account': lambda _: None}, terminals=observe))
+            # R-1 left the only (and thus newest) transcript. R-2 has a new
+            # terminal and UUID, but has not created a transcript of its own.
+            logs = root/'runs/fixture/A-1/codex/sessions'; logs.mkdir(parents=True)
+            old = logs/'old.jsonl'
+            history = b'{"type":"event_msg","timestamp":"2026-11-01T00:00:01Z"}\n'
+            old.write_bytes(history)
+            read_logs = MagicMock(wraps=probe['log_events'])
+            with patch.dict(probe['main'].__globals__, log_events=read_logs):
+                evidence = probe['main'](conf)
+                self.assertIsNone(evidence['events'])
+                read_logs.assert_not_called()
+            self.assertEqual(evidence['terminals'], terminals)
+            self.assertEqual(evidence['processes'], processes)
+            self.assertIsNone(evidence['markers'])
+            self.assertEqual(old.read_bytes(), history)
 
     def test_account_and_claim_before_observation(self):
         user = SimpleNamespace(pw_name='worker',pw_gid=3333,pw_uid=3333,pw_dir='/test/home')

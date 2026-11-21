@@ -161,6 +161,7 @@ def terminals(home, session, labels, pinned, system):
             if hello.get('generation') != 1 or hello.get('framed') is not False:
                 raise ValueError()
             result, processes = [], []
+            incomplete = False
             for t in rpc('terminal.list', dict(all=True, labels=labels))['terminals']:
                 address = t['address']
                 if (not re.fullmatch(r't[0-9a-z]{1,12}', address) or (pinned and address != pinned)
@@ -178,21 +179,30 @@ def terminals(home, session, labels, pinned, system):
                 # The first confirmation occurs *after* recording process births.
                 confirmed = rpc('terminal.get', dict(terminal=address)) if before else t
                 if not same_terminal(confirmed):
+                    incomplete = True
                     continue
                 tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
                 rows = {p: optional(lambda: process(p)) for p in pids(confirmed) & before.keys()
                         if before[p] and before[p]['uid'] == os.getuid()}
                 after = rpc('terminal.get', dict(terminal=address))
                 if not same_terminal(after):
+                    incomplete = True
                     continue
-                for p in pids(after) & rows.keys():
-                    if rows[p] and optional(lambda: observe(p)) == before[p]:
-                        processes.extend(rows[p])
+                for p in pids(after):
+                    birth = before.get(p)
+                    if not birth or optional(lambda: observe(p)) != birth:
+                        incomplete = True
+                    elif birth['uid'] == os.getuid():
+                        if rows.get(p):
+                            processes.extend(rows[p])
+                        else:
+                            incomplete = True
                 activity = (after.get('status') or {}).get('state')
                 result.append(dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail))
                 if len(result) == 4:
                     break
-            return result, processes
+            # Keep verified rows; never turn an unreadable candidate into proof of absence.
+            return result, (None if incomplete and not processes else processes)
 
 
 def process(pid):
@@ -231,7 +241,6 @@ def main(c):
                                    root=c['root'], project=project))
     base = Path(c['root'], 'runs', project, assignment)
     published = generation and not c['local']
-    session_dir = base / 'sessions' / generation if published else base
     labels = dict(cardigan='1', project=project, assignment=assignment)
     if c['launch_run']:
         labels['run'] = c['launch_run']
@@ -245,10 +254,16 @@ def main(c):
     if c['live'] and saved and saved['machine'] == c['target'] and saved['terminal'] == generation and saved['uid'] == os.getuid():
         def observed():
             return native['identity'](saved['machine'], saved['pid'], generation, saved['process_group'])
-        if observed() == saved:
+        birth = optional(observed)
+        if birth == saved:
             rows = optional(lambda: process(saved['pid']))
-            if rows and observed() == saved and not any(r['pid'] == saved['pid'] for r in processes or []):
-                processes = (processes or []) + rows
+            if rows and optional(observed) == saved:
+                if not any(r['pid'] == saved['pid'] for r in processes or []):
+                    processes = (processes or []) + rows
+            elif not processes:
+                processes = None
+        elif birth is None and not processes:
+            processes = None
 
     def markers():
         with directory(base / 'generations' / generation) as d:
@@ -258,7 +273,9 @@ def main(c):
             return [k for k in MARKS if optional(lambda: stat.S_ISREG(os.stat(k, dir_fd=d, follow_symlinks=False).st_mode))]
     marks = optional(markers) if published else None
     logs = {'codex': 'codex/sessions', 'claude-code': 'claude/projects', 'pi': 'pi/sessions'}.get(c['harness'])
-    events = optional(lambda: log_events(session_dir / logs)) if c['live'] and logs and (marks or (c['local'] and hc and hc[0])) else None
+    # Local CLI homes are shared across replacement sessions. A matching hc
+    # terminal does not bind a transcript; do not inspect that shared history.
+    events = optional(lambda: log_events(base / 'sessions' / generation / logs)) if c['live'] and logs and marks else None
     def digest(path):
         with directory(Path(path).parent) as fd:
             return hashlib.sha256(read(fd, Path(path).name, 2*1024*1024)).hexdigest()
