@@ -8,7 +8,9 @@ import {
 import type { CommandState } from "./core.js";
 import {
   beginIdleSessionRetirement,
+  confirmWaitingRetirementExit,
   settleIdleSessionRetirement,
+  trackRetirementDispatch,
 } from "./idle-session-retirement.js";
 import { queueRun } from "./launch.js";
 import { recordSessionMaintenance } from "./session-maintenance.js";
@@ -103,10 +105,111 @@ test("maintenance publication basis preserves project/actor scope and sequence o
   expect(sessionMaintenanceBasis(before, owner)).toBe(basis);
 });
 
+test("retirement dispatch diagnostics follow one waiting session, not the Run or terminal address alone", () => {
+  const initial = setup(),
+    owner = initial.assignments[0]!,
+    run = initial.runs[0]!,
+    ref = owner.runtime_ref!;
+  const io = { ...ports(), clock: { now: () => now } };
+  const a = {
+    ...owner,
+    idle_retirement: {
+      phase: "waiting" as const,
+      runtime_ref: ref,
+      started_at: now,
+      threshold_minutes: 60,
+      failures: 2,
+    },
+  };
+  const state = {
+    ...initial,
+    assignments: [a],
+    runs: [{ ...run, status: "queued" as const }],
+  };
+  const conflict = { source: "owner", status: "runtime_conflict" } as const;
+  expect(
+    trackRetirementDispatch(state, actor(), a, run.id, conflict, io).ok,
+  ).toBe(false);
+  const first = value(
+    trackRetirementDispatch(state, system, a, run.id, conflict, io),
+  );
+  const waiting = apply(state, first),
+    current = waiting.assignments[0]!;
+  const eventId = first.events[0]!.id;
+  expect(current.idle_retirement).toMatchObject({
+    failures: 2,
+    dispatch_wait: { ...conflict, event_id: eventId },
+  });
+  expect(
+    value(
+      trackRetirementDispatch(waiting, system, current, run.id, conflict, io),
+    ).changes,
+  ).toEqual([]);
+  expect(
+    value(trackRetirementDispatch(waiting, system, a, run.id, "woken", io))
+      .changes,
+  ).toEqual([]);
+  const reusedAddress = {
+    ...current,
+    runtime_ref: {
+      ...ref,
+      launch_generation: { run_id: run.id, generation: "other" },
+    },
+  };
+  expect(
+    value(
+      trackRetirementDispatch(
+        waiting,
+        system,
+        reusedAddress,
+        run.id,
+        "woken",
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  const changed = value(
+    trackRetirementDispatch(
+      waiting,
+      system,
+      current,
+      run.id,
+      { source: "owner", status: "runtime_timeout" },
+      io,
+    ),
+  );
+  expect(changed.events.map((e) => e.type)).toEqual([
+    "retirement_dispatch_wait_changed",
+  ]);
+  const resumed = value(
+    trackRetirementDispatch(
+      apply(waiting, changed),
+      system,
+      current,
+      run.id,
+      "woken",
+      io,
+    ),
+  );
+  expect(resumed.events).toMatchObject([
+    {
+      type: "retirement_dispatch_resumed",
+      payload: { retirement_wait_event_id: eventId },
+    },
+  ]);
+  expect(resumed.token_requests).toEqual([]);
+  expect(apply(waiting, resumed).assignments[0]?.runtime_ref).toEqual(ref);
+});
+
 test("retirement fences launch without revoking identity; only trusted exit clears the exact session", () => {
   const state = setup(),
     a = state.assignments[0]!,
     io = { ...ports(), clock: { now: () => now } };
+  const evidence = {
+    stage: "HUP",
+    reason: "hc_failed",
+    runtime_code: "runtime_timeout",
+  } as const;
   const begun = value(beginIdleSessionRetirement(state, system, a.id, 60, io));
   const pending = apply(state, begun);
   expect(begun.token_requests).toEqual([]);
@@ -124,10 +227,72 @@ test("retirement fences launch without revoking identity; only trusted exit clea
     ),
   ).toMatchObject({ ok: false });
   const unknown = value(
-    settleIdleSessionRetirement(pending, system, a.id, "uncertain", 60000, io),
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "uncertain", evidence },
+      60000,
+      io,
+    ),
   );
+  const refused = value(
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "withdrawn", evidence },
+      60000,
+      io,
+    ),
+  );
+  expect(refused.events[0]).toMatchObject({
+    type: "idle_session_retirement_withdrawn",
+    payload: { assignment_id: a.id, retry: true, evidence },
+  });
+  expect(refused.data.idle_retirement).toMatchObject({
+    phase: "waiting",
+    evidence,
+  });
+  expect(refused.data.runtime_ref).toEqual(a.runtime_ref);
+  const waiting = apply(pending, refused);
+  const oldRef = a.runtime_ref!;
+  expect(
+    confirmWaitingRetirementExit(
+      waiting,
+      system,
+      a.id,
+      { ...oldRef, terminal_ref: "other" },
+      io,
+    ).ok,
+  ).toBe(false);
+  expect(
+    confirmWaitingRetirementExit(pending, system, a.id, oldRef, io).ok,
+  ).toBe(false);
+  expect(
+    confirmWaitingRetirementExit(waiting, actor(), a.id, oldRef, io).ok,
+  ).toBe(false);
+  expect(
+    value(confirmWaitingRetirementExit(waiting, system, a.id, oldRef, io)).data
+      .runtime_ref,
+  ).toBeNull();
   expect(unknown.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.idle_retirement?.phase).toBe("stopping");
+  // Even if a signal attempt reported the same platform error as a read-only probe,
+  // neither new nor legacy signal-capable claims can release the dispatch fence.
+  expect(
+    settleIdleSessionRetirement(
+      apply(pending, unknown),
+      system,
+      a.id,
+      {
+        outcome: "observing",
+        evidence: { stage: "HUP", reason: "pidfd_unavailable" },
+      },
+      60000,
+      io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
   const changed = {
     ...pending,
     assignments: pending.assignments.map((owner) => ({
@@ -136,10 +301,24 @@ test("retirement fences launch without revoking identity; only trusted exit clea
     })),
   };
   expect(
-    settleIdleSessionRetirement(changed, system, a.id, "exited", 60000, io),
+    settleIdleSessionRetirement(
+      changed,
+      system,
+      a.id,
+      { outcome: "exited" },
+      60000,
+      io,
+    ),
   ).toMatchObject({ ok: false });
   const exited = value(
-    settleIdleSessionRetirement(pending, system, a.id, "exited", 60000, io),
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "exited" },
+      60000,
+      io,
+    ),
   );
   expect(exited.data.runtime_ref).toBeNull();
   expect(exited.data.role_version).toBe(a.role_version);
@@ -150,7 +329,7 @@ test("retirement fences launch without revoking identity; only trusted exit clea
         apply(pending, exited),
         system,
         a.id,
-        "exited",
+        { outcome: "exited" },
         60000,
         io,
       ),

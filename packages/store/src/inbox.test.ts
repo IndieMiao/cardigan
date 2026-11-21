@@ -6,6 +6,7 @@ import {
   LIVE_NOTIFICATION_STATUSES,
   reassignNotifications,
   recordNotification,
+  resolveRetirementNotifications,
   retireReconcileNotifications,
 } from "./inbox.js";
 import { Store } from "./store.js";
@@ -604,4 +605,75 @@ test("resolved reconcile notices and old occurrences retire; the new unresolved 
     },
     { clock: { now: () => time } },
   );
+});
+
+test("a confirmed human release resolves only preceding retirement notices for its owner", () => {
+  withTempStore((store) => {
+    store.uow.run((tx) => {
+      tx.cards.put(project_id, card());
+      const emit = (
+        type: string,
+        id: string,
+        reason: string,
+        waitId?: string,
+      ) => {
+        const seq = tx.ids.nextEventSequence(project_id, card_id);
+        const e = {
+          ...event({ seq, card_id }),
+          id: tx.ids.nextEventId(),
+          card_id,
+          type,
+          payload: {
+            assignment_id: id,
+            reason,
+            ...(waitId ? { retirement_wait_event_id: waitId } : {}),
+          },
+        };
+        tx.events.append(project_id, e);
+        if (type === "session_maintenance_attention")
+          recordNotification(store.database, {
+            project_id,
+            event_id: e.id,
+            seq,
+            card_id,
+            kind: "run_attention",
+            recipient: { kind: "pm_ops" },
+          });
+        return e.id;
+      };
+      emit("session_maintenance_attention", "A-1", "retirement_unavailable");
+      emit("session_maintenance_attention", "A-2", "retirement_timeout");
+      emit("session_maintenance_attention", "A-1", "identity_unproven");
+      emit("assignment_stop_released", "A-1", "");
+      emit("session_maintenance_attention", "A-1", "retirement_pending");
+      const stale = emit(
+        "session_maintenance_attention",
+        "A-1",
+        "retirement_dispatch_wait",
+      );
+      const current = emit(
+        "session_maintenance_attention",
+        "A-1",
+        "retirement_dispatch_wait",
+      );
+      // Same owner/another session, or another owner with a matching event ID, cannot resolve this wait.
+      emit("retirement_dispatch_resumed", "A-2", "", stale);
+      emit("retirement_dispatch_resumed", "A-1", "", current);
+      resolveRetirementNotifications(
+        store.database,
+        project_id,
+        "2030-01-01T00:01:00Z",
+      );
+    });
+    expect(
+      store.listNotifications({ project_id }).map((n) => n.status),
+    ).toEqual([
+      "resolved",
+      "pending",
+      "pending",
+      "pending",
+      "pending",
+      "resolved",
+    ]);
+  });
 });

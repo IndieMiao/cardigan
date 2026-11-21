@@ -2,6 +2,7 @@ import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
+import { retirementWaitReceipt } from "../retirement-session.js";
 import { transition } from "../transitions.js";
 import {
   type CommandEffect,
@@ -132,6 +133,7 @@ export function stopWorkItemAssignment(
       const next = { ...a, runtime_state, runtime_ref: null };
       d.put("assignments", next);
       d.emit(ASSIGNMENT_STOP_RELEASED, card, {
+        ...retirementWaitReceipt(a),
         assignment_id: a.id,
         cancelled_run_ids: runs.map((r) => r.id),
       });
