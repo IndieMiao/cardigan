@@ -1213,7 +1213,14 @@ export function ProviderForm({
       dirty={dirty}
       secrets={secretValuesOut}
       onSecretsDropped={() => setValues({})}
-      fieldNames={["name", "base_url", "secret_env", "secrets", "env"]}
+      // Editing: a `name` refusal means the Provider is gone; say so above the actions.
+      fieldNames={[
+        ...(creating ? ["name"] : []),
+        "base_url",
+        "secret_env",
+        "secrets",
+        "env",
+      ]}
       reviewFacts={
         creating ? undefined : (
           <SharedFacts label="Provider" name={id} used={used} />
