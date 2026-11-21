@@ -128,6 +128,34 @@ export function reviewRunWakeDisposition(
   );
 }
 
+/** A transport replay can follow run_started. Keep the original review target
+ * authoritative even though ordinary Run-start guards no longer apply. */
+export function reviewReceiptTargetCurrent(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  const binding = run.bell_delivery?.review_target;
+  if (binding) {
+    const target = state.deliveries.find((d) => d.id === binding.delivery_id);
+    if (
+      !target ||
+      target.work_item_id !== owner.work_item_id ||
+      target.subject.value !== binding.target_sha ||
+      target.status === "superseded" ||
+      state.deliveries.some((d) => d.supersedes === target.id)
+    )
+      return false;
+  }
+  if (owner.scope !== "work_item") return true;
+  return !reviewWakeDisposition(
+    state,
+    originalRunTrigger(state, run),
+    owner.work_item_id,
+    true,
+  );
+}
+
 /** Bind a host withdrawal to the immutable trigger, not just the current SHA. */
 export function repairWakeTarget(state: CommandState, run: Run) {
   if (run.kind !== "rework" || run.status !== "dispatched" || run.started_at)

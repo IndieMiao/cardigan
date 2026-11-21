@@ -14,6 +14,7 @@ import {
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
+  idleWakeGuard,
   type ProjectId,
   providerStartFailed,
   type Run,
@@ -34,6 +35,7 @@ import {
   withdrawDispatchStop,
 } from "@cardigan/domain";
 import {
+  armBellReceipt,
   bindRepairAttempt,
   crossRepairSendBoundary,
   deferIfTargetWait,
@@ -575,6 +577,7 @@ export async function retryDispatchedRuns(
         (run.status !== "dispatched" &&
           !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
         run.started_at ||
+        (run.bell_delivery?.run_id === run.id && !!run.bell_delivery.sent_at) ||
         run.dispatch_stop ||
         run.inactivity_stop ||
         stoppedByHuman(state.events, candidate.assignment_id) ||
@@ -798,7 +801,8 @@ export async function retryDispatchedRuns(
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
     const status = await runtime.status(observed.a.runtime_ref);
-    if (!status.ok || status.value.process !== "alive") continue;
+    const guard = status.ok && idleWakeGuard(status.value);
+    if (!guard) continue;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
@@ -930,10 +934,22 @@ export async function retryDispatchedRuns(
           );
           continue;
         }
+        const addressed = job.a.runtime_ref;
+        const arm = () =>
+          !job.run.bell_delivery ||
+          armBellReceipt(
+            store,
+            project,
+            job.run.id,
+            addressed,
+            undefined,
+            job.attempt.review_wake,
+          );
         const result = await runtime.wake(
-          job.a.runtime_ref,
+          addressed,
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
+            ...guard,
             ...(preflight ? { resource_preflight: preflight } : {}),
             before_send: () => {
               if (
@@ -956,7 +972,8 @@ export async function retryDispatchedRuns(
                     clock,
                     job.withdrawn,
                     job.legacyRetry ? legacyRepairAuthority : undefined,
-                  ) === "send"
+                  ) === "send" &&
+                  arm()
                 );
               if (deferIfTargetWait(store, job.attempt, clock)) {
                 return false;
@@ -964,7 +981,8 @@ export async function retryDispatchedRuns(
               return (
                 !options.closing?.() &&
                 currentWakeRun()?.status === "dispatched" &&
-                scope() === reviewPrompt
+                scope() === reviewPrompt &&
+                arm()
               );
             },
           },

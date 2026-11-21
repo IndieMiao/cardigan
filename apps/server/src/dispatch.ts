@@ -28,6 +28,7 @@ import {
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
+  idleWakeGuard,
   isRunCapacityExempt,
   isStandingPm,
   launchSettings,
@@ -49,8 +50,10 @@ import {
   standingRunDormant,
   stoppedByHuman,
   unreadableCommentTrigger,
+  unreceivedBell,
 } from "@cardigan/domain";
 import {
+  armBellReceipt,
   assignmentResourceKeys,
   bindRepairAttempt,
   crossRepairSendBoundary,
@@ -104,6 +107,7 @@ import {
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
+import { checkBellReceipts } from "./bell-receipt.js";
 import {
   CANDIDATE_FEED,
   type Candidate,
@@ -699,6 +703,15 @@ export class Dispatcher {
         }
       }
     });
+    await checkBellReceipts(
+      this.options,
+      project,
+      this.state(project),
+      this.loadState,
+      this.clock,
+      this.dispatchTimeoutMs,
+      () => this.closing,
+    );
     await profileSpan("route.retry_dispatched", () =>
       retryDispatchedRuns(
         {
@@ -819,6 +832,8 @@ export class Dispatcher {
       running && notes.every((n) => !n.run_id || n.run_id === running.id)
         ? running
         : undefined;
+    // A pending inbox note cannot become a second, unmetered initial wake.
+    if (running && unreceivedBell(running)) return;
     if (
       a.external ||
       a.status !== "active" ||
@@ -841,21 +856,17 @@ export class Dispatcher {
     )
       return;
     let live = false;
-    let doneObserved = false;
+    let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
-      if (continuing) {
-        if (!observed?.ok || observed.value.process !== "alive") return;
-        doneObserved = observed.value.agent === "done";
-        // A completed transcript is historical, not a guard on the current
-        // turn. Leave the original note pending without taking a lease or
-        // polling the transcript. Normal finish/confirmed recovery hands it on.
-        if (!doneObserved && observed.value.agent !== "idle") return;
-      }
+      if (observed?.ok && observed.value.process === "alive") {
+        guard = idleWakeGuard(observed.value);
+        if (!guard) return; // A server-side finish never proves the CLI turn has ended.
+      } else if (continuing) return;
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -1090,11 +1101,7 @@ export class Dispatcher {
             runtimeRef,
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
-              ...(continuing
-                ? doneObserved
-                  ? { observed_guard: { state: "done" as const } }
-                  : { if_idle: true }
-                : {}),
+              ...guard,
               ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
@@ -1114,7 +1121,16 @@ export class Dispatcher {
                       job.assignment,
                       this.clock,
                     ) === "send"
-                  : this.activate(job)),
+                  : this.activate(job)) &&
+                (job.run.status !== "queued" ||
+                  armBellReceipt(
+                    this.options.store,
+                    project,
+                    job.run.id,
+                    runtimeRef,
+                    undefined,
+                    job.attempt.review_wake,
+                  )),
             },
           ),
         );
@@ -1672,6 +1688,15 @@ export class Dispatcher {
       let attempt = ready.length
         ? beginBellAttempt(store.database, intent)
         : beginLaunchAttempt(store.database, intent);
+      if (run.status === "queued" && run.bell_delivery?.run_id !== run.id) {
+        const card = cause ? cause.card_id : runCard;
+        run = {
+          ...run,
+          bell_delivery: { run_id: run.id, ...(card ? { card_id: card } : {}) },
+        };
+        tx.runs.put(project, run);
+        state = this.loadState(tx, project);
+      }
       // Keep producer/standing dispatch timing unchanged. Only verification
       // needs to remain queued until asynchronous target preparation finishes.
       if (
@@ -2019,6 +2044,21 @@ export class Dispatcher {
         project_id: project,
         ids: attempt.notification_ids,
       });
+      // Only a positively settled first send arms replay. A lost transport ACK,
+      // shared-review withdrawal or legacy row stays with the existing recovery policy.
+      if (
+        sent &&
+        !continuation &&
+        run?.bell_delivery &&
+        run.bell_delivery.run_id === run.id &&
+        !run.bell_delivery.sent_at &&
+        run.bell_delivery.runtime_ref
+      ) {
+        tx.runs.put(project, {
+          ...run,
+          bell_delivery: { ...run.bell_delivery, sent_at: at },
+        });
+      }
       let failed = !sent && notes.length === 0;
       for (const n of notes) {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))

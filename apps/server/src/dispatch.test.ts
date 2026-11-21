@@ -90,7 +90,7 @@ beforeEach(() => {
   runtime = {
     status: vi.fn(async () => ({
       ok: true,
-      value: { process: "alive", agent: "working", observed_seq: 1 },
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
     })),
     wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
     provision: async () => {
@@ -269,8 +269,10 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
     'summary="2 comments"',
   );
   const wakeOptions = vi.mocked(runtime.wake).mock.calls[0]?.[2];
-  expect(wakeOptions).toEqual({ before_send: expect.any(Function) });
-  expect(wakeOptions?.if_idle).toBeUndefined(); // OSC working is not a business busy flag.
+  expect(wakeOptions).toEqual({
+    if_idle: true,
+    before_send: expect.any(Function),
+  });
   expect(f.state().runs).toHaveLength(2);
   expect(f.state().runs.at(-1)).toMatchObject({
     status: "dispatched",
@@ -1815,6 +1817,10 @@ test("C-255: a standing decision records the old Run ending before the next disp
     });
   });
   const previous = f.session(pm, false);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 1 },
+  });
   const event = f.apply((s, a, p) =>
     postComment(s, a, { card_id: extra.card.id, body: "PM message" }, p),
   );
@@ -1883,6 +1889,12 @@ test("C-255: a standing decision records the old Run ending before the next disp
     },
   });
   const original = f.state().runs.find((r) => r.id === previous.id);
+  await dispatcher.tick();
+  expect(runtime.wake).not.toHaveBeenCalled(); // blocking_decision returned, CLI still working.
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "done", observed_seq: 2 },
+  });
   await dispatcher.tick();
   const next = f
     .state()
