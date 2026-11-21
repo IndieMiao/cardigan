@@ -36,6 +36,7 @@ import { remoteExitAction } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
 import { storyProgress, storyTerminal } from "../story.js";
+import type { StoryDiscussion } from "../story-discussion.js";
 import type { ResumeCondition } from "../work-wait.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
@@ -85,6 +86,7 @@ import {
 } from "./review-strategy.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { suggestSourceMergeUnrelated } from "./source-merge.js";
+import { storyDiscussionChange } from "./story-discussion.js";
 import {
   suggestionProgressEvents,
   suggestionProgressToken,
@@ -181,6 +183,7 @@ export function postComment(
   state: CommandState,
   actor: Actor,
   p: Pick<TimelineEntry, "card_id" | "body"> & {
+    story_discussion?: StoryDiscussion;
     story_summary?: boolean;
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
@@ -194,8 +197,26 @@ export function postComment(
   ports: CommandPorts,
 ) {
   return command(state, actor, "post_comment", ports, (d) => {
-    d.card(p.card_id);
+    const card = d.card(p.card_id);
     text(p.body, "body");
+    ensure(
+      !p.story_discussion ||
+        !(
+          p.story_summary ||
+          p.host_report_for ||
+          p.host_result_for ||
+          p.review_plan ||
+          p.work_item_id ||
+          p.supersedes
+        ),
+      "validation_failed",
+      "需求讨论必须是单独的卡片评论",
+    );
+    const discussion =
+      p.story_discussion && storyDiscussionChange(d, card, p.story_discussion);
+    const body = discussion
+      ? [p.body, ...discussion.lines].join("\n\n")
+      : p.body;
     if (p.work_item_id)
       ensure(
         d.work(p.work_item_id).card_id === p.card_id,
@@ -250,7 +271,7 @@ export function postComment(
           ...(resultFor
             ? [{ kind: "human_action" as const, id: resultFor }]
             : []),
-          ...extractReferences(p.body),
+          ...extractReferences(body),
         ].map((ref) => [JSON.stringify(ref), ref]),
       ).values(),
     ];
@@ -258,16 +279,18 @@ export function postComment(
       "comment_posted",
       p.card_id,
       {
-        body: p.body,
+        body,
         host_report_for: p.host_report_for ?? null,
       },
       {
         type: "comment",
         ...(p.host_report_for ? { human_action_id: p.host_report_for } : {}),
-        body: p.body,
+        body,
         refs,
         mentions: commentMentions(
-          p.body,
+          p.story_discussion?.action === "answer"
+            ? `${p.body}\n${p.story_discussion.answer}`
+            : p.body,
           p.mentions ?? [],
           state.employees ?? [],
           state.roles.map((role) => role.role_id),
@@ -277,8 +300,8 @@ export function postComment(
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       },
     );
+    if (discussion && d.timeline[0]) discussion.apply(d.timeline[0].id);
     if (p.story_summary) {
-      const card = d.card(p.card_id);
       ensure(
         d.assignment?.scope === "standing" &&
           d.assignment.role_id === "pm" &&
@@ -315,7 +338,7 @@ export function postComment(
         d.put("work_items", d.move(item, "story_summary_submitted"));
       d.put("cards", {
         ...card,
-        story: { summary_entry_id: d.timeline[0].id },
+        story: { ...card.story, summary_entry_id: d.timeline[0].id },
       });
       d.emit("story_summary_submitted", card.id, {
         entry_id: d.timeline[0].id,
@@ -607,7 +630,22 @@ export function requestDecision(
         ...items.map((w) => w.card_id),
       ]),
     ];
-    for (const id of cards) d.card(id);
+    const targets = cards.map((id) => d.card(id));
+    const storyQuestion = p.card_id
+      ? targets[0]?.story
+      : targets.length > 0 && targets.every((c) => c.story);
+    if (
+      storyQuestion &&
+      d.assignment?.scope === "standing" &&
+      d.assignment.role_id === "pm" &&
+      d.assignment.standing_mode === "office"
+    ) {
+      ensure(
+        ["scope_change", "spending", "credential"].includes(p.category),
+        "validation_failed",
+        "需求卡仅为方向、范围、花钱或凭据分歧发起拍板；其它正式授权在对应工作卡或项目上办理，不得用问题清单代批",
+      );
+    }
     const readyWhen = p.ready_when
       ? readyCondition(
           d,

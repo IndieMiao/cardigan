@@ -1821,3 +1821,74 @@ test("C-383 human closes a deferred action with a reason, refreshes later counts
     await request(`/human-actions/${action.id}/complete`, { text: "Late" }),
   ).toMatchObject({ status: 409 });
 });
+
+test("Web answers bind to a story group, retry exactly once, and leave the rest to the human default choice", async () => {
+  const group_id =
+    `${s.card.id}#1` as import("@cardigan/domain").TimelineEntryId;
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      story: {
+        question_groups: [
+          {
+            id: group_id,
+            questions: ["布局", "顺序"].map((question) => ({
+              question,
+              recommended: "原样",
+              impact: "少改动",
+            })),
+          },
+        ],
+      },
+    }),
+  );
+  const post = (action: Record<string, unknown>, key: string) =>
+    request(
+      cardPath("comments"),
+      { body: "讨论", story_discussion: action },
+      { "idempotency-key": key },
+    );
+  expect((await post({ action: "propose" }, "forged-proposal")).status).toBe(
+    400,
+  );
+  const reply = { action: "answer", group_id, number: 1, answer: "新布局" };
+  const first = await post(reply, "one-answer");
+  expect(first.status).toBe(200);
+  expect(await post(reply, "one-answer")).toEqual(first);
+  const defaults = await post(
+    { action: "accept_defaults", group_id },
+    "other-defaults",
+  );
+  expect(defaults.status).toBe(200);
+  const read = await fetch(web.url + path(`/cards/${s.card.id}`), {
+    headers: { cookie },
+  });
+  expect(await read.json()).toMatchObject({
+    card: {
+      story: {
+        discussion_rounds: 1,
+        question_groups: [
+          {
+            id: group_id,
+            questions: [
+              {
+                resolution: {
+                  value: "新布局",
+                  source: "answer",
+                  entry_id: first.body.id,
+                },
+              },
+              {
+                resolution: {
+                  value: "原样",
+                  source: "accepted_default",
+                  entry_id: defaults.body.id,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+});

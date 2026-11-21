@@ -28,6 +28,7 @@ import {
   roleRuleInventory,
   runAuthorView,
   sharedMustFixes,
+  storyDiscussionRounds,
   storyProgress,
   verificationActivity,
 } from "@cardigan/domain";
@@ -365,7 +366,15 @@ export const getCardTool = defineTool({
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
-        ...(story_progress ? { story_progress } : {}),
+        ...(card.story
+          ? {
+              story: {
+                ...card.story,
+                discussion_rounds: storyDiscussionRounds(card.story),
+              },
+              story_progress,
+            }
+          : {}),
         ...(dependency ? { dependency } : {}),
         ...(card.merge_classification
           ? {

@@ -48,6 +48,7 @@ import { MergeBlockers } from "../components/MergeBlockers.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { StoryDiscussion } from "../components/StoryDiscussion.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import {
@@ -856,12 +857,22 @@ function CardContent({
             loaded={detail.timeline.length}
             total={detail.counts.timeline}
           />
+          {detail.card.story && (
+            <StoryDiscussion
+              story={detail.card.story}
+              closed={["done", "cancelled"].includes(detail.card.status)}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              reload={reload}
+            />
+          )}
           <CommentBox
             ref={commentBox}
             client={client}
             projectId={projectId}
             cardId={cardId}
-            hasPmOps={detail.has_pm_ops}
+            hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />

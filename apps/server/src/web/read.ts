@@ -59,6 +59,7 @@ import {
   screenshotCheckEnforced,
   sessionMaintenanceView,
   sourceMergeSuggestionView,
+  storyDiscussionRounds,
   storyProgress,
   suggestionView,
   verificationActivity,
@@ -1082,6 +1083,10 @@ export function cardDetail(
       ...card,
       ...(graphSource?.story
         ? {
+            story: {
+              ...graphSource.story,
+              discussion_rounds: storyDiscussionRounds(graphSource.story),
+            },
             story_progress:
               options.storyProgress ??
               storyProgress(dependencySource.cards, graphSource),

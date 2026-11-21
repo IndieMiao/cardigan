@@ -304,6 +304,29 @@ function routeComment(input: RouteInput, draft: Draft): void {
             )
           );
         });
+  if (
+    input.event.actor.kind === "human" &&
+    !mentions.length &&
+    input.snapshot.cards.some((c) => c.id === input.event.card_id && c.story)
+  ) {
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "comment",
+      "story/discuss",
+      `需求卡 ${subject(input)} 有人的评论，请 Office 跟进。`,
+    );
+    note(
+      input,
+      draft,
+      recipient.pm_ops(),
+      "story_fyi",
+      "story/discuss",
+      `知会：需求卡 ${subject(input)} 的评论已交 Office。`,
+    );
+    return;
+  }
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
 
   if (item !== undefined) {

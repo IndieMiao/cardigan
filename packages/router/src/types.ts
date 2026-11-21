@@ -46,6 +46,7 @@ export type NotificationKind =
   | "card"
   | "assignment"
   | "comment"
+  | "story_fyi"
   | "instruction"
   | "delivery"
   | "review"
@@ -69,6 +70,7 @@ export type RuleId =
   | "D6/missing independent reviewer"
   | "6.4/system rules"
   // §6.4 rows
+  | "story/discuss"
   | "story/decompose"
   | "story/summary"
   | "story/confirm"

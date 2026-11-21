@@ -1,8 +1,12 @@
 import { expect, test } from "vitest";
 import type { Card } from "../entities.js";
 import { storyProgress } from "../story.js";
+import {
+  type StoryDiscussion,
+  storyDiscussionRounds,
+} from "../story-discussion.js";
 import { generalCardTemplate, storyCardTemplate } from "../templates.js";
-import { postComment } from "./coordination.js";
+import { postComment, requestDecision } from "./coordination.js";
 import type { CommandState } from "./core.js";
 import { assign, createCard, updateCard } from "./pm.js";
 import { manageCardTemplate, markCardDone } from "./templates.js";
@@ -300,4 +304,181 @@ test("a migrated builtin uses the Office comment tool, never loosening ordinary 
       p,
     ).ok,
   ).toBe(false);
+});
+
+const ask = {
+  action: "ask",
+  questions: [
+    { question: "布局？", recommended: "单列", impact: "便于阅读" },
+    { question: "顺序？", recommended: "按时间", impact: "新内容排在后面" },
+  ],
+} as const;
+
+function discussionFixture() {
+  const f = setup(),
+    office = actor(4, "pm");
+  const post = (
+    a: typeof human,
+    story_discussion: StoryDiscussion,
+    id = f.parent.id,
+  ) =>
+    postComment(
+      f.state,
+      a,
+      { card_id: id, body: "讨论", story_discussion },
+      f.p,
+    );
+  const send = (a: typeof human, action: StoryDiscussion) => {
+    const effect = value(post(a, action));
+    f.apply(effect);
+    if (!effect.data) throw new Error("Missing discussion entry");
+    return effect.data;
+  };
+  const story = () => {
+    const state = f.state.cards.find((c) => c.id === f.parent.id)?.story;
+    if (!state) throw new Error("Missing story");
+    return state;
+  };
+  return { f, office, post, send, story };
+}
+
+test("one round per group with a human response; implicit defaults never approve work", () => {
+  const { f, office, send, post, story } = discussionFixture();
+  const first = send(office, ask).id;
+  const explicit = {
+    action: "answer",
+    group_id: first,
+    number: 1,
+    answer: "两列",
+  } as const;
+  const reply = send(human, explicit);
+  expect(post(human, explicit).ok).toBe(false);
+  const second = send(office, ask).id;
+  const defaults = send(human, { action: "accept_defaults", group_id: second });
+  send(office, ask); // no human reply to the third group
+  const plan = send(office, { action: "propose" });
+  expect(plan.body).toContain("按默认");
+  const resolved = story().question_groups?.map((g) =>
+    g.questions.map((q) => q.resolution),
+  );
+  expect(resolved).toEqual([
+    [
+      { source: "answer", value: "两列", entry_id: reply.id },
+      { source: "proposal_default", value: "按时间", entry_id: plan.id },
+    ],
+    ["单列", "按时间"].map((value) => ({
+      source: "accepted_default",
+      value,
+      entry_id: defaults.id,
+    })),
+    ["单列", "按时间"].map((value) => ({
+      source: "proposal_default",
+      value,
+      entry_id: plan.id,
+    })),
+  ]);
+  expect(storyDiscussionRounds(story())).toBe(2);
+  expect(post(human, { action: "accept_defaults", group_id: first }).ok).toBe(
+    false,
+  );
+  expect(f.state.cards.filter((c) => c.parent_card_id === f.parent.id)).toEqual(
+    [],
+  );
+  expect(f.state.decisions).toEqual([]);
+  expect(f.state.human_actions).toEqual([]);
+  const child = f.create("general", f.parent.id);
+  f.apply(f.done(child));
+  f.apply(value(f.summary()));
+  f.create("general", f.parent.id);
+  expect(story().summary_entry_id).toBeUndefined();
+  expect(storyDiscussionRounds(story())).toBe(2);
+});
+
+test("partial answer then accepting the remainder counts once and preserves the answer", () => {
+  const { office, send, story } = discussionFixture();
+  const group_id = send(office, ask).id;
+  send(human, { action: "answer", group_id, number: 2, answer: "倒序" });
+  send(human, { action: "accept_defaults", group_id });
+  expect(
+    story().question_groups?.[0]?.questions.map((q) => q.resolution?.value),
+  ).toEqual(["单列", "倒序"]);
+  expect(storyDiscussionRounds(story())).toBe(1);
+});
+
+test("discussion commands enforce same-story scope, author, open state and valid questions", () => {
+  const { f, office, post, send } = discussionFixture();
+  expect(post(human, ask).ok).toBe(false);
+  expect(post(actor(3, "pm"), ask).ok).toBe(false);
+  expect(post(office, { action: "ask", questions: [] }).ok).toBe(false);
+  expect(
+    post(office, {
+      action: "ask",
+      questions: [{ ...ask.questions[0], impact: " " }],
+    }).ok,
+  ).toBe(false);
+  const group_id = send(office, ask).id,
+    child = f.create("general", f.parent.id);
+  const accept = { action: "accept_defaults", group_id } as const;
+  expect(post(office, accept).ok).toBe(false);
+  expect(post(human, accept, child.id).ok).toBe(false);
+  expect(post(human, accept, f.create("story").id).ok).toBe(false);
+  expect(
+    post(human, { action: "answer", group_id, number: 0, answer: "x" }).ok,
+  ).toBe(false);
+  const opsState = {
+    ...f.state,
+    assignments: f.state.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: "ops" as const } : a,
+    ),
+  };
+  expect(
+    postComment(
+      opsState,
+      office,
+      { card_id: f.parent.id, body: "Ops", story_discussion: ask },
+      f.p,
+    ).ok,
+  ).toBe(false);
+  f.apply(f.done(f.parent));
+  expect(post(human, accept).ok).toBe(false);
+  expect(post(office, { action: "propose" }).ok).toBe(false);
+});
+
+test("Office uses the checklist for routine details, existing decision command for material story disagreements", () => {
+  const { f, office } = discussionFixture();
+  const request = (
+    category: "scope_change" | "spending" | "credential" | "feature_detail",
+    card_id = f.parent.id,
+  ) =>
+    requestDecision(
+      f.state,
+      office,
+      {
+        card_id,
+        category,
+        kind: "choose",
+        decider: "human",
+        plain_summary: {
+          changed: "选择需求方向",
+          impact: "确定工作范围",
+          risk: "无",
+        },
+        question: "Which direction?",
+        context: "Two options",
+        options: [
+          { key: "a", description: "Option A", impact: "Change scope" },
+        ],
+        recommended: "a",
+        affected_cards: [],
+        affected_work_items: [],
+        blocking: false,
+      },
+      f.p,
+    );
+  for (const category of ["scope_change", "spending", "credential"] as const)
+    expect(request(category).ok).toBe(true);
+  expect(request("feature_detail").ok).toBe(false);
+  expect(
+    request("feature_detail", f.create("general", f.parent.id).id).ok,
+  ).toBe(true);
 });
