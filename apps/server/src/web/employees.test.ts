@@ -122,7 +122,14 @@ test("owner creates audited global employees; options include all characters and
   expect(options.status).toBe(200);
   expect(options.json).toMatchObject({
     library: expect.any(Array),
-    roles: [{ role_id: "coder", display_name: expect.any(String) }],
+    // C-516: the profile "跟随角色" resolves to.
+    roles: [
+      {
+        role_id: "coder",
+        display_name: expect.any(String),
+        launch_profile_ref: "fixture",
+      },
+    ],
   });
   const library = (options.json as { library: unknown[] }).library;
   expect((options.json as { employees: unknown[] }).employees).toEqual([
@@ -134,6 +141,8 @@ test("owner creates audited global employees; options include all characters and
       avatar: "/avatars/v1/guan-yu/head-64.webp",
       role_id: "coder",
       projects: ["p-test"],
+      // C-516: a pinned launch profile, or null to follow the role.
+      launch_profile_ref: null,
       role_change_blocked: null,
     },
   ]);

@@ -5,6 +5,7 @@ import {
   type CreateEmployeeInput,
   describeWriteError,
   type EmployeeOptions,
+  type EmployeePatch,
   type EmployeeSummary,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
@@ -40,6 +41,7 @@ import { Textarea } from "../components/ui/textarea.js";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group.js";
 import { employeeCopy as copy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
+import { LaunchProfileSelect } from "./LaunchProfileSelect.js";
 
 const matches = (item: EmployeeOptions["library"][number], search: string) =>
   `${item.name} ${item.source}`
@@ -566,6 +568,9 @@ const BLOCKED_REASONS = {
  * C-494 item 5: change an employee's role (a transfer, C-493). The read says
  * when the server would refuse — an unfinished run or a bound assignment — so
  * the choice is disabled with that reason; the server still decides.
+ * C-516 item 4: pin one of the host's valid launch profiles, or clear it to
+ * follow the role. Only the changed fields are sent, so a blocked role change
+ * does not stop a profile change.
  */
 function EmployeeRoleDrawer({
   client,
@@ -584,7 +589,18 @@ function EmployeeRoleDrawer({
   onClose: () => void;
   onSaved: (note: string) => void;
 }) {
-  const [role, setRole] = useState(employee.role_id);
+  // Only what the person picked (V-2567): untouched fields follow the latest
+  // read, so a retry after a re-read never writes back a value someone else
+  // just changed. Picking the read's value again is no longer an edit.
+  const savedProfile = employee.launch_profile_ref ?? null;
+  const [roleEdit, setRoleEdit] = useState<string>();
+  const [profileEdit, setProfileEdit] = useState<{ value: string | null }>();
+  const role = roleEdit ?? employee.role_id;
+  const profile = profileEdit ? profileEdit.value : savedProfile;
+  const setRole = (next: string) =>
+    setRoleEdit(next === employee.role_id ? undefined : next);
+  const setProfile = (next: string | null) =>
+    setProfileEdit(next === savedProfile ? undefined : { value: next });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
@@ -595,12 +611,16 @@ function EmployeeRoleDrawer({
       alive.current = false;
     };
   }, []);
+  const loadProfiles = useCallback(() => client.launchProfileNames(), [client]);
+  const names = useResource(loadProfiles);
   const keys = useRef(new Map<string, string>());
   const blocked = employee.role_change_blocked
     ? BLOCKED_REASONS[employee.role_change_blocked]
     : undefined;
   const reasonId = useId();
-  const changed = role !== employee.role_id;
+  const roleChanged = role !== employee.role_id;
+  const profileChanged = profile !== savedProfile;
+  const changed = roleChanged || profileChanged;
   const guard = useDiscardGuard(changed, onClose);
   const roles = options.roles.some((r) => r.role_id === employee.role_id)
     ? options.roles
@@ -610,6 +630,15 @@ function EmployeeRoleDrawer({
       ];
   const label = (id: string) =>
     roles.find((r) => r.role_id === id)?.display_name ?? id;
+  const roleProfile = roles.find((r) => r.role_id === role)?.launch_profile_ref;
+  const profileLabel = (name: string | null) =>
+    name ?? (roleProfile ? `跟随角色（${roleProfile}）` : "跟随角色");
+  const savedNote = () =>
+    roleChanged && profileChanged
+      ? `已将 ${employee.name} 的角色改为 ${label(role)}，启动配置改为 ${profileLabel(profile)}`
+      : roleChanged
+        ? `已将 ${employee.name} 的角色改为 ${label(role)}`
+        : `已将 ${employee.name} 的启动配置改为 ${profileLabel(profile)}`;
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -632,26 +661,24 @@ function EmployeeRoleDrawer({
           </SettingsFact>
         </SettingsFacts>
         <form
-          aria-label="修改角色"
+          aria-label="修改员工"
           onSubmit={async (event) => {
             event.preventDefault();
-            if (sending.current || !changed || blocked) return;
+            if (sending.current || !changed || (roleChanged && blocked)) return;
             sending.current = true;
             setBusy(true);
             setError("");
-            const signature = JSON.stringify([employee.id, role]);
+            const patch: EmployeePatch = {
+              ...(roleChanged ? { role_id: role } : {}),
+              ...(profileChanged ? { launch_profile_ref: profile } : {}),
+            };
+            const signature = JSON.stringify([employee.id, patch]);
             const key = keys.current.get(signature) ?? crypto.randomUUID();
             keys.current.set(signature, key);
             try {
-              await client.updateEmployee(
-                projectId,
-                employee.id,
-                { role_id: role },
-                key,
-              );
+              await client.updateEmployee(projectId, employee.id, patch, key);
               keys.current.delete(signature);
-              if (alive.current)
-                onSaved(`已将 ${employee.name} 的角色改为 ${label(role)}`);
+              if (alive.current) onSaved(savedNote());
             } catch (cause) {
               if (!alive.current) return;
               setError(describeWriteError(cause));
@@ -685,6 +712,27 @@ function EmployeeRoleDrawer({
             {blocked && (
               <SettingsWarning id={reasonId}>{blocked}</SettingsWarning>
             )}
+            {/* biome-ignore lint/a11y/noLabelWithoutControl: `LaunchProfileSelect` renders a `SelectControl`. */}
+            <label>
+              启动配置
+              <LaunchProfileSelect
+                value={profile}
+                // Until the names arrive a pinned name is not yet "已失效".
+                profiles={names.data ?? (profile === null ? [] : [profile])}
+                roleProfile={roleProfile}
+                disabled={busy || names.data === undefined}
+                onChange={(next) => {
+                  setProfile(next);
+                  setError("");
+                }}
+              />
+            </label>
+            <RequestFeedback
+              pending={names.pending && names.data === undefined}
+              pendingMessage="正在读取启动配置…"
+              error={names.data === undefined ? names.error : undefined}
+              retry={names.reload}
+            />
             {error && <SettingsWarning role="alert">{error}</SettingsWarning>}
           </SettingsDialogFields>
           <SettingsDialogActions>
@@ -694,15 +742,17 @@ function EmployeeRoleDrawer({
             <Button
               type="submit"
               variant="primary"
-              disabled={busy || !changed || blocked !== undefined}
+              disabled={
+                busy || !changed || (roleChanged && blocked !== undefined)
+              }
             >
-              保存角色
+              保存
             </Button>
           </SettingsDialogActions>
           <RequestFeedback
             interactive
             pending={busy}
-            pendingMessage="正在保存角色…"
+            pendingMessage="正在保存…"
           />
         </form>
         {guard.dialog}

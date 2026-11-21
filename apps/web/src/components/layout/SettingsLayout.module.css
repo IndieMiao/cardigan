@@ -267,6 +267,10 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
+  /* A field the person must correct (C-516): its note follows it in place. */
+  .dialogFields [aria-invalid="true"] {
+    border-color: var(--danger);
+  }
   .dialogFields fieldset {
     display: grid;
     gap: var(--ui-space-3);
