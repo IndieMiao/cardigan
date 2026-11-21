@@ -77,7 +77,12 @@ export function StoryProposalSection({
           proposal={current}
           closed={["done", "cancelled"].includes(detail.card.status)}
           // The same condition the server and Needs You use.
-          confirmable={storyProposalConfirmable(detail.card)}
+          confirmable={
+            storyProposalConfirmable(detail.card) &&
+            // Unmet prerequisites without an early start: the server refuses.
+            (!!detail.card.early_start ||
+              !detail.card.dependency?.waiting_on.length)
+          }
           client={client}
           projectId={projectId}
           cardId={cardId}

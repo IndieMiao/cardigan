@@ -963,3 +963,91 @@ test("no completion button while a child is still open", async () => {
     within(summary).queryByRole("button", { name: "确认完成" }),
   ).toBeNull();
 });
+
+test("V-2637: after a stale summary is refused, the refreshed summary can be confirmed with a new key", async () => {
+  const ended = children.map((c) => ({ ...c, status: "done" as const }));
+  let number = 9;
+  const detail = () =>
+    storyDetail(
+      {
+        children: ended,
+        story: { discussion_rounds: 0, summary_entry_id: `C-1#${number}` },
+      },
+      {
+        mark_done: { allowed: true, reason: null },
+        timeline: [
+          timelineEntry({
+            id: `C-1#${number}`,
+            event_seq: number,
+            body: `Summary ${number}`,
+          }),
+        ],
+      },
+    );
+  const markCardDone = vi.fn(async () => {
+    if (number === 9) {
+      number = 10;
+      throw new ApiError(409, "stale_target", "已更新");
+    }
+  });
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail(), markCardDone })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const area = await screen.findByRole("region", { name: "对照总结" });
+  fireEvent.click(within(area).getByRole("button", { name: "确认完成" }));
+  fireEvent.click(await within(area).findByRole("button", { name: "刷新" }));
+  await within(area).findByText("Summary 10");
+  const button = within(area).getByRole("button", { name: "确认完成" });
+  expect(button.getAttribute("aria-disabled")).toBeNull();
+  fireEvent.click(button);
+  await waitFor(() => expect(markCardDone).toHaveBeenCalledTimes(2));
+  const calls = markCardDone.mock.calls as unknown as unknown[][];
+  expect(calls[0]?.[5]).toBe("C-1#9");
+  expect(calls[1]?.[5]).toBe("C-1#10");
+  // A different summary is a different confirmation: a new idempotency key.
+  expect(calls[1]?.[4]).not.toBe(calls[0]?.[4]);
+});
+
+test("V-2637: a story waiting on unmet prerequisites offers no confirmation unless started early", async () => {
+  const waiting = {
+    predecessors: [],
+    successors: [],
+    waiting_on: ["C-9"],
+    critical_path_length: 1,
+  };
+  for (const [extra, offered] of [
+    [{ dependency: waiting }, false],
+    [
+      {
+        dependency: waiting,
+        early_start: {
+          reason: "先拆",
+          set_by: "human",
+          set_at: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      true,
+    ],
+  ] as const) {
+    const detail = proposalDetail([proposal(1)]);
+    render(
+      <CardDetailPage
+        client={fakeClient({
+          card: async () =>
+            ({ ...detail, card: { ...detail.card, ...extra } }) as CardDetail,
+        })}
+        projectId="p-1"
+        cardId="C-1"
+      />,
+    );
+    const plan = await screen.findByRole("region", { name: "拆解方案" });
+    expect(!!within(plan).queryByRole("button", { name: /确认开卡/ })).toBe(
+      offered,
+    );
+    cleanup();
+  }
+});

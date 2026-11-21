@@ -473,6 +473,9 @@ function StorySummary({
           {/* Only a summary the person can read may be confirmed against. */}
           {entry && (
             <StoryCompletion
+              // Each summary has its own confirmation state and retry key: a
+              // refusal of an older summary never locks out the newer one.
+              key={id}
               detail={detail}
               client={client}
               projectId={projectId}
@@ -524,7 +527,13 @@ function StoryCompletion({
         <ChecklistAlert>
           <span>{error.message}</span>
           {error.stale && (
-            <Button variant="outline" onClick={onSaved}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setError(undefined);
+                onSaved();
+              }}
+            >
               刷新
             </Button>
           )}
