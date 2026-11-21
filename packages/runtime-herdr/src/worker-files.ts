@@ -5,6 +5,7 @@ import type { RuntimeTargetBinding } from "@cardigan/domain";
 import type { LaunchFile } from "./agent-files.js";
 import { agentProcessCommand } from "./agent-ssh.js";
 import type { ExecutionConfig, WorkerPublishLimits } from "./execution.js";
+import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
 import type { WorkerProcessIdentity } from "./worker-primitives.js";
 
 export type { WorkerPublishLimits } from "./execution.js";
@@ -209,6 +210,7 @@ export async function workerFiles(
     )
   )
     return rejected();
+  let output: Buffer;
   try {
     const command = await agentProcessCommand(config, [
       config.fileHelper.python,
@@ -219,7 +221,7 @@ export async function workerFiles(
     ]);
     const remaining = policy.timeout_ms - (Date.now() - started);
     if (remaining <= 0) return rejected();
-    const output = await new Promise<Buffer>((resolve, reject) => {
+    output = await new Promise<Buffer>((resolve, reject) => {
       const child = spawn(command.file, command.args, {
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -264,7 +266,7 @@ export async function workerFiles(
                   ? "reply_too_large"
                   : "unknown (stderr omitted)";
           reject(
-            new PublicationError(
+            new WorkerPreparationFailure(
               `Worker publication rejected: ${operation}; exit=${code ?? "signal"}; ${summary}`,
             ),
           );
@@ -272,6 +274,17 @@ export async function workerFiles(
       });
       child.stdin.end(payload);
     });
+  } catch (error) {
+    if (
+      error instanceof WorkerPreparationFailure ||
+      error instanceof PublicationError
+    )
+      throw error;
+    // Credential inspection or spawning the local SSH executable failed. Never
+    // propagate the local path or count this against the intended machine.
+    return rejected(`${operation}; SSH entry unavailable`);
+  }
+  try {
     const reply = JSON.parse(output.toString()) as WorkerFileReply;
     if (
       reply.version !== 1 ||
@@ -329,8 +342,10 @@ export async function workerFiles(
       observed: reply.observed,
       ...(operation === "inspect" ? { worktree } : {}),
     } as WorkerFileReply;
-  } catch (error) {
-    if (error instanceof PublicationError) throw error;
-    return rejected(`${operation}; transport or invalid reply`);
+  } catch {
+    // An SSH process completed but its reply failed parsing or validation.
+    throw new WorkerPreparationFailure(
+      `Worker publication rejected: ${operation}; invalid reply`,
+    );
   }
 }

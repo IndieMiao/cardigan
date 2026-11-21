@@ -52,6 +52,7 @@ import {
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
+  WorkerPreparationFailure,
   workerFiles,
   writeAgentLaunch,
   writeAgentSentinel,
@@ -77,11 +78,7 @@ import {
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { launchFingerprint } from "./launch-fingerprint.js";
-import {
-  LaunchPublication,
-  launchFailureReason,
-  WorkerPreparationFailure,
-} from "./launch-publish.js";
+import { LaunchPublication, launchFailureReason } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {

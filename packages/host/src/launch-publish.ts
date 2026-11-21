@@ -70,17 +70,6 @@ export function launchFailureReason(
   }
 }
 
-// Positive attribution at the remote operation, not at the enclosing launch step:
-// the same step can also fail a host-side lease, queue or review-target fence.
-export class WorkerPreparationFailure extends Error {}
-async function workerFilePreparation<T>(result: Promise<T>) {
-  try {
-    return await result;
-  } catch (error) {
-    throw new WorkerPreparationFailure(messageOf(error), { cause: error });
-  }
-}
-
 type Publication = NonNullable<Run["launch_publication"]>;
 interface PublicationHost {
   readonly store: Store;
@@ -275,25 +264,21 @@ export class LaunchPublication {
   }
   async worktree(path: string) {
     return (
-      await workerFilePreparation(
-        workerFiles(this.execution, this.identity, "inspect", [], path),
-      )
+      await workerFiles(this.execution, this.identity, "inspect", [], path)
     ).worktree;
   }
   async publish(files: readonly LaunchFile[], token: string) {
     // Compilation can await worker inspection after MCP preflight. Fence the
     // credential publication itself against changes during either operation.
     this.assertCurrent();
-    await workerFilePreparation(
-      workerFiles(this.execution, this.identity, "publish", [
-        ...files,
-        {
-          path: posix.join(this.runDir, "token"),
-          content: `${token}\n`,
-          mode: 0o600,
-        },
-      ]),
-    );
+    await workerFiles(this.execution, this.identity, "publish", [
+      ...files,
+      {
+        path: posix.join(this.runDir, "token"),
+        content: `${token}\n`,
+        mode: 0o600,
+      },
+    ]);
     this.update("published", {
       artifacts: files
         .filter(
@@ -308,9 +293,7 @@ export class LaunchPublication {
     });
   }
   async observeProcess() {
-    const observed = await workerFilePreparation(
-      workerFiles(this.execution, this.identity, "status"),
-    );
+    const observed = await workerFiles(this.execution, this.identity, "status");
     this.update("provisioned", { process: observed.process });
   }
   description(): RuntimeLaunch {
@@ -337,9 +320,7 @@ export class LaunchPublication {
   }
   async commit() {
     this.assertCurrent();
-    await workerFilePreparation(
-      workerFiles(this.execution, this.identity, "commit"),
-    );
+    await workerFiles(this.execution, this.identity, "commit");
     this.update("started");
   }
   /** Revocation and durable reservation precede every worker call or terminal stop. */
