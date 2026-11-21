@@ -1,6 +1,7 @@
 import type { Actor } from "../entities.js";
-import type { AttachmentId, CardId } from "../ids.js";
+import type { AttachmentId, CardId, TimelineEntryId } from "../ids.js";
 import { validateWorkItemRequirements } from "../machine-requirements.js";
+import { storyProgress } from "../story.js";
 import type { CardTemplate, CardTemplateDefinition } from "../templates.js";
 import {
   activeTemplateRole,
@@ -294,12 +295,32 @@ export function manageCardTemplate(
 export function markCardDone(
   state: CommandState,
   actor: Actor,
-  p: { card_id: CardId; result: string; attachments?: readonly AttachmentId[] },
+  p: {
+    card_id: CardId;
+    result: string;
+    attachments?: readonly AttachmentId[];
+    /**
+     * C-503: the story summary the person compared against. When given, the
+     * story must still carry exactly this summary and every child must have
+     * ended; omitted keeps the existing manual completion.
+     */
+    story_summary_entry_id?: TimelineEntryId;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "mark_card_done", ports, (d) => {
     ensure(canMarkCardDone(actor), "forbidden_tool", "只有人能标记卡片完成");
     const card = d.card(p.card_id);
+    if (p.story_summary_entry_id !== undefined) {
+      const progress = storyProgress(d.list("cards"), card);
+      ensure(
+        card.story?.summary_entry_id === p.story_summary_entry_id &&
+          progress.total > 0 &&
+          progress.finished === progress.total,
+        "stale_target",
+        "对照总结已失效或仍有未结束的子卡，请刷新后再确认",
+      );
+    }
     if (!card.story) {
       ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
       requireCardDependencies(d, card);

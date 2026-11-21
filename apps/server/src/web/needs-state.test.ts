@@ -24,8 +24,13 @@ const BASELINE_SHA256 =
 // C-312 adds an event-derived notice source. Keep the existing digest for every
 // original field/order; source classification has its own event contract tests.
 // C-540 adds attachment thumbnail paths; they derive from the download path.
+// C-503 adds story proposals; the synthetic data has none (asserted below).
 function legacyProjection(view: ReturnType<typeof needsYou>) {
-  const { auto_merge_pause: _pause, ...legacy } = view;
+  const {
+    auto_merge_pause: _pause,
+    story_proposals: _proposals,
+    ...legacy
+  } = view;
   return JSON.parse(
     JSON.stringify(
       {
@@ -63,6 +68,7 @@ test("production-size synthetic Needs You exactly matches the original reader re
     const first = readNeedsState(store, FIXTURE_PROJECT);
     const view = needsYou(first, FIXTURE_NOW);
     expect(view.auto_merge_pause).toEqual({ paused: false, waiting_count: 0 });
+    expect(view.story_proposals).toEqual([]);
     const response = JSON.stringify(legacyProjection(view));
     expect(createHash("sha256").update(response).digest("hex")).toBe(
       BASELINE_SHA256,

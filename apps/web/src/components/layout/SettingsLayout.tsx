@@ -421,15 +421,18 @@ export function SettingsDiscardDialog({
   open,
   onKeep,
   onDiscard,
+  title = "放弃未应用的修改？",
 }: {
   open: boolean;
   onKeep: () => void;
   onDiscard: () => void;
+  /** C-503: what is being discarded, e.g. an unsent comment draft. */
+  title?: string;
 }) {
   return (
     <SettingsConfirmDialog
       open={open}
-      title="放弃未应用的修改？"
+      title={title}
       description="关闭后这次填写的内容不会保留。"
       describe={false}
       cancelLabel="继续编辑"
