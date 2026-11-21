@@ -65,6 +65,46 @@ test("a proven guard refusal preserves the first write across the dispatch timeo
   );
 });
 
+test.each(["probe", "send slot"])(
+  "a first write refused at the %s is handed off without sending an empty bell later",
+  async (boundary) => {
+    const f = recoveryFixture();
+    onTestFinished(f.close);
+    vi.mocked(f.runtime.wake).mockResolvedValue({
+      ok: true,
+      value: { sent: false, withdrawn: true },
+    });
+    const tick = () =>
+      new Dispatcher({ ...f.options, dispatchTimeoutMs: 1000 }).tick();
+    f.comment();
+    await tick();
+    const id = f.latest().id;
+    expect(f.latest().bell_delivery?.refused_attempt_id).toBeTruthy();
+    if (boundary === "probe")
+      f.working.add(f.refFor(f.target.assignment).terminal_ref);
+    await tick();
+    f.advance(1000);
+    await tick();
+    const attempts = vi.mocked(f.runtime.wake).mock.calls.length;
+    f.working.clear();
+    await tick();
+    expect(f.notes()).toMatchObject([{ status: "needs_attention" }]);
+    expect(
+      f.state().events.filter((e) => e.type === "bell_wake_escalated"),
+    ).toMatchObject([
+      {
+        payload: {
+          run_id: id,
+          reason: "first_write_guard",
+          notification_ids: [f.notes()[0]?.id],
+        },
+      },
+    ]);
+    expect(f.runtime.wake).toHaveBeenCalledTimes(attempts);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  },
+);
+
 test("the cold publication boundary pins ordinary rework; supersession retires it without replay", async () => {
   const f = await sharedRepairStore();
   const initial = f.read();

@@ -270,7 +270,6 @@ test("§3.1 live session: merges one Assignment's events, preserves its snapshot
   );
   const wakeOptions = vi.mocked(runtime.wake).mock.calls[0]?.[2];
   expect(wakeOptions).toEqual({
-    if_idle: true,
     before_send: expect.any(Function),
   });
   expect(f.state().runs).toHaveLength(2);
@@ -323,6 +322,63 @@ test.each(["idle", "done", "working", "blocked", "unknown", "error"] as const)(
     });
   },
 );
+
+test("guard waits survive restart and hand only overdue notes to host ops", async () => {
+  const ops = standingSession("host_ops");
+  const run = f.session(target.assignment, false);
+  vi.mocked(runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "blocked", observed_seq: 3 },
+  });
+  const tick = () =>
+    new Dispatcher({ ...options, dispatchTimeoutMs: 1000 }).tick();
+  comment("old");
+  await tick();
+  const old = ownNotes().find((n) => n.kind === "comment");
+  if (!old) throw Error("missing unread comment");
+  const facts = (type: string) =>
+    f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === type &&
+          (e.payload as { run_id: string }).run_id === run.id,
+      );
+  expect(facts("bell_wake_deferred")).toMatchObject([
+    {
+      card_id: target.card.id,
+      payload: {
+        reason: "continuing_turn",
+        assignment_id: target.assignment.id,
+        activity_source: "alive/blocked",
+        notification_ids: [old.id],
+      },
+    },
+  ]);
+  f.advance(999);
+  comment("new");
+  await tick();
+  expect(facts("bell_wake_escalated")).toHaveLength(0);
+  f.advance(1);
+  await tick();
+  await tick();
+  expect(ownNotes().find((n) => n.id === old.id)?.status).toBe(
+    "needs_attention",
+  );
+  expect(
+    ownNotes().find((n) => n.id !== old.id && n.kind === "comment")?.status,
+  ).toBe("pending");
+  const alerts = facts("bell_wake_escalated");
+  expect(alerts).toMatchObject([
+    {
+      payload: { notification_ids: [old.id], activity_source: "alive/blocked" },
+    },
+  ]);
+  expect(
+    f.store.listNotifications({ project_id: f.project, assignment_id: ops.id }),
+  ).toContainEqual(expect.objectContaining({ event_id: alerts[0]?.id }));
+  expect(runtime.release).not.toHaveBeenCalled();
+});
 
 test.each(["codex", "claude-code"] as const)(
   "C-475: a no-OSC %s Run that never finishes hands its unread note to a followup only after confirmed exit",
@@ -1891,6 +1947,16 @@ test("C-255: a standing decision records the old Run ending before the next disp
   const original = f.state().runs.find((r) => r.id === previous.id);
   await dispatcher.tick();
   expect(runtime.wake).not.toHaveBeenCalled(); // blocking_decision returned, CLI still working.
+  expect(f.state().events).toContainEqual(
+    expect.objectContaining({
+      type: "bell_wake_deferred",
+      payload: expect.objectContaining({
+        run_id: previous.id,
+        reason: "system_finished_turn",
+        activity_source: "alive/working",
+      }),
+    }),
+  );
   vi.mocked(runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "done", observed_seq: 2 },
@@ -1900,6 +1966,9 @@ test("C-255: a standing decision records the old Run ending before the next disp
     .state()
     .runs.find((r) => r.assignment_id === pm.id && r.id !== previous.id);
   expect(next?.status).toBe("dispatched");
+  expect(vi.mocked(runtime.wake).mock.calls[0]?.[2]?.observed_guard).toEqual({
+    state: "done",
+  });
   expect(runtime.wake).toHaveBeenCalledTimes(1);
   expect(endings()).toHaveLength(1);
   expect(f.state().runs.find((r) => r.id === previous.id)).toEqual(original);

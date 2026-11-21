@@ -141,6 +141,7 @@ import {
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import { recordTurnWait, systemEndedTurn } from "./dispatch-turn-guard.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -854,15 +855,39 @@ export class Dispatcher {
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
+    const guardedTurn =
+      continuing || (a.runtime_ref ? systemEndedTurn(state, a) : undefined);
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
-      if (observed?.ok && observed.value.process === "alive") {
-        guard = idleWakeGuard(observed.value);
-        if (!guard) return; // A server-side finish never proves the CLI turn has ended.
-      } else if (continuing) return;
+      if (guardedTurn) {
+        guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
+        // Only a new Run can fall through to the existing replacement policy.
+        if (
+          !guard &&
+          (continuing ||
+            (observed?.ok
+              ? observed.value.process !== "exited"
+              : observed?.error.code !== "runtime_not_found" &&
+                observed?.error.code !== "runtime_unavailable"))
+        ) {
+          const observation = observed?.ok
+            ? `${observed.value.process}/${observed.value.agent}`
+            : (observed?.error.code ?? "unavailable");
+          this.waitForTurn(
+            project,
+            a,
+            guardedTurn,
+            notes,
+            observation,
+            queued,
+            !!continuing,
+          );
+          return;
+        }
+      }
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -1000,6 +1025,7 @@ export class Dispatcher {
           live,
           sessionCatalog,
           inspection,
+          guardedTurn?.id,
           continuing,
         ),
       );
@@ -1137,6 +1163,17 @@ export class Dispatcher {
             job.assignment,
             this.clock.now(),
           );
+          // The adapter may repeatedly refuse in its send slot even when the earlier probe saw idle.
+          if (continuing && guard)
+            this.waitForTurn(
+              project,
+              a,
+              continuing,
+              notes,
+              `alive/${guard.if_idle ? "idle" : "done"} (send withdrawn)`,
+              queued,
+              true,
+            );
           return;
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake) {
@@ -1263,6 +1300,68 @@ export class Dispatcher {
       return undefined;
     }
   }
+  private waitForTurn(
+    project: ProjectId,
+    a: Assignment,
+    turn: Run,
+    notes: readonly Notification[],
+    observation: string,
+    queued: Run | undefined,
+    continuing: boolean,
+  ) {
+    this.options.store.uow.run((tx) => {
+      const fresh = this.loadState(tx, project);
+      const owner = fresh.assignments.find((o) => o.id === a.id);
+      if (
+        !owner ||
+        owner.external ||
+        owner.status !== "active" ||
+        !sameRef(owner, a) ||
+        owner.session_ref !== a.session_ref ||
+        !hasRunTarget(owner, fresh) ||
+        !assignmentDependenciesAllowStart(fresh, owner) ||
+        assignmentCardHeld(owner, fresh) ||
+        unfinishedBellAttempts(this.options.store.database, project, owner.id)
+          .length ||
+        this.busy(fresh, owner, continuing ? turn.id : undefined) ||
+        (continuing
+          ? !wakeIsCurrent(fresh, owner, turn.id) ||
+            !fresh.runs.some((r) => r.id === turn.id && r.status === "running")
+          : systemEndedTurn(fresh, owner)?.id !== turn.id)
+      )
+        return;
+      const pending = notes.length
+        ? this.options.store
+            .listNotifications({
+              project_id: project,
+              status: "pending",
+              ids: notes.map((n) => n.id),
+            })
+            .filter(
+              (n) =>
+                this.owner(n, fresh) === owner.id &&
+                !covered(n, fresh, owner.id) &&
+                !notificationBlocked(fresh, n.event_id, owner.id) &&
+                !fresh.cards.some((c) => c.id === n.card_id && c.hold),
+            )
+        : [];
+      if (
+        notes.length
+          ? !pending.length
+          : !queued || this.queued(fresh, owner)?.id !== queued.id
+      )
+        return;
+      recordTurnWait(tx, this.options.store, fresh, this.clock.now(), {
+        owner,
+        turn,
+        reason: continuing ? "continuing_turn" : "system_finished_turn",
+        observation,
+        notes: pending,
+        timeoutMs: this.dispatchTimeoutMs,
+        standing: this.options.standing,
+      });
+    });
+  }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
       const state = this.loadState(tx, project);
@@ -1362,6 +1461,7 @@ export class Dispatcher {
     live: boolean,
     catalog: string | undefined,
     inspection: ResourceAdmission | undefined,
+    guardedTurn: RunId | undefined,
     continuing?: Run,
   ): Job | undefined {
     const { store } = this.options;
@@ -1372,6 +1472,9 @@ export class Dispatcher {
         a?.status !== "active" ||
         a.external ||
         !sameRef(a, expected) ||
+        (!continuing &&
+          a.runtime_ref &&
+          systemEndedTurn(state, a)?.id !== guardedTurn) ||
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
         return;

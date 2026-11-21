@@ -40,21 +40,19 @@ function wait() {
   );
   return { target, run };
 }
-function settlePrecheck() {
+function precheck(status: "passed" | "running") {
   f.store.uow.run((tx) =>
     tx.events.append(f.project, {
       id: tx.ids.nextEventId(),
       seq: tx.ids.nextEventSequence(f.project),
-      type: "precheck_finished",
+      type: status === "passed" ? "precheck_finished" : "precheck_started",
       actor: { kind: "system", project_id: f.project },
       created_at: f.clock.now(),
-      payload: { attempt_id: "fixture-precheck", status: "passed" },
+      payload: { attempt_id: "fixture-precheck", status },
     }),
   );
 }
-test("SQLite restart retains structured blockers and aggregates two resumptions into one PM notice", () => {
-  const one = f.create(),
-    two = f.create();
+function allowBlocker() {
   f.store.uow.run((tx) => {
     const role = tx.roles.get(f.project, { role_id: "coder", role_version: 1 });
     if (!role) throw new Error("Missing fixture role");
@@ -63,43 +61,50 @@ test("SQLite restart retains structured blockers and aggregates two resumptions 
       allowed_tools: [...role.allowed_tools, "report_blocker"],
     });
   });
-  settlePrecheck();
-  for (const target of [one, two]) {
-    const run = f.session(target.assignment, false);
-    // Fixture role permits this newly exercised tool; production uses the unchanged registered scope.
-    const actor = {
-      ...f.actorFor(target.assignment),
-      allowed_tools: ["report_blocker" as const, "finish_run" as const],
-    };
-    f.apply(
-      (s, a, p) =>
-        reportBlocker(
-          s,
-          a,
-          {
-            work_item_id: target.item.id,
-            reason: "Wait check",
-            needs: "role",
-            resume_when: {
-              kind: "precheck_finished",
-              target_id: "fixture-precheck",
-            },
+}
+function blockForPrecheck(target: ReturnType<typeof f.create>) {
+  const run = f.session(target.assignment, false);
+  // Fixture role permits this newly exercised tool; production uses the unchanged registered scope.
+  const actor = {
+    ...f.actorFor(target.assignment),
+    allowed_tools: ["report_blocker" as const, "finish_run" as const],
+  };
+  f.apply(
+    (s, a, p) =>
+      reportBlocker(
+        s,
+        a,
+        {
+          work_item_id: target.item.id,
+          reason: "Wait check",
+          needs: "role",
+          resume_when: {
+            kind: "precheck_finished",
+            target_id: "fixture-precheck",
           },
-          p,
-        ),
-      actor,
-    );
-    f.apply(
-      (s, a, p) =>
-        finishRun(
-          s,
-          a,
-          { run_id: run.id, outcome: "blocked", summary: "Wait" },
-          p,
-        ),
-      f.actorFor(target.assignment),
-    );
-  }
+        },
+        p,
+      ),
+    actor,
+  );
+  f.apply(
+    (s, a, p) =>
+      finishRun(
+        s,
+        a,
+        { run_id: run.id, outcome: "blocked", summary: "Wait" },
+        p,
+      ),
+    f.actorFor(target.assignment),
+  );
+  return run;
+}
+test("SQLite restart retains structured blockers and aggregates two resumptions into one PM notice", () => {
+  const one = f.create(),
+    two = f.create();
+  allowBlocker();
+  precheck("passed");
+  for (const target of [one, two]) blockForPrecheck(target);
   const restarted = Store.open({ dataDir: f.dataDir, clock: f.clock });
   try {
     runSystemRules(restarted, f.project, f.clock);
@@ -136,6 +141,78 @@ test("SQLite restart retains structured blockers and aggregates two resumptions 
     restarted.close();
   }
 });
+
+test.each(["blocked", "error", "unknown"] as const)(
+  "author finish(blocked) → precheck finish → resume rings a new Run on an alive/%s terminal",
+  async (agent) => {
+    const target = f.create();
+    allowBlocker();
+    precheck("running");
+    const previous = blockForPrecheck(target);
+    for (const card_id of [undefined, target.card.id])
+      f.store.advanceRouterCursor(
+        f.project,
+        card_id ?? PROJECT_EVENT_STREAM,
+        f.store.getUpdates({
+          project_id: f.project,
+          ...(card_id ? { card_id } : {}),
+        }).latest_seq,
+      );
+    const wake = vi.fn<DispatcherOptions["runtime"]["wake"]>(
+      async (_ref, _text, opts) => {
+        expect(opts?.if_idle).toBeUndefined();
+        expect(opts?.observed_guard).toBeUndefined();
+        expect(opts?.before_send?.()).toBe(true);
+        return { ok: true, value: { sent: true } };
+      },
+    );
+    const options: DispatcherOptions = {
+      store: f.store,
+      clock: f.clock,
+      runtime: {
+        status: async () => ({
+          ok: true,
+          value: { process: "alive", agent, observed_seq: 1 },
+        }),
+        wake,
+      } as DispatcherOptions["runtime"],
+      snapshot: vi.fn(),
+      startRun: vi.fn(),
+    };
+    await new Dispatcher(options).tick();
+    expect(wake).not.toHaveBeenCalled();
+    precheck("passed");
+    await new Dispatcher(options).tick();
+    await new Dispatcher(options).tick();
+    const resume = f
+      .state()
+      .events.find((e) => e.type === "work_item_resume_requested");
+    expect(resume?.id).toBeDefined();
+    const followups = f
+      .state()
+      .runs.filter(
+        (r) => r.id !== previous.id && r.assignment_id === target.assignment.id,
+      );
+    expect(followups).toMatchObject([
+      { status: "dispatched", trigger_event_id: resume?.id },
+    ]);
+    expect(
+      f.store.listNotifications({
+        project_id: f.project,
+        assignment_id: target.assignment.id,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        status: "belled",
+        run_id: followups[0]?.id,
+        event_id: resume?.id,
+      }),
+    );
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake.mock.calls[0]?.[1]).toContain(`run=${followups[0]?.id}`);
+    expect(options.startRun).not.toHaveBeenCalled();
+  },
+);
 
 test.each(["explicit", "conflict", "blocked"])(
   "Dispatcher observes baseline and prepares it before one followup wake (%s)",

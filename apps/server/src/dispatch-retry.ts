@@ -49,6 +49,7 @@ import {
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { payloadString } from "@cardigan/router";
 import {
   type BellAttempt,
   beginDispatchRetry,
@@ -70,9 +71,10 @@ import {
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
-import { notificationBell } from "./dispatch-inbox.js";
+import { notificationBell, type StandingResolver } from "./dispatch-inbox.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
+import { recordTurnWait } from "./dispatch-turn-guard.js";
 import {
   legacyRepairAuthority,
   legacyRepairWake,
@@ -366,6 +368,7 @@ export function dispatchRecovery(
 export async function retryDispatchedRuns(
   options: ProviderWatch & {
     leases?: MachineLeases;
+    standing?: StandingResolver;
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
@@ -600,7 +603,9 @@ export async function retryDispatchedRuns(
         unfinishedBellAttempts(store.database, project, a.id).length > 0 ||
         state.events.some(
           (e) =>
-            e.type === "run_dispatch_stalled" &&
+            (e.type === "run_dispatch_stalled" ||
+              (e.type === "bell_wake_escalated" &&
+                payloadString(e.payload, "reason") === "first_write_guard")) &&
             typeof e.payload === "object" &&
             e.payload !== null &&
             "run_id" in e.payload &&
@@ -730,6 +735,7 @@ export async function retryDispatchedRuns(
         recover,
         reconcile,
         readmit,
+        refusedClaim,
         refusedNotes: refusedClaim ? last.notification_ids : [],
         legacyRetry: legacy === "unsent",
         withdrawn,
@@ -823,9 +829,11 @@ export async function retryDispatchedRuns(
       continue;
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
-    const status = await runtime.status(observed.a.runtime_ref);
-    const guard = status.ok && idleWakeGuard(status.value);
-    if (!guard) continue;
+    const status = await runtime
+      .status(observed.a.runtime_ref)
+      .catch(() => undefined);
+    const guard = status?.ok ? idleWakeGuard(status.value) : undefined;
+    if (!guard && !observed.refusedClaim) continue;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
@@ -869,6 +877,21 @@ export async function retryDispatchedRuns(
           : (candidates[0] ?? cause ?? item)
       )?.card_id;
       const notes = candidates.filter((n) => n.card_id === source);
+      if (!guard) {
+        // A proven non-write is deliberately exempt from normal dispatch timeout recovery.
+        recordTurnWait(tx, store, current.state, current.at, {
+          owner: current.a,
+          turn: current.run,
+          reason: "first_write_guard",
+          observation: status?.ok
+            ? `${status.value.process}/${status.value.agent}`
+            : (status?.error.code ?? "unavailable"),
+          notes,
+          timeoutMs: policy.timeoutMs,
+          standing: options.standing,
+        });
+        return;
+      }
       // Retain any stored decision instructions on ordinary retries. For a
       // refused claim, render the original pending rows, not a prior address.
       const storedBell = refusedNotes.size
@@ -900,7 +923,7 @@ export async function retryDispatchedRuns(
         bell,
       };
     });
-    if (!job?.a.runtime_ref) continue;
+    if (!job?.a.runtime_ref || !guard) continue;
     const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
     if (!unlock) {
       store.uow.run(() =>
@@ -1040,6 +1063,31 @@ export async function retryDispatchedRuns(
         );
         if (result.ok && result.value.withdrawn) {
           recordWakeRefusal(store, job.attempt, job.a, clock.now());
+          // A successful outer observation does not prove the send-slot guard passed.
+          store.uow.run((tx) => {
+            const fresh = inspect(loadState(tx, project), tx);
+            if (
+              !fresh?.refusedClaim ||
+              !fresh.retry ||
+              fresh.last?.id !== job.attempt.id ||
+              !wakeIsCurrent(fresh.state, job.a, job.run.id)
+            )
+              return;
+            const notes = store.listNotifications({
+              project_id: project,
+              ids: fresh.refusedNotes,
+              statuses: ["pending", "belled", "delivery_failed"],
+            });
+            recordTurnWait(tx, store, fresh.state, fresh.at, {
+              owner: fresh.a,
+              turn: fresh.run,
+              reason: "first_write_guard",
+              observation: `alive/${guard.if_idle ? "idle" : "done"} (send withdrawn)`,
+              notes,
+              timeoutMs: policy.timeoutMs,
+              standing: options.standing,
+            });
+          });
           continue;
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake)
