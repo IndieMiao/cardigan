@@ -52,6 +52,7 @@ export async function stopSystemTurn(
   ref: RuntimeRef | null,
   owner: RetirementIdentity,
   alreadyStopping: boolean,
+  checkWorkspace: () => Promise<boolean>,
   beforeSignal: () => boolean,
 ) {
   if (!ref) return "terminal_binding_changed";
@@ -67,13 +68,21 @@ export async function stopSystemTurn(
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
   if (!runtime.retire_idle) return "unsupported";
   const { hangup_ms, terminate_ms } = idleRetirementPolicy();
+  let workspaceReady = false;
   const result = await runtime
     .retire_idle(ref, {
       ...owner,
       hangup_ms,
       terminate_ms,
       system_finished_turn: true,
-      before_signal: beforeSignal,
+      workspace_preflight: async () =>
+        (workspaceReady = await checkWorkspace()),
+      before_signal: () => {
+        // Fail closed if an adapter skips the in-slot preflight.
+        if (!workspaceReady) return false;
+        workspaceReady = false;
+        return beforeSignal();
+      },
     })
     .catch(() => undefined);
   if (result?.ok && result.value.outcome === "withdrawn")

@@ -95,6 +95,16 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes its
     | "retire_idle"
     | "release"
   >();
+  type SystemTurnStop = Extract<
+    Parameters<NonNullable<Runtime["retire_idle"]>>[1],
+    { system_finished_turn: true }
+  >;
+  expectTypeOf<SystemTurnStop["workspace_preflight"]>().toEqualTypeOf<
+    () => Promise<boolean>
+  >();
+  expectTypeOf<SystemTurnStop["before_signal"]>().toEqualTypeOf<
+    () => boolean
+  >();
   expect(runtimeErrorCodes).toContain("version_mismatch");
 });
 

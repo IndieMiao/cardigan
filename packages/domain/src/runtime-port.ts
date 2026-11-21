@@ -84,10 +84,16 @@ export interface Runtime {
     options: RetirementIdentity & {
       readonly hangup_ms: number;
       readonly terminate_ms: number;
-      /** One owner-bound TERM, no address-based cleanup, refuse a busy terminal. */
-      readonly system_finished_turn?: true;
       readonly before_signal: () => boolean;
-    },
+    } & (
+        | { readonly system_finished_turn?: never }
+        | {
+            /** One owner-bound TERM; recheck workspace inside the signal slot,
+             * then terminal identity/activity, then synchronous authority. */
+            readonly system_finished_turn: true;
+            readonly workspace_preflight: () => Promise<boolean>;
+          }
+      ),
   ): Promise<RuntimeResult<IdleRetirementResult>>;
   provision(
     assignment: Assignment,

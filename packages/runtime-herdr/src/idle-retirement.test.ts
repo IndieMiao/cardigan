@@ -72,7 +72,7 @@ test("legacy retirement-held wake rechecks live ownership inside the send slot",
   f.terminal.labels.assignment = "A-1";
   expect(value(await runtime.wake(ref, "bell", guard))).toEqual({ sent: true });
 });
-test.each(["probe", "signal-slot", "after-signal", "busy", "safe"])(
+test.each(["probe", "signal-slot", "after-signal", "busy", "dirty", "safe"])(
   "system turn stop binds one signal to the process and never removes by address (%s)",
   async (mode) => {
     const f = adapter("TERM"),
@@ -101,6 +101,12 @@ test.each(["probe", "signal-slot", "after-signal", "busy", "safe"])(
     const stopped = await runtime.retire_idle(ref, {
       ...options(),
       system_finished_turn: true,
+      workspace_preflight: async () => {
+        expect(probed).toBe(true);
+        expect(afterProbe).toBe(1); // In-slot, before the final exact read.
+        expect(guard).not.toHaveBeenCalled();
+        return mode !== "dirty";
+      },
       before_signal: guard,
     });
     expect(stopped).toMatchObject({

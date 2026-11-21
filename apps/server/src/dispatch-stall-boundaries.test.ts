@@ -335,6 +335,82 @@ function endedReviewer() {
   return { f, a, card, item, notice, tree, run };
 }
 
+test.each(["dirty", "unknown"])(
+  "an exact missing terminal cannot start a notice-only Run on a %s workspace",
+  async (workspace) => {
+    const { f, a, card, item, tree } = endedReviewer();
+    // The old decision's cancelled queue is unrelated to this fresh instruction.
+    f.store.uow.run(() => {
+      for (const n of f.store.listNotifications({
+        project_id: f.project,
+        assignment_id: a.id,
+        status: "pending",
+      }))
+        moveNotification(
+          f.store.database,
+          { project_id: f.project, id: n.id, event: "ack" },
+          f.clock.now,
+        );
+    });
+    const notice = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      a,
+      card.id,
+    );
+    const original = () =>
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id);
+    const missing = {
+      ok: false,
+      error: { code: "runtime_not_found", message: "missing" },
+    } as const;
+    vi.mocked(f.runtime.status).mockResolvedValue(missing);
+    f.runtime.observe_retirement = vi.fn(async () => missing);
+    if (workspace === "dirty") writeFileSync(join(tree, "keep"), "original");
+    else rmSync(join(tree, ".git"), { recursive: true });
+    const d = new Dispatcher(f.options);
+    try {
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          ),
+      ).toHaveLength(0);
+      await d.tick();
+      expect(f.options.startRun).not.toHaveBeenCalled();
+      expect(original()?.status).toBe("pending");
+      f.advance(600000);
+      await d.tick();
+      await vi.waitFor(async () => {
+        await f.service.tick();
+        expect(
+          f
+            .state()
+            .events.filter((e) => e.type === "bell_turn_recovery_failed"),
+        ).toMatchObject([{ payload: { workspace } }]);
+      });
+      const failure = f
+        .state()
+        .events.find((e) => e.type === "bell_turn_recovery_failed");
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === failure?.id)
+          .map((n) => n.recipient),
+      ).toEqual([{ kind: "pm_ops" }]);
+      expect(original()).toMatchObject({ status: "pending", attempts: 0 });
+      expect(f.options.startRun).not.toHaveBeenCalled();
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      expect(f.state().human_actions).toHaveLength(0);
+    } finally {
+      await d.close();
+    }
+  },
+);
+
 test.each([
   "automatic",
   "tool",
@@ -343,6 +419,8 @@ test.each([
   "lost_observation",
   "in_flight",
   "stop_refused",
+  "dirty_in_slot",
+  "dirty_at_exit",
   "exit_unconfirmed",
 ] as const)("C-554: overdue reviewer bell (%s)", async (mode) => {
   const { f, a, notice, tree, run } = endedReviewer();
@@ -380,7 +458,26 @@ test.each([
           evidence: { stage: "confirm", reason: "terminal_busy" },
         },
       };
-    expect(opts.system_finished_turn).toBe(true);
+    if (!opts.system_finished_turn) throw new Error("missing system turn");
+    if (mode === "dirty_at_exit") {
+      writeFileSync(join(tree, "keep"), "original");
+      exited = true; // The old terminal exited by itself, without a stop.
+      return { ok: true, value: { outcome: "exited" } };
+    }
+    if (mode === "dirty_in_slot") {
+      writeFileSync(join(tree, "keep"), "original");
+      expect(opts.before_signal()).toBe(false); // No cached authorization.
+      expect(await opts.workspace_preflight()).toBe(false);
+      expect(opts.before_signal()).toBe(false);
+      return {
+        ok: true,
+        value: {
+          outcome: "withdrawn",
+          evidence: { stage: "TERM", reason: "guard_changed" },
+        },
+      };
+    }
+    expect(await opts.workspace_preflight()).toBe(true);
     expect(opts.before_signal()).toBe(true);
     signaled();
     exited = mode !== "exit_unconfirmed";
@@ -443,6 +540,8 @@ test.each([
       "tool",
       "exit_unconfirmed",
       "stop_refused",
+      "dirty_in_slot",
+      "dirty_at_exit",
     ].includes(mode);
     const row = (await f.view()).dispatch_stalls.find(
       (s) => s.cause_id === cause,
@@ -450,14 +549,15 @@ test.each([
     expect(row).toMatchObject({ can_restart: safe });
     if (mode === "tool") await f.restart(a, cause);
     await f.service.tick();
-    if (mode === "stop_refused") {
+    if (["stop_refused", "dirty_in_slot", "dirty_at_exit"].includes(mode)) {
       await vi.waitFor(async () => {
         await f.service.tick();
         expect(events("host_ops_action_finished")).toMatchObject([
           {
             payload: {
               result: "withdrawn_stall_changed",
-              reason: "terminal_busy",
+              reason:
+                mode === "stop_refused" ? "terminal_busy" : "workspace=dirty",
             },
           },
         ]);
@@ -470,6 +570,19 @@ test.each([
           .map((n) => n.recipient),
       ).toEqual([{ kind: "pm_ops" }]);
       expect(signaled).not.toHaveBeenCalled();
+      expect(f.options.startRun).not.toHaveBeenCalled();
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project, assignment_id: a.id })
+          .find((n) => n.event_id === notice.id)?.status,
+      ).toBe("pending");
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          ),
+      ).toHaveLength(0);
       expect(events("host_ops_action_deferred")).not.toContainEqual(
         expect.objectContaining({
           payload: expect.objectContaining({
@@ -603,6 +716,8 @@ test.each(["timeout", "refused"] as const)(
             evidence: { stage: "confirm", reason: "terminal_busy" },
           },
         };
+      if (!opts.system_finished_turn) throw new Error("missing system turn");
+      expect(await opts.workspace_preflight()).toBe(true);
       expect(opts.before_signal()).toBe(true);
       signal();
       return {
@@ -715,6 +830,8 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
     f.working.delete(ref.terminal_ref);
     let retired = false;
     f.runtime.retire_idle = vi.fn(async (_ref, opts) => {
+      if (!opts.system_finished_turn) throw new Error("missing system turn");
+      expect(await opts.workspace_preflight()).toBe(true);
       expect(opts.before_signal()).toBe(true);
       retired = true;
       return { ok: true, value: { outcome: "exited" } };

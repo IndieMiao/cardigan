@@ -1131,6 +1131,7 @@ export class HerdrRuntime implements Runtime {
                 ? async (raw) => {
                     // Inside the acquired signal slot. Even if the address is reused
                     // after this read, the helper can only signal the probed pidfd.
+                    if (!(await options.workspace_preflight())) return false;
                     const target: Terminal = JSON.parse(
                       await raw.exec(["get", ref.terminal_ref, "--json"]),
                     );

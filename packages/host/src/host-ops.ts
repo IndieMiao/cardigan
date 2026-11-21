@@ -76,6 +76,7 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { stallWorkspace } from "./stall-evidence.js";
 import { StallPatrol } from "./stall-patrol.js";
 import {
   revokeStoppedRunTokens,
@@ -1328,6 +1329,23 @@ export class HostOpsService {
             ? `workspace=${view.workspace}; terminal_owner=${view.terminal_owner ?? "unknown"}; terminal_state=${view.terminal_state ?? "unknown"}`
             : undefined;
       };
+      // Only inspect the fixed workspace here: the runtime already owns
+      // its signal slot, so a nested runtime probe could wait on itself.
+      const checkWorkspace = async () => {
+        const state = read();
+        const a = state.assignments.find((a) => a.id === action.assignment_id);
+        const workspace = a
+          ? await stallWorkspace(
+              state,
+              a,
+              this.options.contextUsage?.execution,
+              this.contextAbort.signal,
+            )
+          : "unknown";
+        if (workspace === "clean" || workspace === "no_worktree") return true;
+        evidenceFailure = `workspace=${workspace}`;
+        return false;
+      };
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (
@@ -1446,8 +1464,14 @@ export class HostOpsService {
               assignment_id: action.assignment_id,
             },
             stopStarted,
+            checkWorkspace,
             beforeSignal,
           );
+          // Exit can also be observed without sending anything. Exit alone
+          // does not authorize clearing the session and queuing its successor.
+          if (result === "exited" && !(await checkWorkspace()))
+            result = "withdrawn";
+          result = evidenceFailure ?? result;
         } else {
           result = await stopRunRuntime(
             runtime,
@@ -1473,6 +1497,16 @@ export class HostOpsService {
         );
       } catch {
         fail("credential_cleanup_failed");
+        return;
+      }
+      // Credential scrubbing can wait on worker IO. Do not queue from a
+      // workspace observation made before that wait.
+      if (
+        action.system_finished_run_id &&
+        this.options.scrubCredentials &&
+        !(await checkWorkspace())
+      ) {
+        if (!this.closing) fail(evidenceFailure ?? "workspace=unknown");
         return;
       }
       store.uow.run((tx) => {

@@ -940,7 +940,9 @@ export class Dispatcher {
         : observed?.error.code === "runtime_not_found" ||
           observed?.error.code === "runtime_unavailable";
       let previousExitConfirmed = false;
-      if (systemTurn && sessionLoss) {
+      // Only an existing queued Run can take the between-Runs recovery path.
+      // A new notice needs the stall patrol's independent workspace check.
+      if (queued && systemTurn && sessionLoss) {
         // A missing event-snapshot row is not exit proof: check the bound
         // terminal itself, or its local launch receipt when the core is gone.
         const exact = await this.options.runtime
@@ -953,7 +955,6 @@ export class Dispatcher {
           ? exact.value === "exited"
           : exact?.error.code === "runtime_not_found";
         if (
-          queued &&
           !exact?.ok &&
           exact?.error.code === "runtime_unavailable" &&
           a.machine_id === "local"
