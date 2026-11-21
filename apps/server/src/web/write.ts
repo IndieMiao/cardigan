@@ -173,6 +173,23 @@ const comment = z.object({
   reply_to: entryId.optional(),
   supersedes: entryId.optional(),
 });
+const cardComment = comment.extend({
+  story_discussion: z
+    .discriminatedUnion("action", [
+      z
+        .object({
+          action: z.literal("answer"),
+          group_id: entryId,
+          number: z.number().int().positive(),
+          answer: text,
+        })
+        .strict(),
+      z
+        .object({ action: z.literal("accept_defaults"), group_id: entryId })
+        .strict(),
+    ])
+    .optional(),
+});
 const instruction = z.object({ body: text, work_item_id: id("work_item") });
 const cardUpdate = z
   .object({
@@ -1346,7 +1363,7 @@ export async function serveWrite(
         cardResult(supersedeCard(s, a, { ...p, card_id }, ports), "supersede"),
       );
     } else if (operation === "comments") {
-      const p = defined(parsed(comment, body));
+      const p = defined(parsed(cardComment, body));
       output = run(context, (s, a, ports) =>
         postComment(s, a, { ...p, card_id }, ports),
       );
