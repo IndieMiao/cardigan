@@ -340,6 +340,39 @@ export function retireReconcileNotifications(
   return retired;
 }
 
+/** A later confirmed retirement/release resolves only the old Assignment alert.
+ * Works across host restarts, including old alerts without diagnostic fields. */
+export function resolveRetirementNotifications(
+  db: DatabaseSync,
+  project: ProjectId,
+  at: string,
+) {
+  const rows = db
+    .prepare(`SELECT n.id FROM notifications n
+    JOIN events alert ON alert.project_id=n.project_id AND alert.id=n.event_id
+    WHERE n.project_id=? AND n.recipient_kind='pm_ops' AND n.assignment_id=''
+      AND n.status IN ('pending','belled','delivery_failed','needs_attention')
+      AND alert.type='session_maintenance_attention'
+      AND EXISTS (SELECT 1 FROM events done WHERE done.project_id=alert.project_id
+        AND done.stream=alert.stream AND done.seq>alert.seq
+        AND ((json_extract(alert.doc,'$.payload.reason')='retirement_dispatch_wait'
+          AND done.type IN ('retirement_dispatch_resumed','session_replaced','assignment_stop_released')
+          AND json_extract(done.doc,'$.payload.retirement_wait_event_id')=alert.id) OR
+          (json_extract(alert.doc,'$.payload.reason') IN ('retirement_pending','retirement_unavailable','retirement_timeout')
+          AND (done.type='assignment_stop_released' OR (done.type='session_replaced'
+          AND (json_extract(done.doc,'$.payload.reason')='idle_session_retired' OR
+               (json_extract(done.doc,'$.payload.reason')='default_role_upgraded' AND json_extract(done.doc,'$.payload.idle_retirement_confirmed')=1))))))
+        AND json_extract(done.doc,'$.payload.assignment_id')=json_extract(alert.doc,'$.payload.assignment_id'))`)
+    .all(project);
+  for (const row of rows)
+    moveNotification(db, {
+      project_id: project,
+      id: String(row.id),
+      event: "resolve",
+      at,
+    });
+}
+
 /**
  * The Router's position in one event stream (0 = nothing consumed). Event seqs
  * are per stream, so the cursor must be too: `stream` is the card id, or

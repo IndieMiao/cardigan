@@ -12,6 +12,7 @@ export class RuntimeFailure extends Error {
     readonly code: RuntimeErrorCode,
     message: string,
     readonly detail?: AgentCommandFailure,
+    readonly hcKind?: string,
   ) {
     super(message);
   }
@@ -50,5 +51,9 @@ export function hcError(stderr: string, exit?: unknown): RuntimeFailure {
           ...(typeof exit === "number" ? { exit_code: exit } : {}),
           stderr: stderr.slice(-8192),
         },
+    // Preserve only the enumerated hc statuses classified above, never remote text.
+    structured && (code !== "runtime_unavailable" || kind === "unavailable")
+      ? kind
+      : undefined,
   );
 }
