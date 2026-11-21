@@ -4,6 +4,7 @@ import {
   type CommandState,
   type ContextObservation,
   type ContextUsage,
+  contextGenerationStart,
   contextObservationCurrent,
   contextUsageFresh,
   contextUsageLevel,
@@ -74,6 +75,7 @@ async function privateTranscript(
   execution: ExecutionConfig,
   root: string,
   session: string | undefined,
+  earliestCall: number,
   onReadFailure: () => void,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
@@ -81,7 +83,16 @@ async function privateTranscript(
     // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
     // the host cannot read them; use the existing credential-checked channel.
     // Roots come from validated execution paths, never transcript metadata.
-    const args = ["-e", CLAUDE_CONTEXT_READER, "--", root, session ?? ""];
+    const floor = String(earliestCall);
+    const args = [
+      "-e",
+      CLAUDE_CONTEXT_READER,
+      "--",
+      root,
+      session ?? "",
+      "local",
+      floor,
+    ];
     const worker = execution.target && execution.target.machine_id !== "local";
     if (worker && (execution.mode !== "agent-ssh" || !execution.fileHelper)) {
       onReadFailure();
@@ -98,6 +109,7 @@ async function privateTranscript(
             root,
             session ?? "",
             CLAUDE_CONTEXT_READER,
+            floor,
           ]
         : ["node", ...args];
     const command =
@@ -277,6 +289,10 @@ export async function readSessionContexts(
             execution,
             root,
             session,
+            Math.max(
+              contextGenerationStart(a, state.events),
+              Date.parse(run?.started_at ?? a.created_at),
+            ),
             readFailed,
             options.signal,
           ),

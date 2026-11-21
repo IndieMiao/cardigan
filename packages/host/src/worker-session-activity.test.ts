@@ -114,6 +114,7 @@ function scenario({ currentMissing = false } = {}) {
     currentRoot,
     "",
     CLAUDE_CONTEXT_READER,
+    String(Date.parse(a.created_at)),
   ];
   function expectBoundRead() {
     expect(agentProcessCommand).toHaveBeenCalledExactlyOnceWith(worker, argv);

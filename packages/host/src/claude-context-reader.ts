@@ -129,13 +129,17 @@ function bashOutputGrew(call, data) {
 // A later timer, fault, sidechain or unread gap leaves only verified record times.
 function alertMetadata(lines, path, mtime, activity) {
   const id = basename(path, '.jsonl');
-  let last, finalWrite, pending;
+  let last, finalWrite;
+  // Per bounded read of this session only. A tool ID is local to its cwd;
+  // completing one sibling cannot consume another's start or high-water marks.
+  const pending = new Map();
+  const earliestCall = Number(process.argv[4]);
   const writeTime = new Date(mtime).toISOString();
   for (const line of lines) {
     if (line === '') continue;
     finalWrite = undefined;
     let e;
-    try { e = object(JSON.parse(line)); } catch { pending = undefined; continue; }
+    try { e = object(JSON.parse(line)); } catch { pending.clear(); continue; }
     if (!e || e.isSidechain === true || e.message?.model === '<synthetic>') continue;
     if (e.sessionId && e.sessionId !== id) return;
     if (e.sessionId !== id || !text(e.cwd, 4096)) continue;
@@ -144,8 +148,9 @@ function alertMetadata(lines, path, mtime, activity) {
     const ts = Date.parse(text(e.timestamp, 64));
     const timestamp = Number.isFinite(ts) ? new Date(ts).toISOString() : undefined;
     if (e.type === 'progress' && e.data?.type === 'bash_progress') {
-      if (!pending || e.parentToolUseID !== pending.id || e.cwd !== pending.cwd) continue;
-      if (bashOutputGrew(pending, e.data) && timestamp && ts >= Date.parse(pending.since) &&
+      const call = pending.get(e.cwd)?.get(e.parentToolUseID);
+      if (!call || ts < Date.parse(call.since)) continue;
+      if (bashOutputGrew(call, e.data) && timestamp &&
           (!last || ts >= Date.parse(last.updated_at))) {
         last = {session_id: id, cwd: e.cwd, updated_at: timestamp};
       }
@@ -155,14 +160,28 @@ function alertMetadata(lines, path, mtime, activity) {
     if (timestamp && (!last || ts >= Date.parse(last.updated_at))) last = {...finalWrite, updated_at: timestamp};
     if (!Array.isArray(e.message?.content)) continue;
     for (const block of e.message.content) {
-      if (block?.type === 'tool_result' && pending?.id === block.tool_use_id) pending = undefined;
-      if (block?.type !== 'tool_use' || block.name !== 'Bash' || block.input?.run_in_background || typeof block.input?.command !== 'string') continue;
-      if (text(block.id, 128) && timestamp) pending = {id: block.id, command: foregroundName(block.input.command), since: timestamp, cwd: e.cwd, counts: {}, produced: false};
+      let calls = pending.get(e.cwd);
+      if (e.type === 'user' && block?.type === 'tool_result') {
+        const call = calls?.get(block.tool_use_id);
+        if (call && (!timestamp || ts >= Date.parse(call.since))) calls.delete(block.tool_use_id);
+        if (calls?.size === 0) pending.delete(e.cwd);
+        continue;
+      }
+      if (e.type !== 'assistant' || block?.type !== 'tool_use' || block.name !== 'Bash' ||
+          block.input?.run_in_background || typeof block.input?.command !== 'string' ||
+          !text(block.id, 128) || !timestamp || !(ts >= earliestCall)) continue;
+      if (!calls) { calls = new Map(); pending.set(e.cwd, calls); }
+      if (!calls.has(block.id)) calls.set(block.id, {
+        command: foregroundName(block.input.command), since: timestamp, counts: {}, produced: false,
+      });
     }
   }
   const progressAt = activity?.error ? activity.progress?.updated_at : activity?.updated_at;
   const file = finalWrite ?? (last && (!progressAt || Date.parse(last.updated_at) > Date.parse(progressAt)) ? last : undefined);
-  return file || pending ? {...(file ? {file_activity: file} : {}), ...(pending ? {foreground: {command: pending.command, since: pending.since}} : {})} : undefined;
+  // Several calls can all contribute progress, but none is uniquely the stalled command.
+  const calls = pending.size === 1 ? pending.values().next().value : undefined;
+  const only = calls?.size === 1 ? calls.values().next().value : undefined;
+  return file || only ? {...(file ? {file_activity: file} : {}), ...(only ? {foreground: {command: only.command, since: only.since}} : {})} : undefined;
 }
 function readTail(fd, path, attributable, activityOnly = false) {
   const { fstatSync, readSync } = require('node:fs');

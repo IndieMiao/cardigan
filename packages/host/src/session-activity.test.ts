@@ -269,7 +269,7 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
   using capture = vi
     .spyOn(transcript, "captureTranscript")
     .mockImplementation(async (_file, args) => {
-      const [dir, session] = args.slice(-2);
+      const [dir, session] = args.slice(-4);
       const first = session === one.id;
       if (
         (!first && session !== ten.id) ||
@@ -900,5 +900,127 @@ test.each(["totalLines", "totalBytes"])(
     const ended = await read(state("claude-code"));
     expect(ended?.foreground).toBeUndefined();
     expect(ended?.fileActivity).toBeUndefined();
+  },
+);
+
+const bashUse = (id: string, command: string) => ({
+  type: "tool_use",
+  name: "Bash",
+  id,
+  input: { command },
+});
+const bashOutput = (
+  parentToolUseID: string,
+  timestamp: string,
+  totalBytes: number,
+) =>
+  line({
+    ...mainRecord,
+    type: "progress",
+    parentToolUseID,
+    timestamp,
+    data: { type: "bash_progress", totalBytes },
+  });
+
+test("C-541: interleaved calls keep independent output counters and do not name an ambiguous foreground", async () => {
+  const file = claudeFile();
+  const a = "PRIVATE-ID-A",
+    b = "PRIVATE-ID-B";
+  const minute = (m: number) => `2026-01-01T00:${m}:00.000Z`;
+  const inspect = () => read(state("claude-code"));
+  await write(
+    file,
+    line({
+      ...mainRecord,
+      timestamp: oldAt,
+      type: "assistant",
+      message: { content: [bashUse(a, "vite"), bashUse(b, "node web.mjs")] },
+    }) +
+      bashOutput(b, oldAt, 100) +
+      bashOutput(a, minute(16), 1),
+  );
+  const both = await inspect();
+  expect(both?.foreground).toBeUndefined();
+  expect(both?.fileActivity?.updated_at).toBe(minute(16));
+  await appendFile(
+    file,
+    bashOutput(b, minute(24), 101) + bashOutput(a, minute(25), 1),
+  );
+  expect((await inspect())?.fileActivity?.updated_at).toBe(minute(24));
+  // Complete B, then send late B progress; A's high-water mark and start survive.
+  await appendFile(
+    file,
+    line({
+      ...mainRecord,
+      timestamp: minute(30),
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: b }] },
+    }) +
+      bashOutput(a, minute(32), 2) +
+      bashOutput(b, now, 102) +
+      bashOutput(a, now, 2) +
+      timer,
+  );
+  const one = await inspect();
+  expect(one?.fileActivity?.updated_at).toBe(minute(32));
+  expect(one?.foreground).toEqual({ command: "vite", since: oldAt });
+  expect(JSON.stringify(one)).not.toContain("PRIVATE-ID");
+  await appendFile(file, "invalid-record\n" + bashOutput(a, now, 3));
+  const gap = await inspect();
+  expect(gap?.fileActivity?.updated_at).toBe(minute(32));
+  expect(gap?.foreground).toBeUndefined();
+});
+
+test.each(["session", "run", "generation"])(
+  "C-541: reusing a Bash call ID after a %s change does not import an old start",
+  async (boundary) => {
+    const file = claudeFile(),
+      id = "same-id",
+      cut = "2026-01-01T00:30:00.000Z";
+    const s = state("claude-code");
+    const current =
+      boundary === "run"
+        ? { ...s, runs: s.runs.map((r) => ({ ...r, started_at: cut })) }
+        : boundary === "generation"
+          ? ({
+              ...s,
+              events: [
+                {
+                  type: "session_replaced",
+                  payload: { assignment_id: "A-1" },
+                  created_at: cut,
+                },
+              ],
+            } as unknown as CommandState)
+          : s;
+    const start = (
+      timestamp: string,
+      command: string,
+      sessionId = mainRecord.sessionId,
+    ) =>
+      line({
+        ...mainRecord,
+        sessionId,
+        timestamp,
+        type: "assistant",
+        message: { content: [bashUse(id, command)] },
+      });
+    await write(
+      file,
+      boundary === "session" ? "" : start(oldAt, "node web.mjs"),
+    );
+    if (boundary === "session")
+      await write(
+        join(file, "..", "old.jsonl"),
+        start(oldAt, "node web.mjs", "old"),
+      );
+    await appendFile(file, bashOutput(id, now, 90));
+    const old = await read(current);
+    expect(old?.fileActivity).toBeUndefined();
+    expect(old?.foreground).toBeUndefined();
+    await appendFile(file, start(cut, "vite") + bashOutput(id, now, 1));
+    const fresh = await read(current);
+    expect(fresh?.fileActivity?.updated_at).toBe(now);
+    expect(fresh?.foreground).toEqual({ command: "vite", since: cut });
   },
 );

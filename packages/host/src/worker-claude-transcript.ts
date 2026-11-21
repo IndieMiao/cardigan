@@ -7,7 +7,7 @@
 export const WORKER_CLAUDE_OPENER = `
 import contextlib, os, signal, stat, sys
 signal.alarm(10)
-root, session, parser = sys.argv[1:]
+root, session, parser, floor = sys.argv[1:]
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 @contextlib.contextmanager
 def directory(name, parent=None):
@@ -46,7 +46,7 @@ def read():
         if not found: return
         file, path = found
         os.dup2(file, 0, inheritable=True)
-        os.execvp('node', ['node', '-e', parser, '--', path, session, 'worker-fd'])
+        os.execvp('node', ['node', '-e', parser, '--', path, session, 'worker-fd', floor])
 try:
     read()
     print('null')

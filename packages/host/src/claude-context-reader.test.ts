@@ -123,8 +123,8 @@ test.each([
       source: "claude_transcript:last_usage",
     });
     expect(agentProcessCommand).toHaveBeenCalledOnce();
-    expect(vi.mocked(agentProcessCommand).mock.calls[0]?.[1].slice(-2)).toEqual(
-      [runDir, ""],
+    expect(vi.mocked(agentProcessCommand).mock.calls[0]?.[1].slice(-4)).toEqual(
+      [runDir, "", "local", String(Date.parse("2026-01-01T00:00:00.000Z"))],
     );
     expect(sample?.status).toBe(window === null ? "missing" : "fresh");
     if (window === null) expect(sample).not.toHaveProperty("observation");
@@ -139,7 +139,7 @@ const rawRead = async (runDir: string, session = "") =>
   (
     await capture(
       process.execPath,
-      ["-e", CLAUDE_CONTEXT_READER, "--", runDir, session],
+      ["-e", CLAUDE_CONTEXT_READER, "--", runDir, session, "local", "0"],
       {
         encoding: "utf8",
         maxBuffer: 64 * 1024,

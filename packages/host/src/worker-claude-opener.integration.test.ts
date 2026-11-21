@@ -35,7 +35,7 @@ const record = (sessionId: string) =>
       usage: { input_tokens: 1000, output_tokens: 20 },
     },
   });
-const read = () =>
+const read = (earliestCall = 0) =>
   captureTranscript("python3", [
     "-I",
     "-B",
@@ -44,6 +44,7 @@ const read = () =>
     join(root, "generation"),
     "",
     CLAUDE_CONTEXT_READER,
+    String(earliestCall),
   ]);
 
 test("the worker emits only activity from the fd and original record time", async () => {
@@ -84,3 +85,43 @@ test.each(["missing", "symlink", "ambiguous", "conflicting session"])(
     expect(JSON.parse(await read())).toBeNull();
   },
 );
+
+test("a worker fd attributes output to the surviving sibling only if its start belongs to this generation", async () => {
+  const start = "2026-01-01T00:30:00.000Z";
+  const row = (type: string, timestamp: string, extra: object) =>
+    JSON.stringify({
+      type,
+      timestamp,
+      cwd: "/worktree/src",
+      sessionId: "one",
+      ...extra,
+    });
+  const events = [
+    row("assistant", start, {
+      message: {
+        content: ["A", "B"].map((id) => ({
+          type: "tool_use",
+          name: "Bash",
+          id,
+          input: { command: id === "A" ? "vite" : "node web.mjs" },
+        })),
+      },
+    }),
+    row("user", start, {
+      message: { content: [{ type: "tool_result", tool_use_id: "B" }] },
+    }),
+    row("progress", at, {
+      parentToolUseID: "A",
+      data: { type: "bash_progress", totalBytes: 1 },
+    }),
+  ];
+  await writeFile(join(folder, "one.jsonl"), events.join("\n"));
+  const floor = Date.parse(start);
+  expect(JSON.parse(await read(floor))).toMatchObject({
+    foreground: { command: "vite", since: start },
+    file_activity: { updated_at: new Date(at).toISOString() },
+  });
+  const afterRotation = JSON.parse(await read(floor + 1));
+  expect(afterRotation.file_activity).toBeUndefined();
+  expect(afterRotation.foreground).toBeUndefined();
+});

@@ -139,9 +139,13 @@ test.each([
   },
 );
 
-// V-2610: drive the actual private transcript reader and the durable alert,
+// V-2610 / V-2617: drive the actual private transcript reader and the durable alert,
 // with a fixed terminal digest, no MCP calls and a synthetic clock.
-test("C-541: a foreground Bash call producing output is not silent; repeating its counters eventually alerts", async () => {
+test.each(["A", "AB", "BA"])(
+  "C-541: only A remains; verified output and the final stall are independent of invocation order %s",
+  checkForegroundOrder,
+);
+async function checkForegroundOrder(order: string) {
   const f = dispatchFixture();
   const { assignment } = f.create();
   f.session(assignment, false);
@@ -185,25 +189,29 @@ test("C-541: a foreground Bash call producing output is not silent; repeating it
       );
       await utimes(file, new Date(timestamp), new Date(timestamp));
     };
+    const started = f.clock.now();
     await append({
       type: "assistant",
       message: {
-        content: [
-          {
-            type: "tool_use",
-            id: "cmd",
-            name: "Bash",
-            input: { command: "node web.mjs" },
-          },
-        ],
+        content: Array.from(order, (id) => ({
+          type: "tool_use",
+          id,
+          name: "Bash",
+          input: { command: id === "A" ? "node web.mjs" : "vite" },
+        })),
       },
     });
+    if (order.includes("B"))
+      await append({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "B" }] },
+      });
     for (const [i, lines] of [1, 2, 2].entries()) {
       f.advance(16 * 60_000);
       const fullOutput = "PRIVATE\n".repeat(lines);
       await append({
         type: "progress",
-        parentToolUseID: "cmd",
+        parentToolUseID: "A",
         data: {
           type: "bash_progress",
           elapsedTimeSeconds: (i + 1) * 960,
@@ -224,6 +232,15 @@ test("C-541: a foreground Bash call producing output is not silent; repeating it
           { reason: "前台命令 node web.mjs 已运行至少 48 分钟，无近期输出" },
         ]);
       const row = (await inspect.mock.results[i]?.value)?.get(assignment.id);
+      expect(row?.foreground).toEqual({
+        command: "node web.mjs",
+        since: started,
+      });
+      expect(row?.fileActivity?.updated_at).toBe(
+        new Date(
+          Date.parse(started) + Math.min(i + 1, 2) * 16 * 60_000,
+        ).toISOString(),
+      );
       expect(JSON.stringify(row)).not.toContain("PRIVATE");
       expect(JSON.stringify(alerts)).not.toContain("PRIVATE");
     }
@@ -232,4 +249,4 @@ test("C-541: a foreground Bash call producing output is not silent; repeating it
     await service.close();
     f.close();
   }
-});
+}
