@@ -61,6 +61,10 @@ def anchor(path, uid):
 STAGED = '.retention-claim-'
 
 
+class HardLinkedRun(ValueError):
+    pass
+
+
 def facts(s):
     return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
@@ -83,6 +87,10 @@ def observe(fd, guard, run):
             with opened(name, os.O_PATH | os.O_NOFOLLOW, d) as handle:
                 same(d,name,handle)
                 st = os.fstat(handle)
+                # Removing one alias changes ctime for every other alias, including
+                # ones outside this tree. Never offer a partial cleanup of this run.
+                if run and not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
+                    raise HardLinkedRun()
                 digest.update(repr((os.fsencode(name),facts(st))).encode())
                 nested = None
                 if stat.S_ISDIR(st.st_mode):
@@ -183,7 +191,8 @@ def runs(req,root,op):
                             require(req['item']==item); guard()
                             clear_plan(fd,plan,guard)
                     result['candidates'].append(item)
-            except FileNotFoundError:
+            except HardLinkedRun:
+                result.setdefault('skip_reasons', {})[name] = 'hard_linked_run'
                 result['skipped'].append(name)
             except (OSError,ValueError): result['skipped'].append(name)
     return result

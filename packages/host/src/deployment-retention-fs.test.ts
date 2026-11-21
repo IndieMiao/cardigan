@@ -64,3 +64,16 @@ test("matches the entries observed before clear; never consumes new content or a
    if variant=='addition': assert file.read_text()=='original' and added.read_text()=='new';added.unlink()
    else: assert file.read_text()=='replacement';file.unlink();(root/'saved').rename(file)
 `));
+
+test("a hard link added after preview retains the whole run, including earlier entries", () =>
+  fixture(` area=root/'runs'; parent=area/'cardigan'; leaf=parent/'A-1'; leaf.mkdir(parents=True)
+ for p in (root,area,parent): p.chmod(0o2750)
+ leaf.chmod(0o2770); a=leaf/'a'; a.write_text('a'); b=leaf/'b'; b.write_text('b')
+ req=dict(root=tmp,uid=uid,gid=gid,names=['A-1'],deadline_ms=__import__('time').time()*1000+4000)
+ with patch('os.getuid',return_value=uid+10001):
+  req['item']=main('inventory',req)['candidates'][0]
+  os.link(b,leaf/'b2')
+  for op in ('inventory','clear'):
+   assert main(op,req)=={'candidates':[],'skipped':['A-1'],'skip_reasons':{'A-1':'hard_linked_run'}}
+  assert a.read_text()=='a' and b.read_text()==(leaf/'b2').read_text()=='b' and b.stat().st_nlink==2
+`));

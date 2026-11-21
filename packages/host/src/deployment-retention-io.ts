@@ -29,6 +29,7 @@ export interface Item {
 export interface Scan {
   candidates: Item[];
   skipped: string[];
+  skip_reasons?: Record<string, "hard_linked_run">;
 }
 export interface Command {
   file: string;
@@ -45,7 +46,7 @@ function response(
   kind: Item["kind"],
   allowed?: Set<string>,
 ): Scan {
-  const { candidates, skipped } = JSON.parse(text) as Scan;
+  const { candidates, skipped, skip_reasons } = JSON.parse(text) as Scan;
   const valid = (n: string) =>
     typeof n === "string" &&
     names[kind].test(n) &&
@@ -54,6 +55,15 @@ function response(
     !Array.isArray(candidates) ||
     !Array.isArray(skipped) ||
     !skipped.every(valid) ||
+    (skip_reasons !== undefined &&
+      (kind !== "run" ||
+        !skip_reasons ||
+        typeof skip_reasons !== "object" ||
+        Array.isArray(skip_reasons) ||
+        !Object.entries(skip_reasons).every(
+          ([name, reason]) =>
+            skipped.includes(name) && reason === "hard_linked_run",
+        ))) ||
     !candidates.every(
       (i) =>
         i.kind === kind &&
@@ -72,7 +82,7 @@ function response(
       candidates.length + skipped.length
   )
     throw new Error("Invalid maintenance observation");
-  return { candidates, skipped };
+  return { candidates, skipped, ...(skip_reasons && { skip_reasons }) };
 }
 export const localCommand = (op: string): Command => ({
   file: "/usr/bin/python3",

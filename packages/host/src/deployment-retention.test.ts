@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -35,12 +36,13 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
     await mkdir(parent, { recursive: true });
     for (const path of [root, join(root, "runs"), parent])
       await chmod(path, 0o2750);
-    for (const n of [1, 2]) {
+    for (const n of [1, 2, 5]) {
       const path = join(parent, `A-${n}`);
       await mkdir(path);
       await chmod(path, 0o2770);
       await writeFile(join(path, "cache"), "cache");
     }
+    await link(join(parent, "A-5/cache"), join(parent, "A-5/alias"));
     const cmd = (op: string) => ({
       file: "/usr/bin/python3",
       args: [
@@ -93,7 +95,7 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     store.createProject({ id: p });
     store.uow.run((tx) => {
       tx.cards.put(p, { ...card(), project_id: p });
-      for (const n of [1, 2])
+      for (const n of [1, 2, 5])
         tx.assignments.put(p, {
           ...assignment(n),
           runtime_ref: {
@@ -127,6 +129,8 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
         .sort(),
     ).toEqual(["A-1", "A-2", backup(1)]);
     const report = JSON.parse(text);
+    expect(report.skipped).toContain("A-5");
+    expect(report.skip_reasons["A-5"]).toBe("hard_linked_run");
     expect(report.retained_releases).toEqual([
       { name: releaseName, reason: "recent", size_bytes: expect.any(Number) },
     ]);
@@ -223,6 +227,8 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     interruptClear = false;
     await apply().poll(later); // restarted supervisor sees durable intent; changed tree is never retried
     expect(await readFile(join(added, "left"), "utf8")).toBe("retained");
+    for (const name of ["cache", "alias"])
+      expect(await readFile(join(parent, "A-5", name), "utf8")).toBe("cache");
     expect(await readFile(join(dir, releaseName, "server"), "utf8")).toBe(
       "never remove",
     );
@@ -235,6 +241,11 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
         .map((e) => e.payload),
     ).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          name: "A-5",
+          status: "retained",
+          reason: "hard_linked_run",
+        }),
         expect.objectContaining({ name: "A-1", status: "retained" }),
         expect.objectContaining({ name: "A-2", status: "removed" }),
         expect.objectContaining({

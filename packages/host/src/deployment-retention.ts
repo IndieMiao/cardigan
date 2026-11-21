@@ -10,6 +10,7 @@ import {
   type Item,
   localCommand,
   localRunTarget,
+  type Scan,
   scan,
   single,
 } from "./deployment-retention-io.js";
@@ -39,6 +40,7 @@ interface Ready {
 interface Inventory {
   candidates: Item[];
   skipped: string[];
+  skip_reasons: NonNullable<Scan["skip_reasons"]>;
   namespace: Record<string, string>;
   retained_releases: {
     name: string;
@@ -48,7 +50,7 @@ interface Inventory {
   total_bytes: number;
 }
 interface Report extends Inventory {
-  version: 3;
+  version: 4;
   captured_at: string;
   scope: string;
   policy: Omit<RetentionPolicy, "approval">;
@@ -143,6 +145,7 @@ export class DeploymentRetention {
     const snapshots = await this.snapshots(ready);
     const candidates = snapshots.candidates;
     const skipped = [...snapshots.skipped];
+    const skip_reasons: Inventory["skip_reasons"] = {};
     const namespace: Record<string, string> = {
       ...snapshots.namespace,
     };
@@ -196,6 +199,7 @@ export class DeploymentRetention {
             else skipped.push(item.name);
           }
           skipped.push(...result.skipped);
+          Object.assign(skip_reasons, result.skip_reasons);
         } catch {
           skipped.push(...batch);
         }
@@ -204,6 +208,7 @@ export class DeploymentRetention {
     return {
       candidates,
       skipped,
+      skip_reasons,
       namespace,
       retained_releases: releases,
       total_bytes: candidates.reduce((n, i) => n + i.size_bytes, 0),
@@ -296,7 +301,7 @@ export class DeploymentRetention {
       }
       if (!(await ready.stillReady())) return;
       await this.publish(path, {
-        version: 3,
+        version: 4,
         captured_at: new Date(now).toISOString(),
         scope,
         policy,
@@ -309,7 +314,7 @@ export class DeploymentRetention {
     if (!approval) return;
     const report = JSON.parse(text) as Report;
     if (
-      report.version !== 3 ||
+      report.version !== 4 ||
       scope !== report.scope ||
       JSON.stringify(policy) !== JSON.stringify(report.policy)
     ) {
@@ -373,7 +378,7 @@ export class DeploymentRetention {
         notified.add(k);
       };
       for (const name of current.skipped)
-        retained(name, "unverifiable_or_busy");
+        retained(name, current.skip_reasons[name] ?? "unverifiable_or_busy");
       const runs =
         t && eligibleRuns(state, policy.released_days, now, t.ownsRef);
       this.queue = current.candidates.filter((i) => {
