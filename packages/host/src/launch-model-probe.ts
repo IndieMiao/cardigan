@@ -12,10 +12,12 @@ export async function probeModel(
   secrets: Record<string, string>,
   smoke: boolean,
   limits: LaunchConfig["launch_check"],
+  /** C-549: a Provider probe lists the first page of models, no model needed. */
+  listOnly = false,
 ) {
   const p = resolved.provider?.definition,
     model = resolved.profile.model;
-  if (!p?.base_url || !p.api || !model)
+  if (!p?.base_url || !p.api || (!model && !listOnly) || (listOnly && smoke))
     throw new Error("联网检查需要明确的接入点 URL、协议和模型 ID");
   const url = new URL(p.base_url);
   const anthropic = p.api === "anthropic-messages";
@@ -70,6 +72,11 @@ export async function probeModel(
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   };
   try {
+    if (listOnly) {
+      const list = await call("models");
+      if (!Array.isArray(list?.data)) throw new Error();
+      return undefined;
+    }
     let route = "models";
     const cursors = new Set<string>();
     for (let page = 1; ; page++) {
