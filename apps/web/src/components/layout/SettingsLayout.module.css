@@ -92,7 +92,7 @@
     display: none;
   }
   /* Two lists in one tab (C-549: launch profiles, then Providers). */
-  .panel + .panel {
+  .panel:not([hidden]) + .panel:not([hidden]) {
     margin-block-start: calc(var(--ui-space-6) * 2);
   }
   .panelHeading,
