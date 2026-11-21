@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import type { Machine } from "@cardigan/domain";
 import {
   type CheckKind,
   type CheckResult,
@@ -13,6 +14,7 @@ import {
   refreshWorkerObservations,
   runtimeTargetBinding,
   runtimeWorkersPath,
+  upgradeMaterials,
   WORKER_STEPS,
   type WorkerProbeRunner,
   workerJournalId,
@@ -36,7 +38,8 @@ export interface WizardHost {
 }
 export interface MachineHost {
   readonly wizard?: WizardHost;
-  bindingFingerprint?(project: string, machine: string): string | undefined;
+  bindingFingerprint?(project: string, machine: Machine): string | undefined;
+  upgradeCommand?(project: string, machine: Machine): string | undefined;
   bindings(): (project: string, machine: string) => BindingSummary | null;
   workerRecord(
     project: string,
@@ -53,7 +56,8 @@ export interface MachineHost {
     progress: (step: string) => void,
     signal: AbortSignal,
     observationId: string,
-  ): Promise<CheckResult>;
+    confirmation?: { binding: string },
+  ): Promise<CheckResult & { readonly maintenance?: CheckResult }>;
 }
 // This adapter is the only place that touches private files. Neither full targets,
 // onboarding repair commands, subprocess output nor exception messages leave it.
@@ -67,13 +71,32 @@ export function machineHost(
   const file = runtimeWorkersPath(env),
     root = dirname(file),
     dataDir = execution.dataDir;
+  function boundWorker(project: string, machine: Machine) {
+    const worker = loadRuntimeWorkers(dataDir, file).find(
+      (w) => w.machine_id === machine.id && w.project_id === project,
+    );
+    return worker &&
+      machine.id !== "local" &&
+      machine.herdr_machine === machine.id &&
+      matchesWorkerPlatform(machine, worker) &&
+      worker.execution.mode === "agent-ssh"
+      ? worker
+      : undefined;
+  }
   return {
     wizard: { root, dataDir, env },
     bindingFingerprint(project, machine) {
-      const worker = loadRuntimeWorkers(dataDir, file).find(
-        (w) => w.machine_id === machine && w.project_id === project,
-      );
+      const worker = boundWorker(project, machine);
       return worker && runtimeTargetBinding(worker).fingerprint;
+    },
+    upgradeCommand(project, machine) {
+      const worker = boundWorker(project, machine);
+      if (worker?.execution.mode !== "agent-ssh") return undefined;
+      // Derive the expected command from this process's release. Never stage on read.
+      return upgradeMaterials(
+        { ...worker.execution, target: runtimeTargetBinding(worker) },
+        machine.os,
+      ).terminal.command;
     },
     bindings() {
       const workers = loadRuntimeWorkers(dataDir, file);
@@ -125,7 +148,15 @@ export function machineHost(
             : "checking",
       };
     },
-    async check(project, machine, kind, progress, signal, observationId) {
+    async check(
+      project,
+      machine,
+      kind,
+      progress,
+      signal,
+      observationId,
+      confirmation,
+    ) {
       signal.throwIfAborted();
       if (kind === "machine") {
         progress("runtime");
@@ -138,6 +169,7 @@ export function machineHost(
             signal,
             progress,
             observationId,
+            ...(confirmation ? { helperConfirmation: confirmation } : {}),
             browsersPath,
           },
           async () => {
@@ -158,6 +190,7 @@ export function machineHost(
         return {
           status: result.health.status === "passed" ? "passed" : "failed",
           failed_steps: result.health.blockers,
+          ...(result.maintenance ? { maintenance: result.maintenance } : {}),
         };
       }
 
@@ -170,6 +203,9 @@ export function machineHost(
         dataDir,
       );
       if (
+        (confirmation &&
+          runtimeTargetBinding(config.worker).fingerprint !==
+            confirmation.binding) ||
         config.worker.machine_id !== machine ||
         config.worker.project_id !== project
       )

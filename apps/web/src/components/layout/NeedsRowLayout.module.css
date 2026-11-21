@@ -182,6 +182,12 @@
     display: grid;
     gap: var(--ui-space-1);
   }
+  .body :global(.copy-command) pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+    overflow-x: auto;
+  }
   .body :where(textarea) {
     font: inherit;
   }

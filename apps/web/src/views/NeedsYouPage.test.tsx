@@ -3022,7 +3022,7 @@ test("structured terminal steps display and copy the exact multiline command wit
   const terminal = {
     target: "测试机",
     login: "使用管理账号",
-    command: "printf '%s\\n' 'two words'\nprintf 'done'",
+    command: `printf '%s\\n' 'two words' '${"a".repeat(1102)}'\nprintf 'done'`,
     expected_output: "打印 done",
     on_failure: "保留输出",
   };

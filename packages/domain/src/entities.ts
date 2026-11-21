@@ -1200,7 +1200,11 @@ export interface HumanAction {
     readonly reason: string;
     readonly by: Author;
     readonly at: Timestamp;
-    readonly source: "human" | "card_cancelled" | "supervisor_rechecked";
+    readonly source:
+      | "human"
+      | "card_cancelled"
+      | "supervisor_rechecked"
+      | "worker_helper_superseded";
   };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;

@@ -84,6 +84,7 @@ import {
   fixture,
   human,
   id,
+  machine,
   now,
   ports,
   run,
@@ -361,9 +362,13 @@ test("only system reconciles supervisor notices; a verified notice stays unique 
 // Terminal text is presentation, never evidence that the privileged work succeeded.
 test("helper maintenance keeps a failed check open and rejects all ordinary completion routes", () => {
   let state = fixture();
+  state = {
+    ...state,
+    machines: [{ ...machine(), id: "remote", herdr_machine: "remote" }],
+  };
   const io = ports();
   const input = {
-    key: "worker-helper:test",
+    key: helperKey("remote"),
     reason: "worker_maintenance" as const,
     instructions: "prepared",
     helper_upgrade: { machine_id: "remote", binding: "trusted" },
@@ -396,6 +401,7 @@ test("helper maintenance keeps a failed check open and rejects all ordinary comp
   const check = {
     ...p,
     binding: "trusted",
+    machine_id: "remote",
     checks: { worker: passed, machine: failed },
   };
   expect(recordHelperUpgradeChecks(state, actor(4, "pm"), check, io).ok).toBe(
@@ -436,7 +442,7 @@ test("an unbound worker notice can record an unavailable check but never complet
       state,
       { kind: "system", project_id: state.project_id },
       {
-        key: "worker-helper:remote",
+        key: helperKey("remote"),
         reason: "worker_maintenance",
         instructions: "binding unavailable",
         helper_upgrade: { machine_id: "remote", binding: null },
@@ -449,6 +455,7 @@ test("an unbound worker notice can record an unavailable check but never complet
     human_action_id: opened.data.id,
     text: "installed",
     binding: null,
+    machine_id: "remote",
   };
   const passed = { status: "passed", failed_steps: [] } as const;
   const failed = { status: "failed", failed_steps: ["binding"] } as const;
@@ -474,4 +481,84 @@ test("an unbound worker notice can record an unavailable check but never complet
     status: "open",
     helper_checks: { worker: failed, machine: failed },
   });
+});
+
+function helperKey(machine: string, digest = "a") {
+  return `worker-helper:${machine}:${Array(3).fill(digest.repeat(64)).join(":")}`;
+}
+
+test("legacy helper identity comes only from the project's system creation event, not the text", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system", project_id: state.project_id } as const;
+  const open = (key: string) => {
+    const effect = value(
+      requestDeploymentAction(
+        state,
+        system,
+        {
+          key,
+          instructions: "worker-helper:remote",
+          reason: "worker_maintenance",
+        },
+        io,
+      ),
+    );
+    state = apply(state, effect);
+    return { human_action_id: effect.data.id, text: "done" };
+  };
+  for (const key of [helperKey("remote"), "worker-helper:unknown-format"]) {
+    const action = open(key);
+    expect(completeHumanAction(state, human, action, io).ok).toBe(false);
+    expect(
+      triageHumanAction(
+        state,
+        human,
+        { ...action, disposition: "done", rationale: "done" },
+        io,
+      ).ok,
+    ).toBe(false);
+    const events = state.events.map((e) => ({
+      ...e,
+      actor: { ...system, project_id: "other" },
+    }));
+    expect(
+      completeHumanAction({ ...state, events }, human, action, io).ok,
+    ).toBe(true);
+  }
+  const ordinary = open("worker-cooldown:remote");
+  expect(completeHumanAction(state, human, ordinary, io).ok).toBe(true);
+});
+
+test("a new helper generation cancels only the previous open notice for that exact machine", () => {
+  const io = ports();
+  let state = fixture();
+  const request = (machine_id: string, digest: string) => {
+    const effect = value(
+      requestDeploymentAction(
+        state,
+        { kind: "system", project_id: state.project_id },
+        {
+          key: helperKey(machine_id, digest),
+          instructions: "upgrade",
+          reason: "worker_maintenance",
+          helper_upgrade: { machine_id, binding: "trusted" },
+        },
+        io,
+      ),
+    );
+    state = apply(state, effect);
+    return effect.data.id;
+  };
+  const first = request("remote", "a"),
+    neighbor = request("remote-2", "a"),
+    current = request("remote", "b");
+  expect(request("remote", "b")).toBe(current);
+  expect(state.human_actions.find((h) => h.id === first)).toMatchObject({
+    status: "cancelled",
+    cancellation: { source: "worker_helper_superseded" },
+  });
+  expect(
+    state.human_actions.filter((h) => h.status === "open").map((h) => h.id),
+  ).toEqual([neighbor, current]);
 });

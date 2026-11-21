@@ -1,8 +1,15 @@
-import type { Clock, JsonValue } from "@cardigan/domain";
+import { setTimeout as delay } from "node:timers/promises";
+import type {
+  Clock,
+  HumanActionId,
+  JsonValue,
+  Machine,
+} from "@cardigan/domain";
 import {
   type CheckKind,
   type CheckResult,
   MachineCheckJournal,
+  tryHelperConfirmationLock,
 } from "@cardigan/host";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { HttpRejection } from "./http.js";
@@ -76,7 +83,7 @@ export class MachineChecks extends MachineCheckJournal {
           job,
           (progress) =>
             host.check(project, machine, kind, progress, this.signal, job.id),
-          (value) => value,
+          ({ status, failed_steps }) => ({ status, failed_steps }),
           (tx, final) => {
             machineAudit(
               tx,
@@ -96,9 +103,62 @@ export class MachineChecks extends MachineCheckJournal {
     }
     return job;
   }
+  /** Serialize confirmations across listeners until the idempotent result commits. */
+  async withHelperConfirmation<T>(
+    project: string,
+    id: HumanActionId,
+    work: () => Promise<T>,
+  ) {
+    const wait = async () => {
+      for (;;) {
+        this.signal.throwIfAborted();
+        const release = await tryHelperConfirmationLock(
+          this.store,
+          project,
+          id,
+        );
+        if (release) {
+          try {
+            return await work();
+          } finally {
+            await release();
+          }
+        }
+        await delay(100, undefined, { signal: this.signal });
+      }
+    };
+    const promise = wait();
+    this.pending.add(promise);
+    try {
+      return await promise;
+    } finally {
+      this.pending.delete(promise);
+    }
+  }
+  currentBinding(project: string, machine: Machine | undefined) {
+    try {
+      return (
+        (machine &&
+          machine.herdr_machine === machine.id &&
+          this.host?.bindingFingerprint?.(project, machine)) ||
+        null
+      );
+    } catch {
+      return null;
+    }
+  }
+  currentUpgradeCommand(project: string, machine: Machine, binding: string) {
+    try {
+      if (this.currentBinding(project, machine) === binding)
+        return this.host?.upgradeCommand?.(project, machine);
+    } catch {
+      /* Invalid configuration or unreadable release: hide stale material. */
+    }
+    return undefined;
+  }
   async verifyHelper(
     project: string,
-    machine: string,
+    machine: string | null,
     binding: string | null,
     authorize: (tx: StoreTransactionContext) => string,
   ) {
@@ -109,9 +169,14 @@ export class MachineChecks extends MachineCheckJournal {
     });
     const run = async (kind: CheckKind): Promise<CheckResult> => {
       const host = this.host;
-      if (!host || this.signal.aborted) return failed("检查服务不可用");
+      if (!machine || !binding || !host || this.signal.aborted)
+        return failed("检查服务不可用");
       try {
-        if (host.bindingFingerprint?.(project, machine) !== binding)
+        if (
+          this.store.uow.read((tx) =>
+            this.currentBinding(project, tx.machines.get(project, machine)),
+          ) !== binding
+        )
           return failed("机器绑定已变化");
         // Never reuse an older check, including another project's running job.
         const { job, joined } = this.claim(
@@ -139,11 +204,19 @@ export class MachineChecks extends MachineCheckJournal {
         );
         if (joined) return failed("机器检查占用中，请稍后重试");
         try {
-          return await this.execute(
+          const result = await this.execute(
             job,
             (progress) =>
-              host.check(project, machine, kind, progress, this.signal, job.id),
-            (value) => value,
+              host.check(
+                project,
+                machine,
+                kind,
+                progress,
+                this.signal,
+                job.id,
+                { binding },
+              ),
+            ({ status, failed_steps }) => ({ status, failed_steps }),
             (tx, job) =>
               machineAudit(
                 tx,
@@ -153,6 +226,9 @@ export class MachineChecks extends MachineCheckJournal {
                 "system",
               ),
           );
+          if (kind === "machine" && result.maintenance)
+            return result.maintenance;
+          return { status: result.status, failed_steps: result.failed_steps };
         } catch {
           return {
             status: "failed",
@@ -166,7 +242,7 @@ export class MachineChecks extends MachineCheckJournal {
       }
     };
     const verify = async () => {
-      if (!binding)
+      if (!binding || !machine)
         return {
           worker: failed("未确认机器绑定"),
           machine: failed("未确认机器绑定"),
@@ -174,7 +250,11 @@ export class MachineChecks extends MachineCheckJournal {
       const worker = await run("worker");
       const machineResult = await run("machine");
       try {
-        if (this.host?.bindingFingerprint?.(project, machine) === binding)
+        if (
+          this.store.uow.read((tx) =>
+            this.currentBinding(project, tx.machines.get(project, machine)),
+          ) === binding
+        )
           return { worker, machine: machineResult };
       } catch {
         /* configuration unreadable */
