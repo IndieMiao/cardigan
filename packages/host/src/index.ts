@@ -32,6 +32,7 @@ export {
   runCheckExecutor,
   SshCheckExecutor,
 } from "./check-executor.js";
+export * from "./check-flake-cases.js";
 export { checkTargetIdle } from "./check-handoff.js";
 export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
@@ -119,7 +120,7 @@ export {
 export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
-export { tryHostOpsLock } from "./host-ops-lock.js";
+export { tryHelperConfirmationLock, tryHostOpsLock } from "./host-ops-lock.js";
 export {
   boundedRetirementError,
   observeRetirementForDispatch,
@@ -327,6 +328,7 @@ export {
 export { WorkerGitTransport } from "./worker-git.js";
 export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
+export { upgradeMaterials } from "./worker-upgrade.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {

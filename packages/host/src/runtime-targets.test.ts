@@ -22,9 +22,10 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { governHcClient } from "../../runtime-herdr/src/call-queue.js";
 import { HerdrRuntime } from "../../runtime-herdr/src/index.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import { observeRegisteredMachine, RuntimeTargets } from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
 import { WorkerMcpError } from "./worker-mcp.js";
+import { upgradeHold } from "./worker-upgrade-gate.js";
 
 const value = <T>(result: RuntimeResult<T>): T => {
   if (!result.ok) throw new Error(result.error.message);
@@ -1303,4 +1304,86 @@ test("MCP reachability is checked every time and a configuration change during i
     ),
   ).toMatchObject({ ok: false });
   expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+});
+
+test.each([
+  ["draining", false, "passed"],
+  ["draining", true, "failed"],
+  ["offline", false, undefined],
+] as const)(
+  "maintenance observation during %s (broken helpers: %s) never enables dispatch",
+  async (status, broken, expected) => {
+    const project = "fixture",
+      id = "worker-a";
+    store.uow.run((tx) =>
+      tx.machines.put(project, { ...machine(id, id), status }),
+    );
+    if (broken) readiness.mockResolvedValue(["worker_helpers"]);
+    const options = {
+      store,
+      project,
+      machine: id,
+      observationId: "maintenance-check",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    };
+    const observed = await observeRegisteredMachine(options, () => router);
+    expect(readiness).toHaveBeenCalledOnce();
+    expect(observed.maintenance?.status).toBe(expected);
+    if (broken)
+      expect(observed.maintenance?.failed_steps).toEqual(["worker_helpers"]);
+    expect(observed.health).toMatchObject({
+      status: "failed",
+      available: false,
+      launch_enabled: false,
+      blockers: expect.arrayContaining(["machine_not_ready"]),
+    });
+    expect(store.uow.read((tx) => tx.machines.get(project, id)?.status)).toBe(
+      status,
+    );
+    await expect(router.forLaunch(project, assignment(id))).rejects.toThrow(
+      "machine_not_ready",
+    );
+    const { helperConfirmation: _confirmation, ...ordinary } = options;
+    expect(
+      (await observeRegisteredMachine(ordinary, () => router)).maintenance,
+    ).toBeUndefined();
+  },
+);
+
+test("a manual confirmation may ignore drain but not a failed automatic upgrade", async () => {
+  const project = "fixture",
+    id = "worker-a";
+  store.uow.run((tx) => {
+    tx.machines.put(project, { ...machine(id, id), status: "draining" });
+    store.database
+      .prepare(
+        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'failed')",
+      )
+      .run(project, id, "fixture-release");
+  });
+  const observed = await observeRegisteredMachine(
+    {
+      store,
+      project,
+      machine: id,
+      observationId: "confirm-held",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    },
+    () => router,
+  );
+  expect(observed.maintenance).toEqual({
+    status: "failed",
+    failed_steps: [upgradeHold],
+  });
+  expect(observed.health?.available).toBe(false);
 });

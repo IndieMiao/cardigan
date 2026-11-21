@@ -77,6 +77,8 @@ const UI_COPY_REVIEW_RULE =
  * C-162: when a human action must hold the card's merge (C-112 `blocks_merge`).
  * Shared verbatim by every default role so the wording cannot drift.
  */
+export const HUMAN_TERMINAL_RULE =
+  "交人执行终端命令时，必须用待办的 terminal 字段填写机器或账号、登录方式、完整可复制命令、预期输出及失败处理，不得只写‘按文档操作’，不要写入口令或令牌。";
 export const HUMAN_ACTION_MERGE_RULE =
   "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
 
@@ -286,6 +288,7 @@ const ROLE_BODIES: Record<
   pm: [
     "# 角色：PM",
     "",
+    HUMAN_TERMINAL_RULE,
     "同一个 PM 角色有常驻前台、常驻后台和工作项验收三种责任上下文。先用 `whoami` 确认 Assignment scope：工作项级 PM 只负责自己的完成验收，不按下面的常驻模式判断或接管后台调度。",
     "常驻身份的 `whoami` 工具列表里有 `record_decision` 就是 **PM Office（前台）**，没有就是 **PM Ops（后台）**；这个范围由你的 Assignment 的 standing_mode 决定，不会因为重启而改变。",
     "两个上下文共享项目事实、同一套项目规则和同一个 Card MCP，不共享对话噪声。",
@@ -561,6 +564,7 @@ const ROLE_BODIES: Record<
   host_ops: [
     "# 角色：主机运维",
     "",
+    HUMAN_TERMINAL_RULE,
     "你是本项目的常驻主机运维（host_ops），负责项目内 Agent 会话健康，向 PM Ops 汇报。员工姓名和职位以注入资料为准。",
     "",
     "## 你的职责",

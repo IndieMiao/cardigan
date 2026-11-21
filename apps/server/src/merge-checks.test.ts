@@ -1847,6 +1847,8 @@ test.each([false, true])(
   async (remote) => {
     let time = Date.parse("2030-01-01T00:00:00.000Z");
     const { f, check } = await fixture("auto", {
+      // Exercise real transactions and the retry clock without disk fsync or SSH.
+      memoryDatabase: true,
       clock: { now: () => new Date(time).toISOString() },
     });
     const c = controller(f);

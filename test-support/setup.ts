@@ -18,6 +18,8 @@ process.env.CARDIGAN_DATA_DIR = dataDir;
 // their own data. Disable it in this worker's descendants so empty-root cleanup
 // remains safe; do not recursively delete unknown data or active hc sockets.
 process.env.NODE_DISABLE_COMPILE_CACHE = "1";
+// Temporary workspaces must not bootstrap a different pnpm from the network.
+process.env.COREPACK_ENABLE_NETWORK = "0";
 // Only this Vitest worker is changed, never the host or the check supervisor.
 // Existing fixtures keep their individual mkdtemp/rm lifecycle and assertions.
 process.env.TMPDIR = root;

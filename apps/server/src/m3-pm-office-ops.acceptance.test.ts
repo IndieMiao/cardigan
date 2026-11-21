@@ -308,7 +308,7 @@ async function pmFixture(automaticOps = false) {
   let serverUrl: string | undefined;
   const server = await startCardiganServer({
     store,
-    config: { dataDir, host: "localhost", port: 0 },
+    config: { dataDir, host: "127.0.0.1", port: 0 },
     warn: () => {},
     log: () => {},
     // This fixture has no repository: routing is the subject, so the delivery
@@ -361,6 +361,7 @@ async function pmFixture(automaticOps = false) {
       },
     },
   });
+  // startCardiganServer resolves only after the MCP listener is ready.
   serverUrl = server.url;
   const clients = new Map<AssignmentId, Client>();
   // Routing tests isolate the scheduler from pm-start token rotation. Start through

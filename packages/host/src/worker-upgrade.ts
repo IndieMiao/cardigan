@@ -1,199 +1,184 @@
-import { lstatSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { occupiedRunSlots } from "@cardigan/domain";
-import type { ExecutionConfig } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
-import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
+import type { ActionCommand } from "@cardigan/domain";
+import { gitEnvironment, gitSafetyArguments } from "@cardigan/git-transport";
 import {
-  matchesWorkerPlatform,
-  runtimeWorkersPath,
-} from "./runtime-workers-config.js";
-import { helperMismatch } from "./worker-helper-release.js";
-import { notifyWorkerMaintenance } from "./worker-maintenance.js";
-import { onboardWorker } from "./worker-onboarding.js";
-import {
-  parseWorkerOnboarding,
-  readOnboardingYaml,
-} from "./worker-onboarding-config.js";
-import {
-  finishUpgrade,
-  upgradeHold,
-  upgradeKey,
-  upgradeState,
-} from "./worker-upgrade-gate.js";
-import {
-  installRelease,
-  promotionPending,
-  upgradeIdentity,
-} from "./worker-upgrade-transport.js";
+  agentProcessCommand,
+  type ExecutionConfig,
+} from "@cardigan/runtime-herdr";
 
-type Check = { blockers: readonly string[]; launch_enabled: boolean };
-const held: Check = { blockers: [upgradeHold], launch_enabled: false };
-
-/** Called only while the patrol owns the machine check journal. No launch path installs. */
-export async function patrolHelperUpgrade(
-  options: {
-    store: Store;
-    job: string;
-    project: string;
-    machine: string;
-    execution: ExecutionConfig;
-    env?: NodeJS.ProcessEnv | undefined;
-    signal?: AbortSignal | undefined;
-    bindingCurrent: () => boolean;
-    check: () => Promise<Check>;
-  },
-  initial: Check,
-  adapters = {
-    install: installRelease,
-    workerCheck: onboardWorker,
-    promotionPending,
-  },
-): Promise<Check> {
-  const { store, project, machine, execution, signal } = options;
-  if (machine === "local" || execution.mode !== "agent-ssh") return initial;
-  const previous = upgradeState(store, project, machine);
-  const wasHeld = !!previous && previous.state !== "verified";
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) return initial;
-  if (initial.blockers.includes("machine_not_ready")) return initial;
-  const root = dirname(runtimeWorkersPath(options.env));
-  const key = upgradeKey(execution.target?.fingerprint);
-
-  let stage = "configuration";
-  const start = Date.now();
-  let before: Record<string, string> = {};
-  const evidence = () => ({ before, start, job: options.job });
-  const fail = () =>
-    store.uow.run((tx) =>
-      finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
+type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
+const release = new URL("../../../deploy/", import.meta.url);
+const sha = (bytes: Buffer | string) =>
+  createHash("sha256").update(bytes).digest("hex");
+// DeploymentBuild checks out a private clone for each release. Do not include
+// untracked files or consult the server cwd / the project being developed.
+function readRelease() {
+  const root = fileURLToPath(new URL("../", release));
+  const git = (...args: string[]) =>
+    execFileSync(
+      "/usr/bin/git",
+      [...gitSafetyArguments, "--git-dir=.git", ...args],
+      {
+        cwd: root,
+        env: gitEnvironment(),
+        maxBuffer: 8 * 1024 * 1024,
+      },
     );
-  if (previous?.release_key === key) {
-    if (previous.state === "installing") {
-      stage = "interrupted";
-      fail();
-    }
-    if (previous.state === "worker_checked") return initial;
-    if (previous.state !== "verified") return held;
-    // Drift after a verified install needs investigation, not another root write.
-    if (!initial.blockers.some(helperMismatch)) return initial;
-  }
-  const identity = upgradeIdentity(root, project, machine);
-  // Missing enrollment never enables SSH. Malformed/private-file failures may not authorize it either.
-  if (!lstatSync(identity, { throwIfNoEntry: false })) {
+  const rev = git("rev-parse", "--verify", "HEAD^{commit}").toString().trim();
+  if (!/^[0-9a-f]{40}$/u.test(rev)) throw new Error("worker_release_unknown");
+  const manifest: Record<string, string> = {};
+  for (const line of git("ls-tree", "-rz", rev, "--", "deploy")
+    .toString()
+    .split("\0")
+    .filter(Boolean)) {
+    const match =
+      /^100(?:644|755) blob ([a-f0-9]{40})\tdeploy\/([a-zA-Z0-9_-][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9_-][a-zA-Z0-9._-]*)*)$/u.exec(
+        line,
+      );
+    if (!match) throw new Error("unsupported_deploy_entry");
+    const path = join(root, "deploy", match[2] as string);
+    if (!lstatSync(path).isFile()) throw new Error("worker_release_changed");
+    const data = readFileSync(path);
     if (
-      wasHeld &&
-      previous.release_key !== key &&
-      execution.target &&
-      options.bindingCurrent()
-    ) {
-      // The patrol holds the machine job. Do not carry any worker proof across keys.
-      store.uow.run((tx) => {
-        store.database
-          .prepare(
-            "UPDATE worker_helper_upgrades SET release_key=?,state='failed',pending_final=NULL WHERE project_id=? AND machine_id=? AND release_key=? AND state!='verified'",
-          )
-          .run(key, project, machine, String(previous.release_key));
-        if (previous.state === "installing")
-          notifyWorkerMaintenance(
-            tx,
-            project,
-            { now: () => new Date().toISOString() },
-            `worker-upgrade:${machine}:${key}`,
-            `机器 ${machine} 的升级中断且已退出自动更新。请按当前版本人工恢复并顺序运行 worker check、machine check。`,
-          );
-      });
-    }
-    return wasHeld
-      ? { ...held, blockers: [...initial.blockers, upgradeHold] }
-      : initial;
-  }
-  const needsInstall = initial.blockers.some(helperMismatch);
-  if (!needsInstall && initial.blockers.length)
-    return { ...held, blockers: [...initial.blockers, upgradeHold] };
-  try {
-    if (adapters.promotionPending(execution.dataDir)) return held;
-  } catch {
-    /* Missing/invalid deployment proof is recorded as an installation failure. */
-  }
-  const claimed = store.uow.run((tx) => {
-    if (
-      occupiedRunSlots(
-        tx.assignments.list(project),
-        tx.runs.list(project),
-        machine,
-      ) > 0
+      createHash("sha1")
+        .update(`blob ${data.length}\0`)
+        .update(data)
+        .digest("hex") !== match[1]
     )
-      return false;
-    store.database
-      .prepare(
-        "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES (?,?,?,'installing') ON CONFLICT(project_id,machine_id) DO UPDATE SET release_key=excluded.release_key,state='installing',pending_final=NULL",
-      )
-      .run(project, machine, key);
-    return true;
+      throw new Error("worker_release_changed");
+    manifest[match[2] as string] = sha(data);
+  }
+  const template = readFileSync(new URL("manual-worker-upgrade.py", release));
+  if (sha(template) !== manifest["manual-worker-upgrade.py"])
+    throw new Error("worker_release_changed");
+  const bundle = gzipSync(git("archive", "--format=tar", rev, "deploy"));
+  return { manifest, template, bundle, rev, bundleSha: sha(bundle) };
+}
+let cached: ReturnType<typeof readRelease> | undefined;
+const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+// Open the staged directory and regular files without following links; only
+// read the two release-sized inputs. Checksums are verified on the private copies.
+const copyInputs = `import os,stat,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+for name,size in zip(('deploy.tar.gz','upgrade.py'),map(int,sys.argv[2:])):
+    src=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+    with os.fdopen(src,'rb') as f:
+        s=os.fstat(src)
+        if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_size!=size: raise ValueError('invalid_stage')
+        with open(name,'xb') as out: out.write(f.read(size+1))`;
+export function upgradeMaterials(worker: Worker, os: string) {
+  const { target, fileHelper, gitHelper } = worker;
+  if (
+    !target ||
+    target.machine_id === "local" ||
+    !fileHelper ||
+    !gitHelper ||
+    !worker.user ||
+    fileHelper.path !== `${worker.agentRoot}/libexec/worker-files.py` ||
+    gitHelper.path !== `${worker.agentRoot}/libexec/worker-git.py` ||
+    !["linux", "darwin"].includes(os)
+  )
+    throw new Error("worker_binding_unavailable");
+  cached ??= readRelease();
+  const { bundle, manifest, template, rev, bundleSha } = cached;
+  const binding = Buffer.from(
+    JSON.stringify({
+      project: target.project_id,
+      account: worker.user,
+      root: worker.agentRoot,
+      gid: worker.gid,
+      os,
+      manifest,
+      rev,
+      bundleSha,
+    }),
+  ).toString("base64");
+  const script = Buffer.concat([
+    template,
+    Buffer.from(`\nupgrade('${binding}')\n`),
+  ]);
+  const digests = [bundleSha, sha(script)];
+  const dir = `/tmp/cardigan-upgrade-${sha(JSON.stringify([digests, target.fingerprint])).slice(0, 32)}`;
+  const mac = os === "darwin";
+  // Use a fresh root-only destination and fixed bytes, never a manifest or executable in /tmp.
+  const shell = [
+    "set -eu",
+    "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+    "umask 077",
+    `work=$(mktemp -d ${mac ? "/private/var/root" : "/root"}/cardigan-upgrade.XXXXXXXX)`,
+    `cd "$work"`,
+    `/usr/bin/python3 -IB -c ${quote(`exec(${JSON.stringify(copyInputs)})`)} ${dir} ${bundle.length} ${script.length}`,
+    `printf '%s\\n' '${digests[0]}  deploy.tar.gz' '${digests[1]}  upgrade.py' | ${mac ? "/usr/bin/shasum -a 256" : "/usr/bin/sha256sum"} -c -`,
+    "/usr/bin/python3 -IB upgrade.py",
+  ].join("; ");
+  const terminal: ActionCommand = {
+    target: target.machine_id,
+    login: "用管理员账号登录目标机器，在该机终端执行（需要 sudo）。",
+    command: `/usr/bin/sudo /bin/sh -c ${quote(shell)}`,
+    expected_output:
+      "两项摘要均为 OK，最后输出“升级完成”；旧 deploy 和 helper 的备份位置见终端。",
+    on_failure:
+      "停止操作，不跳过摘要检查，不重跑、不恢复派发。记录失败项和备份位置交主机运维核对；临时文件丢失时等待巡检重新备料。",
+  };
+  return { bundle, script, dir, terminal, python: fileHelper.python };
+}
+// Executed as the existing unprivileged worker account. No helper upgrade protocol or sudo.
+const receive = `import base64,hashlib,json,os,stat,sys,tempfile
+p=sys.argv[1]
+try: os.mkdir(p,0o700)
+except FileExistsError: pass
+fd=os.open(p,os.O_DIRECTORY|os.O_NOFOLLOW)
+s=os.fstat(fd)
+if os.geteuid()==0 or s.st_uid!=os.geteuid() or stat.S_IMODE(s.st_mode)!=0o700: raise ValueError()
+os.fchdir(fd)
+for name,data in zip(('deploy.tar.gz','upgrade.py'),json.load(sys.stdin)):
+    with tempfile.NamedTemporaryFile(dir='.',delete=False) as f: f.write(base64.b64decode(data,validate=True))
+    os.replace(f.name,name)
+    with os.fdopen(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as stored:
+        if not stat.S_ISREG(os.fstat(stored.fileno()).st_mode): raise ValueError()
+        print(hashlib.sha256(stored.read(len(data)+1)).hexdigest())`;
+export async function stageWorkerUpgrade(
+  worker: Worker,
+  os: string,
+  signal?: AbortSignal,
+) {
+  const { dir, bundle, script, terminal, python } = upgradeMaterials(
+    worker,
+    os,
+  );
+  const cmd = await agentProcessCommand(worker, [
+    python,
+    "-IB",
+    "-c",
+    receive,
+    dir,
+  ]);
+  await new Promise<void>((resolve, reject) => {
+    const rejectStage = () =>
+      reject(new Error("worker_release_staging_failed"));
+    const child = execFile(
+      cmd.file,
+      cmd.args,
+      {
+        timeout: worker.publication?.timeout_ms ?? 30000,
+        signal,
+        killSignal: "SIGKILL",
+        maxBuffer: 4096,
+      },
+      (err, out) =>
+        err || out.trim() !== `${sha(bundle)}\n${sha(script)}`
+          ? rejectStage()
+          : resolve(),
+    );
+    child.stdin?.on("error", rejectStage);
+    child.stdin?.end(
+      JSON.stringify([bundle, script].map((b) => b.toString("base64"))),
+    );
   });
-  if (!claimed) return held;
-  try {
-    if (previous?.release_key === key) {
-      stage = "unexpected_drift";
-      throw new Error();
-    }
-    const cfg = parseWorkerOnboarding(
-      readOnboardingYaml(join(root, `worker-${machine}-${project}.yaml`)),
-      execution.dataDir,
-    );
-    if (
-      !execution.target ||
-      runtimeTargetBinding(cfg.worker).fingerprint !==
-        execution.target.fingerprint ||
-      !options.bindingCurrent() ||
-      execution.fileHelper?.path !==
-        join(execution.agentRoot, "libexec", "worker-files.py") ||
-      execution.gitHelper?.path !==
-        join(execution.agentRoot, "libexec", "worker-git.py")
-    )
-      throw new Error();
-    signal?.throwIfAborted();
-    if (needsInstall) {
-      stage = "install";
-      before = await adapters.install(execution, project, identity, signal);
-    }
-    stage = "worker_check";
-    if (
-      !options.bindingCurrent() ||
-      !(await adapters.workerCheck({
-        config: cfg,
-        configRoot: root,
-        dataDir: execution.dataDir,
-        mode: "check",
-        registration: async () =>
-          store.uow.read((tx) => {
-            const m = tx.machines.get(project, machine);
-            return (
-              !!m &&
-              m.herdr_machine === machine &&
-              matchesWorkerPlatform(m, cfg.worker)
-            );
-          }),
-        beforeStep: () => signal?.throwIfAborted(),
-        report: () => {},
-      }))
-    )
-      throw new Error();
-    stage = "machine_check";
-    const result = await options.check();
-    if (result.blockers.length || !options.bindingCurrent()) throw new Error();
-    signal?.throwIfAborted();
-    // Outer capability probes, the final binding fence and journal completion still have to pass.
-    store.uow.run(() =>
-      store.database
-        .prepare(
-          "UPDATE worker_helper_upgrades SET pending_final=? WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
-        )
-        .run(JSON.stringify(evidence()), project, machine, key),
-    );
-    return result;
-  } catch {
-    fail();
-    return held;
-  }
+  return terminal;
 }
