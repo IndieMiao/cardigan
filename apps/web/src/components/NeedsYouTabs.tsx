@@ -66,8 +66,10 @@ function Tabs(props: Props & { counts: NeedsCountsResource }) {
     const first =
       tabs.find(([key]) => (counts.data?.tabs[key].count ?? 0) > 0)?.[0] ??
       "decisions";
-    setSelected(first);
-    setVisited([first]);
+    // Enabling the buttons and choosing a default are separate commits.
+    // An intervening click already selected and visited its panel.
+    setSelected((current) => current ?? first);
+    setVisited((current) => (current.length ? current : [first]));
   }, [counts.data, selected]);
   return (
     <section className="needs-page" aria-label="Needs You">
