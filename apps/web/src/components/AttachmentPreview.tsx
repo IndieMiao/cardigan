@@ -3,6 +3,7 @@ import type { AttachmentView } from "../api.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Lightbox } from "./Lightbox.js";
+import { ImageUnavailableIcon } from "./ui/icons.js";
 
 export const isBitmap = (a: AttachmentView) =>
   a.inline && /^image\/(png|jpeg|gif|webp|avif)$/i.test(a.mime);
@@ -16,7 +17,10 @@ export function AttachmentPreview({
 }) {
   const initial = images.findIndex((image) => image.id === attachment.id);
   const [open, setOpen] = useState(false),
-    [index, setIndex] = useState(initial);
+    [index, setIndex] = useState(initial),
+    // C-540: a thumbnail that fails to load shows the placeholder, not a blank box.
+    [failed, setFailed] = useState<string | null>(null),
+    thumbnail = attachment.thumbnail_path;
   return (
     <Lightbox
       open={open}
@@ -50,11 +54,16 @@ export function AttachmentPreview({
           className="attachment-preview"
           aria-label={`预览 ${attachmentName(attachment)}`}
         >
-          <img
-            src={attachment.download_path}
-            alt={`附件 ${attachmentName(attachment)}`}
-            loading="lazy"
-          />
+          {thumbnail && failed !== thumbnail ? (
+            <img
+              src={thumbnail}
+              alt={`附件 ${attachmentName(attachment)}`}
+              loading="lazy"
+              onError={() => setFailed(thumbnail)}
+            />
+          ) : (
+            <ImageUnavailableIcon />
+          )}
         </button>
       }
     />

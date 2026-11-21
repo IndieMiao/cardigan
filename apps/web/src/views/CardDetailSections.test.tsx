@@ -152,7 +152,9 @@ test("a delayed or failed timeline lookup leaves the first page readable and ret
   expect(comment()?.textContent).toContain(full.timeline[0]?.body);
   fireEvent.click(retry);
   await waitFor(() =>
-    expect(comment()?.querySelector('img[src$="/F-1"]')).not.toBeNull(),
+    expect(
+      comment()?.querySelector('img[src$="/F-1/thumbnail"]'),
+    ).not.toBeNull(),
   );
   expect(cardPanel).toHaveBeenCalledTimes(2);
 });
