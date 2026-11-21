@@ -4,6 +4,8 @@ import { promisify } from "node:util";
 import { agentProcessCommand } from "./agent-ssh.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
+import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
+
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export type WorkerGitOperation =
   | "check"
@@ -90,31 +92,45 @@ export function workerGitFailure(
   const code = e?.code;
   // On a pack push, host Git normally exits 128 rather than forwarding SSH's 255.
   const pack = operation === "receive-pack" || operation === "upload-pack";
-  let reason = pack ? "pack transfer failed" : "process failed";
-  if (
-    (e?.killed && e.signal === "SIGKILL") ||
-    (e?.cause?.killed && e.cause.signal === "SIGKILL")
-  )
-    reason = "command timed out";
-  else if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
-    reason = "output limit exceeded";
-  else if (
-    (code === 75 || pack) &&
-    /(?:^|\n)worker_git_rejected(?:\r?\n|$)/u.test(stderr)
-  )
-    reason = "helper rejected request";
-  else if (code === 255 || pack) {
-    if (/connection timed out|operation timed out/iu.test(stderr))
-      reason = "SSH connection timed out";
-    else if (/permission denied/iu.test(stderr))
-      reason = "SSH permission denied";
-    else if (/host key verification failed/iu.test(stderr))
-      reason = "SSH host key verification failed";
-    else if (/connection refused/iu.test(stderr))
-      reason = "SSH connection refused";
-    else if (code === 255) reason = "SSH transport failed";
-  } else if (code === "ENOENT") reason = "SSH executable not found";
-  else if (code === "EACCES") reason = "SSH executable permission denied";
+  // For a pack the direct process is host Git. Its exit or timer alone says
+  // nothing about the worker: require a helper/SSH diagnostic in that case.
+  const [reason, fromWorker] = ((): [string, boolean] => {
+    if (
+      (e?.killed && e.signal === "SIGKILL") ||
+      (e?.cause?.killed && e.cause.signal === "SIGKILL")
+    )
+      return ["command timed out", !pack];
+    if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+      return ["output limit exceeded", !pack];
+    if (
+      (code === 75 || pack) &&
+      /(?:^|\n)worker_git_rejected(?:\r?\n|$)/u.test(stderr)
+    )
+      return ["helper rejected request", true];
+    if (code === 255 || pack) {
+      if (/connection timed out|operation timed out/iu.test(stderr))
+        return ["SSH connection timed out", true];
+      if (
+        /permission denied/iu.test(stderr) &&
+        (!pack ||
+          /permission denied \(publickey|ssh:.*permission denied/iu.test(
+            stderr,
+          ) ||
+          code === 255)
+      )
+        return ["SSH permission denied", true];
+      if (/host key verification failed/iu.test(stderr))
+        return ["SSH host key verification failed", true];
+      if (/connection refused/iu.test(stderr))
+        return ["SSH connection refused", true];
+      if (code === 255) return ["SSH transport failed", true];
+    }
+    if (code === "ENOENT") return ["SSH executable not found", false];
+    if (code === "EACCES") return ["SSH executable permission denied", false];
+    return pack
+      ? ["pack transfer failed", false]
+      : ["process failed", typeof code === "number" && code > 0 && code <= 255];
+  })();
   const status =
     typeof code === "number" &&
     Number.isInteger(code) &&
@@ -123,8 +139,11 @@ export function workerGitFailure(
       ? `; exit ${code}`
       : "";
   // Neither child exit nor a killed local Git/SSH proves the remote mutation stopped.
+  const Failure = fromWorker ? WorkerPreparationFailure : Error;
   return Object.assign(
-    new Error(`Worker Git operation failed (${operation}: ${reason}${status})`),
+    new Failure(
+      `Worker Git operation failed (${operation}: ${reason}${status})`,
+    ),
     { executionExited: false },
   );
 }
@@ -170,7 +189,7 @@ export async function workerGit<T>(
   } catch {
     // A parser error can quote the response; never propagate it.
   }
-  throw new Error(
+  throw new WorkerPreparationFailure(
     `Worker Git operation failed (${request.operation}: invalid helper response)`,
   );
 }

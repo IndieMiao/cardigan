@@ -14,6 +14,7 @@ import {
   type RuntimeWorker,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
+import { workerCooldown } from "./worker-maintenance.js";
 import { readWorktreePreparation } from "./worktree-preparation.js";
 
 /** Installed by server and standalone CLI; evaluated only during a new implicit assignment. */
@@ -98,20 +99,22 @@ export function configureMachinePlacement(
         machines.map((machine) => {
           const { id } = machine;
           const worker = allowed.get(id);
+          const binding =
+            worker && id !== "local"
+              ? runtimeTargetBinding(worker).fingerprint
+              : undefined;
           return [
             id,
             {
+              ...(binding
+                ? workerCooldown(store, project, id, binding, now)
+                : {}),
               ...readMachineObservationsInTransaction(
                 store,
                 project,
                 id,
                 now,
-                worker && id !== "local"
-                  ? observationFingerprint(
-                      runtimeTargetBinding(worker).fingerprint,
-                      machine,
-                    )
-                  : undefined,
+                observationFingerprint(binding, machine),
               ),
               ...(worker && id !== "local" && preparation
                 ? { worktree_preparation: preparation(worker) }
