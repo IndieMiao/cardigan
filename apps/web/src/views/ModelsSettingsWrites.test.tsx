@@ -1053,3 +1053,256 @@ test("the Provider confirmation names the Provider and the profiles using it", a
   expect(provider.textContent).toContain("Provideranthropic");
   expect(provider.textContent).toContain("使用它的配置");
 });
+
+// Q-1052: every read goes through one reader ordered by start (C-516#142).
+const V3 = "c".repeat(64);
+/** Reads answered by the test, in the order they were started. */
+function heldReads(first: LaunchSettingsView) {
+  const pending: {
+    resolve: (value: LaunchSettingsView) => void;
+    reject: (error: unknown) => void;
+  }[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fn = vi.fn(() => {
+    if (fn.mock.calls.length === 1) return Promise.resolve(first);
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    return new Promise<LaunchSettingsView>((resolve, reject) => {
+      pending.push({
+        resolve: (value) => {
+          inFlight--;
+          resolve(value);
+        },
+        reject: (error) => {
+          inFlight--;
+          reject(error);
+        },
+      });
+    });
+  });
+  return { fn, pending, max: () => maxInFlight };
+}
+const withVersion = (
+  version: string,
+  view: LaunchSettingsView,
+): LaunchSettingsView => ({ ...view, version });
+
+test("Q-1052: a delayed first read after a click cannot roll back a newer failure already shown", async () => {
+  const { act } = await import("@testing-library/react");
+  const profile = "pi-deepseek";
+  const before = withCheck(profile, null);
+  const own = withCheck(profile, check("online", "passed"));
+  const newer = withCheck(profile, {
+    ...check("online", "failed", ["online_failed"]),
+    id: "other",
+    started_at: "2026-01-01T00:00:05.000Z",
+    finished_at: "2026-01-01T00:00:06.000Z",
+  });
+  let release: (() => void) | undefined;
+  const reads = vi
+    .fn()
+    .mockResolvedValueOnce(before)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(own);
+        }),
+    )
+    .mockResolvedValue(newer);
+  const api = harness({ launchSettings: reads });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2200);
+    });
+    expect(within(d).queryByText("在线探测未通过")).not.toBeNull();
+    await act(async () => {
+      release?.();
+    });
+    for (let i = 0; i < 4; i++)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+    expect(within(d).queryByText("在线探测未通过")).not.toBeNull();
+    expect(within(d).queryByText("已列出模型")).toBeNull();
+    expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+/** Edit claude-opus, hit a stale confirmation; the page polls because pi-deepseek runs. */
+async function staleEdit(reads: ReturnType<typeof heldReads>) {
+  const api = harness({
+    launchSettings: reads.fn,
+    confirmLaunchChange: vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, "stale_snapshot", "stale")),
+  });
+  await openModels(api.client);
+  const d = await openProfile("claude-opus");
+  const click = (name: string) =>
+    fireEvent.click(within(d).getByRole("button", { name }));
+  click("编辑");
+  fireEvent.change(field(d, "推理强度"), { target: { value: "medium" } });
+  click("预览修改");
+  await within(d).findByRole("button", { name: "确认保存" });
+  click("确认保存");
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  return { api, d, click };
+}
+const polling = withVersion(
+  V1,
+  withCheck("pi-deepseek", check("online", "running")),
+);
+
+test("Q-1052: a form refresh started before a newer poll previews against the newer version", async () => {
+  const reads = heldReads(polling);
+  const { api, d, click } = await staleEdit(reads);
+  // The form's read starts first (no poll has started yet) …
+  click("刷新并重新预览");
+  expect(reads.fn).toHaveBeenCalledTimes(2);
+  // … then the poll starts a later read, which answers first with V3.
+  await waitFor(() => expect(reads.fn).toHaveBeenCalledTimes(3), {
+    timeout: 4000,
+  });
+  reads.pending[1]?.resolve(withVersion(V3, polling));
+  // The form's older read answers late with V2: dropped, not shown or used.
+  reads.pending[0]?.resolve(withVersion(V2, polling));
+  await within(d).findByRole("button", { name: "确认保存" });
+  expect(api.previewLaunchChange.mock.lastCall?.[0]).toBe(V3);
+}, 10000);
+
+test("Q-1052: a form refresh started after a poll replaces it and previews against its own version", async () => {
+  const reads = heldReads(polling);
+  const { api, d, click } = await staleEdit(reads);
+  // A poll read is in flight first …
+  await waitFor(() => expect(reads.fn).toHaveBeenCalledTimes(2), {
+    timeout: 4000,
+  });
+  // … then the form starts a later read.
+  click("刷新并重新预览");
+  expect(reads.fn).toHaveBeenCalledTimes(3);
+  reads.pending[0]?.resolve(withVersion(V2, polling));
+  reads.pending[1]?.resolve(withVersion(V3, polling));
+  await within(d).findByRole("button", { name: "确认保存" });
+  expect(api.previewLaunchChange.mock.lastCall?.[0]).toBe(V3);
+}, 10000);
+
+test("Q-1052: while a check runs at most the click's read and one poll read are in flight", async () => {
+  const { act } = await import("@testing-library/react");
+  const profile = "pi-deepseek";
+  let inFlight = 0;
+  let max = 0;
+  const reads = vi
+    .fn()
+    .mockResolvedValueOnce(withCheck(profile, null))
+    .mockImplementation(async () => {
+      inFlight++;
+      max = Math.max(max, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      inFlight--;
+      return withCheck(profile, check("online", "running"));
+    });
+  const api = harness({ launchSettings: reads });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+    });
+    for (let i = 0; i < 15; i++)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    expect(max).toBeLessThanOrEqual(2);
+    // Serial: about one read per (3s read + 2s wait), plus the click's read.
+    expect(reads.mock.calls.length - 1).toBeLessThanOrEqual(5);
+    expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("Q-1052: one click sends one check, also for a double click and Enter before it is accepted", async () => {
+  let accept: (() => void) | undefined;
+  const startLaunchCheck = vi.fn(
+    (version: string, profile: string, mode: "metadata" | "online") =>
+      new Promise<{
+        id: string;
+        profile: string;
+        mode: "metadata" | "online";
+        version: string;
+        status: "running";
+      }>((resolve) => {
+        accept = () =>
+          resolve({ id: "c", profile, mode, version, status: "running" });
+      }),
+  );
+  const api = harness({ startLaunchCheck });
+  await openModels(api.client);
+  const d = await openProfile("pi-deepseek");
+  const online = within(d).getByRole("button", { name: "在线探测" });
+  fireEvent.click(online);
+  fireEvent.click(online);
+  fireEvent.keyDown(online, { key: "Enter" });
+  fireEvent.click(within(d).getByRole("button", { name: "本地检查" }));
+  accept?.();
+  await waitFor(() =>
+    expect(
+      within(d).getByRole("button", { name: "在线探测" }).textContent,
+    ).toBe("在线探测"),
+  );
+  fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+  expect(startLaunchCheck).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1052: an older read failing after a newer one was shown shows no error; the latest failure does", async () => {
+  const { act } = await import("@testing-library/react");
+  const profile = "pi-deepseek";
+  const reads = heldReads(withCheck(profile, null));
+  const api = harness({ launchSettings: reads.fn });
+  await openModels(api.client);
+  const d = await openProfile(profile);
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(within(d).getByRole("button", { name: "在线探测" }));
+    });
+    // The click's read (1st held) is in flight; the poll starts the 2nd.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(reads.pending).toHaveLength(2);
+    await act(async () => {
+      reads.pending[1]?.resolve(withCheck(profile, check("online", "running")));
+    });
+    await act(async () => {
+      reads.pending[0]?.reject(new TypeError("Failed to fetch"));
+    });
+    expect(within(d).queryByText("在线探测中")).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "重试", hidden: true }),
+    ).toBeNull();
+    // The next poll read is the latest started; its failure is shown with a retry.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    await act(async () => {
+      reads.pending.at(-1)?.reject(new TypeError("Failed to fetch"));
+    });
+    expect(
+      screen.queryByRole("button", { name: "重试", hidden: true }),
+    ).not.toBeNull();
+    expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});

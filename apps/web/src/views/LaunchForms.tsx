@@ -51,7 +51,12 @@ interface EditorContext {
   readonly client: CardiganClient;
   /** The read the form was opened from; a stale preview refreshes it. */
   readonly settings: LaunchSettingsView;
-  readonly onRefreshed: (settings: LaunchSettingsView) => void;
+  /**
+   * Read the settings again through the page's one ordered reader (Q-1052).
+   * Resolves with what the page shows once this read has settled: its own
+   * result, or a newer one another read already showed — never an older one.
+   */
+  readonly reread: () => Promise<LaunchSettingsView>;
   readonly onSaved: (message: string) => void;
   readonly onCancel: () => void;
   readonly onState: (state: LaunchFormState) => void;
@@ -65,7 +70,7 @@ type FieldProblem = Extract<LaunchProblem, { kind: "field" }>;
  * idempotency key per preview, so retrying an unanswered one cannot write twice.
  */
 function useLaunchChange(context: EditorContext) {
-  const { client, onRefreshed } = context;
+  const { client, reread } = context;
   const [version, setVersion] = useState(context.settings.version);
   const [preview, setPreview] = useState<{
     change: LaunchChange;
@@ -104,15 +109,13 @@ function useLaunchChange(context: EditorContext) {
       setPreview(undefined);
       setProblem(next);
       try {
-        const settings = await client.launchSettings();
-        if (!alive.current) return;
-        onRefreshed(settings);
-        setVersion(settings.version);
+        const settings = await reread();
+        if (alive.current) setVersion(settings.version);
       } catch {
         // The notice from the refusal stays; the delete stays unavailable.
       }
     },
-    [client, onRefreshed],
+    [reread],
   );
   const requestPreview = useCallback(
     (change: LaunchChange, at: string) =>
@@ -144,9 +147,8 @@ function useLaunchChange(context: EditorContext) {
     refresh: (change: LaunchChange) =>
       run(async () => {
         try {
-          const settings = await client.launchSettings();
+          const settings = await reread();
           if (!alive.current) return;
-          onRefreshed(settings);
           setVersion(settings.version);
           setPreview(undefined);
           const result = await client.previewLaunchChange(

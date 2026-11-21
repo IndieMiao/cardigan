@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  CardiganClient,
-  LaunchModelMetadata,
-  LaunchProfileCheck,
-  LaunchProfileReference,
-  LaunchProfileView,
-  LaunchSettingsView,
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  type CardiganClient,
+  describeError,
+  type LaunchModelMetadata,
+  type LaunchProfileCheck,
+  type LaunchProfileReference,
+  type LaunchProfileView,
+  type LaunchSettingsView,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
@@ -32,7 +33,6 @@ import {
   TableRow,
 } from "../components/ui/table.js";
 import { routeHash } from "../route.js";
-import { useResource } from "../useResource.js";
 import {
   AliasForm,
   CopyProfileForm,
@@ -66,8 +66,8 @@ export function ModelsSettings({
   client: CardiganClient;
   projectId: string;
 }) {
-  const load = useCallback(() => client.launchSettings(), [client]);
-  const settings = useResource(load);
+  const settings = useLaunchSettingsReader(client);
+  const { read } = settings;
   // The clicked row of this response: names may be redacted to the same mask.
   const [open, setOpen] = useState<{ index: number; name: string }>();
   const [creating, setCreating] = useState(false);
@@ -82,13 +82,42 @@ export function ModelsSettings({
   const running = data?.profiles.some(
     (p) => p.last_check?.status === "running",
   );
-  const { refresh } = settings;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: each new read re-arms the poll.
+  // Check areas waiting for a check the host just accepted (Q-1052).
+  const [following, setFollowing] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const follow = useCallback((who: string, on: boolean) => {
+    setFollowing((old) => {
+      if (old.has(who) === on) return old;
+      const next = new Set(old);
+      if (on) next.add(who);
+      else next.delete(who);
+      return next;
+    });
+  }, []);
+  const polling = Boolean(running) || following.size > 0;
+  // The page's only poll (GET only), one read at a time: the next read waits
+  // for the previous one to settle, also after a failed read.
   useEffect(() => {
-    if (!running) return;
-    const timer = window.setTimeout(refresh, CHECK_POLL_MS);
-    return () => window.clearTimeout(timer);
-  }, [running, refresh, data]);
+    if (!polling) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const next = () => {
+      timer = window.setTimeout(async () => {
+        try {
+          await read();
+        } catch {
+          // The latest failure is shown with a retry; keep polling.
+        }
+        if (!stopped) next();
+      }, CHECK_POLL_MS);
+    };
+    next();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [polling, read]);
   const saved = (note: string) => {
     setMessage(note);
     settings.reload();
@@ -117,7 +146,9 @@ export function ModelsSettings({
     >
       <RequestFeedback message={message} />
       <RequestFeedback
-        {...settings}
+        pending={settings.pending}
+        interactive={settings.interactive}
+        error={settings.error}
         retry={settings.reload}
         pendingMessage="正在加载启动配置…"
       />
@@ -183,8 +214,8 @@ export function ModelsSettings({
           settings={data}
           profile={profile}
           projectId={projectId}
-          onRefreshed={settings.replace}
-          onRefresh={refresh}
+          reread={read}
+          follow={follow}
           onSaved={saved}
           onDeleted={(note) => {
             setOpen(undefined);
@@ -197,7 +228,7 @@ export function ModelsSettings({
         <NewProfile
           client={client}
           settings={data}
-          onRefreshed={settings.replace}
+          reread={read}
           onSaved={(note) => {
             setCreating(false);
             saved(note);
@@ -207,6 +238,77 @@ export function ModelsSettings({
       )}
     </SettingsPanel>
   );
+}
+
+/**
+ * C-516 / Q-1052: every read of the launch settings on this page goes through
+ * one `read`, ordered by when it was started. A reply is shown only when no
+ * read started later has already been shown, so what the page shows never
+ * goes back to an older read. Reads in flight are never abandoned: a slow
+ * read is still shown when nothing newer arrived meanwhile.
+ */
+function useLaunchSettingsReader(client: CardiganClient) {
+  const [state, setState] = useState<{
+    data?: LaunchSettingsView;
+    error?: string;
+    interactive: number;
+  }>({ interactive: 0 });
+  const order = useRef({ started: 0, shown: 0 });
+  const shown = useRef<LaunchSettingsView | undefined>(undefined);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  /** Resolves with what the page shows once this read settled (never older than its own result). */
+  const read = useCallback(
+    async ({ interactive = false } = {}): Promise<LaunchSettingsView> => {
+      const n = ++order.current.started;
+      if (interactive)
+        setState((old) => ({ ...old, interactive: old.interactive + 1 }));
+      const done = interactive ? 1 : 0;
+      try {
+        const data = await client.launchSettings();
+        if (n > order.current.shown) {
+          order.current.shown = n;
+          shown.current = data;
+          if (alive.current)
+            setState((old) => ({
+              data,
+              interactive: old.interactive - done,
+            }));
+        } else if (alive.current && done)
+          setState((old) => ({ ...old, interactive: old.interactive - done }));
+        return shown.current ?? data;
+      } catch (error) {
+        // A failure is shown only while no later-started read was shown.
+        if (alive.current)
+          setState((old) => ({
+            ...old,
+            interactive: old.interactive - done,
+            ...(n > order.current.shown ? { error: describeError(error) } : {}),
+          }));
+        throw error;
+      }
+    },
+    [client],
+  );
+  const reload = useCallback(() => {
+    read({ interactive: true }).catch(() => {});
+  }, [read]);
+  useEffect(() => {
+    read({ interactive: true }).catch(() => {});
+  }, [read]);
+  return {
+    data: state.data,
+    error: state.error,
+    pending: state.data === undefined || state.interactive > 0,
+    interactive: state.interactive > 0,
+    read,
+    reload,
+  };
 }
 
 /** The opened row after a new read: same position and name, else the only one by that name. */
@@ -257,13 +359,13 @@ function useFormDrawer() {
 function NewProfile({
   client,
   settings,
-  onRefreshed,
+  reread,
   onSaved,
   onClose,
 }: {
   client: CardiganClient;
   settings: LaunchSettingsView;
-  onRefreshed: (settings: LaunchSettingsView) => void;
+  reread: () => Promise<LaunchSettingsView>;
   onSaved: (message: string) => void;
   onClose: () => void;
 }) {
@@ -271,7 +373,7 @@ function NewProfile({
   const context: EditorContext = {
     client,
     settings,
-    onRefreshed,
+    reread,
     onSaved,
     onCancel: () => drawer.leave(onClose),
     onState: drawer.onState,
@@ -349,8 +451,8 @@ function ProfileDetail({
   settings,
   profile,
   projectId,
-  onRefreshed,
-  onRefresh,
+  reread,
+  follow,
   onSaved,
   onDeleted,
   onClose,
@@ -359,8 +461,8 @@ function ProfileDetail({
   settings: LaunchSettingsView;
   profile: LaunchProfileView;
   projectId: string;
-  onRefreshed: (settings: LaunchSettingsView) => void;
-  onRefresh: () => void;
+  reread: () => Promise<LaunchSettingsView>;
+  follow: (who: string, on: boolean) => void;
   onSaved: (message: string) => void;
   onDeleted: (message: string) => void;
   onClose: () => void;
@@ -376,7 +478,7 @@ function ProfileDetail({
   const context: EditorContext = {
     client,
     settings,
-    onRefreshed,
+    reread,
     onSaved: (note) => {
       if (mode.kind === "delete") onDeleted(note);
       else {
@@ -523,8 +625,8 @@ function ProfileDetail({
               client={client}
               settings={settings}
               profile={profile}
-              onRefreshed={onRefreshed}
-              onRefresh={onRefresh}
+              reread={reread}
+              follow={follow}
             />
             <SettingsSection title="使用者">
               {profile.references.length === 0 ? (
@@ -550,14 +652,16 @@ function Checks({
   client,
   settings,
   profile,
-  onRefreshed,
-  onRefresh,
+  reread,
+  follow,
 }: {
   client: CardiganClient;
   settings: LaunchSettingsView;
   profile: LaunchProfileView;
-  onRefreshed: (settings: LaunchSettingsView) => void;
-  onRefresh: () => void;
+  /** The page's ordered reader (Q-1052). */
+  reread: () => Promise<LaunchSettingsView>;
+  /** Ask the page's poll to keep reading while this area waits. */
+  follow: (who: string, on: boolean) => void;
 }) {
   const [starting, setStarting] = useState<LaunchProfileCheck["mode"]>();
   const [problem, setProblem] = useState<LaunchProblem>();
@@ -583,31 +687,17 @@ function Checks({
   }, [accepted, shown]);
   const running = waiting || profile.last_check?.status === "running";
   const busy = starting !== undefined || running;
-  // Re-read (GET only) one read at a time until the check appears; the next
-  // read waits for the previous one, also after a failed read.
+  // Until the check appears the page's one poll keeps reading (GET only).
+  const who = useId();
   useEffect(() => {
-    if (!waiting) return;
-    let stopped = false;
-    let timer: number | undefined;
-    const next = () => {
-      timer = window.setTimeout(async () => {
-        try {
-          const read = await client.launchSettings();
-          if (!stopped) onRefreshed(read);
-        } catch {
-          // Read again on the next round; no new check is started.
-        }
-        if (!stopped) next();
-      }, CHECK_POLL_MS);
-    };
-    next();
-    return () => {
-      stopped = true;
-      window.clearTimeout(timer);
-    };
-  }, [waiting, client, onRefreshed]);
+    follow(who, waiting);
+    return () => follow(who, false);
+  }, [follow, who, waiting]);
+  // One click, one check: a ref also covers clicks before the next render.
+  const sending = useRef(false);
   const start = async (mode: LaunchProfileCheck["mode"]) => {
-    if (starting || running) return;
+    if (sending.current || starting || running) return;
+    sending.current = true;
     setStarting(mode);
     setProblem(undefined);
     try {
@@ -620,9 +710,10 @@ function Checks({
     } catch (error) {
       if (alive.current) setProblem(launchProblem(error, "check"));
     } finally {
+      sending.current = false;
       if (alive.current) setStarting(undefined);
-      // Running, refused or stale: the next read shows the latest state.
-      onRefresh();
+      // Running, refused or stale: read once through the ordered reader.
+      reread().catch(() => {});
     }
   };
   return (
@@ -662,7 +753,7 @@ function Checks({
                   onClick={async () => {
                     setProblem(undefined);
                     try {
-                      onRefreshed(await client.launchSettings());
+                      await reread();
                     } catch (error) {
                       if (alive.current)
                         setProblem(launchProblem(error, "check"));
