@@ -1358,8 +1358,10 @@ test.each(clocks)(
         check: job({ id: "job-B", status: "passed", step: "finished" }),
       }),
     );
-    await d.findByText("检查通过");
+    // Q-1085: this request named A, whose result is unknown; B's result is
+    // not its answer, so none is shown (B's stays in the history).
     await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+    expect(d.queryByText("检查通过")).toBeNull();
     expect(progressIds(c).every((id) => id === "job-B")).toBe(true);
     fireEvent.click(d.getByRole("button", { name: "立即检查" }));
     await waitFor(() => expect(c.checkMachine).toHaveBeenCalledTimes(2));
@@ -1517,9 +1519,9 @@ test("Q-1076 P3: a start reply for A after B was followed and ended is checked b
   const reads = vi.mocked(c.machine).mock.calls.length;
   await act(async () => postA.resolve({ check: job({ id: "job-A" }) }));
   await waitFor(() => expect(details.held.length).toBeGreaterThan(0));
-  // B's result stays readable while the read is out; nothing may be sent.
+  // Q-1085: B's result is not this request's answer (A); nothing may be sent.
   expect(disabled(d, "立即检查")).toBe(true);
-  expect(d.getByText("检查通过")).toBeTruthy();
+  expect(d.queryByText("检查通过")).toBeNull();
   const check = details.held.at(-1);
   await act(async () =>
     check?.resolve({
@@ -1686,7 +1688,9 @@ test("Q-1076 R3: when the followed check ends while a check read is out, only a 
       check: job({ id: "job-B", status: "passed", step: "finished" }),
     }),
   );
-  await d.findByText("检查通过");
+  // Q-1085: this request named A (unknown), so B's result is not shown.
+  await waitFor(() => expect(d.queryByText("正在检查：SSH…")).toBeNull());
+  expect(d.queryByText("检查通过")).toBeNull();
   await waitFor(() => expect(details.held.length).toBeGreaterThan(1));
   expect(disabled(d, "立即检查")).toBe(true);
   // The earlier read finds nothing running: it was sent before the change.
@@ -1917,6 +1921,179 @@ test("Q-1083 P1-c: A's failure arriving after B was taken up does not cover B", 
   expect(d.queryByText("检查未通过：SSH")).toBeNull();
   expect(d.getByText("正在检查：MCP…")).toBeTruthy();
   expect(disabled(d, "检查中…")).toBe(true);
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+// V-2685 (attachment-8243), appended verbatim.
+test("D2091 P1-c into R4: a terminal poll for A received after switching to B still answers the late A POST when B has ended", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+      id === "job-A" ? pollA.promise : pollB.promise,
+    ),
+  });
+  const { rerender } = render(<Page c={c} />);
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  const d = within(await screen.findByRole("dialog"));
+  await d.findByText("概况");
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-A", "running"));
+  rerender(<Page c={c} revision={1} />);
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-A"]));
+  details.state.machine = onBinding(
+    requested("job-B", "running", { step: "mcp" }),
+  );
+  rerender(<Page c={c} revision={2} />);
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-A", "job-B"]));
+  await act(async () =>
+    pollA.resolve({
+      check: job({
+        id: "job-A",
+        status: "failed",
+        step: "finished",
+        failed_steps: ["ssh"],
+      }),
+    }),
+  );
+  expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+  details.state.machine = onBinding(requested("job-B", "passed"));
+  await act(async () =>
+    pollB.resolve({
+      check: job({ id: "job-B", status: "passed", step: "finished" }),
+    }),
+  );
+  await within(d.getByRole("table", { name: "最近检查" })).findByRole("row", {
+    name: /手动机器检查.*通过/,
+  });
+  // No other job is followed. The original reply confirms the ID, and A is known to have failed.
+  await act(async () =>
+    postA.resolve({ check: job({ id: "job-A", status: "running" }) }),
+  );
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  expect({
+    resultA: !!d.queryByText("检查未通过：SSH"),
+    resultB: !!d.queryByText("检查通过"),
+  }).toEqual({ resultA: true, resultB: false });
+});
+
+// Q-1085 (C-511#306): neighbours of attachment-8243. Steps 1–3 are shared:
+// A's start reply waits, the page follows A, then a newer read takes up B.
+async function followAThenB() {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+      id === "job-A" ? pollA.promise : pollB.promise,
+    ),
+  });
+  const { rerender } = render(<Page c={c} />);
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  const d = within(await screen.findByRole("dialog"));
+  await d.findByText("概况");
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-A", "running"));
+  rerender(<Page c={c} revision={1} />);
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-A"]));
+  details.state.machine = onBinding(
+    requested("job-B", "running", { step: "mcp" }),
+  );
+  rerender(<Page c={c} revision={2} />);
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-A", "job-B"]));
+  await d.findByText("正在检查：MCP…");
+  expect(disabled(d, "检查中…")).toBe(true);
+  const failA = (id = "job-A") =>
+    act(async () =>
+      pollA.resolve({
+        check: job({
+          id,
+          status: "failed",
+          step: "finished",
+          failed_steps: ["ssh"],
+        }),
+      }),
+    );
+  const passB = async () => {
+    details.state.machine = onBinding(requested("job-B", "passed"));
+    await act(async () =>
+      pollB.resolve({
+        check: job({ id: "job-B", status: "passed", step: "finished" }),
+      }),
+    );
+  };
+  const replyA = () =>
+    act(async () =>
+      postA.resolve({ check: job({ id: "job-A", status: "running" }) }),
+    );
+  return { c, d, failA, passB, replyA };
+}
+const results = (d: ReturnType<typeof within>) => ({
+  a: !!d.queryByText("检查未通过：SSH"),
+  b: !!d.queryByText("检查通过"),
+});
+
+test("Q-1085 V1: A's failure arriving after B ended still answers the late A reply", async () => {
+  const { c, d, failA, passB, replyA } = await followAThenB();
+  await passB();
+  await d.findByText("正在开始检查…");
+  await failA();
+  expect(d.getByText("正在开始检查…")).toBeTruthy();
+  await replyA();
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(results(d)).toEqual({ a: true, b: false });
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1085 V2: the A reply while B runs waits for B; then the request's answer is A's failure", async () => {
+  const { c, d, failA, passB, replyA } = await followAThenB();
+  await replyA();
+  await failA();
+  // B in flight: only B shows, and nothing may be sent.
+  expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+  expect(results(d)).toEqual({ a: false, b: false });
+  expect(disabled(d, "检查中…")).toBe(true);
+  await passB();
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(results(d)).toEqual({ a: true, b: false });
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1085 V3: with A's result unknown, B's success is not given as this request's answer", async () => {
+  const { c, d, passB, replyA } = await followAThenB();
+  await replyA();
+  expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+  expect(disabled(d, "检查中…")).toBe(true);
+  await passB();
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(results(d)).toEqual({ a: false, b: false });
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1085 V4: a progress reply naming another id records nothing", async () => {
+  const { c, d, failA, passB, replyA } = await followAThenB();
+  await failA("job-X");
+  expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+  await passB();
+  await replyA();
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  // A's end was never stated for A: no answer is inferred.
+  expect(results(d)).toEqual({ a: false, b: false });
   expect(progressIds(c)).toEqual(["job-A", "job-B"]);
   expect(c.checkMachine).toHaveBeenCalledTimes(1);
 });

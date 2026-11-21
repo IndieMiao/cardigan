@@ -173,6 +173,12 @@ class MachineActions {
    */
   private fence = 0;
   /**
+   * Q-1085: the check this page's last 立即检查 reply named. That request's
+   * answer is this check's result only, never another check's; `shown` once
+   * it has been given.
+   */
+  private asked: { readonly id: string; shown: boolean } | undefined;
+  /**
    * Bumped whenever the followed check changes or ends and whenever the
    * progress loop restarts: a progress reply is used only with its token.
    */
@@ -302,9 +308,16 @@ class MachineActions {
       } finally {
         if (this.inflight === token) this.inflight = undefined;
       }
-      // Only for the check it was sent for, while still followed.
-      if (token !== this.token || this.state.following?.id !== following.id)
+      const stale =
+        token !== this.token || this.state.following?.id !== following.id;
+      // Q-1085: a reply naming the check it was sent for states that check's
+      // end whatever this page follows now; only the generation decides
+      // whether it may touch buttons, feedback or timers.
+      if (stale) {
+        if (job && job.id === following.id && job.status !== "running")
+          this.end(job);
         return;
+      }
       if (failure) {
         this.notice("check", {
           error: `未能读取检查进度：${describeError(failure.cause)}`,
@@ -406,7 +419,10 @@ class MachineActions {
     const { following, unknownCheck } = this.state;
     const current = following?.id === job.id;
     const seen = unknownCheck?.seen.includes(job.id) ?? false;
-    if (!current && !seen && !fromReply) return;
+    const asked = this.asked;
+    // Q-1085: the request's own check ended; it answers once nothing else runs.
+    const answers = !!asked && !asked.shown && asked.id === job.id;
+    if (!current && !seen && !fromReply && !answers) return;
     if (following && !current) {
       if (seen && unknownCheck)
         this.set({
@@ -421,17 +437,13 @@ class MachineActions {
       this.stopPolling();
       this.fence = machineReadTick();
     }
-    const passed = job.status === "passed";
-    const steps =
-      job.failed_steps.map(checkStepLabel).join("、") || "原因未记录";
-    // Seen after an unknown request: the machine's result, by it or not.
-    const text = seen
-      ? passed
-        ? "这台机器最近一次检查：通过"
-        : `这台机器最近一次检查：未通过（${steps}）`
-      : passed
-        ? "检查通过"
-        : `检查未通过：${steps}`;
+    // Q-1085: when the request named another check, the feedback is that
+    // check's known result, or nothing while it is unknown.
+    const other = !!asked && !asked.shown && asked.id !== job.id;
+    const known = other && asked ? this.ended.get(asked.id) : undefined;
+    const result = other ? known : job;
+    if (asked && !asked.shown && (answers || (other && known)))
+      asked.shown = true;
     const verify = this.state.verify;
     this.set({
       following: undefined,
@@ -439,11 +451,25 @@ class MachineActions {
       // The followed check changed under a pending mark: judge by a new one.
       ...(current && verify ? { verify: { at: this.fence } } : {}),
     });
-    this.notice("check", {
-      error: passed ? "" : text,
-      message: passed ? text : "",
-      retry: false,
-    });
+    if (result) {
+      const passed = result.status === "passed";
+      const steps =
+        result.failed_steps.map(checkStepLabel).join("、") || "原因未记录";
+      // Seen after an unknown request: the machine's result, by it or not.
+      const text =
+        seen && !other
+          ? passed
+            ? "这台机器最近一次检查：通过"
+            : `这台机器最近一次检查：未通过（${steps}）`
+          : passed
+            ? "检查通过"
+            : `检查未通过：${steps}`;
+      this.notice("check", {
+        error: passed ? "" : text,
+        message: passed ? text : "",
+        retry: false,
+      });
+    } else this.notice("check", blank);
     this.reread();
   }
 
@@ -494,6 +520,7 @@ class MachineActions {
     if (!post || sending || following || verify) return;
     if (unknownCheck ? !again : again) return;
     window.clearTimeout(this.notices.check);
+    this.asked = undefined;
     this.set({ sending: "check", unknownCheck: undefined, check: blank });
     // Q-1076: the reply describes the machine no earlier than this.
     const sent = machineReadTick();
@@ -504,7 +531,12 @@ class MachineActions {
         this.machineId,
         crypto.randomUUID(),
       );
-      this.set({ sending: undefined });
+      this.asked = { id: job.id, shown: false };
+      // A result shown meanwhile belongs to another check, not this request.
+      if (this.state.following?.id !== job.id && !this.state.check.retry) {
+        window.clearTimeout(this.notices.check);
+        this.set({ sending: undefined, check: blank });
+      } else this.set({ sending: undefined });
       if (job.status === "running") this.offer(job, sent, true);
       else this.end(job, true);
     } catch (cause) {
