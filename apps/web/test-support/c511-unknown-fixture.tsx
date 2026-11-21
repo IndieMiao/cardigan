@@ -24,6 +24,10 @@ import { settingsPanels } from "./settings-panels-data.js";
 //            with `__c511.b` the reads show job B running on this project,
 //            with `__c511.fail` they fail (500). A's progress ends at once,
 //            B's never does.
+//   r4       Q-1083: as stale, but with `__c511.aDone` the reads show job A
+//            already passed and A's progress read fails (503).
+//   p1       Q-1083: 立即检查 answers job A at once, A's progress fails
+//            (SSH); with `__c511.b` the reads show job B running (MCP).
 Date.now = () => new Date(NOW).getTime();
 // Each scene starts without an unknown write kept from the previous one.
 window.sessionStorage.clear();
@@ -49,7 +53,7 @@ const running: MachineView = {
   ),
 };
 let sent = false;
-const hooks = { b: false, fail: false, releaseA: () => {} };
+const hooks = { b: false, fail: false, aDone: false, releaseA: () => {} };
 Object.assign(window, { __c511: hooks });
 const check = (patch: Partial<MachineCheckJob>): MachineCheckJob => ({
   id: "chk-a",
@@ -63,24 +67,30 @@ const check = (patch: Partial<MachineCheckJob>): MachineCheckJob => ({
   failed_steps: [],
   ...patch,
 });
-const withB: MachineView = {
+/** 本机 with this project's latest explicit check replaced. */
+const onLocal = (
+  id: string,
+  status: "running" | "passed" | "failed",
+  step: string,
+): MachineView => ({
   ...local,
   bindings: local.bindings.map((b) =>
     b.project_id === "p-1"
       ? {
           ...b,
           last_requested_check: {
-            id: "chk-b",
+            id,
             kind: "machine",
-            status: "running",
-            step: "ssh",
+            status,
+            step,
             checked_at: NOW,
             failed_steps: [],
           },
         }
       : b,
   ),
-};
+});
+const withB = onLocal("chk-b", "running", "ssh");
 const capacity: ExecutionCapacity = {
   agents: [
     {
@@ -107,6 +117,10 @@ const client = fakeClient({
         throw new ApiError(500, "internal", "synthetic server error");
       if (hooks.b) return { machine: withB };
     }
+    if (scene === "r4" && id === "local" && hooks.aDone)
+      return { machine: onLocal("chk-a", "passed", "finished") };
+    if (scene === "p1" && id === "local" && hooks.b)
+      return { machine: onLocal("chk-b", "running", "mcp") };
     return {
       machine:
         id === "local" && sent && scene === "running"
@@ -117,18 +131,33 @@ const client = fakeClient({
   setRunLimit: async () => {},
   checkMachine: async () => {
     sent = true;
-    if (scene === "stale")
+    if (scene === "p1") return { check: check({}) };
+    if (scene === "stale" || scene === "r4")
       return new Promise<{ check: MachineCheckJob }>((resolve) => {
         hooks.releaseA = () => resolve({ check: check({}) });
       });
     throw new TypeError("synthetic lost reply");
   },
   machineCheck: (_p: string, _m: string, id: string) =>
-    scene === "stale" && id === "chk-a"
-      ? Promise.resolve({
-          check: check({ status: "passed", step: "finished" }),
-        })
-      : new Promise(() => {}),
+    id !== "chk-a"
+      ? new Promise(() => {})
+      : scene === "stale"
+        ? Promise.resolve({
+            check: check({ status: "passed", step: "finished" }),
+          })
+        : scene === "r4"
+          ? Promise.reject(
+              new ApiError(503, "unavailable", "synthetic progress failure"),
+            )
+          : scene === "p1"
+            ? Promise.resolve({
+                check: check({
+                  status: "failed",
+                  step: "finished",
+                  failed_steps: ["ssh"],
+                }),
+              })
+            : new Promise(() => {}),
   setMachineDrain: async () => {
     sent = true;
     throw new TypeError("synthetic lost reply");

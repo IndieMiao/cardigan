@@ -6,7 +6,9 @@
 // C511_BASELINE_REF=<git ref> renders that ref's machine page (before).
 // C511_BEFORE=<before output dir> counts differing pixels against it.
 // Q-1076 scenes (stale-reply, verify-failed): a late start reply for an
-// older check after the reopened drawer follows a newer one.
+// older check after the reopened drawer follows a newer one. Q-1083 scenes:
+// r4-late-reply (the running reply for a check already seen passed) and
+// p1-next-check (B taken up after A failed).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -294,6 +296,29 @@ try {
         else await delay(400);
         await scene(name);
       }
+      // Q-1083 R4: A seen passed in a reopened drawer, then its late reply.
+      await drawer("r4", theme);
+      await click("[role=dialog]", "立即检查");
+      await run(() => {
+        window.__c511.aDone = true;
+      });
+      await click("[role=dialog]", "关闭抽屉");
+      await until("!document.querySelector('[role=dialog]')");
+      await click("table[aria-label='机器列表']", "本机");
+      await until(has("项目绑定"));
+      await run(() => window.__c511.releaseA());
+      await until(`${has("检查通过")} || ${has("未能读取检查进度")}`);
+      await scene("r4-late-reply");
+      // Q-1083 P1: A fails, the reread takes up B.
+      await drawer("p1", theme);
+      await click("[role=dialog]", "立即检查");
+      await run(() => {
+        window.__c511.b = true;
+      });
+      // Before Q-1083 A's failure covers B's progress, so wait for either.
+      await until(`${has("正在检查：MCP")} || ${has("检查未通过：SSH")}`);
+      await delay(1500);
+      await scene("p1-next-check");
       cases.push({ width, theme, results });
     }
   await send("Emulation.setDeviceMetricsOverride", {
