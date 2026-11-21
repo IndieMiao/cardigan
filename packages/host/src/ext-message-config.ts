@@ -10,6 +10,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { EXT_MESSAGE_DEFAULTS, type ExtMessagePolicy } from "@cardigan/domain";
 import { parse } from "yaml";
 import { parseFeishuCredential } from "./ext-message-feishu.js";
+import { parseAppCredential } from "./feishu-inbox.js";
 
 interface ExtChannel {
   enabled: boolean;
@@ -183,8 +184,12 @@ export function loadExtMessageConfig(
             if (!credential) return invalid();
           }
         }
+        // Fingerprint and send the same effective fields. JSON whitespace, key
+        // order and fields ignored by the adapter do not constitute rotation.
         if (enabled && active && name === "lark")
-          parseFeishuCredential(credential);
+          credential = JSON.stringify(parseFeishuCredential(credential));
+        if (enabled && active && name === "lark_app")
+          credential = JSON.stringify(parseAppCredential(credential));
         channels[name] = {
           enabled: active,
           ...(name === "lark_app"

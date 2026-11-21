@@ -60,6 +60,9 @@ export function invalidateExtHistory(
   prepare(db, `DELETE FROM ext_message_quiet_overflow WHERE ${target}`).run(
     params,
   );
+  prepare(db, `DELETE FROM ext_message_rate_batches WHERE ${target}`).run(
+    params,
+  );
   const rows = prepare(
     db,
     `UPDATE ext_message_outbox SET status='skipped',updated_at=:now,lease_id=NULL,lease_until=NULL WHERE status IN ('pending','failed') AND ${target} RETURNING project_id`,
@@ -115,15 +118,59 @@ export function reserveExtAttempt(
   channel: string,
   at: number,
   limit: number,
+  lease: string,
+  sendBy: number,
 ) {
   prepare(db, "DELETE FROM ext_message_attempts WHERE channel=? AND at<=?").run(
     channel,
     at - 60_000,
   );
   if (!extAttemptAvailable(db, channel, at, limit)) return false;
-  prepare(db, "INSERT INTO ext_message_attempts(channel,at) VALUES(?,?)").run(
-    channel,
-    at,
-  );
+  prepare(
+    db,
+    "INSERT INTO ext_message_attempts(lease,channel,at) VALUES(?,?,?)",
+  ).run(lease, channel, sendBy);
   return true;
+}
+
+/** An unobserved dispatch stays charged through its send deadline plus a full window. */
+export function finishExtAttempt(
+  db: DatabaseSync,
+  lease: string,
+  finishedAt: number | null,
+) {
+  if (finishedAt === null)
+    prepare(db, "DELETE FROM ext_message_attempts WHERE lease=?").run(lease);
+  else
+    prepare(db, "UPDATE ext_message_attempts SET at=? WHERE lease=?").run(
+      finishedAt,
+      lease,
+    );
+}
+
+/** Snapshot the finite cohort at the first available slot, not at saturation:
+ * new arrivals while the channel was full must be included, but later traffic
+ * must not indefinitely postpone the already waiting recipients' summary. */
+export function extRateBatch(db: DatabaseSync, channel: string): number | null {
+  const row = prepare(
+    db,
+    "SELECT through FROM ext_message_rate_batches WHERE channel=?",
+  ).get(channel);
+  return row ? Number(row.through) : null;
+}
+export function openExtRateBatch(db: DatabaseSync, channel: string) {
+  prepare(
+    db,
+    "INSERT OR IGNORE INTO ext_message_rate_batches(channel,through) SELECT ?,COALESCE(MAX(rowid),0) FROM events",
+  ).run(channel);
+}
+export function closeExtRateBatch(
+  db: DatabaseSync,
+  channel: string,
+  through: number,
+) {
+  prepare(
+    db,
+    "DELETE FROM ext_message_rate_batches WHERE channel=? AND through=?",
+  ).run(channel, through);
 }

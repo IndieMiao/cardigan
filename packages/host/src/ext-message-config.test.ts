@@ -107,6 +107,39 @@ test("enabled lark validates its private JSON credential; disabled channels do n
   write(yaml.replace("lark: { enabled: true", "lark: { enabled: false"));
   expect(loadExtMessageConfig(path)).toMatchObject({ status: "loaded" });
 });
+test("the app channel uses the same effective credential for equivalent JSON", () => {
+  write(
+    "enabled: true\nworkbench_url: https://workbench.invalid\nchannels: { lark_app: { enabled: true, credential_file: app.json } }",
+  );
+  const c = {
+    app_id: "cli_0123456789abcdef",
+    app_secret: "fixture",
+    tenant_key: "tenant",
+  };
+  const file = join(dir, "app.json");
+  writeFileSync(file, JSON.stringify(c), { mode: 0o600 });
+  const original = loadExtMessageConfig(path);
+  expect(original).toMatchObject({
+    status: "loaded",
+    config: { channels: { lark_app: { credential: JSON.stringify(c) } } },
+  });
+  writeFileSync(
+    file,
+    JSON.stringify(
+      {
+        tenant_key: c.tenant_key,
+        note: "not consumed",
+        app_secret: c.app_secret,
+        app_id: c.app_id,
+      },
+      null,
+      2,
+    ),
+  );
+  expect(loadExtMessageConfig(path)).toEqual(original);
+  writeFileSync(file, JSON.stringify({ ...c, app_secret: "rotated" }));
+  expect(loadExtMessageConfig(path)).not.toEqual(original);
+});
 test.each([
   "http://open.feishu.cn/open-apis/bot/v2/hook/synthetic-only",
   "https://user:secret@open.feishu.cn/open-apis/bot/v2/hook/synthetic-only",

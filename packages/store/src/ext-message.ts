@@ -177,6 +177,25 @@ export function claimExtMessage(
       .changes === 1
   );
 }
+/** Undo only our own unsent lease. Never undo expiry processing or a successor's attempt. */
+export function releaseUnsentExtMessage(
+  db: DatabaseSync,
+  original: ExtMessageRow,
+  lease: string,
+  digest: string | null,
+) {
+  prepare(
+    db,
+    `UPDATE ext_message_outbox SET attempts=?,digest_id=?,lease_id=NULL,lease_until=NULL,next_attempt_at=?
+    WHERE project_id=? AND item_kind=? AND item_id=? AND channel=? AND status='pending' AND lease_id=?`,
+  ).run(
+    original.attempts,
+    digest,
+    original.next_attempt_at,
+    ...key(original),
+    lease,
+  );
+}
 export function settleExtMessage(
   db: DatabaseSync,
   row: ExtMessageRow,

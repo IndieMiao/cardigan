@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +20,10 @@ import {
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { card, project_id } from "../../store/src/test-support.js";
 import { ExtMessageSender, sendExtMessage } from "./ext-message.js";
-import type { ExtMessageConfig } from "./ext-message-config.js";
+import {
+  type ExtMessageConfig,
+  loadExtMessageConfig,
+} from "./ext-message-config.js";
 
 let dir: string;
 let store: Store;
@@ -568,6 +571,220 @@ test.each([
     "H-3",
   ]);
 });
+
+test.each([11, 80])(
+  "recovering quota does not split a partially projected burst (%i initially)",
+  async (initial) => {
+    const total = initial === 11 ? 50 : 80;
+    const active = sender();
+    active.recordStatus();
+    for (let n = 1; n <= initial; n++) addAction(n);
+    await active.tick();
+    advance(1000);
+    for (let n = initial + 1; n <= total; n++) addAction(n);
+    expect(fake.messages).toHaveLength(10);
+    store.close();
+    store = Store.open({ dataDir: dir });
+    advance(59_000);
+    await sender().tick();
+    expect(fake.messages).toHaveLength(10);
+    await sender().tick();
+    advance(60_000);
+    await sender().tick();
+    expect(fake.messages.slice(10)).toEqual([
+      { title: `${total - 10} 条待处理`, url: config.workbench_url },
+    ]);
+    expect(rows().filter((r) => r.status === "sent")).toHaveLength(total);
+  },
+);
+
+test("later arrivals and restarts cannot starve a partial rate summary", async () => {
+  const active = sender();
+  active.recordStatus();
+  for (let n = 1; n <= 80; n++) addAction(n);
+  await active.tick();
+  advance(60_000);
+  await active.tick();
+  expect(fake.messages).toHaveLength(10);
+  for (let n = 81; n <= 120; n++) addAction(n);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  await sender().tick();
+  expect(fake.messages.slice(10)).toEqual([
+    { title: "70 条待处理", url: config.workbench_url },
+  ]);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(80);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(20);
+});
+
+test("reformatting a loaded webhook credential preserves retry and offline work but rotation does not", async () => {
+  const path = join(dir, "sender.yaml"),
+    secret = join(dir, "sender.json");
+  const webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/fixture";
+  writeFileSync(
+    path,
+    `enabled: true\nworkbench_url: ${config.workbench_url}\nchannels: { lark: { enabled: true, credential_file: sender.json } }`,
+    { mode: 0o600 },
+  );
+  writeFileSync(secret, JSON.stringify({ webhook, secret: "fixture" }), {
+    mode: 0o600,
+  });
+  const start = () =>
+    sender({
+      configuration: loadExtMessageConfig(path),
+      adapters: { lark: () => fake },
+    });
+  const initial = start();
+  initial.recordStatus();
+  addAction(1);
+  fake.result = "retryable";
+  await initial.tick();
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(30_000);
+  writeFileSync(
+    secret,
+    JSON.stringify({ secret: "fixture", ignored: true, webhook }, null, 2),
+  );
+  fake.result = "sent";
+  await start().tick();
+  expect(rows()).toMatchObject([
+    { item_id: "H-1", status: "sent", attempts: 2 },
+    { item_id: "H-2", status: "sent", attempts: 1 },
+  ]);
+  addAction(3);
+  writeFileSync(secret, JSON.stringify({ webhook, secret: "rotated" }));
+  await start().tick();
+  expect(fake.messages).toHaveLength(3);
+  addAction(4);
+  await start().tick();
+  expect(fake.messages.at(-1)).toMatchObject({ item: "H-4" });
+});
+
+// Inject elapsed time between the durable claim and the synchronous adapter invocation.
+const afterClaim = (f: () => void) =>
+  store.observe({
+    transaction(kind) {
+      if (kind === "run" && rows().some((r) => r.lease_id)) {
+        store.observe(undefined);
+        f();
+      }
+    },
+  });
+test("a delayed dispatch occupies a rolling slot through the actual adapter call", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 1 } };
+  startChannel();
+  const sentAt: number[] = [];
+  const start = () =>
+    sender({
+      adapters: {
+        fake: () => ({
+          async send() {
+            sentAt.push(Date.parse(now));
+            return "sent";
+          },
+        }),
+      },
+    });
+  afterClaim(() => advance(100));
+  await start().tick();
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(59_900);
+  await start().tick();
+  expect(sentAt).toHaveLength(1);
+  advance(100);
+  await start().tick();
+  expect(sentAt[1]! - sentAt[0]!).toBe(60_000);
+});
+
+test("an unknown dispatch after a crash holds its slot through the last possible call plus 60s", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1, timeout_ms: 120_000 },
+  };
+  startChannel();
+  afterClaim(() => {
+    throw new Error("crash after claim");
+  });
+  await expect(sender().tick()).rejects.toThrow("crash after claim");
+  addAction(2);
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  advance(119_999);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  advance(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+});
+
+test("a paused sender drops an expired unsent lease instead of sending outside its reservation", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 1 } };
+  startChannel();
+  afterClaim(() => advance(70_000));
+  await sender().tick();
+  expect(fake.messages).toHaveLength(0);
+  expect(rows()).toMatchObject([
+    { attempts: 0, status: "pending", lease_id: null },
+  ]);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+});
+
+test.each(["claim", "dispatch"])(
+  "entering quiet hours at %s preserves the overflow without spending a slot",
+  async (edge) => {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: 1 },
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+    };
+    startChannel();
+    addAction(2);
+    addAction(3);
+    await sender().tick();
+    advance(119_999);
+    const claims = () =>
+      store.database
+        .prepare("SELECT COUNT(*) AS n FROM ext_message_attempts WHERE at>=?")
+        .get(Date.parse(now) - 5)?.n;
+    if (edge === "dispatch") afterClaim(() => advance(1));
+    // Move time only when the claim samples the clock under the writer lock.
+    let enterQuietOnClaim = false;
+    const active = sender({
+      clock: {
+        now: () => {
+          if (enterQuietOnClaim && store.database.isTransaction) {
+            enterQuietOnClaim = false;
+            advance(1);
+          }
+          return now;
+        },
+      },
+    });
+    active.recordStatus();
+    enterQuietOnClaim = edge === "claim";
+    await active.tick();
+    expect(fake.messages).toHaveLength(1);
+    expect(claims()).toBe(0);
+    expect(rows().filter((r) => r.status === "pending")).toMatchObject([
+      { attempts: 0, digest_id: "rate:queued" },
+      { attempts: 0, digest_id: "rate:queued" },
+    ]);
+    advance(60_000);
+    await active.tick();
+    expect(fake.messages.slice(1)).toEqual([
+      { title: "2 条待处理", url: config.workbench_url },
+    ]);
+  },
+);
 
 test("50 new items share one rolling channel budget across projects, ticks, senders and restart", async () => {
   const other = "other-project";
