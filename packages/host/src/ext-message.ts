@@ -6,6 +6,7 @@ import {
   type Clock,
   type CommandState,
   type ExtMessage,
+  type ExtMessageItem,
   type ExtMessagePort,
   extInteraction,
   extMessageItems,
@@ -15,12 +16,16 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import {
   claimExtMessage,
   type ExtMessageRow,
+  extQuietOverflow,
+  extQuietStamp,
   getExtMessage,
   groupExtMessage,
+  hasExtMessage,
   pendingExtMessages,
   projectExtMessage,
   type Store,
   type StoreTransactionContext,
+  saveExtQuietOverflow,
   settleExtMessage,
 } from "@cardigan/store";
 import {
@@ -75,6 +80,78 @@ export interface ExtMessageOptions {
   readonly startApplication?: typeof startFeishu;
   readonly adapters?: ExtMessageAdapters;
   readonly clock?: Clock;
+}
+// Bound first enable/rebinding work without dropping live items or splitting a frozen digest.
+const projectionBatch = 32;
+type Projection = {
+  state: CommandState;
+  version: string;
+  items: Map<string, ExtMessageItem>;
+  incompleteDigests: ReadonlySet<string>;
+  quietStamps: ReadonlyMap<string, string | null>;
+};
+const itemKey = (kind: string, id: string) => `${kind}:${id}`;
+// Called in the read snapshot: retain exact quiet-scan membership, not a time
+// watermark that could sweep in items only created or released after wake.
+function planChannel(
+  store: Store,
+  project: ProjectId,
+  channel: string,
+  items: readonly ExtMessageItem[],
+  config: ExtMessageConfig,
+  quiet: boolean,
+) {
+  const previous = extQuietOverflow(store.database, project, channel);
+  const remembered = new Set<string>(
+    previous ? JSON.parse(previous.members) : [],
+  );
+  const remaining: string[] = [];
+  const writes = [];
+  let complete = true;
+  let incompleteDigest = false;
+  for (const item of items) {
+    if (item.handled) continue;
+    const key = itemKey(item.kind, item.item_id);
+    const observed = remembered.has(key);
+    if (!item.ready && channel.startsWith("lark_app:")) {
+      if (observed) remaining.push(key);
+      continue;
+    }
+    if (hasExtMessage(store.database, item, channel)) continue;
+    const deferred =
+      quiet ||
+      observed ||
+      (item.created_at !== undefined &&
+        extMessageQuiet(config, item.created_at));
+    if (writes.length < projectionBatch) {
+      writes.push({ item, channel, deferred });
+      continue;
+    }
+    complete = false;
+    if (quiet || observed) remaining.push(key);
+    if (deferred && item.ready) incompleteDigest = true;
+    // With no quiet scan to persist, only the first missing digest member matters.
+    if (
+      !quiet &&
+      previous === null &&
+      (!config.quiet_hours || incompleteDigest)
+    )
+      break;
+  }
+  const members = remaining.length ? JSON.stringify(remaining) : null;
+  const next = !members
+    ? null
+    : previous?.members === members
+      ? previous
+      : { stamp: randomUUID(), members };
+  return {
+    channel,
+    writes,
+    complete: complete && next === null,
+    incompleteDigest,
+    previous,
+    next,
+  };
 }
 export class ExtMessageSender {
   private running: Promise<void> | undefined;
@@ -155,39 +232,8 @@ export class ExtMessageSender {
     if (!channels.length) return;
     for (const project of store.listProjects()) {
       if (this.stopped) return;
-      const projectedVersion = store.uow.run((tx) => {
-        const snapshot = store.snapshotVersion(project.id);
-        const version = snapshot && `${snapshot}/${generation ?? ""}`;
-        if (
-          version !== undefined &&
-          this.projectedVersions.get(project.id) === version
-        )
-          return version;
-        for (const item of extMessageItems(
-          loadCommandState(tx, project.id),
-          project.id,
-        ))
-          for (const channel of channels) {
-            if (
-              channel.startsWith("lark_app:") &&
-              (item.handled || !item.ready)
-            )
-              continue;
-            projectExtMessage(
-              store.database,
-              item,
-              channel,
-              this.clock.now(),
-              extMessageQuiet(config, this.clock.now()) ||
-                (item.created_at !== undefined &&
-                  extMessageQuiet(config, item.created_at)),
-            );
-          }
-        return version;
-      });
-      // Publish the replay cursor only after the transaction commits; restart always replays.
-      if (projectedVersion !== undefined)
-        this.projectedVersions.set(project.id, projectedVersion);
+      const projection = this.project(project.id, channels, generation, config);
+      if (!projection) continue;
       // Drain every started channel before reporting failure: stop() must also
       // cover result commits in sibling channels before the caller closes Store.
       const results = await Promise.allSettled(
@@ -195,6 +241,12 @@ export class ExtMessageSender {
           const rows = pendingExtMessages(store.database, project.id, channel);
           const groups = new Map<string, ExtMessageRow[]>();
           for (const row of rows) {
+            // Frozen retries and ordinary messages are independent of an unfinished quiet batch.
+            if (
+              row.digest_id === "queued" &&
+              projection.incompleteDigests.has(channel)
+            )
+              continue;
             const key =
               row.digest_id === null
                 ? `item:${row.item_kind}:${row.item_id}`
@@ -205,7 +257,7 @@ export class ExtMessageSender {
           }
           for (const group of groups.values()) {
             if (this.stopped) return;
-            await this.deliver(group, config);
+            await this.deliver(group, config, projection);
           }
         }),
       );
@@ -220,114 +272,213 @@ export class ExtMessageSender {
         );
     }
   }
+  private project(
+    projectId: ProjectId,
+    channels: readonly string[],
+    generation: string | undefined,
+    config: ExtMessageConfig,
+  ): Projection | undefined {
+    const { store } = this.options;
+    const now = this.clock.now();
+    const plan = store.uow.read((tx) => {
+      const version = store.snapshotVersion(projectId);
+      if (version === undefined)
+        throw new Error("External reminders require a versioned snapshot");
+      const cursor = `${version}/${generation ?? ""}`;
+      const projected = this.projectedVersions.get(projectId) === cursor;
+      if (
+        projected &&
+        channels.every(
+          (channel) =>
+            !pendingExtMessages(store.database, projectId, channel).length,
+        )
+      )
+        return;
+      const state = loadCommandState(tx, projectId);
+      const items = extMessageItems(state, projectId);
+      const quiet = extMessageQuiet(config, now);
+      const plans = projected
+        ? []
+        : channels.map((channel) =>
+            planChannel(store, projectId, channel, items, config, quiet),
+          );
+      return {
+        cursor,
+        plans,
+        projection: {
+          version,
+          state,
+          incompleteDigests: new Set(
+            plans.filter((p) => p.incompleteDigest).map((p) => p.channel),
+          ),
+          quietStamps: new Map(
+            plans.map((p) => [p.channel, p.next?.stamp ?? null]),
+          ),
+          items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
+        },
+      };
+    });
+    if (!plan) return;
+    const { projection } = plan;
+    if (
+      plan.plans.some((p) => p.writes.length || p.previous !== p.next) &&
+      !store.uow.run(() => {
+        if (
+          store.snapshotVersion(projectId) !== projection.version ||
+          this.app?.binding?.generation !== generation ||
+          plan.plans.some(
+            (p) =>
+              extQuietStamp(store.database, projectId, p.channel) !==
+              (p.previous?.stamp ?? null),
+          )
+        )
+          return false;
+        for (const p of plan.plans) {
+          for (const { item, channel, deferred } of p.writes)
+            projectExtMessage(store.database, item, channel, now, deferred);
+          if (p.previous !== p.next)
+            saveExtQuietOverflow(store.database, projectId, p.channel, p.next);
+        }
+        return true;
+      })
+    )
+      return;
+    if (plan.plans.every((p) => p.complete))
+      this.projectedVersions.set(projectId, plan.cursor);
+    return projection;
+  }
   private async deliver(
     candidates: readonly ExtMessageRow[],
     config: ExtMessageConfig,
+    projection: Projection,
   ): Promise<void> {
     const candidate = candidates[0];
     if (!candidate) return;
     const { store } = this.options;
+    const project = candidate.project_id as ProjectId;
+    const at = this.clock.now();
+    const quiet = extMessageQuiet(config, at);
+    const digest =
+      candidate.digest_id === "queued" ? randomUUID() : candidate.digest_id;
+    const eligible: { row: ExtMessageRow; item: ExtMessageItem }[] = [];
+    const updates: {
+      row: ExtMessageRow;
+      kind: "skip" | "fail" | "expire" | "queue";
+    }[] = [];
+    for (const row of candidates) {
+      if (row.lease_until && row.lease_until > at) continue;
+      const item = projection.items.get(itemKey(row.item_kind, row.item_id));
+      if (!item || item.handled) {
+        updates.push({ row, kind: "skip" });
+        continue;
+      }
+      if (row.next_attempt_at > at) continue;
+      if (row.attempts >= config.policy.max_attempts) {
+        updates.push({ row, kind: "fail" });
+        continue;
+      }
+      if (row.lease_id !== null) updates.push({ row, kind: "expire" });
+      if (!item.ready) continue;
+      if (quiet) {
+        if (row.digest_id === null) updates.push({ row, kind: "queue" });
+        continue;
+      }
+      eligible.push({ row, item });
+    }
+    if (!eligible.length && !updates.length) return;
+    const first = eligible[0]?.item;
+    const appChannel = candidate.channel.startsWith("lark_app:");
+    const settings = appChannel ? this.options.gate?.(project) : undefined;
+    const state = settings
+      ? { ...projection.state, project_settings: settings }
+      : projection.state;
+    const interaction =
+      appChannel && first ? extInteraction(state, first) : undefined;
+    const message = !first
+      ? undefined
+      : digest === null
+        ? buildExtMessage(
+            first,
+            config.workbench_url,
+            config.policy.title_limit,
+          )
+        : buildExtMessageDigest(
+            project,
+            eligible.map(({ item }, i) =>
+              appChannel &&
+              i < config.policy.digest_limit &&
+              (i === 0 ? interaction : extInteraction(state, item))?.sensitive
+                ? { ...item, sensitive: true }
+                : item,
+            ),
+            config.workbench_url,
+            config.policy,
+          );
     const claimed = store.uow.run((tx) => {
-      const now = this.clock.now();
-      const state = loadCommandState(
-        tx,
-        candidate.project_id as ProjectId,
-        this.options.gate?.(candidate.project_id as ProjectId),
-      );
-      const items = extMessageItems(state, candidate.project_id as ProjectId);
       if (
-        candidate.channel.startsWith("lark_app:") &&
-        candidate.channel !== `lark_app:${this.app?.binding?.generation}`
+        store.snapshotVersion(project) !== projection.version ||
+        (candidate.digest_id === "queued" &&
+          extQuietStamp(store.database, project, candidate.channel) !==
+            (projection.quietStamps.get(candidate.channel) ?? null)) ||
+        (appChannel &&
+          candidate.channel !== `lark_app:${this.app?.binding?.generation}`)
       )
         return;
-      const eligible = [];
-      for (const pending of candidates) {
-        let row = getExtMessage(store.database, pending);
+      // Outbox rows are not covered by the command-state revision. If another
+      // sender changed any member, never send the previously prepared digest.
+      for (const row of candidates) {
+        const fresh = getExtMessage(store.database, row);
         if (
-          row?.status !== "pending" ||
-          row.digest_id !== candidate.digest_id ||
-          (row.lease_until && row.lease_until > now)
+          fresh?.status !== "pending" ||
+          fresh.digest_id !== row.digest_id ||
+          fresh.attempts !== row.attempts ||
+          fresh.lease_id !== row.lease_id ||
+          fresh.lease_until !== row.lease_until ||
+          fresh.next_attempt_at !== row.next_attempt_at
         )
-          continue;
-        const item = items.find(
-          (i) => i.kind === pending.item_kind && i.item_id === pending.item_id,
-        );
-        if (!item || item.handled) {
-          this.settle(tx, row, "skipped", null, now, now);
-          continue;
-        }
-        if (row.next_attempt_at > now) continue;
-        if (row.attempts >= config.policy.max_attempts) {
-          this.settle(tx, row, "failed", "unknown", now, now);
-          continue;
-        }
-        if (row.lease_id !== null) {
-          // An expired reserved attempt may have reached the remote. Count and audit it.
-          this.settle(tx, row, "pending", "unknown", now, row.next_attempt_at);
-          row = { ...row, lease_id: null, lease_until: null };
-        }
-        if (!item.ready) continue;
-        if (extMessageQuiet(config, now)) {
-          groupExtMessage(store.database, row, "queued");
-          continue;
-        }
-        eligible.push({ row, item });
+          return;
       }
-      if (!eligible.length) return;
-      const digest =
-        candidate.digest_id === "queued" ? randomUUID() : candidate.digest_id;
+      for (const { row, kind } of updates) {
+        if (kind === "queue") groupExtMessage(store.database, row, "queued");
+        else if (kind === "expire")
+          this.settle(tx, row, "pending", "unknown", at, row.next_attempt_at);
+        else if (kind === "skip") this.settle(tx, row, "skipped", null, at, at);
+        else this.settle(tx, row, "failed", "unknown", at, at);
+      }
       const lease = randomUUID();
       const until = new Date(
-        Date.parse(now) + config.policy.timeout_ms,
+        Date.parse(at) + config.policy.timeout_ms,
       ).toISOString();
-      const reserved = [];
-      for (const { row, item } of eligible) {
+      const rows = eligible.map(({ row }) => {
         if (digest !== null) groupExtMessage(store.database, row, digest);
         const retryAt = new Date(
           Date.parse(until) +
             (config.policy.retry_delays_ms[row.attempts] ?? 0),
         ).toISOString();
-        if (!claimExtMessage(store.database, row, lease, now, until, retryAt))
-          continue;
-        reserved.push({
-          row: {
-            ...row,
-            digest_id: digest,
-            attempts: row.attempts + 1,
-            lease_id: lease,
-            lease_until: until,
-          },
-          item,
-        });
-      }
-      const first = reserved[0];
-      if (!first) return;
+        if (!claimExtMessage(store.database, row, lease, at, until, retryAt))
+          throw new Error("External reminder claim changed");
+        return {
+          ...row,
+          digest_id: digest,
+          attempts: row.attempts + 1,
+          lease_id: lease,
+          lease_until: until,
+        };
+      });
       return {
-        appPort: candidate.channel.startsWith("lark_app:")
-          ? this.app?.prepare(state, first.item, digest)
-          : undefined,
-        rows: reserved.map((entry) => entry.row),
-        message:
-          digest !== null
-            ? buildExtMessageDigest(
-                candidate.project_id as ProjectId,
-                reserved.map(({ item }) =>
-                  candidate.channel.startsWith("lark_app:") &&
-                  extInteraction(state, item).sensitive
-                    ? { ...item, sensitive: true }
-                    : item,
-                ),
-                config.workbench_url,
-                config.policy,
-              )
-            : buildExtMessage(
-                first.item,
-                config.workbench_url,
-                config.policy.title_limit,
-              ),
+        rows,
+        appPort:
+          interaction && first
+            ? this.app?.prepare(interaction, first, digest)
+            : undefined,
+        version: store.snapshotVersion(project)!,
       };
     });
     if (!claimed) return;
+    // Only our own ext_message_* audits changed since the checked snapshot;
+    // they cannot affect outbound membership or Feishu action eligibility.
+    projection.version = claimed.version;
+    if (!message) return;
     const factory = (this.options.adapters ?? extMessageAdapters)[
       candidate.channel
     ];
@@ -337,16 +488,14 @@ export class ExtMessageSender {
         claimed.appPort ??
         factory?.(config.channels[candidate.channel]?.credential);
       if (port)
-        result = await sendExtMessage(
-          port,
-          claimed.message,
-          config.policy.timeout_ms,
-        );
+        result = await sendExtMessage(port, message, config.policy.timeout_ms);
     } catch {
       result = "unknown";
     }
     const now = this.clock.now();
-    store.uow.run((tx) => {
+    const settledVersion = store.uow.run((tx) => {
+      const stillCurrent =
+        store.snapshotVersion(project) === projection.version;
       for (const row of claimed.rows) {
         const status =
           result === "sent"
@@ -369,7 +518,9 @@ export class ExtMessageSender {
           next,
         );
       }
+      return stillCurrent ? store.snapshotVersion(project) : undefined;
     });
+    if (settledVersion !== undefined) projection.version = settledVersion;
   }
 
   /** Outbox result and audit/terminal notice commit together, including crash recovery. */

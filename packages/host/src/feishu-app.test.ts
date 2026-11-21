@@ -7,6 +7,7 @@ import {
   buildExtMessage,
   type Decision,
   EXT_MESSAGE_DEFAULTS,
+  extInteraction,
   extMessageItems,
   type HumanAction,
 } from "@cardigan/domain";
@@ -103,7 +104,7 @@ function redeem(
 async function send(id: string) {
   const s = store.uow.read((tx) => loadCommandState(tx, project_id));
   const i = extMessageItems(s, project_id).find((i) => i.item_id === id)!;
-  const port = store.uow.run(() => app.prepare(s, i, null));
+  const port = store.uow.run(() => app.prepare(extInteraction(s, i), i, null));
   expect(
     await port!.send(
       buildExtMessage(i, "https://workbench.invalid"),
