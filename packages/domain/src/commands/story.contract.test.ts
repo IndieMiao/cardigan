@@ -394,6 +394,58 @@ test("one round per group with a human response; implicit defaults never approve
   expect(storyDiscussionRounds(story())).toBe(2);
 });
 
+test("ordinary supersession cannot invalidate checklist or resolution evidence; replies and ordinary corrections still work", () => {
+  const { f, office, send, story } = discussionFixture();
+  const group = send(office, ask);
+  const plain = (
+    author: typeof human,
+    link: { reply_to: typeof group.id } | { supersedes: typeof group.id },
+  ) =>
+    postComment(
+      f.state,
+      author,
+      { card_id: f.parent.id, body: "补充说明", ...link },
+      f.p,
+    );
+  const cannotReplace = (author: typeof human, entry: typeof group) =>
+    expect(plain(author, { supersedes: entry.id })).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+
+  cannotReplace(office, group);
+  const reply = value(plain(office, { reply_to: group.id }));
+  f.apply(reply);
+  if (!reply.data) throw new Error("Missing reply");
+  f.apply(value(plain(office, { supersedes: reply.data.id })));
+
+  const answer = send(human, {
+    action: "answer",
+    group_id: group.id,
+    number: 2,
+    answer: "倒序",
+  });
+  cannotReplace(human, answer);
+  const next = send(office, ask);
+  const accepted = send(human, {
+    action: "accept_defaults",
+    group_id: next.id,
+  });
+  cannotReplace(human, accepted);
+  const plan = send(office, { action: "propose" });
+  cannotReplace(office, plan);
+  expect(plan.body).toContain(`${group.id} 第 1 题按默认：单列`);
+  expect(
+    story().question_groups?.map((g) =>
+      g.questions.map((q) => q.resolution?.entry_id),
+    ),
+  ).toEqual([
+    [plan.id, answer.id],
+    [accepted.id, accepted.id],
+  ]);
+  expect(storyDiscussionRounds(story())).toBe(2);
+});
+
 test("partial answer then accepting the remainder counts once and preserves the answer", () => {
   const { office, send, story } = discussionFixture();
   const group_id = send(office, ask).id;

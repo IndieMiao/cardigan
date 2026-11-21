@@ -239,6 +239,15 @@ export function postComment(
           "unauthorized",
           "Only the same author can supersede a comment",
         );
+        ensure(
+          !card.story?.question_groups?.some(
+            (group) =>
+              group.id === entry.id ||
+              group.questions.some((q) => q.resolution?.entry_id === entry.id),
+          ),
+          "illegal_transition",
+          "不能替换需求问题清单或已绑定的答复、默认记录；可回复原评论继续讨论",
+        );
         checkPlanSupersession(d, entry, p.review_plan);
       }
     }
