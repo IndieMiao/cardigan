@@ -2,12 +2,13 @@ import {
   type Clock,
   type HumanAction,
   requestDeploymentAction,
+  retireVerifiedHelperAction,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { workerHelperDigests } from "./worker-helper-release.js";
 
-function notify(
+export function notifyWorkerMaintenance(
   tx: StoreTransactionContext,
   project: string,
   clock: Clock,
@@ -28,6 +29,29 @@ function notify(
     ),
   );
 }
+const manualUpgradeKey = (machine: string) =>
+  `worker-helper:${machine}:${Object.values(workerHelperDigests()).join(":")}`;
+
+export function retireManualUpgrade(
+  tx: StoreTransactionContext,
+  project: string,
+  machine: string,
+  binding: string,
+  clock: Clock,
+) {
+  persistEffect(
+    tx,
+    project,
+    unwrap(
+      retireVerifiedHelperAction(
+        loadCommandState(tx, project),
+        { kind: "system", project_id: project },
+        { machine_id: machine, binding, key: manualUpgradeKey(machine) },
+        { ids: tx.ids, clock },
+      ),
+    ),
+  );
+}
 export function notifyHelperMismatch(
   tx: StoreTransactionContext,
   project: string,
@@ -37,11 +61,11 @@ export function notifyHelperMismatch(
   fields: Pick<HumanAction, "terminal" | "helper_upgrade">,
 ) {
   const digests = workerHelperDigests();
-  notify(
+  notifyWorkerMaintenance(
     tx,
     project,
     clock,
-    `worker-helper:${machine}:${Object.values(digests).join(":")}`,
+    manualUpgradeKey(machine),
     `机器 ${machine}：${reason}。${fields.terminal ? "暂存已就绪。请先暂停派发、确认无活跃任务，再登录目标机执行下方命令。" : "发行材料暂存失败，没有可执行命令。请主机运维核对 worker 连接；下次巡检会重试。"}\n${Object.entries(
       digests,
     )
@@ -88,7 +112,7 @@ export function workerPreparationOutcome(
     ON CONFLICT(project_id,machine_id,target) DO UPDATE SET failures=excluded.failures, cooldown_until=excluded.cooldown_until`)
     .run(project, machine, target, count, until);
   if (count === policy.failures)
-    notify(
+    notifyWorkerMaintenance(
       tx,
       project,
       clock,

@@ -57,7 +57,7 @@ def directories(account, root):
             + [(root / name / project, account.pw_uid, 0o700, True) for name in namespaces])
 
 
-def layout(account, root):
+def layout(account, root, expected_primitives=None):
     native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
     entries = directories(account, root)
     entries += [(root / 'locks' / (name + '.lock'), 0, 0o660, False) for name in ('git', 'tests')]
@@ -75,11 +75,14 @@ def layout(account, root):
         finally:
             os.close(fd)
         if not is_dir:
-            require(path.read_bytes() == (b'' if path.suffix == '.lock' else Path(__file__).with_name('worker-primitives.py').read_bytes()))
+            expected = b''
+            if path.suffix != '.lock':
+                expected = expected_primitives if expected_primitives is not None else Path(__file__).with_name('worker-primitives.py').read_bytes()
+            require(path.read_bytes() == expected)
     return entries
 
 
-def preflight(config, system='Darwin'):
+def preflight(config, system='Darwin', expected_primitives=None):
     require(platform.system() == system and system in ('Darwin', 'Linux') and os.geteuid() == 0)
     require(system != 'Darwin' or platform.machine() == 'arm64')
     require(re.fullmatch(r'[a-z_][a-z0-9_-]*', config['account']) is not None)
@@ -124,7 +127,7 @@ def preflight(config, system='Darwin'):
         require(space.f_bavail * space.f_frsize >= minimum)
     marker = root / '.cardigan-worker'
     require(trusted_json(marker) == {'project': config['project'], 'uid': account.pw_uid, 'home': str(home)})
-    layout(account, root)  # All existing conflicts are checked before the first mutation.
+    layout(account, root, expected_primitives)  # All existing conflicts are checked before the first mutation.
     return account, root
 
 

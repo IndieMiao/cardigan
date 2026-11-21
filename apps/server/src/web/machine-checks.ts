@@ -135,12 +135,16 @@ export class MachineChecks extends MachineCheckJournal {
       this.pending.delete(promise);
     }
   }
-  currentBinding(project: string, machine: Machine | undefined) {
+  currentBinding(
+    project: string,
+    machine: Machine | undefined,
+    purpose?: "manual-upgrade",
+  ) {
     try {
       return (
         (machine &&
           machine.herdr_machine === machine.id &&
-          this.host?.bindingFingerprint?.(project, machine)) ||
+          this.host?.bindingFingerprint?.(project, machine, purpose)) ||
         null
       );
     } catch {

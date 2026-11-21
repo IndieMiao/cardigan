@@ -329,6 +329,7 @@ export { WorkerGitTransport } from "./worker-git.js";
 export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
 export { upgradeMaterials } from "./worker-upgrade.js";
+export { manualWorkerUpgradeAllowed } from "./worker-upgrade-enrollment.js";
 export * from "./worker-wizard-files.js";
 export * from "./worker-wizard-form.js";
 export {

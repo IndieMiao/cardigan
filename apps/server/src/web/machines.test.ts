@@ -281,6 +281,19 @@ test("host adapter projects a private worker binding and reads a blocked worker 
     expect(host.upgradeCommand?.("example", registration)).toContain(
       "sha256sum",
     );
+    // Changing the private enrollment alone invalidates the command and its Needs You cache key.
+    const manualBinding = () =>
+      host.bindingFingerprint?.("example", registration, "manual-upgrade");
+    const binding = manualBinding();
+    expect(binding).toBe(host.bindingFingerprint?.("example", registration));
+    await writeFile(join(root, "upgrade-6-worker-example.key"), "fixture", {
+      mode: 0o600,
+    });
+    expect(manualBinding()).toBeUndefined();
+    expect(host.upgradeCommand?.("example", registration)).toBeUndefined();
+    expect(host.bindingFingerprint?.("example", registration)).toBe(binding);
+    await rm(join(root, "upgrade-6-worker-example.key"));
+    expect(manualBinding()).toBe(binding);
     expect(host.bindingFingerprint?.("other", registration)).toBeUndefined();
     expect(host.upgradeCommand?.("other", registration)).toBeUndefined();
     expect(

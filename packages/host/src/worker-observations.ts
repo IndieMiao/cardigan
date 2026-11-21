@@ -19,7 +19,7 @@ export async function refreshWorkerObservations(
   options: Pick<
     MachineObservationOptions,
     "signal" | "probe" | "browsersPath"
-  > = {},
+  > & { readonly fullWorkerCheckId?: string } = {},
 ) {
   const { project_id: project, machine_id: machine } = worker;
   const checkedRegistration = () => {
@@ -43,6 +43,9 @@ export async function refreshWorkerObservations(
       machine,
       env,
       ...options,
+      ...(options.fullWorkerCheckId
+        ? { observationId: options.fullWorkerCheckId }
+        : {}),
       // The wizard probes its input configuration, not an arbitrary later registration.
       // Resolve both sides of the observation fence against that same worker.
       target: () => {

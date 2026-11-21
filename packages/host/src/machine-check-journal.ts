@@ -2,24 +2,20 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "@cardigan/domain";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
+import type {
+  CheckKind,
+  CheckResult,
+  MachineCheckJob,
+} from "./machine-check-types.js";
 import { executionOwner } from "./process-identity.js";
+import { settleUpgradeCheck } from "./worker-upgrade-gate.js";
 
-export type CheckKind = "machine" | "worker";
-export interface CheckResult {
-  status: "passed" | "failed";
-  failed_steps: readonly string[];
-}
-export interface MachineCheckJob {
-  id: string;
-  project_id: string;
-  machine_id: string;
-  kind: CheckKind;
-  status: CheckResult["status"] | "running";
-  step: string;
-  started_at: string;
-  checked_at: string;
-  failed_steps: readonly string[];
-}
+export type {
+  CheckKind,
+  CheckResult,
+  MachineCheckJob,
+} from "./machine-check-types.js";
+
 type Source = "cli" | "web" | "patrol";
 type Audit = (
   tx: StoreTransactionContext,
@@ -146,6 +142,11 @@ export class MachineCheckJournal {
         owner,
         JSON.stringify(job),
       );
+      // A newly claimed worker check supersedes the previous worker proof even if this process dies.
+      if (kind === "worker")
+        db.prepare(
+          "UPDATE worker_helper_upgrades SET state='failed' WHERE project_id=? AND machine_id=? AND state='worker_checked'",
+        ).run(project, machine);
       audit?.(tx, job, false);
       return { job, joined: false };
     });
@@ -176,6 +177,7 @@ export class MachineCheckJournal {
       try {
         this.store.uow.run((tx) => {
           this.save(final);
+          settleUpgradeCheck(this.store, tx, final);
           finished?.(tx, final);
         });
       } catch (error) {

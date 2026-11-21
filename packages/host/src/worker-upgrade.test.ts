@@ -77,6 +77,13 @@ test.each(["linux", "darwin"])(
           ]),
         ),
       ).toBe(expected);
+    // Manual staging must ship the operator template, not the enrolled root entry.
+    const template = readFileSync(
+      new URL("../../../deploy/manual-worker-upgrade.py", import.meta.url),
+    );
+    expect(
+      readFileSync(join(stage, "upgrade.py")).subarray(0, template.length),
+    ).toEqual(template);
     // Execute only the copy/check shell, as this user, substituting a harmless completion marker.
     const copy = terminal.command
       .replace("/usr/bin/sudo ", "")
