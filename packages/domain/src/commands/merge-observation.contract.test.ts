@@ -141,7 +141,7 @@ test("C-405: changed reasons record once and bind affected work items; only the 
   expect(reasons).toEqual(
     expect.arrayContaining([
       "自动合并已暂停",
-      "敏感卡片的合并须由人亲自确认。",
+      "卡片已被人标为敏感，合并须由人亲自确认。",
       `验证项 ${verifier.id} 未通过`,
     ]),
   );

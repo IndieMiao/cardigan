@@ -3,12 +3,11 @@ import { categoryDelegated } from "../decision-authorization.js";
 import type { Decision } from "../entities.js";
 import {
   autoMergeOn,
-  highRiskCategories,
   mergePathMatches,
   validMergePathList,
 } from "../preferences.js";
 import type { CommandState } from "./core.js";
-import { mergeContentDecisions } from "./human-decided-merge.js";
+import { mergeNeedsHuman } from "./delegation.js";
 import { roleRuleDeliveries } from "./role-rule-implementation.js";
 
 /** Bind the current human opt-in; legacy A3 retains its original audited policy. */
@@ -79,23 +78,14 @@ export function systemMergeHumanReason(
   const preference = state.project_preferences?.find(
     (p) => p.id === state.project_id,
   );
-  if (
-    card.sensitive &&
-    !categoryDelegated(preference, state.events, "sensitive")
-  )
-    return "敏感卡片的合并须由人亲自确认。";
-  const related = mergeContentDecisions(
+  const personal = mergeNeedsHuman(
     state.decisions,
-    card,
+    state.cards,
+    card.id,
+    preference,
     state.events,
-  ).find(
-    (other) =>
-      !!other.category &&
-      highRiskCategories.includes(other.category) &&
-      !categoryDelegated(preference, state.events, other.category),
   );
-  if (related)
-    return `卡片或来源拍板 ${related.id} 涉及范围或高风险事项，合并须由人确认。`;
+  if (personal) return personal;
   const lite = autoMergeOn(
     state.project_preferences?.find((p) => p.id === state.project_id),
   );

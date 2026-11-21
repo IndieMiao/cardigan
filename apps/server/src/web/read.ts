@@ -575,6 +575,8 @@ export interface AttachmentView extends WebAuthorView {
   /** Known bitmap types may render inline; everything else is a download. */
   readonly inline: boolean;
   readonly download_path: string;
+  /** C-540: small WebP preview for inline bitmaps; null for everything else. */
+  readonly thumbnail_path: string | null;
 }
 
 /** MIME types safe enough for `<img src>` (§3.2); SVG and HTML are not. */
@@ -611,6 +613,12 @@ function attachmentViewMapper(state: CommandState) {
             id: attachment.basis,
             status: decisions.get(attachment.basis)?.status ?? "unknown",
           };
+    const download_path = `/api/projects/${encodeURIComponent(
+      state.project_id,
+    )}/attachments/${encodeURIComponent(attachment.id)}`;
+    const inline =
+      !attachment.streamed_artifact &&
+      INLINE_MIME_TYPES.has(attachment.mime.toLowerCase());
     return {
       id: attachment.id,
       ...(attachment.original_filename === undefined
@@ -630,13 +638,10 @@ function attachmentViewMapper(state: CommandState) {
       uploaded_at: uploaded.get(attachment.id) ?? null,
       basis,
       supersedes: attachment.supersedes ?? null,
-      inline:
-        !attachment.streamed_artifact &&
-        INLINE_MIME_TYPES.has(attachment.mime.toLowerCase()),
+      inline,
       // §6 C-95: the same authenticated download route serves decision previews.
-      download_path: `/api/projects/${encodeURIComponent(
-        state.project_id,
-      )}/attachments/${encodeURIComponent(attachment.id)}`,
+      download_path,
+      thumbnail_path: inline ? `${download_path}/thumbnail` : null,
     };
   };
 }
