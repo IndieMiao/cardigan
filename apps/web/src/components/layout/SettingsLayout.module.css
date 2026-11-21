@@ -91,6 +91,10 @@
   .panel[hidden] {
     display: none;
   }
+  /* Two lists in one tab (C-549: launch profiles, then Providers). */
+  .panel + .panel {
+    margin-block-start: calc(var(--ui-space-6) * 2);
+  }
   .panelHeading,
   .label {
     display: flex;
