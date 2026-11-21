@@ -19,6 +19,7 @@ import {
   canDispatchRun,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
+  idleWakeGuard,
   isRunCapacityExempt,
   providerAdmission,
   recoverPreparation,
@@ -52,6 +53,7 @@ import {
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
+  WorkerPreparationFailure,
   workerFiles,
   writeAgentLaunch,
   writeAgentSentinel,
@@ -63,7 +65,6 @@ import {
   finishBellAttempt,
   getRoleVersion,
   type Store,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -109,7 +110,13 @@ import {
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
-import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
+import {
+  armBellReceipt,
+  confirmBellWrite,
+  RunWakeWithdrawn,
+  recordWakeRefusal,
+  wakeIsCurrent,
+} from "./wake-guard.js";
 import {
   describePreparationFailure,
   preparationExecutionExited,
@@ -794,6 +801,18 @@ async function launch(
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
+      const addressed = assignment.runtime_ref;
+      const arm = () =>
+        armBellReceipt(
+          host.store,
+          project,
+          current.id,
+          addressed,
+          card?.id,
+          attempt?.review_wake,
+        );
+      const guard = idleWakeGuard(observed.value);
+      if (!guard) throw new RunWakeWithdrawn();
       const token = host.store.uow.run((tx) =>
         tx
           .tokensForAssignment(project, assignment.id)
@@ -864,6 +883,7 @@ async function launch(
             .filter(Boolean)
             .join("\n"),
           {
+            ...guard,
             ...(input.resourcePreflight
               ? { resource_preflight: input.resourcePreflight }
               : {}),
@@ -877,7 +897,7 @@ async function launch(
                   clock,
                 );
                 targetDeferred = gate === "deferred";
-                return gate === "send";
+                return gate === "send" && arm();
               }
               targetDeferred = refreshTargetWait(
                 host.store,
@@ -888,17 +908,16 @@ async function launch(
               return (
                 !targetDeferred &&
                 wakeCurrent() &&
-                reviewPrompt() === preparedReviewPrompt
+                reviewPrompt() === preparedReviewPrompt &&
+                arm()
               );
             },
           },
         );
         if (result.ok && result.value.withdrawn) {
           const refused = attempt;
-          if (refused?.review_wake)
-            host.store.uow.run(() =>
-              settleWakeWithdrawal(host.store.database, refused, clock.now()),
-            );
+          if (refused)
+            recordWakeRefusal(host.store, refused, assignment, clock.now());
           if (targetDeferred) throw new RunTargetDeferred();
           throw new RunWakeWithdrawn();
         }
@@ -910,6 +929,7 @@ async function launch(
         }
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
+        confirmBellWrite(host.store, project, current.id, clock.now());
       } catch (error) {
         if (
           error instanceof RunWakeWithdrawn ||
@@ -1194,9 +1214,15 @@ async function launch(
     if (!provisioned.ok) {
       provisionRefusal = provisionRefusalFor(provisioned.error, launchDesc);
       if (provisionRefusal) throw provisionRefusal;
-      throw new Error(
-        `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
-      );
+      const message = `provision failed: ${provisioned.error.code} ${provisioned.error.message}`;
+      if (
+        publication &&
+        ["runtime_unavailable", "runtime_timeout", "version_mismatch"].includes(
+          provisioned.error.code,
+        )
+      )
+        throw new WorkerPreparationFailure(message);
+      throw new Error(message);
     }
     ref = {
       ...provisioned.value,
@@ -1291,8 +1317,11 @@ async function launch(
     )
       throw new RunTargetDeferred();
     step = "sentinel write";
+    if (!armBellReceipt(host.store, project, current.id, dispatchRef, card?.id))
+      throw new RunWakeWithdrawn();
     if (publication) await publication.commit();
     else await writeAgentSentinel(execution, project, assignment.id);
+    confirmBellWrite(host.store, project, current.id, clock.now());
 
     const started = launchEntities(host.store, project, assignment.id);
     const run = host.store.uow.read((tx) => tx.runs.get(project, input.run.id));
@@ -1328,7 +1357,19 @@ async function launch(
       try {
         exited = await publication.stop(
           deferred || retry,
-          deferred || retry ? undefined : reason,
+          deferred || retry
+            ? undefined
+            : {
+                reason,
+                worker:
+                  error instanceof WorkerPreparationFailure ||
+                  (error instanceof WorkerMcpError &&
+                    [
+                      "mcp_worker_failed",
+                      "mcp_unreachable",
+                      "mcp_timeout",
+                    ].includes(error.code)),
+              },
           provisionRefusal,
         );
       } catch {

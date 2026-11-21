@@ -32,6 +32,16 @@ export interface RuntimeObservation {
   /** Runtime event sequence, never a local timestamp. */
   readonly observed_seq: number;
 }
+/** Both local and worker adapters must repeat this observation at the send slot. */
+export function idleWakeGuard(
+  observation: RuntimeObservation,
+): RuntimeWakeOptions | undefined {
+  if (observation.process !== "alive") return;
+  if (observation.agent === "idle") return { if_idle: true };
+  if (observation.agent === "done")
+    return { observed_guard: { state: "done" } };
+  return;
+}
 export interface RuntimeLaunchRecovery {
   /** Recover a lost provision acknowledgement by exact host labels, never by name alone. */
   find_launch(

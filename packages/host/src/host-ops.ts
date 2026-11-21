@@ -282,6 +282,9 @@ export class HostOpsService {
           last_seen_at: f.last_seen_at,
         })),
         actions: view.actions,
+        ...(view.worker_maintenance
+          ? { worker_maintenance: view.worker_maintenance }
+          : {}),
         // Full read-only state stays visible; C-56 failures are excluded from patrol work.
         runs,
         patrol_runs: runs.filter(

@@ -19,6 +19,7 @@ export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
 export * from "./worker-files.js";
 export * from "./worker-preflight.js";
+export { WorkerPreparationFailure } from "./worker-preparation-failure.js";
 export * from "./worker-primitives.js";
 
 import { join } from "node:path";

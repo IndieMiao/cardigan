@@ -10,6 +10,7 @@ import {
   contextUsageLevel,
 } from "../context-usage.js";
 import type { Actor, Run } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import {
   type HOST_OPS_TOOLS,
   type HostOpsExecution,
@@ -408,28 +409,65 @@ export function finishHostOpsAction(
   });
 }
 
+// Only a system-issued, same-project maintenance handoff belongs in this
+// diagnostic. A general Needs You entry (or a later external handoff) does not.
+function workerMaintenanceHandoffs(state: CommandState, actor: Actor) {
+  if (actor.kind !== "assignment" || actor.role_id !== "host_ops") return [];
+  const open = state.human_actions.filter(
+    (a) =>
+      a.requested_by === "system" &&
+      !a.card_id &&
+      a.status === "open" &&
+      a.triage === "host" &&
+      a.host_operator === "host_ops" &&
+      (!a.host_assignment_id || a.host_assignment_id === actor.assignment_id),
+  );
+  if (!open.length) return [];
+  const ids = new Set(
+    eventsOfType(state.events, "host_deployment_action_requested").flatMap(
+      (e) => {
+        const p = e.payload as { reason?: string; human_action_id?: string };
+        return !e.card_id &&
+          e.actor.kind === "system" &&
+          e.actor.project_id === state.project_id &&
+          p.reason === "worker_maintenance" &&
+          p.human_action_id
+          ? [p.human_action_id]
+          : [];
+      },
+    ),
+  );
+  return open
+    .filter((a) => ids.has(a.id))
+    .map((a) => ({ human_action_id: a.id, instructions: a.instructions }));
+}
+
 /**
  * C-137: P2a-10 §2.3 limits diagnostics to attention, Run state, session
  * context usage, paused standing PMs and reconcile findings. The Needs You
  * view (human decisions, human action instructions) stays with PM and human.
  */
 export function hostOpsReadDiagnostics(state: CommandState, actor: Actor) {
-  return command(state, actor, "host_ops_read_diagnostics", undefined, () => ({
-    runs: state.runs.filter(unfinished),
-    actions: pendingHostOpsActions(state.events).map((a) => ({
-      action_id: a.action_id,
-      tool: a.tool,
-      target_id: a.target_id,
-      status_reason:
-        (
-          state.events.findLast(
-            (e) =>
-              e.type === "host_ops_action_deferred" &&
-              (e.payload as { action_id: string }).action_id === a.action_id,
-          )?.payload as { reason?: string } | undefined
-        )?.reason ?? "pending",
-    })),
-  }));
+  return command(state, actor, "host_ops_read_diagnostics", undefined, () => {
+    const handoffs = workerMaintenanceHandoffs(state, actor);
+    return {
+      ...(handoffs.length ? { worker_maintenance: handoffs } : {}),
+      runs: state.runs.filter(unfinished),
+      actions: pendingHostOpsActions(state.events).map((a) => ({
+        action_id: a.action_id,
+        tool: a.tool,
+        target_id: a.target_id,
+        status_reason:
+          (
+            state.events.findLast(
+              (e) =>
+                e.type === "host_ops_action_deferred" &&
+                (e.payload as { action_id: string }).action_id === a.action_id,
+            )?.payload as { reason?: string } | undefined
+          )?.reason ?? "pending",
+      })),
+    };
+  });
 }
 
 export function checkHostOpsAccess(
