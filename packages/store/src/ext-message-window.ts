@@ -156,12 +156,24 @@ export function extRateBatch(db: DatabaseSync, channel: string): number | null {
     db,
     "SELECT through FROM ext_message_rate_batches WHERE channel=?",
   ).get(channel);
-  return row ? Number(row.through) : null;
+  return row?.through != null ? Number(row.through) : null;
+}
+export function collectingExtRateBatch(db: DatabaseSync, channel: string) {
+  return !!prepare(
+    db,
+    "SELECT 1 FROM ext_message_rate_batches WHERE channel=? AND through IS NULL",
+  ).get(channel);
+}
+export function deferExtRateBatch(db: DatabaseSync, channel: string) {
+  prepare(
+    db,
+    "INSERT OR IGNORE INTO ext_message_rate_batches(channel,through) VALUES(?,NULL)",
+  ).run(channel);
 }
 export function openExtRateBatch(db: DatabaseSync, channel: string) {
   prepare(
     db,
-    "INSERT OR IGNORE INTO ext_message_rate_batches(channel,through) SELECT ?,COALESCE(MAX(rowid),0) FROM events",
+    "UPDATE ext_message_rate_batches SET through=(SELECT COALESCE(MAX(rowid),0) FROM events) WHERE channel=? AND through IS NULL",
   ).run(channel);
 }
 export function closeExtRateBatch(
@@ -169,8 +181,38 @@ export function closeExtRateBatch(
   channel: string,
   through: number,
 ) {
+  // Rows that were quiet or temporarily ineligible still belong to an open
+  // batch. Release the old source fence, not their durable summary marker.
+  if (
+    prepare(
+      db,
+      "SELECT 1 FROM ext_message_outbox WHERE channel=? AND digest_id='rate:queued' AND status='pending' LIMIT 1",
+    ).get(channel)
+  ) {
+    prepare(
+      db,
+      "UPDATE ext_message_rate_batches SET through=NULL WHERE channel=? AND through=?",
+    ).run(channel, through);
+    return;
+  }
   prepare(
     db,
     "DELETE FROM ext_message_rate_batches WHERE channel=? AND through=?",
   ).run(channel, through);
+}
+
+/** Last synchronous authorization before invoking a port; all members and the
+ * recipient epoch must still belong to this attempt in one SQLite snapshot. */
+export function ownsExtDispatch(
+  db: DatabaseSync,
+  name: string,
+  epoch: string,
+  lease: string,
+  members: number,
+) {
+  return !!prepare(
+    db,
+    `SELECT 1 FROM ext_message_channels WHERE name=? AND epoch=? AND
+    (SELECT COUNT(*) FROM ext_message_outbox WHERE lease_id=? AND status='pending')=?`,
+  ).get(name, epoch, lease, members);
 }

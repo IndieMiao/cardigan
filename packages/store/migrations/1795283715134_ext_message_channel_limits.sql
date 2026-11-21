@@ -8,5 +8,6 @@ ALTER TABLE feishu_bindings ADD COLUMN watermark INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE ext_message_attempts (lease TEXT PRIMARY KEY, channel TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX ext_message_attempts_window ON ext_message_attempts(channel, at);
 CREATE INDEX ext_message_pending_group ON ext_message_outbox(channel,digest_id) WHERE status='pending';
--- A finite source cohort while a rate summary waits for bounded projection to catch up.
-CREATE TABLE ext_message_rate_batches (channel TEXT PRIMARY KEY, through INTEGER NOT NULL);
+CREATE INDEX ext_message_active_lease ON ext_message_outbox(lease_id) WHERE lease_id IS NOT NULL;
+-- NULL while the quota is exhausted; a finite source position once a slot returns.
+CREATE TABLE ext_message_rate_batches (channel TEXT PRIMARY KEY, through INTEGER);

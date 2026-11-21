@@ -18,6 +18,8 @@ import {
   afterExtWatermark,
   claimExtMessage,
   closeExtRateBatch,
+  collectingExtRateBatch,
+  deferExtRateBatch,
   type ExtChannelActivation,
   type ExtMessageRow,
   extAttemptAvailable,
@@ -31,6 +33,7 @@ import {
   hasExtMessage,
   invalidateExtHistory,
   openExtRateBatch,
+  ownsExtDispatch,
   pendingExtGroupSize,
   pendingExtMessages,
   projectExtMessage,
@@ -331,7 +334,23 @@ export class ExtMessageSender {
       this.observedBinding = generation;
     }
     const rateBatches = new Map(
-      channels.map((c) => [c, extRateBatch(store.database, c)]),
+      channels.map((channel) => {
+        const db = store.database;
+        // Seal a waiting batch before projection, even on the first tick after
+        // restart. A concurrent sender must observe the same boundary or retry.
+        if (
+          collectingExtRateBatch(db, channel) &&
+          this.slotAvailable(channel, config, this.clock.now())
+        )
+          store.uow.run(() => {
+            if (
+              this.current(channel) &&
+              this.slotAvailable(channel, config, this.clock.now())
+            )
+              openExtRateBatch(db, channel);
+          });
+        return [channel, extRateBatch(db, channel)] as const;
+      }),
     );
     const projections = new Map<string, Projection>();
     let snapshotConflict = false;
@@ -368,6 +387,14 @@ export class ExtMessageSender {
         failures,
         "External notification channels failed",
       );
+  }
+  private slotAvailable(channel: string, config: ExtMessageConfig, at: string) {
+    return extAttemptAvailable(
+      this.options.store.database,
+      channel.split(":")[0]!,
+      Date.parse(at),
+      config.policy.max_per_minute ?? defaultMaxPerMinute,
+    );
   }
   private async drain(
     channel: string,
@@ -418,45 +445,43 @@ export class ExtMessageSender {
     }
     // Once saturated, collect all fresh ordinary rows into the same open batch
     // (also across projection ticks/projects) before using the next available slot.
-    for (const group of groups.values()) {
+    const incomplete = [...projections.values()].some((p) =>
+      p.incompleteOrdinary.has(channel),
+    );
+    const ordered = [...groups.values()];
+    const lastOrdinary = ordered.findLastIndex(([row]) => {
+      if (!row || row.digest_id !== null || row.attempts !== 0) return false;
+      const item = projections
+        .get(row.project_id)
+        ?.items.get(itemKey(row.item_kind, row.item_id));
+      return item?.ready && !item.handled;
+    });
+    for (const [i, group] of ordered.entries()) {
       if (this.stopped) return;
-      const queued = await this.deliver(
+      const result = await this.deliver(
         group,
         config,
         projections,
-        overflow.length > 0,
+        through !== null || overflow.length > 0,
+        incomplete || i < lastOrdinary,
       );
-      if (queued) overflow.push(queued);
+      if (result === "conflict") snapshotConflict = true;
+      else if (result && result !== "deferred") overflow.push(result);
     }
-    if (this.stopped || snapshotConflict) return;
+    if (this.stopped || snapshotConflict || incomplete || through === null)
+      return;
     const { store } = this.options;
     if (overflow.length) {
-      if (
-        !extAttemptAvailable(
-          store.database,
-          channel.split(":")[0]!,
-          Date.parse(this.clock.now()),
-          config.policy.max_per_minute ?? defaultMaxPerMinute,
-        )
-      )
-        return;
-      if (
-        [...projections.values()].some((p) => p.incompleteOrdinary.has(channel))
-      ) {
-        if (through === null)
-          store.uow.run(() => {
-            if (
-              this.current(channel) &&
-              pendingExtGroupSize(store.database, channel, rateQueue) > 0
-            )
-              openExtRateBatch(store.database, channel);
-          });
-        return;
-      }
-      await this.deliver(overflow, config, projections, false);
+      const result = await this.deliver(
+        overflow,
+        config,
+        projections,
+        false,
+        false,
+      );
+      if (result === "conflict" || result === "deferred") return;
     }
-    if (through !== null)
-      store.uow.run(() => closeExtRateBatch(store.database, channel, through));
+    store.uow.run(() => closeExtRateBatch(store.database, channel, through));
   }
   private project(
     projectId: ProjectId,
@@ -539,6 +564,14 @@ export class ExtMessageSender {
         )
           return false;
         for (const p of plan.plans) {
+          // The quota can already be full when the read plan first discovers
+          // ordinary overflow, even if every row in this write batch is deferred.
+          if (
+            (p.incompleteOrdinary ||
+              p.writes.some(({ item, deferred }) => item.ready && !deferred)) &&
+            !this.slotAvailable(p.channel, config, this.clock.now())
+          )
+            deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, deferred } of p.writes)
             projectExtMessage(store.database, item, channel, now, deferred);
           if (p.previous !== p.next)
@@ -557,7 +590,8 @@ export class ExtMessageSender {
     config: ExtMessageConfig,
     projections: Map<string, Projection>,
     collectOverflow: boolean,
-  ): Promise<ExtMessageRow | undefined> {
+    moreOrdinary: boolean,
+  ): Promise<ExtMessageRow | "conflict" | "deferred" | undefined> {
     const candidate = candidates[0];
     if (!candidate) return;
     const { store } = this.options;
@@ -582,8 +616,8 @@ export class ExtMessageSender {
     for (const row of candidates) {
       if (row.lease_until && row.lease_until > at) continue;
       const item = projections
-        .get(row.project_id)!
-        .items.get(itemKey(row.item_kind, row.item_id));
+        .get(row.project_id)
+        ?.items.get(itemKey(row.item_kind, row.item_id));
       if (
         !item ||
         item.handled ||
@@ -610,7 +644,10 @@ export class ExtMessageSender {
       }
       eligible.push({ row, item });
     }
-    if (!eligible.length && !updates.length) return;
+    if (!eligible.length && !updates.length)
+      return quiet && candidate.digest_id === rateQueue
+        ? "deferred"
+        : undefined;
     const first = eligible[0]?.item;
     const appChannel = candidate.channel.startsWith("lark_app:");
     const firstProject = first?.project_id ?? project;
@@ -652,7 +689,10 @@ export class ExtMessageSender {
             candidate.channel,
             candidate.digest_id,
           ) !== candidates.length) ||
-        participants.some(
+        (candidate.digest_id === rateQueue
+          ? [...projections.keys()]
+          : participants
+        ).some(
           (p) => store.snapshotVersion(p) !== projections.get(p)!.version,
         ) ||
         (candidate.digest_id === "queued" &&
@@ -661,7 +701,7 @@ export class ExtMessageSender {
         (appChannel &&
           candidate.channel !== `lark_app:${this.app?.binding?.generation}`)
       )
-        return;
+        return "conflict" as const;
       // Outbox rows are not covered by the command-state revision. If another
       // sender changed any member, never send the previously prepared digest.
       for (const row of candidates) {
@@ -674,7 +714,7 @@ export class ExtMessageSender {
           fresh.lease_until !== row.lease_until ||
           fresh.next_attempt_at !== row.next_attempt_at
         )
-          return;
+          return "conflict" as const;
       }
       for (const { row, kind } of updates) {
         if (kind === "queue") groupExtMessage(store.database, row, "queued");
@@ -691,11 +731,13 @@ export class ExtMessageSender {
           for (const { row } of eligible)
             if (row.digest_id === null)
               groupExtMessage(store.database, row, "queued");
-          return;
+          return "deferred" as const;
         }
         const single = digest === null && candidate.attempts === 0;
         if (
-          (single && collectOverflow) ||
+          (single &&
+            (collectOverflow ||
+              collectingExtRateBatch(store.database, candidate.channel))) ||
           !reserveExtAttempt(
             store.database,
             candidate.channel.split(":")[0]!,
@@ -706,11 +748,19 @@ export class ExtMessageSender {
           )
         ) {
           if (single) {
+            deferExtRateBatch(store.database, candidate.channel);
             groupExtMessage(store.database, candidate, rateQueue);
             return { queued: { ...candidate, digest_id: rateQueue } };
           }
-          return;
+          return "deferred" as const;
         }
+        // The last reservation may precede the first overflow outbox row. A
+        // crash here must not turn the remaining known members back into singles.
+        if (
+          moreOrdinary &&
+          !this.slotAvailable(candidate.channel, config, claimAt)
+        )
+          deferExtRateBatch(store.database, candidate.channel);
       }
       const until = new Date(sendBy).toISOString();
       const rows = eligible.map(({ row }) => {
@@ -744,7 +794,7 @@ export class ExtMessageSender {
         ),
       };
     });
-    if (!claimed) return;
+    if (typeof claimed === "string") return claimed;
     // Only our own ext_message_* audits changed since the checked snapshot;
     // they cannot affect outbound membership or Feishu action eligibility.
     if (claimed.queued) return claimed.queued;
@@ -764,14 +814,30 @@ export class ExtMessageSender {
       result = "unknown";
     }
     if (port) {
-      // Factory/commit/scheduling delays may cross a quiet boundary or the
-      // last instant covered by this reservation. No adapter call in either case.
+      // Claim commit and adapter construction can cross quiet hours, a lease
+      // deadline or a recipient change. Recheck immediately before the call.
       const dispatchAt = this.clock.now();
       const nowQuiet = extMessageQuiet(config, dispatchAt);
-      if (nowQuiet || Date.parse(dispatchAt) >= claimed.sendBy) {
+      const name = candidate.channel.split(":")[0]!;
+      const activation = this.activations?.get(name);
+      if (
+        !activation ||
+        nowQuiet ||
+        Date.parse(dispatchAt) >= claimed.sendBy ||
+        (appChannel &&
+          candidate.channel !== `lark_app:${this.app?.binding?.generation}`) ||
+        !ownsExtDispatch(
+          store.database,
+          name,
+          activation.epoch,
+          claimed.lease,
+          claimed.rows.length,
+        )
+      ) {
         store.uow.run(() => {
-          for (const { row } of eligible)
-            releaseUnsentExtMessage(
+          let restoredOverflow = false;
+          for (const { row } of eligible) {
+            const released = releaseUnsentExtMessage(
               store.database,
               row,
               claimed.lease,
@@ -779,9 +845,15 @@ export class ExtMessageSender {
                 ? "queued"
                 : row.digest_id,
             );
+            if (released && row.digest_id === rateQueue)
+              restoredOverflow = true;
+          }
+          // Another sender may have closed the fence while all members were leased.
+          if (restoredOverflow)
+            deferExtRateBatch(store.database, candidate.channel);
           finishExtAttempt(store.database, claimed.lease, null);
         });
-        return;
+        return "deferred";
       }
       result = await sendExtMessage(port, message, config.policy.timeout_ms);
     }

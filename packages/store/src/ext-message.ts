@@ -184,16 +184,18 @@ export function releaseUnsentExtMessage(
   lease: string,
   digest: string | null,
 ) {
-  prepare(
-    db,
-    `UPDATE ext_message_outbox SET attempts=?,digest_id=?,lease_id=NULL,lease_until=NULL,next_attempt_at=?
+  return (
+    prepare(
+      db,
+      `UPDATE ext_message_outbox SET attempts=?,digest_id=?,lease_id=NULL,lease_until=NULL,next_attempt_at=?
     WHERE project_id=? AND item_kind=? AND item_id=? AND channel=? AND status='pending' AND lease_id=?`,
-  ).run(
-    original.attempts,
-    digest,
-    original.next_attempt_at,
-    ...key(original),
-    lease,
+    ).run(
+      original.attempts,
+      digest,
+      original.next_attempt_at,
+      ...key(original),
+      lease,
+    ).changes === 1
   );
 }
 export function settleExtMessage(

@@ -598,6 +598,181 @@ test.each([11, 80])(
   },
 );
 
+test.each([false, true])(
+  "a cross-project summary waits for a fresh membership snapshot (one handled: %s)",
+  async (handled) => {
+    const b = "project-b";
+    store.createProject({ id: b, name: "B" });
+    store.uow.run((tx) => tx.cards.put(b, card()));
+    const active = sender();
+    active.recordStatus();
+    for (let n = 1; n <= 11; n++) addAction(n);
+    await active.tick();
+    advance(1000);
+    for (let n = 12; n <= 20; n++) addAction(n);
+    for (let n = 21; n <= 50; n++) addAction(n, b);
+    advance(59_000);
+    const other = Store.open({ dataDir: dir });
+    try {
+      let conflicted = false;
+      store.observe({
+        transaction(kind) {
+          if (
+            kind !== "run" ||
+            rows().filter((r) => r.project_id === b).length !== 30
+          )
+            return;
+          store.observe(undefined);
+          conflicted = true;
+          other.uow.run((tx) => {
+            if (handled)
+              tx.human_actions.put(b, {
+                ...action,
+                id: "H-21",
+                key: "H-21",
+                status: "done",
+              });
+            tx.events.append(b, {
+              id: tx.ids.nextEventId(),
+              seq: tx.ids.nextEventSequence(b),
+              type: "run_started",
+              actor: { kind: "system", project_id: b },
+              created_at: now,
+              payload: {},
+            });
+          });
+        },
+      });
+      await sender().tick();
+      expect(conflicted).toBe(true);
+      expect(fake.messages).toHaveLength(10);
+      await sender().tick();
+      advance(60_000);
+      await sender().tick();
+      expect(fake.messages.slice(10)).toEqual([
+        { title: `${handled ? 39 : 40} 条待处理`, url: config.workbench_url },
+      ]);
+      expect(rows().find((r) => r.item_id === "H-21")?.status).toBe(
+        handled ? "skipped" : "sent",
+      );
+    } finally {
+      other.close();
+    }
+  },
+);
+
+test.each([
+  [10, 0],
+  [32, 0],
+  [10, 10],
+] as const)(
+  "the final slot persists overflow not yet projected (limit %i, %i slots already used)",
+  async (limit, used) => {
+    config = { ...config, policy: { ...config.policy, max_per_minute: limit } };
+    const active = sender();
+    active.recordStatus();
+    if (used) {
+      for (let n = 1; n <= used; n++) addAction(100 + n);
+      await active.tick();
+    }
+    for (let n = 1; n <= 32 - limit + used; n++) {
+      addAction(n);
+      const id = `H-${n}` as const;
+      store.uow.run((tx) =>
+        tx.human_actions.put(project_id, {
+          ...action,
+          id,
+          key: id,
+          ready_when: { kind: "manual" },
+        }),
+      );
+    }
+    store.uow.run((tx) => {
+      for (let n = 1; n <= 50; n++)
+        tx.events.append(project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project_id),
+          type: "host_role_upgraded",
+          actor: { kind: "system", project_id },
+          created_at: now,
+          payload: {},
+        });
+    });
+    await active.tick();
+    expect(rows()).toHaveLength(32 + used);
+    expect(fake.messages).toHaveLength(limit);
+    store.close();
+    store = Store.open({ dataDir: dir });
+    advance(60_000);
+    const restarted = sender();
+    await restarted.tick();
+    await restarted.tick();
+    advance(60_000);
+    await restarted.tick();
+    expect(fake.messages.slice(limit)).toEqual([
+      { title: `${50 - limit + used} 条待处理`, url: config.workbench_url },
+    ]);
+  },
+);
+
+test("a claimed retry revoked by a new recipient is never dispatched to the old one", async () => {
+  const other = Store.open({ dataDir: dir });
+  try {
+    const targets: string[] = [];
+    const boot = (target: string, db: Store) =>
+      sender({
+        store: db,
+        configuration: {
+          status: "loaded",
+          config: {
+            ...config,
+            channels: {
+              lark: {
+                enabled: true,
+                credential: JSON.stringify({
+                  webhook: `https://open.feishu.cn/open-apis/bot/v2/hook/${target}`,
+                }),
+              },
+            },
+          },
+        },
+        adapters: {
+          lark: () => ({
+            async send() {
+              targets.push(target);
+              return targets.length === 1 ? "retryable" : "sent";
+            },
+          }),
+        },
+      });
+    const a = boot("A", store),
+      b = boot("B", other);
+    a.recordStatus();
+    addAction(1);
+    await a.tick();
+    advance(30_000);
+    afterClaim(() => {
+      expect(rows()[0]).toMatchObject({ status: "pending", attempts: 2 });
+      b.recordStatus();
+      expect(rows()[0]).toMatchObject({ status: "skipped", lease_id: null });
+    });
+    await a.tick();
+    expect(targets).toEqual(["A"]);
+    expect(rows()[0]).toMatchObject({ status: "skipped", lease_id: null });
+    expect(events().filter((e) => e.type === "ext_message_sent")).toHaveLength(
+      0,
+    );
+    expect(
+      events().filter((e) => e.type === "ext_message_history_invalidated"),
+    ).toHaveLength(1);
+    addAction(2);
+    await b.tick();
+    expect(targets).toEqual(["A", "B"]);
+  } finally {
+    other.close();
+  }
+});
+
 test("later arrivals and restarts cannot starve a partial rate summary", async () => {
   const active = sender();
   active.recordStatus();
@@ -761,7 +936,15 @@ test.each(["claim", "dispatch"])(
     const active = sender({
       clock: {
         now: () => {
-          if (enterQuietOnClaim && store.database.isTransaction) {
+          if (
+            enterQuietOnClaim &&
+            store.database.isTransaction &&
+            store.database
+              .prepare(
+                "SELECT 1 FROM ext_message_rate_batches WHERE through IS NOT NULL",
+              )
+              .get()
+          ) {
             enterQuietOnClaim = false;
             advance(1);
           }
