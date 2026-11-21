@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,7 @@ import {
   HC_RELEASE,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import { workerHelperDigests } from "./worker-helper-release.js";
 import { workerReadiness, workerReadinessScript } from "./worker-readiness.js";
 
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
@@ -40,12 +41,12 @@ const execution: Extract<ExecutionConfig, { mode: "agent-ssh" }> = {
   },
 };
 afterEach(() => vi.resetAllMocks());
-const reply = (value: unknown) =>
+const reply = (value: Record<string, unknown>) =>
   vi.mocked(agentProcessCommand).mockResolvedValue({
     file: process.execPath,
     args: [
       "-e",
-      `process.stdout.write(${JSON.stringify(JSON.stringify(value))})`,
+      `process.stdout.write(${JSON.stringify(JSON.stringify({ protocol: 2, matching: true, ...value }))})`,
     ],
   });
 
@@ -62,6 +63,7 @@ test("successful observations are collected through the pinned SSH entry with fi
     workerReadinessScript,
   ]);
   expect(JSON.parse(args?.[5] ?? "null")).toEqual({
+    digests: workerHelperDigests(),
     root: "/workers/fixture",
     gid: 2001,
     project: "fixture",
@@ -185,6 +187,7 @@ test.each([
               : "/Users/fixture/git.py",
           file_helper: "/Users/fixture/files.py",
           version: `hc ${HC_RELEASE.version}`,
+          digests: workerHelperDigests(),
           system,
           fixture,
           native_source,
@@ -199,3 +202,70 @@ test.each([
     );
   },
 );
+
+test("a legacy publication helper is rejected before launch; version alone cannot hide a stale file", async () => {
+  reply({
+    version: `hc ${HC_RELEASE.version}`,
+    failures: [],
+    protocol: 1,
+    matching: false,
+  });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 落后（已装 1，需要 2）",
+  ]);
+  reply({ version: `hc ${HC_RELEASE.version}`, failures: [], matching: false });
+  expect(await workerReadiness(execution)).toEqual([
+    "worker helper 与当前部署的 SHA-256 不一致",
+  ]);
+});
+
+test("real probe compares a release and a pre-run-command whitelist on a simulated worker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-compat-"));
+  try {
+    for (const name of Object.keys(workerHelperDigests()))
+      await copyFile(
+        new URL(`../../../deploy/${name}`, import.meta.url),
+        join(root, name),
+      );
+    // Only substitute the fixture's administrator-owned namespace. Keep module loading,
+    // protocol detection and checksums identical to the distributed read-only probe.
+    vi.mocked(agentProcessCommand).mockImplementation(
+      async (_config, args) => ({
+        file: "python3",
+        args: [
+          "-IB",
+          "-c",
+          workerReadinessScript.replace(
+            "try:\n    git=module",
+            "protected=lambda path: None\ntry:\n    git=module",
+          ),
+          args.at(-1) ?? "",
+        ],
+      }),
+    );
+    const path = join(root, "worker-files.py");
+    const config = {
+      ...execution,
+      agentRoot: root,
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: join(root, "worker-git.py"),
+      },
+      fileHelper: { python: "/usr/bin/python3", path },
+    };
+    const current = await workerReadiness(config);
+    expect(
+      current.every((b) => b === "worker_directories" || b === "hc_version"),
+    ).toBe(true);
+    const legacy = (await readFile(path, "utf8"))
+      .replace(/^PUBLICATION_PROTOCOL = .*$/mu, "")
+      .replace("run-command\\.py|", "");
+    expect(legacy).not.toContain("run-command\\.py|");
+    await writeFile(path, legacy);
+    expect((await workerReadiness(config))[0]).toBe(
+      "worker helper 落后（已装 1，需要 2）",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fixed stdin-only launch publication protocol. Never print payloads/errors."""
+import errno
 import fcntl
 import hashlib
 import io
@@ -21,7 +22,13 @@ native = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 TRAILER = b'\nCARDIGAN-PUBLISH-1\n'
+# Independent of the format version in each publication manifest.
+PUBLICATION_PROTOCOL = 2
 FILES = re.compile(r'(core\.md|first\.md|run-command\.py|launch\.sh|launch\.json|token|secrets\.env|codex/config\.toml|pi/(models\.json|mcp\.json|trust\.json|extensions/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)')
+
+
+class FilenameRejected(ValueError):
+    pass
 
 
 def require(ok):
@@ -31,8 +38,9 @@ def require(ok):
 
 def private(fd, mode, regular=False):
     info = os.fstat(fd)
-    require(info.st_uid == os.getuid() and info.st_gid == os.getgid()
-            and stat.S_IMODE(info.st_mode) == mode and native.acl_safe(fd))
+    if not (info.st_uid == os.getuid() and info.st_gid == os.getgid()
+            and stat.S_IMODE(info.st_mode) == mode and native.acl_safe(fd)):
+        raise PermissionError()
     require((stat.S_ISREG(info.st_mode) and info.st_nlink == 1) if regular else stat.S_ISDIR(info.st_mode))
 
 
@@ -124,7 +132,9 @@ def manifest(source, policy):
     names, total, secret_seen = set(), 0, False
     for entry in header['files']:
         name = entry['name']
-        require(type(name) is str and FILES.fullmatch(name) and name not in names)
+        if type(name) is not str or not FILES.fullmatch(name):
+            raise FilenameRejected()
+        require(name not in names)
         names.add(name)
         secret = name in ('token', 'secrets.env')
         require(set(entry) == ({'name', 'size', 'mode'} if secret else {'name', 'size', 'mode', 'sha256'}))
@@ -494,6 +504,15 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        sys.stderr.write('worker_publication_rejected\n')
+    except Exception as error:
+        category = 'publication_rejected'
+        if isinstance(error, FilenameRejected):
+            category = 'filename_rejected'
+        elif isinstance(error, PermissionError):
+            category = 'permission_denied'
+        elif isinstance(error, OSError) and error.errno in (errno.ENOSPC, errno.EDQUOT, errno.EROFS):
+            category = 'disk_error'
+        elif isinstance(error, TimeoutError):
+            category = 'timeout'
+        sys.stderr.write('worker_' + category + '\n')
         sys.exit(1)

@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { type AgentExecution, HC_RELEASE } from "@cardigan/runtime-herdr";
+import { workerHelperDigests } from "../../../packages/host/src/worker-helper-release.js";
 import { workerReadinessScript } from "../../../packages/host/src/worker-readiness.js";
 
 /** Separate physical disk; only the SSH fixture knows its mapping. */
@@ -145,6 +146,7 @@ ${workerReadinessScript}`;
       "-c",
       program,
       JSON.stringify({
+        digests: workerHelperDigests(),
         root: disk,
         project,
         gid: config.gid,

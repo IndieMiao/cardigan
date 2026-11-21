@@ -191,6 +191,10 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /s
 
 ### 升级已接入 worker 的 helper
 
+部署新版本后，控制主机后台会立即巡检已登记机器；后续巡检和启动前检查仍核对发布协议及三个 helper 的 SHA-256。版本落后或文件不同的机器不能启动，运维待办附当前发行版预期摘要。不要通过工作树分发或以 worker 自身权限覆盖 helper。
+
+默认连续 3 次远程启动准备失败会让自动指派跳过该项目绑定 30 分钟；冷却到期或该绑定实际启动成功后自动解除。私有 `runtime-workers.yaml` 的项目绑定可设 `preparation_cooldown: { failures: 3, duration_ms: 1800000 }`。冷却不撤回已派任务、不解除其它就绪门禁。
+
 暂停向这台 worker 派发新 Run，在执行视图确认没有仍在运行的 Run。在 worker 上，由管理员将与控制主机同版本的可信发行包解包到仅 root 可写的 `/opt/cardigan` 下，再去掉 `deploy` 目录及其文件的组和其他用户写权限：`git archive` 打包的文件和目录通常为 0664/0775，不符合安装器要求。不要对项目工作根执行此命令。
 
 ```sh

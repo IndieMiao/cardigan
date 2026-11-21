@@ -202,7 +202,7 @@ export function recordDeploymentStop(
 interface DeploymentActionInput {
   readonly key: string;
   readonly instructions: string;
-  readonly reason?: "evidence_wait";
+  readonly reason?: "evidence_wait" | "worker_maintenance";
 }
 
 export function requestDeploymentAction(
@@ -212,7 +212,7 @@ export function requestDeploymentAction(
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_deployment", ports, (d) => {
-    const prior = state.events.find(
+    const prior = state.events.findLast(
       (e) =>
         e.type === "host_deployment_action_requested" &&
         (e.payload as { key?: string }).key === input.key,
@@ -226,7 +226,11 @@ export function requestDeploymentAction(
             h.id ===
             (prior.payload as { human_action_id?: string }).human_action_id,
         );
-    if (existing) return existing;
+    if (
+      existing &&
+      (input.reason !== "worker_maintenance" || existing.status === "open")
+    )
+      return existing;
     return createDeploymentAction(d, input);
   });
 }
@@ -238,15 +242,23 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
     key: id,
     requested_by: "system",
     status: "open",
-    ...(input.reason === "evidence_wait"
-      ? { category: "general" as const }
+    ...(input.reason ? { category: "general" as const } : {}),
+    triage:
+      input.reason === "worker_maintenance"
+        ? "host"
+        : input.reason === "evidence_wait"
+          ? "pm_ops"
+          : "human",
+    ...(input.reason === "worker_maintenance"
+      ? { host_operator: "host_ops" as const }
       : {}),
-    triage: input.reason === "evidence_wait" ? "pm_ops" : "human",
     instructions: input.instructions,
     why_human:
-      input.reason === "evidence_wait"
-        ? "中心 main 持续缺少合并门禁证据，请后台分拣核对"
-        : "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
+      input.reason === "worker_maintenance"
+        ? "请主机运维核对远程 worker；需要 root 安装时请管理员处理"
+        : input.reason === "evidence_wait"
+          ? "中心 main 持续缺少合并门禁证据，请后台分拣核对"
+          : "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
     expected_return: "记录核对及处理结果后标记完成",
     blocked_work_items: [],
   };
@@ -256,6 +268,9 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
     human_action_id: id,
   });
   d.emit("human_action_requested", undefined, {
+    ...(input.reason === "worker_maintenance"
+      ? { disposition: "host" as const }
+      : {}),
     human_action_id: id,
     blocked_work_items: [],
   });

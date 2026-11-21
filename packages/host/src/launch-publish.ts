@@ -33,6 +33,7 @@ import {
 } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { redactSecrets } from "./wake-preparation.js";
+import { workerPreparationOutcome } from "./worker-maintenance.js";
 
 /** One bounded host diagnostic for the journal and the dispatcher's failure log. */
 export function launchFailureReason(
@@ -194,6 +195,24 @@ export class LaunchPublication {
           )
             throw new Error("Launch identity revocation failed");
       persistEffect(tx, this.project, effect);
+      if (
+        (value.phase === "started" && old?.phase !== "started") ||
+        (value.phase === "stopping" &&
+          old?.phase !== "stopping" &&
+          old?.phase !== "started" &&
+          !value.wait &&
+          value.failure_reason)
+      )
+        workerPreparationOutcome(
+          this.host.store,
+          tx,
+          this.project,
+          this.assignment.machine_id,
+          value.target.fingerprint,
+          this.clock,
+          value.failure_reason ?? null,
+          this.execution.preparationCooldown,
+        );
       return value;
     });
   }

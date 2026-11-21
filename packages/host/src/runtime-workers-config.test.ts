@@ -282,17 +282,24 @@ test("publication has no implicit limits; only complete trusted limits and helpe
   const parsed = parseRuntimeWorkers(
     configured({
       publication,
+      preparation_cooldown: { failures: 2, duration_ms: 1000 },
       python: "/usr/bin/python3",
       file_helper: "/opt/worker/worker-files.py",
     }),
     "/private/data",
   )[0];
   expect(parsed?.execution.publication).toEqual(publication);
+  expect(parsed?.execution.preparationCooldown).toEqual({
+    failures: 2,
+    duration_ms: 1000,
+  });
   expect(parsed?.execution.fileHelper).toEqual({
     python: "/usr/bin/python3",
     path: "/opt/worker/worker-files.py",
   });
   for (const patch of [
+    { preparation_cooldown: { failures: 0, duration_ms: 1 } },
+    { preparation_cooldown: { failures: 2, duration_ms: -1 } },
     { publication: {} },
     { publication: { ...publication, timeout_ms: 0 } },
     { publication: { ...publication, file_max_bytes: 8193 } },

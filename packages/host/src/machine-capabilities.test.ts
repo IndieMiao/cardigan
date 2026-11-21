@@ -565,3 +565,95 @@ test("a browser path change fences an in-flight result in either commit order wi
     store.close();
   }
 });
+
+test("the post-deploy patrol opens one host_ops upgrade task per affected worker, with release digests", async () => {
+  const store = Store.open({ dataDir: temp() });
+  try {
+    store.createProject({ id: "a" });
+    const machine = store.uow.run((tx) => {
+      const local = tx.machines.get("a", "local");
+      if (!local) throw new Error("fixture machine missing");
+      const remote = {
+        ...local,
+        id: "remote",
+        label: "Remote",
+        herdr_machine: "remote",
+      };
+      tx.machines.put("a", remote);
+      return remote;
+    });
+    const reason = "worker helper 落后（已装 1，需要 2）";
+    const options = {
+      store,
+      project: "a",
+      machine: machine.id,
+      target: () => ({
+        machine,
+        execution: { mode: "local" as const, dataDir: "/fixture" },
+      }),
+      check: async () => ({ blockers: [reason], launch_enabled: false }),
+    };
+    for (let i = 0; i < 2; i++)
+      expect((await refreshMachineObservations(options)).health).toMatchObject({
+        blockers: [reason],
+        available: false,
+      });
+    const actions = store.uow.read((tx) => tx.human_actions.list("a"));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      status: "open",
+      triage: "host",
+      host_operator: "host_ops",
+      blocked_work_items: [],
+    });
+    for (const [name, sha] of Object.entries(workerHelperDigests()))
+      expect(actions[0]?.instructions).toContain(`${sha}  ${name}`);
+  } finally {
+    store.close();
+  }
+});
+
+test("only consecutive preparations on one binding cool it down; expiry or success re-admits it", () => {
+  const store = Store.open({ dataDir: temp() });
+  let ms = Date.now();
+  const clock = { now: () => new Date(ms).toISOString() };
+  const outcome = (reason: string | null, target = "binding") =>
+    store.uow.run((tx) =>
+      workerPreparationOutcome(store, tx, "a", "remote", target, clock, reason),
+    );
+  const cooldown = () =>
+    workerCooldown(store, "a", "remote", "binding", clock.now());
+  try {
+    store.createProject({ id: "a" });
+    outcome("failed");
+    outcome("failed");
+    outcome(null);
+    outcome("failed");
+    outcome("failed");
+    outcome("failed", "other");
+    expect(cooldown()).toEqual({});
+    outcome("failed");
+    expect(cooldown()).toEqual({
+      preparation_cooldown_until: new Date(ms + 1800000).toISOString(),
+    });
+    expect(store.uow.read((tx) => tx.human_actions.list("a"))).toMatchObject([
+      { triage: "host", instructions: expect.stringContaining("连续 3 次") },
+    ]);
+    ms += 1800000;
+    expect(cooldown()).toEqual({});
+    outcome("failed");
+    expect(cooldown()).toEqual({});
+    outcome("failed");
+    outcome("failed");
+    outcome(null);
+    expect(cooldown()).toEqual({});
+  } finally {
+    store.close();
+  }
+});
+
+import { workerHelperDigests } from "./worker-helper-release.js";
+import {
+  workerCooldown,
+  workerPreparationOutcome,
+} from "./worker-maintenance.js";

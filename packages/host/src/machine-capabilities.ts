@@ -10,6 +10,7 @@ import {
   type MachineCapability,
   type MachineHealth,
   readMachineObservations,
+  readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
 import {
@@ -21,6 +22,13 @@ import {
   probeMachineCapability,
 } from "./machine-capability-probe.js";
 
+import {
+  helperMismatch,
+  workerHelperDigests,
+  workerPublicationProtocol,
+} from "./worker-helper-release.js";
+import { notifyHelperMismatch } from "./worker-maintenance.js";
+
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
 /** Capability evidence identifies the probed platform as well as the private runtime binding.
  * Keep this separate from the persisted runtime_ref fingerprint used to address live terminals. */
@@ -30,7 +38,15 @@ export function observationFingerprint(
 ) {
   if (!binding) return undefined;
   return createHash("sha256")
-    .update(JSON.stringify([binding, platform.os, platform.arch]))
+    .update(
+      JSON.stringify([
+        binding,
+        platform.os,
+        platform.arch,
+        workerPublicationProtocol,
+        workerHelperDigests(),
+      ]),
+    )
     .digest("hex");
 }
 interface ObservationTarget {
@@ -193,7 +209,7 @@ export async function refreshMachineObservations(
     };
     capabilities = [];
   }
-  completeMachineObservation(
+  const recorded = completeMachineObservation(
     store,
     actor,
     project,
@@ -204,5 +220,17 @@ export async function refreshMachineObservations(
     targetFingerprint,
     observedBrowserDigest,
   );
+  const mismatch = health.blockers.find(helperMismatch);
+  if (recorded && machine !== "local" && mismatch)
+    store.uow.run((tx) => {
+      const current = readMachineObservationsInTransaction(
+        store,
+        project,
+        machine,
+        now(),
+      );
+      if (current.health?.evidence_ref === `machine-observation:${observation}`)
+        notifyHelperMismatch(tx, project, machine, { now }, mismatch);
+    });
   return readMachineObservations(store, project, machine, now());
 }

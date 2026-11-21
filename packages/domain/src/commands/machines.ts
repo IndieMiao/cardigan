@@ -130,6 +130,10 @@ export function selectMachine(
     if (machine_id === options.failedMachine)
       reasons.push("上次首发未完成，重新指派需要另一台机器");
     if (machine_id !== "local") {
+      if (f?.preparation_cooldown_until && f.preparation_cooldown_until > d.now)
+        reasons.push(
+          `连续启动准备失败，冷却至 ${f.preparation_cooldown_until}`,
+        );
       if (!facts?.harness) reasons.push("启动配置未知，无法确定所需启动器");
       else {
         const key = `harness.${facts.harness}`;
@@ -170,7 +174,9 @@ export function selectMachine(
       if (!f?.health) reasons.push("缺少健康快照");
       else if (!f.health.available || f.health.status !== "passed")
         reasons.push(
-          f.health.status === "passed" ? "健康快照已过期" : "健康检查未通过",
+          f.health.status === "passed"
+            ? "健康快照已过期"
+            : f.health.blockers?.join("、") || "健康检查未通过",
         );
     }
     for (const req of constraints) {
