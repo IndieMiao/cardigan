@@ -50,6 +50,8 @@ function readFile(path: string, privateFile: boolean) {
     closeSync(fd);
   }
 }
+/** A 0600 regular file, not followed through a symlink (secrets.env). */
+export const readPrivateText = (path: string) => readFile(path, true);
 export function readLaunchSettings(
   dir: string,
   dataDir: string,
