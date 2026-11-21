@@ -72,6 +72,67 @@ test("legacy retirement-held wake rechecks live ownership inside the send slot",
   f.terminal.labels.assignment = "A-1";
   expect(value(await runtime.wake(ref, "bell", guard))).toEqual({ sent: true });
 });
+test.each(["probe", "signal-slot", "after-signal", "busy", "dirty", "safe"])(
+  "system turn stop binds one signal to the process and never removes by address (%s)",
+  async (mode) => {
+    const f = adapter("TERM"),
+      runtime = await f.create();
+    const call = vi.mocked(f.client.exec),
+      original = call.getMockImplementation();
+    if (!original) throw new Error("Missing mock client");
+    let probed = false,
+      afterProbe = 0;
+    call.mockImplementation(async (args) => {
+      if (args.includes("probe")) probed = true;
+      if (probed && args[0] === "get") {
+        afterProbe++;
+        if (
+          (mode === "probe" && afterProbe === 1) ||
+          (mode === "signal-slot" && afterProbe === 2) ||
+          (mode === "after-signal" && afterProbe === 3)
+        )
+          f.terminal.labels.assignment = "A-2";
+        if (mode === "busy" && afterProbe === 2)
+          Object.assign(f.terminal, { status: { state: "working" } });
+      }
+      return original(args);
+    });
+    const guard = vi.fn(() => true);
+    const stopped = await runtime.retire_idle(ref, {
+      ...options(),
+      system_finished_turn: true,
+      workspace_preflight: async () => {
+        expect(probed).toBe(true);
+        expect(afterProbe).toBe(1); // In-slot, before the final exact read.
+        expect(guard).not.toHaveBeenCalled();
+        return mode !== "dirty";
+      },
+      before_signal: guard,
+    });
+    expect(stopped).toMatchObject({
+      ok: true,
+      value: {
+        outcome:
+          mode === "safe"
+            ? "exited"
+            : mode === "after-signal"
+              ? "uncertain"
+              : "withdrawn",
+        ...(mode === "busy" ? { evidence: { reason: "terminal_busy" } } : {}),
+      },
+    });
+    const writes = call.mock.calls
+      .map(([a]) => a)
+      .filter((a) => a.includes("TERM"));
+    const signals = ["safe", "after-signal"].includes(mode) ? 1 : 0;
+    expect(writes).toHaveLength(signals);
+    expect(guard).toHaveBeenCalledTimes(signals);
+    for (const [args] of call.mock.calls)
+      expect(args).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^(kill|rm|HUP)$/)]),
+      );
+  },
+);
 test.each(["HUP", "TERM", undefined])(
   "retirement uses only HUP/TERM; finish after %s",
   async (finishAfter) => {

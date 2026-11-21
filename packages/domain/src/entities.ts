@@ -462,6 +462,8 @@ export type RuntimeTargetBinding = {
   readonly fingerprint: string;
 };
 export interface RuntimeRef {
+  /** Opaque adapter-local observation ID. Not a capability or exit proof. */
+  readonly local_process_receipt?: string;
   readonly launch_generation?: {
     readonly run_id: RunId;
     readonly generation: string;

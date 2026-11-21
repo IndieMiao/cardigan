@@ -126,11 +126,22 @@ export async function stallEvidence(
   runtime: Runtime,
   execution?: ExecutionConfig,
   signal?: AbortSignal,
+  systemTurn = false,
 ) {
-  const [workspace, observed] = await Promise.all([
+  const [workspace, observed, owner] = await Promise.all([
     stallWorkspace(state, a, execution, signal),
     a.runtime_ref
       ? runtime.status(a.runtime_ref).catch(() => undefined)
+      : undefined,
+    systemTurn &&
+    a.runtime_ref?.machine_id === a.machine_id &&
+    a.machine_id === "local"
+      ? runtime
+          .observe_retirement?.(a.runtime_ref, {
+            project_id: state.project_id,
+            assignment_id: a.id,
+          })
+          .catch(() => undefined)
       : undefined,
   ]);
   const terminal_state = observed?.ok ? observed.value.agent : null;
@@ -141,12 +152,21 @@ export async function stallEvidence(
       a.runtime_state === "not_provisioned") ||
     (observed?.ok &&
       (observed.value.process === "exited" || idleWakeGuard(observed.value)));
+  const ownerConfirmed =
+    owner?.ok && (owner.value === "alive" || owner.value === "exited");
+  const unknownOrIdle =
+    !observed?.ok ||
+    ["unknown", "idle", "done"].includes(observed.value.agent) ||
+    observed.value.process === "exited";
   return {
+    ...(systemTurn
+      ? { terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed" }
+      : {}),
     workspace,
     terminal_state,
     process_state: observed?.ok ? observed.value.process : null,
     can_restart:
-      !!safeTerminal &&
+      (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
       a.machine_id === "local" &&
       (workspace === "clean" || workspace === "no_worktree"),
   };

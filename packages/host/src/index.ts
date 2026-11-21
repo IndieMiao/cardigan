@@ -83,6 +83,7 @@ export {
   rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
+export { turnSessionKey } from "./dispatch-stalls.js";
 export {
   HostLaunchError,
   LAUNCH_STEPS,
