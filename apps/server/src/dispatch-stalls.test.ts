@@ -7,6 +7,7 @@ import {
   recordDecision,
   requestDecision,
 } from "@cardigan/domain";
+import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
@@ -325,6 +326,119 @@ test.each(["ops", "office"] as const)(
     expect(
       (await f.view()).dispatch_stalls.filter((s) => s.assignment_id === a.id),
     ).toEqual([]);
+  },
+);
+
+test.each([
+  ["card", false],
+  ["project", false],
+  ["card", true],
+  ["project", true],
+] as const)(
+  "a standing PM recovery keeps the %s stream through queued dispatch (notification already read: %s)",
+  async (stream, alreadyRead) => {
+    const f = setup();
+    const pm = { ...f.pm(), standing_mode: "office" as const };
+    const card = f.target.card;
+    const sourceCard = stream === "card" ? card.id : undefined;
+    f.store.uow.run((tx) =>
+      tx.assignments.put(f.project, {
+        ...pm,
+        runtime_state: "idle",
+        runtime_ref: f.refFor(pm),
+        session_ref: "old",
+      }),
+    );
+    const source = f.event(
+      sourceCard ? "comment_posted" : "project_created",
+      {},
+      pm,
+      sourceCard,
+    );
+    f.skipEvents();
+    f.advance(660000);
+    vi.mocked(f.runtime.status).mockResolvedValueOnce({
+      ok: true,
+      value: { process: "unknown", agent: "unknown", observed_seq: 1 },
+    });
+    const dispatcher = new Dispatcher(f.options);
+    try {
+      await dispatcher.tick();
+      const note = f.store
+        .listNotifications({ project_id: f.project, assignment_id: pm.id })
+        .find((n) => n.event_id === source.id);
+      if (!note) throw new Error("missing original notification");
+      expect(note.status).toBe("needs_attention");
+      expect(
+        (await f.view()).dispatch_stalls.find((s) => s.cause_id === note.id),
+      ).toMatchObject({ card_id: sourceCard ?? null, can_restart: true });
+      await f.restart(pm, note.id);
+      await f.service.tick();
+      const queued = await vi.waitFor(() => {
+        const r = f
+          .state()
+          .runs.find((r) => r.assignment_id === pm.id && r.status === "queued");
+        if (!r) throw new Error("recovery not queued");
+        return r;
+      });
+      // An acknowledged delivery can still have a queued capacity retry with no pending note.
+      if (alreadyRead) {
+        const trigger = f
+          .state()
+          .events.find((e) => e.id === queued.trigger_event_id);
+        if (!trigger) throw new Error("missing replacement trigger");
+        expect(
+          f.store.ackEvents({
+            project_id: f.project,
+            assignment_id: pm.id,
+            card_id: sourceCard ?? PROJECT_EVENT_STREAM,
+            up_to_seq: trigger.seq,
+          }).ok,
+        ).toBe(true);
+        f.store.uow.run((tx) =>
+          tx.runs.put(f.project, {
+            ...queued,
+            queue_reason: "concurrency_limit",
+          }),
+        );
+      }
+      const startRun = f.options.startRun;
+      if (!startRun) throw new Error("missing launch fixture");
+      const start = () =>
+        vi.mocked(startRun).mock.calls.filter(([p]) => p.run.id === queued.id);
+      f.store.uow.run((tx) =>
+        tx.cards.put(f.project, {
+          ...card,
+          hold: {
+            set_by: "system",
+            reason: "paused",
+            resume_condition: "test",
+            set_at: f.clock.now(),
+          },
+        }),
+      );
+      await dispatcher.tick();
+      if (sourceCard) {
+        expect(start()).toHaveLength(0);
+        expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+          "queued",
+        );
+        f.store.uow.run((tx) => tx.cards.put(f.project, card));
+        await dispatcher.tick();
+      }
+      expect(start()).toHaveLength(1);
+      expect(start()[0]?.[0].bell).toContain(
+        sourceCard ? `card=${sourceCard} ` : `project=${f.project} `,
+      );
+      expect(
+        f.state().events.find((e) => e.id === queued.trigger_event_id)?.card_id,
+      ).toBe(sourceCard);
+      expect(
+        f.state().runs.find((r) => r.id === queued.id)?.bell_delivery?.card_id,
+      ).toBe(sourceCard);
+    } finally {
+      await dispatcher.close();
+    }
   },
 );
 

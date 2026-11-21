@@ -18,7 +18,13 @@ import {
   hostOpsPending,
   pendingHostOpsActions,
 } from "../host-ops.js";
-import type { AssignmentId, EventId, HumanActionId, RunId } from "../ids.js";
+import type {
+  AssignmentId,
+  CardId,
+  EventId,
+  HumanActionId,
+  RunId,
+} from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import { lastUpstreamInactivity } from "../upstream-health.js";
@@ -327,7 +333,11 @@ export function finishHostOpsAction(
   actor: Actor,
   action_id: HostOpsExecution["action_id"],
   ports: CommandPorts,
-  stall?: { cause_id: string; review_trigger_id?: EventId },
+  stall?: {
+    cause_id: string;
+    card_id: CardId | null;
+    review_trigger_id?: EventId;
+  },
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -370,14 +380,20 @@ export function finishHostOpsAction(
       runtime_ref: null,
       runtime_state,
     });
-    const sourceCard = assignmentCardId(a, state, previous?.trigger_event_id);
+    const currentStall =
+      action.dispatch_stall_id === stall?.cause_id ? stall : undefined;
+    // Standing stalls have no work item or previous Run. The revalidated cause
+    // owns the stream: null means project, not the last card the PM visited.
+    const sourceCard =
+      a.scope === "standing" && currentStall
+        ? currentStall.card_id
+        : assignmentCardId(a, state, previous?.trigger_event_id);
     const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
     if (
       action.tool !== "host_ops_cancel_run" &&
-      (!action.dispatch_stall_id ||
-        action.dispatch_stall_id === stall?.cause_id) &&
+      (!action.dispatch_stall_id || currentStall) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
@@ -406,8 +422,8 @@ export function finishHostOpsAction(
         : card?.id,
       {
         action_id,
-        ...(action.dispatch_stall_id && run && stall?.review_trigger_id
-          ? { stall_review_trigger: stall.review_trigger_id }
+        ...(run && currentStall?.review_trigger_id
+          ? { stall_review_trigger: currentStall.review_trigger_id }
           : {}),
         ...(action.context_usage
           ? {

@@ -394,6 +394,7 @@ test("only the system may replace a stalled patrol, once per cause and never wit
   const finished = value(
     finishHostOpsAction(pending, system, effect.data.action_id, f.io, {
       cause_id: params.cause_id,
+      card_id: null,
     }),
   );
   expect(finished.data.run?.status).toBe("queued");
@@ -404,3 +405,44 @@ test("only the system may replace a stalled patrol, once per cause and never wit
     )?.entity,
   ).not.toHaveProperty("session_ref");
 });
+
+test.each(["card", "project"] as const)(
+  "standing stall settlement keeps its %s stream and rechecks the card hold",
+  (stream) => {
+    const f = setup();
+    const card = required(f.state.cards[0]);
+    const params = { assignment_id: f.ops.id, cause_id: "note", snapshot };
+    const begun = value(
+      beginStalledPatrolRestart(f.state, system, params, f.io),
+    );
+    const pending = apply(f.state, begun);
+    const stall = {
+      cause_id: params.cause_id,
+      card_id: stream === "card" ? card.id : null,
+    };
+    const settle = (state: CommandState) =>
+      value(
+        finishHostOpsAction(state, system, begun.data.action_id, f.io, stall),
+      );
+    const result = settle(pending).data;
+    expect(required(result.run).trigger_event_id).toBe(result.event.id);
+    expect(result.event.card_id).toBe(stall.card_id ?? undefined);
+    const held = settle({
+      ...pending,
+      cards: pending.cards.map((c) =>
+        c.id === card.id
+          ? {
+              ...c,
+              hold: {
+                set_by: "system",
+                reason: "paused",
+                resume_condition: "test",
+                set_at: now,
+              },
+            }
+          : c,
+      ),
+    });
+    expect(Boolean(held.data.run)).toBe(stream === "project");
+  },
+);

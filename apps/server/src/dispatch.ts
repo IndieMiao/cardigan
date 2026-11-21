@@ -14,6 +14,7 @@ import type {
 import {
   abortDispatch,
   assignmentCardHeld,
+  assignmentCardId,
   assignmentDependenciesAllowStart,
   canDispatchRun,
   cardDependencyDispatchOrder,
@@ -1904,19 +1905,27 @@ export class Dispatcher {
         throw { code: "finished_run_needs_attention" };
       // §6.2: the bell names the Run, because the Agent needs it for
       // finish_run and heartbeat even when the host started the session.
-      const runCard = state.work_items.find(
+      const workItemCard = state.work_items.find(
         (w) => w.id === a.work_item_id,
       )?.card_id;
+      // A capacity retry can outlive the notification. Use the queued Run's
+      // stream for that bell and its receipt, not the standing recipient's scope.
+      const bellCard = cause
+        ? cause.card_id
+        : (workItemCard ?? assignmentCardId(a, state, run.trigger_event_id));
+      const stream = bellCard
+        ? `card=${bellCard}${a.scope === "work_item" ? ` wi=${a.work_item_id}` : ""}`
+        : `project=${project}`;
       const bell = !ready.length
-        ? `[bell] ${runCard ? `card=${runCard} wi=${a.work_item_id}` : `project=${project}`} asg=${a.id} run=${run.id} kind=${run.kind}\n→ 请调用 whoami、get_card、get_updates 继续已排队工作`
+        ? `[bell] ${stream} asg=${a.id} run=${run.id} kind=${run.kind}\n→ 请调用 whoami、get_card、get_updates 继续已排队工作`
         : notificationBell(project, a.id, run.id, ready);
       // Set the budget on the durable intent *before* publication copies it.
       // Live wakes (including retries), local starts and no-checkout roles keep the bell lease.
       const worktree =
         !live &&
         a.machine_id !== "local" &&
-        runCard &&
-        state.cards.find((c) => c.id === runCard)?.repo &&
+        workItemCard &&
+        state.cards.find((c) => c.id === workItemCard)?.repo &&
         getRoleVersion(tx, project, a.role_id, a.role_version)?.worktree;
       const leaseMs =
         worktree === "write" || worktree === "readonly"
@@ -1947,10 +1956,12 @@ export class Dispatcher {
         ? beginBellAttempt(store.database, intent)
         : beginLaunchAttempt(store.database, intent);
       if (run.status === "queued" && run.bell_delivery?.run_id !== run.id) {
-        const card = cause ? cause.card_id : runCard;
         run = {
           ...run,
-          bell_delivery: { run_id: run.id, ...(card ? { card_id: card } : {}) },
+          bell_delivery: {
+            run_id: run.id,
+            ...(bellCard ? { card_id: bellCard } : {}),
+          },
         };
         tx.runs.put(project, run);
         state = this.loadState(tx, project);
