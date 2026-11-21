@@ -306,7 +306,7 @@ test("D3: dispatch pushes only the candidate, binds the trusted baseline run bef
   );
   expect((await f.executor.poll(handle)).status).toBe("passed");
   await f.executor.cancel(handle);
-  await f.executor.fetchFailureLog(handle);
+  await f.executor.fetchFailureLog(handle, () => vi.fn());
   expect(f.lifecycle.poll).toHaveBeenCalledWith(
     f.onExternalRun.mock.calls[0]![0],
   );

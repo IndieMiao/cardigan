@@ -67,6 +67,10 @@ import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
+import {
+  openMobileArtifact,
+  requestMobileSignature,
+} from "./mobile-signing.js";
 import { serverProbes } from "./probes.js";
 import {
   clearTickProfileSync,
@@ -80,7 +84,11 @@ import {
 import type { WebConfig } from "./web/config.js";
 import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
-import { type RunningWebServer, startWebServer } from "./web/server.js";
+import {
+  type RunningWebServer,
+  startWebServer,
+  type WebServerOptions,
+} from "./web/server.js";
 
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
@@ -126,6 +134,7 @@ export interface StartServerOptions {
    * endpoint (§3.1); absent in tests that only exercise the MCP surface.
    */
   readonly web?: {
+    readonly launchSettings?: WebServerOptions["launchSettings"];
     readonly config: WebConfig;
     readonly log?: (event: Readonly<Record<string, unknown>>) => void;
     /** SSE cadence; tests shorten it. */
@@ -480,6 +489,15 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              ...(execution.mode === "agent-ssh" &&
+              runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1"
+                ? {
+                    openMobileArtifact: (scope, id, current) =>
+                      openMobileArtifact(config.dataDir, scope, id, current),
+                    signMobile: (scope, current) =>
+                      requestMobileSignature(config.dataDir, scope, current),
+                  }
+                : {}),
               reserveResource: (actor, input, revalidate) =>
                 leases.reserve(
                   actor,
@@ -615,6 +633,9 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          ...(webOptions.launchSettings
+            ? { launchSettings: webOptions.launchSettings }
+            : {}),
           roleLaunchConfig: () => options.dispatcher?.upstream,
           launchProfiles: () =>
             Object.keys(options.dispatcher?.upstream?.profiles ?? {}),
@@ -719,6 +740,12 @@ async function assembleServer(
                 assignment,
               );
         },
+        ...(config.providerFailureThreshold !== undefined
+          ? { providerFailureThreshold: config.providerFailureThreshold }
+          : {}),
+        ...(config.providerCooldownMs !== undefined
+          ? { providerCooldownMs: config.providerCooldownMs }
+          : {}),
         ...options.dispatcher,
         ...((options.dispatcher.runtimeFailureLimit ??
           config.runtimeFailureLimit) === undefined
@@ -809,6 +836,11 @@ async function assembleServer(
       extSender = new ExtMessageSender({
         store,
         configuration: loadExtMessageConfig(),
+        gate: (project) => ({
+          ...mergeProjectSettings(mergeGate, project),
+          merge_gate_enabled:
+            mergeGate.forProject(project).status !== "disabled",
+        }),
       });
       extSender.recordStatus();
       const notificationSender = extSender;

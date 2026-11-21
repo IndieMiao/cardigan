@@ -1728,6 +1728,19 @@ export function routeEvent(input: RouteInput): RouteResult {
           );
       break;
     }
+    case "provider_start_failed": {
+      const notice = payloadString(input.event.payload, "notice");
+      if (notice)
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "run_attention",
+          "6.4/system rules",
+          notice,
+        );
+      break;
+    }
     case "host_role_upgrade_deferred":
     case "session_maintenance_attention":
       note(

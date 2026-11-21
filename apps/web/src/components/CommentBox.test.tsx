@@ -24,23 +24,20 @@ import {
 } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
-import { CommentBox, type MentionOption, mentionsIn } from "./CommentBox.js";
+import {
+  CommentBox,
+  insertMention,
+  matchMentionCandidates,
+  mentionQuery,
+  mentionsIn,
+  orderMentionCandidates,
+} from "./CommentBox.js";
 
 afterEach(cleanup);
 
-const MENTIONS: readonly MentionOption[] = [
-  { value: "coder", label: "角色 coder" },
-  { value: "A-1", label: "Assignment A-1" },
-];
-
 const box = (overrides: Parameters<typeof fakeClient>[0] = {}) =>
   render(
-    <CommentBox
-      client={fakeClient(overrides)}
-      projectId="p-1"
-      cardId="C-1"
-      mentions={MENTIONS}
-    />,
+    <CommentBox client={fakeClient(overrides)} projectId="p-1" cardId="C-1" />,
   );
 
 test("empty comments stay compact until focused, keep drafts expanded, and shrink after clearing and leaving", () => {
@@ -96,15 +93,6 @@ test("the preview never executes HTML from the body", () => {
   ).toBe(true);
 });
 
-test("typing @ offers mentions and inserts the chosen one", () => {
-  box();
-  const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
-  fireEvent.change(input, { target: { value: "请 @co" } });
-  fireEvent.click(screen.getByRole("button", { name: "角色 coder" }));
-  expect(input.value).toBe("请 @coder ");
-  expect(screen.queryByRole("list", { name: "提及建议" })).toBeNull();
-});
-
 test("sending a comment posts it and clears the box", async () => {
   const posted: CommentInput[] = [];
   let reloaded = 0;
@@ -118,7 +106,6 @@ test("sending a comment posts it and clears the box", async () => {
       })}
       projectId="p-1"
       cardId="C-1"
-      mentions={MENTIONS}
       onPosted={() => {
         reloaded += 1;
       }}

@@ -2,6 +2,8 @@ import {
   DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
   DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
   DEFAULT_MERGE_BLOCKED_REMINDER_MS,
+  DEFAULT_PROVIDER_COOLDOWN_MS,
+  DEFAULT_PROVIDER_FAILURES,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   parseRuntimeUnknownGraceMs,
@@ -51,6 +53,8 @@ export interface ServerConfig {
   readonly backupIntervalMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
+  readonly providerFailureThreshold?: number;
+  readonly providerCooldownMs?: number;
   readonly dispatchTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly contextUsageCacheDir?: string;
@@ -67,6 +71,7 @@ export interface ServerConfig {
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  readonly CARDIGAN_MOBILE_SIGNING?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_INLINE_BYTES?: string | undefined;
   /** hc session the runtime uses; registered for the CLI (C-152). */
   readonly CARDIGAN_HC_SESSION?: string | undefined;
@@ -98,6 +103,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_PROVIDER_FAILURE_THRESHOLD?: string | undefined;
+  readonly CARDIGAN_PROVIDER_COOLDOWN_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
@@ -230,6 +237,16 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
             1000,
           ),
         }),
+    providerFailureThreshold: interval(
+      env.CARDIGAN_PROVIDER_FAILURE_THRESHOLD,
+      "CARDIGAN_PROVIDER_FAILURE_THRESHOLD",
+      DEFAULT_PROVIDER_FAILURES,
+    ),
+    providerCooldownMs: interval(
+      env.CARDIGAN_PROVIDER_COOLDOWN_MS,
+      "CARDIGAN_PROVIDER_COOLDOWN_MS",
+      DEFAULT_PROVIDER_COOLDOWN_MS,
+    ),
     dispatchTimeoutMs: interval(
       env.CARDIGAN_DISPATCH_TIMEOUT_MS,
       "CARDIGAN_DISPATCH_TIMEOUT_MS",

@@ -256,7 +256,11 @@ export function recordPrecheck(
       "日志引用无效",
     );
     ensure(
-      !p.summary || validPrecheckSummary(p.summary),
+      !p.summary ||
+        validPrecheckSummary(
+          p.summary,
+          old.executor?.type === "github" ? old.external_run : undefined,
+        ),
       "validation_failed",
       "预检查摘要含不安全路径",
     );

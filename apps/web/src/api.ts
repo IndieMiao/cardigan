@@ -1,5 +1,6 @@
 import type { CardHold, DispatchOrder, ReviewImpact } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
+import type { RunPresence } from "./run-presence.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
@@ -229,7 +230,10 @@ export interface CardListItem
     readonly ahead: number;
   }[];
   readonly produce_owners?: readonly AuthorView[];
-  readonly participants?: readonly AuthorView[];
+  /** C-531: `run_presence` is this person's state for this card; older servers omit it. */
+  readonly participants?: readonly (AuthorView & {
+    readonly run_presence?: RunPresence;
+  })[];
   readonly work_items?: readonly Pick<
     WorkItemView,
     "id" | "title" | "status"
@@ -292,6 +296,9 @@ export interface WorkItemView {
   readonly depends_on: readonly string[];
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: string;
+  /** C-531: the unreleased owner and their state for this work item only. */
+  readonly assignee?: AuthorView;
+  readonly run_presence?: RunPresence;
   readonly target_work_item_id?: string;
   /** MC-2: scheduling constraints declared on the work item itself. */
   readonly requirements?: MachineRequirements;
@@ -938,6 +945,10 @@ export interface NeedsPage {
   readonly notices_next_cursor?: string | null;
   /** C-153: who looks after lost runtimes; older servers omit it. */
   readonly incident_handling?: IncidentHandling;
+  readonly provider_incidents?: readonly {
+    readonly profile: string;
+    readonly paused: boolean;
+  }[];
   readonly incidents: readonly (AuthorView & {
     readonly id: string;
     readonly role_id: string;
@@ -1037,10 +1048,12 @@ export interface RunView {
     readonly after_minutes: number;
     readonly waited_ms: number;
   };
+  readonly failure_reason?: "provider_unavailable";
   readonly queue_reason?:
     | "concurrency_limit"
     | "runtime_unavailable"
-    | "awaiting_dispatch";
+    | "awaiting_dispatch"
+    | "provider_unavailable";
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
@@ -1105,6 +1118,8 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  /** C-531: this row's own state for its card; absent on standing rows. */
+  readonly run_presence?: RunPresence;
   readonly verification_activity?: {
     readonly status: string;
     readonly label: string;
@@ -1184,6 +1199,80 @@ export interface ExecutionMachine {
     readonly blockers: readonly string[];
     readonly available: boolean;
   } | null;
+}
+
+/**
+ * C-512: the human-only machine read (C-509). Machines are global; each
+ * binding is one project's registration of the machine, as far as the server
+ * authorises it. Only these fields are read; credentials never appear here.
+ */
+export interface MachineBindingView {
+  readonly project_id: string;
+  readonly project_name: string;
+  readonly is_current: boolean;
+  readonly status: string;
+  readonly last_seen: string | null;
+  /** Account, directory and session summary; null without a binding. */
+  readonly runtime: {
+    readonly account: string | null;
+    readonly directory: string | null;
+    readonly session: string;
+    readonly path_entries: number;
+  } | null;
+  /** False when the host's private configuration could not be read. */
+  readonly config_available: boolean;
+  readonly capabilities: readonly MachineCapabilityView[];
+  /** The latest machine check (health) for this project. */
+  readonly machine_check: {
+    readonly status: "checking" | "passed" | "failed";
+    readonly checked_at: string;
+    readonly blockers: readonly string[];
+    readonly available: boolean;
+  } | null;
+  /** The latest explicitly requested check (Web or CLI). */
+  readonly last_requested_check: {
+    readonly id: string;
+    readonly kind: "machine" | "worker";
+    readonly status: "running" | "passed" | "failed";
+    readonly step: string;
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  /** The latest worker onboarding check; `local` has none. */
+  readonly worker_check: {
+    readonly status: "failed" | "passed" | "checking" | "unknown";
+    readonly checked_at: string;
+    readonly failed_steps: readonly string[];
+  } | null;
+  readonly worker_record_readable: boolean;
+  readonly assignments: readonly {
+    readonly assignment_id: string;
+    readonly role_id: string;
+    readonly employee_id: string | null;
+    readonly employee_name: string | null;
+    readonly card_id: string | null;
+    readonly runs: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly card_id: string | null;
+    }[];
+  }[];
+}
+export interface MachineView {
+  readonly id: string;
+  readonly label: string;
+  readonly os: string;
+  readonly arch: string;
+  /** The most restrictive status across bindings; absent if none is known. */
+  readonly status?: string;
+  readonly last_seen: string | null;
+  readonly run_limit: number;
+  readonly run_limit_maximum: number;
+  readonly resources: readonly {
+    readonly key: string;
+    readonly limit: number;
+  }[];
+  readonly bindings: readonly MachineBindingView[];
 }
 
 /** C-75: one server page of an Assignment's Run history, newest first. */
@@ -1360,15 +1449,93 @@ export interface RoleSummary {
   readonly launch_profile_ref: string;
 }
 
+/** C-494: a launch profile the host has loaded; never endpoints or secrets. */
+export interface LaunchProfileOption {
+  readonly name: string;
+  readonly harness: string;
+  readonly model: string | null;
+}
+
 export interface RoleListView {
   readonly project_id: string;
   readonly roles: readonly RoleSummary[];
   readonly default_roles: readonly string[];
   readonly harnesses: readonly string[];
   readonly allowlists: RoleAllowlists;
+  /** Older servers omit it; role pickers then offer no profiles. */
+  readonly launch_profiles?: readonly LaunchProfileOption[];
+}
+
+/** One global employee as listed in the employee settings. */
+export interface EmployeeSummary extends CreatedEmployee {
+  readonly title?: string;
+  readonly status?: "active" | "inactive";
+  readonly avatar?: string | null;
+  /** Why a role change would be refused now: an unfinished run or a bound assignment. */
+  readonly role_change_blocked?: "run" | "assignment" | null;
+}
+
+/** C-515 `GET /api/launch-settings`: global, read-only; secret values never leave the host. */
+export interface LaunchModelMetadata {
+  readonly cost?: { readonly input: number; readonly output: number };
+  readonly context_window?: number;
+  readonly max_output_tokens?: number;
+  readonly reasoning_efforts?: readonly string[];
+}
+export type LaunchProfileReference =
+  | {
+      readonly project_id: string;
+      readonly role_id: string;
+      readonly version: number;
+      readonly name: string;
+    }
+  | { readonly employee_id: string; readonly name: string };
+export interface LaunchProfileCheck {
+  readonly id: string;
+  readonly version: string;
+  readonly mode: "metadata" | "online";
+  readonly started_at: string;
+  readonly finished_at: string | null;
+  readonly status: "passed" | "failed" | "running" | "interrupted";
+  readonly problems: readonly string[];
+  readonly cli_version: string | null;
+}
+export interface LaunchProfileView {
+  readonly name: string;
+  readonly harness: string;
+  readonly provider: string | null;
+  readonly model_alias: string | null;
+  readonly model_id: string | null;
+  readonly metadata: LaunchModelMetadata | null;
+  readonly parameters: {
+    readonly effort: string | null;
+    readonly permission_mode: string | null;
+    readonly auto_update: boolean | null;
+    readonly provider_flag: string | null;
+    readonly custom_args_count: number;
+    readonly custom_config_count: number;
+  };
+  readonly cli: {
+    readonly path: string | null;
+    readonly version: string | null;
+  };
+  readonly secrets: readonly { readonly key: string; readonly set: boolean }[];
+  readonly references: readonly LaunchProfileReference[];
+  readonly last_check: LaunchProfileCheck | null;
+}
+export interface LaunchProviderView {
+  readonly id: string;
+  readonly name: string;
+  readonly base_url: string | null;
+}
+export interface LaunchSettingsView {
+  readonly version: string;
+  readonly profiles: readonly LaunchProfileView[];
+  readonly providers: readonly LaunchProviderView[];
 }
 
 export interface EmployeeOptions {
+  readonly employees?: readonly EmployeeSummary[];
   readonly library: readonly {
     readonly id: string;
     readonly name: string;
@@ -1385,7 +1552,20 @@ export interface EmployeeOptions {
     readonly display_name: string;
   }[];
 }
+/** `@` candidates for one card's comment box (active employees only). */
+export interface MentionCandidate {
+  readonly id: string;
+  readonly name: string;
+  readonly title: string;
+  readonly avatar: string | null;
+  /** Works on the card, wrote on its timeline, or is a standing PM. */
+  readonly related: boolean;
+}
+export interface MentionCandidates {
+  readonly employees: readonly MentionCandidate[];
+}
 export interface CreateEmployeeInput {
+  readonly projects?: readonly string[];
   readonly launch_profile_ref?: string | null;
   readonly name: string;
   readonly title: string;
@@ -1396,9 +1576,39 @@ export interface CreateEmployeeInput {
   readonly avatar_file?: string;
 }
 export interface CreatedEmployee {
+  readonly projects?: readonly string[];
   readonly id: string;
   readonly name: string;
   readonly role_id: string;
+}
+
+/** C-492 role document preview; apply returns the same shape after writing. */
+export interface RoleDocumentPreview {
+  readonly snapshot: string;
+  readonly role: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly role: RoleDefinitionView;
+    readonly fields: readonly {
+      readonly field: string;
+      readonly before: unknown;
+      readonly after: unknown;
+    }[];
+    readonly relaxations: readonly string[];
+  };
+  readonly template: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly before: (TemplateDefinition & { version: number }) | null;
+    readonly after: TemplateDefinition & { version: number };
+  } | null;
+  readonly employees: readonly {
+    readonly name: string;
+    readonly title: string;
+    readonly bio?: string;
+    readonly role_id: string;
+    readonly launch_profile_ref: string | null;
+    readonly action: "create" | "unchanged";
+    readonly id: string | null;
+  }[];
 }
 
 /** One saved role version (V9a `Role`). */
@@ -1484,7 +1694,14 @@ export interface RoleCopyInput {
       };
 }
 
+export interface FeishuBindingView {
+  state: string;
+  bound: boolean;
+  code?: string;
+  expires?: number;
+}
 export interface CardiganClient {
+  feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
   /** In-memory only, scoped to the currently validated login. */
   cachedCards?(
     projectId: string,
@@ -1493,11 +1710,33 @@ export interface CardiganClient {
   ): CardPage | undefined;
   cardPreferenceScope?(): string | undefined;
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
+  /** Global launch profiles (not project scoped). */
+  launchSettings(): Promise<LaunchSettingsView>;
   createEmployee(
     projectId: string,
     input: CreateEmployeeInput,
     idempotencyKey: string,
   ): Promise<CreatedEmployee>;
+  /** C-493: a role change is a transfer; the server refuses while work is bound. */
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: { readonly role_id: string },
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee>;
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview>;
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview>;
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }>;
+  /** C-515: the launch profile names roles and employees may use (global). */
+  launchProfileNames(): Promise<readonly string[]>;
   templates(projectId: string): Promise<{ templates: TemplateView[] }>;
   template(projectId: string, id: string): Promise<TemplateDetail>;
   templateHistory(
@@ -1694,6 +1933,12 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
+  /** C-512: read only; the machine actions belong to C-511. */
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }>;
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -1784,6 +2029,10 @@ export interface CardiganClient {
     cardId: string,
     panel: CardPanel,
   ): Promise<Partial<CardDetail>>;
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates>;
   addComment(
     projectId: string,
     cardId: string,
@@ -1851,6 +2100,12 @@ export class HttpCardiganClient implements CardiganClient {
     options: Readonly<Record<string, string>>,
   ) {
     return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
+  feishuBinding(action?: "code" | "unbind") {
+    return this.request<FeishuBindingView>(
+      "/api/me/feishu",
+      action ? { method: "POST", body: JSON.stringify({ action }) } : {},
+    );
   }
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");
@@ -1994,6 +2249,15 @@ export class HttpCardiganClient implements CardiganClient {
     );
   }
 
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
+    );
+  }
+
   async addComment(
     projectId: string,
     cardId: string,
@@ -2052,6 +2316,19 @@ export class HttpCardiganClient implements CardiganClient {
   executionDiagnostics(projectId: string): Promise<ExecutionDiagnosticsData> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
+    );
+  }
+  machines(projectId: string): Promise<{ machines: readonly MachineView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines`,
+    );
+  }
+  machine(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ machine: MachineView }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}`,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {
@@ -2352,6 +2629,9 @@ export class HttpCardiganClient implements CardiganClient {
   roles(projectId: string): Promise<RoleListView> {
     return this.request(`/api/projects/${encodeURIComponent(projectId)}/roles`);
   }
+  launchSettings(): Promise<LaunchSettingsView> {
+    return this.request("/api/launch-settings");
+  }
   employeeOptions(projectId: string): Promise<EmployeeOptions> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/employees/options`,
@@ -2368,6 +2648,52 @@ export class HttpCardiganClient implements CardiganClient {
       input,
       idempotencyKey,
     ) as Promise<CreatedEmployee>;
+  }
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: { readonly role_id: string },
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee> {
+    return this.write(
+      projectId,
+      `employees/${encodeURIComponent(employeeId)}/update`,
+      patch,
+      idempotencyKey,
+    ) as Promise<CreatedEmployee>;
+  }
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/role-document/preview`,
+      { method: "POST", body: JSON.stringify({ markdown }) },
+    );
+  }
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.write(
+      projectId,
+      "role-document/apply",
+      { markdown, snapshot },
+      idempotencyKey,
+    ) as Promise<RoleDocumentPreview>;
+  }
+  async launchProfileNames(): Promise<readonly string[]> {
+    const { profiles } = await this.request<{ profiles: readonly string[] }>(
+      "/api/launch-settings/profiles",
+    );
+    return profiles;
+  }
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}/export`,
+    );
   }
   role(projectId: string, roleId: string): Promise<RoleDetailView> {
     return this.request(
@@ -2858,6 +3184,8 @@ export function describeError(error: unknown): string {
     if (error.status === 401) return "会话已失效，请重新登录。";
     if (error.status === 429) return "尝试次数太多，请稍后再试。";
     if (error.status === 403) {
+      if (error.code === "owner_required")
+        return webErrorMessage(error.message);
       if (["origin_required", "origin_rejected"].includes(error.code))
         return "请求被拒绝（来源校验未通过）。";
       if (["unauthorized", "forbidden_tool"].includes(error.code))

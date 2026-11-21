@@ -69,13 +69,24 @@ import {
   type RecordReadTiming,
   timeRead,
 } from "@cardigan/mcp-server";
-import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
+import {
+  convertLegacyRole,
+  HARNESSES,
+  isDefaultRoleId,
+  type LaunchConfig,
+} from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 import { runQueuedAt } from "../run-queued-at.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
+import {
+  assignmentPresence,
+  precheckIndex,
+  type RunPresence,
+  strongestPresence,
+} from "./run-presence.js";
 
 /**
  * The Workbench read model (M5 plan §4 M5.1: 只读接口).
@@ -185,18 +196,22 @@ export function webMemberView(
   member: import("@cardigan/domain").MemberView | null,
 ) {
   if (!member) return null;
-  const avatar = parseAvatarReference(member.avatar);
   return {
     id: member.id,
     name: member.name,
     title: member.title,
-    avatar:
-      avatar?.kind === "library"
-        ? `/avatars/v1/${avatar.id}/head-64.webp`
-        : avatar?.kind === "upload"
-          ? `/api/avatars/${avatar.sha256}`
-          : null,
+    avatar: webAvatarPath(member.avatar),
   };
+}
+
+/** Same-origin image path for a stored avatar reference; opaque values are none. */
+export function webAvatarPath(reference: string | null | undefined) {
+  const avatar = parseAvatarReference(reference);
+  return avatar?.kind === "library"
+    ? `/avatars/v1/${avatar.id}/head-64.webp`
+    : avatar?.kind === "upload"
+      ? `/api/avatars/${avatar.sha256}`
+      : null;
 }
 export function webDecisionView(
   state: CommandState,
@@ -271,7 +286,6 @@ export function webAuthorView(state: CommandState, author: Author) {
           : undefined
       : undefined;
   const employee = state.employees?.find((e) => e.id === view.employee?.id);
-  const avatar = parseAvatarReference(employee?.avatar);
   return {
     ...view,
     author_display:
@@ -287,12 +301,7 @@ export function webAuthorView(state: CommandState, author: Author) {
           title: employee.title,
           bio: employee.bio,
           role_id: assignment?.role_id ?? employee.role_id,
-          avatar:
-            avatar?.kind === "library"
-              ? `/avatars/v1/${avatar.id}/head-64.webp`
-              : avatar?.kind === "upload"
-                ? `/api/avatars/${avatar.sha256}`
-                : null,
+          avatar: webAvatarPath(employee.avatar),
         }
       : null,
   };
@@ -358,7 +367,9 @@ export interface CardListView extends WebCardView {
   } | null;
   readonly queued_runs?: readonly RunQueuePosition[];
   readonly produce_owners: readonly WebAuthorView[];
-  readonly participants: readonly WebAuthorView[];
+  readonly participants: readonly (WebAuthorView & {
+    readonly run_presence: RunPresence;
+  })[];
   readonly work_items: readonly Pick<WorkItem, "id" | "title" | "status">[];
   readonly attachment_count: number;
   readonly progress: { readonly completed: number; readonly total: number };
@@ -390,23 +401,48 @@ export function cardListViews(
   const assignments = new Map(
     state.assignments.map((assignment) => [assignment.id, assignment]),
   );
+  const live = (items: readonly WorkItem[]) =>
+    items.flatMap((item) => {
+      const assignment = item.assignment_id
+        ? assignments.get(item.assignment_id)
+        : undefined;
+      return assignment && assignment.status !== "released" ? [assignment] : [];
+    });
   const owners = (items: readonly WorkItem[]) => [
     ...new Map(
-      items.flatMap((item) => {
-        const assignment = item.assignment_id
-          ? assignments.get(item.assignment_id)
-          : undefined;
-        return assignment && assignment.status !== "released"
-          ? [
-              [
-                assignment.employee_id ?? assignment.id,
-                webAuthorView(state, `assignment:${assignment.id}`),
-              ] as const,
-            ]
-          : [];
-      }),
+      live(items).map(
+        (assignment) =>
+          [
+            assignment.employee_id ?? assignment.id,
+            webAuthorView(state, `assignment:${assignment.id}`),
+          ] as const,
+      ),
     ).values(),
   ];
+  const cardPrechecks = precheckIndex(state);
+  // C-531: the same people as `owners`, each with what they are doing for
+  // this card, merged over all of their assignments on it.
+  const participants = (cardId: string, items: readonly WorkItem[]) => {
+    const people = new Map<
+      string,
+      { view: WebAuthorView; presences: RunPresence[] }
+    >();
+    for (const assignment of live(items)) {
+      const key = assignment.employee_id ?? assignment.id;
+      const person = people.get(key) ?? {
+        view: webAuthorView(state, `assignment:${assignment.id}`),
+        presences: [],
+      };
+      person.presences.push(
+        assignmentPresence(state, assignment, cardPrechecks(cardId)),
+      );
+      people.set(key, person);
+    }
+    return [...people.values()].map(({ view, presences }) => ({
+      ...view,
+      run_presence: strongestPresence(presences),
+    }));
+  };
   return cardViews(state, dependencyState, mergeState).map((card) => {
     const template = cardTemplate(card, state.card_templates);
     const items = state.work_items.filter((item) => item.card_id === card.id),
@@ -442,7 +478,7 @@ export function cardListViews(
           }
         : {}),
       produce_owners: owners(items.filter((item) => item.kind === "produce")),
-      participants: owners(items),
+      participants: participants(card.id, items),
       work_items: items.map(({ id, title, status }) => ({ id, title, status })),
       attachment_count: attachmentCounts.get(card.id) ?? 0,
       progress: { completed, total: items.length },
@@ -768,6 +804,7 @@ export function cardDetail(
   }
   const dependencySource = options.dependencyState ?? state,
     graphSource = dependencySource.cards.find((c) => c.id === card_id);
+  const cardPrechecks = precheckIndex(state);
   // Precheck display time comes from the last trusted event, not the paged timeline.
   const precheckTimes = new Map<string, { seq: number; at: string }>();
   for (const event of state.events) {
@@ -1070,10 +1107,24 @@ export function cardDetail(
       const selection = options.overviewOnly
         ? undefined
         : machineSelection(state.events, item.id);
+      // C-531: the work item's own owner and what they do for this item only.
+      const assignment = item.assignment_id
+        ? state.assignments.find((a) => a.id === item.assignment_id)
+        : undefined;
       return {
         ...item,
         verification_activity: verificationActivity(item, state),
         ...(selection ? { machine_selection: selection } : {}),
+        ...(assignment && assignment.status !== "released"
+          ? {
+              assignee: webAuthorView(state, `assignment:${assignment.id}`),
+              run_presence: assignmentPresence(
+                state,
+                assignment,
+                cardPrechecks(card_id),
+              ),
+            }
+          : {}),
       };
     }),
     timeline: timeRead(options.recordTiming, "timeline_view", () =>
@@ -1571,6 +1622,9 @@ export function needsYou(
     auto_merge_pause: autoMergePauseView(state),
     attention: data.attention,
     system_rule_attention: data.system_rule_attention,
+    ...(data.provider_incidents.length
+      ? { provider_incidents: data.provider_incidents }
+      : {}),
     incident_handling: {
       ...incidentHandling(state, hostOpsPatrolIntervalMs),
       // C-153: the session the server registered in runtime.json; null when
@@ -1811,6 +1865,7 @@ export function executionView<M extends Machine = Machine>(
     const usage = contextByRun.get(run.id);
     return usage ? { context_usage: usage } : {};
   };
+  const cardPrechecks = precheckIndex(state);
   return {
     project_id: state.project_id,
     generated_at: now,
@@ -1844,6 +1899,16 @@ export function executionView<M extends Machine = Machine>(
         ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
+        // C-531: only a row bound to a card's work item has a card presence.
+        ...(assignment.scope === "work_item" && card_id
+          ? {
+              run_presence: assignmentPresence(
+                state,
+                assignment,
+                cardPrechecks(card_id),
+              ),
+            }
+          : {}),
         verification_activity: (() => {
           const item = state.work_items.find(
             (w) => w.id === assignment.work_item_id,
@@ -2180,8 +2245,26 @@ function roleStatus(role: Role): "active" | "inactive" {
   return role.status === "inactive" ? "inactive" : "active";
 }
 
+/**
+ * C-494: the host's loaded launch profiles for role pickers — name, harness and
+ * model only. Providers, endpoints and secrets never leave the host.
+ */
+export function launchProfileOptions(config: LaunchConfig | undefined) {
+  return Object.entries(config?.profiles ?? {})
+    .map(([name, profile]) => ({
+      name,
+      harness: profile.harness,
+      model: profile.model ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** V9b 角色列表: the latest version of every role, inactive ones included. */
-export function roleList(project_id: ProjectId, versions: readonly Role[]) {
+export function roleList(
+  project_id: ProjectId,
+  versions: readonly Role[],
+  config?: LaunchConfig,
+) {
   return {
     project_id,
     roles: latestRoles(versions).map((role) => ({
@@ -2196,6 +2279,7 @@ export function roleList(project_id: ProjectId, versions: readonly Role[]) {
     default_roles: DEFAULT_ROLE_IDS,
     harnesses: HARNESSES,
     allowlists: ROLE_TOOL_ALLOWLISTS,
+    launch_profiles: launchProfileOptions(config),
   };
 }
 

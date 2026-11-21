@@ -10,6 +10,7 @@ import {
   type CommandPorts,
   type CommandState,
   cancelHumanAction,
+  canRecheckMerge,
   completeHumanAction,
   confirmSourceMergeUnrelated,
   copyRole,
@@ -20,7 +21,6 @@ import {
   deactivateRole,
   issueInstruction,
   latestCardTemplate,
-  latestMergeCheck,
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
@@ -1216,12 +1216,7 @@ export async function serveWrite(
             "illegal_transition",
             "完成申请已更新，请刷新后重新检查。",
           );
-        const latest = latestMergeCheck(
-          s.events,
-          card_id,
-          plan.value.completion_id,
-        );
-        if (!latest || !["failed", "timed_out"].includes(latest.status))
+        if (!canRecheckMerge(s.events, card_id, plan.value.completion_id))
           throw new HttpRejection(
             409,
             "illegal_transition",

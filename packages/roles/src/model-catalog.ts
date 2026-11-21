@@ -4,6 +4,12 @@ const tokens = z.number().int().positive();
 const efforts = z.array(z.string().regex(/^[a-zA-Z0-9_-]+$/)).nonempty();
 
 export const modelMetadata = z.object({
+  cost: z
+    .object({
+      input: z.number().nonnegative(),
+      output: z.number().nonnegative(),
+    })
+    .optional(),
   context_window: tokens.optional(),
   max_output_tokens: tokens.optional(),
   reasoning_efforts: efforts.optional(),
@@ -66,6 +72,11 @@ export function* catalogEntries(json: unknown, previous: CatalogEntry[] = []) {
       const entry: CatalogEntry = {
         provider,
         id,
+        cost: field(
+          modelMetadata.shape.cost.unwrap(),
+          model?.cost,
+          model?.cost === undefined ? undefined : old?.cost,
+        ),
         context_window: field(tokens, limit?.context, old?.context_window),
         max_output_tokens: field(
           tokens,

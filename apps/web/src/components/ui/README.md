@@ -10,6 +10,8 @@ SelectControl 使用 `value` + `onValueChange(string)`；已有 `<option>` 仅�
 
 表头排序使用 `TableHead sort="ascending|descending|none" onSort={...}`，整个文字和箭头可键盘激活；不要传排序按钮 CSS。静态表头直接放文字。
 
+链接指向表格中的某一行（例如角色版本历史里被引用的版本）时，用 `TableRow current` 标记：输出 `aria-current="true"`，整行（含窄屏纵向记录）使用 `--ui-selected` 选中底色；不要在页面另写高亮样式。
+
 旧样式集中放在 `legacy` cascade layer，关闭 Tailwind preflight；全站生产入口加载 `theme.css`，旧截图夹具若仍直接加载 styles.css，只用于历史证据。阶段二迁移页面时，删除对应 `test-support/ui-legacy.json` 的精确存量豁免，不能新增。`pnpm lint` 同时检查原生控件、直接 Radix 导入、页面内联尺寸、额外 CSS 和任意值 utility。
 
 
@@ -22,5 +24,7 @@ Tailwind 扫描所有 views/components/App。页面组合布局组件；页面�
 编号统一消费IdBadge（IdTag/帮助图例复用，Markdown编号使用相同data-ui及类型类）；浅底、类型色文字，全部交互状态无下划线及hover边框。所有语义颜色只在theme定义，强调和成功用中性灰，不保留绿色/青绿类型色。Button的avatar尺寸用于圆形溢出计数，继承头像尺寸token，不改变常规控件28px合同。布局CSS module若使用cascade layer，须先声明完整layer顺序，避免动态导入顺序反转legacy与components。
 
 设置页用 `layout/SettingsLayout`（导航、面板、分组、设置行、数值框、悬停说明）组合，布尔设置用 `Switch`，多字段设置用 `DialogContent`；保存方式和危险区规则见 `docs/design/ui-guidelines.md` 的“设置页模式”。列表类设置用 `SettingsTable`，详情/编辑放 `Drawer` + `CardDetailLayout`，抽屉内用 `SettingsSection`、`SettingsFacts`、`SettingsText`、`SettingsDiff`、`SettingsWarning`、`SettingsAvatar`，见同文档“列表类设置与抽屉”。
+
+抽屉里放不下全部列的确认表（如角色导入预览的模板工作项）给 `SettingsTable` 加 `recordsAlways`，在所有宽度用纵向记录；表内编号用 `DataTableId`，只在 `_`、`-`、`.` 后换行、不改文字。
 
 工具栏日期筛选用 `FilterDate`（`layout/FilterDateLayout` 提供控件框）；非卡片数据表用 `DataTableLayout stacked` 获得窄屏纵向记录，短值列用 `DataTableCell nowrap`。不要在页面为这两种场景另写 CSS。

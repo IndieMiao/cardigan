@@ -163,6 +163,7 @@ export function BoardCard({
         <ProduceOwners
           owners={card.participants ?? card.produce_owners ?? []}
           label="参与员工"
+          presence
         />
         {display.roles &&
           badge(

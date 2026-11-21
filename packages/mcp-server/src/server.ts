@@ -5,11 +5,17 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import { pipeline } from "node:stream/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
 import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
-import { authenticate, bearerToken, type Identity } from "./auth.js";
+import {
+  authenticate,
+  bearerToken,
+  type Identity,
+  recordIdentity,
+} from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import {
@@ -27,12 +33,18 @@ import {
 } from "./commands/support-tools.js";
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
+import { freshResourceNonce, runResourceState } from "./run-resource-state.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
 import {
   type CheckLogOptions,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import {
+  type MobileSigningOptions,
+  mobileAccess,
+  mobileSigningTool,
+} from "./tools/mobile-signing.js";
 import {
   type ReservationOptions,
   reservationTool,
@@ -46,6 +58,7 @@ export interface McpServerOptions
     HostOpsToolOptions,
     CheckLogOptions,
     ReservationOptions,
+    MobileSigningOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
@@ -104,12 +117,14 @@ export function serverTools(
     HostOpsToolOptions &
     CheckLogOptions &
     ReservationOptions &
+    MobileSigningOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    mobileSigningTool(options),
     reservationTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
@@ -203,10 +218,24 @@ export async function startMcpServer(
       return;
     }
 
-    const identity = authenticate(
-      options.store,
-      bearerToken(req.headers.authorization),
-    );
+    const resource =
+      req.method === "GET" && url.searchParams.has("run_resource");
+    const key = url.searchParams.get("run_resource") ?? "";
+    const nonce = req.headers["x-resource-nonce"];
+    const id = req.headers["x-resource-registration"];
+    const mac = req.headers["x-resource-proof"];
+    const identity = resource
+      ? recordIdentity(
+          options.store,
+          typeof id === "string" &&
+            typeof mac === "string" &&
+            typeof nonce === "string" &&
+            freshResourceNonce(nonce) &&
+            /^A-[1-9]\d{0,15}\.R-[1-9]\d{0,15}\.R-[1-9]\d{0,15}$/u.test(key)
+            ? options.store.verifyResourceRead?.(id, key, nonce, mac)
+            : undefined,
+        )
+      : authenticate(options.store, bearerToken(req.headers.authorization));
     if (!identity.ok) {
       // Unknown, revoked and orphaned tokens all look like this on purpose.
       log({
@@ -241,6 +270,108 @@ export async function startMcpServer(
         ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
       );
 
+    if (resource) {
+      res.setHeader("Cache-Control", "private, no-store");
+      if (
+        url.searchParams.size !== 1 ||
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined &&
+          req.headers.origin !== url.origin) ||
+        identity.value.assignment.external ||
+        !options.store.runResources
+      ) {
+        res.writeHead(403).end();
+        return;
+      }
+      const state = runResourceState(
+        options.store,
+        identity.value,
+        key,
+        options.clock ? Date.parse(options.clock.now()) : Date.now(),
+      );
+      // No inbox advance, token rotation, wake or synthetic activity.
+      const payload = JSON.stringify([
+        "resource-state-v1",
+        id,
+        nonce,
+        key,
+        identity.value.actor.project_id,
+        identity.value.assignment.machine_id,
+        state,
+      ]);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          payload,
+          signature: options.store.runResources.signState(payload),
+        }),
+      );
+      return;
+    }
+    if (url.searchParams.has("mobile_artifact")) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const id = url.searchParams.get("mobile_artifact") ?? "",
+        platform = url.searchParams.get("platform");
+      if (
+        req.method !== "GET" ||
+        !options.openMobileArtifact ||
+        !tools.some((t) => t.name === "request_mobile_signature") ||
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined &&
+          req.headers.origin !== url.origin) ||
+        url.searchParams.size !== 2 ||
+        !/^[a-f0-9]{32}$/u.test(id) ||
+        (platform !== "android" && platform !== "ios")
+      ) {
+        res.writeHead(404).end();
+        return;
+      }
+      try {
+        const { scope, current } = mobileAccess(
+          {
+            store: options.store,
+            identity: identity.value,
+            revalidateToken: () => {
+              const fresh = authenticate(
+                options.store,
+                bearerToken(req.headers.authorization),
+              );
+              if (
+                !fresh.ok ||
+                fresh.value.token.id !== identity.value.token.id ||
+                !fresh.value.actor.allowed_tools.includes(
+                  "request_mobile_signature",
+                )
+              )
+                throw new Error("denied");
+            },
+          },
+          platform,
+        );
+        const { stream, size, sha256 } = await options.openMobileArtifact(
+          scope,
+          id,
+          current,
+        );
+        try {
+          current();
+          if (res.destroyed) return;
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": size,
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": `attachment; filename="${id}.${platform === "android" ? "apk" : "xcarchive.zip"}"`,
+            ETag: `"${sha256}"`,
+          });
+          await pipeline(stream, res);
+        } finally {
+          stream.destroy();
+        }
+      } catch {
+        if (!res.headersSent && !res.destroyed) res.writeHead(404).end();
+        else res.destroy();
+      }
+      return;
+    }
     if (req.method === "POST" && url.searchParams.has("artifact_upload")) {
       res.setHeader("Cache-Control", "private, no-store");
       if (

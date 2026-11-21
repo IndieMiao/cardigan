@@ -423,6 +423,7 @@ function Workbench({
                   client={client}
                   projectId={selected.id}
                   revision={live.revision}
+                  machineRevision={live.revision + live.capacityRevision}
                 />
               )}
               {selected && route?.kind === "activity" && (

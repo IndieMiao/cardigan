@@ -20,6 +20,7 @@ import {
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
+  providerAdmission,
   recoverPreparation,
   recoveryTargetCurrent,
   remainingResourceRatio,
@@ -60,6 +61,7 @@ import {
   beginLaunchAttempt,
   confirmReviewNotSent,
   finishBellAttempt,
+  getRoleVersion,
   type Store,
   settleWakeWithdrawal,
   unfinishedBellAttempts,
@@ -91,6 +93,7 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
+import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
 import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
@@ -145,6 +148,11 @@ export class RunCapacityDeferred extends Error {
     readonly ahead: number,
   ) {
     super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+export class RunProviderDeferred extends Error {
+  constructor() {
+    super("模型服务不可用，保留执行排队等待");
   }
 }
 export class RunPreparationDeferred extends Error {
@@ -371,6 +379,34 @@ async function launchWithClaim(
     const assignment = tx.assignments.get(input.project, input.assignment_id);
     if (!assignment)
       throw new HostLaunchError("dispatch", "Assignment is missing");
+    const profile =
+      run.launch_profile_ref ??
+      (assignment.employee_id &&
+        tx.employees.get(assignment.employee_id)?.launch_profile_ref) ??
+      getRoleVersion(
+        tx,
+        input.project,
+        assignment.role_id,
+        assignment.role_version,
+      )?.launch_profile_ref;
+    const probe = providerAdmission(
+      loadCommandState(tx, input.project),
+      profile,
+      clock.now(),
+      (r) =>
+        unfinishedBellAttempts(
+          host.store.database,
+          input.project,
+          r.assignment_id,
+        ).some((b) => b.run_id === r.id),
+    );
+    if (probe === "wait") {
+      tx.runs.put(input.project, {
+        ...run,
+        queue_reason: "provider_unavailable",
+      });
+      return "provider_unavailable" as const;
+    }
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
     const capacity = runCapacitySnapshot(
       host.store,
@@ -449,7 +485,11 @@ async function launchWithClaim(
     ) {
       return undefined;
     }
-    const cleared = { ...run, resource_keys: keys };
+    const cleared = {
+      ...run,
+      resource_keys: keys,
+      ...(probe ? { provider_probe: probe } : {}),
+    };
     delete cleared.queue_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
@@ -488,6 +528,7 @@ async function launchWithClaim(
           : undefined,
     };
   });
+  if (attempt === "provider_unavailable") throw new RunProviderDeferred();
   if (!attempt) {
     const waiting = host.store.uow.read((tx) =>
       runCapacitySnapshot(host.store, tx).queue.find(
@@ -1028,6 +1069,14 @@ async function launch(
         : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
+      run_resources: resourceEntry(
+        project,
+        assignment.machine_id,
+        execution,
+        mcpUrl,
+        issued.record.id,
+        host.store.runResources.publicKey(),
+      ),
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
@@ -1103,8 +1152,7 @@ async function launch(
     if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
-      command: compiled.launch_script,
-      args: [],
+      ...verifiedLocalLaunch(compiled),
       cwd: workDir,
       agent_name: agentName,
       labels: {

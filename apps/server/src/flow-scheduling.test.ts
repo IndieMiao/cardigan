@@ -382,7 +382,7 @@ function mergeController(s: { f: M4Fixture }, unreachable = false) {
       cleanup_errors: [],
     })),
     cancel: vi.fn(async () => {}),
-    fetchFailureLog: vi.fn(async () => ""),
+    fetchFailureLog: vi.fn(async () => {}),
   };
   const published = vi.fn();
   const errors = vi.fn();

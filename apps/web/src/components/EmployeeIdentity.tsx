@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { AuthorView, NextOwnerItem } from "../api.js";
+import {
+  type RunPresence,
+  runPresence,
+  runPresenceLabel,
+  runRing,
+} from "../run-presence.js";
 import { useInlineIdentity } from "./IdentityRow.js";
+import { RunRing } from "./layout/RunRingLayout.js";
 import { Tooltip } from "./Tooltip.js";
 import { Button } from "./ui/button.js";
 import * as Popover from "./ui/popover.js";
@@ -63,18 +70,22 @@ function EmployeeAvatar({
   src,
   initial,
   color,
-  size,
+  size: requested,
+  ring,
 }: {
   src: string | undefined;
   initial: string | undefined;
   color: number | "role";
   size?: 24 | 32 | 64 | 128 | undefined;
+  ring?: "running" | "queued" | null | undefined;
 }) {
   const [failedImage, setFailedImage] = useState<string>();
-  const pixels = (size ?? 32) > 64 ? 128 : 64;
+  const pixels = (requested ?? 32) > 64 ? 128 : 64;
   const image = avatarVariant(src, pixels);
   const retina = avatarVariant(src, pixels === 64 ? 128 : 256);
-  return (
+  // Inside a ring the slot carries the size and the face shrinks within it.
+  const size = ring ? undefined : requested;
+  const face = (
     <span
       className={`employee-avatar employee-color-${color}`}
       style={size ? { width: size, height: size } : undefined}
@@ -92,6 +103,31 @@ function EmployeeAvatar({
       )}
     </span>
   );
+  return ring ? (
+    <RunRing state={ring} size={requested}>
+      {face}
+    </RunRing>
+  ) : (
+    face
+  );
+}
+
+/** The avatar alone (decorative), e.g. beside a name in a suggestion list. */
+export function EmployeeFace({
+  employee,
+  size,
+}: {
+  employee: { id: string; name: string; avatar: string | null };
+  size?: 24 | 32;
+}) {
+  return (
+    <EmployeeAvatar
+      src={avatarPath(employee.avatar)}
+      initial={Array.from(employee.name)[0]?.toUpperCase()}
+      color={colorIndex(employee.id)}
+      size={size}
+    />
+  );
 }
 
 export function EmployeeIdentity({
@@ -104,11 +140,18 @@ export function EmployeeIdentity({
   showTitle = true,
   avatarOnly = false,
   avatarSize,
+  presence,
 }: { [K in keyof AuthorView]?: AuthorView[K] | undefined } & {
   showTitle?: boolean;
   avatarOnly?: boolean;
   avatarSize?: 24 | 32 | 64 | 128;
   metadata?: string;
+  /**
+   * C-531: only hosts scoped to "this card + this person" pass it (board
+   * participants, a work item's owner, an execution row). It adds the run
+   * ring and makes the hover text and accessible name "姓名，状态".
+   */
+  presence?: RunPresence | undefined;
 }) {
   const inline = useInlineIdentity();
   const inlineSize = inline ? 24 : avatarSize;
@@ -126,6 +169,7 @@ export function EmployeeIdentity({
     undefined,
   );
   const mounted = useRef(false);
+  const statusId = useId();
   const closeHover = useCallback(() => {
     clearTimeout(closeTimer.current);
     setOpen((mode) => (mode === "hover" ? null : mode));
@@ -160,6 +204,8 @@ export function EmployeeIdentity({
     profile?.name ?? (author === "human" ? name : role),
   )[0]?.toUpperCase();
   const color = profile ? colorIndex(profile.id) : "role";
+  const status = presence ? runPresenceLabel(name, presence) : undefined;
+  const ring = presence ? runRing(presence) : null;
   const keepOpen = () => clearTimeout(closeTimer.current);
   const leave = () => {
     clearTimeout(openTimer.current);
@@ -176,6 +222,7 @@ export function EmployeeIdentity({
           initial={initial}
           color={color}
           size={inlineSize}
+          ring={ring}
         />
       )}
       {!avatarOnly && (
@@ -184,6 +231,11 @@ export function EmployeeIdentity({
           {showTitle && !inline && profile?.title && (
             <span className="employee-title">{profile.title}</span>
           )}
+        </span>
+      )}
+      {status && profile && (
+        <span id={statusId} className="visually-hidden">
+          {status}
         </span>
       )}
     </>
@@ -201,12 +253,12 @@ export function EmployeeIdentity({
           </button>
         </Tooltip>
       );
-    return avatarOnly ? (
-      <Tooltip content={name}>
+    return avatarOnly || status ? (
+      <Tooltip content={status ?? name}>
         <span
           className={identityClass}
           role="img"
-          aria-label={name}
+          aria-label={status ?? name}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Tooltip content must be reachable by keyboard.
           tabIndex={0}
         >
@@ -226,7 +278,8 @@ export function EmployeeIdentity({
         setOpen(value ? "click" : null);
       }}
     >
-      <Popover.Trigger asChild>
+      {/* The status label outranks the trigger's own aria-label (C-531). */}
+      <Popover.Trigger asChild aria-labelledby={status ? statusId : undefined}>
         <button
           ref={trigger}
           type="button"
@@ -304,6 +357,7 @@ export function EmployeeIdentity({
             {employee?.bio?.trim() && (
               <p className="employee-card-bio">{employee.bio}</p>
             )}
+            {status && <p className="employee-card-meta">{status}</p>}
             <p className="employee-card-meta">角色：{role}</p>
             {metadata && <p className="employee-card-meta">{metadata}</p>}
           </div>
@@ -344,11 +398,26 @@ export function NextOwners({
 export function ProduceOwners({
   owners,
   label = "产出负责人",
+  presence = false,
 }: {
-  owners: readonly AuthorView[];
+  owners: readonly (AuthorView & { readonly run_presence?: unknown })[];
   label?: string;
+  /** C-531: board participants show what each person does for this card. */
+  presence?: boolean;
 }) {
   if (!owners.length) return null;
+  const ownerName = (owner: AuthorView) =>
+    owner.employee?.name ??
+    owner.author_display ??
+    `未命名的 ${owner.author_role ?? "未知角色"}`;
+  const hidden = owners.slice(3).map((owner) => ({
+    name: ownerName(owner),
+    presence: presence ? runPresence(owner.run_presence) : undefined,
+  }));
+  // +N never spins; hidden runners are named in its hover text and name.
+  const hiddenRunners = hidden
+    .filter((owner) => owner.presence?.state === "running")
+    .map((owner) => owner.name);
   return (
     <fieldset className="employee-group employee-owners" aria-label={label}>
       {owners.slice(0, 3).map((owner, index) => (
@@ -356,26 +425,29 @@ export function ProduceOwners({
           key={owner.employee?.id ?? owner.author ?? index}
           {...owner}
           avatarOnly
+          presence={presence ? runPresence(owner.run_presence) : undefined}
         />
       ))}
       {owners.length > 3 && (
         <Tooltip
-          content={owners
-            .slice(3)
-            .map(
-              (owner) =>
-                owner.employee?.name ??
-                owner.author_display ??
-                `未命名的 ${owner.author_role ?? "未知角色"}`,
+          content={hidden
+            .map((owner) =>
+              owner.presence
+                ? runPresenceLabel(owner.name, owner.presence)
+                : owner.name,
             )
-            .join("、")}
+            .join(presence ? "；" : "、")}
         >
           <Button
             type="button"
             variant="ghost"
             size="avatar"
             className="employee-overflow ui-avatar-overflow"
-            aria-label={`另有 ${owners.length - 3} 位${label}`}
+            aria-label={`另有 ${owners.length - 3} 位${label}${
+              hiddenRunners.length
+                ? `，其中正在为这张卡运行：${hiddenRunners.join("、")}`
+                : ""
+            }`}
           >
             +{owners.length - 3}
           </Button>

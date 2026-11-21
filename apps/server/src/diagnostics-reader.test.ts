@@ -109,10 +109,12 @@ test("runtime IO leaves Web timers responsive and revocation during IO rejects t
   const { f, reader, status, context, issued } = fixture();
   f.session(f.create().assignment, false);
   let finish!: () => void;
+  const entered = Promise.withResolvers<void>();
   const blocked = new Promise<void>((resolve) => {
     finish = resolve;
   });
   status.mockImplementation(async () => {
+    entered.resolve();
     await blocked;
     return {
       ok: true,
@@ -121,7 +123,7 @@ test("runtime IO leaves Web timers responsive and revocation during IO rejects t
   });
   const result = reader.read(context);
   const rejected = expect(result).rejects.toThrow("revoked");
-  await vi.waitFor(() => expect(status).toHaveBeenCalled());
+  await entered.promise;
   await new Promise<void>((resolve) => setImmediate(resolve));
   f.store.revokeToken(issued.record.id);
   finish();
@@ -155,9 +157,13 @@ test("a replaced session during runtime IO is rejected using the reader's fresh 
 test("shutdown rejects outstanding reads and further requests without starting a replacement", async () => {
   const { f, reader, status, context } = fixture();
   f.session(f.create().assignment, false);
-  status.mockImplementation(() => new Promise(() => {}));
+  const entered = Promise.withResolvers<void>();
+  status.mockImplementation(() => {
+    entered.resolve();
+    return new Promise(() => {});
+  });
   const read = expect(reader.read(context)).rejects.toThrow("closed");
-  await vi.waitFor(() => expect(status).toHaveBeenCalled());
+  await entered.promise;
   await reader.close();
   await read;
   await expect(reader.read(context)).rejects.toThrow("closed");
@@ -258,10 +264,12 @@ test("concurrent status IO overlaps and runtime diagnostics include completed ob
     diagnostics: () => ({ status_calls: status.mock.calls.length }),
   });
   let release!: () => void;
+  const bothEntered = Promise.withResolvers<void>();
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
   status.mockImplementation(async () => {
+    if (status.mock.calls.length === 2) bothEntered.resolve();
     await gate;
     return {
       ok: true,
@@ -270,7 +278,8 @@ test("concurrent status IO overlaps and runtime diagnostics include completed ob
   });
   const first = reader.read(context),
     second = reader.read(context);
-  await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2));
+  await bothEntered.promise;
+  expect(status).toHaveBeenCalledTimes(2);
   release();
   expect(await first).toMatchObject({ runtime_calls: { status_calls: 2 } });
   expect(await second).toMatchObject({ runtime_calls: { status_calls: 2 } });

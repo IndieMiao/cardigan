@@ -23,6 +23,7 @@ import {
 } from "../execution-machine.js";
 import { assignmentActivity } from "../execution-sort.js";
 import { routeHash } from "../route.js";
+import { runPresence } from "../run-presence.js";
 import { statusLabel } from "../status.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { DetailsTip } from "./DetailsTip.js";
@@ -37,6 +38,7 @@ import { Tooltip } from "./Tooltip.js";
 import { Badge } from "./ui/badge.js";
 import { Button } from "./ui/button.js";
 import { MoreHorizontalIcon } from "./ui/icons.js";
+import { Meter, type MeterTone } from "./ui/meter.js";
 import { TableCell, TableRow } from "./ui/table.js";
 
 export const MachinesContext = createContext<ExecutionData["machines"]>([]);
@@ -77,6 +79,11 @@ const kinds: Readonly<Record<string, string>> = {
 };
 export const unfinished = (run: RunView) =>
   !["completed", "failed", "cancelled"].includes(run.status);
+const runStatus = (run: RunView) =>
+  run.failure_reason ??
+  (run.queue_reason === "provider_unavailable"
+    ? run.queue_reason
+    : (run.outcome ?? run.status));
 const runKind = (run: RunView) => kinds[run.kind] ?? "执行";
 const runTime = (run: RunView) =>
   run.finished_at ?? run.started_at ?? run.queued_at;
@@ -100,6 +107,12 @@ function useRunDetails(run: RunView | undefined): string[] {
   if (!run) return [];
   return [
     run.queue_reason === "runtime_unavailable" ? "等待运行环境恢复" : "",
+    run.queue_reason === "provider_unavailable"
+      ? "等待模型服务恢复后自动重派"
+      : "",
+    runStatus(run) === "provider_unavailable" && run.launch_profile_ref
+      ? `启动配置：${run.launch_profile_ref}`
+      : "",
     run.queue_ahead !== undefined
       ? `排队中（前面还有 ${run.queue_ahead} 个）`
       : "",
@@ -110,7 +123,7 @@ function useRunDetails(run: RunView | undefined): string[] {
       run.queue_warning.after_minutes * 60_000
       ? `已长时间排队（超过 ${run.queue_warning.after_minutes} 分钟）`
       : "",
-    abnormalRun(run) ? `最近执行${statusLabel(run.outcome ?? run.status)}` : "",
+    abnormalRun(run) ? `最近执行：${statusLabel(runStatus(run))}` : "",
   ];
 }
 export function RunLine({ run }: { readonly run: RunView }) {
@@ -118,9 +131,9 @@ export function RunLine({ run }: { readonly run: RunView }) {
   return (
     <>
       <IdTag id={run.id} label={runKind(run)} />
-      <DetailsTip lines={[statusLabel(run.outcome ?? run.status), ...details]}>
+      <DetailsTip lines={[statusLabel(runStatus(run)), ...details]}>
         <Button variant="ghost" className="ui-status-tip">
-          <StatusTag status={run.outcome ?? run.status} />
+          <StatusTag status={runStatus(run)} />
         </Button>
       </DetailsTip>
       <MachineBadge id={runMachine(run)} />
@@ -222,19 +235,40 @@ export function contextUsage(run: RunView | undefined): string {
   if (!reading) return NONE;
   return `已用 ${reading.used}%，剩余 ${reading.remaining}%（${reading.window}）`;
 }
-/** The execution list consistently shows used percentage, including missing samples. */
+const meterTones: Record<ContextLevel, MeterTone> = {
+  normal: "neutral",
+  handoff: "warning",
+  restart: "danger",
+};
+/**
+ * The execution list consistently shows used percentage, including missing
+ * samples. C-504: list mode adds a meter under a recorded reading.
+ */
 function ContextCell({
   run,
   labelled = false,
+  meter = false,
 }: {
   readonly run: RunView | undefined;
   readonly labelled?: boolean;
+  readonly meter?: boolean;
 }) {
   const reading = contextReading(run);
+  const value = reading ? `${reading.used}%` : NONE;
   return (
     <span className="execution-context hint" data-level={reading?.level}>
       {labelled ? "上下文 " : ""}
-      {reading ? `${reading.used}%` : NONE}
+      {meter && reading ? (
+        <Meter
+          value={reading.meter}
+          tone={meterTones[reading.level]}
+          label={`上下文已用 ${reading.used}%`}
+        >
+          {value}
+        </Meter>
+      ) : (
+        value
+      )}
     </span>
   );
 }
@@ -357,11 +391,9 @@ function RuntimeState({
           <StatusTag status={a.runtime_state} />
         )}
         {!a.external && run?.status === "queued" && (
-          <StatusTag status="queued" />
+          <StatusTag status={runStatus(run)} />
         )}
-        {run && abnormalRun(run) && (
-          <StatusTag status={run.outcome ?? run.status} />
-        )}
+        {run && abnormalRun(run) && <StatusTag status={runStatus(run)} />}
         {a.status !== "active" && a.status !== a.runtime_state && (
           <StatusTag status={a.status} />
         )}
@@ -474,7 +506,11 @@ export function AssignmentRow({
     >
       <TableCell data-column="employee">
         <IdentityRow className="execution-employee">
-          <EmployeeIdentity {...a} author_role={a.role_id} />
+          <EmployeeIdentity
+            {...a}
+            author_role={a.role_id}
+            presence={a.card_id ? runPresence(a.run_presence) : undefined}
+          />
           <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
         </IdentityRow>
       </TableCell>
@@ -490,7 +526,7 @@ export function AssignmentRow({
         <AssignmentMachine a={a} />
       </TableCell>
       <TableCell data-column="context">
-        <ContextCell run={run} />
+        <ContextCell run={run} meter />
       </TableCell>
       <TableCell data-column="config" className="execution-config">
         <LongContent lines={2}>{runConfig(run)}</LongContent>
@@ -529,7 +565,11 @@ export function AssignmentCard({
       <BoardCardLayout className="card-tile ui-surface-card">
         {(!lane || showEmployee) && (
           <IdentityRow className="execution-card-head">
-            <EmployeeIdentity {...a} author_role={a.role_id} />
+            <EmployeeIdentity
+              {...a}
+              author_role={a.role_id}
+              presence={a.card_id ? runPresence(a.run_presence) : undefined}
+            />
             <span className="execution-state">
               <RuntimeState a={a} run={run} />
             </span>
@@ -551,7 +591,7 @@ export function AssignmentCard({
 
         <IdentityRow className="execution-card-context metadata">
           <AssignmentMachine a={a} />
-          <ContextCell run={run} labelled />
+          <ContextCell run={run} labelled meter={!lane} />
         </IdentityRow>
         <IdentityRow className="execution-card-foot">
           <OpenButton a={a} open={open} onOpen={onOpen} button={button} />

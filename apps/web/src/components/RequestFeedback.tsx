@@ -30,12 +30,18 @@ export function RequestFeedbackScope({
 /** False inside a retained panel that is currently hidden. */
 export const useFeedbackVisible = () => useContext(FeedbackVisible);
 
-/** Share a stack, inside the active dialog when applicable (Radix hides its siblings). */
+/**
+ * Share a stack, inside the active dialog when applicable (Radix hides its
+ * siblings). A nearer `[data-feedback-host]` (e.g. a settings drawer body)
+ * holds its own stack, which that host lays out in its flow.
+ */
 function useFeedbackRegion() {
   const anchor = useRef<HTMLSpanElement>(null);
   const [target, setTarget] = useState<HTMLDivElement>();
   useEffect(() => {
-    const parent = anchor.current?.closest('[role="dialog"]') ?? document.body;
+    const parent =
+      anchor.current?.closest('[data-feedback-host], [role="dialog"]') ??
+      document.body;
     let region = regions.get(parent);
     if (!region) {
       const node = document.createElement("div");

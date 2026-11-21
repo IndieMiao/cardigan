@@ -48,12 +48,24 @@
     --ui-content-width: 1088px;
     --ui-settings-nav: 160px;
     --ui-settings-width: 720px;
+    /* C-494: a confirmation raised from inside a drawer sits above it. */
+    --ui-layer-confirm: 110;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
     --ui-graph-node: 176px;
     --ui-graph-node-compact: 144px;
     --ui-avatar-size: 32px;
     --ui-avatar-compact: 24px;
+    /* C-531: running ring, isolation line and one clockwise orbit. */
+    --ui-run-ring: 2px;
+    --ui-run-keyline: 1px;
+    --ui-run-cycle: 2.8s;
+    /* C-534: a wrapping Markdown table column never gets narrower than this. */
+    --ui-markdown-column: 5em;
+    /* C-534: label gutter of a help table record on narrow screens. */
+    --ui-markdown-label: 5em;
+    /* C-504: a thin meter track under its value text. */
+    --ui-meter: 3px;
     --ui-pill-radius: 999px;
     --ui-panel-padding: 16px;
     --ui-shadow: 0 4px 16px #0003;
@@ -362,6 +374,14 @@
     max-height: var(--radix-dropdown-menu-content-available-height);
     overflow-y: auto;
   }
+  .ui-suggestions {
+    width: var(--ui-menu-max);
+    max-height: min(
+      var(--radix-popover-content-available-height),
+      calc(var(--ui-control-regular) * 8 + var(--ui-space-1) * 2)
+    );
+    overflow-y: auto;
+  }
   .ui-select-item,
   .ui-menu-item {
     display: flex;
@@ -386,6 +406,32 @@
   .ui-select-item[data-state="checked"] {
     color: var(--ui-selected-text);
     background: var(--ui-selected);
+  }
+  .ui-suggestion {
+    min-height: var(--ui-control-regular);
+    padding-inline-end: var(--ui-space-2);
+    cursor: pointer;
+  }
+  .ui-suggestion-label,
+  .ui-suggestion-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ui-suggestion-label {
+    flex: 0 1 auto;
+  }
+  /* The meta only takes the room the label leaves, so a long title never
+     shortens the name; the name itself shrinks only when it alone overflows. */
+  .ui-suggestion-meta {
+    flex: 1 1 0;
+    color: var(--text-muted);
+  }
+  .ui-suggestion-status {
+    padding: var(--ui-space-1) var(--ui-space-2);
+    color: var(--text-muted);
+    line-height: var(--ui-leading);
   }
   .ui-item-indicator {
     position: absolute;
@@ -468,6 +514,58 @@
   }
   .ui-skeleton > div:last-child {
     width: 80%;
+  }
+  /* The track hangs below the value's line box, so the value keeps its
+     baseline and the row keeps its height. */
+  .ui-meter {
+    --ui-meter-color: var(--text-muted);
+    position: relative;
+    display: inline-block;
+  }
+  .ui-meter[data-tone="warning"] {
+    --ui-meter-color: var(--status-wait);
+  }
+  .ui-meter[data-tone="danger"] {
+    --ui-meter-color: var(--danger);
+  }
+  .ui-meter-track {
+    position: absolute;
+    top: calc(100% + var(--ui-space-1));
+    left: 0;
+    display: block;
+    width: 100%;
+    height: var(--ui-meter);
+    margin: 0;
+    border: 0;
+    border-radius: var(--ui-pill-radius);
+    overflow: hidden;
+    appearance: none;
+    background: var(--border);
+  }
+  /* The bar and value get the track height explicitly: with percentage
+     heights or a restyled inner element the value fills only its top row. */
+  .ui-meter-track::-webkit-meter-bar,
+  .ui-meter-track::-webkit-meter-optimum-value,
+  .ui-meter-track::-webkit-meter-suboptimum-value,
+  .ui-meter-track::-webkit-meter-even-less-good-value {
+    box-sizing: border-box;
+    height: var(--ui-meter);
+    margin: 0;
+    border: 0;
+    border-radius: var(--ui-pill-radius);
+  }
+  .ui-meter-track::-webkit-meter-bar {
+    background: var(--border);
+  }
+  .ui-meter-track::-webkit-meter-optimum-value,
+  .ui-meter-track::-webkit-meter-suboptimum-value,
+  .ui-meter-track::-webkit-meter-even-less-good-value {
+    background: var(--ui-meter-color);
+  }
+  .ui-meter-track::-moz-meter-bar {
+    height: var(--ui-meter);
+    border-radius: var(--ui-pill-radius);
+    background: var(--ui-meter-color);
   }
   .ui-badge {
     display: inline-flex;
@@ -647,6 +745,11 @@
     vertical-align: top;
     border-bottom: var(--ui-stroke) solid var(--border);
   }
+  .ui-table-row[aria-current="true"],
+  .ui-table-row[aria-current="true"] > .ui-table-cell {
+    background: var(--ui-selected);
+    color: var(--ui-selected-text);
+  }
 }
 
 @layer components {
@@ -794,5 +897,95 @@
     color: var(--text-muted);
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
+  }
+}
+
+/* C-534: one table look for every Markdown body (timeline, card goal, Needs
+   You, help). The renderers wrap each table in .ui-markdown-table, which
+   scrolls on its own instead of widening the body or the drawer. */
+@layer components {
+  .ui-markdown-table {
+    /* Never lends the table's width to an auto-sized ancestor. */
+    contain: inline-size;
+    overflow-x: auto;
+    margin-block: 0 var(--ui-space-2);
+  }
+  .ui-markdown-table:last-child {
+    margin-block-end: 0;
+  }
+  .ui-markdown-table > table {
+    width: auto;
+    border-collapse: collapse;
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .ui-markdown-table :is(th, td) {
+    min-width: 0;
+    padding: var(--ui-space-1) var(--ui-space-2);
+    border-bottom: var(--ui-stroke) solid var(--border);
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+  .ui-markdown-table th {
+    background: var(--surface-muted);
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .ui-markdown-table td[data-wide] {
+    min-width: var(--ui-markdown-column);
+    white-space: normal;
+  }
+  .ui-markdown-table [data-align="center"] {
+    text-align: center;
+  }
+  .ui-markdown-table [data-align="right"] {
+    text-align: right;
+  }
+  /* In a cell a tag flows as text on the 20px line: the badge stays whole,
+     its description and the words after it wrap like the rest of the cell,
+     so a column is never wider than its badge needs. */
+  .ui-markdown-table .id-tag {
+    display: inline;
+  }
+  .ui-markdown-table .id-badge {
+    vertical-align: baseline;
+  }
+  /* A short-value column keeps the whole tag on its line; in a wrapping
+     column the description flows with the text, keeping a short label such
+     as “卡片” together without letting a long one set the column width. */
+  .ui-markdown-table td:not([data-wide]) .id-description {
+    white-space: nowrap;
+  }
+  .ui-markdown-table td[data-wide] .id-description {
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  /* Help keeps its narrow-screen records from the legacy help styles. */
+  @media (max-width: 760px) {
+    .ui-markdown-table[data-layout="stacked"] {
+      contain: none;
+      overflow-x: visible;
+    }
+    .ui-markdown-table[data-layout="stacked"] :is(table, th, td) {
+      width: revert-layer;
+      min-width: revert-layer;
+      padding: revert-layer;
+      border-bottom: revert-layer;
+      text-align: revert-layer;
+      white-space: revert-layer;
+    }
+    /* Label in a hanging gutter, so tags, code and links in the value keep
+       flowing as one line of text instead of becoming separate grid items. */
+    .ui-markdown-table[data-layout="stacked"] td:not(:first-child) {
+      display: block;
+      padding-inline-start: calc(var(--ui-markdown-label) + var(--ui-space-2));
+    }
+    .ui-markdown-table[data-layout="stacked"] td:not(:first-child)::before {
+      display: inline-block;
+      width: var(--ui-markdown-label);
+      margin-inline: calc(-1 * (var(--ui-markdown-label) + var(--ui-space-2)))
+        var(--ui-space-2);
+    }
   }
 }

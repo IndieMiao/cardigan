@@ -1,25 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ApiError,
   type CardiganClient,
   type CreateEmployeeInput,
   describeWriteError,
   type EmployeeOptions,
+  type EmployeeSummary,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
-import { EmptyState } from "../components/Foundation.js";
+import { EmptyState, StatusTag } from "../components/Foundation.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
 import {
   SettingsAvatar,
   SettingsDialogActions,
   SettingsDialogFields,
+  SettingsFact,
+  SettingsFacts,
   SettingsHelp,
   SettingsIdentity,
   SettingsPanel,
   SettingsTable,
   SettingsWarning,
   settingsDrawerClassName,
+  useDiscardGuard,
   useDrawerReturnFocus,
 } from "../components/layout/SettingsLayout.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
@@ -65,7 +69,15 @@ export function EmployeesSettings({
     initialRole ? { person: "" } : undefined,
   );
   const [version, setVersion] = useState(0);
+  const [editing, setEditing] = useState<string>();
   const visible = options.data?.library.filter((item) => matches(item, search));
+  const staff = options.data?.employees?.filter(
+    (e) => !e.projects?.length || e.projects.includes(projectId),
+  );
+  const roleName = (id: string) =>
+    options.data?.roles.find((r) => r.role_id === id)?.display_name ?? id;
+  const edit = useDrawerReturnFocus(editing !== undefined);
+  const editedEmployee = staff?.find((e) => e.id === editing);
   const newEmployee = useRef<HTMLButtonElement>(null);
   const { remember, forget } = useDrawerReturnFocus(
     form !== undefined && options.data !== undefined,
@@ -109,11 +121,77 @@ export function EmployeesSettings({
         retry={options.reload}
         pendingMessage={copy.loading}
       />
+      {staff && staff.length > 0 && (
+        <SettingsTable label="员工" aria-label="员工列表">
+          <TableHeader>
+            <TableRow>
+              <TableHead>员工</TableHead>
+              <TableHead>职位</TableHead>
+              <TableHead>角色</TableHead>
+              <TableHead>状态</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {staff.map((employee) => (
+              <TableRow key={employee.id}>
+                <DataTableCell nowrap data-record="lead">
+                  <SettingsIdentity>
+                    {employee.avatar && (
+                      <SettingsAvatar src={employee.avatar} loading="lazy" />
+                    )}
+                    <Button
+                      variant="link"
+                      aria-haspopup="dialog"
+                      onClick={() => {
+                        edit.remember();
+                        setMessage("");
+                        setEditing(employee.id);
+                      }}
+                    >
+                      {employee.name}
+                    </Button>
+                  </SettingsIdentity>
+                </DataTableCell>
+                <DataTableCell data-label="职位">
+                  {employee.title || "—"}
+                </DataTableCell>
+                <DataTableCell nowrap data-label="角色">
+                  {roleName(employee.role_id)}
+                </DataTableCell>
+                <DataTableCell nowrap data-record="aside">
+                  <StatusTag
+                    status={
+                      employee.status === "inactive" ? "inactive" : "active"
+                    }
+                    label={employee.status === "inactive" ? "已离职" : "在职"}
+                  />
+                </DataTableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </SettingsTable>
+      )}
+      {options.data && editedEmployee && (
+        <EmployeeRoleDrawer
+          key={editedEmployee.id}
+          client={client}
+          projectId={projectId}
+          employee={editedEmployee}
+          options={options.data}
+          refresh={options.reload}
+          onClose={() => setEditing(undefined)}
+          onSaved={(note) => {
+            setEditing(undefined);
+            setMessage(note);
+            options.reload();
+          }}
+        />
+      )}
       {visible && visible.length === 0 && (
         <EmptyState>{copy.emptySearch}</EmptyState>
       )}
       {visible && visible.length > 0 && (
-        <SettingsTable aria-label="人物库">
+        <SettingsTable label="人物库" aria-label="人物库">
           <TableHeader>
             <TableRow>
               <TableHead>人物</TableHead>
@@ -474,6 +552,160 @@ function EmployeeForm({
             </Button>
           </SettingsDialogActions>
         </form>
+      </CardDetailLayout>
+    </Drawer>
+  );
+}
+
+const BLOCKED_REASONS = {
+  run: "这名员工还有未结束的运行，结束后才能换角色。",
+  assignment: "这名员工还有未释放的指派，释放后才能换角色。",
+} as const;
+
+/**
+ * C-494 item 5: change an employee's role (a transfer, C-493). The read says
+ * when the server would refuse — an unfinished run or a bound assignment — so
+ * the choice is disabled with that reason; the server still decides.
+ */
+function EmployeeRoleDrawer({
+  client,
+  projectId,
+  employee,
+  options,
+  refresh,
+  onClose,
+  onSaved,
+}: {
+  client: CardiganClient;
+  projectId: string;
+  employee: EmployeeSummary;
+  options: EmployeeOptions;
+  refresh: () => void;
+  onClose: () => void;
+  onSaved: (note: string) => void;
+}) {
+  const [role, setRole] = useState(employee.role_id);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const sending = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const keys = useRef(new Map<string, string>());
+  const blocked = employee.role_change_blocked
+    ? BLOCKED_REASONS[employee.role_change_blocked]
+    : undefined;
+  const reasonId = useId();
+  const changed = role !== employee.role_id;
+  const guard = useDiscardGuard(changed, onClose);
+  const roles = options.roles.some((r) => r.role_id === employee.role_id)
+    ? options.roles
+    : [
+        { role_id: employee.role_id, display_name: employee.role_id },
+        ...options.roles,
+      ];
+  const label = (id: string) =>
+    roles.find((r) => r.role_id === id)?.display_name ?? id;
+  return (
+    <Drawer
+      className={settingsDrawerClassName}
+      open
+      onOpenChange={(next) => {
+        if (!next && !busy) guard.confirmClose();
+      }}
+      title={employee.name}
+      description={`员工 ${employee.id}`}
+      initialFocus="close"
+    >
+      <CardDetailLayout className="card-page-drawer">
+        <SettingsFacts>
+          <SettingsFact label="编号">{employee.id}</SettingsFact>
+          <SettingsFact label={copy.title}>
+            {employee.title || "—"}
+          </SettingsFact>
+          <SettingsFact label="状态">
+            {employee.status === "inactive" ? "已离职" : "在职"}
+          </SettingsFact>
+        </SettingsFacts>
+        <form
+          aria-label="修改角色"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (sending.current || !changed || blocked) return;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            const signature = JSON.stringify([employee.id, role]);
+            const key = keys.current.get(signature) ?? crypto.randomUUID();
+            keys.current.set(signature, key);
+            try {
+              await client.updateEmployee(
+                projectId,
+                employee.id,
+                { role_id: role },
+                key,
+              );
+              keys.current.delete(signature);
+              if (alive.current)
+                onSaved(`已将 ${employee.name} 的角色改为 ${label(role)}`);
+            } catch (cause) {
+              if (!alive.current) return;
+              setError(describeWriteError(cause));
+              // A run or assignment may have started meanwhile.
+              refresh();
+            } finally {
+              sending.current = false;
+              if (alive.current) setBusy(false);
+            }
+          }}
+        >
+          <SettingsDialogFields>
+            <label>
+              {copy.role}
+              <SelectControl
+                value={role}
+                disabled={busy || blocked !== undefined}
+                aria-describedby={blocked ? reasonId : undefined}
+                onValueChange={(next) => {
+                  setRole(next);
+                  setError("");
+                }}
+              >
+                {roles.map((item) => (
+                  <option key={item.role_id} value={item.role_id}>
+                    {item.display_name}（{item.role_id}）
+                  </option>
+                ))}
+              </SelectControl>
+            </label>
+            {blocked && (
+              <SettingsWarning id={reasonId}>{blocked}</SettingsWarning>
+            )}
+            {error && <SettingsWarning role="alert">{error}</SettingsWarning>}
+          </SettingsDialogFields>
+          <SettingsDialogActions>
+            <Button onClick={guard.confirmClose} disabled={busy}>
+              取消
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={busy || !changed || blocked !== undefined}
+            >
+              保存角色
+            </Button>
+          </SettingsDialogActions>
+          <RequestFeedback
+            interactive
+            pending={busy}
+            pendingMessage="正在保存角色…"
+          />
+        </form>
+        {guard.dialog}
       </CardDetailLayout>
     </Drawer>
   );

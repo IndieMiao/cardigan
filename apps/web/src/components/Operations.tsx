@@ -11,12 +11,18 @@ export function Markdown({ body }: { body: string }) {
   return (
     <LongContent>
       <Prose text={body}>
-        <div
-          className="markdown"
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
-        />
+        <MarkdownBody body={body} />
       </Prose>
     </LongContent>
+  );
+}
+/** The bare rendered body, for callers that own their own folding (list items). */
+export function MarkdownBody({ body }: { body: string }) {
+  return (
+    <div
+      className="markdown"
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
+    />
   );
 }
 export function CardLink({

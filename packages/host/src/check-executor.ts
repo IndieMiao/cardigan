@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { withCheckoutDeadline } from "./checkout-deadline.js";
+import { githubJobLog, type StepTime } from "./github-job-log.js";
 import {
   type CheckoutInput,
   type CheckoutResult,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 
-export { CheckExecutorSuspended } from "./checkout-deadline.js";
+export {
+  CandidateRepositoryBusy,
+  CheckExecutorSuspended,
+} from "./checkout-deadline.js";
 
 /** Fixed provider categories only; raw transport errors must not cross this boundary. */
 export class CheckExecutorUnavailable extends Error {
@@ -30,16 +34,26 @@ export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly mergeTier?: "card" | "batch";
   readonly kind: "merge_check" | "precheck";
   /** Recheck scheduling after asynchronous preparation, immediately before execution. */
-  readonly beforeDispatch?: () => void;
+  readonly beforeDispatch?: () => void | Promise<void>;
   /** Host shutdown detaches supervision; business cancellation continues to use signal. */
   readonly hostSignal?: AbortSignal;
   /** Trusted provider progress; never candidate output. */
   readonly onProgress?: (summary: string) => void;
+  readonly resetFailureLog?: (name: string) => void;
   readonly onExecutionStarted?: () => void;
 }
 /** Provider-private state is held by the executor, never by domain events. */
 export interface CheckHandle {
   readonly id: string;
+}
+/** Each download attempt starts a fresh stream; partial logs must not be spliced. */
+export type OpenFailureLog = (
+  steps?: readonly StepTime[],
+) => (text: string) => void;
+export class FailureLogError extends Error {
+  constructor(readonly category: NonNullable<CheckoutResult["logFailure"]>) {
+    super(category);
+  }
 }
 export interface CheckExecutor {
   /** Additional startup budget; execution gets its original deadline on start. */
@@ -49,7 +63,11 @@ export interface CheckExecutor {
   poll(handle: CheckHandle): Promise<CheckoutResult>;
   cancel(handle: CheckHandle): Promise<void>;
   /** Raw private output; consumers must use the host log redactor. */
-  fetchFailureLog(handle: CheckHandle): Promise<string | undefined>;
+  fetchFailureLog(
+    handle: CheckHandle,
+    open: OpenFailureLog,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 /** Provider-independent deadline, cancellation and late-callback fence. */
@@ -79,8 +97,9 @@ export async function runCheckExecutor(
       request,
       async (input) => {
         let executing = true;
+        const { resetFailureLog, ...dispatchInput } = input;
         const handle = await executor.dispatch({
-          ...input,
+          ...dispatchInput,
           onProgress: (summary) => {
             if (executing && !closed && !input.signal?.aborted)
               input.onProgress?.(summary);
@@ -135,22 +154,55 @@ export async function runCheckExecutor(
           if (input.signal?.aborted || closed) return terminal;
           polled = terminal;
           if (terminal.status !== "passed") {
+            const name =
+              terminal.checks.find(
+                (step) =>
+                  !["passed", "not_run", "skipped"].includes(step.status),
+              )?.name ?? "executor";
+            const signal =
+              request.hostSignal && input.signal
+                ? AbortSignal.any([input.signal, request.hostSignal])
+                : input.signal;
+            const streams = new Set([name]);
+            let router: ReturnType<typeof githubJobLog> | undefined;
+            const emit = (step: string, text: string) => {
+              if (closed || signal?.aborted) return;
+              streams.add(step);
+              input.onOutput?.(step, text);
+            };
             try {
-              const failure = await executor.fetchFailureLog(handle);
-              if (!closed && !input.signal?.aborted && failure !== undefined)
-                input.onOutput?.(
-                  terminal.checks.find(
-                    (step) =>
-                      !["passed", "not_run", "skipped"].includes(step.status),
-                  )?.name ?? "executor",
-                  failure,
-                );
-            } catch {
-              if (!closed && !input.signal?.aborted)
+              await executor.fetchFailureLog(
+                handle,
+                (steps) => {
+                  if (!closed && !signal?.aborted)
+                    for (const key of streams) resetFailureLog?.(key);
+                  router = steps
+                    ? githubJobLog(
+                        steps,
+                        terminal.checks.map((s) => s.name),
+                        emit,
+                        terminal.failedGithubStep,
+                      )
+                    : undefined;
+                  return router?.write ?? ((text) => emit(name, text));
+                },
+                signal,
+              );
+              if (router && !router.finish())
+                polled = { ...terminal, logAttributionIncomplete: true };
+            } catch (error) {
+              const category = signal?.aborted
+                ? "timeout_or_cancel"
+                : error instanceof FailureLogError
+                  ? error.category
+                  : "api";
+              if (terminal.logSource)
+                polled = { ...terminal, logFailure: category };
+              if (!closed && !signal?.aborted)
                 diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
             }
           }
-          return terminal;
+          return polled;
         } finally {
           executing = false;
           input.signal?.removeEventListener("abort", cancel);
@@ -163,7 +215,9 @@ export async function runCheckExecutor(
     // result. A stuck download is bounded by the same deadline as execution.
     if (polled && result !== polled) {
       diagnostic("检查失败日志获取超时或取消，保留原执行结果与清理提示");
-      return polled;
+      return polled.logSource
+        ? { ...polled, logFailure: "timeout_or_cancel" }
+        : polled;
     }
     return result;
   } catch (error) {
@@ -197,7 +251,7 @@ export class SshCheckExecutor implements CheckExecutor {
   async dispatch(request: CheckRequest): Promise<CheckHandle> {
     await this.options.distribute();
     const { kind: _kind, ...input } = request;
-    request.beforeDispatch?.();
+    await request.beforeDispatch?.();
     const abort = new AbortController();
     const handle = { id: randomUUID() };
     const result = (this.options.run ?? runInTemporaryCheckout)({

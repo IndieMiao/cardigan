@@ -3,6 +3,7 @@ import {
   type Actor,
   abortMergeBatch,
   abortMergeBatchPublish,
+  batchFailures,
   beginMergeBatchPublish,
   type CommandEffect,
   type CommandState,
@@ -24,6 +25,7 @@ import {
   recordMergeBatchCheck,
   recordMergeBatchResult,
   recordMergeCheck,
+  recordMergeCheckWait,
   recordMergeResult,
   referenceProjectSnapshot,
   referenceReadState,
@@ -132,7 +134,7 @@ async function fixture(count = 3, flow_version = 1) {
     );
   const check = (
     batch: MergeBatch,
-    status: "passed" | "failed",
+    status: "queued" | "passed" | "failed" | "repository_busy",
     attempt = `batch-${batch.id}`,
     summary = status as string,
   ) => {
@@ -160,6 +162,28 @@ async function fixture(count = 3, flow_version = 1) {
         io,
       ),
     );
+    if (status === "queued") return;
+    if (status === "repository_busy") {
+      commit(
+        recordMergeBatchCheck(
+          state,
+          system,
+          {
+            ...p,
+            check: {
+              ...identity,
+              status: "failed",
+              startup_failure: status,
+              checks: [],
+              summary,
+              log_ref: `${attempt}.log`,
+            },
+          },
+          io,
+        ),
+      );
+      return;
+    }
     commit(
       recordMergeBatchCheck(
         state,
@@ -231,6 +255,64 @@ test("MB identifiers do not alias members, and card checks cannot authorize publ
       f.io,
     ).ok,
   ).toBe(false);
+});
+
+test("only a matching host wait is visible to batch members; it is not check evidence", async () => {
+  const f = await fixture(2),
+    batch = f.form(),
+    tail = batch.members.at(-1),
+    peer = batch.members[0];
+  if (!tail || !peer) throw new Error("Missing members");
+  f.check(batch, "queued");
+  const observe = (reason: string) =>
+    recordMergeCheckWait(
+      f.state(),
+      system,
+      {
+        card_id: tail.card_id,
+        completion_id: tail.completion_id,
+        batch_id: batch.id,
+        attempt_id: `batch-${batch.id}`,
+        reason,
+      },
+      f.io,
+    );
+  const before = mergeBatches(f.state().events);
+  f.commit(observe("first wait"));
+  f.commit(observe("current wait"));
+  expect(value(observe("current wait")).events).toEqual([]);
+  expect(mergeBatches(f.state().events)).toEqual(before);
+  expect(
+    beginMergeBatchPublish(f.state(), system, { batch_id: batch.id }, f.io).ok,
+  ).toBe(false);
+  const state = f.state(),
+    wait = state.events.findLast((e) => e.type === "merge_check_waiting");
+  if (!wait) throw new Error("Missing observation");
+  const payload = {
+    ...(wait.payload as Record<string, string>),
+    reason: "unrelated wait",
+  };
+  // A newer observation on another target or stream must not shadow this one.
+  const events = [
+    ...state.events,
+    { ...wait, payload, actor: human },
+    { ...wait, payload, actor: { ...system, project_id: "other" } },
+    { ...wait, payload, card_id: peer.card_id },
+    ...[
+      { batch_id: "MB-999" },
+      { attempt_id: "other" },
+      { completion_id: "D-999" },
+    ].map((change) => ({ ...wait, payload: { ...payload, ...change } })),
+  ];
+  for (const card of state.cards)
+    expect(
+      mergeStage({ ...state, events }, card)?.batch_check?.queue_wait?.reason,
+    ).toBe("current wait");
+  f.check(batch, "passed");
+  for (const card of f.state().cards)
+    expect(
+      mergeStage(f.state(), card)?.batch_check?.queue_wait,
+    ).toBeUndefined();
 });
 
 test("one batch owns all three cards and only a passed final tree publishes all members atomically", async () => {
@@ -423,6 +505,61 @@ test.each(["passed", "failed"] as const)(
       );
       expect(mergeQueue(f.state())).toEqual([]);
     }
+  },
+);
+
+test.each(["main", "probe"])(
+  "C-533: a repository-busy %s cannot confirm a failure or implicate a batch member",
+  async (kind) => {
+    const f = await fixture(2, 2),
+      batch = f.form();
+    let target = batch;
+    if (kind === "probe") {
+      f.check(batch, "failed");
+      f.commit(
+        startMergeBatchBisect(f.state(), system, { batch_id: batch.id }, f.io),
+      );
+      target = f.commit(
+        formBisectProbe(
+          f.state(),
+          system,
+          { batch_id: batch.id, length: 1 },
+          f.io,
+        ),
+      );
+    }
+    f.check(target, "repository_busy");
+    const id = { batch_id: target.id };
+    expect(startMergeBatchBisect(f.state(), system, id, f.io).ok).toBe(false);
+    expect(requeueMergeBatch(f.state(), system, id, f.io).ok).toBe(false);
+    expect(batchFailures(f.state().events, target.id)).toEqual([]);
+    expect(
+      identifyMergeBatchCulprit(
+        f.state(),
+        system,
+        { batch_id: batch.id, failed_batch_id: target.id },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    expect(beginMergeBatchPublish(f.state(), system, id, f.io).ok).toBe(false);
+    f.commit(
+      abortMergeBatch(
+        f.state(),
+        system,
+        { batch_id: batch.id, reason: "repository_busy" },
+        f.io,
+      ),
+    );
+    expect(mergeQueue(f.state())).toEqual([]);
+    expect(
+      f.state().events.filter((e) => e.type === "merge_batch_member_deferred"),
+    ).toHaveLength(2);
+    const [first] = f.members;
+    if (!first) throw new Error("Missing first member");
+    const { card_id } = first;
+    f.commit(recheckMerge(f.state(), human, { card_id }, f.io));
+    expect(recheckMerge(f.state(), human, { card_id }, f.io).ok).toBe(false);
+    expect(mergeQueue(f.state()).map((q) => q.plan.card_id)).toEqual([card_id]);
   },
 );
 

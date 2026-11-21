@@ -54,12 +54,16 @@ export function DialogDescription({
 export function DialogContent({
   children,
   inlineFeedback = false,
+  overlayClassName,
   className,
   ...props
-}: React.ComponentProps<typeof DialogPanel> & { inlineFeedback?: boolean }) {
+}: React.ComponentProps<typeof DialogPanel> & {
+  inlineFeedback?: boolean;
+  overlayClassName?: string | undefined;
+}) {
   return (
     <Portal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} />
       <DialogPanel
         {...props}
         className={cn(

@@ -35,6 +35,7 @@ import {
   obsoleteDispatchAttention,
   pendingPrecheckConflict,
   pmNotificationState,
+  providerAdmission,
   queueRun,
   refreshRunTargetWait,
   refreshTestReviewLimits,
@@ -163,6 +164,8 @@ export type LaunchSnapshot = Pick<
 
 export interface DispatcherOptions {
   /** Passive standing-PM observation; inactivity cancellation keeps its existing policy. */
+  readonly providerFailureThreshold?: number;
+  readonly providerCooldownMs?: number;
   readonly pmRecoveryIntervalMs?: number;
   readonly proveReviewLimit?: NonNullable<MergeGit["proveReviewLimit"]>;
   readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
@@ -321,6 +324,8 @@ export class Dispatcher {
       this.maxRetries < 0 ||
       this.maxRetries > 30 ||
       ![
+        options.providerFailureThreshold ?? 1,
+        options.providerCooldownMs ?? 1,
         this.retryBaseMs,
         this.inactivityGraceMs,
         this.dispatchTimeoutMs,
@@ -1525,6 +1530,26 @@ export class Dispatcher {
         return;
       if (unreadableCommentTrigger(state, run)) return;
       if (run.status === "queued") {
+        const profile =
+          snapshot.launch_profile_ref ??
+          run.launch_profile_ref ??
+          (a.employee_id &&
+            tx.employees.get(a.employee_id)?.launch_profile_ref) ??
+          getRoleVersion(tx, project, a.role_id, a.role_version)
+            ?.launch_profile_ref;
+        const probe = providerAdmission(state, profile, at, (r) =>
+          unfinishedBellAttempts(store.database, project, r.assignment_id).some(
+            (b) => b.run_id === r.id,
+          ),
+        );
+        if (probe === "wait") {
+          if (run.queue_reason !== "provider_unavailable")
+            tx.runs.put(project, {
+              ...run,
+              queue_reason: "provider_unavailable",
+            });
+          return;
+        }
         const leases = this.options.leases;
         const keysNeeded = assignmentResourceKeys(tx, project, a);
         const blocked = leases?.blocked(
@@ -1554,7 +1579,11 @@ export class Dispatcher {
         }
         // A pending launch is reserved by its BellAttempt until dispatchRun
         // commits. It must no longer appear as a capacity wait in read views.
-        const cleared = { ...run, resource_keys: keys };
+        const cleared = {
+          ...run,
+          resource_keys: keys,
+          ...(probe ? { provider_probe: probe } : {}),
+        };
         delete cleared.queue_reason;
         run = cleared;
         tx.runs.put(project, run);
@@ -1759,6 +1788,7 @@ export class Dispatcher {
     ) {
       const stopped = await dispatchRecovery(
         {
+          ...this.options,
           store,
           runtime,
           clock: this.clock,
