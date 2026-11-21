@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
+import { captureBellReceipt } from "./commands/bell-receipt.js";
 import { ToolError, toDomainError } from "./errors.js";
 import type { Logger } from "./log.js";
 import {
@@ -178,6 +179,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
 
     stage("validate");
     try {
+      const receive = captureBellReceipt(context, toolName, parsed.data);
       const value = await definition.handler(
         parsed.data as Record<string, unknown>,
         {
@@ -187,6 +189,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
           },
         },
       );
+      receive?.();
       stage("handler");
       const result = {
         structuredContent: asStructured(value),

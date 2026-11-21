@@ -14,6 +14,7 @@ import {
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
+  idleWakeGuard,
   type ProjectId,
   providerStartFailed,
   type Run,
@@ -34,12 +35,14 @@ import {
   withdrawDispatchStop,
 } from "@cardigan/domain";
 import {
+  armBellReceipt,
   bindRepairAttempt,
   crossRepairSendBoundary,
   deferIfTargetWait,
   failAutomaticContextRun,
   type HarnessActivityInspection,
   type MachineLeases,
+  recordWakeRefusal,
   refreshTargetWait,
   testReviewRunPrompt,
   tryHostOpsLock,
@@ -55,7 +58,6 @@ import {
   recordNotification,
   type Store,
   type StoreTransactionContext,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
@@ -68,6 +70,7 @@ import {
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
+import { notificationBell } from "./dispatch-inbox.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 import {
@@ -575,6 +578,16 @@ export async function retryDispatchedRuns(
         (run.status !== "dispatched" &&
           !(run.status === "queued" && dispatchRecoveryQueuedAt(state, run))) ||
         run.started_at ||
+        // Give a confirmed send to the receipt monitor. After handoff, allow the
+        // original timeout policy a fresh window; obsolete targets only retire.
+        (run.bell_delivery?.run_id === run.id &&
+          run.bell_delivery.sent_at &&
+          a &&
+          reviewRunWakeDisposition(state, a, run) !== "obsolete" &&
+          (!run.bell_delivery.escalated_at ||
+            Date.parse(clock.now()) -
+              Date.parse(run.bell_delivery.escalated_at) <
+              policy.timeoutMs)) ||
         run.dispatch_stop ||
         run.inactivity_stop ||
         stoppedByHuman(state.events, candidate.assignment_id) ||
@@ -619,6 +632,13 @@ export async function retryDispatchedRuns(
         state.decisions.some(
           (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
         );
+      const refusedClaim =
+        !disposition &&
+        !run.bell_delivery?.sent_at &&
+        last?.outcome === "failed" &&
+        (run.bell_delivery?.refused_attempt_id === last.id ||
+          (sameTarget && binding?.refused_at && !binding.sending_at));
+      const refusedFirstWrite = !shared && refusedClaim;
       // Keep every receipt for audit. A positive refusal for this shared target
       // neither spends nor resets the ordinary failure budget since the last send.
       let failures = 0;
@@ -645,6 +665,7 @@ export async function retryDispatchedRuns(
       // A wait finishing is not a send. Only an actual boundary (or a legacy
       // result) starts the restored ack window. Clear failures still back off.
       const noSendYet =
+        refusedFirstWrite ||
         withdrawn ||
         legacy === "unsent" ||
         (!reconcile &&
@@ -686,7 +707,9 @@ export async function retryDispatchedRuns(
           (!noSendYet || readmit) &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
-          (!unconfirmed && failures >= policy.maxRetries + 1));
+          (!refusedFirstWrite &&
+            !unconfirmed &&
+            failures >= policy.maxRetries + 1));
       const retry =
         run.status === "dispatched" &&
         last?.outcome === "failed" &&
@@ -707,10 +730,13 @@ export async function retryDispatchedRuns(
         recover,
         reconcile,
         readmit,
+        refusedNotes: refusedClaim ? last.notification_ids : [],
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
-          (withdrawn || ((retry || resourceWait) && !unconfirmed)) &&
+          (withdrawn ||
+            refusedFirstWrite ||
+            ((retry || resourceWait) && !unconfirmed)) &&
           !unreadable &&
           (!binding || sameTarget) &&
           !disposition,
@@ -798,7 +824,8 @@ export async function retryDispatchedRuns(
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
     const status = await runtime.status(observed.a.runtime_ref);
-    if (!status.ok || status.value.process !== "alive") continue;
+    const guard = status.ok && idleWakeGuard(status.value);
+    if (!guard) continue;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
@@ -810,21 +837,49 @@ export async function retryDispatchedRuns(
         current.last?.id !== observed.last?.id
       )
         return;
-      const notes = store
+      // A refused first claim never settled its inbox rows. Reclaim exactly
+      // those IDs alongside Run-owned rows, not unrelated newer comments.
+      const refusedNotes = new Set(current.refusedNotes);
+      const candidates = store
         .listNotifications({
           project_id: project,
           statuses: ["pending", "belled", "delivery_failed"],
         })
-        .filter((n) => n.run_id === current.run.id);
+        .filter(
+          (n) =>
+            n.run_id === current.run.id ||
+            (!n.run_id &&
+              n.status === "pending" &&
+              refusedNotes.has(n.id) &&
+              (n.recipient.kind !== "assignment" ||
+                n.recipient.assignment_id === current.a.id)),
+        );
       const item = current.state.work_items.find(
         (w) => w.id === current.a.work_item_id,
       );
       const cause = current.state.events.find(
         (e) => e.id === current.run.trigger_event_id,
       );
+      // An absent card on an existing receipt means project stream. It is
+      // not a missing value to fill with the recipient's work-item card.
+      const receipt = current.run.bell_delivery;
+      const source = (
+        receipt?.run_id === current.run.id
+          ? receipt
+          : (candidates[0] ?? cause ?? item)
+      )?.card_id;
+      const notes = candidates.filter((n) => n.card_id === source);
+      // Retain any stored decision instructions on ordinary retries. For a
+      // refused claim, render the original pending rows, not a prior address.
+      const storedBell = refusedNotes.size
+        ? undefined
+        : notes.find((n) => n.bell)?.bell;
+      const address = source ? `card=${source}` : `project=${project}`;
       const bell =
-        notes.find((n) => n.bell)?.bell ??
-        `[bell] ${item ? `card=${item.card_id} wi=${item.id}` : `project=${project}`} asg=${current.a.id} run=${current.run.id} seq=${cause?.seq ?? 0} kind=${current.run.kind}\n→ 请调用 get_updates 读取详情`;
+        storedBell ??
+        (notes.length
+          ? notificationBell(project, current.a.id, current.run.id, notes)
+          : `[bell] ${address} asg=${current.a.id} run=${current.run.id} seq=${cause?.seq ?? 0} kind=${current.run.kind}\n→ 请调用 get_updates 读取详情`);
       const attempt: BellAttempt = {
         id: randomUUID(),
         project_id: project,
@@ -930,10 +985,22 @@ export async function retryDispatchedRuns(
           );
           continue;
         }
+        const addressed = job.a.runtime_ref;
+        const arm = () =>
+          !job.run.bell_delivery ||
+          armBellReceipt(
+            store,
+            project,
+            job.run.id,
+            addressed,
+            undefined,
+            job.attempt.review_wake,
+          );
         const result = await runtime.wake(
-          job.a.runtime_ref,
+          addressed,
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
+            ...guard,
             ...(preflight ? { resource_preflight: preflight } : {}),
             before_send: () => {
               if (
@@ -956,7 +1023,8 @@ export async function retryDispatchedRuns(
                     clock,
                     job.withdrawn,
                     job.legacyRetry ? legacyRepairAuthority : undefined,
-                  ) === "send"
+                  ) === "send" &&
+                  arm()
                 );
               if (deferIfTargetWait(store, job.attempt, clock)) {
                 return false;
@@ -964,15 +1032,14 @@ export async function retryDispatchedRuns(
               return (
                 !options.closing?.() &&
                 currentWakeRun()?.status === "dispatched" &&
-                scope() === reviewPrompt
+                scope() === reviewPrompt &&
+                arm()
               );
             },
           },
         );
         if (result.ok && result.value.withdrawn) {
-          store.uow.run(() =>
-            settleWakeWithdrawal(store.database, job.attempt, clock.now()),
-          );
+          recordWakeRefusal(store, job.attempt, job.a, clock.now());
           continue;
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake)

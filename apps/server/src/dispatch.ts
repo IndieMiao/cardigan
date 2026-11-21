@@ -28,6 +28,7 @@ import {
   type HarnessActivity,
   hasRunTarget,
   hostOpsPending,
+  idleWakeGuard,
   isRunCapacityExempt,
   isStandingPm,
   launchSettings,
@@ -49,8 +50,10 @@ import {
   standingRunDormant,
   stoppedByHuman,
   unreadableCommentTrigger,
+  unreceivedBell,
 } from "@cardigan/domain";
 import {
+  armBellReceipt,
   assignmentResourceKeys,
   bindRepairAttempt,
   crossRepairSendBoundary,
@@ -72,6 +75,7 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
+  recordWakeRefusal,
   redactFailureLine,
   runCapacitySnapshot,
   settleTestReviewLimits,
@@ -82,12 +86,7 @@ import {
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import {
-  mergeNotifications,
-  type NotificationKind,
-  payloadString,
-  summarizeNotifications,
-} from "@cardigan/router";
+import { payloadString } from "@cardigan/router";
 import {
   type BellAttempt,
   beginBellAttempt,
@@ -100,10 +99,10 @@ import {
   type ReadRepositories,
   type Store,
   type StoreTransactionContext,
-  settleWakeWithdrawal,
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
+import { checkBellReceipts } from "./bell-receipt.js";
 import {
   CANDIDATE_FEED,
   type Candidate,
@@ -131,6 +130,7 @@ import {
   acknowledgeInbox,
   dispatcherClock,
   memoStanding,
+  notificationBell,
   notificationOwner,
   resolveObsoletePmNotifications,
   resolveUnreadableNotifications,
@@ -699,6 +699,15 @@ export class Dispatcher {
         }
       }
     });
+    await checkBellReceipts(
+      this.options,
+      project,
+      this.state(project),
+      this.loadState,
+      this.clock,
+      this.dispatchTimeoutMs,
+      () => this.closing,
+    );
     await profileSpan("route.retry_dispatched", () =>
       retryDispatchedRuns(
         {
@@ -819,6 +828,8 @@ export class Dispatcher {
       running && notes.every((n) => !n.run_id || n.run_id === running.id)
         ? running
         : undefined;
+    // A pending inbox note cannot become a second, unmetered initial wake.
+    if (running && unreceivedBell(running)) return;
     if (
       a.external ||
       a.status !== "active" ||
@@ -841,21 +852,17 @@ export class Dispatcher {
     )
       return;
     let live = false;
-    let doneObserved = false;
+    let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
-      if (continuing) {
-        if (!observed?.ok || observed.value.process !== "alive") return;
-        doneObserved = observed.value.agent === "done";
-        // A completed transcript is historical, not a guard on the current
-        // turn. Leave the original note pending without taking a lease or
-        // polling the transcript. Normal finish/confirmed recovery hands it on.
-        if (!doneObserved && observed.value.agent !== "idle") return;
-      }
+      if (observed?.ok && observed.value.process === "alive") {
+        guard = idleWakeGuard(observed.value);
+        if (!guard) return; // A server-side finish never proves the CLI turn has ended.
+      } else if (continuing) return;
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -1090,11 +1097,7 @@ export class Dispatcher {
             runtimeRef,
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
-              ...(continuing
-                ? doneObserved
-                  ? { observed_guard: { state: "done" as const } }
-                  : { if_idle: true }
-                : {}),
+              ...guard,
               ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
@@ -1114,17 +1117,25 @@ export class Dispatcher {
                       job.assignment,
                       this.clock,
                     ) === "send"
-                  : this.activate(job)),
+                  : this.activate(job)) &&
+                (job.run.status !== "queued" ||
+                  armBellReceipt(
+                    this.options.store,
+                    project,
+                    job.run.id,
+                    runtimeRef,
+                    undefined,
+                    job.attempt.review_wake,
+                  )),
             },
           ),
         );
         if (result.ok && result.value.withdrawn) {
-          this.options.store.uow.run(() =>
-            settleWakeWithdrawal(
-              this.options.store.database,
-              job.attempt,
-              this.clock.now(),
-            ),
+          recordWakeRefusal(
+            this.options.store,
+            job.attempt,
+            job.assignment,
+            this.clock.now(),
           );
           return;
         }
@@ -1615,11 +1626,6 @@ export class Dispatcher {
       }
       if (!live && run.status !== "queued")
         throw { code: "finished_run_needs_attention" };
-      const kinds = ready.map((n) => ({
-        seq: n.seq,
-        kind: n.kind as NotificationKind,
-        summary: "",
-      }));
       // §6.2: the bell names the Run, because the Agent needs it for
       // finish_run and heartbeat even when the host started the session.
       const runCard = state.work_items.find(
@@ -1627,15 +1633,7 @@ export class Dispatcher {
       )?.card_id;
       const bell = !ready.length
         ? `[bell] ${runCard ? `card=${runCard} wi=${a.work_item_id}` : `project=${project}`} asg=${a.id} run=${run.id} kind=${run.kind}\n→ 请调用 whoami、get_card、get_updates 继续已排队工作`
-        : cause?.card_id
-          ? mergeNotifications({
-              card_id: cause.card_id,
-              assignment_id: a.id,
-              run_id: run.id,
-              notifications: kinds,
-            })?.text
-          : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
-      if (!bell) throw new Error("Missing bell");
+        : notificationBell(project, a.id, run.id, ready);
       // Set the budget on the durable intent *before* publication copies it.
       // Live wakes (including retries), local starts and no-checkout roles keep the bell lease.
       const worktree =
@@ -1672,6 +1670,15 @@ export class Dispatcher {
       let attempt = ready.length
         ? beginBellAttempt(store.database, intent)
         : beginLaunchAttempt(store.database, intent);
+      if (run.status === "queued" && run.bell_delivery?.run_id !== run.id) {
+        const card = cause ? cause.card_id : runCard;
+        run = {
+          ...run,
+          bell_delivery: { run_id: run.id, ...(card ? { card_id: card } : {}) },
+        };
+        tx.runs.put(project, run);
+        state = this.loadState(tx, project);
+      }
       // Keep producer/standing dispatch timing unchanged. Only verification
       // needs to remain queued until asynchronous target preparation finishes.
       if (
@@ -2019,6 +2026,21 @@ export class Dispatcher {
         project_id: project,
         ids: attempt.notification_ids,
       });
+      // Only a positively settled first send arms replay. A lost transport ACK,
+      // shared-review withdrawal or legacy row stays with the existing recovery policy.
+      if (
+        sent &&
+        !continuation &&
+        run?.bell_delivery &&
+        run.bell_delivery.run_id === run.id &&
+        !run.bell_delivery.sent_at &&
+        run.bell_delivery.runtime_ref
+      ) {
+        tx.runs.put(project, {
+          ...run,
+          bell_delivery: { ...run.bell_delivery, sent_at: at },
+        });
+      }
       let failed = !sent && notes.length === 0;
       for (const n of notes) {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
