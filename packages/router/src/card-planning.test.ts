@@ -1,5 +1,13 @@
 import { expect, test } from "vitest";
-import { agent, assignment, card, event, human, snapshot } from "./fixtures.js";
+import {
+  agent,
+  assignment,
+  card,
+  entry,
+  event,
+  human,
+  snapshot,
+} from "./fixtures.js";
 import { summarizeNotifications } from "./merge.js";
 import { routeEvent } from "./route.js";
 
@@ -115,4 +123,27 @@ test("story planning and settlement ring Office; the summary requests human conf
       }).notifications.map((n) => n.recipient.kind),
     ).toEqual([recipient]);
   }
+});
+
+test("unmentioned human story comments belong to Office with a distinct FYI to Ops; explicit targets and children keep their routes", () => {
+  const routes = (
+    c: ReturnType<typeof card>,
+    mentions: string[] = [],
+    author = human(),
+  ) =>
+    routeEvent({
+      event: event("comment_posted", {}, { actor: author }),
+      snapshot: snapshot({ cards: [c], timeline: [entry(1, { mentions })] }),
+    }).notifications.map((n) => [n.recipient, n.kind]);
+  expect(routes(card({ story: {} }))).toEqual([
+    [{ kind: "pm_office" }, "comment"],
+    [{ kind: "pm_ops" }, "story_fyi"],
+  ]);
+  expect(routes(card({ story: {} }), [], agent("A-1"))).toEqual([]);
+  expect(routes(card({ story: {} }), ["@A-1"])).toEqual([
+    [{ kind: "assignment", assignment_id: "A-1" }, "comment"],
+  ]);
+  expect(routes(card({ parent_card_id: "C-5" }))).toEqual([
+    [{ kind: "pm_ops" }, "comment"],
+  ]);
 });

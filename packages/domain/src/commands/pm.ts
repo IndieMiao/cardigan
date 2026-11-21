@@ -242,8 +242,10 @@ export function createCard(
         "validation_failed",
         "父卡必须是同项目未结束的需求卡，需求卡不能作为子卡",
       );
-      if (parent.story.summary_entry_id)
-        d.put("cards", { ...parent, story: {} });
+      if (parent.story.summary_entry_id) {
+        const { summary_entry_id: _old, ...story } = parent.story;
+        d.put("cards", { ...parent, story });
+      }
       const item = d
         .list("work_items")
         .find(
