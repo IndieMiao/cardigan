@@ -460,12 +460,6 @@ export class InactivityAlerts {
       evidence,
       (activity ?? file)?.session_id,
     );
-    if (
-      recentTerminal ||
-      recentProgress ||
-      (terminal && now - terminal.observedSince < this.options.graceMs)
-    )
-      return;
     const card_id = state.work_items.find(
       (w) => w.id === a.work_item_id,
     )?.card_id;
@@ -497,6 +491,13 @@ export class InactivityAlerts {
         });
       return;
     }
+    // Recent progress vetoes escalation, not the one-shot observation of a failed read.
+    if (
+      recentTerminal ||
+      recentProgress ||
+      (terminal && now - terminal.observedSince < this.options.graceMs)
+    )
+      return;
     const since =
       inspection.foreground && Date.parse(inspection.foreground.since);
     const fg =
