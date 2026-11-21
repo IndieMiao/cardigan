@@ -9,7 +9,11 @@ import {
 import { recordContextUsageNotices } from "./context-usage.js";
 import { completeHumanAction } from "./coordination.js";
 import type { CommandState } from "./core.js";
-import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
+import {
+  beginHostOpsAction,
+  finishHostOpsAction,
+  withdrawUnstartedStallRestart,
+} from "./host-ops-actions.js";
 import {
   automaticContextRestartReady,
   beginAutomaticContextRestart,
@@ -420,6 +424,37 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   ).toBe(false);
   const started = value(begin(state));
   const pending = apply(state, started);
+  // A proven pre-signal refusal frees the assignment; a durable signal fence
+  // is never cleared by the same withdrawal, even after a service restart.
+  const withdraw = (s: CommandState) =>
+    value(
+      withdrawUnstartedStallRestart(
+        s,
+        system,
+        started.data.action_id,
+        f.io,
+        "terminal_busy",
+      ),
+    );
+  expect(
+    pendingHostOpsActions(apply(pending, withdraw(pending)).events),
+  ).toHaveLength(0);
+  const stopping: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        ...due,
+        id: f.io.ids.nextEventId(),
+        type: "host_ops_action_deferred",
+        payload: {
+          action_id: started.data.action_id,
+          reason: "automatic_context_stop_started",
+        },
+      },
+    ],
+  };
+  expect(withdraw(stopping).events).toEqual([]);
   const result = value(
     recordAutomaticContextRestartResult(
       pending,

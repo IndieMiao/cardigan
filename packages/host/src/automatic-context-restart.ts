@@ -1,4 +1,6 @@
 import {
+  type Assignment,
+  type AssignmentId,
   automaticContextActionForRun,
   type Clock,
   type CommandEffect,
@@ -13,11 +15,20 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 
+export function recoveryPm(target: Assignment | undefined) {
+  return target?.scope === "standing" &&
+    target.role_id === "pm" &&
+    target.standing_mode === "ops"
+    ? ("pm_office" as const)
+    : ("pm_ops" as const);
+}
+
 /** Called in the same write transaction as the result, so restart cannot lose the notice. */
 export function notifyAutomaticContextResult(
   store: Store,
   project: ProjectId,
   effect: Pick<CommandEffect<unknown>, "events">,
+  tx: StoreTransactionContext,
 ) {
   for (const event of effect.events) {
     const pmOnly =
@@ -30,7 +41,14 @@ export function notifyAutomaticContextResult(
       continue;
     if (!pmOnly && event.type !== "context_session_restart_result") continue;
     const recipients = pmOnly
-      ? (["pm_ops"] as const)
+      ? [
+          recoveryPm(
+            tx.assignments.get(
+              project,
+              (event.payload as { assignment_id: AssignmentId }).assignment_id,
+            ),
+          ),
+        ]
       : (event.payload as { result?: string }).result === "failed"
         ? (["pm_ops", "pm_office", "needs_you"] as const)
         : (event.payload as { dispatch_stall_id?: string }).dispatch_stall_id
@@ -42,7 +60,11 @@ export function notifyAutomaticContextResult(
         event_id: event.id,
         seq: event.seq,
         at: event.created_at,
-        kind: kind === "pm_ops" ? "context_usage" : "needs_you",
+        kind: pmOnly
+          ? "run_attention"
+          : kind === "pm_ops"
+            ? "context_usage"
+            : "needs_you",
         recipient: { kind },
       });
   }
@@ -71,7 +93,7 @@ export function failAutomaticContextRun(
       ),
     );
     persistEffect(tx, project, effect);
-    notifyAutomaticContextResult(store, project, effect);
+    notifyAutomaticContextResult(store, project, effect, tx);
     return true;
   };
   return transaction ? settle(transaction) : store.uow.run(settle);

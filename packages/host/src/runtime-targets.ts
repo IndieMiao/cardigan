@@ -834,11 +834,8 @@ export class RuntimeTargets implements Runtime {
   human_entry(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.human_entry(ref));
   }
-  release(ref: RuntimeRef, options: Parameters<Runtime["release"]>[1]) {
-    return this.invoke(
-      () => this.targetForRef(ref, options.owner?.project_id),
-      (runtime) => runtime.release(ref, options),
-    );
+  release(ref: RuntimeRef, options: { readonly force: boolean }) {
+    return this.onRef(ref, (runtime) => runtime.release(ref, options));
   }
   observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {
     return this.invoke(

@@ -42,6 +42,23 @@ export function previousInboxTurn(
   if (turn) return { turn, reason: "system_finished_turn" } as const;
 }
 
+/** Exclude only notices already claimed by this system-ended turn's own deadline. */
+export function systemTurnWaitingNotes(state: CommandState, owner: Assignment) {
+  const turn = owner.runtime_ref && systemEndedTurn(state, owner);
+  return new Set(
+    turn
+      ? eventsOfType(state.events, "bell_wake_deferred")
+          .filter(
+            (e) =>
+              payloadString(e.payload, "assignment_id") === owner.id &&
+              payloadString(e.payload, "run_id") === turn.id &&
+              payloadString(e.payload, "reason") === "system_finished_turn",
+          )
+          .flatMap((e) => payloadStrings(e.payload, "notification_ids"))
+      : [],
+  );
+}
+
 /** Commit the deadline with the positive non-write receipt, not when its next retry is due. */
 export function settleRefusedWake(
   store: Store,

@@ -342,6 +342,7 @@ test.each([
   "owner_mismatch",
   "lost_observation",
   "in_flight",
+  "stop_refused",
   "exit_unconfirmed",
 ] as const)("C-554: overdue reviewer bell (%s)", async (mode) => {
   const { f, a, notice, tree, run } = endedReviewer();
@@ -369,9 +370,29 @@ test.each([
       value: exited ? ("exited" as const) : ("alive" as const),
     };
   });
-  vi.mocked(f.runtime.release).mockImplementation(async () => {
+  const signaled = vi.fn();
+  f.runtime.retire_idle = vi.fn(async (_ref, opts) => {
+    if (mode === "stop_refused")
+      return {
+        ok: true,
+        value: {
+          outcome: "withdrawn",
+          evidence: { stage: "confirm", reason: "terminal_busy" },
+        },
+      };
+    expect(opts.system_finished_turn).toBe(true);
+    expect(opts.before_signal()).toBe(true);
+    signaled();
     exited = mode !== "exit_unconfirmed";
-    return { ok: true, value: undefined };
+    return exited
+      ? { ok: true, value: { outcome: "exited" } }
+      : {
+          ok: true,
+          value: {
+            outcome: "timeout",
+            evidence: { stage: "TERM", reason: "still_live" },
+          },
+        };
   });
   const dispatcher = new Dispatcher(f.options);
   const events = (type: string) =>
@@ -417,17 +438,49 @@ test.each([
           p,
         ),
       );
-    const safe = ["automatic", "tool", "exit_unconfirmed"].includes(mode);
+    const safe = [
+      "automatic",
+      "tool",
+      "exit_unconfirmed",
+      "stop_refused",
+    ].includes(mode);
     const row = (await f.view()).dispatch_stalls.find(
       (s) => s.cause_id === cause,
     );
     expect(row).toMatchObject({ can_restart: safe });
     if (mode === "tool") await f.restart(a, cause);
     await f.service.tick();
-    if (safe) {
+    if (mode === "stop_refused") {
       await vi.waitFor(async () => {
         await f.service.tick();
-        expect(f.runtime.release).toHaveBeenCalledTimes(1);
+        expect(events("host_ops_action_finished")).toMatchObject([
+          {
+            payload: {
+              result: "withdrawn_stall_changed",
+              reason: "terminal_busy",
+            },
+          },
+        ]);
+      });
+      const id = events("host_ops_action_finished")[0]?.id;
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === id)
+          .map((n) => n.recipient),
+      ).toEqual([{ kind: "pm_ops" }]);
+      expect(signaled).not.toHaveBeenCalled();
+      expect(events("host_ops_action_deferred")).not.toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            reason: "automatic_context_stop_started",
+          }),
+        }),
+      );
+    } else if (safe) {
+      await vi.waitFor(async () => {
+        await f.service.tick();
+        expect(signaled).toHaveBeenCalledTimes(1);
       });
       if (mode === "exit_unconfirmed") {
         await vi.waitFor(() =>
@@ -478,11 +531,133 @@ test.each([
       ).toEqual([{ kind: "pm_ops" }]);
       expect(f.runtime.release).not.toHaveBeenCalled();
     }
+    expect(f.runtime.release).not.toHaveBeenCalled();
     expect(f.state().human_actions).toHaveLength(0);
   } finally {
     await dispatcher.close();
   }
 });
+
+test.each(["timeout", "refused"] as const)(
+  "standing PM Ops keeps the original notice and reports %s to Office",
+  async (outcome) => {
+    vi.stubEnv("CARDIGAN_DISPATCH_STALL_MS", "600000");
+    const f = setup();
+    const pm = { ...f.pm(), standing_mode: "ops" as const };
+    f.store.uow.run((tx) => {
+      tx.assignments.put(f.project, pm);
+      const role = tx.roles.get(f.project, {
+        role_id: pm.role_id,
+        role_version: pm.role_version,
+      });
+      if (!role) throw new Error("Missing PM");
+      tx.roles.put(f.project, {
+        ...role,
+        allowed_tools: [...role.allowed_tools, "request_decision"],
+      });
+    });
+    const run = f.session(pm, false);
+    f.apply(
+      (s, actor, ports) =>
+        requestDecision(
+          s,
+          actor,
+          {
+            kind: "choose",
+            decider: "human",
+            category: "general",
+            blocking: true,
+            question: "Continue?",
+            context: "fixture",
+            options: [{ key: "go", description: "Continue", impact: "Resume" }],
+            recommended: "go",
+            affected_cards: [],
+            affected_work_items: [],
+            plain_summary: { changed: "等待确认", impact: "暂停", risk: "无" },
+          },
+          ports,
+        ),
+      f.actorFor(pm),
+    );
+    expect(f.state().runs.find((r) => r.id === run.id)?.outcome).toBe(
+      "blocked",
+    );
+    f.skipEvents();
+    const notice = f.event("fixture", {}, pm);
+    const original = () =>
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: pm.id })
+        .find((n) => n.event_id === notice.id);
+    f.runtime.observe_retirement = async () => ({ ok: true, value: "alive" });
+    vi.mocked(f.runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "unknown", observed_seq: 1 },
+    });
+    const signal = vi.fn();
+    f.runtime.retire_idle = vi.fn(async (_ref, opts) => {
+      if (outcome === "refused")
+        return {
+          ok: true,
+          value: {
+            outcome: "withdrawn",
+            evidence: { stage: "confirm", reason: "terminal_busy" },
+          },
+        };
+      expect(opts.before_signal()).toBe(true);
+      signal();
+      return {
+        ok: true,
+        value: {
+          outcome: "timeout",
+          evidence: { stage: "TERM", reason: "still_live" },
+        },
+      };
+    });
+    const d = new Dispatcher(f.options);
+    try {
+      // Notification age is already past the standing deadline at the very first deferral.
+      f.advance(610000);
+      await d.tick();
+      expect(original()?.status).toBe("pending");
+      f.advance(600000);
+      await d.tick();
+      expect(original()?.status).toBe("pending");
+      expect(
+        f.state().events.filter((e) => e.type === "standing_inbox_stalled"),
+      ).toEqual([]);
+      expect(
+        f.state().events.filter((e) => e.type === "bell_turn_recovery_due"),
+      ).toHaveLength(1);
+      const failure = () =>
+        f
+          .state()
+          .events.find((e) =>
+            outcome === "timeout"
+              ? e.type === "host_ops_action_deferred" &&
+                (e.payload as { notify_pm?: boolean }).notify_pm
+              : e.type === "host_ops_action_finished" &&
+                (e.payload as { reason?: string }).reason === "terminal_busy",
+          );
+      await vi.waitFor(async () => {
+        await f.service.tick();
+        expect(failure()).toBeDefined();
+      });
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === failure()?.id)
+          .map((n) => n.recipient),
+      ).toEqual([{ kind: "pm_office" }]);
+      f.advance(900000);
+      await f.service.tick();
+      expect(signal).toHaveBeenCalledTimes(outcome === "timeout" ? 1 : 0);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      expect(f.state().human_actions).toHaveLength(0);
+    } finally {
+      await d.close();
+    }
+  },
+);
 
 test("synthetic review handoff: reading the bell is not a restart; safe fresh evidence recovers its original assignment once", async () => {
   const { f, a, card, notice } = endedReviewer();
@@ -538,11 +713,15 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
     expect(execute).not.toHaveBeenCalled();
     // No prior attempt. Do not bypass the guard: only a new terminal observation enables this call.
     f.working.delete(ref.terminal_ref);
+    let retired = false;
+    f.runtime.retire_idle = vi.fn(async (_ref, opts) => {
+      expect(opts.before_signal()).toBe(true);
+      retired = true;
+      return { ok: true, value: { outcome: "exited" } };
+    });
     f.runtime.observe_retirement = async () => ({
       ok: true,
-      value: vi.mocked(f.runtime.release).mock.calls.length
-        ? "exited"
-        : "alive",
+      value: retired ? "exited" : "alive",
     });
     const ready = await row();
     if (!ready?.can_restart)
@@ -564,7 +743,8 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
     ).toMatchObject([
       { payload: { dispatch_stall_id: handoff.id, target_id: a.id } },
     ]);
-    expect(f.runtime.release).toHaveBeenCalledOnce();
+    expect(f.runtime.retire_idle).toHaveBeenCalledOnce();
+    expect(f.runtime.release).not.toHaveBeenCalled();
     expect(
       f.state().assignments.find((owner) => owner.id === a.id)?.runtime_ref,
     ).toBeNull();

@@ -61,7 +61,10 @@ import {
   writeContextSamples,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
-import { notifyAutomaticContextResult } from "./automatic-context-restart.js";
+import {
+  notifyAutomaticContextResult,
+  recoveryPm,
+} from "./automatic-context-restart.js";
 import {
   type ContextUsageOptions,
   contextThresholdView,
@@ -74,7 +77,11 @@ import {
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { StallPatrol } from "./stall-patrol.js";
-import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+import {
+  revokeStoppedRunTokens,
+  stopRunRuntime,
+  stopSystemTurn,
+} from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
 
 import { inspectWorker } from "./worker-inspection.js";
@@ -1013,7 +1020,7 @@ export class HostOpsService {
         ),
       );
       persistEffect(tx, project, effect);
-      notifyAutomaticContextResult(store, project, effect);
+      notifyAutomaticContextResult(store, project, effect, tx);
     });
   }
 
@@ -1033,7 +1040,7 @@ export class HostOpsService {
         ),
       );
       persistEffect(tx, project, effect);
-      notifyAutomaticContextResult(this.options.store, project, effect);
+      notifyAutomaticContextResult(this.options.store, project, effect, tx);
     });
   }
   /**
@@ -1230,7 +1237,11 @@ export class HostOpsService {
                 seq: e.seq,
                 kind: "run_attention",
                 at: e.created_at,
-                recipient: { kind: "pm_ops" },
+                recipient: {
+                  kind: recoveryPm(
+                    tx.assignments.get(project, action.assignment_id),
+                  ),
+                },
               });
             return !!e;
           });
@@ -1410,31 +1421,48 @@ export class HostOpsService {
           return;
         }
         if (!this.confirmedByHuman(project, action)) return;
-      } else if (
-        (await stopRunRuntime(
-          runtime,
-          action.runtime_ref,
-          () => {
-            if (!mayStop()) return false;
-            // Persist before the external stop: after a crash only observe its exit.
-            if (action.automatic_context_restart || action.dispatch_stall_id)
-              this.defer(
-                project,
-                action.action_id,
-                "automatic_context_stop_started",
-              );
-            return true;
-          },
-          stopStarted,
-          !stopStarted,
-          action.dispatch_stall_id ? checkStall : undefined,
-          action.system_finished_run_id
-            ? { project_id: project, assignment_id: action.assignment_id }
-            : undefined,
-        )) !== "exited"
-      ) {
-        if (!this.closing) fail("terminal_exit_unconfirmed");
-        return;
+      } else {
+        const beforeSignal = () => {
+          if (!mayStop()) return false;
+          if (action.automatic_context_restart || action.dispatch_stall_id)
+            this.defer(
+              project,
+              action.action_id,
+              "automatic_context_stop_started",
+            );
+          return true;
+        };
+        let result: string;
+        if (action.system_finished_run_id) {
+          if (!stopStarted) {
+            await checkStall();
+            if (!mayStop()) return;
+          }
+          result = await stopSystemTurn(
+            runtime,
+            action.runtime_ref,
+            {
+              project_id: project,
+              assignment_id: action.assignment_id,
+            },
+            stopStarted,
+            beforeSignal,
+          );
+        } else {
+          result = await stopRunRuntime(
+            runtime,
+            action.runtime_ref,
+            beforeSignal,
+            stopStarted,
+            !stopStarted,
+            action.dispatch_stall_id ? checkStall : undefined,
+          );
+          if (result !== "exited") result = "terminal_exit_unconfirmed";
+        }
+        if (result !== "exited") {
+          if (!this.closing) fail(result);
+          return;
+        }
       }
       if (!current()) return;
       try {

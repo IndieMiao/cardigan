@@ -1,10 +1,18 @@
 import type {
   AssignmentId,
   ProjectId,
+  RetirementIdentity,
   Runtime,
   RuntimeRef,
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
+
+import { idleRetirementPolicy } from "./idle-session-retirement.js";
+
+const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
+  result?.ok
+    ? result.value.process === "exited"
+    : result?.error.code === "runtime_not_found";
 
 /** Shared automatic-stop primitive: recheck eligibility, stop, independently prove exit. */
 export async function stopRunRuntime(
@@ -19,43 +27,59 @@ export async function stopRunRuntime(
    */
   releaseLive = true,
   beforeMayStop?: () => Promise<void>,
-  owner?: Parameters<Runtime["release"]>[1]["owner"],
 ) {
-  // For an owner-bound stop the generic feed may omit a live terminal. Only
-  // a dedicated read of the bound address/labels can prove exit.
-  const observe = () => {
-    if (!ref) return;
-    const read = owner
-      ? runtime.observe_retirement?.(ref, owner)
-      : runtime.status(ref);
-    return read?.catch(() => undefined);
-  };
-  const exited = (result: Awaited<ReturnType<typeof observe>>) => {
-    if (!result?.ok) return result?.error.code === "runtime_not_found";
-    return typeof result.value === "string"
-      ? result.value === "exited"
-      : result.value.process === "exited";
-  };
-  if (owner && !ref) return "unconfirmed" as const;
-  const before = exited(await observe());
+  const observe = () =>
+    ref ? runtime.status(ref).catch(() => undefined) : undefined;
+  const before = await observe();
   // A previous release may finish after fresh activity or process loss. Settle
   // its original fence without asking to issue another stop; ownership and the
   // exact runtime reference are checked again by the settlement transaction.
-  if (alreadyStopping && (!ref || before)) return "exited" as const;
-  if (!releaseLive && ref && !before) return "not_exited" as const;
+  if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
+  if (!releaseLive && ref && !exited(before)) return "not_exited" as const;
   if (beforeMayStop) await beforeMayStop();
   if (!mayStop()) return "withdrawn" as const;
-  if (!ref) return "exited" as const;
-  if (before)
-    return !owner || exited(await observe())
-      ? ("exited" as const)
-      : ("unconfirmed" as const);
-  await runtime
-    .release(ref, { force: true, ...(owner ? { owner } : {}) })
-    .catch(() => undefined);
+  if (!ref || exited(before)) return "exited" as const;
+  await runtime.release(ref, { force: true }).catch(() => undefined);
   return exited(await observe())
     ? ("exited" as const)
     : ("unconfirmed" as const);
+}
+
+/** System-ended bells never use address-based release, even for cleanup. A
+ * previously started stop may only read exit evidence; no second signal. */
+export async function stopSystemTurn(
+  runtime: Runtime,
+  ref: RuntimeRef | null,
+  owner: RetirementIdentity,
+  alreadyStopping: boolean,
+  beforeSignal: () => boolean,
+) {
+  if (!ref) return "terminal_binding_changed";
+  const confirmed = async () => {
+    const exact = await runtime
+      .observe_retirement?.(ref, owner)
+      .catch(() => undefined);
+    return exact?.ok
+      ? exact.value === "exited"
+      : exact?.error.code === "runtime_not_found";
+  };
+  if (alreadyStopping)
+    return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
+  if (!runtime.retire_idle) return "unsupported";
+  const { hangup_ms, terminate_ms } = idleRetirementPolicy();
+  const result = await runtime
+    .retire_idle(ref, {
+      ...owner,
+      hangup_ms,
+      terminate_ms,
+      system_finished_turn: true,
+      before_signal: beforeSignal,
+    })
+    .catch(() => undefined);
+  if (result?.ok && result.value.outcome === "withdrawn")
+    return result.value.evidence.reason;
+  if (await confirmed()) return "exited";
+  return "terminal_exit_unconfirmed";
 }
 
 /** Call in the same transaction as cancellation, only after proving terminal exit. */

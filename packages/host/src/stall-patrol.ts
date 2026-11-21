@@ -19,6 +19,7 @@ import {
   standingResolver,
   unfinishedBellAttempts,
 } from "@cardigan/store";
+import { recoveryPm } from "./automatic-context-restart.js";
 import {
   type DispatchStall,
   dispatchHandoffs,
@@ -267,12 +268,7 @@ export class StallPatrol {
         seq: event.seq,
         at: event.created_at,
         recipient: {
-          kind:
-            a.scope === "standing" &&
-            a.role_id === "pm" &&
-            a.standing_mode === "ops"
-              ? "pm_office"
-              : "pm_ops",
+          kind: recoveryPm(a),
         },
         kind: "run_attention",
       });

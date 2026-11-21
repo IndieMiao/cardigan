@@ -78,6 +78,8 @@ export interface Runtime {
     options: RetirementIdentity & {
       readonly hangup_ms: number;
       readonly terminate_ms: number;
+      /** One owner-bound TERM, no address-based cleanup, refuse a busy terminal. */
+      readonly system_finished_turn?: true;
       readonly before_signal: () => boolean;
     },
   ): Promise<RuntimeResult<IdleRetirementResult>>;
@@ -103,6 +105,6 @@ export interface Runtime {
   /** Runtime terminal only; never removes a worktree. */
   release(
     ref: RuntimeRef,
-    options: { readonly force: boolean; readonly owner?: RetirementIdentity },
+    options: { readonly force: boolean },
   ): Promise<RuntimeResult<void>>;
 }
