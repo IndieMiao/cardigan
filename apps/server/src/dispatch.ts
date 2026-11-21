@@ -75,7 +75,6 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
-  recordWakeRefusal,
   redactFailureLine,
   runCapacitySnapshot,
   settleTestReviewLimits,
@@ -142,6 +141,12 @@ import {
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { DispatchSkips } from "./dispatch-skips.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import {
+  handoffUnread,
+  previousInboxTurn,
+  recordTurnWait,
+  settleRefusedWake,
+} from "./dispatch-turn-guard.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -464,6 +469,7 @@ export class Dispatcher {
               candidate.notes,
               candidate.assignment,
             );
+            this.checkStandingInbox(candidate);
           }
         });
       } finally {
@@ -871,15 +877,47 @@ export class Dispatcher {
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
+    const guardedTurn = continuing
+      ? ({ turn: continuing, reason: "continuing_turn" } as const)
+      : previousInboxTurn(state, a, notes);
+    const reminder =
+      guardedTurn?.reason === "unread_reminder" ? guardedTurn.turn : undefined;
+    if (guardedTurn?.reason === "unread_reminder" && !a.runtime_ref) {
+      this.waitForTurn(
+        project,
+        a,
+        guardedTurn,
+        notes,
+        "no_runtime_ref",
+        queued,
+      );
+      return skip("wake_guard:no_runtime_ref");
+    }
+    let observation = "unavailable";
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
-      if (observed?.ok && observed.value.process === "alive") {
-        guard = idleWakeGuard(observed.value);
-        if (!guard) return skip(`wake_guard:${observed.value.agent}`); // A server-side finish never proves the CLI turn has ended.
-      } else if (continuing) return skip("continuation_not_alive");
+      observation = observed?.ok
+        ? `${observed.value.process}/${observed.value.agent}`
+        : (observed?.error.code ?? "unavailable");
+      if (guardedTurn) {
+        guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
+        // Only a new Run can fall through to the existing replacement policy.
+        if (
+          !guard &&
+          (continuing ||
+            reminder ||
+            (observed?.ok
+              ? observed.value.process !== "exited"
+              : observed?.error.code !== "runtime_not_found" &&
+                observed?.error.code !== "runtime_unavailable"))
+        ) {
+          this.waitForTurn(project, a, guardedTurn, notes, observation, queued);
+          return skip(`wake_guard:${observation}`);
+        }
+      }
       if (!observed) {
         this.waitForRuntime(project, a);
         return skip("runtime_unavailable");
@@ -925,7 +963,8 @@ export class Dispatcher {
           prior?.tool_catalog !== undefined &&
           prior.tool_catalog !== catalog));
     try {
-      if (continuing) snapshot = continuing;
+      if (reminder) snapshot = reminder;
+      else if (continuing) snapshot = continuing;
       else if (
         queued?.recovery_policy &&
         queued.recovery_policy.root_run_id !== queued.id
@@ -990,7 +1029,13 @@ export class Dispatcher {
       );
       return;
     }
-    if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
+    if (
+      !continuing &&
+      !reminder &&
+      replaceCatalog &&
+      !replaceProfile &&
+      a.runtime_ref
+    ) {
       // Same replacement path as a lost runtime: resume_or_replace force-
       // releases the live terminal and starts a fresh CLI session, so the new
       // session lists the current tools.
@@ -1017,6 +1062,7 @@ export class Dispatcher {
           live,
           sessionCatalog,
           inspection,
+          guardedTurn?.turn.id,
           continuing,
           skip,
         ),
@@ -1150,12 +1196,25 @@ export class Dispatcher {
           ),
         );
         if (result.ok && result.value.withdrawn) {
-          recordWakeRefusal(
+          settleRefusedWake(
             this.options.store,
             job.attempt,
             job.assignment,
             this.clock.now(),
+            `${observation} (send withdrawn)`,
+            this.dispatchTimeoutMs,
+            this.options.standing,
           );
+          // The adapter may repeatedly refuse in its send slot even when the earlier probe saw idle.
+          if (guardedTurn && (continuing || reminder) && guard)
+            this.waitForTurn(
+              project,
+              a,
+              guardedTurn,
+              notes,
+              `${observation} (send withdrawn)`,
+              queued,
+            );
           return skip("wake_guard_changed");
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake) {
@@ -1283,6 +1342,130 @@ export class Dispatcher {
       return undefined;
     }
   }
+  /** Catch no-Run stalls independently of the turn guard (e.g. status unavailable before claim).
+   * Use the routed candidate's IDs; never scan all inbox history or preempt a successful delivery. */
+  private checkStandingInbox({ project, assignment, notes }: Candidate) {
+    if (this.closing || assignment.scope !== "standing" || !notes.length)
+      return;
+    const at = this.clock.now(),
+      deadline = Date.parse(at) - this.dispatchTimeoutMs;
+    const overdue = notes.filter((n) => Date.parse(n.updated_at) <= deadline);
+    if (!overdue.length) return;
+    const { store, standing } = this.options;
+    store.uow.run((tx) => {
+      const state = this.loadState(tx, project);
+      const owner = state.assignments.find((a) => a.id === assignment.id);
+      if (
+        owner?.scope !== "standing" ||
+        owner.status !== "active" ||
+        owner.external ||
+        !sameRef(owner, assignment) ||
+        owner.session_ref !== assignment.session_ref ||
+        this.busy(state, owner) ||
+        runsOf(state.runs, owner.id).some(unfinishedRun) ||
+        unfinishedBellAttempts(store.database, project, owner.id).length
+      )
+        return;
+      const pending = this.pendingForOwner(state, owner, overdue).filter(
+        (n) =>
+          Date.parse(n.updated_at) <= deadline &&
+          !(
+            owner.standing_mode === "ops" &&
+            newPmNotification(state, n) &&
+            pmNotificationState(state, n) === "obsolete"
+          ),
+      );
+      if (pending.length)
+        handoffUnread(
+          tx,
+          store,
+          state,
+          at,
+          {
+            assignment: owner,
+            card_id: pending[0]?.card_id,
+            type: "standing_inbox_stalled",
+            reason: "pending_without_run",
+          },
+          pending.map((n) => n.id),
+          pending,
+          standing,
+        );
+    });
+  }
+
+  private pendingForOwner(
+    state: CommandState,
+    owner: Assignment,
+    notes: readonly Notification[],
+  ) {
+    if (!notes.length) return [];
+    return this.options.store
+      .listNotifications({
+        project_id: state.project_id,
+        status: "pending",
+        ids: notes.map((n) => n.id),
+      })
+      .filter(
+        (n) =>
+          this.owner(n, state) === owner.id &&
+          !covered(n, state, owner.id) &&
+          !notificationBlocked(state, n.event_id, owner.id) &&
+          !state.cards.some((c) => c.id === n.card_id && c.hold),
+      );
+  }
+  private waitForTurn(
+    project: ProjectId,
+    a: Assignment,
+    guarded: {
+      turn: Run;
+      reason: "continuing_turn" | "system_finished_turn" | "unread_reminder";
+    },
+    notes: readonly Notification[],
+    observation: string,
+    queued: Run | undefined,
+  ) {
+    const { turn, reason } = guarded;
+    const continuing = reason === "continuing_turn";
+    this.options.store.uow.run((tx) => {
+      const fresh = this.loadState(tx, project);
+      const owner = fresh.assignments.find((o) => o.id === a.id);
+      if (
+        !owner ||
+        owner.external ||
+        owner.status !== "active" ||
+        !sameRef(owner, a) ||
+        owner.session_ref !== a.session_ref ||
+        !hasRunTarget(owner, fresh) ||
+        !assignmentDependenciesAllowStart(fresh, owner) ||
+        assignmentCardHeld(owner, fresh) ||
+        unfinishedBellAttempts(this.options.store.database, project, owner.id)
+          .length ||
+        this.busy(fresh, owner, continuing ? turn.id : undefined) ||
+        (continuing
+          ? !wakeIsCurrent(fresh, owner, turn.id) ||
+            !fresh.runs.some((r) => r.id === turn.id && r.status === "running")
+          : previousInboxTurn(fresh, owner, notes)?.turn.id !== turn.id)
+      )
+        return;
+      const pending = this.pendingForOwner(fresh, owner, notes);
+      if (
+        notes.length
+          ? !pending.length
+          : !queued || this.queued(fresh, owner)?.id !== queued.id
+      )
+        return;
+      recordTurnWait(tx, this.options.store, fresh, this.clock.now(), {
+        owner,
+        turn,
+        reason,
+        observation,
+        notes: pending,
+        timeoutMs: this.dispatchTimeoutMs,
+        standing: this.options.standing,
+      });
+    });
+  }
   private waitForRuntime(project: ProjectId, expected: Assignment) {
     this.options.store.uow.run((tx) => {
       const state = this.loadState(tx, project);
@@ -1382,6 +1565,7 @@ export class Dispatcher {
     live: boolean,
     catalog: string | undefined,
     inspection: ResourceAdmission | undefined,
+    guardedTurn: RunId | undefined,
     continuing: Run | undefined,
     skip: (reason: string) => undefined,
   ): Job | undefined {
@@ -1491,6 +1675,11 @@ export class Dispatcher {
               pmNotificationState(state, n) === "obsolete"
             ),
         );
+      const previous = continuing
+        ? undefined
+        : previousInboxTurn(state, a, ready);
+      if (!continuing && previous?.turn.id !== guardedTurn)
+        return skip("guarded_turn_changed");
       const waiting = this.queued(state, a);
       if (
         (!ready.length &&
@@ -1516,7 +1705,8 @@ export class Dispatcher {
       if (!cause && !waiting) return skip("no_pending_work");
       let run =
         continuing ??
-        this.queued(state, a) ??
+        (previous?.reason === "unread_reminder" ? previous.turn : undefined) ??
+        waiting ??
         state.runs.find(
           (r) =>
             r.assignment_id === a.id &&
@@ -1962,14 +2152,13 @@ export class Dispatcher {
     owner: Assignment,
     run: Run,
   ) {
-    if (job.run.status !== "running")
-      return (
-        ["queued", "dispatched"].includes(run.status) ||
-        (run.status === "completed" && job.run.status === "completed")
-      );
+    if (job.run.status !== "running" && job.run.status !== "completed")
+      return ["queued", "dispatched"].includes(run.status);
+    // An unread reminder is bound to the old Run: recheck its cursor and owner
+    // at the send slot just as for a continuation, including if a new Run started.
     if (
       this.closing ||
-      run.status !== "running" ||
+      run.status !== job.run.status ||
       run.heartbeat_at !== job.run.heartbeat_at ||
       owner.last_mcp_activity_at !== job.assignment.last_mcp_activity_at ||
       this.busy(state, owner, run.id) ||

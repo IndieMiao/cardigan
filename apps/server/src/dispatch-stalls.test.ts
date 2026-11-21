@@ -1,7 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Assignment } from "@cardigan/domain";
+import {
+  type Assignment,
+  abortDispatch,
+  recordDecision,
+  requestDecision,
+} from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
@@ -10,26 +15,76 @@ test("guard refusal logs its state once; resume without queue and pending notifi
   vi.stubEnv("CARDIGAN_DISPATCH_STALL_MS", "600000");
   const f = setup();
   const a = f.target.assignment;
+  // A system-ended turn still requires an idle terminal; an author-ended turn does not.
+  f.session(a, false);
+  const q = f.apply((s, actor, p) =>
+    requestDecision(
+      s,
+      actor,
+      {
+        card_id: f.target.card.id,
+        category: "general",
+        kind: "choose",
+        decider: "human",
+        question: "Continue?",
+        context: "fixture",
+        blocking: true,
+        affected_cards: [f.target.card.id],
+        affected_work_items: [f.target.item.id],
+        options: [
+          { key: "go", description: "Continue", impact: "Resume work" },
+        ],
+        recommended: "go",
+        plain_summary: { changed: "等待确认", impact: "暂缓", risk: "无" },
+      },
+      p,
+    ),
+  );
+  f.apply((s, actor, p) =>
+    recordDecision(
+      s,
+      actor,
+      {
+        decision_id: q.id,
+        option: "go",
+        rationale: "fixture",
+        raw_quote: "go",
+      },
+      p,
+    ),
+  );
+  // No outstanding Run: the prior decision follow-up was cancelled before it started.
+  const followup = f.latest();
+  expect(followup.status).toBe("queued");
+  f.apply((s, actor, p) =>
+    abortDispatch(s, actor, { run_id: followup.id, reason: "fixture" }, p),
+  );
+  f.skipEvents();
   f.advance(1);
   const info = vi.spyOn(console, "info").mockImplementation(() => {});
   vi.mocked(f.runtime.status).mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "blocked", observed_seq: 1 },
   });
-  f.event(
+  const resumed = f.event(
     "work_item_resume_requested",
     { assignment_id: a.id, work_item_id: f.target.item.id },
     a,
+    f.target.card.id,
   );
   const dispatcher = new Dispatcher(f.options);
   await dispatcher.tick();
   await dispatcher.tick();
   expect(
-    info.mock.calls.filter(([s]) => String(s).includes("wake_guard:blocked")),
+    info.mock.calls.filter(([s]) =>
+      String(s).includes("wake_guard:alive/blocked"),
+    ),
   ).toHaveLength(1);
   f.advance(599999);
   expect((await f.view()).dispatch_stalls).toEqual([]);
   f.advance(1);
+  await dispatcher.tick(); // C-546 hands the refused notification to operations at the same deadline.
+  expect(f.notes().some((n) => n.status === "needs_attention")).toBe(true);
   const rows = (await f.view()).dispatch_stalls;
   expect(rows).toEqual(
     expect.arrayContaining(
@@ -45,12 +100,30 @@ test("guard refusal logs its state once; resume without queue and pending notifi
       ),
     ),
   );
-  const cause = rows[0]?.cause_id as string;
+  const cause = rows.find((r) => r.kind === "notification_backlog")
+    ?.cause_id as string;
   await f.restart(a, cause);
   await f.restart(a, cause);
   expect(
     f.state().events.filter((e) => e.type === "host_ops_action_taken"),
   ).toHaveLength(1);
+  // The row stays needs_attention after ACK. Its original stream cursor must invalidate the stop.
+  expect(
+    f.store.ackEvents({
+      project_id: f.project,
+      assignment_id: a.id,
+      card_id: f.target.card.id,
+      up_to_seq: resumed.seq,
+    }).ok,
+  ).toBe(true);
+  await f.service.tick();
+  await vi.waitFor(() =>
+    expect(
+      f.state().events.find((e) => e.type === "host_ops_action_finished")
+        ?.payload,
+    ).toMatchObject({ result: "withdrawn_stall_changed" }),
+  );
+  expect(f.runtime.release).not.toHaveBeenCalled();
   await dispatcher.close();
 });
 
@@ -120,51 +193,97 @@ test.each(["ops", "office"] as const)(
   },
 );
 
-test("patrol supervisor sees its own old pending bell without a host ops Run; once only, PM Office is notified", async () => {
+test.each([false, true])(
+  "patrol supervisor recovers its own overdue bell once, including after dispatch handoff=%s",
+  async (handoff) => {
+    const f = setup();
+    const a = f.ops;
+    const ref = f.refFor(a);
+    f.store.uow.run((tx) =>
+      tx.assignments.put(f.project, {
+        ...a,
+        runtime_ref: ref,
+        runtime_state: "idle",
+        session_ref: "old",
+      }),
+    );
+    f.event("host_ops_patrol_due", { assignment_id: a.id }, a);
+    f.advance(11 * 60000);
+    if (handoff) {
+      // Dispatcher wins the race to the deadline. Unknown process state is not proof it is safe to stop.
+      vi.mocked(f.runtime.status).mockResolvedValueOnce({
+        ok: true,
+        value: { process: "unknown", agent: "unknown", observed_seq: 1 },
+      });
+      const dispatcher = new Dispatcher(f.options);
+      try {
+        await dispatcher.tick();
+      } finally {
+        await dispatcher.close();
+      }
+      expect(
+        f.store.listNotifications({
+          project_id: f.project,
+          assignment_id: a.id,
+          status: "needs_attention",
+        }),
+      ).toHaveLength(1);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+    }
+    await f.service.tick();
+    await vi.waitFor(() =>
+      expect(
+        f.state().events.some((e) => e.type === "host_ops_action_taken"),
+      ).toBe(true),
+    );
+    await f.service.tick();
+    await vi.waitFor(() =>
+      expect(
+        f
+          .state()
+          .runs.some((r) => r.assignment_id === a.id && r.status === "queued"),
+      ).toBe(true),
+    );
+    expect(f.runtime.release).toHaveBeenCalledOnce();
+    expect(
+      f.state().assignments.find((v) => v.id === a.id)?.session_ref,
+    ).toBeUndefined();
+    await f.service.tick();
+    expect(
+      f.state().events.filter((e) => e.type === "dispatch_stall_attention"),
+    ).toHaveLength(1);
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(1);
+    expect(
+      f.store.listNotifications({
+        project_id: f.project,
+        recipient_kind: "pm_office",
+      }),
+    ).toHaveLength(1);
+  },
+);
+
+test("unrelated escalations cannot authorize restarting a session", async () => {
   const f = setup();
   const a = f.ops;
-  const ref = f.refFor(a);
-  f.store.uow.run((tx) =>
-    tx.assignments.put(f.project, {
-      ...a,
-      runtime_ref: ref,
-      runtime_state: "idle",
-      session_ref: "old",
-    }),
-  );
-  f.event("host_ops_patrol_due", { assignment_id: a.id }, a);
+  const event = f.event("host_ops_patrol_due", { assignment_id: a.id }, a);
+  const note = f.store
+    .listNotifications({ project_id: f.project, assignment_id: a.id })
+    .find((n) => n.event_id === event.id);
+  if (!note) throw Error("missing notification");
+  f.store.moveNotification({
+    project_id: f.project,
+    id: note.id,
+    event: "needs_attention",
+    at: f.clock.now(),
+  });
   f.advance(11 * 60000);
+  expect((await f.view()).dispatch_stalls).toEqual([]);
   await f.service.tick();
-  await vi.waitFor(() =>
-    expect(
-      f.state().events.some((e) => e.type === "host_ops_action_taken"),
-    ).toBe(true),
+  expect(f.state().events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
   );
-  await f.service.tick();
-  await vi.waitFor(() =>
-    expect(
-      f
-        .state()
-        .runs.some((r) => r.assignment_id === a.id && r.status === "queued"),
-    ).toBe(true),
-  );
-  expect(f.runtime.release).toHaveBeenCalledOnce();
-  expect(
-    f.state().assignments.find((v) => v.id === a.id)?.session_ref,
-  ).toBeUndefined();
-  await f.service.tick();
-  expect(
-    f.state().events.filter((e) => e.type === "dispatch_stall_attention"),
-  ).toHaveLength(1);
-  expect(
-    f.state().events.filter((e) => e.type === "host_ops_action_taken"),
-  ).toHaveLength(1);
-  expect(
-    f.store.listNotifications({
-      project_id: f.project,
-      recipient_kind: "pm_office",
-    }),
-  ).toHaveLength(1);
 });
 
 test("unconfirmed plan feedback points at the author, without guessing from words or requiring a bell", async () => {

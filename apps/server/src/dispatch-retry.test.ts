@@ -1060,16 +1060,27 @@ test.each([false, true])(
     });
     if (withOps) {
       expect(f.state().human_actions).toHaveLength(0);
-      expect(
-        f.store
-          .listNotifications({ project_id: f.project })
-          .some(
-            (n) =>
-              n.event_id === incident?.id &&
-              n.recipient.kind === "pm_ops" &&
-              n.status === "pending",
-          ),
-      ).toBe(true);
+      const inbox = f.store.listNotifications({ project_id: f.project });
+      const original = inbox.find(
+        (n) => n.event_id === incident?.id && n.recipient.kind === "pm_ops",
+      );
+      // Ops itself stayed busy through the confirmation window. Do not strand the recovery incident there.
+      expect(original?.status).toBe("needs_attention");
+      const handoff = f
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "bell_wake_escalated" &&
+            (
+              e.payload as { notification_ids: string[] }
+            ).notification_ids.includes(original?.id ?? ""),
+        );
+      expect(inbox).toContainEqual(
+        expect.objectContaining({
+          event_id: handoff?.id,
+          recipient: { kind: "needs_you" },
+        }),
+      );
     } else {
       const needs = listNeedsYou(f.state(), {
         kind: "human",

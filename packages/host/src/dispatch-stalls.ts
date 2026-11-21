@@ -10,6 +10,7 @@ import {
   eventsOfType,
   hasRunTarget,
   type Notification,
+  pmNotificationState,
   reviewWakeBlocked,
   runById,
   runsOf,
@@ -34,16 +35,44 @@ export interface DispatchStall {
   card_id: CardId | null;
   cause_id: string;
   review_trigger_id?: Event["id"];
+  handoff_event_id?: Event["id"];
   age_ms: number;
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
   restart_blocked: string | null;
 }
 
+export function dispatchHandoffs(state: CommandState) {
+  // A durable dispatch handoff retires the original bell, not the incident. Never
+  // use unrelated needs_attention rows (e.g. retry exhaustion) to stop a session.
+  const handoffs = new Map<string, { owner: string; event: Event }>();
+  for (const type of ["standing_inbox_stalled", "bell_wake_escalated"]) {
+    for (const event of eventsOfType(state.events, type)) {
+      const p = event.payload as {
+        assignment_id: string;
+        reason: string;
+        notification_ids?: string[];
+      };
+      if (
+        event.actor.kind !== "system" ||
+        !Array.isArray(p.notification_ids) ||
+        !(type === "standing_inbox_stalled"
+          ? p.reason === "pending_without_run"
+          : ["system_finished_turn", "unread_reminder"].includes(p.reason))
+      )
+        continue;
+      for (const id of p.notification_ids)
+        handoffs.set(id, { owner: p.assignment_id, event });
+    }
+  }
+  return handoffs;
+}
+
 /** Only current actionable work: an old rejection, held card or retired assignee is not a restart request. */
 export function dispatchStallCauses(
   state: CommandState,
   notes: readonly Notification[],
+  handoffs: ReturnType<typeof dispatchHandoffs>,
   now: string,
   standing: ReturnType<typeof standingResolver>,
   threshold = dispatchStallMs(),
@@ -104,6 +133,7 @@ export function dispatchStallCauses(
     a: Assignment | undefined,
     source: Pick<Event, "seq" | "card_id" | "created_at"> & { id: string },
     trigger = eventById(state.events, source.id),
+    handoff?: Event,
   ) {
     const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
@@ -180,6 +210,7 @@ export function dispatchStallCauses(
       assignment_id: a.id,
       card_id: card ?? null,
       cause_id: cause,
+      ...(handoff ? { handoff_event_id: handoff.id } : {}),
       ...(trigger &&
       (trigger.type === "review_submitted" ||
         trigger.type === "decision_resolved")
@@ -193,7 +224,9 @@ export function dispatchStallCauses(
   }
   for (const n of notes) {
     if (
-      !["pending", "belled", "delivery_failed"].includes(n.status) ||
+      !["pending", "belled", "delivery_failed", "needs_attention"].includes(
+        n.status,
+      ) ||
       n.recipient.kind === "needs_you" ||
       (n.next_attempt_at && n.next_attempt_at > now)
     )
@@ -207,6 +240,18 @@ export function dispatchStallCauses(
           : logicalOwner(n.recipient.kind);
     const a = owner && assignments.get(owner);
     if (!a) continue;
+    const handoff =
+      n.status === "needs_attention" ? handoffs.get(n.id) : undefined;
+    if (
+      n.status === "needs_attention" &&
+      (!handoff ||
+        handoff.owner !== a.id ||
+        handoff.event.created_at !== n.updated_at ||
+        (latestQueue.get(a.id) ?? "") >= n.updated_at ||
+        (a.standing_mode === "ops" &&
+          pmNotificationState(state, n) === "obsolete"))
+    )
+      continue;
     const last =
       a.scope === "standing"
         ? runsOf(state.runs, a.id).reduce(
@@ -219,6 +264,7 @@ export function dispatchStallCauses(
       a,
       { ...n, created_at: last },
       eventById(state.events, n.event_id),
+      handoff?.event,
     );
   }
   for (const e of eventsOfType(state.events, "work_item_resume_requested")) {

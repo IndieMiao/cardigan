@@ -3,6 +3,7 @@ import {
   beginStalledPatrolRestart,
   type Clock,
   type CommandState,
+  eventById,
   eventsOfType,
   type HostOpsExecution,
   hostOpsPending,
@@ -17,7 +18,11 @@ import {
   standingResolver,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-import { type DispatchStall, dispatchStallCauses } from "./dispatch-stalls.js";
+import {
+  type DispatchStall,
+  dispatchHandoffs,
+  dispatchStallCauses,
+} from "./dispatch-stalls.js";
 import { stallEvidence } from "./stall-evidence.js";
 
 // Keep diagnostics and notifications compact, without using a display row as a recovery fence.
@@ -40,12 +45,20 @@ export class StallPatrol {
     private signal: AbortSignal,
   ) {}
   private causes(state: CommandState) {
+    const handoffs = dispatchHandoffs(state);
+    const live = this.store.listNotifications({
+      project_id: state.project_id,
+      statuses: ["pending", "belled", "delivery_failed"],
+    });
+    const escalated = this.store.listNotifications({
+      project_id: state.project_id,
+      status: "needs_attention",
+      ids: [...handoffs.keys()],
+    });
     return dispatchStallCauses(
       state,
-      this.store.listNotifications({
-        project_id: state.project_id,
-        statuses: ["pending", "belled", "delivery_failed"],
-      }),
+      [...live, ...escalated],
+      handoffs,
       this.clock.now(),
       standingResolver(this.store),
     );
@@ -137,10 +150,16 @@ export class StallPatrol {
           payload: { ...stall },
         };
         tx.events.append(project, event);
+        // Reuse the handoff's (event, recipient) key; the dispatcher already rang operations.
+        const notice =
+          (stall.handoff_event_id
+            ? eventById(state.events, stall.handoff_event_id)
+            : undefined) ?? event;
         recordNotification(this.store.database, {
           project_id: project,
-          event_id: event.id,
-          seq: event.seq,
+          event_id: notice.id,
+          card_id: "card_id" in notice ? notice.card_id : undefined,
+          seq: notice.seq,
           kind: "run_attention",
           at: event.created_at,
           recipient:

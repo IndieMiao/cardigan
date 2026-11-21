@@ -58,9 +58,10 @@ test.each([
         })),
         wake: vi.fn(async (ref, text, opts) => {
           expect(ref).toEqual(f.refFor(t.assignment));
-          expect(opts?.if_idle || opts?.observed_guard?.state === "done").toBe(
-            true,
-          );
+          if (writes.length)
+            expect(
+              opts?.if_idle || opts?.observed_guard?.state === "done",
+            ).toBe(true);
           if (
             (opts?.resource_preflight && !(await opts.resource_preflight())) ||
             !opts?.before_send?.()
@@ -90,9 +91,7 @@ test.each([
       };
       const dispatch = new Dispatcher(opts);
       await dispatch.tick();
-      expect(writes).toEqual([]);
-      agent = "done";
-      await dispatch.tick();
+      // The previous business Run finished explicitly. Only a retry or continuation requires idle.
       expect(writes).toHaveLength(1);
       const id = f.state().runs.at(-1)?.id;
       if (!id) throw new Error("missing Run");
@@ -246,7 +245,7 @@ test.each([
       };
     });
     vi.mocked(f.runtime.wake).mockImplementation(async (_ref, _bell, gates) => {
-      expect(gates?.observed_guard?.state).toBe("done");
+      if (retry) expect(gates?.observed_guard?.state).toBe("done");
       if (gates?.resource_preflight && !(await gates.resource_preflight()))
         return { ok: true, value: { sent: false, withdrawn: true } };
       if (retry && !raced && scenario === "slot refusal") {

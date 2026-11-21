@@ -42,13 +42,13 @@ import {
   failAutomaticContextRun,
   type HarnessActivityInspection,
   type MachineLeases,
-  recordWakeRefusal,
   refreshTargetWait,
   testReviewRunPrompt,
   tryHostOpsLock,
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { payloadString } from "@cardigan/router";
 import {
   type BellAttempt,
   beginDispatchRetry,
@@ -70,9 +70,10 @@ import {
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
-import { notificationBell } from "./dispatch-inbox.js";
+import { notificationBell, type StandingResolver } from "./dispatch-inbox.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
+import { recordTurnWait, settleRefusedWake } from "./dispatch-turn-guard.js";
 import {
   legacyRepairAuthority,
   legacyRepairWake,
@@ -366,6 +367,7 @@ export function dispatchRecovery(
 export async function retryDispatchedRuns(
   options: ProviderWatch & {
     leases?: MachineLeases;
+    standing?: StandingResolver;
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
@@ -600,11 +602,13 @@ export async function retryDispatchedRuns(
         unfinishedBellAttempts(store.database, project, a.id).length > 0 ||
         state.events.some(
           (e) =>
-            e.type === "run_dispatch_stalled" &&
-            typeof e.payload === "object" &&
-            e.payload !== null &&
-            "run_id" in e.payload &&
-            e.payload.run_id === run.id,
+            payloadString(e.payload, "run_id") === run.id &&
+            (e.type === "run_dispatch_stalled" ||
+              // Handoff stops replays, not the exit-confirmed retirement of stale work.
+              (e.type === "bell_wake_escalated" &&
+                payloadString(e.payload, "reason") === "first_write_guard" &&
+                reviewRunWakeDisposition(state, a, run) !== "obsolete" &&
+                !unreadableCommentTrigger(state, run))),
         )
       )
         return;
@@ -697,6 +701,7 @@ export async function retryDispatchedRuns(
                 options.leases?.configured(project, a.machine_id)
               ? last.finished_at
               : undefined;
+      const unreadable = unreadableCommentTrigger(state, run);
       const timedOut =
         started &&
         Date.parse(at) - Date.parse(started) - dispatchTargetWaitMs(run, at) >=
@@ -704,7 +709,7 @@ export async function retryDispatchedRuns(
       const recover =
         !resourceWait &&
         ((timedOut &&
-          (!noSendYet || readmit) &&
+          (!noSendYet || readmit || unreadable) &&
           (!ackSince ||
             Date.parse(at) - Date.parse(ackSince) >= policy.timeoutMs)) ||
           (!refusedFirstWrite &&
@@ -721,7 +726,6 @@ export async function retryDispatchedRuns(
                 (shared && binding?.refused_at ? 0 : Math.max(0, failures - 1));
       // C-120: an obsolete cross-card bell cannot be retried as an empty launch.
       // Timeout recovery safely stops its terminal, then cancels without requeueing.
-      const unreadable = unreadableCommentTrigger(state, run);
       return {
         state,
         run,
@@ -730,6 +734,7 @@ export async function retryDispatchedRuns(
         recover,
         reconcile,
         readmit,
+        noSendYet,
         refusedNotes: refusedClaim ? last.notification_ids : [],
         legacyRetry: legacy === "unsent",
         withdrawn,
@@ -823,14 +828,17 @@ export async function retryDispatchedRuns(
       continue;
     // C-247: no new delivery once shutdown began; the next process retries.
     if (options.closing?.()) continue;
-    const status = await runtime.status(observed.a.runtime_ref);
-    const guard = status.ok && idleWakeGuard(status.value);
-    if (!guard) continue;
+    const status = await runtime
+      .status(observed.a.runtime_ref)
+      .catch(() => undefined);
+    const guard = status?.ok ? idleWakeGuard(status.value) : undefined;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
       if (
         !current?.retry ||
+        // Only a proven non-write needs a guard deadline in place of ACK recovery.
+        (!guard && !current.noSendYet) ||
         current.recover ||
         JSON.stringify(current.a.runtime_ref) !==
           JSON.stringify(observed.a.runtime_ref) ||
@@ -850,7 +858,12 @@ export async function retryDispatchedRuns(
             n.run_id === current.run.id ||
             (!n.run_id &&
               n.status === "pending" &&
-              refusedNotes.has(n.id) &&
+              (refusedNotes.has(n.id) ||
+                // A pause withdrew the original claim before it could bind the note.
+                (current.withdrawn &&
+                  n.event_id === current.run.trigger_event_id &&
+                  n.recipient.kind === "assignment" &&
+                  n.recipient.assignment_id === current.a.id)) &&
               (n.recipient.kind !== "assignment" ||
                 n.recipient.assignment_id === current.a.id)),
         );
@@ -869,6 +882,21 @@ export async function retryDispatchedRuns(
           : (candidates[0] ?? cause ?? item)
       )?.card_id;
       const notes = candidates.filter((n) => n.card_id === source);
+      if (!guard) {
+        // A proven non-write is deliberately exempt from normal dispatch timeout recovery.
+        recordTurnWait(tx, store, current.state, current.at, {
+          owner: current.a,
+          turn: current.run,
+          reason: "first_write_guard",
+          observation: status?.ok
+            ? `${status.value.process}/${status.value.agent}`
+            : (status?.error.code ?? "unavailable"),
+          notes,
+          timeoutMs: policy.timeoutMs,
+          standing: options.standing,
+        });
+        return;
+      }
       // Retain any stored decision instructions on ordinary retries. For a
       // refused claim, render the original pending rows, not a prior address.
       const storedBell = refusedNotes.size
@@ -900,7 +928,7 @@ export async function retryDispatchedRuns(
         bell,
       };
     });
-    if (!job?.a.runtime_ref) continue;
+    if (!job?.a.runtime_ref || !guard) continue;
     const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
     if (!unlock) {
       store.uow.run(() =>
@@ -1039,7 +1067,15 @@ export async function retryDispatchedRuns(
           },
         );
         if (result.ok && result.value.withdrawn) {
-          recordWakeRefusal(store, job.attempt, job.a, clock.now());
+          settleRefusedWake(
+            store,
+            job.attempt,
+            job.a,
+            clock.now(),
+            `alive/${guard.if_idle ? "idle" : "done"} (send withdrawn)`,
+            policy.timeoutMs,
+            options.standing,
+          );
           continue;
         }
         if (result.ok && !result.value.sent && job.attempt.review_wake)
