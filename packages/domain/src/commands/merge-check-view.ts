@@ -1,5 +1,4 @@
 import type { Event, MergeCheckView } from "../entities.js";
-import { eventsForCompletion } from "../event-index.js";
 import type { CardId, DeliveryId } from "../ids.js";
 export const MERGE_CHECK_EVENTS = [
   "merge_check_queued",
@@ -7,44 +6,60 @@ export const MERGE_CHECK_EVENTS = [
   "merge_check_finished",
   "merge_check_requeued",
 ];
+interface TargetChecks {
+  // Empty tree selects the latest check irrespective of tree, as in the public query.
+  byTree: Map<string, Event>;
+  waits: Map<string | undefined, Event>;
+}
+const indexes = new WeakMap<readonly Event[], Map<string, TargetChecks>>();
+const targetKey = (card: CardId, completion: DeliveryId) =>
+  `${card}/${completion}`;
+function keepLatest<K>(map: Map<K, Event>, key: K, event: Event) {
+  const previous = map.get(key);
+  if (!previous || event.seq > previous.seq) map.set(key, event);
+}
+/** Immutable history (as in event-index.ts): one pass across all streams per snapshot. */
+function targetIndex(events: readonly Event[]) {
+  const cached = indexes.get(events);
+  if (cached) return cached;
+  const targets = new Map<string, TargetChecks>();
+  for (const e of events) {
+    const waiting =
+      e.type === "merge_check_waiting" && e.actor.kind === "system";
+    if (!e.card_id || (!waiting && !MERGE_CHECK_EVENTS.includes(e.type)))
+      continue;
+    const p = e.payload as Partial<MergeCheckView> | null;
+    if (!p?.completion_id) continue;
+    const key = targetKey(e.card_id, p.completion_id);
+    let target = targets.get(key);
+    if (!target) {
+      target = { byTree: new Map(), waits: new Map() };
+      targets.set(key, target);
+    }
+    if (waiting) {
+      keepLatest(target.waits, p.attempt_id, e);
+    } else {
+      keepLatest(target.byTree, "", e);
+      if (p.tree_sha) keepLatest(target.byTree, p.tree_sha, e);
+    }
+  }
+  indexes.set(events, targets);
+  return targets;
+}
 export function latestMergeCheck(
   events: readonly Event[],
   card: CardId,
   completion: DeliveryId,
   tree?: string,
 ): MergeCheckView | undefined {
-  const history = eventsForCompletion(events, completion);
-  const event = history
-    .filter((e) => {
-      const p = e.payload as Partial<MergeCheckView> | null;
-      return (
-        e.card_id === card &&
-        MERGE_CHECK_EVENTS.includes(e.type) &&
-        p?.completion_id === completion &&
-        (!tree || p.tree_sha === tree)
-      );
-    })
-    .sort((a, b) => b.seq - a.seq)[0];
+  const target = targetIndex(events).get(targetKey(card, completion));
+  const event = target?.byTree.get(tree ?? "");
   if (!event) return undefined;
   const check = event.payload as unknown as MergeCheckView;
   const waiting =
-    check.status === "queued"
-      ? history
-          .filter(
-            (e) =>
-              e.actor.kind === "system" &&
-              e.card_id === card &&
-              e.type === "merge_check_waiting" &&
-              e.seq > event.seq &&
-              (e.payload as { attempt_id?: string }).attempt_id ===
-                check.attempt_id &&
-              (e.payload as { completion_id?: string }).completion_id ===
-                completion,
-          )
-          .sort((a, b) => b.seq - a.seq)[0]
-      : undefined;
+    check.status === "queued" ? target?.waits.get(check.attempt_id) : undefined;
   return {
-    ...(waiting
+    ...(waiting && waiting.seq > event.seq
       ? {
           queue_wait: {
             reason: (waiting.payload as { reason: string }).reason,

@@ -238,18 +238,27 @@ export function loadExtMessageConfig(
     return { status: "invalid" };
   }
 }
+// One host timezone at a time. A backlog scan must not reconstruct Intl for every source date.
+let quietClock: { zone: string; formatter: Intl.DateTimeFormat } | undefined;
+
 export function extMessageQuiet(
   config: ExtMessageConfig,
   now: string,
 ): boolean {
   const q = config.quiet_hours;
   if (!q) return false;
-  const time = new Intl.DateTimeFormat("en-GB", {
-    timeZone: q.timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).format(new Date(now));
+  if (quietClock?.zone !== q.timezone) {
+    quietClock = {
+      zone: q.timezone,
+      formatter: new Intl.DateTimeFormat("en-GB", {
+        timeZone: q.timezone,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }),
+    };
+  }
+  const time = quietClock.formatter.format(new Date(now));
   return q.start < q.end
     ? time >= q.start && time < q.end
     : time >= q.start || time < q.end;
