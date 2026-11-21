@@ -12,6 +12,7 @@ import {
   pmMergeBlockers,
   prepareDelivery,
   type RiskTag,
+  recordAutomaticMergeWaits,
   recordDecision,
   recordMergeCheck,
   requestDecision,
@@ -29,7 +30,9 @@ import {
 import { CommandDraft } from "./core.js";
 import { assignDecision, riskTagAutoMergeAllowed } from "./delegation.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
+import { pathEvidence } from "./system-merge/test-fixtures.js";
 import {
+  apply,
   assignment,
   fixture,
   human,
@@ -589,6 +592,69 @@ test.each(["独立　复核", "独立複核"])(
     expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
   },
 );
+
+test("C-535: personal credential consent does not request another review; a real review gap still reminds PM", async () => {
+  const fixture = await setup(undefined, true, false, "credential");
+  const { f, check, product, confirmation, item, resolve } = fixture;
+  if (!item) throw new Error("Missing independent verifier");
+  check("passed");
+  f.commit(setProjectPreferences(f.state, human, { auto_merge: "on" }, f.io));
+  const q = confirmation();
+  const state = {
+    ...f.state,
+    deliveries: f.state.deliveries.map((v) =>
+      v.id === product.id ? { ...v, evidence: pathEvidence() } : v,
+    ),
+  };
+  const missingReview = "高危交付须有当前有效的必需独立复核";
+  for (const valid of [true, false]) {
+    const snapshot = valid
+      ? state
+      : {
+          ...state,
+          reviews: state.reviews.filter((r) => r.work_item_id !== item.id),
+        };
+    const consent = expect.stringMatching(/凭据.*须由人确认/u);
+    const expected = valid
+      ? [consent]
+      : expect.arrayContaining([consent, missingReview]);
+    expect(pmMergeBlockers(snapshot, q)).toEqual(expected);
+    expect(resolve(snapshot).ok).toBe(false);
+    const observation = value(
+      recordAutomaticMergeWaits(snapshot, system, {}, f.io),
+    );
+    expect(observation.events).toMatchObject([
+      {
+        type: "merge_blocked",
+        payload: { reasons: expected },
+      },
+    ]);
+    const later = {
+      ...f.io,
+      clock: {
+        now: () => new Date(Date.parse(now) + 30 * 60_000).toISOString(),
+      },
+    };
+    const reminder = value(
+      recordAutomaticMergeWaits(
+        apply(snapshot, observation),
+        system,
+        {},
+        later,
+      ),
+    );
+    if (valid) expect(reminder.events).toEqual([]);
+    else {
+      expect(reminder.events).toMatchObject([
+        { type: "merge_blocked_reminded" },
+      ]);
+      expect(reminder.timeline[0]?.body).toContain(missingReview);
+      expect(reminder.timeline[0]?.body).not.toContain("须由人确认");
+    }
+  }
+  await authorize(fixture, "human");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
 
 test.each<DecisionCategory>([
   "spending",

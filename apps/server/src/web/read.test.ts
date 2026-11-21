@@ -347,11 +347,15 @@ test("a card page carries work items, timeline, relations and attachments", asyn
       basis: { id: "D-1", status: "open" },
       inline: false,
       download_path: `/api/projects/${project_id}/attachments/F-2`,
+      thumbnail_path: null,
     });
     const image = body.attachments.find(
       (attachment: { id: string }) => attachment.id === "F-1",
     );
     expect(image.inline).toBe(true);
+    expect(image.thumbnail_path).toBe(
+      `/api/projects/${project_id}/attachments/F-1/thumbnail`,
+    );
 
     const missing = await call(
       harness.port,

@@ -114,6 +114,7 @@ import {
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
+import { serveAttachmentThumbnail } from "./thumbnails.js";
 import { readPagedCard } from "./timeline-state.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
@@ -833,6 +834,22 @@ async function serveProjectRoute(
         }),
       authorize: () => requireSession(context),
     });
+  }
+
+  const thumbnail = /^\/attachments\/([^/]+)\/thumbnail$/.exec(rest);
+  if (thumbnail !== null) {
+    const served = await serveAttachmentThumbnail({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(thumbnail[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
   }
 
   const attachment = /^\/attachments\/([^/]+)$/.exec(rest);
