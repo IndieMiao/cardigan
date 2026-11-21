@@ -386,6 +386,15 @@ async function assembleServer(
     ? {
         store,
         runtime: options.dispatcher.runtime,
+        ...(config.workerInspectionIntervalMs
+          ? { workerInspectionIntervalMs: config.workerInspectionIntervalMs }
+          : {}),
+        workerExecution: (project, machine) => {
+          const runtime = options.dispatcher?.runtime;
+          if (!(runtime instanceof RuntimeTargets))
+            throw new Error("Worker registry unavailable");
+          return runtime.resolve(project, machine).execution;
+        },
         snapshot: options.dispatcher.snapshot,
         get upstream() {
           return options.dispatcher?.upstream;

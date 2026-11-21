@@ -372,3 +372,13 @@ test("framework dependency reminder accepts a positive host duration", () => {
       resolveServerConfig({ CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS: value }),
     ).toThrow("CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS");
 });
+
+test("worker inspection cadence accepts only a positive deployment interval", () => {
+  expect(
+    resolveServerConfig({ CARDIGAN_WORKER_INSPECTION_INTERVAL_MS: "30000" })
+      .workerInspectionIntervalMs,
+  ).toBe(30000);
+  expect(() =>
+    resolveServerConfig({ CARDIGAN_WORKER_INSPECTION_INTERVAL_MS: "0" }),
+  ).toThrow("positive");
+});
