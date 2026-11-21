@@ -1,6 +1,7 @@
 import { resolve, sep } from "node:path";
 import {
   type Assignment,
+  associatedHarnessActivity,
   type CommandState,
   type ContextObservation,
   type ContextUsage,
@@ -18,6 +19,7 @@ import {
 } from "@cardigan/domain";
 import {
   type ActivityMetadata,
+  type ContextReading,
   type ContextSample,
   expandClaudeModel,
   getHarnessAdapter,
@@ -75,7 +77,7 @@ async function privateTranscript(
   execution: ExecutionConfig,
   root: string,
   session: string | undefined,
-  earliestCall: number,
+  alertScope: readonly [floor: string, exactCwd: string, childPrefix: string],
   onReadFailure: () => void,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
@@ -83,7 +85,6 @@ async function privateTranscript(
     // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
     // the host cannot read them; use the existing credential-checked channel.
     // Roots come from validated execution paths, never transcript metadata.
-    const floor = String(earliestCall);
     const args = [
       "-e",
       CLAUDE_CONTEXT_READER,
@@ -91,7 +92,7 @@ async function privateTranscript(
       root,
       session ?? "",
       "local",
-      floor,
+      ...alertScope,
     ];
     const worker = execution.target && execution.target.machine_id !== "local";
     if (worker && (execution.mode !== "agent-ssh" || !execution.fileHelper)) {
@@ -109,7 +110,7 @@ async function privateTranscript(
             root,
             session ?? "",
             CLAUDE_CONTEXT_READER,
-            floor,
+            ...alertScope,
           ]
         : ["node", ...args];
     const command =
@@ -266,7 +267,7 @@ export async function readSessionContexts(
     let startupMetadata: ActivityMetadata | undefined;
     let activityMetadata: ActivityMetadata | undefined;
     let fileMetadata: ActivityMetadata | undefined;
-    let foreground: AlertEvidence["foreground"];
+    let pending: ContextReading["foreground"];
     let activityReadFailed = false;
     const readFailed = () => {
       activityReadFailed = true;
@@ -275,6 +276,18 @@ export async function readSessionContexts(
     const harness = run?.harness;
     const adapter =
       harness && isHarness(harness) ? getHarnessAdapter(harness) : undefined;
+    // Pass the same trusted exact directory and (only for a worktree) child
+    // prefix to the reader. A Run directory alone does not permit descendants.
+    const exactCwd = cwd ? resolve(cwd) : "";
+    const worktree = a.worktree_path ?? a.runtime_ref?.worktree_path;
+    const childPrefix =
+      exactCwd && adapter?.allowWorktreeDescendant && worktree
+        ? resolve(worktree) + sep
+        : "";
+    const matchesCwd = (dir: string) =>
+      exactCwd &&
+      (resolve(dir) === exactCwd ||
+        (childPrefix && resolve(dir).startsWith(childPrefix)));
     if (!a.external && execution && root && options && adapter) {
       const reading = await adapter.readContext({
         root,
@@ -289,10 +302,16 @@ export async function readSessionContexts(
             execution,
             root,
             session,
-            Math.max(
-              contextGenerationStart(a, state.events),
-              Date.parse(run?.started_at ?? a.created_at),
-            ),
+            [
+              String(
+                Math.max(
+                  contextGenerationStart(a, state.events),
+                  Date.parse(run?.started_at ?? a.created_at),
+                ),
+              ),
+              exactCwd,
+              childPrefix,
+            ],
             readFailed,
             options.signal,
           ),
@@ -301,7 +320,7 @@ export async function readSessionContexts(
       if (reading && (!worker || (await boundPaths())?.root === worker.root)) {
         usage = reading.usage;
         fileMetadata = reading.fileActivity;
-        foreground = reading.foreground;
+        pending = reading.foreground;
         activityMetadata = reading.activity;
         progress = reading.progress;
         startupMetadata = reading.startupFailure;
@@ -323,15 +342,6 @@ export async function readSessionContexts(
       source = "claude_statusline_cache";
       if (usage && measured(usage)) consumed.add(usage);
     }
-    // Claude reports the current directory (e.g. apps/web), not necessarily
-    // the launch cwd. Only its private transcript may use a worktree descendant.
-    const worktree = a.worktree_path ?? a.runtime_ref?.worktree_path;
-    const matchesCwd = (dir: string) =>
-      cwd &&
-      (resolve(dir) === resolve(cwd) ||
-        (adapter?.allowWorktreeDescendant &&
-          worktree &&
-          resolve(dir).startsWith(resolve(worktree) + sep)));
     const bindActivity = (
       metadata: ActivityMetadata | undefined,
       progress?: ActivityMetadata,
@@ -365,6 +375,22 @@ export async function readSessionContexts(
       (!activity?.error || harness === "claude-code") &&
       !activityReadFailed
         ? { ...file, source: `${harness}:transcript_mtime` }
+        : undefined;
+    // Bind the command's own start, not merely some other activity in the file.
+    const start = associatedHarnessActivity(
+      state,
+      a,
+      now,
+      bindActivity(pending?.start),
+    );
+    const foreground =
+      pending &&
+      start &&
+      !activityReadFailed &&
+      [activity, fileActivity].some(
+        (sample) => sample?.session_id === start.session_id,
+      )
+        ? { command: pending.command, since: start.updated_at }
         : undefined;
     const startupFailure = bindActivity(startupMetadata);
     const activityFresh = !!currentHarnessActivity(state, a, now, activity);
@@ -421,7 +447,7 @@ export async function readSessionContexts(
       ...(observation ? { observation } : {}),
       ...(activity ? { activity } : {}),
       ...(fileActivity ? { fileActivity } : {}),
-      ...(foreground && (activity || fileActivity) ? { foreground } : {}),
+      ...(foreground ? { foreground } : {}),
       ...(startupFailure ? { startupFailure } : {}),
       activity_updated_at: activity?.updated_at ?? null,
       activity_source: activity?.source ?? null,

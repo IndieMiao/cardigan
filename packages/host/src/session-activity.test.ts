@@ -269,7 +269,7 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
   using capture = vi
     .spyOn(transcript, "captureTranscript")
     .mockImplementation(async (_file, args) => {
-      const [dir, session] = args.slice(-4);
+      const [dir, session] = args.slice(-6);
       const first = session === one.id;
       if (
         (!first && session !== ten.id) ||
@@ -305,6 +305,29 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
   expect((await inspect())[0]?.activity_status).toBe("unassociated");
   expect(capture).toHaveBeenCalledTimes(4);
 });
+
+test.each([
+  { cwd: `${cwd}-other` },
+  { session_id: "different" },
+  { updated_at: "2025-12-31T23:59:59.000Z" },
+])(
+  "the host rejects an unrelated command start even beside valid activity: %j",
+  async (unrelated) => {
+    const activity = { session_id: "session-1", cwd, updated_at: now };
+    using _capture = vi
+      .spyOn(transcript, "captureTranscript")
+      .mockResolvedValue(
+        JSON.stringify({
+          path: claudeFile(),
+          activity,
+          foreground: { command: "vite", start: { ...activity, ...unrelated } },
+        }),
+      );
+    const row = await read(state("claude-code"));
+    expect(row?.activity_status).toBe("fresh");
+    expect(row?.foreground).toBeUndefined();
+  },
+);
 
 test("regressed record clocks, mismatched session/cwd and old generations fail association", async () => {
   await write(rollout(), codex(progress() + progress("2026-01-01T00:59:00Z")));

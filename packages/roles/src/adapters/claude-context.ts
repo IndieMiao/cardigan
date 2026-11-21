@@ -22,6 +22,7 @@ export async function readClaudeContext({
       return undefined;
     }
     const fg = object(event?.foreground);
+    const start = parseActivityMetadata(fg?.start);
     const foreground =
       fg &&
       typeof fg.command === "string" &&
@@ -32,9 +33,8 @@ export async function readClaudeContext({
         "dev server",
         "vite",
       ].includes(fg.command) &&
-      typeof fg.since === "string" &&
-      Number.isFinite(Date.parse(fg.since))
-        ? { command: fg.command, since: fg.since }
+      start
+        ? { command: fg.command, start }
         : undefined;
     return event && typeof event.path === "string"
       ? {

@@ -176,7 +176,7 @@ export interface ContextReading {
   activity?: ActivityMetadata | undefined;
   progress?: ActivityMetadata | undefined;
   fileActivity?: ActivityMetadata | undefined;
-  foreground?: { command: string; since: string } | undefined;
+  foreground?: { command: string; start: ActivityMetadata } | undefined;
   /** Original fault record, separate from the latest activity used for idle detection. */
   startupFailure?: ActivityMetadata | undefined;
 }

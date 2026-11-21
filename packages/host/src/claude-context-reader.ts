@@ -133,7 +133,13 @@ function alertMetadata(lines, path, mtime, activity) {
   // Per bounded read of this session only. A tool ID is local to its cwd;
   // completing one sibling cannot consume another's start or high-water marks.
   const pending = new Map();
-  const earliestCall = Number(process.argv[4]);
+  const [floor, exactCwd, childPrefix] = process.argv.slice(4);
+  const earliestCall = Number(floor);
+  function matchesCwd(dir) {
+    if (!exactCwd || !text(dir, 4096) || !dir.startsWith('/')) return false;
+    const normalized = resolve(dir);
+    return normalized === exactCwd || (childPrefix && normalized.startsWith(childPrefix));
+  }
   const writeTime = new Date(mtime).toISOString();
   for (const line of lines) {
     if (line === '') continue;
@@ -142,14 +148,14 @@ function alertMetadata(lines, path, mtime, activity) {
     try { e = object(JSON.parse(line)); } catch { pending.clear(); continue; }
     if (!e || e.isSidechain === true || e.message?.model === '<synthetic>') continue;
     if (e.sessionId && e.sessionId !== id) return;
-    if (e.sessionId !== id || !text(e.cwd, 4096)) continue;
+    if (e.sessionId !== id || !matchesCwd(e.cwd)) continue;
     if (e.isApiErrorMessage === true || (e.type === 'system' && e.subtype === 'api_error') ||
         !['user', 'assistant', 'progress'].includes(e.type)) continue;
     const ts = Date.parse(text(e.timestamp, 64));
     const timestamp = Number.isFinite(ts) ? new Date(ts).toISOString() : undefined;
     if (e.type === 'progress' && e.data?.type === 'bash_progress') {
       const call = pending.get(e.cwd)?.get(e.parentToolUseID);
-      if (!call || ts < Date.parse(call.since)) continue;
+      if (!call || ts < Date.parse(call.start.updated_at)) continue;
       if (bashOutputGrew(call, e.data) && timestamp &&
           (!last || ts >= Date.parse(last.updated_at))) {
         last = {session_id: id, cwd: e.cwd, updated_at: timestamp};
@@ -163,7 +169,7 @@ function alertMetadata(lines, path, mtime, activity) {
       let calls = pending.get(e.cwd);
       if (e.type === 'user' && block?.type === 'tool_result') {
         const call = calls?.get(block.tool_use_id);
-        if (call && (!timestamp || ts >= Date.parse(call.since))) calls.delete(block.tool_use_id);
+        if (call && (!timestamp || ts >= Date.parse(call.start.updated_at))) calls.delete(block.tool_use_id);
         if (calls?.size === 0) pending.delete(e.cwd);
         continue;
       }
@@ -172,16 +178,25 @@ function alertMetadata(lines, path, mtime, activity) {
           !text(block.id, 128) || !timestamp || !(ts >= earliestCall)) continue;
       if (!calls) { calls = new Map(); pending.set(e.cwd, calls); }
       if (!calls.has(block.id)) calls.set(block.id, {
-        command: foregroundName(block.input.command), since: timestamp, counts: {}, produced: false,
+        command: foregroundName(block.input.command),
+        start: {session_id: id, cwd: e.cwd, updated_at: timestamp},
+        counts: {}, produced: false,
       });
     }
   }
-  const progressAt = activity?.error ? activity.progress?.updated_at : activity?.updated_at;
+  // A later protocol sample outside this scope will be discarded by the
+  // host. It must not suppress the last attributable alert-only record.
+  const progress = activity?.error ? activity.progress : activity;
+  const progressAt = matchesCwd(activity?.cwd) && matchesCwd(progress?.cwd) && progress?.updated_at;
   const file = finalWrite ?? (last && (!progressAt || Date.parse(last.updated_at) > Date.parse(progressAt)) ? last : undefined);
   // Several calls can all contribute progress, but none is uniquely the stalled command.
   const calls = pending.size === 1 ? pending.values().next().value : undefined;
   const only = calls?.size === 1 ? calls.values().next().value : undefined;
-  return file || only ? {...(file ? {file_activity: file} : {}), ...(only ? {foreground: {command: only.command, since: only.since}} : {})} : undefined;
+  if (!file && !only) return;
+  return {
+    ...(file ? {file_activity: file} : {}),
+    ...(only ? {foreground: {command: only.command, start: only.start}} : {}),
+  };
 }
 function readTail(fd, path, attributable, activityOnly = false) {
   const { fstatSync, readSync } = require('node:fs');

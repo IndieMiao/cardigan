@@ -45,6 +45,8 @@ const read = (earliestCall = 0) =>
     "",
     CLAUDE_CONTEXT_READER,
     String(earliestCall),
+    "/worktree",
+    "/worktree/",
   ]);
 
 test("the worker emits only activity from the fd and original record time", async () => {
@@ -118,7 +120,10 @@ test("a worker fd attributes output to the surviving sibling only if its start b
   await writeFile(join(folder, "one.jsonl"), events.join("\n"));
   const floor = Date.parse(start);
   expect(JSON.parse(await read(floor))).toMatchObject({
-    foreground: { command: "vite", since: start },
+    foreground: {
+      command: "vite",
+      start: { cwd: "/worktree/src", session_id: "one", updated_at: start },
+    },
     file_activity: { updated_at: new Date(at).toISOString() },
   });
   const afterRotation = JSON.parse(await read(floor + 1));
