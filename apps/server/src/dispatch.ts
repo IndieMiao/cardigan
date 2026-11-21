@@ -729,8 +729,7 @@ export class Dispatcher {
           maxRetries: this.maxRetries,
           leaseMs: this.leaseMs,
         },
-        (attempt, sent, reason, bell, failure) =>
-          this.settle(attempt, sent, reason, bell, failure),
+        this.settle.bind(this),
       ),
     );
     // Recovery and escalation are durable events, including CLI starts without an inbox row.

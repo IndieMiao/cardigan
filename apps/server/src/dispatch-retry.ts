@@ -393,6 +393,7 @@ export async function retryDispatchedRuns(
     reason: string,
     bell: string,
     failure?: DeliveryFailure,
+    resumedRetirement?: Assignment,
   ) => void,
 ) {
   const { store, runtime, clock, loadState = loadCommandState } = options;
@@ -909,6 +910,7 @@ export async function retryDispatchedRuns(
       );
       continue;
     }
+    let resumedRetirement: Assignment | undefined;
     let sent = false,
       reason = "delivery_call_failed",
       failure: DeliveryFailure | undefined,
@@ -987,6 +989,7 @@ export async function retryDispatchedRuns(
           continue;
         }
         const addressed = job.a.runtime_ref;
+        const retirementHeld = retirementOwnsSession(job.a);
         const arm = () =>
           !job.run.bell_delivery ||
           armBellReceipt(
@@ -1002,7 +1005,7 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             ...guard,
-            ...(retirementOwnsSession(job.a)
+            ...(retirementHeld
               ? {
                   retirement_owner: {
                     project_id: project,
@@ -1056,6 +1059,10 @@ export async function retryDispatchedRuns(
             confirmReviewNotSent(store.database, job.attempt),
           );
         sent = result.ok && result.value.sent;
+        // A Run that advanced before wake can settle its bell, but only an
+        // actual guarded send may resolve the wait captured at retry claim.
+        if (sent && retirementHeld && job.a.idle_retirement?.dispatch_wait)
+          resumedRetirement = job.a;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));
       }
@@ -1083,6 +1090,6 @@ export async function retryDispatchedRuns(
           }),
         ),
       );
-    settle(job.attempt, sent, reason, job.bell, failure);
+    settle(job.attempt, sent, reason, job.bell, failure, resumedRetirement);
   }
 }

@@ -287,6 +287,122 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
   expect(f.store.verifyToken(token.token)).toBeTruthy();
 });
 
+async function retirementWakeToRetry(firstWake: "withdrawn" | "queue_timeout") {
+  const fixture = await recoveredWaitingRun();
+  const { f, queued } = fixture;
+  vi.mocked(f.runtime.status).mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_not_found", message: "snapshot gap" },
+  });
+  await f.dispatcher.tick();
+  const wait = f.owner().idle_retirement?.dispatch_wait;
+  expect(wait?.event_id).toBeTruthy();
+
+  const wake = vi.mocked(f.runtime.wake);
+  wake.mockResolvedValueOnce(
+    firstWake === "withdrawn"
+      ? { ok: true, value: { sent: false, withdrawn: true } }
+      : {
+          ok: false,
+          error: {
+            code: "runtime_queue_timeout",
+            message: "pre-send timeout",
+          },
+        },
+  );
+  await f.dispatcher.tick();
+  expect(wake).toHaveBeenCalledOnce();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  expect(waitNotices(f)).toMatchObject([
+    { event_id: wait?.event_id, status: "pending" },
+  ]);
+
+  return { ...fixture, wake, wait };
+}
+
+test.each(["withdrawn", "queue_timeout"] as const)(
+  "a confirmed retry after %s resolves the original retirement wait",
+  async (firstWake) => {
+    const { f, queued, owner, token, wake, wait } =
+      await retirementWakeToRetry(firstWake);
+    wake.mockImplementationOnce(async (ref, _bell, options) => {
+      expect(ref).toEqual(owner.runtime_ref);
+      expect(options?.retirement_owner).toEqual({
+        project_id: f.project,
+        assignment_id: owner.id,
+      });
+      expect(await options?.before_send?.()).toBe(true);
+      return { ok: true, value: { sent: true } };
+    });
+    f.advance(31_000);
+    await f.dispatcher.tick();
+    expect(wake).toHaveBeenCalledTimes(2);
+    const actor = f.actorFor(f.owner());
+    f.apply((s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p), actor);
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: queued, outcome: "completed", summary: "resumed" },
+          p,
+        ),
+      actor,
+    );
+    await host.upgradeIdleAssignmentRoles(
+      f.store,
+      f.project,
+      f.runtime,
+      f.clock,
+    );
+    expect(waitNotices(f)).toMatchObject([
+      { event_id: wait?.event_id, status: "resolved" },
+    ]);
+    expect(f.owner().idle_retirement?.dispatch_wait).toBeUndefined();
+    expect(
+      f.state().events.filter((e) => e.type === "retirement_dispatch_resumed"),
+    ).toMatchObject([
+      {
+        payload: {
+          assignment_id: owner.id,
+          run_id: queued,
+          retirement_wait_event_id: wait?.event_id,
+        },
+      },
+    ]);
+    expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+    expect(f.store.verifyToken(token.token)).toBeTruthy();
+    expect(f.startRun).not.toHaveBeenCalled();
+  },
+);
+
+test("a Run acknowledged before the retry sends is not a guarded wake receipt", async () => {
+  const { f, queued, wake, wait } = await retirementWakeToRetry("withdrawn");
+  const dispatcher = new Dispatcher({
+    store: f.store,
+    clock: f.clock,
+    runtime: f.runtime,
+    startRun: f.startRun,
+    snapshot: f.snapshot,
+    beforeWake: async () => {
+      f.apply(
+        (s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p),
+        f.actorFor(f.owner()),
+      );
+    },
+  });
+  f.advance(31_000);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("running");
+  expect(wake).toHaveBeenCalledOnce(); // The first, withdrawn call only.
+  expect(f.owner().idle_retirement?.dispatch_wait).toEqual(wait);
+  expect(
+    f.state().events.some((e) => e.type === "retirement_dispatch_resumed"),
+  ).toBe(false);
+});
+
 test.each([
   "runtime_not_found",
   "runtime_unavailable",
