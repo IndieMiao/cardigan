@@ -3,8 +3,14 @@
   .facts {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--ui-space-1) var(--ui-space-3);
     margin: 0 0 var(--ui-space-2);
+  }
+  /* Keep the control-sized hit area without growing the facts line. */
+  .help {
+    margin-block: calc((var(--ui-leading) - var(--ui-control)) / 2);
+    color: var(--text-muted);
   }
   /* A soft edge on each side that has nodes scrolled out of view. */
   .frame {
@@ -92,6 +98,10 @@
   }
   .edge.edgeMuted {
     stroke: var(--ui-border-hover);
+  }
+  /* Story to child: belonging, not order. */
+  .edgeParent {
+    stroke-dasharray: var(--ui-space-1) var(--ui-space-1);
   }
   .arrow {
     fill: var(--text-muted);

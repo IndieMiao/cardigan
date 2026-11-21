@@ -210,7 +210,7 @@ export function CardDependencies({
 }
 
 /** Facts the graph already has show at once; the rest come from one read. */
-function DependencyPeek({
+export function DependencyPeek({
   node,
   status,
   relation,
