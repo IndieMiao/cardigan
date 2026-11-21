@@ -10,6 +10,8 @@
 // C549_BASELINE_REF=<git ref> renders that ref's page files (before: only the
 // scenes that existed — card list, models list, profile detail and the
 // profile drawer's Provider form).
+// C549_FULL=1 with a baseline renders every scene that existed then (V-2708:
+// before = the previous delivery).
 // C549_BEFORE=<before output dir> counts differing pixels per scene name.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -455,7 +457,7 @@ try {
         left: cardsShot,
         right: providersShot,
       });
-      if (baseline) {
+      if (baseline && !process.env.C549_FULL) {
         // Before: the profile drawer's Provider form is all there was.
         await models(theme);
         await row("claude-opus");
@@ -550,6 +552,65 @@ try {
       await scene("provider-discard", measureDrawer);
       await click("放弃修改");
       await until("document.querySelectorAll('[role=dialog]').length <= 1");
+
+      if (!baseline) {
+        // V-2708: no reply, and the check gets none either: unknown, not "not written".
+        await models(theme, "?confirm=lost");
+        await toProviders();
+        await provider("relay");
+        await click("编辑");
+        await until("!!document.querySelector('[role=dialog] form input')");
+        await clickIn("密钥变量 ANTHROPIC_AUTH_TOKEN", "填写");
+        await fillIn(
+          "密钥变量 ANTHROPIC_AUTH_TOKEN",
+          "新密钥 RELAY_TOKEN",
+          FAKE,
+        );
+        await click("预览修改");
+        await until("!!document.querySelector('[role=dialog] dd [data-op]')");
+        await click("确认保存");
+        await until(
+          "[...document.querySelectorAll('[role=dialog] [role=alert]')].some((a) => a.textContent.includes('无法确认密钥是否已写入'))",
+        );
+        await run(() =>
+          document
+            .querySelector("[role=dialog] [role=alert]")
+            ?.scrollIntoView({ block: "center" }),
+        );
+        await scene("provider-write-unknown", measureDrawer);
+        results.unknownPasswords = await passwords();
+        assert.deepEqual(
+          results.unknownPasswords.map((p) => p.length),
+          [0],
+        );
+        await click("取消");
+        await until("document.querySelectorAll('[role=dialog]').length === 2");
+        await click("放弃修改");
+        await until("document.querySelectorAll('[role=dialog]').length <= 1");
+        // V-2708: a key another Provider reads is refused before any preview.
+        await models(theme);
+        await toProviders();
+        await provider("relay");
+        await click("编辑");
+        await until("!!document.querySelector('[role=dialog] form input')");
+        await click("添加密钥变量");
+        await fillIn("新密钥变量", "变量名", "ANTHROPIC_API_KEY");
+        await fillIn("新密钥变量", "secrets.env 键名", "ANTHROPIC_API_KEY");
+        await fillIn("新密钥变量", "密钥", FAKE);
+        await until(
+          "[...document.querySelectorAll('[role=dialog] [role=alert]')].some((a) => a.textContent.includes('也被 Provider anthropic 使用'))",
+        );
+        await run(() =>
+          document
+            .querySelector("[role=dialog] [role=alert]")
+            ?.scrollIntoView({ block: "center" }),
+        );
+        await scene("provider-shared-key", measureDrawer);
+        await click("取消");
+        await until("document.querySelectorAll('[role=dialog]').length === 2");
+        await click("放弃修改");
+        await until("document.querySelectorAll('[role=dialog]').length <= 1");
+      }
 
       // A stale write: refresh and preview again; nothing written.
       await models(theme, "?confirm=stale");

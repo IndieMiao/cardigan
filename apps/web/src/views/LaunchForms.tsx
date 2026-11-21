@@ -41,8 +41,11 @@ import {
   nameProblem,
   optionalNameProblem,
   permissionProblem,
+  provedNotWritten,
   secretValueProblem,
+  sharedKeyProblem,
   textProblem,
+  UNSETTLED,
   urlProblem,
 } from "./launch-change.js";
 
@@ -83,7 +86,9 @@ function useLaunchChange(context: EditorContext) {
   }>();
   const [problem, setProblem] = useState<LaunchProblem>();
   const [busy, setBusy] = useState(false);
-  const [secretsDropped, setSecretsDropped] = useState(false);
+  // C-549 / V-2708: after a failed confirmation the secret inputs are empty;
+  // "dropped" when the host proved nothing was written, "unknown" otherwise.
+  const [secretsOutcome, setSecretsOutcome] = useState<"dropped" | "unknown">();
   const sending = useRef(false);
   const keys = useRef(new Map<string, string>());
   const alive = useRef(true);
@@ -143,10 +148,10 @@ function useLaunchChange(context: EditorContext) {
     busy,
     problem,
     preview,
-    secretsDropped,
+    secretsOutcome,
     /** Show the diff of `change`; the form stays as it was. */
     start: (change: LaunchChange) => {
-      setSecretsDropped(false);
+      setSecretsOutcome(undefined);
       return requestPreview(change, version);
     },
     /** Back to the form; the preview is dropped. */
@@ -208,8 +213,29 @@ function useLaunchChange(context: EditorContext) {
             // Secret values are never kept for a retry: back to the form,
             // inputs emptied, the rest of the draft as it was.
             setPreview(undefined);
-            setSecretsDropped(true);
             onSecretsDropped?.();
+            if (!provedNotWritten(error)) {
+              // V-2708: the reply was lost or unclear, so the host may have
+              // written. Ask again with the same key and no values: a settled
+              // receipt answers success; anything else stays unknown.
+              try {
+                await client.confirmLaunchChange(at, preview_id, key);
+                keys.current.delete(preview_id);
+                if (alive.current) onDone();
+                return;
+              } catch {
+                if (!alive.current) return;
+                setSecretsOutcome("unknown");
+                try {
+                  const settings = await reread();
+                  if (alive.current) setVersion(settings.version);
+                } catch {
+                  // The notice already says to refresh before retyping.
+                }
+                return;
+              }
+            }
+            setSecretsOutcome("dropped");
             setProblem(next);
             if (next.kind === "stale")
               try {
@@ -374,9 +400,11 @@ function LaunchEditor({
       <SettingsDialogFields>
         <fieldset disabled={editor.busy}>{fields(fieldProblem)}</fieldset>
         {notice}
-        {editor.secretsDropped && (
+        {editor.secretsOutcome && (
           <SettingsWarning role="alert">
-            密钥没有写入，输入框已清空，请重新输入。
+            {editor.secretsOutcome === "unknown"
+              ? UNSETTLED
+              : "密钥没有写入，输入框已清空，请重新输入。"}
           </SettingsWarning>
         )}
       </SettingsDialogFields>
@@ -1166,6 +1194,19 @@ export function ProviderForm({
   }
   for (const [key, n] of writes)
     if (n > 1) problems.secrets = `密钥键 ${key} 填了不止一次。`;
+  // V-2708: secrets.env is shared. A key another Provider reads is not
+  // rewritten or cleared from this form (the server refuses it too).
+  for (const key of [...set, ...clear]) {
+    const others = settings.providers
+      .filter(
+        (p) =>
+          p.id !== id &&
+          (p.secrets?.some((s) => s.key === key) ||
+            Object.values(p.secret_env ?? {}).includes(key)),
+      )
+      .map((p) => p.id);
+    if (others.length) problems.secrets ??= sharedKeyProblem(key, others);
+  }
   if (Object.keys(env).length) fields.env = env;
   if (Object.keys(secretEnv).length) fields.secret_env = secretEnv;
   const plan = {

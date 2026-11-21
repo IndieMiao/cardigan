@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   launchRevision,
@@ -11,6 +11,7 @@ import {
 } from "@cardigan/host";
 import {
   type LaunchConfig,
+  LaunchConfigError,
   requiredSecretKeys,
   validateLaunchSecrets,
 } from "@cardigan/roles";
@@ -33,7 +34,8 @@ import { ProfileChecks, providerCheck } from "./launch-settings-check.js";
 import {
   digest,
   invalid,
-  legacyEndpoints,
+  privateEnv,
+  providerEndpoint,
   publicFields,
   readLaunchSettings,
   references,
@@ -46,9 +48,11 @@ import {
   planKeys,
   plannedSecrets,
   readSecretsText,
-  restoreSecrets,
+  SecretsUnsettled,
   secretTimes,
   secretValues,
+  settleSecretIntents,
+  settleSecrets,
   updateSecretsText,
 } from "./launch-settings-secrets.js";
 
@@ -78,25 +82,21 @@ const checkBody = z.union([
 /** Nothing changed: our own partial write was undone (C-549). */
 const writeFailed = () =>
   new HttpRejection(500, "write_failed", "写入失败，已恢复原文件，没有改动");
-/** Env names that usually hold a credential: their values are never shown. */
-const CREDENTIAL_NAME =
-  /KEY|TOKEN|SECRET|PASSW|AUTH|CREDENTIAL|COOKIE|PRIVATE|SESSION/iu;
+/** V-2708: the outcome is not known yet; the next read settles it from the files. */
+const writeUnknown = () =>
+  new HttpRejection(
+    500,
+    "write_unsettled",
+    "写入结果暂未确认，请刷新后查看密钥状态",
+  );
 function envView(
   env: Readonly<Record<string, string>>,
   secrets: Record<string, string>,
 ) {
-  return Object.entries(env).map(([name, value]) => {
-    const url = URL.parse(value);
-    const hidden =
-      CREDENTIAL_NAME.test(name) ||
-      publicFields(value, secrets) !== value ||
-      !!url?.username ||
-      !!url?.password;
-    return {
-      name: publicFields(name, secrets) as string,
-      value: hidden ? null : value,
-    };
-  });
+  return Object.entries(env).map(([name, value]) => ({
+    name: publicFields(name, secrets) as string,
+    value: privateEnv(name, value, secrets) ? null : value,
+  }));
 }
 
 function redactedFields(
@@ -130,6 +130,8 @@ export class LaunchSettings {
     return snapshot(this.dir, launchRevision(this.store));
   }
   private file() {
+    // V-2708: an interrupted secrets.env write is applied or undone first.
+    settleSecretIntents(this.store);
     return withLaunchSnapshot(this.store, this.dir, this.dataDir, (fence) => ({
       ...readLaunchSettings(this.dir, this.dataDir, fence.revision),
       fence,
@@ -188,8 +190,7 @@ export class LaunchSettings {
           {
             id,
             name: p.name ?? p.codex?.name ?? id,
-            base_url:
-              p.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null,
+            base_url: providerEndpoint(config, id),
             harness: p.harness ?? null,
             api: p.api ?? null,
             profiles: users.profiles,
@@ -358,58 +359,49 @@ export class LaunchSettings {
           installed ? 1 : 0,
         );
     // C-549: secrets.env first. Every key the YAML can need is already there
-    // (both the old and the new YAML were checked against the new secrets), so
-    // a crash between the two renames leaves a valid pair. A failed YAML
-    // install puts the old secrets.env back.
-    let written: { original: string | null; text: string } | undefined;
+    // (both the old and the new YAML were checked against the new secrets).
+    // V-2708: the write is recorded as an intent before its rename and
+    // settled from the files: it stands only with its YAML installed, and a
+    // crash or failure anywhere in between undoes it (see `installSecrets`).
+    let files: string | undefined;
     if (set.length || clear.length) {
       const original = readSecretsText(this.dir);
       const next = updateSecretsText(original, values, clear);
       const now = new Date().toISOString();
       try {
-        installSecrets(
-          this.store,
-          this.dir,
-          this.dataDir,
-          f.fence,
+        files = installSecrets(this.store, this.dir, this.dataDir, f.fence, {
+          operation: id,
           original,
-          next,
-          () => {
+          text: next,
+          yaml: yaml ? { path, after: digest(text) } : null,
+          reserve: () => {
             const journal = this.store.database.prepare(
               "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
             );
             for (const k of set) journal.run(id, k, "set", actor, now);
             for (const k of clear) journal.run(id, k, "clear", actor, now);
-            if (!yaml) receipt(true);
+            if (!yaml) receipt(false);
           },
-        );
+        });
       } catch (error) {
         if (error instanceof HttpRejection) throw error;
+        if (error instanceof SecretsUnsettled) throw writeUnknown();
         throw writeFailed();
       }
-      written = { original, text: next };
     }
     if (yaml) {
-      const rollback = () => {
-        if (!written) return false;
-        // Only while the YAML is still the old one; an installed YAML needs its keys.
-        if (readFileSync(path, "utf8") !== f.original) return false;
-        restoreSecrets(this.store, this.dir, written.text, written.original);
-        this.store.database
-          .prepare("DELETE FROM launch_secret_changes WHERE operation=?")
-          .run(id);
-        return true;
-      };
       const suffix = randomUUID(),
         temp = `${path}.${suffix}.tmp`,
         opts = { flag: "wx", mode: 0o600 };
+      let revision: number;
       try {
-        // After our own secrets.env rename, publish against the files as they are now.
-        const fence = written ? this.file() : f;
-        if (fence.original !== f.original) throw stale();
+        // V-2708: only our own secrets.env rename may differ from the
+        // previewed snapshot. The catalog, the revision and every other file
+        // must still be exactly those the preview was validated against.
+        const fence = files === undefined ? f.fence : { ...f.fence, files };
         writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
         writeFileSync(temp, text, opts);
-        const revision = publishModelFile(
+        revision = publishModelFile(
           this.store,
           path,
           temp,
@@ -417,7 +409,7 @@ export class LaunchSettings {
           f.original,
           text,
           this.dataDir,
-          fence.fence,
+          fence,
           staged.catalog,
           "人员已确认修改启动配置，新运行将使用更新后的配置。",
           {
@@ -429,16 +421,35 @@ export class LaunchSettings {
             checkReferences: (tx) => this.guardDelete(f, change, tx),
           },
         );
-        this.adopt({ config: staged.config, secrets, revision });
       } catch (error) {
-        const restored = rollback();
+        let outcome = "none";
+        if (files !== undefined)
+          try {
+            outcome = settleSecrets(this.store, id);
+          } catch {
+            throw writeUnknown();
+          }
+        if (outcome === "undone") {
+          if (error instanceof HttpRejection) throw error;
+          // Another writer changed the launch files between the two steps.
+          if (error instanceof LaunchConfigError) throw stale();
+          throw writeFailed();
+        }
         if (error instanceof HttpRejection) throw error;
-        if (restored) throw writeFailed();
         if (this.snapshot() !== version) throw stale();
         throw error;
       } finally {
         rmSync(temp, { force: true });
       }
+      // The YAML is installed, so its secrets stand; if this cannot record
+      // that now, the next read settles the intent the same way.
+      if (files !== undefined)
+        try {
+          settleSecrets(this.store, id);
+        } catch {
+          /* settled as applied by the next read */
+        }
+      this.adopt({ config: staged.config, secrets, revision });
     }
     this.previews.delete(id);
     return success;

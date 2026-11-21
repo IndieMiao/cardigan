@@ -83,7 +83,8 @@ export function ModelsSettings({
   );
   const data = settings.data;
   const profile = data && open && locate(data.profiles, open);
-  const running = data?.profiles.some(
+  // V-2708: a running Provider probe keeps the poll going like a profile check.
+  const running = [...(data?.profiles ?? []), ...(data?.providers ?? [])].some(
     (p) => p.last_check?.status === "running",
   );
   // Check areas waiting for a check the host just accepted (Q-1052).

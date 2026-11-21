@@ -5,6 +5,7 @@ import { HttpRejection } from "./http.js";
 import {
   invalid,
   legacyEndpoints,
+  privateEnv,
   publicFields,
   type SettingsFile,
 } from "./launch-settings-file.js";
@@ -97,6 +98,8 @@ function independent(file: SettingsFile, path: string[]) {
 }
 
 const SECRET_DIFF = "secrets.";
+/** A diff value that exists but is not shown (see `privateEnv`). */
+export const HIDDEN = Object.freeze({ hidden: true });
 
 export function candidate(file: SettingsFile, change: Change) {
   const { doc, config, secrets } = file;
@@ -205,6 +208,8 @@ export function candidate(file: SettingsFile, change: Change) {
       }
       for (const [env, value] of Object.entries(fields.env ?? {})) {
         if (!plain(env)) throw invalid("env");
+        // A secrets.env value never goes into the YAML as plain text.
+        if (value !== null && !plain(value)) throw invalid();
         set(["env", env], value);
       }
       for (const [env, key] of Object.entries(fields.secret_env ?? {})) {
@@ -226,6 +231,33 @@ export function candidate(file: SettingsFile, change: Change) {
         Object.values(config.providers[change.name]?.secret_env ?? {}),
       );
       for (const key of [...plan.set, ...plan.clear]) {
+        // V-2708: secrets.env is one global map. Writing a key another
+        // Provider also reads would change that Provider's credential from
+        // this form without its users ever seeing it; use a separate key.
+        const others = Object.entries(config.providers)
+          .filter(
+            ([id, p]) =>
+              id !== change.name && Object.values(p.secret_env).includes(key),
+          )
+          .map(([id]) => id);
+        if (others.length)
+          throw new HttpRejection(
+            409,
+            "secret_shared",
+            "其它 Provider 也在使用这个密钥",
+            publicFields(
+              {
+                key,
+                providers: others,
+                profiles: Object.entries(config.profiles)
+                  .filter(
+                    ([, p]) => !!p.provider && others.includes(p.provider),
+                  )
+                  .map(([profile]) => profile),
+              },
+              secrets,
+            ),
+          );
         const isSet = Object.hasOwn(secrets, key) && !!secrets[key];
         const clearing = plan.clear.includes(key);
         if (
@@ -241,6 +273,18 @@ export function candidate(file: SettingsFile, change: Change) {
         });
       }
       break;
+    }
+  }
+  // V-2708: a plain env value follows the read view's rule. A hidden value is
+  // replaced or removed by status only; its text never comes back.
+  const envPrefix = `${path.join(".")}.env.`;
+  for (const line of diff) {
+    if (!line.field.startsWith(envPrefix)) continue;
+    const env = line.field.slice(envPrefix.length);
+    for (const side of ["before", "after"] as const) {
+      const value = line[side];
+      if (typeof value === "string" && privateEnv(env, value, secrets))
+        line[side] = HIDDEN;
     }
   }
   const yaml = diff.some((d) => !d.field.startsWith(SECRET_DIFF));

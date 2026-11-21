@@ -22,6 +22,7 @@ import { settingsPanels } from "./settings-panels-data.js";
 // No backend, endpoint, credential or paid call.
 //   ?confirm=stale  the first confirmation answers 409 stale_snapshot
 //   ?confirm=fail   the first confirmation answers 500 write_failed
+//   ?confirm=lost   the first confirmation and its check get no reply
 //   ?check=hold     a started probe stays running
 Date.now = () => new Date(NOW).getTime();
 const query = new URLSearchParams(location.search);
@@ -52,7 +53,13 @@ function diff(change: LaunchChange) {
     })),
     ...Object.entries(env ?? {}).map(([k, v]) => ({
       field: `providers.${change.name}.env.${k}`,
-      before: provider?.env?.find((e) => e.name === k)?.value ?? null,
+      // V-2708: a hidden value comes back as a status, never its text.
+      before: (() => {
+        const row = provider?.env?.find((e) => e.name === k);
+        return row && row.value === null
+          ? { hidden: true }
+          : (row?.value ?? null);
+      })(),
       after: v,
     })),
     ...Object.entries(secret_env ?? {}).map(([k, v]) => ({
@@ -165,6 +172,10 @@ const client = fakeClient({
       failOnce = "";
       current = { ...current, version: "c".repeat(64) };
       throw new ApiError(409, "stale_snapshot", "启动配置已变化");
+    }
+    if (failOnce === "lost" || failOnce === "lost-check") {
+      failOnce = failOnce === "lost" ? "lost-check" : "";
+      throw new TypeError("Failed to fetch");
     }
     if (failOnce === "fail") {
       failOnce = "";

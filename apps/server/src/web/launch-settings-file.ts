@@ -175,3 +175,35 @@ export function legacyEndpoints(config: LaunchConfig, id: string) {
     ];
   });
 }
+
+/** Env names that usually hold a credential: their values are never shown. */
+const CREDENTIAL_NAME =
+  /KEY|TOKEN|SECRET|PASSW|AUTH|CREDENTIAL|COOKIE|PRIVATE|SESSION/iu;
+/**
+ * V-2708: the one rule for a plain env value that is not public, used by the
+ * read view and by every preview diff. A credential-like name, a value
+ * containing a secrets.env value, or a URL with an account, query or fragment
+ * (the same rule `legacyEndpoints` applies to endpoints) stays hidden.
+ */
+export function privateEnv(
+  name: string,
+  value: string,
+  secrets: Record<string, string>,
+) {
+  const url = URL.parse(value);
+  return (
+    CREDENTIAL_NAME.test(name) ||
+    publicFields(value, secrets) !== value ||
+    !!url?.username ||
+    !!url?.password ||
+    !!url?.search ||
+    !!url?.hash
+  );
+}
+
+/** The endpoint the detail shows and a Provider probe uses: explicit, else a safe legacy env URL. */
+export function providerEndpoint(config: LaunchConfig, id: string) {
+  const provider = config.providers[id];
+  if (!provider) return null;
+  return provider.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null;
+}

@@ -396,3 +396,183 @@ test("harness and protocol choices go out as edits of those fields only", async 
     fields: { api: "openai-responses" },
   });
 });
+
+/** The fixture with no profile check running: nothing else keeps the poll going. */
+const idle: LaunchSettingsView = {
+  ...launchSettingsFixture,
+  profiles: launchSettingsFixture.profiles.map((p) =>
+    p.last_check?.status === "running"
+      ? {
+          ...p,
+          last_check: {
+            ...p.last_check,
+            status: "passed",
+            finished_at: "2026-01-01T00:00:00.000Z",
+          },
+        }
+      : p,
+  ),
+};
+const withRelayCheck = (status: "running" | "failed"): LaunchSettingsView => ({
+  ...idle,
+  providers: idle.providers.map((p) =>
+    p.id === "relay"
+      ? {
+          ...p,
+          last_check: {
+            id: "probe",
+            version: V1,
+            mode: "online",
+            started_at: "2026-01-01T00:00:00.000Z",
+            finished_at:
+              status === "running" ? null : "2026-01-01T00:00:02.000Z",
+            status,
+            problems: status === "running" ? [] : ["online_failed"],
+            cli_version: null,
+          },
+        }
+      : p,
+  ),
+});
+
+test("a Provider probe first read as running is polled until it ends, without a manual refresh", async () => {
+  const api = harness();
+  api.set(idle);
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  // The very next read already shows this probe, still running; no profile
+  // check is running, so only the Provider keeps the page polling.
+  api.set(withRelayCheck("running"));
+  click(d, "在线探测");
+  expect(await within(d).findByText("在线探测中")).toBeTruthy();
+  api.set(withRelayCheck("failed"));
+  expect(
+    await within(d).findByText("在线探测未通过", {}, { timeout: 6000 }),
+  ).toBeTruthy();
+  expect(
+    within(d)
+      .getByRole("button", { name: "在线探测" })
+      .hasAttribute("disabled"),
+  ).toBe(false);
+}, 10000);
+
+async function relayWithSecret(api: ReturnType<typeof harness>) {
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  click(d, "编辑");
+  const group = within(d).getByRole("group", {
+    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  });
+  click(group, "填写");
+  fireEvent.change(password(group)[0] as HTMLInputElement, {
+    target: { value: FAKE },
+  });
+  click(d, "预览修改");
+  await within(d).findByRole("form", { name: "确认编辑 Provider" });
+  click(d, "确认保存");
+  return d;
+}
+
+test("a confirmation whose reply is lost is verified with the same key and no values; a settled receipt counts as saved", async () => {
+  const confirmLaunchChange = vi
+    .fn<CardiganClient["confirmLaunchChange"]>()
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockResolvedValueOnce(undefined);
+  const api = harness({ confirmLaunchChange });
+  await relayWithSecret(api);
+  await waitFor(() => expect(confirmLaunchChange).toHaveBeenCalledTimes(2));
+  const [first, second] = confirmLaunchChange.mock.calls;
+  expect(first).toEqual([
+    V1,
+    PREVIEW,
+    expect.any(String),
+    { RELAY_TOKEN: FAKE },
+  ]);
+  expect(second).toEqual([V1, PREVIEW, first?.[2]]);
+  expect(await screen.findByText(/已保存 Provider relay/u)).toBeTruthy();
+  expect(document.body.innerHTML).not.toContain(FAKE);
+});
+
+test("a confirmation that cannot be verified is reported as unknown, never as not written", async () => {
+  const confirmLaunchChange = vi
+    .fn<CardiganClient["confirmLaunchChange"]>()
+    .mockRejectedValueOnce(
+      new ApiError(500, "write_unsettled", "写入结果暂未确认", false),
+    )
+    .mockRejectedValueOnce(
+      new ApiError(400, "validation_failed", "x", false, { field: "secrets" }),
+    );
+  const api = harness({ confirmLaunchChange });
+  const d = await relayWithSecret(api);
+  const alert = await within(d).findByText(/无法确认密钥是否已写入/u);
+  expect(alert).toBeTruthy();
+  expect(d.textContent).not.toContain("密钥没有写入");
+  const group = within(d).getByRole("group", {
+    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  });
+  expect(password(group).map((i) => i.value)).toEqual([""]);
+  expect(confirmLaunchChange).toHaveBeenCalledTimes(2);
+  expect(document.body.innerHTML).not.toContain(FAKE);
+});
+
+test("a key another Provider reads cannot be rewritten here; the preview names it", async () => {
+  const api = harness();
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  click(d, "编辑");
+  click(d, "添加密钥变量");
+  const secret = within(d).getByRole("group", { name: "新密钥变量" });
+  fireEvent.change(field(secret, "变量名"), {
+    target: { value: "ANTHROPIC_API_KEY" },
+  });
+  fireEvent.change(field(secret, "secrets.env 键名"), {
+    target: { value: "ANTHROPIC_API_KEY" },
+  });
+  fireEvent.change(password(secret)[0] as HTMLInputElement, {
+    target: { value: FAKE },
+  });
+  expect(within(d).getByRole("alert").textContent).toContain(
+    "密钥键 ANTHROPIC_API_KEY 也被 Provider anthropic 使用",
+  );
+  expect(
+    within(d)
+      .getByRole("button", { name: "预览修改" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+});
+
+test("a hidden value in a diff is shown as hidden", async () => {
+  const api = harness({
+    previewLaunchChange: vi.fn(async (version: string) => ({
+      version,
+      preview_id: PREVIEW,
+      diff: [
+        {
+          field: "providers.anthropic.env.ANTHROPIC_CUSTOM_HEADERS_TOKEN",
+          before: { hidden: true },
+          after: null,
+        },
+      ],
+    })),
+  });
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "anthropic" }));
+  const d = await screen.findByRole("dialog", { name: "Anthropic" });
+  click(d, "编辑");
+  click(
+    within(d).getByRole("group", {
+      name: "环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN",
+    }),
+    "移除",
+  );
+  click(d, "预览修改");
+  const confirm = await within(d).findByRole("form", {
+    name: "确认编辑 Provider",
+  });
+  expect(confirm.textContent).toContain(
+    "环境变量 ANTHROPIC_CUSTOM_HEADERS_TOKEN已隐藏 → 未设置",
+  );
+});

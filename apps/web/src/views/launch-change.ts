@@ -74,6 +74,10 @@ export const secretValueProblem = (value: string) =>
         ? "首尾不能有空格或成对的引号。"
         : undefined;
 
+/** V-2708: writing a shared secrets.env key would change other Providers' credential. */
+export const sharedKeyProblem = (key: string, providers: readonly string[]) =>
+  `密钥键 ${key} 也被 Provider ${providers.join("、")} 使用，不能在这里改写或清除，请改用独立的键。`;
+
 /** What went wrong with a preview, confirmation or check, for display in place. */
 export type LaunchProblem =
   | { readonly kind: "field"; readonly field: string; readonly message: string }
@@ -114,6 +118,28 @@ const FIELD_MESSAGES: Record<string, Record<string, string>> = {
   profile: { default: "这个配置已不存在或不能在页面检查，请刷新。" },
 };
 
+/** V-2708: a confirmation whose outcome could not be verified. */
+export const UNSETTLED =
+  "无法确认密钥是否已写入，输入框已清空。请刷新后查看密钥状态和最后修改时间，再决定是否重新填写。";
+/**
+ * Replies that prove the host wrote nothing for this confirmation. Anything
+ * else (no reply, a gateway error) may have been written.
+ */
+const NOT_WRITTEN = new Set([
+  "validation_failed",
+  "stale_snapshot",
+  "write_failed",
+  "idempotency_conflict",
+  "profile_in_use",
+  "provider_in_use",
+  "secret_shared",
+  "unauthorized",
+]);
+export const provedNotWritten = (error: unknown) =>
+  error instanceof ApiError &&
+  !error.outcomeUncertain &&
+  NOT_WRITTEN.has(error.code);
+
 const stringList = (value: unknown) =>
   Array.isArray(value)
     ? value.filter((v): v is string => typeof v === "string")
@@ -139,6 +165,13 @@ export function launchProblem(error: unknown, op: string): LaunchProblem {
       };
     if (error.code === "write_failed")
       return { kind: "form", message: "写入失败，已恢复原文件，没有改动。" };
+    if (error.code === "write_unsettled")
+      return { kind: "form", message: UNSETTLED };
+    if (error.code === "secret_shared" && typeof details.key === "string")
+      return {
+        kind: "form",
+        message: sharedKeyProblem(details.key, stringList(details.providers)),
+      };
     if (error.code === "idempotency_conflict") return { kind: "stale" };
     if (error.code === "check_running")
       return { kind: "form", message: "这个配置已有检查在进行。" };
@@ -207,6 +240,8 @@ export function diffValue(value: unknown): string {
   if (value === null || value === undefined) return "未设置";
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "object") {
+    // V-2708: a value the host does not show (a hidden env value).
+    if ((value as Record<string, unknown>).hidden === true) return "已隐藏";
     const copy = (value as Record<string, unknown>).copy_of;
     if (typeof copy === "string") return `复制自 ${copy}`;
     return JSON.stringify(value);

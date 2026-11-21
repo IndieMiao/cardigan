@@ -15,6 +15,7 @@ import type { Store } from "@cardigan/store";
 import { HttpRejection } from "./http.js";
 import {
   invalid,
+  providerEndpoint,
   publicFields,
   type SettingsFile,
 } from "./launch-settings-file.js";
@@ -198,7 +199,8 @@ export class ProfileChecks {
         : harness === "codex"
           ? "openai-responses"
           : undefined);
-    const url = definition.base_url;
+    // V-2708: the same endpoint the detail shows (a safe legacy env URL counts).
+    const url = providerEndpoint(file.config, id);
     if (
       !harness ||
       !api ||
@@ -211,7 +213,7 @@ export class ProfileChecks {
     const resolved: ResolvedProfile = {
       name: providerCheck(id),
       profile: { harness },
-      provider: { name: id, definition: { ...definition, api } },
+      provider: { name: id, definition: { ...definition, api, base_url: url } },
     };
     return this.run(
       file,
