@@ -244,6 +244,18 @@ test.each(["pause", "human condition"])(
           "superseded",
         );
         expect(f.read().decisions.at(-1)?.decider).toBe("human");
+        f.clock.now = () => "2026-01-02T01:00:00Z";
+        await executor.tick();
+        const events = f.read().events;
+        expect(
+          events.findLast((e) => e.type === "merge_blocked")?.payload,
+        ).toMatchObject({
+          reasons: [expect.stringMatching(/敏感.*须由人亲自确认/u)],
+        });
+        expect(events.some((e) => e.type === "merge_blocked_reminded")).toBe(
+          false,
+        );
+        expect(published).not.toHaveBeenCalled();
       } else {
         f.store.uow.run((tx) => {
           const result = setProjectPreferences(

@@ -137,6 +137,7 @@ export interface TestResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string | string[] | undefined>>;
   readonly body: string;
+  readonly bytes: Buffer;
   readonly json: unknown;
 }
 
@@ -170,7 +171,8 @@ export function call(
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
+          const bytes = Buffer.concat(chunks),
+            text = bytes.toString("utf8");
           let json: unknown;
           try {
             json = JSON.parse(text);
@@ -181,6 +183,7 @@ export function call(
             status: res.statusCode ?? 0,
             headers: res.headers,
             body: text,
+            bytes,
             json,
           });
         });

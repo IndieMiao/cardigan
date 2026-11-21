@@ -586,6 +586,8 @@ export interface AttachmentView extends AuthorView {
   readonly supersedes: string | null;
   readonly inline: boolean;
   readonly download_path: string;
+  /** Small server-rendered preview for inline bitmaps; null otherwise. */
+  readonly thumbnail_path: string | null;
 }
 
 export interface CardRelations {
