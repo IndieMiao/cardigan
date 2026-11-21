@@ -28,6 +28,10 @@ import { settingsPanels } from "./settings-panels-data.js";
 //            already passed and A's progress read fails (503).
 //   p1       Q-1083: 立即检查 answers job A at once, A's progress fails
 //            (SSH); with `__c511.b` the reads show job B running (MCP).
+//   p1c      Q-1085: 立即检查's reply (A) waits for `releaseA()`; reads
+//            follow `__c511.read` ("a": A running, "b": B running,
+//            "bdone": B passed); A's progress fails on `failA()`, B's
+//            passes on `passB()`.
 Date.now = () => new Date(NOW).getTime();
 // Each scene starts without an unknown write kept from the previous one.
 window.sessionStorage.clear();
@@ -53,7 +57,15 @@ const running: MachineView = {
   ),
 };
 let sent = false;
-const hooks = { b: false, fail: false, aDone: false, releaseA: () => {} };
+const hooks = {
+  b: false,
+  fail: false,
+  aDone: false,
+  read: "",
+  releaseA: () => {},
+  failA: () => {},
+  passB: () => {},
+};
 Object.assign(window, { __c511: hooks });
 const check = (patch: Partial<MachineCheckJob>): MachineCheckJob => ({
   id: "chk-a",
@@ -121,6 +133,15 @@ const client = fakeClient({
       return { machine: onLocal("chk-a", "passed", "finished") };
     if (scene === "p1" && id === "local" && hooks.b)
       return { machine: onLocal("chk-b", "running", "mcp") };
+    if (scene === "p1c" && id === "local" && hooks.read)
+      return {
+        machine:
+          hooks.read === "a"
+            ? onLocal("chk-a", "running", "ssh")
+            : hooks.read === "b"
+              ? onLocal("chk-b", "running", "mcp")
+              : onLocal("chk-b", "passed", "finished"),
+      };
     return {
       machine:
         id === "local" && sent && scene === "running"
@@ -132,32 +153,53 @@ const client = fakeClient({
   checkMachine: async () => {
     sent = true;
     if (scene === "p1") return { check: check({}) };
-    if (scene === "stale" || scene === "r4")
+    if (scene === "stale" || scene === "r4" || scene === "p1c")
       return new Promise<{ check: MachineCheckJob }>((resolve) => {
         hooks.releaseA = () => resolve({ check: check({}) });
       });
     throw new TypeError("synthetic lost reply");
   },
   machineCheck: (_p: string, _m: string, id: string) =>
-    id !== "chk-a"
-      ? new Promise(() => {})
-      : scene === "stale"
-        ? Promise.resolve({
-            check: check({ status: "passed", step: "finished" }),
-          })
-        : scene === "r4"
-          ? Promise.reject(
-              new ApiError(503, "unavailable", "synthetic progress failure"),
-            )
-          : scene === "p1"
-            ? Promise.resolve({
+    scene === "p1c"
+      ? new Promise<{ check: MachineCheckJob }>((resolve) => {
+          if (id === "chk-a")
+            hooks.failA = () =>
+              resolve({
                 check: check({
                   status: "failed",
                   step: "finished",
                   failed_steps: ["ssh"],
                 }),
-              })
-            : new Promise(() => {}),
+              });
+          else
+            hooks.passB = () =>
+              resolve({
+                check: check({
+                  id: "chk-b",
+                  status: "passed",
+                  step: "finished",
+                }),
+              });
+        })
+      : id !== "chk-a"
+        ? new Promise(() => {})
+        : scene === "stale"
+          ? Promise.resolve({
+              check: check({ status: "passed", step: "finished" }),
+            })
+          : scene === "r4"
+            ? Promise.reject(
+                new ApiError(503, "unavailable", "synthetic progress failure"),
+              )
+            : scene === "p1"
+              ? Promise.resolve({
+                  check: check({
+                    status: "failed",
+                    step: "finished",
+                    failed_steps: ["ssh"],
+                  }),
+                })
+              : new Promise(() => {}),
   setMachineDrain: async () => {
     sent = true;
     throw new TypeError("synthetic lost reply");

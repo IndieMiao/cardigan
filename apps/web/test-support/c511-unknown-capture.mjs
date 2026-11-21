@@ -8,7 +8,8 @@
 // Q-1076 scenes (stale-reply, verify-failed): a late start reply for an
 // older check after the reopened drawer follows a newer one. Q-1083 scenes:
 // r4-late-reply (the running reply for a check already seen passed) and
-// p1-next-check (B taken up after A failed).
+// p1-next-check (B taken up after A failed). Q-1085 scene: p1c-late-answer
+// (attachment-8243: A fails while B is followed, B passes, then A's reply).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -319,6 +320,37 @@ try {
       await until(`${has("正在检查：MCP")} || ${has("检查未通过：SSH")}`);
       await delay(1500);
       await scene("p1-next-check");
+      // Q-1085 (attachment-8243): A, then B; A fails; B passes; A's reply.
+      const reopenDrawer = async () => {
+        await click("[role=dialog]", "关闭抽屉");
+        await until("!document.querySelector('[role=dialog]')");
+        await click("table[aria-label='机器列表']", "本机");
+        await until(has("项目绑定"));
+      };
+      await drawer("p1c", theme);
+      await click("[role=dialog]", "立即检查");
+      await run(() => {
+        window.__c511.read = "a";
+      });
+      await reopenDrawer();
+      await until(has("正在检查：SSH"));
+      await run(() => {
+        window.__c511.read = "b";
+      });
+      await reopenDrawer();
+      await until(has("正在检查：MCP"));
+      await delay(1500); // both progress reads are out
+      await run(() => window.__c511.failA());
+      await delay(300);
+      await run(() => {
+        window.__c511.read = "bdone";
+        window.__c511.passB();
+      });
+      await delay(1500);
+      await run(() => window.__c511.releaseA());
+      await until(`${has("检查未通过：SSH")} || ${has("检查通过")}`);
+      await delay(400);
+      await scene("p1c-late-answer");
       cases.push({ width, theme, results });
     }
   await send("Emulation.setDeviceMetricsOverride", {
