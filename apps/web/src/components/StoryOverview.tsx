@@ -523,6 +523,7 @@ function StoryCompletion({
       )}
       <ChecklistActions>
         <Button
+          variant="primary"
           disabled={busy}
           onClick={async () => {
             if (sending.current) return;
@@ -540,7 +541,7 @@ function StoryCompletion({
               setMessage("需求卡已确认完成");
               onSaved();
             } catch (cause) {
-              setError(describeWriteError(cause));
+              setError(describeWriteError(cause).replace(/^请求失败：/u, ""));
             } finally {
               sending.current = false;
               setBusy(false);

@@ -24,7 +24,18 @@ import { Button } from "./ui/button.js";
 import { Textarea } from "./ui/textarea.js";
 
 /** A failed confirmation, kept beside the proposal it was about. */
-type Refusal = { readonly message: string; readonly stale: boolean };
+export type StoryRefusal = {
+  readonly message: string;
+  readonly stale: boolean;
+};
+
+/** One wording for a refused confirmation, on the story card and in Needs You. */
+export function storyRefusal(cause: unknown): StoryRefusal {
+  if (cause instanceof ApiError && cause.code === "stale_target")
+    return { stale: true, message: "拆解方案已更新，请刷新后再确认" };
+  const reason = describeWriteError(cause).replace(/^请求失败：/u, "");
+  return { stale: false, message: `开卡失败：${reason}` };
+}
 
 /**
  * Drafts survive the ways out a page cannot intercept (browser back/forward,
@@ -89,7 +100,7 @@ function ProposalPanel({
   onSaved: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [refusal, setRefusal] = useState<Refusal>();
+  const [refusal, setRefusal] = useState<StoryRefusal>();
   const [message, setMessage] = useState("");
   const [commenting, setCommenting] = useState(false);
   const sending = useRef(false);
@@ -117,13 +128,7 @@ function ProposalPanel({
       setMessage(`已开出 ${result.card_ids.length} 张子卡`);
       onSaved();
     } catch (cause) {
-      const stale = cause instanceof ApiError && cause.code === "stale_target";
-      setRefusal({
-        stale,
-        message: stale
-          ? "拆解方案已更新，请刷新后再确认"
-          : `开卡失败：${describeWriteError(cause)}`,
-      });
+      setRefusal(storyRefusal(cause));
     } finally {
       sending.current = false;
       setBusy(false);
@@ -160,6 +165,7 @@ function ProposalPanel({
               )}
               <ChecklistActions>
                 <Button
+                  variant="primary"
                   onClick={() => void confirm()}
                   aria-label={`确认开卡：拆解方案第 ${proposal.version} 版`}
                 >

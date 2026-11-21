@@ -2,7 +2,6 @@ import { reviewImpactLabel } from "@cardigan/domain";
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ApiError,
   type CardiganClient,
   type DecisionView,
   describeError,
@@ -59,6 +58,10 @@ import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
+import {
+  type StoryRefusal,
+  storyRefusal,
+} from "../components/StoryProposal.js";
 import { Button } from "../components/ui/button.js";
 import * as Dialog from "../components/ui/dialog.js";
 import { Skeleton } from "../components/ui/skeleton.js";
@@ -1555,7 +1558,7 @@ function StoryProposalRow({
   elapsed: number;
 }) {
   const [busy, setBusy] = useState(false);
-  const [refusal, setRefusal] = useState<{ message: string; stale: boolean }>();
+  const [refusal, setRefusal] = useState<StoryRefusal>();
   const [message, setMessage] = useState("");
   const sending = useRef(false);
   // Same version, same key: a retry after a lost reply opens nothing twice.
@@ -1622,14 +1625,7 @@ function StoryProposalRow({
               );
               done();
             } catch (cause) {
-              const stale =
-                cause instanceof ApiError && cause.code === "stale_target";
-              setRefusal({
-                stale,
-                message: stale
-                  ? "拆解方案已更新，请刷新后再确认"
-                  : `开卡失败：${describeWriteError(cause)}`,
-              });
+              setRefusal(storyRefusal(cause));
             } finally {
               sending.current = false;
               setBusy(false);
