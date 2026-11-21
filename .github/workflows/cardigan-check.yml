@@ -189,29 +189,38 @@ jobs:
           [[ -n "$CARDIGAN_FLAKE_CASES" ]] || exit 0
           clean=(env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STATE)
           if [[ "$CARDIGAN_FLAKE_CASES" != corepack ]]; then "${clean[@]}" pnpm exec tsc -b; fi
-          report="$("${clean[@]}" node node_modules/vitest/vitest.mjs run 3>&1 1>&2)"
+          # Preserve ordinary test failure while carrying completed per-case evidence.
+          status=0
+          report="$("${clean[@]}" node node_modules/vitest/vitest.mjs run 3>&1 1>&2)" || status=$?
+          [[ "$status" -le 1 ]] || exit "$status"
           REPORT="$report" python3 - <<'PYCODE'
           import json, os
-          ids = json.loads(os.environ['REPORT'])
+          report = json.loads(os.environ['REPORT'])
+          if not isinstance(report, dict) or set(report) != {'passed', 'recovered'} or type(report['passed']) is not bool:
+              raise ValueError('invalid partition report')
+          ids = report['recovered']
           allowed = os.environ['CARDIGAN_FLAKE_CASES'].split()
           if not isinstance(ids, list) or not all(key in allowed for key in ids) or len(set(ids)) != len(ids):
               raise ValueError('invalid case receipt')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               for key in ids:
                   print(f'{key}=true', file=out)
+          if not report['passed']:
+              raise SystemExit(1)
           PYCODE
+          exit "$status"
       # Fixed vocabulary only. These receipts never replace a required check.
       - name: Recovered ssh_local
-        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'ssh_local') && steps.isolated.outputs.ssh_local == 'true' }}
+        if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'ssh_local') && steps.isolated.outputs.ssh_local == 'true' }}
         run: 'true'
       - name: Recovered ssh_remote
-        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'ssh_remote') && steps.isolated.outputs.ssh_remote == 'true' }}
+        if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'ssh_remote') && steps.isolated.outputs.ssh_remote == 'true' }}
         run: 'true'
       - name: Recovered corepack
-        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'corepack') && steps.isolated.outputs.corepack == 'true' }}
+        if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'corepack') && steps.isolated.outputs.corepack == 'true' }}
         run: 'true'
       - name: Recovered loopback
-        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.isolated.outputs.loopback == 'true' }}
+        if: ${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.isolated.outputs.loopback == 'true' }}
         run: 'true'
       - name: build
         id: build

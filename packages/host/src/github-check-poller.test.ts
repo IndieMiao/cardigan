@@ -872,6 +872,8 @@ test.each([
   "missing all",
   "unselected",
   "isolated failed",
+  "isolated skipped",
+  "isolated timed out",
   "batch timeout",
   "card timeout",
 ] as const)(
@@ -900,8 +902,11 @@ test.each([
           ? "success"
           : "skipped";
       if (name === "test" && (timeout || mode === "failed")) return "failure";
-      if (name === CASE_RUN_STEP && mode === "isolated failed")
-        return "failure";
+      if (name === CASE_RUN_STEP) {
+        if (mode === "isolated failed") return "failure";
+        if (mode === "isolated skipped") return "skipped";
+        if (mode === "isolated timed out") return "timed_out";
+      }
       return "success";
     };
     const steps = names.map((name, i) => ({
@@ -916,6 +921,12 @@ test.each([
     const settled = await result;
     if (mode === "passed" || mode === "failed")
       expect(settled).toMatchObject({ status: mode, recovered: ["corepack"] });
+    else if (mode === "isolated failed")
+      expect(settled).toMatchObject({
+        status: "failed",
+        failedGithubStep: CASE_RUN_STEP,
+        recovered: ["corepack"],
+      });
     else if (timeout) {
       expect(settled.status).toBe("failed");
       const dataDir = await mkdtemp(join(tmpdir(), "case-contract-timeout-"));

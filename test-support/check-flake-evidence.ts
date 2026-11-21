@@ -78,14 +78,18 @@ export function caseReceipts(
     attempts: readonly Attempt[];
   }[],
 ) {
-  return eligible.filter((id) => {
+  const recovered: CheckFlakeId[] = [];
+  let complete = true;
+  for (const id of eligible) {
     const spec = checkFlakeCases[id];
     const rows = tests.filter(
       (row) => row.file === spec.file && row.name === spec.name,
     );
     const row = rows[0];
-    if (rows.length !== 1 || !row || row.state !== "passed")
-      throw new Error(`Missing successful case: ${id}`);
+    if (rows.length !== 1 || !row || row.state !== "passed") {
+      complete = false;
+      continue;
+    }
     const [first, second] = row.attempts;
     if (first?.retryIndex === 0 && first.repeatIndex === 0) {
       if (
@@ -93,7 +97,7 @@ export function caseReceipts(
         first.state === "passed" &&
         !first.errors?.length
       )
-        return false;
+        continue;
       if (
         row.attempts.length === 2 &&
         first.state === "failed" &&
@@ -103,9 +107,12 @@ export function caseReceipts(
         second.retryIndex === 1 &&
         second.repeatIndex === 0 &&
         !second.errors?.length
-      )
-        return true;
+      ) {
+        recovered.push(id);
+        continue;
+      }
     }
-    throw new Error(`Invalid attempt history: ${id}`);
-  });
+    complete = false;
+  }
+  return { recovered, complete };
 }

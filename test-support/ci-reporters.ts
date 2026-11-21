@@ -12,7 +12,7 @@ export const isolatedReceipts = (
   eligible: readonly CheckFlakeId[],
 ): Reporter => ({
   onTestRunEnd(modules, errors, reason) {
-    if (errors.length || reason !== "passed") return; // Vitest owns the failing exit.
+    if (reason !== "passed" && reason !== "failed") return; // No terminal evidence on interruption.
     const expectedFiles = new Set<string>(
       eligible.map((id) => checkFlakeCases[id].file),
     );
@@ -23,7 +23,7 @@ export const isolatedReceipts = (
       )
     )
       throw new Error("Unexpected test module in isolated run");
-    const ids = caseReceipts(
+    const { recovered, complete } = caseReceipts(
       eligible,
       modules.flatMap((module) =>
         Array.from(module.children.allTests(), (test) => ({
@@ -36,7 +36,8 @@ export const isolatedReceipts = (
     );
     // Private coordinator pipe, not stdout or a GitHub command file. A missing
     // report (even with exit 0) is never accepted as a successful partition.
-    writeSync(3, `${JSON.stringify(ids)}\n`);
+    const passed = reason === "passed" && errors.length === 0 && complete;
+    writeSync(3, `${JSON.stringify({ recovered, passed })}\n`);
   },
 });
 // Add to (rather than replace) Vitest's normal output and GitHub annotations.

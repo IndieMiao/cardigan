@@ -52,8 +52,16 @@ try {
     path = join(dir, spec.file);
   mkdirSync(dirname(path), { recursive: true });
   const output = join(dir, "github-output");
-  for (const mode of ["recover", "clean", "twice", "absent", "unselected"]) {
+  for (const mode of [
+    "recover",
+    "mixed",
+    "clean",
+    "twice",
+    "absent",
+    "unselected",
+  ]) {
     const selected = mode !== "unselected";
+    const recovers = mode === "recover" || mode === "mixed";
     writeFileSync(output, "");
     writeFileSync(
       path,
@@ -61,10 +69,11 @@ try {
       let first = true;
       test(${JSON.stringify(mode === "absent" ? "other" : spec.name)}, () => {
         expect(process.env.GITHUB_OUTPUT).toBeUndefined();
-        const fail = (${JSON.stringify(mode)} === "recover" && first) || ${JSON.stringify(mode)} === "twice";
+        const fail = (${recovers} && first) || ${JSON.stringify(mode)} === "twice";
         first = false;
         if (fail) throw new Error("Command failed: pnpm test\\n! Corepack is about to download https://registry.invalid/pnpm.tgz\\nDownloading the pnpm 12.21.0 binary for linux-x64...\\n");
-      });`,
+      });
+      ${mode === "mixed" ? `test("different assertion", () => { expect(1).toBe(2); });` : ""}`,
     );
     const result = spawnSync("bash", ["-e", "-c", partition.run], {
       cwd: dir,
@@ -77,10 +86,14 @@ try {
         GITHUB_OUTPUT: output,
       },
     });
-    const success = mode !== "twice" && mode !== "absent";
+    const success = mode !== "twice" && mode !== "absent" && mode !== "mixed";
     assert.equal(result.status === 0, success, result.stderr);
     const receipt = readFileSync(output, "utf8").trim();
-    assert.equal(receipt, mode === "recover" ? "corepack=true" : "");
+    assert.equal(receipt, recovers ? "corepack=true" : "", mode);
+    if (mode === "mixed") {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /different assertion/);
+    }
     // Ordinary step outputs cannot alter earlier marker steps, even if that
     // step ran an unrelated subset and has a same-named output.
 
@@ -131,16 +144,24 @@ try {
       },
     });
     assert.equal(mapped.status, success ? "passed" : "failed");
-    const summary = recordCheckFlakes(
-      f.store,
-      f.project_id,
-      card.id,
-      mode,
-      "2030-01-01T00:00:00.000Z",
-      mapped.recovered,
-      "3",
-    );
-    assert.equal(summary.includes("近七天 1 次"), mode === "recover");
+    const settle = () =>
+      recordCheckFlakes(
+        f.store,
+        f.project_id,
+        card.id,
+        mode,
+        "2030-01-01T00:00:00.000Z",
+        mapped.recovered,
+        "2",
+      );
+    const summary = settle();
+    if (mode === "mixed") assert.equal(settle(), summary); // Same failed attempt replay.
+    if (recovers) {
+      assert.deepEqual(mapped.recovered, ["corepack"]);
+      assert.ok(
+        summary.includes(mode === "recover" ? "近七天 1 次" : "近七天 2 次"),
+      );
+    } else assert.equal(summary, "");
     console.log(`${mode}: ${mapped.status}, ${receipt || "no receipt"}`);
   }
   // The remainder still runs other tests, including a same-named case in the
@@ -166,10 +187,21 @@ try {
   );
   assert.equal(remainder.status, 0, remainder.stdout + remainder.stderr);
   assert.match(remainder.stdout, /1 passed/);
-  assert.equal(
-    f.state().events.filter((e) => e.type === "check_case_recovered").length,
-    1,
+  const events = f
+    .state()
+    .events.filter((e) => e.type === "check_case_recovered");
+  assert.deepEqual(
+    events.map((e) => [e.payload.attempt, e.payload.key]),
+    [
+      ["recover", "corepack"],
+      ["mixed", "corepack"],
+    ],
   );
+  const notices = f.store
+    .listNotifications({ project_id: f.project_id })
+    .filter((n) => n.kind === "escalation" && n.recipient.kind === "pm_ops");
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].event_id, events[1].id);
 } finally {
   f.close();
   rmSync(dir, { recursive: true, force: true });

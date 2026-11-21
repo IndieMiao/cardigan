@@ -72,7 +72,7 @@ describe("trusted GitHub check workflow", () => {
     for (const step of marker) {
       const key = step.name.slice("Recovered ".length);
       expect(step.if).toBe(
-        `\${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, '${key}') && steps.isolated.outputs.${key} == 'true' }}`,
+        `\${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, '${key}') && steps.isolated.outputs.${key} == 'true' }}`,
       );
       expect(steps.indexOf(step)).toBeGreaterThan(ids.indexOf("isolated"));
       expect(steps.indexOf(step)).toBeLessThan(ids.indexOf("build"));

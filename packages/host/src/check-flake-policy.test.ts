@@ -88,7 +88,10 @@ test("the coordinator ties recovery to exact identity, first signature and index
     { state: "passed", retryIndex: 1, repeatIndex: 0 },
   ] as const;
   const row = { ...checkFlakeCases.corepack, state: "passed", attempts };
-  expect(caseReceipts(["corepack"], [row])).toEqual(["corepack"]);
+  expect(caseReceipts(["corepack"], [row])).toEqual({
+    recovered: ["corepack"],
+    complete: true,
+  });
   expect(
     caseReceipts(
       ["corepack"],
@@ -99,7 +102,7 @@ test("the coordinator ties recovery to exact identity, first signature and index
         },
       ],
     ),
-  ).toEqual([]);
+  ).toEqual({ recovered: [], complete: true });
   for (const rows of [
     [],
     [row, row],
@@ -117,6 +120,18 @@ test("the coordinator ties recovery to exact identity, first signature and index
     ],
     [{ ...row, attempts: [attempts[0], { ...attempts[1], state: "skipped" }] }],
   ])
-    expect(() => caseReceipts(["corepack"], rows)).toThrow();
-  expect(caseReceipts([], [row])).toEqual([]);
+    expect(caseReceipts(["corepack"], rows)).toEqual({
+      recovered: [],
+      complete: false,
+    });
+  expect(caseReceipts([], [row])).toEqual({ recovered: [], complete: true });
+  // Missing or failed evidence for B cannot erase A, or permit the partition to pass.
+  for (const other of [
+    [],
+    [{ ...row, ...checkFlakeCases.ssh_local, state: "failed" }],
+  ])
+    expect(caseReceipts(["ssh_local", "corepack"], [...other, row])).toEqual({
+      recovered: ["corepack"],
+      complete: false,
+    });
 });

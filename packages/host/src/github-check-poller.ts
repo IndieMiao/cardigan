@@ -664,7 +664,7 @@ function mapGithubCheckSteps(
   const isolated = steps.find((s) => s.name === CASE_RUN_STEP);
   if (
     recovered.length &&
-    (isolated?.conclusion !== "success" ||
+    (!["success", "failure"].includes(isolated?.conclusion ?? "") ||
       request.mergeTier === "batch" ||
       scope.skip_checks.split(",").includes("test") ||
       (scope.scope === "affected" &&
