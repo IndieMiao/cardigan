@@ -13,9 +13,11 @@ import type {
   LaunchProfileFields,
   LaunchProfileReference,
   LaunchProfileView,
+  LaunchProviderSecret,
   LaunchProviderView,
   LaunchSettingsView,
 } from "../api.js";
+import { StatusTag, Time } from "../components/Foundation.js";
 import {
   SettingsDialogActions,
   SettingsDialogFields,
@@ -32,12 +34,18 @@ import { SelectControl } from "../components/ui/select-control.js";
 import {
   diffLabel,
   diffValue,
+  envNameProblem,
+  envValueProblem,
   type LaunchProblem,
   launchProblem,
   nameProblem,
   optionalNameProblem,
   permissionProblem,
+  provedNotWritten,
+  secretValueProblem,
+  sharedKeyProblem,
   textProblem,
+  UNSETTLED,
   urlProblem,
 } from "./launch-change.js";
 
@@ -78,6 +86,9 @@ function useLaunchChange(context: EditorContext) {
   }>();
   const [problem, setProblem] = useState<LaunchProblem>();
   const [busy, setBusy] = useState(false);
+  // C-549 / V-2708: after a failed confirmation the secret inputs are empty;
+  // "dropped" when the host proved nothing was written, "unknown" otherwise.
+  const [secretsOutcome, setSecretsOutcome] = useState<"dropped" | "unknown">();
   const sending = useRef(false);
   const keys = useRef(new Map<string, string>());
   const alive = useRef(true);
@@ -126,7 +137,8 @@ function useLaunchChange(context: EditorContext) {
         } catch (error) {
           if (!alive.current) return;
           const next = launchProblem(error, change.op);
-          if (next.kind === "in_use") await refused(next);
+          if (next.kind === "in_use" || next.kind === "provider_in_use")
+            await refused(next);
           else setProblem(next);
         }
       }),
@@ -136,8 +148,12 @@ function useLaunchChange(context: EditorContext) {
     busy,
     problem,
     preview,
+    secretsOutcome,
     /** Show the diff of `change`; the form stays as it was. */
-    start: (change: LaunchChange) => requestPreview(change, version),
+    start: (change: LaunchChange) => {
+      setSecretsOutcome(undefined);
+      return requestPreview(change, version);
+    },
     /** Back to the form; the preview is dropped. */
     back: () => {
       setPreview(undefined);
@@ -169,21 +185,67 @@ function useLaunchChange(context: EditorContext) {
           if (alive.current) setProblem(launchProblem(error, change.op));
         }
       }),
-    confirm: (onDone: () => void) =>
+    confirm: (
+      onDone: () => void,
+      secrets?: Readonly<Record<string, string>>,
+      /** C-549: the values were not written; the form clears its secret inputs. */
+      onSecretsDropped?: () => void,
+    ) =>
       run(async () => {
         if (!preview) return;
         const { preview_id, version: at } = preview.result;
         const key = keys.current.get(preview_id) ?? crypto.randomUUID();
         keys.current.set(preview_id, key);
+        const withSecrets = secrets && Object.keys(secrets).length > 0;
         try {
-          await client.confirmLaunchChange(at, preview_id, key);
+          if (withSecrets)
+            await client.confirmLaunchChange(at, preview_id, key, secrets);
+          else await client.confirmLaunchChange(at, preview_id, key);
           keys.current.delete(preview_id);
           // A form that is gone (the drawer closed) must not act on its reply.
           if (alive.current) onDone();
         } catch (error) {
           if (!alive.current) return;
           const next = launchProblem(error, preview.change.op);
-          if (next.kind === "in_use") return await refused(next);
+          if (next.kind === "in_use" || next.kind === "provider_in_use")
+            return await refused(next);
+          if (withSecrets) {
+            // Secret values are never kept for a retry: back to the form,
+            // inputs emptied, the rest of the draft as it was.
+            setPreview(undefined);
+            onSecretsDropped?.();
+            if (!provedNotWritten(error)) {
+              // V-2708: the reply was lost or unclear, so the host may have
+              // written. Ask again with the same key and no values: a settled
+              // receipt answers success; anything else stays unknown.
+              try {
+                await client.confirmLaunchChange(at, preview_id, key);
+                keys.current.delete(preview_id);
+                if (alive.current) onDone();
+                return;
+              } catch {
+                if (!alive.current) return;
+                setSecretsOutcome("unknown");
+                try {
+                  const settings = await reread();
+                  if (alive.current) setVersion(settings.version);
+                } catch {
+                  // The notice already says to refresh before retyping.
+                }
+                return;
+              }
+            }
+            setSecretsOutcome("dropped");
+            setProblem(next);
+            if (next.kind === "stale")
+              try {
+                const settings = await reread();
+                if (alive.current) setVersion(settings.version);
+              } catch {
+                // The next preview answers stale again and offers the refresh.
+              }
+            return;
+          }
           // The host rejected the file or a field: correct it in the form.
           if (next.kind === "field") setPreview(undefined);
           setProblem(next);
@@ -199,6 +261,8 @@ const SAVED: Record<LaunchChange["op"], (name: string) => string> = {
   delete_profile: (name) => `已删除启动配置 ${name}`,
   set_model: (name) => `已更新模型别名 ${name}，新运行将使用新模型`,
   edit_provider: (name) => `已保存 Provider ${name}，新运行将使用新配置`,
+  create_provider: (name) => `已新建 Provider ${name}`,
+  delete_provider: (name) => `已删除 Provider ${name}`,
 };
 
 /**
@@ -218,9 +282,14 @@ function LaunchEditor({
   destructive = false,
   heading = true,
   reviewFacts,
+  secrets,
+  onSecretsDropped,
 }: {
   context: EditorContext;
   label: string;
+  /** C-549: secret values sent with the confirmation only (never the preview). */
+  secrets?: Readonly<Record<string, string>>;
+  onSecretsDropped?: () => void;
   /** What the confirmation names besides the diff (a shared alias or Provider and its users). */
   reviewFacts?: ReactNode;
   /** False when the drawer title already names the form (a new profile). */
@@ -254,7 +323,8 @@ function LaunchEditor({
         : problem
       : undefined;
   // Known to be referenced: no further delete from this form.
-  const inUse = problem?.kind === "in_use";
+  const inUse =
+    problem?.kind === "in_use" || problem?.kind === "provider_in_use";
   // When the new read already lists the users, the form shows them instead.
   const notice = general && !(inUse && change === undefined) && (
     <ProblemNote problem={general} />
@@ -287,8 +357,10 @@ function LaunchEditor({
           onSubmit={(event) => {
             event.preventDefault();
             if (inUse) return;
-            void editor.confirm(() =>
-              onSaved(SAVED[previewed.op](previewed.name)),
+            void editor.confirm(
+              () => onSaved(SAVED[previewed.op](previewed.name)),
+              secrets,
+              onSecretsDropped,
             );
           }}
         >
@@ -328,6 +400,13 @@ function LaunchEditor({
       <SettingsDialogFields>
         <fieldset disabled={editor.busy}>{fields(fieldProblem)}</fieldset>
         {notice}
+        {editor.secretsOutcome && (
+          <SettingsWarning role="alert">
+            {editor.secretsOutcome === "unknown"
+              ? UNSETTLED
+              : "密钥没有写入，输入框已清空，请重新输入。"}
+          </SettingsWarning>
+        )}
       </SettingsDialogFields>
       <SettingsDialogActions>
         <Button onClick={onCancel} disabled={editor.busy}>
@@ -370,6 +449,15 @@ function ProblemNote({
         <ReferenceNote references={problem.references} />
       </SettingsWarning>
     );
+  if (problem.kind === "provider_in_use")
+    return (
+      <SettingsWarning role="alert">
+        <ProviderUsersNote
+          profiles={problem.profiles}
+          models={problem.models}
+        />
+      </SettingsWarning>
+    );
   return <SettingsWarning role="alert">{problem.message}</SettingsWarning>;
 }
 
@@ -409,7 +497,24 @@ function LaunchDiff({
   return (
     <SettingsFacts>
       {diff.map((line) => {
-        const whole = line.field === `profiles.${change.name}`;
+        const whole =
+          line.field === `profiles.${change.name}` ||
+          line.field === `providers.${change.name}`;
+        if (line.field.startsWith("secrets."))
+          return (
+            <SettingsFact
+              key={line.field}
+              label={diffLabel(line.field, change.name)}
+            >
+              <SettingsDiff op="remove">
+                {line.before === "set" ? "已设置" : "未设置"}
+              </SettingsDiff>
+              {" → "}
+              <SettingsDiff op="add">
+                {line.after === "new" ? "写入新密钥" : "清除"}
+              </SettingsDiff>
+            </SettingsFact>
+          );
         return (
           <SettingsFact
             key={line.field}
@@ -829,176 +934,792 @@ export function DeleteProfileForm({
   );
 }
 
-/** Provider name, endpoint and which existing secrets.env key each variable uses. */
-export function ProviderForm({
+/** Who still uses a Provider, so it cannot be deleted. */
+export function ProviderUsersNote({
+  profiles,
+  models,
+}: {
+  profiles: readonly string[];
+  models: readonly string[];
+}) {
+  return (
+    <>
+      <p>仍有启动配置或模型别名使用这个 Provider，不能删除：</p>
+      <ul aria-label="使用者">
+        {profiles.map((name) => (
+          <li key={`profile:${name}`}>启动配置 {name}</li>
+        ))}
+        {models.map((alias) => (
+          <li key={`model:${alias}`}>模型别名 {alias}</li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** Deleting a Provider: refused up front while a profile or alias uses it. */
+export function DeleteProviderForm({
   context,
   provider,
 }: {
   context: EditorContext;
   provider: LaunchProviderView;
 }) {
+  const profiles = provider.profiles ?? [];
+  const models = provider.models ?? [];
+  const used = profiles.length + models.length > 0;
+  return (
+    <LaunchEditor
+      context={context}
+      label="删除 Provider"
+      change={used ? undefined : { op: "delete_provider", name: provider.id }}
+      dirty={false}
+      fieldNames={[]}
+      submitLabel="预览删除"
+      confirmLabel="确认删除"
+      destructive
+      fields={() =>
+        used ? (
+          <SettingsWarning role="alert">
+            <ProviderUsersNote profiles={profiles} models={models} />
+          </SettingsWarning>
+        ) : (
+          <SettingsFacts>
+            <SettingsFact label="删除">{provider.id}</SettingsFact>
+          </SettingsFacts>
+        )
+      }
+    />
+  );
+}
+
+export const PROVIDER_APIS = [
+  "anthropic-messages",
+  "openai-responses",
+  "openai-completions",
+] as const;
+
+/** The secret variables of a read; older reads only carry `secret_env`. */
+export function providerSecrets(
+  provider: LaunchProviderView | undefined,
+  keys: readonly string[],
+): readonly LaunchProviderSecret[] {
+  if (!provider) return [];
+  return (
+    provider.secrets ??
+    Object.entries(provider.secret_env ?? {}).map(([env, key]) => ({
+      env,
+      key,
+      set: keys.includes(key),
+      updated_at: null,
+    }))
+  );
+}
+
+type Scalar = "id" | "name" | "harness" | "api" | "base_url";
+interface EnvEdit {
+  readonly value?: string;
+  readonly removed?: boolean;
+}
+interface AddedEnv {
+  readonly row: number;
+  readonly name: string;
+  readonly value: string;
+}
+interface SecretEdit {
+  readonly key?: string | undefined;
+  readonly mode?: "replace" | "clear" | undefined;
+  readonly removed?: boolean | undefined;
+}
+interface AddedSecret {
+  readonly row: number;
+  readonly env: string;
+  /** Follows the variable name until the person edits it. */
+  readonly key: string | undefined;
+}
+interface ProviderEdits {
+  readonly scalars: Partial<Record<Scalar, string>>;
+  readonly env: Readonly<Record<string, EnvEdit>>;
+  readonly addedEnv: readonly AddedEnv[];
+  readonly secrets: Readonly<Record<string, SecretEdit>>;
+  readonly addedSecrets: readonly AddedSecret[];
+}
+const NO_EDITS: ProviderEdits = {
+  scalars: {},
+  env: {},
+  addedEnv: [],
+  secrets: {},
+  addedSecrets: [],
+};
+/** The secrets.env key a new variable suggests: `<ID>_<VARIABLE>`. */
+const suggestedKey = (id: string, env: string) =>
+  [id.toUpperCase().replace(/[^A-Z0-9]+/gu, "_"), env]
+    .filter(Boolean)
+    .join("_")
+    .replace(/^[0-9]/u, "_$&")
+    .slice(0, 128);
+
+/**
+ * C-549: a new or edited Provider. Plain variables are edited in place;
+ * secret values are write-only: typed here, sent only with the confirmation,
+ * never kept in the draft and cleared when the write fails.
+ */
+export function ProviderForm({
+  context,
+  provider,
+  onCreated,
+}: {
+  context: EditorContext;
+  provider?: LaunchProviderView;
+  /** A new Provider opens its detail afterwards (to probe it). */
+  onCreated?: (id: string) => void;
+}) {
   const { settings } = context;
+  const creating = provider === undefined;
   const keys = settings.secret_keys ?? [];
-  const initial: ProviderDraft = {
-    name: provider.name,
-    base_url: provider.base_url ?? "",
-    secret_env: { ...(provider.secret_env ?? {}) },
+  const initial: Record<Scalar, string> = {
+    id: provider?.id ?? "",
+    name: provider?.name ?? "",
+    harness: provider ? (provider.harness ?? "") : (HARNESSES[0] ?? ""),
+    api: provider?.api ?? "",
+    base_url: provider?.base_url ?? "",
   };
+  const envRows = provider?.env ?? [];
+  const secretRows = providerSecrets(provider, keys);
   // Only what the person edited, over the latest read (see `ProfileForm`).
-  const [edits, setEdits] = useState<ProviderEdits>({ secret_env: {} });
-  const draft: ProviderDraft = {
-    name: edits.name ?? initial.name,
-    base_url: edits.base_url ?? initial.base_url,
-    secret_env: { ...initial.secret_env, ...edits.secret_env },
-  };
-  const problems = {
-    name: textProblem(draft.name),
+  const [edits, setEdits] = useState<ProviderEdits>(NO_EDITS);
+  // Secret values by row: component state only, never part of the draft.
+  const [values, setValues] = useState<Readonly<Record<string, string>>>({});
+  const nextRow = useRef(0);
+  const draft = { ...initial, ...edits.scalars };
+  const id = creating ? draft.id.trim() : initial.id;
+  const patchScalar = (key: Scalar, value: string) =>
+    setEdits((old) => {
+      const scalars = { ...old.scalars };
+      if (value === initial[key]) delete scalars[key];
+      else scalars[key] = value;
+      return { ...old, scalars };
+    });
+
+  // Problems, in place, before any preview.
+  const taken = creating && settings.providers.some((p) => p.id === id);
+  const problems: Record<string, string | undefined> = {
+    id: creating
+      ? (nameProblem(id) ??
+        (taken ? "已有同一 ID 的 Provider，换一个 ID。" : undefined))
+      : undefined,
+    name: creating && draft.name === "" ? undefined : textProblem(draft.name),
+    harness:
+      creating && draft.harness === "" && draft.api === ""
+        ? "请选择 Harness 或协议。"
+        : undefined,
     base_url:
       draft.base_url === "" && initial.base_url === ""
         ? undefined
         : urlProblem(draft.base_url),
   };
+  const names = new Map<string, number>();
+  const count = (name: string) => names.set(name, (names.get(name) ?? 0) + 1);
+  for (const row of envRows) if (!edits.env[row.name]?.removed) count(row.name);
+  for (const row of edits.addedEnv) count(row.name.trim());
+  for (const row of secretRows)
+    if (!edits.secrets[row.env]?.removed) count(row.env);
+  for (const row of edits.addedSecrets) count(row.env.trim());
+  const duplicate = (name: string) =>
+    (names.get(name) ?? 0) > 1 ? "变量名重复。" : undefined;
+
+  // The change: scalars, plain env, secret references and the secrets plan.
   const fields: Record<string, unknown> = {};
-  if (draft.name !== initial.name) fields.name = draft.name;
-  if (draft.base_url !== initial.base_url) fields.base_url = draft.base_url;
-  const secrets = Object.fromEntries(
-    Object.entries(draft.secret_env).filter(
-      ([env, key]) => initial.secret_env[env] !== key,
-    ),
-  );
-  if (Object.keys(secrets).length) fields.secret_env = secrets;
+  for (const key of ["name", "harness", "api", "base_url"] as const) {
+    const value = draft[key];
+    if (creating) {
+      if (value !== "") fields[key] = value;
+    } else if (value !== initial[key])
+      fields[key] = key === "harness" || key === "api" ? value || null : value;
+  }
+  const env: Record<string, string | null> = {};
+  for (const row of envRows) {
+    const edit = edits.env[row.name];
+    if (edit?.removed) env[row.name] = null;
+    else if (edit?.value !== undefined && edit.value !== (row.value ?? ""))
+      env[row.name] = edit.value;
+    if (!edit?.removed && edit?.value !== undefined)
+      problems[`env:${row.name}`] = envValueProblem(edit.value);
+  }
+  for (const row of edits.addedEnv) {
+    const name = row.name.trim();
+    problems[`env+${row.row}`] =
+      envNameProblem(name) ?? duplicate(name) ?? envValueProblem(row.value);
+    env[name] = row.value;
+  }
+  const secretEnv: Record<string, string | null> = {};
+  const set: string[] = [];
+  const clear: string[] = [];
+  const secretValuesOut: Record<string, string> = {};
+  const writes = new Map<string, number>();
+  for (const row of secretRows) {
+    const edit = edits.secrets[row.env];
+    if (edit?.removed) {
+      secretEnv[row.env] = null;
+      continue;
+    }
+    const key = edit?.key ?? row.key;
+    if (key !== row.key) secretEnv[row.env] = key;
+    if (edit?.mode === "clear") clear.push(row.key);
+    if (edit?.mode === "replace") {
+      const value = values[`s:${row.env}`] ?? "";
+      problems[`secret:${row.env}`] = secretValueProblem(value);
+      set.push(key);
+      secretValuesOut[key] = value;
+      writes.set(key, (writes.get(key) ?? 0) + 1);
+    }
+  }
+  for (const row of edits.addedSecrets) {
+    const name = row.env.trim();
+    const key = (row.key ?? suggestedKey(id, name)).trim();
+    const value = values[`n:${row.row}`] ?? "";
+    // A new variable needs a value unless it names a key secrets.env has.
+    const needed = value !== "" || !keys.includes(key);
+    problems[`secret+${row.row}`] =
+      envNameProblem(name) ??
+      duplicate(name) ??
+      envNameProblem(key) ??
+      (needed ? secretValueProblem(value) : undefined);
+    secretEnv[name] = key;
+    if (needed) {
+      set.push(key);
+      secretValuesOut[key] = value;
+      writes.set(key, (writes.get(key) ?? 0) + 1);
+    }
+  }
+  for (const [key, n] of writes)
+    if (n > 1) problems.secrets = `密钥键 ${key} 填了不止一次。`;
+  // V-2708: secrets.env is shared. A key another Provider reads is not
+  // rewritten or cleared from this form (the server refuses it too).
+  for (const key of [...set, ...clear]) {
+    const others = settings.providers
+      .filter(
+        (p) =>
+          p.id !== id &&
+          (p.secrets?.some((s) => s.key === key) ||
+            Object.values(p.secret_env ?? {}).includes(key)),
+      )
+      .map((p) => p.id);
+    if (others.length) problems.secrets ??= sharedKeyProblem(key, others);
+  }
+  if (Object.keys(env).length) fields.env = env;
+  if (Object.keys(secretEnv).length) fields.secret_env = secretEnv;
+  const plan = {
+    ...(set.length ? { set } : {}),
+    ...(clear.length ? { clear } : {}),
+  };
   const valid = Object.values(problems).every((p) => p === undefined);
-  const used = settings.profiles
-    .filter((p) => p.provider === provider.id)
-    .map((p) => p.name);
+  const changed =
+    creating || Object.keys(fields).length > 0 || set.length + clear.length > 0;
+  const change: LaunchChange | undefined =
+    valid && changed
+      ? {
+          op: creating ? "create_provider" : "edit_provider",
+          name: id,
+          fields,
+          ...(set.length + clear.length ? { secrets: plan } : {}),
+        }
+      : undefined;
+  const dirty =
+    Object.keys(edits.scalars).length > 0 ||
+    Object.keys(edits.env).length > 0 ||
+    edits.addedEnv.length > 0 ||
+    Object.keys(edits.secrets).length > 0 ||
+    edits.addedSecrets.length > 0 ||
+    Object.values(values).some(Boolean);
+  const used = provider
+    ? (provider.profiles ??
+      settings.profiles
+        .filter((p) => p.provider === provider.id)
+        .map((p) => p.name))
+    : [];
+  const label = creating ? "新建 Provider" : "编辑 Provider";
   return (
     <LaunchEditor
-      context={context}
-      label="编辑 Provider"
-      change={
-        valid && Object.keys(fields).length
-          ? { op: "edit_provider", name: provider.id, fields }
-          : undefined
-      }
-      dirty={JSON.stringify(draft) !== JSON.stringify(initial)}
-      fieldNames={["base_url", "secret_env"]}
+      context={{
+        ...context,
+        onSaved: (note) => {
+          context.onSaved(note);
+          if (creating) onCreated?.(id);
+        },
+      }}
+      label={label}
+      heading={!creating}
+      change={change}
+      dirty={dirty}
+      secrets={secretValuesOut}
+      onSecretsDropped={() => setValues({})}
+      // Editing: a `name` refusal means the Provider is gone; say so above the actions.
+      fieldNames={[
+        ...(creating ? ["name"] : []),
+        "base_url",
+        "secret_env",
+        "secrets",
+        "env",
+      ]}
       reviewFacts={
-        <SharedFacts label="Provider" name={provider.id} used={used} />
+        creating ? undefined : (
+          <SharedFacts label="Provider" name={id} used={used} />
+        )
       }
       fields={(server) => (
         <ProviderFields
-          id={provider.id}
+          creating={creating}
+          id={id}
           used={used}
           keys={keys}
           draft={draft}
-          patch={(next) =>
-            // A field put back to the read's value is no longer an edit.
-            setEdits((old) => {
-              const out: ProviderEdits = {
-                ...old,
-                secret_env: { ...old.secret_env },
-              };
-              for (const key of ["name", "base_url"] as const) {
-                const value = next[key];
-                if (value === undefined) continue;
-                if (value === initial[key]) delete out[key];
-                else out[key] = value;
-              }
-              for (const [env, key] of Object.entries(next.secret_env ?? {})) {
-                if (key === initial.secret_env[env]) delete out.secret_env[env];
-                else out.secret_env[env] = key;
-              }
-              return out;
-            })
+          envRows={envRows}
+          secretRows={secretRows}
+          edits={edits}
+          setEdits={setEdits}
+          values={values}
+          setValue={(row, value) =>
+            setValues((old) => ({ ...old, [row]: value }))
           }
+          patchScalar={patchScalar}
+          addRow={() => nextRow.current++}
           problems={{
             ...problems,
+            id:
+              problems.id ??
+              (server?.field === "name" ? server.message : undefined),
             base_url:
               problems.base_url ??
               (server?.field === "base_url" ? server.message : undefined),
-            secret_env:
-              server?.field === "secret_env" ? server.message : undefined,
+            secrets:
+              problems.secrets ??
+              (server?.field === "secrets" ||
+              server?.field === "secret_env" ||
+              server?.field === "env"
+                ? server.message
+                : undefined),
           }}
         />
       )}
     />
   );
 }
-interface ProviderDraft {
-  name: string;
-  base_url: string;
-  secret_env: Record<string, string>;
-}
-type ProviderEdits = Partial<Omit<ProviderDraft, "secret_env">> & {
-  secret_env: Record<string, string>;
-};
+
 function ProviderFields({
+  creating,
   id,
   used,
   keys,
   draft,
-  patch,
+  envRows,
+  secretRows,
+  edits,
+  setEdits,
+  values,
+  setValue,
+  patchScalar,
+  addRow,
   problems,
 }: {
+  creating: boolean;
   id: string;
   used: readonly string[];
   keys: readonly string[];
-  draft: ProviderDraft;
-  patch: (next: Partial<ProviderEdits>) => void;
-  problems: Record<"name" | "base_url" | "secret_env", string | undefined>;
+  draft: Record<Scalar, string>;
+  envRows: NonNullable<LaunchProviderView["env"]>;
+  secretRows: readonly LaunchProviderSecret[];
+  edits: ProviderEdits;
+  setEdits: (update: (old: ProviderEdits) => ProviderEdits) => void;
+  values: Readonly<Record<string, string>>;
+  setValue: (row: string, value: string) => void;
+  patchScalar: (key: Scalar, value: string) => void;
+  addRow: () => number;
+  problems: Record<string, string | undefined>;
 }) {
+  const harnesses = HARNESSES.includes(draft.harness as never)
+    ? HARNESSES
+    : [draft.harness, ...HARNESSES].filter(Boolean);
+  const editEnv = (name: string, edit: EnvEdit | undefined) =>
+    setEdits((old) => {
+      const env = { ...old.env };
+      if (edit) env[name] = edit;
+      else delete env[name];
+      return { ...old, env };
+    });
+  const editSecret = (env: string, edit: SecretEdit | undefined) =>
+    setEdits((old) => {
+      const secrets = { ...old.secrets };
+      if (edit && Object.values(edit).some((v) => v !== undefined))
+        secrets[env] = edit;
+      else delete secrets[env];
+      return { ...old, secrets };
+    });
+  const patchAddedEnv = (row: number, next: Partial<AddedEnv> | null) =>
+    setEdits((old) => ({
+      ...old,
+      addedEnv: old.addedEnv.flatMap((r) =>
+        r.row !== row ? [r] : next ? [{ ...r, ...next }] : [],
+      ),
+    }));
+  const patchAddedSecret = (row: number, next: Partial<AddedSecret> | null) =>
+    setEdits((old) => ({
+      ...old,
+      addedSecrets: old.addedSecrets.flatMap((r) =>
+        r.row !== row ? [r] : next ? [{ ...r, ...next }] : [],
+      ),
+    }));
   return (
     <>
-      <SettingsFacts>
-        <SettingsFact label="编号">
-          <code>{id}</code>
-        </SettingsFact>
-        <SettingsFact label="使用它的配置">
-          {used.length ? used.join("、") : "—"}
-        </SettingsFact>
-      </SettingsFacts>
+      {creating ? (
+        <TextField
+          label="ID"
+          error={problems.id}
+          value={draft.id}
+          onChange={(value) => patchScalar("id", value)}
+        />
+      ) : (
+        <SettingsFacts>
+          <SettingsFact label="ID">
+            <code>{id}</code>
+          </SettingsFact>
+          <SettingsFact label="使用它的配置">
+            {used.length ? used.join("、") : "—"}
+          </SettingsFact>
+        </SettingsFacts>
+      )}
       <TextField
         label="名称"
         error={problems.name}
         value={draft.name}
-        onChange={(value) => patch({ name: value })}
+        onChange={(value) => patchScalar("name", value)}
       />
+      <SettingsField label="Harness" error={problems.harness}>
+        {(field) => (
+          <SelectControl
+            value={draft.harness}
+            aria-invalid={field.invalid}
+            aria-describedby={field.describedBy}
+            onValueChange={(value) => patchScalar("harness", value)}
+          >
+            <option value="">不指定</option>
+            {harnesses.map((h) => (
+              <option key={h} value={h}>
+                {h}
+              </option>
+            ))}
+          </SelectControl>
+        )}
+      </SettingsField>
+      <label>
+        协议
+        <SelectControl
+          value={draft.api}
+          onValueChange={(value) => patchScalar("api", value)}
+        >
+          <option value="">不指定</option>
+          {PROVIDER_APIS.map((api) => (
+            <option key={api} value={api}>
+              {api}
+            </option>
+          ))}
+        </SelectControl>
+      </label>
       <TextField
         label="端点"
         error={problems.base_url}
         value={draft.base_url}
         url
-        onChange={(value) => patch({ base_url: value })}
+        onChange={(value) => patchScalar("base_url", value)}
       />
-      {Object.entries(draft.secret_env).map(([env, key]) => (
-        <SettingsField
-          key={env}
-          label={`密钥引用 ${env}`}
-          error={problems.secret_env}
-        >
-          {(field) => (
-            <SelectControl
-              value={key}
-              aria-invalid={field.invalid}
-              aria-describedby={field.describedBy}
-              onValueChange={(next) => patch({ secret_env: { [env]: next } })}
-            >
-              {/* A key secrets.env no longer has stays visible, not choosable. */}
-              {!keys.includes(key) && (
-                <option value={key} disabled>
-                  {key}（已失效）
-                </option>
+      {envRows.map((row) => {
+        const edit = edits.env[row.name];
+        if (edit?.removed)
+          return (
+            <fieldset key={`env:${row.name}`}>
+              <legend>环境变量 {row.name}</legend>
+              <SettingsDiff op="remove">将移除</SettingsDiff>
+              <SettingsDialogActions>
+                <Button onClick={() => editEnv(row.name, undefined)}>
+                  撤销移除
+                </Button>
+              </SettingsDialogActions>
+            </fieldset>
+          );
+        const hidden = row.value === null && edit?.value === undefined;
+        return (
+          <fieldset key={`env:${row.name}`}>
+            <legend>环境变量 {row.name}</legend>
+            {hidden ? (
+              <SettingsFacts>
+                <SettingsFact label="值">已隐藏</SettingsFact>
+              </SettingsFacts>
+            ) : (
+              <TextField
+                label="值"
+                error={problems[`env:${row.name}`]}
+                value={edit?.value ?? row.value ?? ""}
+                onChange={(value) =>
+                  editEnv(row.name, value === row.value ? undefined : { value })
+                }
+              />
+            )}
+            <SettingsDialogActions>
+              {hidden && (
+                <Button onClick={() => editEnv(row.name, { value: "" })}>
+                  替换
+                </Button>
               )}
-              {keys.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
-            </SelectControl>
-          )}
-        </SettingsField>
+              <Button onClick={() => editEnv(row.name, { removed: true })}>
+                移除
+              </Button>
+            </SettingsDialogActions>
+          </fieldset>
+        );
+      })}
+      {edits.addedEnv.map((row) => (
+        <fieldset key={`env+${row.row}`}>
+          <legend>新环境变量</legend>
+          <TextField
+            label="变量名"
+            error={problems[`env+${row.row}`]}
+            value={row.name}
+            onChange={(name) => patchAddedEnv(row.row, { name })}
+          />
+          <TextField
+            label="值"
+            error={undefined}
+            value={row.value}
+            onChange={(value) => patchAddedEnv(row.row, { value })}
+          />
+          <SettingsDialogActions>
+            <Button onClick={() => patchAddedEnv(row.row, null)}>移除</Button>
+          </SettingsDialogActions>
+        </fieldset>
       ))}
+      <SettingsDialogActions>
+        <Button
+          onClick={() =>
+            setEdits((old) => ({
+              ...old,
+              addedEnv: [
+                ...old.addedEnv,
+                { row: addRow(), name: "", value: "" },
+              ],
+            }))
+          }
+        >
+          添加环境变量
+        </Button>
+      </SettingsDialogActions>
+      {secretRows.map((row) => {
+        const edit = edits.secrets[row.env];
+        if (edit?.removed)
+          return (
+            <fieldset key={`secret:${row.env}`}>
+              <legend>密钥变量 {row.env}</legend>
+              <SettingsDiff op="remove">
+                将移除（secrets.env 中的值保留）
+              </SettingsDiff>
+              <SettingsDialogActions>
+                <Button onClick={() => editSecret(row.env, undefined)}>
+                  撤销移除
+                </Button>
+              </SettingsDialogActions>
+            </fieldset>
+          );
+        const key = edit?.key ?? row.key;
+        return (
+          <fieldset key={`secret:${row.env}`}>
+            <legend>密钥变量 {row.env}</legend>
+            <SettingsFacts>
+              <SettingsFact label="状态">
+                {edit?.mode === "clear" ? (
+                  <SettingsDiff op="remove">将清除</SettingsDiff>
+                ) : (
+                  <SecretStatus secret={row} />
+                )}
+              </SettingsFact>
+            </SettingsFacts>
+            <SettingsField label={`密钥引用 ${row.env}`} error={undefined}>
+              {(field) => (
+                <SelectControl
+                  value={key}
+                  aria-invalid={field.invalid}
+                  aria-describedby={field.describedBy}
+                  onValueChange={(next) =>
+                    editSecret(row.env, {
+                      ...edit,
+                      key: next === row.key ? undefined : next,
+                    })
+                  }
+                >
+                  {/* A key secrets.env does not have yet stays visible, not choosable; “填写” sets it. */}
+                  {!keys.includes(key) && (
+                    <option value={key} disabled>
+                      {key}（未设置）
+                    </option>
+                  )}
+                  {keys.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </SelectControl>
+              )}
+            </SettingsField>
+            {edit?.mode === "replace" && (
+              <SecretInput
+                label={`新密钥 ${key}`}
+                error={problems[`secret:${row.env}`]}
+                value={values[`s:${row.env}`] ?? ""}
+                onChange={(value) => setValue(`s:${row.env}`, value)}
+              />
+            )}
+            <SettingsDialogActions>
+              {edit?.mode ? (
+                <Button
+                  onClick={() => {
+                    setValue(`s:${row.env}`, "");
+                    editSecret(row.env, { ...edit, mode: undefined });
+                  }}
+                >
+                  {edit.mode === "clear" ? "撤销清除" : "撤销替换"}
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    onClick={() =>
+                      editSecret(row.env, { ...edit, mode: "replace" })
+                    }
+                  >
+                    {row.set ? "替换" : "填写"}
+                  </Button>
+                  {row.set && (
+                    <Button
+                      onClick={() =>
+                        editSecret(row.env, { ...edit, mode: "clear" })
+                      }
+                    >
+                      清除
+                    </Button>
+                  )}
+                </>
+              )}
+              <Button
+                onClick={() => {
+                  setValue(`s:${row.env}`, "");
+                  editSecret(row.env, { removed: true });
+                }}
+              >
+                移除
+              </Button>
+            </SettingsDialogActions>
+          </fieldset>
+        );
+      })}
+      {edits.addedSecrets.map((row) => {
+        const key = row.key ?? suggestedKey(id, row.env.trim());
+        return (
+          <fieldset key={`secret+${row.row}`}>
+            <legend>新密钥变量</legend>
+            <TextField
+              label="变量名"
+              error={undefined}
+              value={row.env}
+              onChange={(env) => patchAddedSecret(row.row, { env })}
+            />
+            <TextField
+              label="secrets.env 键名"
+              error={undefined}
+              value={key}
+              onChange={(next) => patchAddedSecret(row.row, { key: next })}
+            />
+            <SecretInput
+              label="密钥"
+              error={problems[`secret+${row.row}`]}
+              value={values[`n:${row.row}`] ?? ""}
+              onChange={(value) => setValue(`n:${row.row}`, value)}
+            />
+            <SettingsDialogActions>
+              <Button
+                onClick={() => {
+                  setValue(`n:${row.row}`, "");
+                  patchAddedSecret(row.row, null);
+                }}
+              >
+                移除
+              </Button>
+            </SettingsDialogActions>
+          </fieldset>
+        );
+      })}
+      {problems.secrets && (
+        <SettingsWarning role="alert">{problems.secrets}</SettingsWarning>
+      )}
+      <SettingsDialogActions>
+        <Button
+          onClick={() =>
+            setEdits((old) => ({
+              ...old,
+              addedSecrets: [
+                ...old.addedSecrets,
+                { row: addRow(), env: "", key: undefined },
+              ],
+            }))
+          }
+        >
+          添加密钥变量
+        </Button>
+      </SettingsDialogActions>
     </>
+  );
+}
+
+/** Set or not, and when the Web last wrote it; never a value. */
+export function SecretStatus({ secret }: { secret: LaunchProviderSecret }) {
+  return (
+    <>
+      <StatusTag
+        status={secret.set ? "passed" : "blocked"}
+        label={secret.set ? "已设置" : "未设置"}
+      />
+      {secret.updated_at && (
+        <>
+          {" "}
+          最后修改 <Time value={secret.updated_at} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** A write-only secret: a password field the browser must not remember. */
+function SecretInput({
+  label,
+  error,
+  value,
+  onChange,
+}: {
+  label: string;
+  error: string | undefined;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <SettingsField label={label} error={error}>
+      {(field) => (
+        <Input
+          type="password"
+          value={value}
+          autoComplete="new-password"
+          spellCheck={false}
+          aria-invalid={field.invalid}
+          aria-describedby={field.describedBy}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </SettingsField>
   );
 }
 
