@@ -64,7 +64,7 @@ const plan = (
       title: "帮助文档：导出报表",
       template_id: "general",
       goal: "在帮助页说明导出范围和字段。",
-      acceptance_criteria: [],
+      acceptance_criteria: ["说明只导出当前筛选结果"],
       depends_on: [2],
       depends_on_cards: ["C-700"],
       priority: 1,

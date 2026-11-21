@@ -1561,6 +1561,7 @@ function StoryProposalRow({
   const [refusal, setRefusal] = useState<StoryRefusal>();
   const [message, setMessage] = useState("");
   const sending = useRef(false);
+  const refreshButton = useRef<HTMLButtonElement>(null);
   // Same version, same key: a retry after a lost reply opens nothing twice.
   const key = useRef(crypto.randomUUID());
   const cardHref = (anchor?: string) =>
@@ -1594,7 +1595,7 @@ function StoryProposalRow({
           <>
             <span>{refusal.message}</span>
             {refusal.stale && (
-              <Button variant="outline" onClick={done}>
+              <Button ref={refreshButton} variant="outline" onClick={done}>
                 刷新
               </Button>
             )}
@@ -1606,7 +1607,8 @@ function StoryProposalRow({
       action={
         <Button
           variant="primary"
-          disabled={busy}
+          aria-disabled={busy || undefined}
+          disabled={refusal?.stale}
           aria-label={`确认开卡 ${item.card_id} 第 ${item.version} 版`}
           onClick={async () => {
             if (sending.current) return;
@@ -1625,7 +1627,10 @@ function StoryProposalRow({
               );
               done();
             } catch (cause) {
-              setRefusal(storyRefusal(cause));
+              const refused = storyRefusal(cause);
+              setRefusal(refused);
+              if (refused.stale)
+                requestAnimationFrame(() => refreshButton.current?.focus());
             } finally {
               sending.current = false;
               setBusy(false);

@@ -1,4 +1,4 @@
-import type { StoryProposal } from "@cardigan/domain";
+import { type StoryProposal, storyProposalConfirmable } from "@cardigan/domain";
 import { useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -6,6 +6,7 @@ import {
   type CardiganClient,
   describeWriteError,
 } from "../api.js";
+import { registerLeaveGuard } from "../leave-guard.js";
 import { parseRoute, routeHash } from "../route.js";
 import { EmptyState, StatusTag } from "./Foundation.js";
 import { IdTag } from "./IdTag.js";
@@ -38,10 +39,13 @@ export function storyRefusal(cause: unknown): StoryRefusal {
 }
 
 /**
- * Drafts survive the ways out a page cannot intercept (browser back/forward,
- * closing the drawer); every other way out asks first. Keyed by card and version.
+ * Drafts survive the ways out a page cannot intercept (browser back/forward)
+ * and a new proposal version arriving while writing; every other way out asks
+ * first. Keyed by card, so a draft follows the story to its newest version.
  */
 const drafts = new Map<string, string>();
+const draftKey = (projectId: string, cardId: string) =>
+  `${projectId}/${cardId}`;
 
 /**
  * C-503: the story's current decomposition proposal. Only the newest version
@@ -72,6 +76,8 @@ export function StoryProposalSection({
           key={current.version}
           proposal={current}
           closed={["done", "cancelled"].includes(detail.card.status)}
+          // The same condition the server and Needs You use.
+          confirmable={storyProposalConfirmable(detail.card)}
           client={client}
           projectId={projectId}
           cardId={cardId}
@@ -87,6 +93,7 @@ export function StoryProposalSection({
 function ProposalPanel({
   proposal,
   closed,
+  confirmable,
   client,
   projectId,
   cardId,
@@ -94,6 +101,7 @@ function ProposalPanel({
 }: {
   proposal: StoryProposal;
   closed: boolean;
+  confirmable: boolean;
   client: CardiganClient;
   projectId: string;
   cardId: string;
@@ -102,8 +110,13 @@ function ProposalPanel({
   const [busy, setBusy] = useState(false);
   const [refusal, setRefusal] = useState<StoryRefusal>();
   const [message, setMessage] = useState("");
-  const [commenting, setCommenting] = useState(false);
+  // A draft written against an earlier version reopens on this one.
+  const [commenting, setCommenting] = useState(() =>
+    drafts.has(draftKey(projectId, cardId)),
+  );
   const sending = useRef(false);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
   // One key per version: a retry after a lost reply cannot open cards twice.
   const key = useRef(crypto.randomUUID());
   const confirmed = proposal.confirmed;
@@ -128,7 +141,12 @@ function ProposalPanel({
       setMessage(`已开出 ${result.card_ids.length} 张子卡`);
       onSaved();
     } catch (cause) {
-      setRefusal(storyRefusal(cause));
+      const refused = storyRefusal(cause);
+      setRefusal(refused);
+      // A stale version disables confirmation: hand focus to "刷新".
+      if (refused.stale)
+        requestAnimationFrame(() => refreshButton.current?.focus());
+      else confirmButton.current?.focus();
     } finally {
       sending.current = false;
       setBusy(false);
@@ -137,7 +155,8 @@ function ProposalPanel({
   return (
     <>
       <ChecklistPanel
-        disabled={busy}
+        // Buttons stay focusable while confirming; see aria-disabled below.
+        disabled={false}
         title={
           <>
             第 {proposal.version} 版
@@ -157,20 +176,32 @@ function ProposalPanel({
                 <ChecklistAlert>
                   <span>{refusal.message}</span>
                   {refusal.stale && (
-                    <Button variant="outline" onClick={onSaved}>
+                    <Button
+                      ref={refreshButton}
+                      variant="outline"
+                      onClick={() => {
+                        setRefusal(undefined);
+                        onSaved();
+                      }}
+                    >
                       刷新
                     </Button>
                   )}
                 </ChecklistAlert>
               )}
               <ChecklistActions>
-                <Button
-                  variant="primary"
-                  onClick={() => void confirm()}
-                  aria-label={`确认开卡：拆解方案第 ${proposal.version} 版`}
-                >
-                  确认开卡
-                </Button>
+                {confirmable && (
+                  <Button
+                    ref={confirmButton}
+                    variant="primary"
+                    aria-disabled={busy || undefined}
+                    disabled={refusal?.stale}
+                    onClick={() => void confirm()}
+                    aria-label={`确认开卡：拆解方案第 ${proposal.version} 版`}
+                  >
+                    确认开卡
+                  </Button>
+                )}
                 {!commenting && (
                   <Button variant="outline" onClick={() => setCommenting(true)}>
                     提修改意见
@@ -266,7 +297,7 @@ function ChangeRequest({
   onClose: () => void;
   onSent: () => void;
 }) {
-  const draftId = `${projectId}/${cardId}/${proposal.version}`;
+  const draftId = draftKey(projectId, cardId);
   const [body, setBody] = useState(() => drafts.get(draftId) ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -400,9 +431,18 @@ function useLeaveGuard(
         window.location.hash = href;
       });
     };
+    // Closing the card drawer (button, Escape, outside click) asks too.
+    const unregister = registerLeaveGuard((leave) => {
+      setPending(() => () => {
+        forgetRef.current();
+        leave();
+      });
+      return true;
+    });
     window.addEventListener("beforeunload", warn);
     document.addEventListener("click", click, true);
     return () => {
+      unregister();
       window.removeEventListener("beforeunload", warn);
       document.removeEventListener("click", click, true);
     };
@@ -413,6 +453,7 @@ function useLeaveGuard(
   };
   const dialog = (
     <SettingsDiscardDialog
+      title="放弃未发送的修改意见？"
       open={pending !== undefined}
       onKeep={() => setPending(undefined)}
       onDiscard={() => {

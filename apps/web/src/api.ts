@@ -1874,6 +1874,8 @@ export interface CardiganClient {
     result: string,
     attachments: string[],
     idempotencyKey: string,
+    /** C-503: the story summary the person confirmed against. */
+    storySummaryEntryId?: string,
   ): Promise<void>;
   /** C-503: confirm the story proposal version the person saw. */
   confirmStoryProposal(
@@ -2544,11 +2546,18 @@ export class HttpCardiganClient implements CardiganClient {
     result: string,
     attachments: string[],
     idempotencyKey: string,
+    storySummaryEntryId?: string,
   ): Promise<void> {
     await this.write(
       projectId,
       `cards/${encodeURIComponent(cardId)}/mark-done`,
-      { result, attachments },
+      {
+        result,
+        attachments,
+        ...(storySummaryEntryId
+          ? { story_summary_entry_id: storySummaryEntryId }
+          : {}),
+      },
       idempotencyKey,
     );
   }

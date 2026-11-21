@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import {
+  ApiError,
   type AttachmentView,
   type CardDetail,
   type CardiganClient,
@@ -469,14 +470,17 @@ function StorySummary({
           ) : (
             !read.error && read.pending && <Skeleton />
           )}
-          <StoryCompletion
-            detail={detail}
-            client={client}
-            projectId={projectId}
-            cardId={cardId}
-            summaryId={id}
-            onSaved={onSaved}
-          />
+          {/* Only a summary the person can read may be confirmed against. */}
+          {entry && (
+            <StoryCompletion
+              detail={detail}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              summaryId={id}
+              onSaved={onSaved}
+            />
+          )}
         </>
       )}
     </section>
@@ -503,7 +507,7 @@ function StoryCompletion({
   onSaved: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ message: string; stale: boolean }>();
   const [message, setMessage] = useState("");
   const sending = useRef(false);
   const key = useRef(crypto.randomUUID());
@@ -518,18 +522,24 @@ function StoryCompletion({
     <>
       {error && (
         <ChecklistAlert>
-          <span>确认完成失败：{error}</span>
+          <span>{error.message}</span>
+          {error.stale && (
+            <Button variant="outline" onClick={onSaved}>
+              刷新
+            </Button>
+          )}
         </ChecklistAlert>
       )}
       <ChecklistActions>
         <Button
           variant="primary"
-          disabled={busy}
+          // Stays focusable while busy, so a refusal does not drop focus.
+          aria-disabled={busy || error?.stale}
           onClick={async () => {
-            if (sending.current) return;
+            if (sending.current || error?.stale) return;
             sending.current = true;
             setBusy(true);
-            setError("");
+            setError(undefined);
             try {
               await client.markCardDone(
                 projectId,
@@ -537,11 +547,19 @@ function StoryCompletion({
                 `已对照总结 ${summaryId} 确认需求完成`,
                 [],
                 key.current,
+                summaryId,
               );
               setMessage("需求卡已确认完成");
               onSaved();
             } catch (cause) {
-              setError(describeWriteError(cause).replace(/^请求失败：/u, ""));
+              const stale =
+                cause instanceof ApiError && cause.code === "stale_target";
+              setError({
+                stale,
+                message: stale
+                  ? "对照总结已更新，请刷新后再确认"
+                  : `确认完成失败：${describeWriteError(cause).replace(/^请求失败：/u, "")}`,
+              });
             } finally {
               sending.current = false;
               setBusy(false);

@@ -96,7 +96,10 @@ export function confirmStoryProposal(
           ],
         },
       );
-      const entry = d.timeline.find((e) => e.event_seq === event.seq);
+      // Sequences are per card: match the story card as well, not a child's notice.
+      const entry = d.timeline.find(
+        (e) => e.card_id === story.id && e.event_seq === event.seq,
+      );
       ensure(entry, "invariant_violation", "缺少确认记录");
       d.put("cards", {
         ...latest,

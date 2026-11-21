@@ -1,5 +1,6 @@
 import {
   cardCriticalPathLengths,
+  cardDependenciesAllowStart,
   cardDependencyView,
 } from "../card-dependencies.js";
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
@@ -39,14 +40,17 @@ import { providerIncidents } from "../provider-start.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
-import { storyTerminal } from "../story.js";
-import { currentStoryProposal } from "../story-discussion.js";
+import {
+  currentStoryProposal,
+  storyProposalConfirmable,
+} from "../story-discussion.js";
 import {
   builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
+import { dependencyState } from "./card-dependencies.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -704,10 +708,12 @@ export function listNeedsYouCounts(
       (q) => decisionSection(state, q),
       false,
     );
-    const decisionCount =
-      data.decisions.filter((s) => s === "decisions").length +
-      data.story_proposals.length;
-    const mergeCount = data.decisions.length - decisionCount;
+    const decisionsOnly = data.decisions.filter(
+      (s) => s === "decisions",
+    ).length;
+    // Story proposals count with decisions and never against merges.
+    const decisionCount = decisionsOnly + data.story_proposals.length;
+    const mergeCount = data.decisions.length - decisionsOnly;
     const humanActions = data.human_actions.filter(
       (h) => h.triage !== "host",
     ).length;
@@ -1085,15 +1091,24 @@ function selectNeedsYou<T>(
   };
 }
 
-/** Open, unpaused stories whose latest proposal is not yet confirmed. */
+/**
+ * Stories whose latest proposal the human can confirm right now: the same
+ * open, scheduled, unpaused and startable conditions `confirm_story_proposal`
+ * checks, so the list never offers an action known to fail.
+ */
 export function pendingStoryProposals(d: CommandDraft) {
+  let dependencies: ReturnType<typeof dependencyState> | undefined;
+  const startable = (card: Card) => {
+    if (!card.depends_on_cards?.length || card.early_start) return true;
+    dependencies ??= dependencyState(d);
+    return cardDependenciesAllowStart(dependencies, card);
+  };
   return d.list("cards").flatMap((card) => {
     const proposal = currentStoryProposal(card.story);
     return card.story &&
       proposal &&
-      !proposal.confirmed &&
-      !card.hold &&
-      !storyTerminal(card)
+      storyProposalConfirmable(card) &&
+      startable(card)
       ? [
           {
             card_id: card.id,

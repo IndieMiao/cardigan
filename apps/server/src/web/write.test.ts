@@ -1977,3 +1977,36 @@ test("Web confirms the current story proposal once: every child opens in one tra
   expect(childrenOf()).toHaveLength(2);
   expect((await readNeeds()).story_proposals).toEqual([]);
 });
+
+test("V-2625: mark-done carries the story summary the person saw and refuses a stale one", async () => {
+  const summary =
+    `${s.card.id}#9` as import("@cardigan/domain").TimelineEntryId;
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      template: "story",
+      story: { summary_entry_id: summary },
+    }),
+  );
+  const before = snapshot();
+  const done = (body: Record<string, unknown>, key: string) =>
+    request(
+      cardPath("mark-done"),
+      { result: "已对照", ...body },
+      { "idempotency-key": key },
+    );
+  expect(
+    (await done({ story_summary_entry_id: "not an entry" }, "bad-entry"))
+      .status,
+  ).toBe(400);
+  // No child has ended (there are none), and the summary differs.
+  for (const [entry, key] of [
+    [summary, "no-children"],
+    [`${s.card.id}#8`, "other-summary"],
+  ] as const)
+    expect(await done({ story_summary_entry_id: entry }, key)).toMatchObject({
+      status: 409,
+      body: { error: { code: "stale_target" } },
+    });
+  expect(snapshot()).toBe(before);
+});

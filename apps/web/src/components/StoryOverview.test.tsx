@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -14,6 +15,7 @@ import {
   type CardListItem,
   type CardStatus,
 } from "../api.js";
+import { guardLeave } from "../leave-guard.js";
 import { routeHash } from "../route.js";
 import {
   attachment,
@@ -587,7 +589,7 @@ const proposal = (
       title: "导出按钮",
       template_id: "ui",
       goal: "在看板放导出按钮。",
-      acceptance_criteria: [],
+      acceptance_criteria: ["按钮遵守界面规范"],
       depends_on: [1],
       depends_on_cards: ["C-9"],
       priority: 2,
@@ -742,14 +744,16 @@ test("a change request replies to the proposal; leaving a written draft asks fir
   away.textContent = "看板";
   document.body.append(away);
   fireEvent.click(away);
-  const ask = await screen.findByRole("dialog", { name: "放弃未应用的修改？" });
+  const ask = await screen.findByRole("dialog", {
+    name: "放弃未发送的修改意见？",
+  });
   fireEvent.click(within(ask).getByRole("button", { name: "继续编辑" }));
   expect(window.location.hash).not.toBe(away.getAttribute("href"));
   away.remove();
 
   fireEvent.click(within(again).getByRole("button", { name: "取消" }));
   const discard = await screen.findByRole("dialog", {
-    name: "放弃未应用的修改？",
+    name: "放弃未发送的修改意见？",
   });
   fireEvent.click(within(discard).getByRole("button", { name: "继续编辑" }));
   fireEvent.click(within(again).getByRole("button", { name: "发送意见" }));
@@ -800,7 +804,144 @@ test("after every child ended and the summary arrived, the person confirms the s
     "已对照总结 C-1#9 确认需求完成",
     [],
     expect.any(String),
+    // V-2625: the server checks the summary the person saw is still current.
+    "C-1#9",
   );
+});
+
+test("V-2625: no completion button until the summary text itself is read", async () => {
+  const ended = children.map((c) => ({ ...c, status: "done" as const }));
+  const detail = storyDetail(
+    { children: ended, summary: true },
+    { mark_done: { allowed: true, reason: null } },
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        // The summary sits outside the loaded window and its read never ends.
+        card: async (_p, _c, options) =>
+          options?.at ? new Promise(() => {}) : { ...detail, timeline: [] },
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  expect(
+    within(summary).queryByRole("button", { name: "确认完成" }),
+  ).toBeNull();
+});
+
+test("V-2625: a stale version disables confirmation and focus moves to 刷新", async () => {
+  const confirm = vi.fn(async () => {
+    throw new ApiError(409, "stale_target", "已更新");
+  });
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => proposalDetail([proposal(1)]),
+        confirmStoryProposal: confirm,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  const button = within(plan).getByRole("button", { name: /确认开卡/ });
+  button.focus();
+  fireEvent.click(button);
+  const refresh = await within(plan).findByRole("button", { name: "刷新" });
+  await waitFor(() => expect(document.activeElement).toBe(refresh));
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(button);
+  expect(confirm).toHaveBeenCalledTimes(1);
+});
+
+test("V-2625: a paused or unscheduled story offers change requests but no confirmation", async () => {
+  for (const extra of [
+    { status: "backlog" as const },
+    {
+      hold: {
+        reason: "x",
+        resume_condition: "y",
+        set_by: "human",
+        set_at: "2026-01-01T00:00:00.000Z",
+      },
+    },
+  ]) {
+    const detail = proposalDetail([proposal(1)]);
+    render(
+      <CardDetailPage
+        client={fakeClient({
+          card: async () =>
+            ({ ...detail, card: { ...detail.card, ...extra } }) as CardDetail,
+        })}
+        projectId="p-1"
+        cardId="C-1"
+      />,
+    );
+    const plan = await screen.findByRole("region", { name: "拆解方案" });
+    expect(within(plan).queryByRole("button", { name: /确认开卡/ })).toBeNull();
+    expect(
+      within(plan).getByRole("button", { name: "提修改意见" }),
+    ).toBeTruthy();
+    cleanup();
+  }
+});
+
+test("V-2625: a draft survives a new version and closing the drawer asks first", async () => {
+  let detail = proposalDetail([proposal(1)]);
+  const view = render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+      revision={0}
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  fireEvent.click(within(plan).getByRole("button", { name: "提修改意见" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "修改意见" }), {
+    target: { value: "先做接口" },
+  });
+  // The Office revises while the person is writing.
+  detail = proposalDetail([proposal(1), proposal(2)]);
+  view.rerender(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  await screen.findByRole("form", { name: "对拆解方案第 2 版提修改意见" });
+  expect(
+    (screen.getByRole("textbox", { name: "修改意见" }) as HTMLTextAreaElement)
+      .value,
+  ).toBe("先做接口");
+  // The drawer's close path goes through the shared guard.
+  const close = vi.fn();
+  act(() => guardLeave(close));
+  const ask = await screen.findByRole("dialog", {
+    name: "放弃未发送的修改意见？",
+  });
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(within(ask).getByRole("button", { name: "放弃修改" }));
+  expect(close).toHaveBeenCalledTimes(1);
+  // Discarded: the drawer is gone and the draft does not come back.
+  view.unmount();
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const again = await screen.findByRole("region", { name: "拆解方案" });
+  expect(
+    within(again).getByRole("button", { name: "提修改意见" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("form", { name: /提修改意见/ })).toBeNull();
 });
 
 test("no completion button while a child is still open", async () => {

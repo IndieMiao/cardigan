@@ -29,7 +29,8 @@ export interface StoryProposalChildInput {
   readonly title: string;
   readonly template_id: string;
   readonly goal: string;
-  readonly acceptance_criteria?: readonly string[];
+  /** At least one non-empty review point. */
+  readonly acceptance_criteria: readonly string[];
   /** 1-based numbers of other children in the same proposal. */
   readonly depends_on?: readonly number[];
   /** Existing same-project cards the child waits for. */
@@ -98,4 +99,23 @@ export function storyDiscussionRounds(story: StoryState) {
       (q) => q.resolution && q.resolution.source !== "proposal_default",
     ),
   ).length;
+}
+
+/**
+ * The card-level conditions under which the current proposal may be confirmed
+ * (dependency start is checked separately). Shared by the command, Needs You
+ * and the Web so none offers an action the server will refuse.
+ */
+export function storyProposalConfirmable(card: {
+  readonly status: string;
+  readonly hold?: unknown;
+  readonly story?: StoryState;
+}): boolean {
+  const proposal = currentStoryProposal(card.story);
+  return (
+    !!proposal &&
+    !proposal.confirmed &&
+    !card.hold &&
+    !["backlog", "done", "cancelled"].includes(card.status)
+  );
 }

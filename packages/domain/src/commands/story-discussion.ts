@@ -63,12 +63,14 @@ function proposalChildren(
       "validation_failed",
       `第 ${n} 张子卡的负责角色 ${c.owner_role} 未在项目登记`,
     );
-    const acceptance = c.acceptance_criteria ?? [];
+    // Structured proposals always carry review points, whatever the template.
+    const acceptance = c.acceptance_criteria;
     ensure(
       Array.isArray(acceptance) &&
+        acceptance.length > 0 &&
         acceptance.every((a) => typeof a === "string" && a.trim()),
       "validation_failed",
-      `第 ${n} 张子卡的验收要点须为非空文字`,
+      `第 ${n} 张子卡至少需要一条非空验收要点`,
     );
     const priority = parseCardPriority(c.priority ?? 0);
     ensure(

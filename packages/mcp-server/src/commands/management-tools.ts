@@ -142,8 +142,8 @@ const schemas = {
                     goal: text.describe("子卡目标摘要"),
                     acceptance_criteria: z
                       .array(text)
-                      .optional()
-                      .describe("验收要点"),
+                      .min(1)
+                      .describe("验收要点，至少一条"),
                     depends_on: z
                       .array(z.number().int().positive())
                       .optional()

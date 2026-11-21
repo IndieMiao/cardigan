@@ -1201,6 +1201,8 @@ export async function serveWrite(
             .object({
               result: text,
               attachments: z.array(z.string()).optional(),
+              // C-503: the story summary the person confirmed against.
+              story_summary_entry_id: entryId.optional(),
             })
             .strict(),
           body,

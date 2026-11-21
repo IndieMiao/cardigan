@@ -342,3 +342,148 @@ test("Needs You lists the current unconfirmed proposal for the human until it is
   );
   expect(cancelled.ok).toBe(true);
 });
+
+test("V-2625: every structured child needs at least one review point", () => {
+  const f = setup();
+  const { acceptance_criteria: _omit, ...bare } = child("A");
+  for (const children of [
+    [bare as StoryProposalChildInput],
+    [child("A", { acceptance_criteria: [] })],
+  ])
+    expect(f.propose(children)).toMatchObject({
+      ok: false,
+      error: { message: "第 1 张子卡至少需要一条非空验收要点" },
+    });
+});
+
+test("V-2625: the confirmation entry is the story's own, even when children emit many notices", () => {
+  const f = setup();
+  // Framework dependencies give each child its own run of timeline entries.
+  const frameworks = Array.from({ length: 6 }, (_, i) =>
+    f.commit(
+      createCard(
+        f.state,
+        human,
+        {
+          template_id: "general",
+          title: `Frame ${i}`,
+          goal: "Frame",
+          source: { kind: "quote", text: "Frame" },
+          is_ui_framework: true,
+        },
+        f.p,
+      ),
+    ),
+  );
+  f.commit(
+    f.propose([
+      child("A", { depends_on_cards: frameworks.map((c) => c.id) }),
+      child("B", { depends_on_cards: frameworks.map((c) => c.id) }),
+    ]),
+  );
+  const effect = value(f.confirm(1));
+  f.state = apply(f.state, effect);
+  const confirmed = f.current().story?.proposals?.[0]?.confirmed;
+  const entry = f.state.timeline.find((e) => e.id === confirmed?.entry_id);
+  expect(entry).toMatchObject({
+    card_id: f.story.id,
+    body: expect.stringContaining("已确认拆解方案第 1 版"),
+  });
+});
+
+test("V-2625: Needs You counts proposals with decisions only and hides ones that cannot be confirmed", () => {
+  const f = setup();
+  f.commit(f.propose([child("A")]));
+  const counts = () => value(listNeedsYouCounts(f.state, human, clock)).data;
+  expect(counts().tabs.decisions).toEqual({ count: 1, attention: 1 });
+  expect(counts().tabs.merges).toEqual({ count: 0, attention: 0 });
+  expect(counts().total_pending).toBe(1);
+  // Moved back to backlog: the confirmation would fail, so it is not offered.
+  f.commit(
+    updateCard(f.state, human, { card_id: f.story.id, status: "backlog" }, f.p),
+  );
+  expect(
+    value(listNeedsYou(f.state, human, clock)).data.story_proposals,
+  ).toEqual([]);
+  expect(counts().tabs.decisions.count).toBe(0);
+  expect(f.confirm(1)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+});
+
+test("V-2625: completion against a summary requires that summary to be current and every child ended", () => {
+  const f = setup();
+  f.commit(f.propose([child("A")]));
+  f.state = apply(f.state, value(f.confirm(1)));
+  const [a] = f.children();
+  if (!a) throw new Error("missing child");
+  f.state = apply(
+    f.state,
+    value(markCardDone(f.state, human, { card_id: a.id, result: "ok" }, f.p)),
+  );
+  const summary = f.commit(
+    postComment(
+      f.state,
+      office,
+      { card_id: f.story.id, body: "对照完成", story_summary: true },
+      f.p,
+    ),
+  );
+  if (!summary) throw new Error("missing summary");
+  const done = (story_summary_entry_id?: typeof summary.id) =>
+    markCardDone(
+      f.state,
+      human,
+      {
+        card_id: f.story.id,
+        result: "已对照",
+        ...(story_summary_entry_id ? { story_summary_entry_id } : {}),
+      },
+      f.p,
+    );
+  // Another window opens a new child: the old summary no longer holds.
+  f.commit(f.propose([child("B")]));
+  f.state = apply(f.state, value(f.confirm(2)));
+  expect(f.current().story?.summary_entry_id).toBeUndefined();
+  expect(done(summary.id)).toMatchObject({
+    ok: false,
+    error: { code: "stale_target" },
+  });
+  expect(f.current().status).not.toBe("done");
+  // The existing manual completion is unchanged.
+  expect(done().ok).toBe(true);
+});
+
+test("V-2625: a current summary with every child ended confirms the story done", () => {
+  const f = setup();
+  f.commit(f.propose([child("A")]));
+  f.state = apply(f.state, value(f.confirm(1)));
+  const [a] = f.children();
+  if (!a) throw new Error("missing child");
+  f.state = apply(
+    f.state,
+    value(markCardDone(f.state, human, { card_id: a.id, result: "ok" }, f.p)),
+  );
+  const summary = f.commit(
+    postComment(
+      f.state,
+      office,
+      { card_id: f.story.id, body: "对照完成", story_summary: true },
+      f.p,
+    ),
+  );
+  if (!summary) throw new Error("missing summary");
+  expect(
+    markCardDone(
+      f.state,
+      human,
+      {
+        card_id: f.story.id,
+        result: "已对照",
+        story_summary_entry_id: summary.id,
+      },
+      f.p,
+    ).ok,
+  ).toBe(true);
+});
