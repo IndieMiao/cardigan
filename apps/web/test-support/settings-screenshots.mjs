@@ -7,13 +7,14 @@ import { createServer } from "vite";
 import { chromium } from "./chromium.mjs";
 
 // C-455 evidence: settings fixture only (no backend, live data or e2e suite).
-// Usage: node settings-screenshots.mjs <output-dir> [--card-page] [--panels]
+// Usage: node settings-screenshots.mjs <output-dir> [--card-page | --panels | --feishu]
 // C-479: --panels captures only the capacity, roles, templates and employee
 // panels and their drawers (preferences/authorization are the default run).
 const root = fileURLToPath(new URL("../", import.meta.url));
 const output = resolve(process.argv[2] ?? "../../artifacts/settings");
 const cardPage = process.argv.includes("--card-page");
 const panels = process.argv.includes("--panels");
+const feishu = process.argv.includes("--feishu");
 await mkdir(output, { recursive: true });
 const server = await createServer({
   root,
@@ -205,6 +206,19 @@ try {
           document.documentElement.dataset.theme = theme;
         }, theme);
       };
+      if (feishu) {
+        for (const [state, badge] of [
+          ["disabled", "未启用"],
+          ["connected", "未绑定"],
+        ]) {
+          await open(
+            `?feishu=${state}#/p/p-1/settings?tab=feishu`,
+            `[...document.querySelectorAll('[data-ui="badge"]')].some(el => el.textContent.trim() === '${badge}')`,
+          );
+          await capture(`feishu-${state}`, width, theme);
+        }
+        continue;
+      }
       if (cardPage) {
         await open(
           "#/p/p-1/cards?view=board",

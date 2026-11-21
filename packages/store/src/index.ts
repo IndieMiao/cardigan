@@ -81,7 +81,10 @@ export {
   writeRole,
 } from "./roles.js";
 export * from "./run-capacity.js";
-export { backfillStandingModesInTransaction } from "./standing.js";
+export {
+  backfillStandingModesInTransaction,
+  standingResolver,
+} from "./standing.js";
 export {
   type AckEventsParams,
   type AckEventsResult,
