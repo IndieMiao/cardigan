@@ -541,6 +541,94 @@ test("recovery spanning two projection batches sends one quiet digest and does n
   expect(rows().filter((r) => r.status === "sent")).toHaveLength(34);
 });
 
+const startQuietBacklog = (count: number) => {
+  quiet();
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, { ...action, status: "done" }),
+  );
+  now = "2026-01-01T22:00:00.000Z";
+  for (let n = 2; n <= count + 1; n++) addAction(n);
+  now = "2026-01-02T07:59:59.000Z";
+};
+
+test("a quiet scan just before wake keeps all 33 earlier ready items in one digest", async () => {
+  startQuietBacklog(33);
+  const active = sender();
+  await active.tick();
+  expect(rows()).toHaveLength(32);
+  expect(rows().every((r) => r.digest_id === "queued")).toBe(true);
+  expect(fake.messages).toEqual([]);
+  advance(1000);
+  await active.tick();
+  expect(fake.messages).toMatchObject([{ total: 33 }]);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(33);
+});
+
+test("after restart only surviving quiet-scan members join the digest, not new ordinary items", async () => {
+  startQuietBacklog(65);
+  await sender().tick();
+  const queued = new Set(rows().map((r) => r.item_id));
+  expect(queued.size).toBe(32);
+  const handled = Array.from(
+    { length: 65 },
+    (_, i) => `H-${i + 2}` as const,
+  ).find((id) => !queued.has(id));
+  if (!handled) throw new Error("Expected unqueued backlog");
+  store.close();
+  store = Store.open({ dataDir: dir });
+  advance(1000);
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, {
+      ...action,
+      id: handled,
+      key: handled,
+      status: "done",
+    }),
+  );
+  addAction(1000);
+  const active = sender();
+  await active.tick();
+  expect(rows()).toHaveLength(64);
+  expect(fake.messages).toMatchObject([{ item: "H-1000" }]);
+  await active.tick();
+  await active.tick();
+  expect(fake.messages).toMatchObject([{ item: "H-1000" }, { total: 64 }]);
+  expect(rows().some((r) => r.item_id === handled)).toBe(false);
+  expect(
+    store.database.prepare("SELECT 1 FROM ext_message_quiet_overflow").get(),
+  ).toBeUndefined();
+});
+
+test("an awake projection cannot overwrite a quiet scan committed by a concurrent sender", async () => {
+  startQuietBacklog(33);
+  const other = Store.open({ dataDir: dir });
+  try {
+    const asleep = sender({
+      store: other,
+      clock: { now: () => "2026-01-02T07:59:59.000Z" },
+    });
+    advance(1000);
+    const awake = sender();
+    let quietTick: Promise<void> | undefined;
+    store.observe({
+      transaction(kind) {
+        if (kind !== "read") return;
+        store.observe(undefined);
+        // No command-state revision changes when only projection rows are written.
+        quietTick = asleep.tick();
+      },
+    });
+    await awake.tick();
+    await quietTick;
+    expect(fake.messages).toEqual([]);
+    expect(rows()).toHaveLength(32);
+    await awake.tick();
+    expect(fake.messages).toMatchObject([{ total: 33 }]);
+  } finally {
+    other.close();
+  }
+});
+
 test("digest retries preserve the approved budget and membership across restart and local commit failure", async () => {
   quiet();
   addAction(2);
@@ -659,83 +747,93 @@ test("an external edit during send is not mistaken for our settlement audit", as
   expect(fake.messages[1]?.title).toBe("有 1 条敏感事项待处理");
 });
 
-test("production-size first enable bounds tick computation, replay writes and writer lock time", async () => {
-  // Keep the creation facts at the end of the stream ordering (a worst-case linear find).
-  store.uow.run((tx) => {
-    store.database
-      .prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<150000)
+test.each([false, true])(
+  "production-size first enable bounds computation, replay writes and writer lock time (quiet overflow: %s)",
+  async (quietOverflow) => {
+    if (quietOverflow) {
+      quiet();
+      now = "2026-01-01T22:00:00.000Z";
+    }
+    // Keep the creation facts at the end of the stream ordering (a worst-case linear find).
+    store.uow.run((tx) => {
+      store.database
+        .prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<150000)
       INSERT INTO events(project_id,id,card_id,stream,seq,type,doc)
       SELECT ?, 'history-'||i, NULL,'',i,'tick', json_object('id','history-'||i,'seq',i,'type','tick','payload',json('{}'),'actor',json_object('kind','system','project_id',?),'created_at',?) FROM n`)
-      .run(project_id, project_id, now);
-    const fact = (
-      payload: { decision_id: string } | { human_action_id: string },
-    ) =>
-      tx.events.append(project_id, {
-        id: tx.ids.nextEventId(),
-        card_id: "C-1",
-        seq: tx.ids.nextEventSequence(project_id, "C-1"),
-        type:
-          "decision_id" in payload
-            ? "decision_requested"
-            : "human_action_requested",
-        actor: { kind: "human", project_id },
-        created_at: now,
-        payload,
-      });
-    for (let n = 1; n <= 1000; n++) {
-      const id = `Q-${n}` as Decision["id"];
-      tx.decisions.put(project_id, {
-        id,
-        key: id,
-        card_id: "C-1",
-        kind: "choose",
-        question: "Fixture",
-        context: "",
-        raised_by: "human",
-        decider: "human",
-        status: "open",
-        category: "general",
-        blocking: false,
-        affected_cards: [],
-        affected_work_items: [],
-        options: [],
-        recommended: "",
-        doc_refs: [],
-      });
-      fact({ decision_id: id });
-    }
-    for (let n = 2; n <= 200; n++) {
-      const id = `H-${n}` as HumanAction["id"];
-      tx.human_actions.put(project_id, { ...action, id, key: id });
-      fact({ human_action_id: id });
-    }
-  });
-  expect(
-    store.database.prepare("SELECT COUNT(*) AS n FROM events").get()?.n,
-  ).toBe(151200);
-  const active = sender();
-  // First tick includes cold SQLite/JSON decoding. Second tick sees our audits,
-  // so it must reproject (and take the next batch), not hit an unchanged cursor.
-  for (const cold of [true, false]) {
-    const locks: number[] = [];
-    let compute = 0;
-    store.observe({
-      transaction(kind, ms) {
-        if (kind === "run") locks.push(ms);
-        else compute += ms;
-      },
+        .run(project_id, project_id, now);
+      const fact = (
+        payload: { decision_id: string } | { human_action_id: string },
+      ) =>
+        tx.events.append(project_id, {
+          id: tx.ids.nextEventId(),
+          card_id: "C-1",
+          seq: tx.ids.nextEventSequence(project_id, "C-1"),
+          type:
+            "decision_id" in payload
+              ? "decision_requested"
+              : "human_action_requested",
+          actor: { kind: "human", project_id },
+          created_at: now,
+          payload,
+        });
+      for (let n = 1; n <= 1000; n++) {
+        const id = `Q-${n}` as Decision["id"];
+        tx.decisions.put(project_id, {
+          id,
+          key: id,
+          card_id: "C-1",
+          kind: "choose",
+          question: "Fixture",
+          context: "",
+          raised_by: "human",
+          decider: "human",
+          status: "open",
+          category: "general",
+          blocking: false,
+          affected_cards: [],
+          affected_work_items: [],
+          options: [],
+          recommended: "",
+          doc_refs: [],
+        });
+        fact({ decision_id: id });
+      }
+      for (let n = 2; n <= 200; n++) {
+        const id = `H-${n}` as HumanAction["id"];
+        tx.human_actions.put(project_id, { ...action, id, key: id });
+        fact({ human_action_id: id });
+      }
     });
-    const start = performance.now();
-    await active.tick();
-    const elapsed = performance.now() - start,
-      longest = Math.max(...locks);
-    console.info(
-      `ext-message (${cold ? "cold" : "warm"}): projection ${compute.toFixed(1)} ms, tick ${elapsed.toFixed(1)} ms, longest write ${longest.toFixed(1)} ms`,
-    );
-    expect(rows()).toHaveLength(cold ? 32 : 64);
-    expect(fake.messages).toHaveLength(cold ? 32 : 64);
-    expect(compute).toBeLessThan(cold ? 2000 : 200);
-    expect(elapsed).toBeLessThan(cold ? 3000 : 750);
-    expect(longest).toBeLessThan(50);
-  }
-}, 20000);
+    expect(
+      store.database.prepare("SELECT COUNT(*) AS n FROM events").get()?.n,
+    ).toBe(151200);
+    if (quietOverflow) now = "2026-01-02T07:59:59.000Z";
+    const active = sender();
+    // First tick includes cold SQLite/JSON decoding. Second tick sees our audits,
+    // so it must reproject (and take the next batch), not hit an unchanged cursor.
+    for (const cold of [true, false]) {
+      if (quietOverflow && !cold) advance(1000);
+      const locks: number[] = [];
+      let compute = 0;
+      store.observe({
+        transaction(kind, ms) {
+          if (kind === "run") locks.push(ms);
+          else compute += ms;
+        },
+      });
+      const start = performance.now();
+      await active.tick();
+      const elapsed = performance.now() - start,
+        longest = Math.max(...locks);
+      console.info(
+        `ext-message (${quietOverflow ? "quiet" : "ordinary"}, ${cold ? "cold" : "warm"}): projection ${compute.toFixed(1)} ms, tick ${elapsed.toFixed(1)} ms, longest write ${longest.toFixed(1)} ms`,
+      );
+      expect(rows()).toHaveLength(cold ? 32 : 64);
+      expect(fake.messages).toHaveLength(quietOverflow ? 0 : cold ? 32 : 64);
+      expect(compute).toBeLessThan(cold ? 2000 : 200);
+      expect(elapsed).toBeLessThan(cold ? 3000 : 750);
+      expect(longest).toBeLessThan(50);
+    }
+  },
+  20000,
+);

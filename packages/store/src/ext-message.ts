@@ -42,6 +42,55 @@ export function hasExtMessage(
     "SELECT 1 FROM ext_message_outbox WHERE project_id=? AND item_kind=? AND item_id=? AND channel=?",
   ).get(item.project_id, item.kind, item.item_id, channel);
 }
+export interface ExtQuietOverflow {
+  readonly stamp: string;
+  readonly members: string; // Pre-encoded item keys, never message content.
+}
+/** Only read the membership document in the read snapshot. */
+export function extQuietOverflow(
+  db: DatabaseSync,
+  project: string,
+  channel: string,
+): ExtQuietOverflow | null {
+  const row = prepare(
+    db,
+    "SELECT stamp,members FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+  ).get(project, channel);
+  return row
+    ? { stamp: String(row.stamp), members: String(row.members) }
+    : null;
+}
+/** Constant-size fencing check inside the writer transaction. */
+export function extQuietStamp(
+  db: DatabaseSync,
+  project: string,
+  channel: string,
+): string | null {
+  const row = prepare(
+    db,
+    "SELECT stamp FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+  ).get(project, channel);
+  return row ? String(row.stamp) : null;
+}
+export function saveExtQuietOverflow(
+  db: DatabaseSync,
+  project: string,
+  channel: string,
+  checkpoint: ExtQuietOverflow | null,
+): void {
+  if (checkpoint === null) {
+    prepare(
+      db,
+      "DELETE FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+    ).run(project, channel);
+  } else {
+    prepare(
+      db,
+      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members) VALUES (?,?,?,?)
+      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members`,
+    ).run(project, channel, checkpoint.stamp, checkpoint.members);
+  }
+}
 export function projectExtMessage(
   db: DatabaseSync,
   item: ExtMessageItem,

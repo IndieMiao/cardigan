@@ -16,6 +16,8 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import {
   claimExtMessage,
   type ExtMessageRow,
+  extQuietOverflow,
+  extQuietStamp,
   getExtMessage,
   groupExtMessage,
   hasExtMessage,
@@ -23,6 +25,7 @@ import {
   projectExtMessage,
   type Store,
   type StoreTransactionContext,
+  saveExtQuietOverflow,
   settleExtMessage,
 } from "@cardigan/store";
 import {
@@ -85,8 +88,71 @@ type Projection = {
   version: string;
   items: Map<string, ExtMessageItem>;
   incompleteDigests: ReadonlySet<string>;
+  quietStamps: ReadonlyMap<string, string | null>;
 };
 const itemKey = (kind: string, id: string) => `${kind}:${id}`;
+// Called in the read snapshot: retain exact quiet-scan membership, not a time
+// watermark that could sweep in items only created or released after wake.
+function planChannel(
+  store: Store,
+  project: ProjectId,
+  channel: string,
+  items: readonly ExtMessageItem[],
+  config: ExtMessageConfig,
+  quiet: boolean,
+) {
+  const previous = extQuietOverflow(store.database, project, channel);
+  const remembered = new Set<string>(
+    previous ? JSON.parse(previous.members) : [],
+  );
+  const remaining: string[] = [];
+  const writes = [];
+  let complete = true;
+  let incompleteDigest = false;
+  for (const item of items) {
+    if (item.handled) continue;
+    const key = itemKey(item.kind, item.item_id);
+    const observed = remembered.has(key);
+    if (!item.ready && channel.startsWith("lark_app:")) {
+      if (observed) remaining.push(key);
+      continue;
+    }
+    if (hasExtMessage(store.database, item, channel)) continue;
+    const deferred =
+      quiet ||
+      observed ||
+      (item.created_at !== undefined &&
+        extMessageQuiet(config, item.created_at));
+    if (writes.length < projectionBatch) {
+      writes.push({ item, channel, deferred });
+      continue;
+    }
+    complete = false;
+    if (quiet || observed) remaining.push(key);
+    if (deferred && item.ready) incompleteDigest = true;
+    // With no quiet scan to persist, only the first missing digest member matters.
+    if (
+      !quiet &&
+      previous === null &&
+      (!config.quiet_hours || incompleteDigest)
+    )
+      break;
+  }
+  const members = remaining.length ? JSON.stringify(remaining) : null;
+  const next = !members
+    ? null
+    : previous?.members === members
+      ? previous
+      : { stamp: randomUUID(), members };
+  return {
+    channel,
+    writes,
+    complete: complete && next === null,
+    incompleteDigest,
+    previous,
+    next,
+  };
+}
 export class ExtMessageSender {
   private running: Promise<void> | undefined;
   private receipts: Promise<void> | undefined;
@@ -230,47 +296,24 @@ export class ExtMessageSender {
         return;
       const state = loadCommandState(tx, projectId);
       const items = extMessageItems(state, projectId);
-      const writes = [];
-      let complete = true;
-      const incompleteDigests = new Set<string>();
-      if (!projected) {
-        const quiet = extMessageQuiet(config, now);
-        for (const channel of channels) {
-          let count = 0;
-          for (const item of items) {
-            if (
-              item.handled ||
-              (!item.ready && channel.startsWith("lark_app:")) ||
-              hasExtMessage(store.database, item, channel)
-            )
-              continue;
-            const deferred =
-              quiet ||
-              (item.created_at !== undefined &&
-                extMessageQuiet(config, item.created_at));
-            if (count === projectionBatch) {
-              complete = false;
-              if (!config.quiet_hours) break;
-              if (deferred && item.ready) {
-                incompleteDigests.add(channel);
-                break;
-              }
-              // An ordinary or not-yet-ready item must not delay a complete digest.
-              continue;
-            }
-            writes.push({ item, channel, deferred });
-            count++;
-          }
-        }
-      }
+      const quiet = extMessageQuiet(config, now);
+      const plans = projected
+        ? []
+        : channels.map((channel) =>
+            planChannel(store, projectId, channel, items, config, quiet),
+          );
       return {
         cursor,
-        writes,
-        complete,
+        plans,
         projection: {
           version,
           state,
-          incompleteDigests,
+          incompleteDigests: new Set(
+            plans.filter((p) => p.incompleteDigest).map((p) => p.channel),
+          ),
+          quietStamps: new Map(
+            plans.map((p) => [p.channel, p.next?.stamp ?? null]),
+          ),
           items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
         },
       };
@@ -278,20 +321,30 @@ export class ExtMessageSender {
     if (!plan) return;
     const { projection } = plan;
     if (
-      plan.writes.length &&
+      plan.plans.some((p) => p.writes.length || p.previous !== p.next) &&
       !store.uow.run(() => {
         if (
           store.snapshotVersion(projectId) !== projection.version ||
-          this.app?.binding?.generation !== generation
+          this.app?.binding?.generation !== generation ||
+          plan.plans.some(
+            (p) =>
+              extQuietStamp(store.database, projectId, p.channel) !==
+              (p.previous?.stamp ?? null),
+          )
         )
           return false;
-        for (const { item, channel, deferred } of plan.writes)
-          projectExtMessage(store.database, item, channel, now, deferred);
+        for (const p of plan.plans) {
+          for (const { item, channel, deferred } of p.writes)
+            projectExtMessage(store.database, item, channel, now, deferred);
+          if (p.previous !== p.next)
+            saveExtQuietOverflow(store.database, projectId, p.channel, p.next);
+        }
         return true;
       })
     )
       return;
-    if (plan.complete) this.projectedVersions.set(projectId, plan.cursor);
+    if (plan.plans.every((p) => p.complete))
+      this.projectedVersions.set(projectId, plan.cursor);
     return projection;
   }
   private async deliver(
@@ -364,6 +417,9 @@ export class ExtMessageSender {
     const claimed = store.uow.run((tx) => {
       if (
         store.snapshotVersion(project) !== projection.version ||
+        (candidate.digest_id === "queued" &&
+          extQuietStamp(store.database, project, candidate.channel) !==
+            (projection.quietStamps.get(candidate.channel) ?? null)) ||
         (appChannel &&
           candidate.channel !== `lark_app:${this.app?.binding?.generation}`)
       )
