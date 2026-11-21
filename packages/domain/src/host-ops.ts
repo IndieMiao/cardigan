@@ -10,6 +10,7 @@ import {
 /** Reserved domain names; MCP execution is wired separately from the role policy. */
 export const HOST_OPS_TOOLS = [
   "host_ops_read_diagnostics",
+  "host_ops_inspect_worker",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
@@ -58,7 +59,7 @@ export interface HostOpsActionTaken extends Event {
   readonly payload: {
     readonly tool: Exclude<
       (typeof HOST_OPS_TOOLS)[number],
-      "host_ops_read_diagnostics"
+      "host_ops_read_diagnostics" | "host_ops_inspect_worker"
     >;
     readonly target_id: AssignmentId | RunId | CardId;
     readonly reason: string;

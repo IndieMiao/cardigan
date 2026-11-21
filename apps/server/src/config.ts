@@ -56,6 +56,7 @@ export interface ServerConfig {
   readonly providerFailureThreshold?: number;
   readonly providerCooldownMs?: number;
   readonly dispatchTimeoutMs?: number;
+  readonly workerInspectionIntervalMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly contextUsageCacheDir?: string;
   readonly contextUsageStaleAfterMs?: number;
@@ -106,6 +107,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_PROVIDER_FAILURE_THRESHOLD?: string | undefined;
   readonly CARDIGAN_PROVIDER_COOLDOWN_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
+  readonly CARDIGAN_WORKER_INSPECTION_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_CACHE_DIR?: string | undefined;
   readonly CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS?: string | undefined;
@@ -140,7 +142,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       : resolveAttachmentInlineBytes(Number(inlineText));
   const logRead = nonEmpty(env.CARDIGAN_CHECK_LOG_READ_BYTES);
   const logAttempt = nonEmpty(env.CARDIGAN_CHECK_LOG_ATTEMPT_BYTES);
-  const logBytes = (
+  const positiveInteger = (
     text: string | undefined,
     fallback: number,
     name: string,
@@ -155,12 +157,12 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     logRead === undefined && logAttempt === undefined
       ? undefined
       : {
-          per_read_bytes: logBytes(
+          per_read_bytes: positiveInteger(
             logRead,
             64 * 1024,
             "CARDIGAN_CHECK_LOG_READ_BYTES",
           ),
-          per_assignment_attempt_bytes: logBytes(
+          per_assignment_attempt_bytes: positiveInteger(
             logAttempt,
             1024 * 1024,
             "CARDIGAN_CHECK_LOG_ATTEMPT_BYTES",
@@ -223,6 +225,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_CONTEXT_USAGE_STALE_AFTER_MS",
       600_000,
     ),
+    ...(env.CARDIGAN_WORKER_INSPECTION_INTERVAL_MS
+      ? {
+          workerInspectionIntervalMs: positiveInteger(
+            env.CARDIGAN_WORKER_INSPECTION_INTERVAL_MS,
+            10000,
+            "CARDIGAN_WORKER_INSPECTION_INTERVAL_MS",
+          ),
+        }
+      : {}),
     hostOpsPatrolIntervalMs: interval(
       env.CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS,
       "CARDIGAN_HOST_OPS_PATROL_INTERVAL_MS",

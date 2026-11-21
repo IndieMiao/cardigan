@@ -252,8 +252,8 @@ def process_groups():
     return list(groups[:actual])
 
 
-def project_isolation(request):
-    """Read-only B8 entry, run under the selected project UID; no credentials read."""
+def project_account(request):
+    """Prove the effective account and its immutable project claim before reading worker data."""
     account = isolation_account(request, process_groups())
     uid, gid = account.pw_uid, account.pw_gid
     # Removing membership from the account database does not revoke old hc/login
@@ -280,6 +280,14 @@ def project_isolation(request):
                 raise ValueError('isolation_claim')
     finally:
         os.close(parent)
+    return account
+
+
+def project_isolation(request):
+    """Read-only B8 entry, run under the selected project UID; no credentials read."""
+    account = project_account(request)
+    uid, gid = account.pw_uid, account.pw_gid
+    home, root = Path(account.pw_dir), Path(request['root'])
     # An immutable home also protects the account's SSH authorization namespace.
     parent = isolation_directory(str(home / '.ssh'), 0, gid, 0o750, True)
     try:

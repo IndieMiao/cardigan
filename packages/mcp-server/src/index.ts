@@ -41,6 +41,7 @@ export {
   hostOpsTools,
 } from "./commands/host-ops-tools.js";
 export { managementTools } from "./commands/management-tools.js";
+export { workerEvidence } from "./commands/worker-evidence.js";
 export {
   ERROR_CODES,
   ToolError,
