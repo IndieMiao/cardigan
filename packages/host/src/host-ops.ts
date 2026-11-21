@@ -1,6 +1,7 @@
 import {
   type Assignment,
   type AssignmentId,
+  admitWorkerInspection,
   automaticContextActionForRun,
   automaticContextRestartReady,
   beginAutomaticContextRestart,
@@ -32,7 +33,9 @@ import {
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
   type SessionActivity,
+  type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
+  workerInspectionTarget,
 } from "@cardigan/domain";
 import {
   type HostOpsToolOptions,
@@ -44,7 +47,11 @@ import {
 } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
 import { launchWarnings } from "@cardigan/roles";
-import { DEFAULT_HC_SESSION, type HerdrRuntime } from "@cardigan/runtime-herdr";
+import {
+  DEFAULT_HC_SESSION,
+  type ExecutionConfig,
+  type HerdrRuntime,
+} from "@cardigan/runtime-herdr";
 import {
   readContextSamples,
   recordNotification,
@@ -68,7 +75,11 @@ import { tryHostOpsLock } from "./host-ops-lock.js";
 import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
 
+import { inspectWorker } from "./worker-inspection.js";
+
 interface Options {
+  workerInspectionIntervalMs?: number;
+  workerExecution?: (project: ProjectId, machine: string) => ExecutionConfig;
   upstream?: LaunchConfig | undefined;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
@@ -161,6 +172,8 @@ export class HostOpsService {
     return this.monitor;
   }
   readonly tools: NonNullable<HostOpsToolOptions["hostOps"]> = {
+    inspectWorker: (context, request) =>
+      this.workerInspection(context, request),
     read: (context, project) => this.read(context, project),
     execute: (context, tool, params) => this.execute(context, tool, params),
   };
@@ -195,6 +208,94 @@ export class HostOpsService {
         })),
       };
     });
+  }
+  private async workerInspection(
+    context: ToolContext,
+    request: WorkerInspectionRequest,
+  ) {
+    context.revalidateToken?.();
+    const actor = context.identity.actor,
+      project = actor.project_id;
+    const { store, workerExecution } = this.options;
+    const { status, assignment, run, current, platform, harness } =
+      store.uow.run((tx) => {
+        const effect = unwrap(
+          admitWorkerInspection(
+            loadCommandState(tx, project),
+            actor,
+            request,
+            {
+              clock: this.clock,
+              ids: tx.ids,
+            },
+            this.options.workerInspectionIntervalMs,
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return effect.data;
+      });
+    if (status === "rate_limited")
+      throw new ToolError(
+        "illegal_transition",
+        "Worker inspection rate limited; retry later",
+      );
+    if (status !== "admitted" || !assignment || !platform)
+      throw new ToolError(
+        "not_found",
+        "Worker inspection target does not match",
+      );
+    const resolve = () => {
+      try {
+        if (workerExecution)
+          return workerExecution(project, request.machine_id);
+      } catch {
+        /* Never expose config or SSH diagnostics. */
+      }
+      throw new ToolError(
+        "illegal_transition",
+        "Worker unavailable or unconfigured",
+      );
+    };
+    const execution = resolve();
+    const result = await inspectWorker(
+      execution,
+      project,
+      assignment,
+      run,
+      current,
+      platform,
+      harness,
+    );
+    context.revalidateToken?.();
+    const fresh = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      unwrap(checkHostOpsAccess(state, actor, "host_ops_inspect_worker"));
+      return workerInspectionTarget(state, request);
+    });
+    if (
+      fresh.assignment?.machine_id !== assignment.machine_id ||
+      fresh.assignment.external ||
+      fresh.platform !== platform ||
+      fresh.harness !== harness ||
+      fresh.current !== current ||
+      fresh.run?.id !== run?.id ||
+      fresh.run?.status !== run?.status ||
+      JSON.stringify(fresh.run?.launch_publication) !==
+        JSON.stringify(run?.launch_publication) ||
+      JSON.stringify(fresh.assignment.runtime_ref) !==
+        JSON.stringify(assignment.runtime_ref) ||
+      resolve().target?.fingerprint !== execution.target?.fingerprint
+    )
+      throw new ToolError(
+        "stale_target",
+        "Worker binding changed during inspection",
+      );
+    return {
+      machine_id: assignment.machine_id,
+      assignment_id: assignment.id,
+      run_id: run?.id ?? null,
+      ...result,
+    };
   }
   private async read(context: ToolContext, project?: string) {
     context.revalidateToken?.();

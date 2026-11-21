@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -230,6 +231,27 @@ test("omitted target fields preserve SSH command bytes and streaming argv", asyn
         .join(" "),
     ],
   });
+});
+
+test("the inspection entry preserves only the worker runtime directory as a single value", async () => {
+  const command = await agentProcessCommand(execution, ["/usr/bin/env"], {
+    workerRuntimeDir: true,
+  });
+  const entry = command.args.at(-1);
+  if (!entry) throw new Error("missing SSH entry");
+  const dir = "/private/fixture dir";
+  const env = execFileSync("sh", ["-c", entry], {
+    env: {
+      PATH: "/usr/bin:/bin",
+      XDG_RUNTIME_DIR: dir,
+      UNRELATED: "not forwarded",
+    },
+    encoding: "utf8",
+  });
+  expect(env.trim().split("\n").sort()).toEqual([
+    expectedAgentPath,
+    `XDG_RUNTIME_DIR=${dir}`,
+  ]);
 });
 
 test("remote targets use the selected credentials, port and pinned alias in every SSH entry", async () => {
