@@ -1350,3 +1350,57 @@ test("V-2567 (孙权): an older GET does not restore passed after a newer failed
     vi.useRealTimers();
   }
 });
+
+// V-2571 (林黛玉, Q-1054): a rejected preview is never confirmed again.
+test("V-2571: the form's refresh read failing after a newer poll succeeded re-previews against the newer version", async () => {
+  const { act } = await import("@testing-library/react");
+  const reads = heldReads(polling);
+  const { api, d, click } = await staleEdit(reads);
+  const confirm = vi.mocked(api.client.confirmLaunchChange);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(api.previewLaunchChange).toHaveBeenCalledTimes(1);
+  click("刷新并重新预览");
+  // The rejected preview is gone while the refresh runs.
+  expect(within(d).queryByRole("button", { name: "确认保存" })).toBeNull();
+  await waitFor(() => expect(reads.pending).toHaveLength(2), {
+    timeout: 4000,
+  });
+  await act(async () => {
+    reads.pending[1]?.resolve(withVersion(V3, polling));
+  });
+  await act(async () => {
+    reads.pending[0]?.reject(new TypeError("Failed to fetch"));
+  });
+  await within(d).findByRole("button", { name: "确认保存" });
+  expect(api.previewLaunchChange.mock.calls.map((a) => a[0])).toEqual([V1, V3]);
+  // No error from the dropped read while the newer one is shown.
+  expect(
+    screen.queryByRole("button", { name: "重试", hidden: true }),
+  ).toBeNull();
+  expect(confirm).toHaveBeenCalledTimes(1);
+}, 10000);
+
+test("V-2571: when nothing newer can be read the refresh stays as the retry and the rejected preview cannot be confirmed", async () => {
+  const { act } = await import("@testing-library/react");
+  const reads = heldReads(withVersion(V1, launchSettingsFixture));
+  const { api, d, click } = await staleEdit(reads);
+  const confirm = vi.mocked(api.client.confirmLaunchChange);
+  click("刷新并重新预览");
+  await waitFor(() => expect(reads.pending).toHaveLength(1));
+  await act(async () => {
+    reads.pending[0]?.reject(new TypeError("Failed to fetch"));
+  });
+  // Still known stale: the retry is in place, the old confirm is not offered.
+  await within(d).findByRole("button", { name: "刷新并重新预览" });
+  expect(within(d).queryByRole("button", { name: "确认保存" })).toBeNull();
+  expect(within(d).getByRole("alert").textContent).toContain("预览已作废");
+  // Retrying reads again and previews against what it reads.
+  click("刷新并重新预览");
+  await waitFor(() => expect(reads.pending).toHaveLength(2));
+  await act(async () => {
+    reads.pending[1]?.resolve(withVersion(V2, launchSettingsFixture));
+  });
+  await within(d).findByRole("button", { name: "确认保存" });
+  expect(api.previewLaunchChange.mock.calls.map((a) => a[0])).toEqual([V1, V2]);
+  expect(confirm).toHaveBeenCalledTimes(1);
+});

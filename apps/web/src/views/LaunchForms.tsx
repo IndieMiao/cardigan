@@ -146,11 +146,20 @@ function useLaunchChange(context: EditorContext) {
     /** A snapshot changed elsewhere: read it again, then preview anew. */
     refresh: (change: LaunchChange) =>
       run(async () => {
+        // V-2571: the rejected preview can never be confirmed again.
+        setPreview(undefined);
+        let settings: LaunchSettingsView;
         try {
-          const settings = await reread();
-          if (!alive.current) return;
-          setVersion(settings.version);
-          setPreview(undefined);
+          settings = await reread();
+        } catch {
+          // Nothing newer could be read: the snapshot is still known to be
+          // stale, so "刷新并重新预览" stays as the retry, in place.
+          if (alive.current) setProblem({ kind: "stale" });
+          return;
+        }
+        if (!alive.current) return;
+        setVersion(settings.version);
+        try {
           const result = await client.previewLaunchChange(
             settings.version,
             change,

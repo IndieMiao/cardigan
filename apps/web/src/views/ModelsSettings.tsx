@@ -283,13 +283,17 @@ function useLaunchSettingsReader(client: CardiganClient) {
           setState((old) => ({ ...old, interactive: old.interactive - done }));
         return shown.current ?? data;
       } catch (error) {
+        const newer = n < order.current.shown ? shown.current : undefined;
         // A failure is shown only while no later-started read was shown.
         if (alive.current)
           setState((old) => ({
             ...old,
             interactive: old.interactive - done,
-            ...(n > order.current.shown ? { error: describeError(error) } : {}),
+            ...(newer ? {} : { error: describeError(error) }),
           }));
+        // A later-started read already succeeded: callers get what the page
+        // shows (V-2571), only a failure with nothing newer is thrown.
+        if (newer) return newer;
         throw error;
       }
     },
