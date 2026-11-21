@@ -118,7 +118,12 @@ test("covers state vocabulary, linked evidence, identities and content boundarie
         [true, false],
       );
     }
-    for (const item of work) {
+    const storyItems = work.filter((v) => v.card_id === "C-2");
+    expect(storyItems).toMatchObject([
+      { template_key: "decomposition", role_id: "pm", status: "in_progress" },
+    ]);
+    expect(storyItems[0]?.assignment_id).toBeUndefined();
+    for (const item of work.filter((v) => v.card_id !== "C-2")) {
       expect(cards.some((c) => c.id === item.card_id)).toBe(true);
       expect(
         tx.assignments.get(FIXTURE_PROJECT, required(item.assignment_id))
@@ -251,6 +256,12 @@ test("independent Web renders relationships, merge checks, notices and blobs; pr
       expect(response.status, path).toBe(200);
       return response.json();
     };
+    const story = await get("/api/projects/synthetic/cards/C-2");
+    expect(story.card.story_progress).toMatchObject({
+      children: [{ id: "C-16", status: "in_progress" }],
+      finished: 0,
+      total: 1,
+    });
     const child = await get("/api/projects/synthetic/cards/C-5");
     expect(child.relations.source_card).toMatchObject({
       id: "C-4",

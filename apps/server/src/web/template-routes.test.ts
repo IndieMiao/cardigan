@@ -137,6 +137,7 @@ test("list, details and version history preserve project boundaries and do not m
       },
       { id: "dev", requires_repo: true, merge: "confirm" },
       { id: "general", completion: { mode: "human_mark_done" } },
+      { id: "story", requires_repo: false, merge: "none" },
     ],
   });
   expect((await read("/card-templates/dev")).json).toMatchObject({
@@ -574,4 +575,66 @@ test("role and template routes coexist: human role lifecycle changes reach templ
   expect((await read("/card-templates/custom/history")).json).toMatchObject({
     versions: [{ id: "custom", version: 1 }],
   });
+});
+
+test("Web creates parented cards once, reads paged progress, and rejects a stale cancellation choice", async () => {
+  const input = {
+    title: "Initial need",
+    goal: "Original words",
+    template_id: "story",
+  };
+  expect((await write("/cards", input)).json).toMatchObject({
+    error: { code: "validation_failed", message: "拆解角色不能发表评论" },
+  });
+  h.store.uow.run((tx) => {
+    const pm = tx.roles.get(project, { role_id: "pm", role_version: 1 });
+    if (!pm) throw new Error("Missing fixture PM");
+    tx.roles.put(project, {
+      ...pm,
+      role_version: 2,
+      allowed_tools: ["post_comment"],
+      capabilities: ["verify"],
+    });
+  });
+  const parent = await write("/cards", input, "story-create");
+  expect(parent.status).toBe(201);
+  const id = parent.json.id;
+  expect((await write("/cards", input, "story-create")).json).toEqual(
+    parent.json,
+  );
+  const child = await write("/cards", {
+    ...input,
+    template_id: "general",
+    parent_card_id: id,
+  });
+  expect(child.status).toBe(201);
+  for (const suffix of ["", "?limit=1", "?limit=1&section=overview"])
+    expect(
+      (await read(`/cards/${id}${suffix}`)).json.card.story_progress,
+    ).toMatchObject({
+      finished: 0,
+      total: 1,
+      children: [{ id: child.json.id, status: "todo" }],
+    });
+  expect(
+    (await read(`/cards/${child.json.id}?limit=1`)).json.mark_done.allowed,
+  ).toBe(true);
+  expect((await write(`/cards/${id}/cancel`, {})).status).not.toBe(200);
+  expect(
+    (
+      await write(`/cards/${id}/cancel`, {
+        story_children: { action: "cancel", ids: [] },
+      })
+    ).status,
+  ).not.toBe(200);
+  expect(
+    (
+      await write(`/cards/${id}/cancel`, {
+        story_children: { action: "detach", ids: [child.json.id] },
+      })
+    ).status,
+  ).toBe(200);
+  expect((await read(`/cards/${child.json.id}`)).json.card).not.toHaveProperty(
+    "parent_card_id",
+  );
 });

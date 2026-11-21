@@ -53,15 +53,27 @@ export function DialogDescription({
 }
 export function DialogContent({
   children,
+  inlineFeedback = false,
   overlayClassName,
+  className,
   ...props
 }: React.ComponentProps<typeof DialogPanel> & {
+  inlineFeedback?: boolean;
   overlayClassName?: string | undefined;
 }) {
   return (
     <Portal>
       <DialogOverlay className={overlayClassName} />
-      <DialogPanel {...props}>{children}</DialogPanel>
+      <DialogPanel
+        {...props}
+        className={cn(
+          inlineFeedback &&
+            "[&>form]:border-0 [&>form]:p-0 [&>.request-feedback-region:has([role=alert])]:mt-3 [&>.request-feedback-region]:static [&>.request-feedback-region]:max-w-none [&>.request-feedback-region]:items-stretch",
+          className,
+        )}
+      >
+        {children}
+      </DialogPanel>
     </Portal>
   );
 }

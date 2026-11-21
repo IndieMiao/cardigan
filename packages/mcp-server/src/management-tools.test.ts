@@ -2798,3 +2798,22 @@ test("PM can create and clear the explicit UI framework marker through MCP", asy
     }),
   ).toMatchObject({ is_ui_framework: false });
 });
+
+test("MCP creates a repo-free story and links a child without creating a dependency", async () => {
+  const parent = await ok<Card>(office, "create_card", {
+    title: "Need",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Need" },
+    template_id: "story",
+  });
+  expect(parent).toMatchObject({ template: "story", merge_policy: "none" });
+  const child = await ok<Card>(office, "create_card", {
+    title: "Part",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Part" },
+    template_id: "general",
+    parent_card_id: parent.id,
+  });
+  expect(child.parent_card_id).toBe(parent.id);
+  expect(child.depends_on_cards).toBeUndefined();
+});
