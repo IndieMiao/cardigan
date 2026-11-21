@@ -293,7 +293,13 @@ export {
   type CaptureAgent,
   harnessBinary,
 } from "./version.js";
-export { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
+export {
+  armBellReceipt,
+  confirmBellWrite,
+  RunWakeWithdrawn,
+  recordWakeRefusal,
+  wakeIsCurrent,
+} from "./wake-guard.js";
 export {
   describePreparationFailure,
   PreparationError,
