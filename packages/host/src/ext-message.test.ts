@@ -517,6 +517,30 @@ test("restart after quiet hours projects unscanned source events into one digest
   expect(fake.messages[1]).not.toHaveProperty("items");
 });
 
+test("recovery spanning two projection batches sends one quiet digest and does not hold ordinary messages", async () => {
+  quiet();
+  // Insert one ordinary item amongst 33 quiet-hour members. None has been projected yet.
+  advance(8 * 3600000);
+  addAction(2);
+  advance(-8 * 3600000);
+  for (let n = 3; n <= 34; n++) addAction(n);
+  advance(8 * 3600000);
+  await sender().tick();
+  expect(rows()).toHaveLength(32);
+  expect(fake.messages).toHaveLength(1);
+  expect(fake.messages[0]).toMatchObject({ item: "H-2" });
+  // A new process must recognize the unfinished digest from persisted rows.
+  store.close();
+  store = Store.open({ dataDir: dir });
+  await sender().tick();
+  await sender().tick();
+  expect(fake.messages).toHaveLength(2);
+  const digest = fake.messages[1];
+  expect(digest).toMatchObject({ total: 33, title: "免打扰期间 33 条待处理" });
+  expect(digest && "items" in digest && digest.items).toHaveLength(20);
+  expect(rows().filter((r) => r.status === "sent")).toHaveLength(34);
+});
+
 test("digest retries preserve the approved budget and membership across restart and local commit failure", async () => {
   quiet();
   addAction(2);

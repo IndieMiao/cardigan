@@ -84,6 +84,7 @@ type Projection = {
   state: CommandState;
   version: string;
   items: Map<string, ExtMessageItem>;
+  incompleteDigests: ReadonlySet<string>;
 };
 const itemKey = (kind: string, id: string) => `${kind}:${id}`;
 export class ExtMessageSender {
@@ -174,6 +175,12 @@ export class ExtMessageSender {
           const rows = pendingExtMessages(store.database, project.id, channel);
           const groups = new Map<string, ExtMessageRow[]>();
           for (const row of rows) {
+            // Frozen retries and ordinary messages are independent of an unfinished quiet batch.
+            if (
+              row.digest_id === "queued" &&
+              projection.incompleteDigests.has(channel)
+            )
+              continue;
             const key =
               row.digest_id === null
                 ? `item:${row.item_kind}:${row.item_id}`
@@ -225,6 +232,7 @@ export class ExtMessageSender {
       const items = extMessageItems(state, projectId);
       const writes = [];
       let complete = true;
+      const incompleteDigests = new Set<string>();
       if (!projected) {
         const quiet = extMessageQuiet(config, now);
         for (const channel of channels) {
@@ -236,18 +244,21 @@ export class ExtMessageSender {
               hasExtMessage(store.database, item, channel)
             )
               continue;
+            const deferred =
+              quiet ||
+              (item.created_at !== undefined &&
+                extMessageQuiet(config, item.created_at));
             if (count === projectionBatch) {
               complete = false;
-              break;
+              if (!config.quiet_hours) break;
+              if (deferred && item.ready) {
+                incompleteDigests.add(channel);
+                break;
+              }
+              // An ordinary or not-yet-ready item must not delay a complete digest.
+              continue;
             }
-            writes.push({
-              item,
-              channel,
-              deferred:
-                quiet ||
-                (item.created_at !== undefined &&
-                  extMessageQuiet(config, item.created_at)),
-            });
+            writes.push({ item, channel, deferred });
             count++;
           }
         }
@@ -259,6 +270,7 @@ export class ExtMessageSender {
         projection: {
           version,
           state,
+          incompleteDigests,
           items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
         },
       };
