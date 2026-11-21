@@ -79,9 +79,12 @@ test.each([
   if (route === "settings") {
     fireEvent.click(screen.getByRole("button", { name: "员工" }));
     expect(screen.getByRole("button", { name: /Agent 4\/10/u })).toBeTruthy();
+    // C-511: the old entry leads to the machine page, where each machine's
+    // detail edits its limit; merge check targets stay listed, read only.
     fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
-    await screen.findByRole("heading", { name: "并发与容量" });
-    expect(screen.getAllByRole("spinbutton")).toHaveLength(2);
+    await screen.findByRole("heading", { name: "机器" });
+    expect(window.location.hash).toContain("tab=machines");
+    expect(screen.getByRole("heading", { name: "合并检查" })).toBeTruthy();
   }
 });
 

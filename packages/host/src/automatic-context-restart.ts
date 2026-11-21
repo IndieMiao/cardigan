@@ -24,7 +24,9 @@ export function notifyAutomaticContextResult(
     const recipients =
       (event.payload as { result?: string }).result === "failed"
         ? (["pm_ops", "pm_office", "needs_you"] as const)
-        : (["pm_ops"] as const);
+        : (event.payload as { dispatch_stall_id?: string }).dispatch_stall_id
+          ? (["pm_ops", "pm_office"] as const)
+          : (["pm_ops"] as const);
     for (const kind of recipients)
       recordNotification(store.database, {
         project_id: project,

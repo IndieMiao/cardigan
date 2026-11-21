@@ -13,6 +13,7 @@ import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
 import {
   automaticContextRestartReady,
   beginAutomaticContextRestart,
+  beginStalledPatrolRestart,
   recordAutomaticContextRestartResult,
 } from "./host-ops-context-restart.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
@@ -356,3 +357,92 @@ test("new-session queue is not success; dispatch records replacement, actual sta
     false,
   );
 });
+
+test("only the system may replace a stalled patrol, once per cause and never with unfinished work", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const begin = (
+    state: CommandState,
+    who: Parameters<typeof beginStalledPatrolRestart>[1] = system,
+  ) => beginStalledPatrolRestart(state, who, params, f.io);
+  expect(begin(f.state, human).ok).toBe(false);
+  expect(begin(f.state, actor(10, "host_ops")).ok).toBe(false);
+  const busy = apply(
+    f.state,
+    value(
+      queueRun(f.state, system, { assignment_id: f.ops.id, ...snapshot }, f.io),
+    ),
+  );
+  expect(begin(busy).ok).toBe(false);
+  expect(
+    begin({
+      ...f.state,
+      assignments: f.state.assignments.map((a) =>
+        a.id === f.ops.id ? { ...a, worktree_path: "unverified" } : a,
+      ),
+    }).ok,
+  ).toBe(false);
+  const effect = value(begin(f.state));
+  const pending = apply(f.state, effect);
+  expect(begin(pending).ok).toBe(false);
+  // An independently confirmed exit is still settled if its cause expired,
+  // but no unrelated followup Run is authorized.
+  expect(
+    value(finishHostOpsAction(pending, system, effect.data.action_id, f.io))
+      .data.run,
+  ).toBeUndefined();
+  const finished = value(
+    finishHostOpsAction(pending, system, effect.data.action_id, f.io, {
+      cause_id: params.cause_id,
+      card_id: null,
+    }),
+  );
+  expect(finished.data.run?.status).toBe("queued");
+  expect(finished.data.assignment_id).toBe(f.ops.id);
+  expect(
+    finished.changes.find(
+      (c) => c.collection === "assignments" && c.entity.id === f.ops.id,
+    )?.entity,
+  ).not.toHaveProperty("session_ref");
+});
+
+test.each(["card", "project"] as const)(
+  "standing stall settlement keeps its %s stream and rechecks the card hold",
+  (stream) => {
+    const f = setup();
+    const card = required(f.state.cards[0]);
+    const params = { assignment_id: f.ops.id, cause_id: "note", snapshot };
+    const begun = value(
+      beginStalledPatrolRestart(f.state, system, params, f.io),
+    );
+    const pending = apply(f.state, begun);
+    const stall = {
+      cause_id: params.cause_id,
+      card_id: stream === "card" ? card.id : null,
+    };
+    const settle = (state: CommandState) =>
+      value(
+        finishHostOpsAction(state, system, begun.data.action_id, f.io, stall),
+      );
+    const result = settle(pending).data;
+    expect(required(result.run).trigger_event_id).toBe(result.event.id);
+    expect(result.event.card_id).toBe(stall.card_id ?? undefined);
+    const held = settle({
+      ...pending,
+      cards: pending.cards.map((c) =>
+        c.id === card.id
+          ? {
+              ...c,
+              hold: {
+                set_by: "system",
+                reason: "paused",
+                resume_condition: "test",
+                set_at: now,
+              },
+            }
+          : c,
+      ),
+    });
+    expect(Boolean(held.data.run)).toBe(stream === "project");
+  },
+);
