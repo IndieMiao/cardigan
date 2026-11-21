@@ -651,3 +651,19 @@ test("C-169 superseded by Flow Lite: PM decides configurable details, credential
   expect(PM_DECISION_RULES.join("")).not.toContain("仍由人来定");
   expect(PM_FLOW_LITE_RULES[0]).toContain("凭据和账号");
 });
+
+test("the default PM Office workflow keeps clarification on the story, not in Needs You", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "先调研后提问",
+    "小需求不提问",
+    "一次问齐",
+    "推荐默认和影响",
+    "结论必须回写需求卡",
+    "首次收到人的回答记一轮",
+    "不催办",
+    "方向、范围、花钱或凭据",
+    "其余问题留在卡上",
+  ])
+    expect(prompt).toContain(phrase);
+});

@@ -10,14 +10,17 @@ const watchSources = new Map<string, RegExp>([
   ],
   [
     "packages/host",
-    /^src\/(deployment(?:-[\w-]+)?|index|warnings|capacity-owner|process-identity|repository-lock|preparation-budget)\.ts$/u,
+    /^src\/(deployment(?:-[\w-]+)?|index|runtime-workers-config|worker-mcp|runtime-target-fingerprint|warnings|capacity-owner|process-identity|repository-lock|preparation-budget)\.ts$/u,
   ],
   ["packages/domain", /^src\//u],
   ["packages/store", /^(src\/|migrations\/.*\.sql$)/u],
   ["packages/mcp-server", /^src\//u],
   ["packages/git-service", /^src\/(index|lock)\.ts$/u],
   ["packages/git-transport", /^src\/(index|hardening)\.ts$/u],
-  ["packages/runtime-herdr", /^src\/(index|execution)\.ts$/u],
+  [
+    "packages/runtime-herdr",
+    /^src\/(index|execution|registered|agent-ssh)\.ts$/u,
+  ],
   ["packages/roles", /^src\/(index|errors)\.ts$/u],
 ]);
 
@@ -163,7 +166,9 @@ export async function supervisorChanges(
         local === "tsconfig.json")
     ) {
       affected.add(dir);
-    } else if (path === "tsconfig.base.json") affected.add(path);
+    } else if (path === "packages/host/src/deployment-retention-fs.py")
+      affected.add("packages/host");
+    else if (path === "tsconfig.base.json") affected.add(path);
   }
   // Only a complete negative comparison can retire the running version's notice.
   if (incomplete && !affected.size)

@@ -116,6 +116,26 @@ const schemas = {
     body: text,
   },
   post_comment: {
+    story_discussion: z
+      .discriminatedUnion("action", [
+        z
+          .object({
+            action: z.literal("ask"),
+            questions: z
+              .array(
+                z
+                  .object({ question: text, recommended: text, impact: text })
+                  .strict(),
+              )
+              .min(1),
+          })
+          .strict(),
+        z.object({ action: z.literal("propose") }).strict(),
+      ])
+      .optional()
+      .describe(
+        "常驻 Office 在需求卡发问题清单（ask），或用正文提交拆解方案（propose，未答题按默认，不代替确认开卡）。",
+      ),
     story_summary: z
       .boolean()
       .optional()

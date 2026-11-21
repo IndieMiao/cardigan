@@ -3,6 +3,11 @@ import { lstat, open } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseDocument } from "yaml";
 
+import {
+  parseRetention,
+  type RetentionPolicy,
+} from "./deployment-retention-policy.js";
+
 export interface DeploymentConfig {
   readonly enabled: boolean;
   readonly initial_release: string;
@@ -13,9 +18,13 @@ export interface DeploymentConfig {
   readonly build_timeout_ms: number;
   readonly evidence_wait_timeout_ms?: number;
   readonly capacity_wait_timeout_ms?: number;
+  readonly retention?: RetentionPolicy;
+  readonly disk_low_percent?: number;
   readonly server_log_max_bytes?: number;
   readonly server_log_max_files?: number;
 }
+
+export const DEFAULT_DISK_LOW_PERCENT = 15;
 
 /** Capacity waiting only raises attention; it never releases an unknown execution. */
 export const DEFAULT_CAPACITY_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -69,6 +78,8 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "build_timeout_ms",
     "evidence_wait_timeout_ms",
     "capacity_wait_timeout_ms",
+    "retention",
+    "disk_low_percent",
     "server_log_max_bytes",
     "server_log_max_files",
   ];
@@ -109,8 +120,19 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     )
       throw new Error("Invalid server log capacity");
   }
+  if (
+    value.disk_low_percent !== undefined &&
+    (!Number.isInteger(value.disk_low_percent) ||
+      Number(value.disk_low_percent) < 1 ||
+      Number(value.disk_low_percent) > 100)
+  )
+    throw new Error("Invalid disk warning threshold");
   return {
     ...value,
+    retention: parseRetention(
+      value.retention === undefined ? {} : value.retention,
+    ),
+    disk_low_percent: value.disk_low_percent ?? DEFAULT_DISK_LOW_PERCENT,
     enabled: value.enabled ?? true,
     capacity_wait_timeout_ms:
       value.capacity_wait_timeout_ms ?? DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,

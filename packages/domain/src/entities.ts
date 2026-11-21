@@ -34,6 +34,7 @@ import type {
   RuntimeState,
   VerifyStatus,
 } from "./states.js";
+import type { StoryState } from "./story-discussion.js";
 
 export type Timestamp = string;
 export type JsonValue =
@@ -162,7 +163,7 @@ export interface Card {
   readonly deadline?: Timestamp;
   readonly parent_card_id?: CardId;
   /** Stamped only for the built-in story workflow, not existing custom templates. */
-  readonly story?: { readonly summary_entry_id?: TimelineEntryId };
+  readonly story?: StoryState;
   readonly related_cards: readonly CardId[];
   readonly is_ui_framework?: boolean;
   readonly depends_on_cards?: readonly CardId[];

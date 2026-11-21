@@ -47,6 +47,7 @@ import {
   requireHostDirectory,
 } from "./deployment-config.js";
 import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
+import { DeploymentRetention } from "./deployment-retention.js";
 import {
   DeploymentServerLog,
   taggedServerOutput,
@@ -74,6 +75,7 @@ interface State {
 export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
   private state!: State;
+  private readonly retention?: DeploymentRetention;
   private readyMessage = false;
   private backgroundReady = false;
   private launchBackground: (() => Promise<void>) | undefined;
@@ -101,6 +103,13 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   ) {
     this.enabled = options.config.enabled;
     this.directory = deploymentDirectory(options.dataDir);
+    if (options.config.retention)
+      this.retention = new DeploymentRetention(
+        options.store,
+        this.directory,
+        options.env,
+        options.config.retention,
+      );
     this.central = join(options.dataDir, "central", `${PROJECT}.git`);
     this.ports = [
       Number(options.env.CARDIGAN_MCP_PORT ?? 3004),
@@ -1070,6 +1079,55 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       },
     );
     if (result.code !== 0) throw new Error("部署后角色同步未完成，请主机检查");
+  }
+  /** Called between deploy ticks, still under the exclusive supervisor flock. Rollbacks are not success. */
+  async maintainDisk() {
+    if (!this.enabled || !this.retention) return;
+    const state = await this.readState();
+    if (
+      !state?.ready ||
+      !state.running ||
+      state.running.release !== state.current.release ||
+      state.running.sha !== state.current.sha ||
+      state.current.release !== this.state.current.release ||
+      state.fence !== (state.dual ? 2 : 1) ||
+      !this.live() ||
+      (state.dual && !this.live("background"))
+    )
+      return;
+    const row = this.options.store.database
+      .prepare(
+        `SELECT doc FROM events WHERE project_id=? AND card_id IS NULL AND type='host_deployment_recorded' ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(PROJECT);
+    if (!row) return;
+    const e = JSON.parse(String(row.doc));
+    const r = e.payload as DeploymentRecord;
+    if (
+      e.actor.kind !== "system" ||
+      !r.ready ||
+      r.status !== "deployed" ||
+      r.to !== state.current.sha ||
+      r.post_deploy_failed
+    )
+      return;
+    const keep = [
+      state.current.release,
+      state.running.release,
+      this.options.config.initial_release,
+      fileURLToPath(new URL("../../../", import.meta.url)).replace(/\/$/u, ""),
+    ];
+    if (state.previous !== undefined) keep.push(state.previous.release);
+    await this.retention.poll({
+      stillReady: async () =>
+        this.live() &&
+        (!state.dual || this.live("background")) &&
+        JSON.stringify(await this.readState()) === JSON.stringify(state),
+      keep: [...keep, ...(await Promise.all(keep.map((p) => realpath(p))))],
+      ...(state.backup_file ? { backup: state.backup_file } : {}),
+      attempt: r.attempt,
+      deployed_at: e.created_at,
+    });
   }
   async record(record: DeploymentRecord) {
     writeDeploymentRecord(this.options.store, PROJECT, record);
