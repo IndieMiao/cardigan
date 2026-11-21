@@ -155,13 +155,13 @@ test("idle retirement defers bells and the next legal wake starts exactly one re
   f.store.touchAssignmentActivity(f.project, f.owner().id, f.clock.now());
   f.advance(60 * 60_000 + 1);
   let finish!: () => void;
-  f.runtime.retire_idle = vi.fn(async (_ref, options) => {
+  f.runtime.retire_idle = async (_ref, options) => {
     expect(options.before_signal()).toBe(true);
     await new Promise<void>((resolve) => {
       finish = resolve;
     });
-    return { ok: true, value: { exited: true } };
-  });
+    return { ok: true, value: { outcome: "exited" } };
+  };
   const retirement = host.upgradeIdleAssignmentRoles(
     f.store,
     f.project,
