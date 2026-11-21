@@ -36,6 +36,7 @@ import {
   type ReadRepositories,
   type Store,
 } from "@cardigan/store";
+import { recordCheckFlakes } from "./check-flake-ledger.js";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 /** An explicit rejection of the check evidence, not a failure to persist it. */
@@ -694,6 +695,16 @@ export class AuthorPrechecks {
       const saved = await log.finish(
         result,
         target.type === "github" ? bound : undefined,
+        bound
+          ? recordCheckFlakes(
+              this.options.store,
+              projectId,
+              check.card_id,
+              check.attempt_id,
+              this.options.clock.now(),
+              result.recovered,
+            )
+          : undefined,
       );
       const completed: Precheck = {
         ...check,

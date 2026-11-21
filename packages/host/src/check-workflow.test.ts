@@ -7,8 +7,9 @@ import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 import { githubCheckRunName } from "./github-check-executor.js";
 import {
+  CASE_SCOPE_STEP,
+  CASE_WORKFLOW_STEPS,
   GITHUB_CHECK_NAMES,
-  GITHUB_WORKFLOW_STEPS,
 } from "./github-check-poller.js";
 
 const root = new URL("../../../", import.meta.url);
@@ -50,9 +51,9 @@ describe("trusted GitHub check workflow", () => {
   );
 
   test("D4 explicitly names every trusted step in the polling contract", () => {
-    expect(steps.map((step: { name: string }) => step.name)).toEqual([
-      ...GITHUB_WORKFLOW_STEPS,
-    ]);
+    expect(steps.map((step: { name: string }) => step.name)).toEqual(
+      CASE_WORKFLOW_STEPS,
+    );
     expect(
       steps
         .filter((step: { id?: string }) =>
@@ -60,6 +61,23 @@ describe("trusted GitHub check workflow", () => {
         )
         .map((step: { name: string }) => step.name),
     ).toEqual([...GITHUB_CHECK_NAMES]);
+  });
+
+  test("receipts are finalized before ordinary candidate execution and never consume its outputs", () => {
+    const ids = steps.map((step: { id?: string }) => step.id);
+    const marker = steps.filter((step: { name: string }) =>
+      step.name.startsWith("Recovered "),
+    );
+    expect(marker).toHaveLength(4);
+    for (const step of marker) {
+      const key = step.name.slice("Recovered ".length);
+      expect(step.if).toBe(
+        `\${{ !cancelled() && (steps.isolated.outcome == 'success' || steps.isolated.outcome == 'failure') && contains(steps.identity.outputs.retry_cases, '${key}') && steps.isolated.outputs.${key} == 'true' }}`,
+      );
+      expect(steps.indexOf(step)).toBeGreaterThan(ids.indexOf("isolated"));
+      expect(steps.indexOf(step)).toBeLessThan(ids.indexOf("build"));
+    }
+    expect(steps[ids.indexOf("test")].env.CARDIGAN_FLAKE_CASES).toBe("");
   });
 
   test("restricts triggers, credentials, concurrency and timeout", () => {
@@ -292,7 +310,7 @@ exec(json.loads(sys.argv[3]))
       const sha = git("rev-parse", "HEAD"),
         tree = git("rev-parse", "HEAD^{tree}");
       const verifyIndex = steps.findIndex(
-        (step: { name?: string }) => step.name === "Verify candidate identity",
+        (step: { name?: string }) => step.name === CASE_SCOPE_STEP,
       );
       expect(
         steps
@@ -312,6 +330,8 @@ exec(json.loads(sys.argv[3]))
           env: {
             ...process.env,
             EXPECTED_SHA: head,
+            MERGE_TIER: "single",
+            GITHUB_OUTPUT: join(dir, "outputs"),
             EXPECTED_TREE: expectedTree,
           },
         });
@@ -322,7 +342,7 @@ exec(json.loads(sys.argv[3]))
         [sha, "0".repeat(40)],
         ["$(touch injected)", tree],
         [sha, "`touch injected`"],
-      ]) {
+      ] as const) {
         expect(run(head, expectedTree).status).not.toBe(0);
         expect(() => readFileSync(marker)).toThrow();
         expect(() => readFileSync(join(dir, "injected"))).toThrow();
@@ -441,6 +461,118 @@ test("trusted workflow executes full or affected test arguments without shell ex
     expect(testStep.if).toBe("steps.scope.outputs.skip_test != 'true'");
     expect(steps.find((step: { name: string }) => step.name === "e2e").if).toBe(
       "steps.scope.outputs.skip_e2e != 'true'",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("only the trusted complete merge diff grants environment retries (including the old side of a rename)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "flake-diff-"));
+  try {
+    const git = (...args: string[]) =>
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          ...args,
+        ],
+        { cwd: dir, encoding: "utf8" },
+      ).trim();
+    git("init", "-q");
+    writeFileSync(join(dir, "package.json"), "{}");
+    git("add", ".");
+    git("commit", "-qm", "base");
+    const base = git("rev-parse", "HEAD");
+    const script = steps.find(
+      (s: { name: string }) => s.name === CASE_SCOPE_STEP,
+    ).run;
+    const check = (
+      path: string,
+      {
+        tier = "single",
+        remove = false,
+        wrongBase = false,
+        scope = "full",
+        affected = "",
+        skip = false,
+      } = {},
+    ) => {
+      git("reset", "--hard", "-q", base);
+      execFileSync("mkdir", ["-p", join(dir, path, "..")]);
+      writeFileSync(join(dir, path), "{}");
+      if (remove) git("rm", "package.json");
+      git("add", "--", path);
+      git("commit", "-qm", "side");
+      const head = git("rev-parse", "HEAD");
+      const tree = git("rev-parse", "HEAD^{tree}");
+      const candidate = git(
+        "commit-tree",
+        tree,
+        "-p",
+        base,
+        "-p",
+        head,
+        "-m",
+        "candidate",
+      );
+      git("checkout", "-q", "--detach", candidate);
+      const out = join(dir, "outputs");
+      writeFileSync(out, "");
+      execFileSync("bash", ["-e", "-c", script], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          EXPECTED_SHA: candidate,
+          EXPECTED_TREE: tree,
+          MERGE_TIER: tier,
+          CHECK_SCOPE: scope,
+          AFFECTED_PATHS: affected,
+          SKIP_TEST: String(skip),
+          WORKFLOW_BASE: wrongBase ? head : base,
+          GITHUB_OUTPUT: out,
+        },
+      });
+      return readFileSync(out, "utf8").trim();
+    };
+    expect(check("apps/web/src/file.ts")).toBe(
+      "retry_cases=ssh_local ssh_remote loopback corepack",
+    );
+    for (const file of [
+      "packages/host/src/check-flake-cases.ts",
+      "packages/host/src/check-flake-cases.js",
+      "test-support/check-flake-evidence.ts",
+      "vitest.config.ts",
+    ])
+      expect(check(file)).toBe("retry_cases=");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/web",
+      }),
+    ).toBe("retry_cases=");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/web packages/roles",
+      }),
+    ).toBe("retry_cases=corepack");
+    expect(
+      check("docs/plans/C-77.md", { scope: "docs_only", skip: true }),
+    ).toBe("retry_cases=");
+    expect(check("apps/server/src/dispatch.ts")).toBe("retry_cases=corepack");
+    expect(check("packages/roles/src/file.ts")).toBe("retry_cases=");
+    expect(check("apps/web/src/file.ts", { remove: true })).toBe(
+      "retry_cases=",
+    );
+    expect(check("apps/web/src/file.ts", { wrongBase: true })).toBe(
+      "retry_cases=",
+    );
+    expect(check("apps/web/src/file.ts", { tier: "batch" })).toBe(
+      "retry_cases=",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

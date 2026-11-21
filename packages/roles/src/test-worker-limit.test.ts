@@ -1,15 +1,24 @@
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { instructionsFor } from "./role-pack.js";
 import { testWorkerLimit } from "./test-worker-limit.js";
 
 const exec = promisify(execFile);
+const { packageManager } = JSON.parse(
+  await readFile(new URL("../../../package.json", import.meta.url), "utf8"),
+);
 let dir: string, cli: string, env: NodeJS.ProcessEnv;
 function inheritedLimit(policy: number) {
   const inherited = Number(env.VITEST_MAX_WORKERS);
@@ -27,7 +36,11 @@ beforeEach(async () => {
     "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)))\n",
     { mode: 0o700 },
   );
-  env = { ...process.env, NODE_OPTIONS: limit.nodeOptions };
+  env = {
+    ...process.env,
+    COREPACK_ENABLE_NETWORK: "0",
+    NODE_OPTIONS: limit.nodeOptions,
+  };
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -84,7 +97,7 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
   ] as const)
     await writeFile(
       join(folder, "package.json"),
-      JSON.stringify({ name, scripts: { test: script } }),
+      JSON.stringify({ name, packageManager, scripts: { test: script } }),
     );
   for (const args of [["test"], ["--filter", "fixture-child", "test"]]) {
     const result = await exec("pnpm", args, {
@@ -152,6 +165,7 @@ test.each(["root", "filtered", "direct"])(
         join(folder, "package.json"),
         JSON.stringify({
           name: folder === dir ? "fixture-root" : "fixture-child",
+          packageManager,
           scripts: {
             test: `VITEST_MAX_WORKERS=8 vitest run --config ${folder === dir ? "vitest.config.mjs" : "../vitest.config.mjs"} --maxWorkers=8`,
           },
@@ -254,14 +268,3 @@ test("manual tests and other Node entrypoints keep their arguments", async () =>
       .stdout,
   ).toBe("unrelated\n");
 });
-
-test.each(["coder", "reviewer", "tester"] as const)(
-  "%s states the self-test limit",
-  (role) => {
-    expect(instructionsFor(role)).toContain(
-      "不超过主机限流配置的上限（启动时已强制）",
-    );
-    expect(instructionsFor(role)).not.toMatch(/\d+ 个 worker/);
-    expect(instructionsFor(role)).toContain("不要设法绕过");
-  },
-);

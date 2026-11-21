@@ -32,6 +32,7 @@ export {
   runCheckExecutor,
   SshCheckExecutor,
 } from "./check-executor.js";
+export * from "./check-flake-cases.js";
 export { checkTargetIdle } from "./check-handoff.js";
 export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";

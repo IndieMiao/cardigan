@@ -4,6 +4,7 @@ import {
   FailureLogError,
   type OpenFailureLog,
 } from "./check-executor.js";
+import { checkFlakeCases, checkFlakeIds } from "./check-flake-cases.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
 import { githubCheckScope } from "./github-check-scope.js";
 import {
@@ -51,6 +52,18 @@ export const GITHUB_WORKFLOW_STEPS = [
   "deps",
   "e2e",
 ] as const;
+// A renamed mandatory step identifies the new contract independently of
+// optional diagnostics. Losing even all receipt steps cannot look like v1.
+export const CASE_SCOPE_STEP = "Verify candidate identity and case scope";
+export const CASE_RUN_STEP = "Run isolated case files";
+export const CASE_WORKFLOW_STEPS = GITHUB_WORKFLOW_STEPS.flatMap(
+  (step): string[] =>
+    step === "Verify candidate identity"
+      ? [CASE_SCOPE_STEP]
+      : step === "build"
+        ? [CASE_RUN_STEP, ...checkFlakeIds.map((id) => `Recovered ${id}`), step]
+        : [step],
+);
 interface Pending {
   identity: GithubRun;
   external: ExternalGithubRun;
@@ -561,20 +574,25 @@ function mapGithubCheckSteps(
   job: GithubJob,
 ): CheckoutResult {
   if (!Array.isArray(job.steps)) return rejected();
-  const mainStepCount =
-    GITHUB_WORKFLOW_STEPS.length +
-    (job.steps[0]?.name === "Set up job" ? 1 : 0);
+
   const steps = [...job.steps];
   if (steps[0]?.name === "Set up job") steps.shift();
   if (steps.at(-1)?.name === "Complete job") steps.pop();
   // GitHub registers post steps for these trusted actions, even when skipped.
   for (const name of ["Post Checkout candidate", "Post Setup Node"])
     if (steps.at(-1)?.name === name) steps.pop();
+  // Accept exactly the complete old contract or the complete new one; never
+  // treat arbitrary missing/extra business steps as optional.
+  const receipts = checkFlakeIds.map((id) => `Recovered ${id}`);
+  const caseContract = steps.some((step) => step?.name === CASE_SCOPE_STEP);
+  const expected: readonly string[] = caseContract
+    ? CASE_WORKFLOW_STEPS
+    : GITHUB_WORKFLOW_STEPS;
+  const mainStepCount =
+    expected.length + (job.steps[0]?.name === "Set up job" ? 1 : 0);
   if (
-    steps.length !== GITHUB_WORKFLOW_STEPS.length ||
-    steps.some(
-      (step, index) => !step || step.name !== GITHUB_WORKFLOW_STEPS[index],
-    ) ||
+    steps.length !== expected.length ||
+    steps.some((step, index) => !step || step.name !== expected[index]) ||
     job.steps.some(
       (step, index) =>
         !step ||
@@ -597,6 +615,7 @@ function mapGithubCheckSteps(
     return rejected();
   const scope = githubCheckScope(request);
   const intentionalSkip = (name: string) =>
+    receipts.includes(name) ||
     (scope.scope === "docs_only" &&
       scope.skip_checks.split(",").includes(name)) ||
     (request.mergeTier === "card" && name === "e2e");
@@ -636,12 +655,42 @@ function mapGithubCheckSteps(
     checks.every(
       (step) => step.status === "passed" || step.status === "skipped",
     );
+  const recovered = checkFlakeIds.filter((id) =>
+    steps.some(
+      (step) =>
+        step.name === `Recovered ${id}` && step.conclusion === "success",
+    ),
+  );
+  const isolated = steps.find((s) => s.name === CASE_RUN_STEP);
+  if (
+    recovered.length &&
+    (!["success", "failure"].includes(isolated?.conclusion ?? "") ||
+      request.mergeTier === "batch" ||
+      scope.skip_checks.split(",").includes("test") ||
+      (scope.scope === "affected" &&
+        recovered.some(
+          (id) =>
+            !scope.affected_paths
+              .split(" ")
+              .some((pkg) => checkFlakeCases[id].file.startsWith(`${pkg}/`)),
+        )))
+  )
+    return rejected();
   const failedGithubStep = job.steps.find(
     (s) =>
       !checks.some((c) => c.name === s.name) &&
       (s.conclusion === "failure" || s.conclusion === "timed_out"),
   )?.name;
   return {
+    // The new workflow already made the case-level retry decision. Do not
+    // turn a remaining Vitest timeout into a second, whole-check retry.
+    ...(caseContract &&
+    request.mergeTier !== "batch" &&
+    (isolated?.conclusion === "failure" ||
+      checks.some((step) => step.name === "test" && step.status === "failed"))
+      ? { caseTimeoutsManaged: true }
+      : {}),
+    ...(recovered.length ? { recovered } : {}),
     ...(failedGithubStep ? { failedGithubStep } : {}),
     status: passed
       ? "passed"
