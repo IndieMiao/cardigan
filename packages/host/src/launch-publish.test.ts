@@ -217,6 +217,16 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
+function preparationCount() {
+  return (
+    store.database
+      .prepare(
+        "SELECT SUM(failures) AS failures FROM worker_preparation_health WHERE project_id=? AND machine_id=?",
+      )
+      .get("fixture", "worker-a")?.failures ?? 0
+  );
+}
+
 function fixture(
   harness: "codex" | "pi" | "claude-code" = "codex",
   profile = "fixture",
@@ -773,6 +783,7 @@ test.each(["mcp", "inspect"])(
       status: "cancelled",
       launch_publication: { phase: "exited" },
     });
+    expect(preparationCount()).toBe(0);
     const tokens = store.uow.run((tx) =>
       tx.tokensForAssignment("fixture", "A-1"),
     );
@@ -793,12 +804,30 @@ test.each(["publish_ack", "provision_ack", "start_ack"])(
     expect(
       disk.get(f.latest()?.launch_publication?.generation ?? "")?.phase,
     ).toBe("revoked");
+    expect(preparationCount()).toBe(1);
     if (failure === "provision_ack")
       expect(order.indexOf("locate")).toBeGreaterThan(order.indexOf("clear"));
     if (failure !== "publish_ack")
       expect(order.indexOf("release")).toBeGreaterThan(order.indexOf("clear"));
   },
 );
+test("an expired delivery lease withdraws without blaming the worker", async () => {
+  const f = fixture();
+  vi.mocked(checkWorkerMcp).mockImplementationOnce(async () => {
+    const publication = f.latest()?.launch_publication;
+    if (!publication) throw new Error("Missing publication");
+    now = Date.parse(publication.lease_until);
+  });
+  await expect(f.start()).rejects.toThrow(
+    "Launch target or delivery lease changed",
+  );
+  expect(f.latest()?.launch_publication).toMatchObject({
+    phase: "exited",
+    wait: false,
+  });
+  expect(order).not.toContain("publish");
+  expect(preparationCount()).toBe(0);
+});
 test("target withdrawal before start keeps the queued Run and never provisions", async () => {
   const f = fixture();
   failAt = "withdraw";
@@ -808,6 +837,7 @@ test("target withdrawal before start keeps the queued Run and never provisions",
     outcome: null,
     launch_publication: { phase: "exited", wait: true },
   });
+  expect(preparationCount()).toBe(0);
   expect(order).not.toContain("provision");
 });
 test("unknown exit survives database restart and recovery only resumes exact-generation cleanup", async () => {
@@ -818,6 +848,7 @@ test("unknown exit survives database restart and recovery only resumes exact-gen
   await expect(f.start()).rejects.toThrow(`${reason}; exit_unconfirmed`);
   expect(f.latest()?.launch_publication?.failure_reason).toBe(reason);
   expect(f.latest()?.launch_publication?.phase).toBe("stopping");
+  expect(preparationCount()).toBe(1);
   expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
   const generation = f.latest()?.launch_publication?.generation;
   store.close();
@@ -827,6 +858,7 @@ test("unknown exit survives database restart and recovery only resumes exact-gen
   await expect(
     recoverLaunchPublications({ ...f.host, store }, "fixture"),
   ).rejects.toThrow("exit_unconfirmed");
+  expect(preparationCount()).toBe(1);
   expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
   expect(f.latest()?.launch_publication?.generation).toBe(generation);
   failAt = "";
@@ -984,6 +1016,7 @@ test.each(["clear_fail", "token_failure", "journal_failure", "target_failure"])(
     expect(diagnostic).not.toContain("SYNTHETIC-SECRET");
     expect(diagnostic).not.toContain("/private/path");
     expect(f.latest()?.launch_publication?.phase).toBe("stopping");
+    expect(preparationCount()).toBe(1);
     expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
     vi.restoreAllMocks();
   },

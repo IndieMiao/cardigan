@@ -7,6 +7,7 @@ import {
 } from "../host-ops.js";
 import { completeHumanAction } from "./coordination.js";
 import { CommandDraft, type CommandState } from "./core.js";
+import { requestDeploymentAction } from "./deployment.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
@@ -858,6 +859,52 @@ test("C-152: exit confirmation for a foreign terminal is system-requested, human
 test("C-137: diagnostics domain view carries only Run and host action state", () => {
   const data = value(hostOpsReadDiagnostics(base(), caller)).data;
   expect(Object.keys(data).sort()).toEqual(["actions", "runs"]);
+});
+
+test("only open system worker handoffs addressed to the authenticated host operator expose instructions", () => {
+  const s = base(),
+    system = { kind: "system" as const, project_id: s.project_id };
+  const effect = value(
+    requestDeploymentAction(
+      s,
+      system,
+      {
+        key: "worker-helper:machine:digest",
+        reason: "worker_maintenance",
+        instructions: "verify release digest",
+      },
+      ports(),
+    ),
+  );
+  const state = apply(s, effect),
+    action = effect.data;
+  const read = (st: CommandState) =>
+    value(hostOpsReadDiagnostics(st, caller)).data.worker_maintenance;
+  expect(read(state)).toEqual([
+    { human_action_id: action.id, instructions: "verify release digest" },
+  ]);
+  for (const patch of [
+    { triage: "human" },
+    { host_operator: "external" },
+    { host_assignment_id: id("assignment", 99) },
+    { status: "done" },
+    { card_id: id("card", 1) },
+    { requested_by: "human" },
+  ] as const)
+    expect(
+      read({ ...state, human_actions: [{ ...action, ...patch }] }),
+    ).toBeUndefined();
+  expect(read({ ...state, events: [] })).toBeUndefined();
+  expect(
+    read({
+      ...state,
+      events: state.events.map((e) => ({
+        ...e,
+        actor: { ...system, project_id: "other" },
+      })),
+    }),
+  ).toBeUndefined();
+  expect(hostOpsReadDiagnostics(state, actor(4, "pm")).ok).toBe(false);
 });
 
 test("hold during an in-flight restart allows exit settlement without queueing new work", () => {

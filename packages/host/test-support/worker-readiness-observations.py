@@ -13,6 +13,7 @@ git = types.SimpleNamespace(native=native, Workspace=lambda: None,
                             check_layout=lambda *args: os.open('/dev/null', os.O_RDONLY))
 files = types.SimpleNamespace(namespace=lambda: None)
 pathlib.Path.read_bytes = lambda self: b'fixture'
+protected = lambda path: None
 module = lambda path, name: git if name == 'worker_git' else files
 pathlib.Path.lstat = lambda path: types.SimpleNamespace(st_mode=stat.S_IFREG | 0o660,
                                                         st_uid=0, st_gid=r['gid'], st_nlink=1)

@@ -265,6 +265,7 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
   d.put("human_actions", action);
   d.emit("host_deployment_action_requested", undefined, {
     key: input.key,
+    ...(input.reason === "worker_maintenance" ? { reason: input.reason } : {}),
     human_action_id: id,
   });
   d.emit("human_action_requested", undefined, {

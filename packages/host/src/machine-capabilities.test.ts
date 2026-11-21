@@ -566,52 +566,59 @@ test("a browser path change fences an in-flight result in either commit order wi
   }
 });
 
-test("the post-deploy patrol opens one host_ops upgrade task per affected worker, with release digests", async () => {
-  const store = Store.open({ dataDir: temp() });
-  try {
-    store.createProject({ id: "a" });
-    const machine = store.uow.run((tx) => {
-      const local = tx.machines.get("a", "local");
-      if (!local) throw new Error("fixture machine missing");
-      const remote = {
-        ...local,
-        id: "remote",
-        label: "Remote",
-        herdr_machine: "remote",
-      };
-      tx.machines.put("a", remote);
-      return remote;
-    });
-    const reason = "worker helper 落后（已装 1，需要 2）";
-    const options = {
-      store,
-      project: "a",
-      machine: machine.id,
-      target: () => ({
-        machine,
-        execution: { mode: "local" as const, dataDir: "/fixture" },
-      }),
-      check: async () => ({ blockers: [reason], launch_enabled: false }),
-    };
-    for (let i = 0; i < 2; i++)
-      expect((await refreshMachineObservations(options)).health).toMatchObject({
-        blockers: [reason],
-        available: false,
+test.each([
+  ["worker helper 落后（已装 1，需要 2）"],
+  ["worker helper 与当前部署的 SHA-256 不一致", "worker_helpers"],
+])(
+  "the post-deploy patrol opens one host_ops upgrade task per worker: %s",
+  async (...blockers) => {
+    const store = Store.open({ dataDir: temp() });
+    try {
+      store.createProject({ id: "a" });
+      const machine = store.uow.run((tx) => {
+        const local = tx.machines.get("a", "local");
+        if (!local) throw new Error("fixture machine missing");
+        const remote = {
+          ...local,
+          id: "remote",
+          label: "Remote",
+          herdr_machine: "remote",
+        };
+        tx.machines.put("a", remote);
+        return remote;
       });
-    const actions = store.uow.read((tx) => tx.human_actions.list("a"));
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({
-      status: "open",
-      triage: "host",
-      host_operator: "host_ops",
-      blocked_work_items: [],
-    });
-    for (const [name, sha] of Object.entries(workerHelperDigests()))
-      expect(actions[0]?.instructions).toContain(`${sha}  ${name}`);
-  } finally {
-    store.close();
-  }
-});
+      const options = {
+        store,
+        project: "a",
+        machine: machine.id,
+        target: () => ({
+          machine,
+          execution: { mode: "local" as const, dataDir: "/fixture" },
+        }),
+        check: async () => ({ blockers, launch_enabled: false }),
+      };
+      for (let i = 0; i < 2; i++)
+        expect(
+          (await refreshMachineObservations(options)).health,
+        ).toMatchObject({
+          blockers,
+          available: false,
+        });
+      const actions = store.uow.read((tx) => tx.human_actions.list("a"));
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({
+        status: "open",
+        triage: "host",
+        host_operator: "host_ops",
+        blocked_work_items: [],
+      });
+      for (const [name, sha] of Object.entries(workerHelperDigests()))
+        expect(actions[0]?.instructions).toContain(`${sha}  ${name}`);
+    } finally {
+      store.close();
+    }
+  },
+);
 
 test("only consecutive preparations on one binding cool it down; expiry or success re-admits it", () => {
   const store = Store.open({ dataDir: temp() });

@@ -77,7 +77,11 @@ import {
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
 import { launchFingerprint } from "./launch-fingerprint.js";
-import { LaunchPublication, launchFailureReason } from "./launch-publish.js";
+import {
+  LaunchPublication,
+  launchFailureReason,
+  WorkerPreparationFailure,
+} from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {
@@ -1194,9 +1198,15 @@ async function launch(
     if (!provisioned.ok) {
       provisionRefusal = provisionRefusalFor(provisioned.error, launchDesc);
       if (provisionRefusal) throw provisionRefusal;
-      throw new Error(
-        `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
-      );
+      const message = `provision failed: ${provisioned.error.code} ${provisioned.error.message}`;
+      if (
+        publication &&
+        ["runtime_unavailable", "runtime_timeout", "version_mismatch"].includes(
+          provisioned.error.code,
+        )
+      )
+        throw new WorkerPreparationFailure(message);
+      throw new Error(message);
     }
     ref = {
       ...provisioned.value,
@@ -1328,7 +1338,19 @@ async function launch(
       try {
         exited = await publication.stop(
           deferred || retry,
-          deferred || retry ? undefined : reason,
+          deferred || retry
+            ? undefined
+            : {
+                reason,
+                worker:
+                  error instanceof WorkerPreparationFailure ||
+                  (error instanceof WorkerMcpError &&
+                    [
+                      "mcp_worker_failed",
+                      "mcp_unreachable",
+                      "mcp_timeout",
+                    ].includes(error.code)),
+              },
           provisionRefusal,
         );
       } catch {

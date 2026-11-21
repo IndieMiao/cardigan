@@ -164,8 +164,8 @@ test.each([
       ),
     ]);
     const source = workerReadinessScript.replace(
-      "try:\n    git=module",
-      `${observations}\ntry:\n    git=module`,
+      "try:\n    paths=",
+      `${observations}\ntry:\n    paths=`,
     );
     const { stdout, stderr } = await promisify(execFile)(
       "python3",
@@ -236,8 +236,8 @@ test("real probe compares a release and a pre-run-command whitelist on a simulat
           "-IB",
           "-c",
           workerReadinessScript.replace(
-            "try:\n    git=module",
-            "protected=lambda path: None\ntry:\n    git=module",
+            "try:\n    paths=",
+            "protected=lambda path: None\ntry:\n    paths=",
           ),
           args.at(-1) ?? "",
         ],
@@ -257,6 +257,21 @@ test("real probe compares a release and a pre-run-command whitelist on a simulat
     expect(
       current.every((b) => b === "worker_directories" || b === "hc_version"),
     ).toBe(true);
+    // A protected older git helper without check_layout is a confirmed release
+    // mismatch, even though it also fails the separate capability probe.
+    const gitPath = config.gitHelper.path;
+    const original = await readFile(gitPath, "utf8");
+    await writeFile(
+      gitPath,
+      original.replace("def check_layout(", "def legacy_layout("),
+    );
+    expect(await workerReadiness(config)).toEqual(
+      expect.arrayContaining([
+        "worker helper 与当前部署的 SHA-256 不一致",
+        "worker_helpers",
+      ]),
+    );
+    await writeFile(gitPath, original);
     const legacy = (await readFile(path, "utf8"))
       .replace(/^PUBLICATION_PROTOCOL = .*$/mu, "")
       .replace("run-command\\.py|", "");

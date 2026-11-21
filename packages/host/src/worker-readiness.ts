@@ -28,7 +28,7 @@ import hashlib,importlib.util,json,os,pathlib,platform,pwd,stat,subprocess,sys
 r=json.loads(sys.argv[1])
 failures=[]
 protocol=None
-matching=False
+matching=None
 def require(value):
     if not value: raise ValueError()
 def protected(path):
@@ -46,16 +46,17 @@ def module(path,name):
     spec.loader.exec_module(m)
     return m
 try:
-    git=module(r['git_helper'],'worker_git')
+    paths=(('worker-files.py',r['file_helper']),('worker-git.py',r['git_helper']),
+        ('worker-primitives.py',pathlib.Path(r['git_helper']).with_name('worker-primitives.py')),
+        ('worker-primitives.py',pathlib.Path(r['file_helper']).with_name('worker-primitives.py')))
+    # Unknown (unsafe/unreadable) is not evidence of an installed release mismatch.
+    for _,path in paths: protected(path)
+    matching=all(hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==r['digests'][name] for name,path in paths)
     files=module(r['file_helper'],'worker_files')
+    protocol=getattr(files, 'PUBLICATION_PROTOCOL', 1)
+    git=module(r['git_helper'],'worker_git')
     require(callable(git.Workspace) and callable(git.check_layout) and callable(files.namespace))
     native=git.native
-    protocol=getattr(files, 'PUBLICATION_PROTOCOL', 1)
-    expected=r['digests']
-    matching=all(hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==expected[name] for name,path in (
-        ('worker-files.py',r['file_helper']),('worker-git.py',r['git_helper']),
-        ('worker-primitives.py',pathlib.Path(r['git_helper']).with_name('worker-primitives.py')),
-        ('worker-primitives.py',pathlib.Path(r['file_helper']).with_name('worker-primitives.py'))))
     require(subprocess.run(['git','--version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0)
 except Exception:
     failures.append('worker_helpers')
@@ -133,17 +134,19 @@ export async function workerReadiness(
         ? /^hc (\S+)$/u.exec(result.version)?.[1]
         : undefined;
     const blockers = result.failures as WorkerReadinessFailure[];
-    if (!blockers.includes("worker_helpers")) {
-      if (
-        typeof result.protocol !== "number" ||
-        !Number.isSafeInteger(result.protocol) ||
-        result.protocol < 1
-      )
-        blockers.unshift("worker_helpers");
-      else if (result.protocol < workerPublicationProtocol)
-        blockers.unshift(protocolMismatch(result.protocol));
-      else if (result.matching !== true) blockers.unshift(digestMismatch);
-    }
+    const { protocol } = result;
+    const protocolKnown =
+      typeof protocol === "number" &&
+      Number.isSafeInteger(protocol) &&
+      protocol >= 1;
+    if (
+      (!protocolKnown || typeof result.matching !== "boolean") &&
+      !blockers.includes("worker_helpers")
+    )
+      blockers.push("worker_helpers");
+    if (protocolKnown && protocol < workerPublicationProtocol)
+      blockers.unshift(protocolMismatch(protocol));
+    else if (result.matching === false) blockers.unshift(digestMismatch);
     return [
       ...blockers,
       ...(isHcVersionCompatible(version) ? [] : ["hc_version" as const]),
