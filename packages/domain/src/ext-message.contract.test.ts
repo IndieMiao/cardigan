@@ -200,6 +200,41 @@ test("projection follows current handled/readiness state, preferred title and al
     extMessageItems({ ...state, cards: [] }, project).every((i) => i.sensitive),
   ).toBe(true);
 });
+test("projection preserves the first source in stream order and canonical handoff groups", () => {
+  const second = { ...decision, id: id("decision", 2), key: id("decision", 2) };
+  const state = {
+    ...fixture(),
+    decisions: [decision, second].map((q) => ({
+      ...q,
+      handoff_group: "shared",
+    })),
+    human_actions: [action],
+    events: [
+      event(
+        "decision_requested",
+        { decision_id: decision.id, human_action_id: action.id },
+        2,
+      ),
+      event("decision_requested", { decision_id: second.id }, 3),
+      event(
+        "legacy",
+        { decision_id: decision.id, human_action_id: action.id },
+        1,
+      ),
+    ],
+  };
+  expect(
+    extMessageItems(state, state.project_id).map((i) => [
+      i.item_id,
+      i.event_id,
+      i.handled,
+    ]),
+  ).toEqual([
+    [decision.id, "event-2", false],
+    [second.id, "event-3", true],
+    [action.id, "event-2", false],
+  ]);
+});
 test("final failure becomes one readable Workbench notice and never enters external projection", () => {
   const failed = {
     ...event(

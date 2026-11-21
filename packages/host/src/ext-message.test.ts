@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type Decision,
   EXT_MESSAGE_DEFAULTS,
   type ExtMessage,
   type ExtMessagePort,
@@ -170,10 +171,17 @@ test("permanent errors stop immediately; raw thrown errors are reduced to unknow
     ),
   ).toBe("unknown");
 });
-test("processed or missing items skip without sending, and sensitivity is read at dispatch", async () => {
+test("first enable ignores handled history, but audits an already queued item that was handled", async () => {
+  const [prior] = store.uow.read((tx) =>
+    extMessageItems(loadCommandState(tx, project_id), project_id),
+  );
   store.uow.run((tx) =>
     tx.human_actions.put(project_id, { ...action, status: "done" }),
   );
+  await sender().tick();
+  expect(rows()).toEqual([]);
+  expect(events().some((e) => e.type === "ext_message_skipped")).toBe(false);
+  projectExtMessage(store.database, prior!, "fake", now);
   await sender().tick();
   expect(rows()).toMatchObject([{ status: "skipped", attempts: 0 }]);
   expect(fake.messages).toEqual([]);
@@ -580,3 +588,130 @@ test("a digest is claimed atomically by concurrent senders and retry drops newly
     status: "sent",
   });
 });
+
+test("a concurrent write after projection invalidates the batch; next tick uses fresh sensitivity", async () => {
+  const other = Store.open({ dataDir: dir });
+  try {
+    const active = sender();
+    store.observe({
+      transaction(kind) {
+        if (kind !== "read") return;
+        store.observe(undefined);
+        other.uow.run((tx) =>
+          tx.cards.put(project_id, card({ sensitive: true })),
+        );
+      },
+    });
+    await active.tick();
+    expect(rows()).toEqual([]);
+    await active.tick();
+    expect(fake.messages.map((m) => m.title)).toEqual([
+      "有 1 条敏感事项待处理",
+    ]);
+  } finally {
+    other.close();
+  }
+});
+
+test("an external edit during send is not mistaken for our settlement audit", async () => {
+  addAction(2);
+  const active = sender({
+    adapters: {
+      fake: () => ({
+        async send(m) {
+          fake.messages.push(m);
+          if (fake.messages.length === 1)
+            store.uow.run((tx) =>
+              tx.cards.put(project_id, card({ sensitive: true })),
+            );
+          return "sent";
+        },
+      }),
+    },
+  });
+  await active.tick();
+  expect(fake.messages).toHaveLength(1);
+  await active.tick();
+  expect(fake.messages[1]?.title).toBe("有 1 条敏感事项待处理");
+});
+
+test("production-size first enable bounds tick computation, replay writes and writer lock time", async () => {
+  // Keep the creation facts at the end of the stream ordering (a worst-case linear find).
+  store.uow.run((tx) => {
+    store.database
+      .prepare(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<150000)
+      INSERT INTO events(project_id,id,card_id,stream,seq,type,doc)
+      SELECT ?, 'history-'||i, NULL,'',i,'tick', json_object('id','history-'||i,'seq',i,'type','tick','payload',json('{}'),'actor',json_object('kind','system','project_id',?),'created_at',?) FROM n`)
+      .run(project_id, project_id, now);
+    const fact = (
+      payload: { decision_id: string } | { human_action_id: string },
+    ) =>
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        card_id: "C-1",
+        seq: tx.ids.nextEventSequence(project_id, "C-1"),
+        type:
+          "decision_id" in payload
+            ? "decision_requested"
+            : "human_action_requested",
+        actor: { kind: "human", project_id },
+        created_at: now,
+        payload,
+      });
+    for (let n = 1; n <= 1000; n++) {
+      const id = `Q-${n}` as Decision["id"];
+      tx.decisions.put(project_id, {
+        id,
+        key: id,
+        card_id: "C-1",
+        kind: "choose",
+        question: "Fixture",
+        context: "",
+        raised_by: "human",
+        decider: "human",
+        status: "open",
+        category: "general",
+        blocking: false,
+        affected_cards: [],
+        affected_work_items: [],
+        options: [],
+        recommended: "",
+        doc_refs: [],
+      });
+      fact({ decision_id: id });
+    }
+    for (let n = 2; n <= 200; n++) {
+      const id = `H-${n}` as HumanAction["id"];
+      tx.human_actions.put(project_id, { ...action, id, key: id });
+      fact({ human_action_id: id });
+    }
+  });
+  expect(
+    store.database.prepare("SELECT COUNT(*) AS n FROM events").get()?.n,
+  ).toBe(151200);
+  const active = sender();
+  // First tick includes cold SQLite/JSON decoding. Second tick sees our audits,
+  // so it must reproject (and take the next batch), not hit an unchanged cursor.
+  for (const cold of [true, false]) {
+    const locks: number[] = [];
+    let compute = 0;
+    store.observe({
+      transaction(kind, ms) {
+        if (kind === "run") locks.push(ms);
+        else compute += ms;
+      },
+    });
+    const start = performance.now();
+    await active.tick();
+    const elapsed = performance.now() - start,
+      longest = Math.max(...locks);
+    console.info(
+      `ext-message (${cold ? "cold" : "warm"}): projection ${compute.toFixed(1)} ms, tick ${elapsed.toFixed(1)} ms, longest write ${longest.toFixed(1)} ms`,
+    );
+    expect(rows()).toHaveLength(cold ? 32 : 64);
+    expect(fake.messages).toHaveLength(cold ? 32 : 64);
+    expect(compute).toBeLessThan(cold ? 2000 : 200);
+    expect(elapsed).toBeLessThan(cold ? 3000 : 750);
+    expect(longest).toBeLessThan(50);
+  }
+}, 20000);

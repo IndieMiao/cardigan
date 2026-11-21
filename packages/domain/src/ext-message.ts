@@ -1,6 +1,7 @@
-import type { CommandState } from "./commands/core.js";
+import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
-import { listNeedsYou } from "./commands/queries.js";
+import { selectNeedsYouDecisions } from "./commands/queries.js";
+import type { Event } from "./entities.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
 import { needsYouItemReady } from "./readiness.js";
 
@@ -145,33 +146,55 @@ export function extMessageItems(
   state: CommandState,
   project: ProjectId,
 ): ExtMessageItem[] {
-  const result = listNeedsYou(state, { kind: "human", project_id: project });
+  const result = command(
+    state,
+    { kind: "human", project_id: project },
+    "list_needs_you",
+    undefined,
+    (d) => {
+      d.pm();
+      d.projectAccess();
+      return new Set(selectNeedsYouDecisions(d).map((q) => q.id));
+    },
+  );
   if (!result.ok) return [];
-  const view = result.value.data;
-  const sensitive = (ids: readonly CardId[]) =>
-    ids.some((id) => {
-      const card = state.cards.find((c) => c.id === id);
-      return !card || card.sensitive === true;
-    });
-  const source = (field: string, id: string) =>
-    state.events.find(
-      (e) =>
-        e.payload &&
-        typeof e.payload === "object" &&
-        field in e.payload &&
-        (e.payload as Record<string, unknown>)[field] === id,
+  const visible = result.value.data;
+  const cards = new Map(state.cards.map((c) => [c.id, c]));
+  const work = new Map(state.work_items.map((w) => [w.id, w.card_id]));
+  const decisions = new Map(state.decisions.map((q) => [q.id, q]));
+  const sensitive = (ids: readonly (CardId | undefined)[]) =>
+    ids.some(
+      (id) => !id || !cards.has(id) || cards.get(id)?.sensitive === true,
     );
+  // Preserve first-match stream order, including legacy events with both references.
+  const decisionSources = new Map<string, Event>();
+  const actionSources = new Map<string, Event>();
+  for (const e of state.events) {
+    const p = e.payload;
+    if (!p || typeof p !== "object") continue;
+    if (
+      "decision_id" in p &&
+      typeof p.decision_id === "string" &&
+      !decisionSources.has(p.decision_id)
+    )
+      decisionSources.set(p.decision_id, e);
+    if (
+      "human_action_id" in p &&
+      typeof p.human_action_id === "string" &&
+      !actionSources.has(p.human_action_id)
+    )
+      actionSources.set(p.human_action_id, e);
+  }
   const out: ExtMessageItem[] = [];
   for (const q of state.decisions) {
     if (q.decider !== "human") continue;
-    const event = source("decision_id", q.id);
+    const event = decisionSources.get(q.id);
     if (!event) continue;
-    const cards = [
+    const ready = needsYouItemReady(state, q);
+    const related = [
       ...q.affected_cards,
       ...(q.card_id ? [q.card_id] : []),
-      ...state.work_items
-        .filter((w) => q.affected_work_items.includes(w.id))
-        .map((w) => w.card_id),
+      ...q.affected_work_items.map((id) => work.get(id)),
     ];
     out.push({
       project_id: project,
@@ -182,16 +205,16 @@ export function extMessageItems(
       kind:
         q.trigger === "merge_confirmation" ? "merge_confirmation" : "decision",
       title: q.question,
-      sensitive: sensitive(cards),
-      ready: needsYouItemReady(state, q),
+      sensitive: sensitive(related),
+      ready,
       handled:
-        !view.decisions.some((v) => v.id === q.id) &&
-        !view.later.some((v) => v.kind === "decision" && v.id === q.id),
+        !visible.has(q.id) &&
+        (ready || !["open", "provisional", "snoozed"].includes(q.status)),
     });
   }
   for (const h of state.human_actions) {
     if (h.triage === "pm_ops") continue;
-    const event = source("human_action_id", h.id);
+    const event = actionSources.get(h.id);
     if (!event) continue;
     out.push({
       project_id: project,
@@ -203,27 +226,21 @@ export function extMessageItems(
       ...(h.handoff?.title ? { title: h.handoff.title } : {}),
       sensitive: sensitive([
         ...(h.card_id ? [h.card_id] : []),
-        ...state.work_items
-          .filter((w) => h.blocked_work_items.includes(w.id))
-          .map((w) => w.card_id),
+        ...h.blocked_work_items.map((id) => work.get(id)),
       ]),
       ready: needsYouItemReady(state, h),
-      handled:
-        h.status !== "open" ||
-        (!view.human_actions.some((v) => v.id === h.id) &&
-          !view.later.some((v) => v.kind === "human_action" && v.id === h.id)),
+      handled: h.status !== "open",
     });
   }
   for (const n of notices(state)) {
     // A failed external delivery is a Workbench-only notice. Never recurse.
     if (n.kind === "external_message") continue;
-    const decision = state.decisions.find((q) => q.id === n.decision_id);
-    const createdAt = state.events.find((e) => e.id === n.id)?.created_at;
+    const decision = n.decision_id ? decisions.get(n.decision_id) : undefined;
     out.push({
       project_id: project,
       ...(n.card_id ? { card_id: n.card_id } : {}),
       event_id: n.id,
-      ...(createdAt ? { created_at: createdAt } : {}),
+      created_at: n.at,
       item_id: n.id,
       kind: "notice",
       title: n.question,
@@ -231,9 +248,7 @@ export function extMessageItems(
       sensitive: sensitive([
         ...(n.card_id ? [n.card_id] : []),
         ...(decision?.affected_cards ?? []),
-        ...state.work_items
-          .filter((w) => decision?.affected_work_items.includes(w.id))
-          .map((w) => w.card_id),
+        ...(decision?.affected_work_items.map((id) => work.get(id)) ?? []),
       ]),
       ready: true,
       handled: n.read,

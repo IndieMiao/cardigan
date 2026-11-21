@@ -1,6 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtMessageItem } from "@cardigan/domain";
 
+import { prepare } from "./statements.js";
+
 export interface ExtMessageRow {
   project_id: string;
   item_kind: ExtMessageItem["kind"];
@@ -29,6 +31,17 @@ const key = (r: ExtMessageRow) => [
   r.item_id,
   r.channel,
 ];
+/** Primary-key probe: projection never reads the channel's sent history. */
+export function hasExtMessage(
+  db: DatabaseSync,
+  item: ExtMessageItem,
+  channel: string,
+): boolean {
+  return !!prepare(
+    db,
+    "SELECT 1 FROM ext_message_outbox WHERE project_id=? AND item_kind=? AND item_id=? AND channel=?",
+  ).get(item.project_id, item.kind, item.item_id, channel);
+}
 export function projectExtMessage(
   db: DatabaseSync,
   item: ExtMessageItem,
@@ -36,9 +49,12 @@ export function projectExtMessage(
   now: string,
   deferred = false,
 ): void {
-  db.prepare(`INSERT OR IGNORE INTO ext_message_outbox
+  prepare(
+    db,
+    `INSERT OR IGNORE INTO ext_message_outbox
     (project_id,item_kind,item_id,channel,event_id,card_id,status,next_attempt_at,updated_at,digest_id)
-    VALUES (?,?,?,?,?,?,'pending',?,?,?)`).run(
+    VALUES (?,?,?,?,?,?,'pending',?,?,?)`,
+  ).run(
     item.project_id,
     item.kind,
     item.item_id,
@@ -57,42 +73,42 @@ export function groupExtMessage(
   row: ExtMessageRow,
   digest: string,
 ): void {
-  db.prepare(`UPDATE ext_message_outbox SET digest_id = ?
+  prepare(
+    db,
+    `UPDATE ext_message_outbox SET digest_id = ?
     WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ?
     AND status = 'pending' AND attempts = 0 AND lease_id IS NULL
-    AND (digest_id IS NULL OR digest_id = 'queued')`).run(digest, ...key(row));
+    AND (digest_id IS NULL OR digest_id = 'queued')`,
+  ).run(digest, ...key(row));
 }
 export function listExtMessages(
   db: DatabaseSync,
   project?: string,
 ): ExtMessageRow[] {
-  return db
-    .prepare(
-      `SELECT * FROM ext_message_outbox${project ? " WHERE project_id = ?" : ""} ORDER BY updated_at, item_id, channel`,
-    )
-    .all(...(project ? [project] : [])) as unknown as ExtMessageRow[];
+  return prepare(
+    db,
+    `SELECT * FROM ext_message_outbox${project ? " WHERE project_id = ?" : ""} ORDER BY updated_at, item_id, channel`,
+  ).all(...(project ? [project] : [])) as unknown as ExtMessageRow[];
 }
 /** Exact row lookup and pending-only scans keep sent history out of each sending tick. */
 export function getExtMessage(
   db: DatabaseSync,
   row: ExtMessageRow,
 ): ExtMessageRow | undefined {
-  return db
-    .prepare(
-      "SELECT * FROM ext_message_outbox WHERE project_id=? AND item_kind=? AND item_id=? AND channel=?",
-    )
-    .get(...key(row)) as unknown as ExtMessageRow | undefined;
+  return prepare(
+    db,
+    "SELECT * FROM ext_message_outbox WHERE project_id=? AND item_kind=? AND item_id=? AND channel=?",
+  ).get(...key(row)) as unknown as ExtMessageRow | undefined;
 }
 export function pendingExtMessages(
   db: DatabaseSync,
   project: string,
   channel: string,
 ): ExtMessageRow[] {
-  return db
-    .prepare(
-      "SELECT * FROM ext_message_outbox WHERE project_id=? AND channel=? AND status='pending' ORDER BY next_attempt_at,item_id",
-    )
-    .all(project, channel) as unknown as ExtMessageRow[];
+  return prepare(
+    db,
+    "SELECT * FROM ext_message_outbox WHERE project_id=? AND channel=? AND status='pending' ORDER BY next_attempt_at,item_id",
+  ).all(project, channel) as unknown as ExtMessageRow[];
 }
 /** Called inside a Store write transaction; stale results cannot overwrite a new attempt. */
 export function claimExtMessage(
@@ -104,10 +120,11 @@ export function claimExtMessage(
   retryAt: string,
 ): boolean {
   return (
-    db
-      .prepare(`UPDATE ext_message_outbox SET attempts = attempts + 1, lease_id = ?, lease_until = ?, next_attempt_at = ?, updated_at = ?
-    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND next_attempt_at <= ? AND (lease_until IS NULL OR lease_until <= ?)`)
-      .run(lease, until, retryAt, now, ...key(row), row.attempts, now, now)
+    prepare(
+      db,
+      `UPDATE ext_message_outbox SET attempts = attempts + 1, lease_id = ?, lease_until = ?, next_attempt_at = ?, updated_at = ?
+    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND next_attempt_at <= ? AND (lease_until IS NULL OR lease_until <= ?)`,
+    ).run(lease, until, retryAt, now, ...key(row), row.attempts, now, now)
       .changes === 1
   );
 }
@@ -120,10 +137,11 @@ export function settleExtMessage(
   next: string,
 ): boolean {
   return (
-    db
-      .prepare(`UPDATE ext_message_outbox SET status = ?, last_error = ?, updated_at = ?, next_attempt_at = ?, lease_id = NULL, lease_until = NULL
-    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND lease_id IS ?`)
-      .run(status, error, now, next, ...key(row), row.attempts, row.lease_id)
+    prepare(
+      db,
+      `UPDATE ext_message_outbox SET status = ?, last_error = ?, updated_at = ?, next_attempt_at = ?, lease_id = NULL, lease_until = NULL
+    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND lease_id IS ?`,
+    ).run(status, error, now, next, ...key(row), row.attempts, row.lease_id)
       .changes === 1
   );
 }
