@@ -10,9 +10,14 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { App } from "../App.js";
-import type { PreferencesView, SystemReminderPolicy } from "../api.js";
+import type {
+  MachineView,
+  PreferencesView,
+  SystemReminderPolicy,
+} from "../api.js";
 import type { StreamCallbacks } from "../stream.js";
 import { fakeClient, project } from "../testing/fixtures.js";
+import { fixtureMachines } from "../testing/machines-fixture.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
@@ -780,7 +785,27 @@ const alerts = () =>
     .map((e) => e.textContent)
     .join(" ");
 const settingsShown = () => !!screen.queryByRole("heading", { name: "设置" });
-const helpLink = () => screen.getByRole("link", { name: "帮助", exact: true });
+// An open settings drawer is modal: the link is outside the accessibility
+// tree then, but still navigates.
+const helpLink = () =>
+  screen.getByRole("link", { name: "帮助", exact: true, hidden: true });
+/**
+ * C-511: the Agent limit is edited in the machine detail; the old
+ * 并发与容量 link lands on the machine page.
+ */
+const local = fixtureMachines.find((m) => m.id === "local") as MachineView;
+/** The detail's own read shows the limit it edits (Q-1013). */
+const machineReads = (limit: () => number) => ({
+  machines: async () => ({ machines: [{ ...local, run_limit: limit() }] }),
+  machine: async () => ({ machine: { ...local, run_limit: limit() } }),
+});
+async function openLimit() {
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  return screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: "本机 Agent 并发上限",
+  });
+}
 
 /** App on p-1 settings with the next timeout write held. */
 async function timeoutApp() {
@@ -852,13 +877,14 @@ test("a revocation that fails after leaving is reported once, and leads back to 
   expect(alerts()).not.toContain("请回到设置重试");
 });
 
-test("a capacity limit that fails after leaving is reported once and leads back to its panel", async () => {
+test("a capacity limit that fails after leaving is reported once and leads back to the machine page", async () => {
   window.location.hash = h("settings", "?tab=capacity");
   const write = Promise.withResolvers<void>();
   const setRunLimit = vi.fn(() => write.promise);
   render(
     <App
       client={fakeClient({
+        ...machineReads(() => 4),
         executionCapacity: async () => ({
           agents: [
             {
@@ -879,14 +905,13 @@ test("a capacity limit that fails after leaving is reported once and leads back 
       })}
     />,
   );
-  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
-    name: "本机 Agent 并发上限",
-  });
+  await waitFor(() =>
+    expect(location.hash).toBe(h("settings", "?tab=machines")),
+  );
   expect(
-    screen
-      .getByRole("button", { name: "并发与容量" })
-      .getAttribute("aria-current"),
+    screen.getByRole("button", { name: "机器" }).getAttribute("aria-current"),
   ).toBe("page");
+  const input = await openLimit();
   fireEvent.change(input, { target: { value: "6" } });
   fireEvent.keyDown(input, { key: "Enter" });
   expect(setRunLimit).toHaveBeenCalledOnce();
@@ -899,13 +924,8 @@ test("a capacity limit that fails after leaving is reported once and leads back 
     expect(alerts()).toContain("未能保存“本机 Agent 并发上限”，请回到设置重试"),
   );
   fireEvent.click(screen.getByRole("button", { name: "回到设置" }));
-  await screen.findByRole("spinbutton", { name: "本机 Agent 并发上限" });
-  expect(location.hash).toBe(h("settings", "?tab=capacity"));
-  expect(
-    screen
-      .getByRole("button", { name: "并发与容量" })
-      .getAttribute("aria-current"),
-  ).toBe("page");
+  await openLimit();
+  expect(location.hash).toBe(h("settings", "?tab=machines"));
 });
 
 describe("a capacity limit saved and then left (C-479 review V-2216)", () => {
@@ -935,6 +955,7 @@ describe("a capacity limit saved and then left (C-479 review V-2216)", () => {
     render(
       <App
         client={fakeClient({
+          ...machineReads(() => limit),
           executionCapacity,
           setRunLimit: vi.fn(() => write.promise),
           subscribe: (_, s) => {
@@ -945,9 +966,7 @@ describe("a capacity limit saved and then left (C-479 review V-2216)", () => {
         })}
       />,
     );
-    const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
-      name: "本机 Agent 并发上限",
-    });
+    const input = await openLimit();
     fireEvent.change(input, { target: { value: "6" } });
     fireEvent.keyDown(input, { key: "Enter" });
     fireEvent.click(helpLink());

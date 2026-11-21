@@ -7,6 +7,7 @@ import type {
   TemplateVersion,
 } from "../src/api.js";
 import { fixtureMachines } from "../src/testing/machines-fixture.js";
+import { workerWizardData } from "./worker-wizard-data.js";
 
 // C-479: synthetic data for the capacity, roles, templates and employee
 // panels — two Agent machines, one merge-check target, three roles, three
@@ -167,6 +168,8 @@ const templates: TemplateVersion[] = [
 let macMiniRead = false;
 export const settingsPanels: Partial<CardiganClient> = {
   executionCapacity: async () => capacity,
+  // C-511: machine actions and the add-worker wizard, synthetic.
+  ...workerWizardData,
   // C-512: three synthetic machines (see machines-fixture.ts).
   machines: async () => ({ machines: fixtureMachines }),
   machine: async (_p, id) => {
