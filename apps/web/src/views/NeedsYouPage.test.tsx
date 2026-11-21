@@ -431,6 +431,9 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
       mime,
       inline: mime.startsWith("image/"),
       download_path: `/api/projects/p-1/attachments/${id}`,
+      thumbnail_path: mime.startsWith("image/")
+        ? `/api/projects/p-1/attachments/${id}/thumbnail`
+        : null,
     });
   const data = page([
     q({
@@ -457,16 +460,19 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
   expect(link.getAttribute("href")).toBe("/api/projects/p-1/attachments/F-2");
   expect(link.hasAttribute("download")).toBe(true);
   const thumb = within(list).getByRole("button", { name: "预览 before.png" });
+  // C-540: the thumbnail is the small rendition; the lightbox opens the original.
   expect(within(thumb).getByRole("img").getAttribute("src")).toBe(
-    "/api/projects/p-1/attachments/F-1",
+    "/api/projects/p-1/attachments/F-1/thumbnail",
   );
   const plain = screen.getByRole("article", { name: "拍板 Q-2" });
   expect(within(plain).queryByRole("list", { name: "拍板附件" })).toBeNull();
   fireEvent.click(thumb);
   const dialog = await screen.findByRole("dialog");
-  expect(
-    within(dialog).getByRole("img", { name: "附件 before.png" }).className,
-  ).toBe("lightbox-image");
+  const original = within(dialog).getByRole("img", { name: "附件 before.png" });
+  expect(original.className).toBe("lightbox-image");
+  expect(original.getAttribute("src")).toBe(
+    "/api/projects/p-1/attachments/F-1",
+  );
 });
 
 test("C-95: merge confirmations show the completion request's attachments", async () => {

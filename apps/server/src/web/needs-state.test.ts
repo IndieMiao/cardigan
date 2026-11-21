@@ -23,12 +23,18 @@ const BASELINE_SHA256 =
   "19e9ed5fbd5c281b0b9b59af645e83d0285eac23a10af7dafa7bc3c695b12a22";
 // C-312 adds an event-derived notice source. Keep the existing digest for every
 // original field/order; source classification has its own event contract tests.
+// C-540 adds attachment thumbnail paths; they derive from the download path.
 function legacyProjection(view: ReturnType<typeof needsYou>) {
   const { auto_merge_pause: _pause, ...legacy } = view;
-  return {
-    ...legacy,
-    notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
-  };
+  return JSON.parse(
+    JSON.stringify(
+      {
+        ...legacy,
+        notices: legacy.notices.map(({ source: _source, ...notice }) => notice),
+      },
+      (key, value) => (key === "thumbnail_path" ? undefined : value),
+    ),
+  );
 }
 test("production-size synthetic Needs You exactly matches the original reader response", async () => {
   const root = await mkdtemp(join(tmpdir(), "needs-golden-"));
