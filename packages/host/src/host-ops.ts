@@ -1270,7 +1270,7 @@ export class HostOpsService {
         const a = state.assignments.find((a) => a.id === action.assignment_id);
         evidenceSafe =
           !!a &&
-          this.stallPatrol.current(state, a.id, action.dispatch_stall_id) &&
+          !!this.stallPatrol.current(state, a.id, action.dispatch_stall_id) &&
           (await this.stallPatrol.evidence(state, a)).can_restart;
       };
       const mayStop = () => {
@@ -1411,10 +1411,17 @@ export class HostOpsService {
           return;
         const effect = unwrap(
           finishHostOpsAction(
-            loadCommandState(tx, project),
+            state,
             { kind: "system", project_id: project },
             action.action_id,
             { clock: this.clock, ids: tx.ids },
+            action.dispatch_stall_id
+              ? this.stallPatrol.current(
+                  state,
+                  action.assignment_id,
+                  action.dispatch_stall_id,
+                )
+              : undefined,
           ),
         );
         revokeStoppedRunTokens(tx, project, action.assignment_id);

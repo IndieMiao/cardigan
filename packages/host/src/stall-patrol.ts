@@ -14,6 +14,7 @@ import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
   recordNotification,
   type Store,
+  standingResolver,
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { type DispatchStall, dispatchStalls } from "./dispatch-stalls.js";
@@ -36,17 +37,17 @@ export class StallPatrol {
         statuses: ["pending", "belled", "delivery_failed"],
       }),
       this.clock.now(),
+      standingResolver(this.store),
     );
   }
-  current(state: CommandState, id: string, cause: string) {
-    return (
-      this.rows(state).some(
-        (s) =>
-          s.assignment_id === id && s.cause_id === cause && !s.restart_blocked,
-      ) &&
-      !unfinishedBellAttempts(this.store.database, state.project_id).some(
-        (b) => b.assignment_id === id,
-      )
+  current(state: CommandState, id: Assignment["id"], cause: string) {
+    if (
+      unfinishedBellAttempts(this.store.database, state.project_id, id).length
+    )
+      return;
+    return this.rows(state).find(
+      (s) =>
+        s.assignment_id === id && s.cause_id === cause && !s.restart_blocked,
     );
   }
   async evidence(state: CommandState, a: Assignment) {
@@ -136,20 +137,20 @@ export class StallPatrol {
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
     const { state, rows, patrol } = this.publish(project);
-    const own = rows.find(
-      (s) => s.assignment_id === patrol?.id && s.kind === "standing_backlog",
+    if (!patrol || hostOpsPending(state.events, patrol.id)) return;
+    const consumed = new Set(
+      eventsOfType(state.events, "host_ops_action_taken").map(
+        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+      ),
     );
-    if (
-      !patrol ||
-      !own ||
-      hostOpsPending(state.events, patrol.id) ||
-      eventsOfType(state.events, "host_ops_action_taken").some(
-        (e) =>
-          (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id ===
-          own.cause_id,
-      )
-    )
-      return;
+    const own = rows.find(
+      (s) =>
+        s.assignment_id === patrol.id &&
+        s.kind === "standing_backlog" &&
+        !s.restart_blocked &&
+        !consumed.has(s.cause_id),
+    );
+    if (!own) return;
     if (
       !(await this.evidence(state, patrol)).can_restart ||
       this.signal.aborted

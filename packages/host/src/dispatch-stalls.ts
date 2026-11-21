@@ -4,13 +4,18 @@ import {
   assignmentDependenciesAllowStart,
   type CardId,
   type CommandState,
+  decisionFollowupBlocked,
+  type Event,
+  eventById,
   eventsOfType,
   hasRunTarget,
   type Notification,
+  reviewWakeBlocked,
   runById,
   runsOf,
   stoppedByHuman,
 } from "@cardigan/domain";
+import type { standingResolver } from "@cardigan/store";
 
 export function dispatchStallMs() {
   const value = Number(process.env.CARDIGAN_DISPATCH_STALL_MS ?? 600_000);
@@ -28,6 +33,7 @@ export interface DispatchStall {
   assignment_id: Assignment["id"];
   card_id: CardId | null;
   cause_id: string;
+  review_trigger_id?: Event["id"];
   age_ms: number;
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
@@ -39,12 +45,54 @@ export function dispatchStalls(
   state: CommandState,
   notes: readonly Notification[],
   now: string,
+  standing: ReturnType<typeof standingResolver>,
   threshold = dispatchStallMs(),
 ) {
   const found = new Map<string, DispatchStall>();
   const assignments = new Map(state.assignments.map((a) => [a.id, a]));
   const items = new Map(state.work_items.map((w) => [w.id, w]));
   const cards = new Map(state.cards.map((c) => [c.id, c]));
+  const deliveries = new Map(state.deliveries.map((d) => [d.id, d]));
+  const currentDelivery = new Map(
+    state.deliveries.map((d) => [d.work_item_id, d.id]),
+  );
+  const currentReviews = new Set<string>(
+    state.reviews.filter((r) => !r.withdrawn).map((r) => r.id),
+  );
+  // Check the live rejection for both the durable notification and the missing-bell path.
+  function staleOwnerRejection(
+    e: Event,
+    w: CommandState["work_items"][number],
+  ) {
+    if (e.type !== "review_submitted") return false;
+    const p = e.payload as {
+      verdict?: string;
+      rework_allowed?: boolean;
+      review_id: string;
+      delivery_id: CommandState["deliveries"][number]["id"];
+    };
+    const d = deliveries.get(p.delivery_id);
+    return (
+      p.verdict === "reject" &&
+      d?.work_item_id === w.id &&
+      (!p.rework_allowed ||
+        d.status !== "rejected" ||
+        currentDelivery.get(w.id) !== d.id ||
+        !currentReviews.has(p.review_id))
+    );
+  }
+  const acked = new Map(
+    state.cursors.map((c) => [`${c.assignment_id}/${c.card_id}`, c.acked_seq]),
+  );
+  const recipients = new Map<
+    "pm_ops" | "pm_office",
+    Assignment["id"] | undefined
+  >();
+  function logicalOwner(kind: "pm_ops" | "pm_office") {
+    if (!recipients.has(kind))
+      recipients.set(kind, standing(state.project_id, kind, state));
+    return recipients.get(kind);
+  }
   const latestQueue = new Map<string, string>();
   for (const e of eventsOfType(state.events, "run_queued")) {
     const id = (e.payload as { assignment_id: string }).assignment_id;
@@ -54,10 +102,10 @@ export function dispatchStalls(
   function add(
     kind: StallKind,
     a: Assignment | undefined,
-    cause: string,
-    at: string,
-    sourceCard?: CardId,
+    source: Pick<Event, "seq" | "card_id" | "created_at"> & { id: string },
+    trigger = eventById(state.events, source.id),
   ) {
+    const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
     if (
       !(age >= threshold) ||
@@ -74,6 +122,12 @@ export function dispatchStalls(
       (card && !cards.has(card))
     )
       return;
+    // Sequence numbers are local to the source stream, not to the displayed card.
+    if (
+      kind !== "resume_not_dispatched" &&
+      (acked.get(`${a.id}/${sourceCard ?? ""}`) ?? -1) >= seq
+    )
+      return;
     const blocked = (() => {
       if (stoppedByHuman(state.events, a.id)) return "human_stopped";
       if (a.role_upgrade || a.idle_retirement?.phase === "stopping")
@@ -83,6 +137,14 @@ export function dispatchStalls(
         return "closed_card";
       if (parent?.hold || assignmentCardHeld(a, state)) return "card_held";
       if (!assignmentDependenciesAllowStart(state, a)) return "dependencies";
+      if (
+        trigger &&
+        (decisionFollowupBlocked(state, trigger.id, a.id) ||
+          (w &&
+            (reviewWakeBlocked(state, trigger, w.id) ||
+              staleOwnerRejection(trigger, w))))
+      )
+        return "trigger_blocked";
       if (!hasRunTarget(a, state)) return "no_target";
       if (
         w &&
@@ -120,6 +182,11 @@ export function dispatchStalls(
       assignment_id: a.id,
       card_id: card ?? null,
       cause_id: cause,
+      ...(trigger &&
+      (trigger.type === "review_submitted" ||
+        trigger.type === "decision_resolved")
+        ? { review_trigger_id: trigger.id }
+        : {}),
       age_ms: age,
       runtime_state: a.runtime_state,
       restart_blocked: blocked,
@@ -134,29 +201,14 @@ export function dispatchStalls(
     )
       continue;
     const sent = n.run_id && runById(state.runs, n.run_id);
-    const a =
+    const owner =
       n.recipient.kind === "assignment"
-        ? assignments.get(n.recipient.assignment_id)
+        ? n.recipient.assignment_id
         : sent
-          ? assignments.get(sent.assignment_id)
-          : state.assignments.find(
-              (a) =>
-                a.scope === "standing" &&
-                a.status === "active" &&
-                a.role_id === "pm" &&
-                a.standing_mode ===
-                  (n.recipient.kind === "pm_ops" ? "ops" : "office"),
-            );
-    if (
-      !a ||
-      state.cursors.some(
-        (c) =>
-          c.assignment_id === a.id &&
-          c.card_id === (n.card_id ?? "") &&
-          c.acked_seq >= n.seq,
-      )
-    )
-      continue;
+          ? sent.assignment_id
+          : logicalOwner(n.recipient.kind);
+    const a = owner && assignments.get(owner);
+    if (!a) continue;
     const last =
       a.scope === "standing"
         ? runsOf(state.runs, a.id).reduce(
@@ -167,9 +219,8 @@ export function dispatchStalls(
     add(
       a.scope === "standing" ? "standing_backlog" : "notification_backlog",
       a,
-      n.id,
-      last,
-      n.card_id,
+      { ...n, created_at: last },
+      eventById(state.events, n.event_id),
     );
   }
   for (const e of eventsOfType(state.events, "work_item_resume_requested")) {
@@ -183,7 +234,7 @@ export function dispatchStalls(
       a?.work_item_id === p.work_item_id &&
       (!p.role_version || p.role_version === a?.role_version)
     )
-      add("resume_not_dispatched", a, e.id, e.created_at, e.card_id);
+      add("resume_not_dispatched", a, e);
   }
   // Instructions carry a structured recipient even when their notification was lost.
   for (const e of eventsOfType(state.events, "instruction_issued")) {
@@ -192,21 +243,8 @@ export function dispatchStalls(
         .work_item_id,
     );
     if (w?.assignment_id)
-      add(
-        "owner_not_woken",
-        assignments.get(w.assignment_id),
-        e.id,
-        e.created_at,
-        e.card_id,
-      );
+      add("owner_not_woken", assignments.get(w.assignment_id), e);
   }
-  const deliveries = new Map(state.deliveries.map((d) => [d.id, d]));
-  const currentDelivery = new Map(
-    state.deliveries.map((d) => [d.work_item_id, d.id]),
-  );
-  const currentReviews = new Set<string>(
-    state.reviews.filter((r) => !r.withdrawn).map((r) => r.id),
-  );
   for (const e of eventsOfType(state.events, "review_submitted")) {
     const p = e.payload as {
       review_id: string;
@@ -217,18 +255,8 @@ export function dispatchStalls(
     if (p.verdict !== "reject" || !p.rework_allowed) continue;
     const d = deliveries.get(p.delivery_id);
     const w = d && items.get(d.work_item_id);
-    if (
-      w?.assignment_id &&
-      currentDelivery.get(w.id) === d?.id &&
-      currentReviews.has(p.review_id)
-    )
-      add(
-        "owner_not_woken",
-        assignments.get(w.assignment_id),
-        e.id,
-        e.created_at,
-        e.card_id,
-      );
+    if (w?.assignment_id)
+      add("owner_not_woken", assignments.get(w.assignment_id), e);
   }
   // A reviewer can reply to the current proposal without confirming it. Match the reply and the designated verifier, not words in the comment.
   for (const q of state.decisions) {
@@ -256,13 +284,10 @@ export function dispatchStalls(
           t.author === `assignment:${verifier.assignment_id}`,
       );
     if (w?.assignment_id && reply)
-      add(
-        "owner_not_woken",
-        assignments.get(w.assignment_id),
-        reply.id,
-        reply.created_at,
-        q.card_id,
-      );
+      add("owner_not_woken", assignments.get(w.assignment_id), {
+        ...reply,
+        seq: reply.event_seq,
+      });
   }
   return [...found.values()];
 }

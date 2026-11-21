@@ -8,6 +8,17 @@ import {
 } from "@cardigan/runtime-herdr";
 import { captureTranscript } from "./capture-transcript.js";
 
+// An idle verifier's build checkout can already have been reclaimed. Only an
+// actual missing entry (not EACCES, a symlink or a failed git command) counts.
+const inspectBuild = `import os, stat, sys
+for path in sys.argv[1:]:
+    try: mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        print("missing")
+        break
+    if not stat.S_ISDIR(mode): sys.exit(1)
+else: print("present")`;
+
 type Workspace = "clean" | "dirty" | "unknown" | "no_worktree";
 /** Fixed placement only. Use the worker account for agent-ssh; never return paths, stderr or filenames. */
 export async function stallWorkspace(
@@ -45,14 +56,33 @@ export async function stallWorkspace(
       (a.runtime_ref?.worktree_path && a.runtime_ref.worktree_path !== path)
     )
       return "unknown";
-    const paths =
-      role?.worktree === "readonly"
-        ? [path, join(roots.buildsRoot, state.project_id, a.id)]
-        : [path];
+    const run = async (file: string, args: string[]) => {
+      const cmd =
+        execution.mode === "agent-ssh"
+          ? await agentProcessCommand(execution, [file, ...args])
+          : { file, args };
+      return captureTranscript(cmd.file, cmd.args, signal);
+    };
+    const paths = [path];
+    if (role?.worktree === "readonly") {
+      const parent = join(roots.buildsRoot, state.project_id);
+      const build = join(parent, a.id);
+      const status = (
+        await run("python3", [
+          "-IB",
+          "-c",
+          inspectBuild,
+          roots.buildsRoot,
+          parent,
+          build,
+        ])
+      ).trimEnd();
+      if (status === "present") paths.push(build);
+      else if (status !== "missing") return "unknown";
+    }
     for (const target of paths) {
       const git = async (args: string[]) => {
         const argv = [
-          "git",
           ...gitSafetyArguments,
           "--no-optional-locks",
           "-c",
@@ -65,11 +95,7 @@ export async function stallWorkspace(
           target,
           ...args,
         ];
-        const cmd =
-          execution.mode === "agent-ssh"
-            ? await agentProcessCommand(execution, argv)
-            : { file: "git", args: argv.slice(1) };
-        return captureTranscript(cmd.file, cmd.args, signal);
+        return run("git", argv);
       };
       if ((await git(["rev-parse", "--show-toplevel"])).trimEnd() !== target)
         return "unknown";

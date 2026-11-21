@@ -1,10 +1,13 @@
+import type { DatabaseSync } from "node:sqlite";
 import type {
   Assignment,
+  AssignmentId,
+  CommandState,
   ProjectId,
   TransactionContext,
 } from "@cardigan/domain";
 import { applyStandingMode, standingModeFromTools } from "@cardigan/domain";
-import type { TokenRecord } from "./tokens.js";
+import { type TokenRecord, tokensForAssignment } from "./tokens.js";
 
 /**
  * M4.5: give rows written before the `standing_mode` field a mode once
@@ -46,4 +49,54 @@ export function backfillStandingModesInTransaction(
     updated.push(stamped.value);
   }
   return updated;
+}
+
+/**
+ * M4.5 (§7.1, §10.4): PM Office and PM Ops are the standing pm Assignments with
+ * `standing_mode` office / ops. The field is written once by `cardigan pm
+ * create` and backfilled for older rows at startup, so routing never has to
+ * guess from a token again. The token lookup stays as a read-only fallback for
+ * a legacy row that a dispatcher tick sees before the startup backfill.
+ */
+export function standingResolver(
+  store: { readonly database: DatabaseSync },
+  tokensOf: (
+    project: ProjectId,
+    assignment: AssignmentId,
+  ) => readonly { readonly allowed_tools: readonly string[] }[] = (
+    project,
+    assignment,
+  ) =>
+    tokensForAssignment(store.database, project, assignment).map((token) => ({
+      allowed_tools: token.allowed_tools,
+    })),
+) {
+  return (
+    project: ProjectId,
+    kind: "pm_ops" | "pm_office",
+    state: CommandState,
+  ): AssignmentId | undefined => {
+    const want = kind === "pm_office" ? "office" : "ops";
+    for (const candidate of state.assignments) {
+      if (
+        candidate.scope !== "standing" ||
+        candidate.role_id !== "pm" ||
+        candidate.status !== "active"
+      )
+        continue;
+      // C-244: read tokens only for a legacy row without standing_mode; the
+      // token query scans the whole tokens table.
+      const newest =
+        candidate.standing_mode === undefined
+          ? tokensOf(project, candidate.id).at(-1)
+          : undefined;
+      const mode =
+        candidate.standing_mode ??
+        (newest === undefined
+          ? undefined
+          : standingModeFromTools(newest.allowed_tools));
+      if (mode === want) return candidate.id;
+    }
+    return undefined;
+  };
 }

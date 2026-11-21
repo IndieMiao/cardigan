@@ -385,8 +385,16 @@ test("only the system may replace a stalled patrol, once per cause and never wit
   const effect = value(begin(f.state));
   const pending = apply(f.state, effect);
   expect(begin(pending).ok).toBe(false);
+  // An independently confirmed exit is still settled if its cause expired,
+  // but no unrelated followup Run is authorized.
+  expect(
+    value(finishHostOpsAction(pending, system, effect.data.action_id, f.io))
+      .data.run,
+  ).toBeUndefined();
   const finished = value(
-    finishHostOpsAction(pending, system, effect.data.action_id, f.io),
+    finishHostOpsAction(pending, system, effect.data.action_id, f.io, {
+      cause_id: params.cause_id,
+    }),
   );
   expect(finished.data.run?.status).toBe("queued");
   expect(finished.data.assignment_id).toBe(f.ops.id);

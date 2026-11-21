@@ -18,7 +18,7 @@ import {
   hostOpsPending,
   pendingHostOpsActions,
 } from "../host-ops.js";
-import type { AssignmentId, HumanActionId, RunId } from "../ids.js";
+import type { AssignmentId, EventId, HumanActionId, RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import { lastUpstreamInactivity } from "../upstream-health.js";
@@ -327,6 +327,7 @@ export function finishHostOpsAction(
   actor: Actor,
   action_id: HostOpsExecution["action_id"],
   ports: CommandPorts,
+  stall?: { cause_id: string; review_trigger_id?: EventId },
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -375,6 +376,8 @@ export function finishHostOpsAction(
     let run: Run | undefined;
     if (
       action.tool !== "host_ops_cancel_run" &&
+      (!action.dispatch_stall_id ||
+        action.dispatch_stall_id === stall?.cause_id) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
@@ -403,6 +406,9 @@ export function finishHostOpsAction(
         : card?.id,
       {
         action_id,
+        ...(action.dispatch_stall_id && run && stall?.review_trigger_id
+          ? { stall_review_trigger: stall.review_trigger_id }
+          : {}),
         ...(action.context_usage
           ? {
               body,
