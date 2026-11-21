@@ -10,6 +10,7 @@ import {
 import { unwrap } from "@cardigan/mcp-server";
 import { moveNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
+import { stalledTranscript } from "../test-support/dispatch.js";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
@@ -47,8 +48,10 @@ test.each(["pending", "belled"] as const)(
       ok: true,
       value: { process: "alive", agent: "unknown", observed_seq: 1 },
     });
+    const frozen = f.state();
     const dispatcher = new Dispatcher({
       ...f.options,
+      harnessActivity: (_p, id) => stalledTranscript(frozen, id),
       inactiveCancelAfterMs: null,
     });
     try {
@@ -149,7 +152,7 @@ test("an instruction ACKed by the original Run is consumed only on its own card 
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
 
-test("a cleaned verifier build allows recovery; an existing unreadable checkout, link or dirty work blocks it", async () => {
+function reviewerFixture() {
   const f = setup();
   const { card } = f.target;
   const run_id = f.latest().id;
@@ -211,8 +214,17 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
     const owner = tx.assignments.get(f.project, a.id);
     if (!role || !owner) throw new Error("Missing owner");
     tx.roles.put(f.project, { ...role, worktree: "readonly" });
-    tx.assignments.put(f.project, { ...owner, worktree_path: tree });
+    tx.assignments.put(f.project, {
+      ...owner,
+      worktree_path: tree,
+      base_sha: "b".repeat(40),
+    });
   });
+  return { f, a, card, item, tree, parent, build };
+}
+
+test("a cleaned verifier build allows recovery; an existing unreadable checkout, link or dirty work blocks it", async () => {
+  const { f, a, card, item, tree, parent, build } = reviewerFixture();
   f.advance(1);
   const e = f.event(
     "instruction_issued",
@@ -244,6 +256,138 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   await f.restart(a, e.id);
   await f.service.tick();
   await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
+});
+
+test("synthetic review handoff: reading the bell is not a restart; safe fresh evidence recovers its original assignment once", async () => {
+  const { f, a, card, item } = reviewerFixture();
+  // Replay the persisted end of a review-limit turn. The review is allowed to proceed now.
+  const run = f.session(a, false);
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id);
+    const active = tx.runs.get(f.project, run.id);
+    if (!owner || !active) throw new Error("missing review session");
+    tx.runs.put(f.project, {
+      ...active,
+      status: "completed",
+      outcome: "blocked",
+      finished_at: f.clock.now(),
+    });
+    tx.assignments.put(f.project, { ...owner, runtime_state: "idle" });
+  });
+  f.event(
+    "run_finished",
+    {
+      run_id: run.id,
+      assignment_id: a.id,
+      outcome: "blocked",
+      finished_by: "system",
+      reason: "review_limit",
+    },
+    undefined,
+    card.id,
+  );
+  f.skipEvents();
+  f.advance(1);
+  const notice = f.event(
+    "comment_posted",
+    { work_item_id: item.id },
+    a,
+    card.id,
+  );
+  f.skipEvents();
+  const ref = f.refFor(a);
+  f.working.add(ref.terminal_ref);
+  const execute = vi.spyOn(f.service.tools, "execute");
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    const handoff = f
+      .state()
+      .events.find(
+        (e) =>
+          e.type === "bell_wake_escalated" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      );
+    expect(handoff).toMatchObject({
+      payload: {
+        reason: "system_finished_turn",
+        activity_forwarded_to: f.ops.id,
+      },
+    });
+    if (!handoff || handoff.card_id !== card.id)
+      throw new Error("missing review handoff on the original card");
+    const [note] = f.store
+      .listNotifications({ project_id: f.project, assignment_id: a.id })
+      .filter((n) => n.event_id === notice.id);
+    if (!note) throw new Error("missing original notification");
+    expect(note.status).toBe("needs_attention");
+    unwrap(
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: f.ops.id,
+        card_id: handoff.card_id,
+        up_to_seq: handoff.seq,
+      }),
+    );
+    const row = async () =>
+      (await f.view()).dispatch_stalls.find(
+        (s) => s.assignment_id === a.id && s.handoff_event_id === handoff.id,
+      );
+    expect(await row()).toMatchObject({
+      cause_id: note.id,
+      workspace: "clean",
+      can_restart: false,
+    });
+    expect(
+      f.state().events.some((e) => e.type === "host_ops_action_taken"),
+    ).toBe(false);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    // No prior attempt. Do not bypass the guard: only a new terminal observation enables this call.
+    f.working.delete(ref.terminal_ref);
+    const ready = await row();
+    if (!ready?.can_restart)
+      throw new Error("expected actionable review handoff");
+    await f.restart(a, ready.cause_id);
+    await f.restart(a, ready.cause_id);
+    await f.service.tick();
+    await vi.waitFor(() =>
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          ),
+      ).toHaveLength(1),
+    );
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toMatchObject([
+      { payload: { dispatch_stall_id: note.id, target_id: a.id } },
+    ]);
+    expect(f.runtime.release).toHaveBeenCalledOnce();
+    expect(
+      f.state().assignments.find((owner) => owner.id === a.id)?.runtime_ref,
+    ).toBeNull();
+    expect(await row()).toBeUndefined();
+    const queued = f
+      .state()
+      .runs.find((r) => r.assignment_id === a.id && r.status === "queued");
+    expect(
+      f.state().events.find((e) => e.type === "host_ops_action_finished"),
+    ).toMatchObject({ payload: { assignment_id: a.id, run_id: queued?.id } });
+    await dispatcher.tick();
+    expect(f.options.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignment: expect.objectContaining({ id: a.id }),
+        run: expect.objectContaining({ id: queued?.id }),
+      }),
+    );
+  } finally {
+    await dispatcher.close();
+  }
 });
 
 test.each(["held", "consumed"])(

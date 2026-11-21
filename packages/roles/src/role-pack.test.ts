@@ -349,6 +349,20 @@ test("host operations keeps v3 outage safeguards and C-200 context guidance with
     expect(body).toContain(rule);
 });
 
+test("a bell handoff directs operations to the cause-bound restart or a specific refusal", () => {
+  const body = instructionsFor("host_ops");
+  for (const text of [
+    "收到 bell_wake_escalated 就读取 host_ops_read_diagnostics",
+    "handoff_event_id",
+    "cause_id 作为 dispatch_stall_id",
+    "不直接开人工待办",
+    "记录未尝试的具体原因",
+    "stale_target 时重读诊断",
+    "已尝试但被拒",
+  ])
+    expect(body).toContain(text);
+});
+
 describe("default role kinds (p2v-12 §2.3)", () => {
   test("every default role has an explicit kind", () => {
     expect(DEFAULT_ROLE_KINDS).toEqual({

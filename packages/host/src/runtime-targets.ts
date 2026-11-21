@@ -60,7 +60,7 @@ type Adapter = Runtime &
     HerdrRuntime,
     "events" | "probeTerminal" | "captureAgent" | "checkLocalHealth"
   > &
-  Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
+  Partial<Pick<HerdrRuntime, "session" | "socketPath" | "terminalActivity">>;
 interface Target {
   readonly execution: ExecutionConfig;
   readonly session: string;
@@ -695,6 +695,18 @@ export class RuntimeTargets implements Runtime {
     call: (runtime: Adapter) => Promise<RuntimeResult<T>>,
   ) {
     return this.invoke(() => this.targetForRef(ref), call);
+  }
+  terminalActivity(ref: RuntimeRef, project: string, assignment: string) {
+    const target = () => this.targetForRef(ref, project);
+    return this.invoke(target, async (runtime) => {
+      const observation = await runtime.terminalActivity?.(
+        ref,
+        project,
+        assignment,
+      );
+      target(); // A replaced worker must not contribute a late screen sample.
+      return observation ?? rejected();
+    });
   }
   interaction(
     ref: RuntimeRef,

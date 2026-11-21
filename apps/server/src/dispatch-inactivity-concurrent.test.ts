@@ -89,6 +89,8 @@ function fixture() {
         { status: "fresh" as const, activity: t.activity },
       ]),
     ),
+    notices: () =>
+      f.state().events.filter((e) => e.type === "run_local_activity_missing"),
     alerts: () => f.state().events.filter((e) => e.type === "run_inactive"),
   };
 }
@@ -130,15 +132,15 @@ test("C-417: later due Runs share the original deadline without extending it", a
   expect(t.runtime.release).not.toHaveBeenCalled();
   t.f.advance(1);
   await vi.advanceTimersByTimeAsync(1);
-  expect(t.alerts()).toHaveLength(2);
-  for (const alert of t.alerts())
+  expect(t.notices()).toHaveLength(2);
+  for (const alert of t.notices())
     expect(alert.payload).toMatchObject({ activity_check: "timeout" });
   await t.d.tick();
   expect(t.runtime.release).toHaveBeenCalledTimes(2);
   expect(t.inspection).toHaveBeenCalledOnce();
   t.read.resolve(t.fresh);
   await flush();
-  expect(t.alerts()).toHaveLength(2);
+  expect(t.notices()).toHaveLength(2);
 });
 
 test.each(["runtime", "session"])(
@@ -176,8 +178,8 @@ test.each(["runtime", "session"])(
     await t.d.tick();
     await flush();
     expect(t.inspection).toHaveBeenCalledTimes(2);
-    expect(t.alerts()).toHaveLength(1);
-    expect(t.alerts()[0]?.payload).toMatchObject({
+    expect(t.notices()).toHaveLength(1);
+    expect(t.notices()[0]?.payload).toMatchObject({
       run_id: t.second.run.id,
       activity_check: "completed",
     });
@@ -215,7 +217,7 @@ test.each(["missing", "read_failed"])(
     if (mode === "missing") t.read.resolve(new Map());
     else t.read.reject(new Error("fixture read failure"));
     await flush();
-    expect(t.alerts()).toHaveLength(2);
+    expect(t.notices()).toHaveLength(2);
     await t.d.tick();
     expect(t.inspection).toHaveBeenCalledOnce();
     expect(t.runtime.release).toHaveBeenCalledTimes(2);

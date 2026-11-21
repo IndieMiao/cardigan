@@ -40,7 +40,11 @@ import {
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { dispatchFixture } from "../test-support/dispatch.js";
+import {
+  dispatchFixture,
+  stalledCache,
+  stalledTranscript,
+} from "../test-support/dispatch.js";
 import { resolveServerConfig } from "./config.js";
 import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -1762,6 +1766,7 @@ test("C-213: patrol observes working sessions before clustering, without waiting
     runtime,
     snapshot,
     clock: f.clock,
+    harnessActivity: stalledCache(f.state()),
   }).tick();
   expect(
     f.state().events.filter((e) => e.type === "run_inactive"),
@@ -2171,10 +2176,12 @@ test.each([
     const original = f.session(assignment, false);
     const { sample } = upstreamService();
     await sample(true);
+    let frozen = f.state();
     const dispatcher = new Dispatcher({
       store: f.store,
       runtime,
       snapshot,
+      harnessActivity: (_p, id) => stalledTranscript(frozen, id),
       clock: f.clock,
     });
     f.advance(15 * 60_000);
@@ -2219,6 +2226,7 @@ test.each([
       (s, a, p) => acknowledgeRun(s, a, { run_id: nextRun.id }, p),
       f.actorFor(assignment),
     );
+    frozen = f.state();
     f.advance(lastActivityAfterMs - 1_000);
     expect(f.store.touchAssignmentActivity(f.project, assignment.id)).toBe(
       true,

@@ -576,6 +576,7 @@ const ROLE_BODIES: Record<
     "- 自己的上下文到换会话档时，可以主动用 host_ops_restart_assignment 以自身 Assignment 和当前 context_session_id 换会话，先更新交接；未主动处理时系统会在空闲时自动换会话。",
     "- 每次上下文处理保留审计及卡片／项目事件中的交接记录：员工、Assignment、会话、当时已用和剩余比例、动作、结果；上下文提醒和换会话记录由服务端持久化。失败或无法关联时明确记录原因，不猜测目标。",
     "- 每次巡检读取 dispatch_stalls：通知积压、请求恢复后未排队、常驻积压、等待的人未被唤醒。复核对应卡、指派、等待年龄、终端状态和工作区；没有未结束 Run、工作区 clean 或 no_worktree 且 can_restart 为真时，工作项用 host_ops_restart_assignment，托管常驻 PM 用 host_ops_restart_standing_pm，带该行 cause_id 作为 dispatch_stall_id。同一原因只处置一次。自己积压由主机巡检恢复并通知 PM Office。不碰外接、暂停或运行中的会话；有未提交改动或证据不足交 PM，不直接 stop + start。远端只在受支持的只读取证和退出确认都就绪且工具允许时同样处理，否则交张良。",
+    "- 收到 bell_wake_escalated 就读取 host_ops_read_diagnostics，不等下一次巡检。按告警事件编号（handoff_event_id）和原指派匹配 dispatch_stalls；满足上述复核条件就用该行 cause_id 调用对应换会话工具，不直接开人工待办。没有匹配或不能安全恢复时记录未尝试的具体原因；工具返回 stale_target 时重读诊断，记录为已尝试但被拒，不换编号重试、不绕开守卫。告警移交、工具受理都不等于恢复成功，另核原会话退出和后续 Run。",
     "- 恢复卡住的会话用 host_ops_restart_assignment；只取消 Run 用 host_ops_cancel_run；偶发合并检查失败可用 host_ops_recheck_merge 重查；常驻 PM 会话过期用 host_ops_restart_standing_pm。先核实目标、原因和当前状态，失败后核对最新记录，不能盲目重试。",
     "- 重启前先区分上游 API 线路中断、Agent 卡死和 server 侧问题。仅长时间没有 MCP 调用不证明卡死：Agent 仍在改代码或跑测试时不能重启；模型网关错误与 card MCP 连接错误按来源区分，证据不明时先记录并核实。",
     "- 沿用已批准的上游中断规则：10 分钟内有 3 个及以上使用同一中转线路的会话失活（run_inactive 或派发超时），按上游 API 中断处理，直连线路不混入统计。以诊断的显式配置为准，未配置时沿用这组默认阈值；探测失败同样先按上游中断处理，不能用一次连接成功覆盖多会话失活证据。",

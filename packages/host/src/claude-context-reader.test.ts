@@ -8,6 +8,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -122,8 +123,15 @@ test.each([
       source: "claude_transcript:last_usage",
     });
     expect(agentProcessCommand).toHaveBeenCalledOnce();
-    expect(vi.mocked(agentProcessCommand).mock.calls[0]?.[1].slice(-2)).toEqual(
-      [runDir, ""],
+    expect(vi.mocked(agentProcessCommand).mock.calls[0]?.[1].slice(-6)).toEqual(
+      [
+        runDir,
+        "",
+        "local",
+        String(Date.parse("2026-01-01T00:00:00.000Z")),
+        cwd,
+        kind === "worktrees" ? `${cwd}/` : "",
+      ],
     );
     expect(sample?.status).toBe(window === null ? "missing" : "fresh");
     if (window === null) expect(sample).not.toHaveProperty("observation");
@@ -138,7 +146,17 @@ const rawRead = async (runDir: string, session = "") =>
   (
     await capture(
       process.execPath,
-      ["-e", CLAUDE_CONTEXT_READER, "--", runDir, session],
+      [
+        "-e",
+        CLAUDE_CONTEXT_READER,
+        "--",
+        runDir,
+        session,
+        "local",
+        "0",
+        "/fixture",
+        "",
+      ],
       {
         encoding: "utf8",
         maxBuffer: 64 * 1024,
@@ -159,13 +177,15 @@ const line = (input = 100) =>
     },
   });
 
-test("the process boundary emits only usage fields and reads only a complete tail sample", async () => {
+test("only complete tail records supply usage; a verified crossing record identifies the file write", async () => {
   root = await mkdtemp(join(tmpdir(), "claude-tail-"));
   const dir = join(root, "claude", "projects", "-fixture");
   await mkdir(dir, { recursive: true });
   const file = join(dir, "session.jsonl");
   const padding = JSON.stringify({
     type: "user",
+    sessionId: "session",
+    cwd: "/fixture",
     content: "x".repeat(4 * 1024 * 1024),
   });
   await writeFile(file, `${line(1)}\n${padding}\n${line()}\n{"partial`);
@@ -178,7 +198,17 @@ test("the process boundary emits only usage fields and reads only a complete tai
   expect(stdout.length).toBeLessThan(1024);
   // A sample before the bounded tail cannot be recovered from the file head.
   await writeFile(file, `${line(1)}\n${padding}\n`);
-  expect(await rawRead(root)).toBe("null");
+  // Use a known whole-second write time distinct from the record timestamp.
+  const writtenAt = new Date("2026-01-01T00:05:00.000Z");
+  await utimes(file, writtenAt, writtenAt);
+  expect(JSON.parse(await rawRead(root))).toEqual({
+    path: file,
+    file_activity: {
+      cwd: "/fixture",
+      session_id: "session",
+      updated_at: writtenAt.toISOString(),
+    },
+  });
 });
 
 test.each(["claude", "projects", "slug", "file"])(

@@ -12,6 +12,7 @@ import {
   createCard,
   dispatchRun,
   finishRun,
+  type HarnessActivity,
   queueRun,
   type Result,
   type Run,
@@ -237,3 +238,27 @@ export function dispatchFixture(
     },
   };
 }
+
+/** Attributable transcript frozen at Run start (not merely a missing sample). */
+export function stalledTranscript(
+  state: CommandState,
+  id: Assignment["id"],
+): HarnessActivity | undefined {
+  const run = state.runs.findLast((r) => r.assignment_id === id);
+  const a = state.assignments.find((a) => a.id === id);
+  if (!run?.started_at || !a?.runtime_ref) return;
+  return {
+    assignment_id: id,
+    run_id: run.id,
+    runtime_key: JSON.stringify(a.runtime_ref),
+    session_id:
+      a.runtime_ref.agent_session_id ?? a.session_ref ?? "fixture-session",
+    source: `${run.harness ?? "codex"}:session_metadata`,
+    stale_after_ms: 600_000,
+    updated_at: run.started_at,
+  };
+}
+
+export const stalledCache =
+  (state: CommandState) => (_project: string, id: Assignment["id"]) =>
+    stalledTranscript(state, id);

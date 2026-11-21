@@ -49,6 +49,7 @@ export function setup() {
       dispatch_stalls: Array<{
         kind: string;
         cause_id: string;
+        handoff_event_id?: string;
         can_restart: boolean;
         assignment_id: string;
         workspace: string;
