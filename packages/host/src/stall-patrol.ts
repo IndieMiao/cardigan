@@ -17,8 +17,18 @@ import {
   standingResolver,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-import { type DispatchStall, dispatchStalls } from "./dispatch-stalls.js";
+import { type DispatchStall, dispatchStallCauses } from "./dispatch-stalls.js";
 import { stallEvidence } from "./stall-evidence.js";
+
+// Keep diagnostics and notifications compact, without using a display row as a recovery fence.
+function oldestPerGroup(causes: DispatchStall[]) {
+  const rows = new Map<string, DispatchStall>();
+  for (const s of causes) {
+    const key = `${s.assignment_id}/${s.kind}/${s.card_id ?? ""}`;
+    if ((rows.get(key)?.age_ms ?? -1) < s.age_ms) rows.set(key, s);
+  }
+  return rows;
+}
 
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
@@ -29,8 +39,8 @@ export class StallPatrol {
     private execution: () => ExecutionConfig | undefined,
     private signal: AbortSignal,
   ) {}
-  rows(state: CommandState) {
-    return dispatchStalls(
+  private causes(state: CommandState) {
+    return dispatchStallCauses(
       state,
       this.store.listNotifications({
         project_id: state.project_id,
@@ -40,12 +50,31 @@ export class StallPatrol {
       standingResolver(this.store),
     );
   }
+  private survey(state: CommandState) {
+    const causes = this.causes(state);
+    const consumed = new Set(
+      eventsOfType(state.events, "host_ops_action_taken").map(
+        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+      ),
+    );
+    const actionable = oldestPerGroup(
+      causes.filter((s) => !s.restart_blocked && !consumed.has(s.cause_id)),
+    );
+    // Groups with no actionable cause still report their oldest outstanding wait.
+    const rows = oldestPerGroup(causes);
+    for (const [key, s] of actionable) rows.set(key, s);
+    return {
+      rows: [...rows.values()],
+      actionable: new Set(actionable.values()),
+    };
+  }
   current(state: CommandState, id: Assignment["id"], cause: string) {
     if (
       unfinishedBellAttempts(this.store.database, state.project_id, id).length
     )
       return;
-    return this.rows(state).find(
+    // An in-flight action must recheck its exact cause, even after it is marked consumed.
+    return this.causes(state).find(
       (s) =>
         s.assignment_id === id && s.cause_id === cause && !s.restart_blocked,
     );
@@ -55,18 +84,13 @@ export class StallPatrol {
   }
   async diagnostics(project: ProjectId) {
     const state = this.store.uow.read((tx) => loadCommandState(tx, project));
-    const stalls = this.rows(state);
+    const { rows, actionable } = this.survey(state);
     const result = [];
-    const consumed = new Set(
-      eventsOfType(state.events, "host_ops_action_taken").map(
-        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
-      ),
-    );
     const evidence = new Map<
       string,
       Awaited<ReturnType<StallPatrol["evidence"]>>
     >();
-    for (const s of stalls) {
+    for (const s of rows) {
       const a = state.assignments.find((a) => a.id === s.assignment_id);
       if (!a) continue;
       const view = evidence.get(a.id) ?? (await this.evidence(state, a));
@@ -75,8 +99,7 @@ export class StallPatrol {
         ...s,
         ...view,
         can_restart:
-          !s.restart_blocked &&
-          !consumed.has(s.cause_id) &&
+          actionable.has(s) &&
           view.can_restart &&
           !hostOpsPending(state.events, a.id) &&
           !unfinishedBellAttempts(this.store.database, project, a.id).length,
@@ -87,7 +110,7 @@ export class StallPatrol {
   private publish(project: ProjectId) {
     return this.store.uow.run((tx) => {
       const state = loadCommandState(tx, project);
-      const rows = this.rows(state);
+      const { rows, actionable } = this.survey(state);
       const patrol = state.assignments.find(
         (a) =>
           a.scope === "standing" &&
@@ -126,7 +149,7 @@ export class StallPatrol {
               : { kind: "pm_office" },
         });
       }
-      return { state, rows, patrol };
+      return { state, actionable, patrol };
     });
   }
   async tick(
@@ -136,19 +159,10 @@ export class StallPatrol {
       p: ProjectId,
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
-    const { state, rows, patrol } = this.publish(project);
+    const { state, actionable, patrol } = this.publish(project);
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
-    const consumed = new Set(
-      eventsOfType(state.events, "host_ops_action_taken").map(
-        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
-      ),
-    );
-    const own = rows.find(
-      (s) =>
-        s.assignment_id === patrol.id &&
-        s.kind === "standing_backlog" &&
-        !s.restart_blocked &&
-        !consumed.has(s.cause_id),
+    const own = [...actionable].find(
+      (s) => s.assignment_id === patrol.id && s.kind === "standing_backlog",
     );
     if (!own) return;
     if (

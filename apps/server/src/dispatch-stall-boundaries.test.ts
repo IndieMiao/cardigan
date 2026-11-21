@@ -12,6 +12,7 @@ import { moveNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
+import { patrolHostOps } from "./host-ops-patrol.js";
 
 test.each(["pending", "belled"] as const)(
   "C-520#50: an unconsumed %s bell on a 13-hour running Run alerts Ops once, without replacing it",
@@ -329,6 +330,77 @@ test.each(["held", "consumed"])(
     ).toHaveLength(1);
   },
 );
+
+test("an unacknowledged patrol notification cannot hide a new alert on the project stream", async () => {
+  const f = setup();
+  const pending = () =>
+    f.store.listNotifications({
+      project_id: f.project,
+      assignment_id: f.ops.id,
+      statuses: ["pending"],
+    });
+  const ownRows = async () =>
+    (await f.view()).dispatch_stalls.filter(
+      (s) => s.assignment_id === f.ops.id,
+    );
+  const actions = () =>
+    f
+      .state()
+      .events.filter((e) => e.type === "host_ops_action_taken")
+      .map(
+        (e) => (e.payload as { dispatch_stall_id: string }).dispatch_stall_id,
+      );
+
+  f.advance(1);
+  patrolHostOps(f.store, f.project, f.clock, 1);
+  const [old] = pending();
+  if (!old) throw new Error("missing patrol notification");
+  const taken = f.event("host_ops_action_taken", {
+    assignment_id: f.ops.id,
+    dispatch_stall_id: old.id,
+    tool: "host_ops_restart_assignment",
+  });
+  f.event("host_ops_action_finished", {
+    assignment_id: f.ops.id,
+    action_id: taken.id,
+  });
+
+  // Let an unrelated missing bell reach the threshold and publish a real alert to Ops.
+  f.advance(1_000);
+  f.event("instruction_issued", { work_item_id: f.target.item.id });
+  f.advance(610_000);
+  await f.service.tick();
+  const next = pending().find((n) => n.id !== old.id);
+  if (!next) throw new Error("missing stall attention notification");
+  expect(f.state().events.find((e) => e.id === next.event_id)?.type).toBe(
+    "dispatch_stall_attention",
+  );
+  expect(pending().map((n) => n.card_id)).toEqual([undefined, undefined]);
+  expect(await ownRows()).toMatchObject([
+    { cause_id: old.id, can_restart: false },
+  ]);
+  expect(actions()).toEqual([old.id]);
+
+  f.advance(610_000);
+  expect(await ownRows()).toMatchObject([
+    { cause_id: next.id, can_restart: true },
+  ]);
+  await f.service.tick();
+  await vi.waitFor(() => expect(actions()).toEqual([old.id, next.id]));
+  await f.service.tick();
+  await vi.waitFor(() =>
+    expect(
+      f
+        .state()
+        .runs.filter(
+          (r) => r.assignment_id === f.ops.id && r.status === "queued",
+        ),
+    ).toHaveLength(1),
+  );
+  f.advance(30_000);
+  await f.service.tick();
+  expect(actions()).toEqual([old.id, next.id]);
+});
 
 test.each(["ops", "office", "external"] as const)(
   "undelivered logical bells share the dispatcher resolver (%s)",

@@ -41,14 +41,14 @@ export interface DispatchStall {
 }
 
 /** Only current actionable work: an old rejection, held card or retired assignee is not a restart request. */
-export function dispatchStalls(
+export function dispatchStallCauses(
   state: CommandState,
   notes: readonly Notification[],
   now: string,
   standing: ReturnType<typeof standingResolver>,
   threshold = dispatchStallMs(),
 ) {
-  const found = new Map<string, DispatchStall>();
+  const found: DispatchStall[] = [];
   const assignments = new Map(state.assignments.map((a) => [a.id, a]));
   const items = new Map(state.work_items.map((w) => [w.id, w]));
   const cards = new Map(state.cards.map((c) => [c.id, c]));
@@ -175,9 +175,7 @@ export function dispatchStalls(
       (latestQueue.get(a.id) ?? "") >= at
     )
       return;
-    const key = `${a.id}/${kind}/${card ?? ""}`;
-    if ((found.get(key)?.age_ms ?? -1) >= age) return;
-    found.set(key, {
+    found.push({
       kind,
       assignment_id: a.id,
       card_id: card ?? null,
@@ -289,5 +287,5 @@ export function dispatchStalls(
         seq: reply.event_seq,
       });
   }
-  return [...found.values()];
+  return found;
 }
