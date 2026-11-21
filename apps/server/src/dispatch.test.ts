@@ -2012,6 +2012,94 @@ function standingSession(role_id: string, standing_mode?: "office" | "ops") {
   return owner;
 }
 
+test.each(["pm", "host_ops"])(
+  "standing %s: wake after an explicit finish and hand off a later no-Run stall",
+  async (role) => {
+    const owner = standingSession(role, role === "pm" ? "ops" : undefined);
+    const ops = role === "pm" ? standingSession("host_ops") : undefined;
+    const notify = () => {
+      const entry = comment();
+      const event = f
+        .state()
+        .events.find(
+          (e) => e.card_id === target.card.id && e.seq === entry.event_seq,
+        );
+      if (!event) throw Error("missing fixture comment");
+      return f.store.recordNotification({
+        project_id: f.project,
+        event_id: event.id,
+        card_id: event.card_id,
+        seq: event.seq,
+        kind: "comment",
+        recipient: { kind: "assignment", assignment_id: owner.id },
+      }).notification;
+    };
+    let probeFails = false;
+    vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+      ok: true,
+      value: {
+        process:
+          probeFails && ref.terminal_ref === f.refFor(owner).terminal_ref
+            ? "unknown"
+            : "alive",
+        agent: "blocked",
+        observed_seq: 1,
+      },
+    }));
+    const tick = () =>
+      new Dispatcher({ ...options, dispatchTimeoutMs: 1000 }).tick();
+    const ready = notify();
+    await tick();
+    const read = (id: string) =>
+      f.store.listNotifications({ project_id: f.project, ids: [id] })[0];
+    expect(read(ready.id)?.status).toBe("belled");
+    const run = read(ready.id)?.run_id;
+    if (!run) throw Error("missing standing followup");
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: run }, p),
+      f.actorFor(owner),
+    );
+    finish(owner);
+    probeFails = true;
+    const waiting = notify();
+    await tick();
+    f.advance(999);
+    await tick();
+    expect(read(waiting.id)?.status).toBe("pending");
+    f.advance(1);
+    await tick();
+    await tick();
+    expect(read(waiting.id)?.status).toBe("needs_attention");
+    const alerts = f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "standing_inbox_stalled" &&
+          (e.payload as { assignment_id: string }).assignment_id === owner.id,
+      );
+    expect(alerts).toMatchObject([
+      {
+        payload: {
+          reason: "pending_without_run",
+          notification_ids: [waiting.id],
+        },
+      },
+    ]);
+    expect(f.store.listNotifications({ project_id: f.project })).toContainEqual(
+      expect.objectContaining({
+        event_id: alerts[0]?.id,
+        recipient: ops
+          ? { kind: "assignment", assignment_id: ops.id }
+          : { kind: "needs_you" },
+      }),
+    );
+    expect(runtime.release).not.toHaveBeenCalledWith(
+      f.refFor(owner),
+      expect.anything(),
+    );
+  },
+);
+
 test.each([
   ["pm", "office", 0],
   ["pm", "ops", 0],

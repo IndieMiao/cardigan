@@ -141,7 +141,11 @@ import {
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
-import { recordTurnWait, systemEndedTurn } from "./dispatch-turn-guard.js";
+import {
+  handoffUnread,
+  recordTurnWait,
+  systemEndedTurn,
+} from "./dispatch-turn-guard.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -462,6 +466,7 @@ export class Dispatcher {
               candidate.notes,
               candidate.assignment,
             );
+            this.checkStandingInbox(candidate);
           }
         });
       } finally {
@@ -1300,6 +1305,78 @@ export class Dispatcher {
       return undefined;
     }
   }
+  /** Catch no-Run stalls independently of the turn guard (e.g. status unavailable before claim).
+   * Use the routed candidate's IDs; never scan all inbox history or preempt a successful delivery. */
+  private checkStandingInbox({ project, assignment, notes }: Candidate) {
+    if (this.closing || assignment.scope !== "standing" || !notes.length)
+      return;
+    const at = this.clock.now(),
+      deadline = Date.parse(at) - this.dispatchTimeoutMs;
+    const overdue = notes.filter((n) => Date.parse(n.updated_at) <= deadline);
+    if (!overdue.length) return;
+    const { store, standing } = this.options;
+    store.uow.run((tx) => {
+      const state = this.loadState(tx, project);
+      const owner = state.assignments.find((a) => a.id === assignment.id);
+      if (
+        owner?.scope !== "standing" ||
+        owner.status !== "active" ||
+        owner.external ||
+        !sameRef(owner, assignment) ||
+        owner.session_ref !== assignment.session_ref ||
+        this.busy(state, owner) ||
+        runsOf(state.runs, owner.id).some(unfinishedRun) ||
+        unfinishedBellAttempts(store.database, project, owner.id).length
+      )
+        return;
+      const pending = this.pendingForOwner(state, owner, overdue).filter(
+        (n) =>
+          Date.parse(n.updated_at) <= deadline &&
+          !(
+            owner.standing_mode === "ops" &&
+            newPmNotification(state, n) &&
+            pmNotificationState(state, n) === "obsolete"
+          ),
+      );
+      if (pending.length)
+        handoffUnread(
+          tx,
+          store,
+          state,
+          at,
+          {
+            assignment: owner,
+            card_id: pending[0]?.card_id,
+            type: "standing_inbox_stalled",
+            reason: "pending_without_run",
+          },
+          pending.map((n) => n.id),
+          pending,
+          standing,
+        );
+    });
+  }
+
+  private pendingForOwner(
+    state: CommandState,
+    owner: Assignment,
+    notes: readonly Notification[],
+  ) {
+    if (!notes.length) return [];
+    return this.options.store
+      .listNotifications({
+        project_id: state.project_id,
+        status: "pending",
+        ids: notes.map((n) => n.id),
+      })
+      .filter(
+        (n) =>
+          this.owner(n, state) === owner.id &&
+          !covered(n, state, owner.id) &&
+          !notificationBlocked(state, n.event_id, owner.id) &&
+          !state.cards.some((c) => c.id === n.card_id && c.hold),
+      );
+  }
   private waitForTurn(
     project: ProjectId,
     a: Assignment,
@@ -1330,21 +1407,7 @@ export class Dispatcher {
           : systemEndedTurn(fresh, owner)?.id !== turn.id)
       )
         return;
-      const pending = notes.length
-        ? this.options.store
-            .listNotifications({
-              project_id: project,
-              status: "pending",
-              ids: notes.map((n) => n.id),
-            })
-            .filter(
-              (n) =>
-                this.owner(n, fresh) === owner.id &&
-                !covered(n, fresh, owner.id) &&
-                !notificationBlocked(fresh, n.event_id, owner.id) &&
-                !fresh.cards.some((c) => c.id === n.card_id && c.hold),
-            )
-        : [];
+      const pending = this.pendingForOwner(fresh, owner, notes);
       if (
         notes.length
           ? !pending.length

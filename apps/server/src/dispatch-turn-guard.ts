@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  type CardId,
   type CommandState,
   eventsOfType,
   type Notification,
@@ -64,7 +65,6 @@ export function recordTurnWait(
   },
 ) {
   const { owner, turn, notes, reason, observation } = input;
-  const project = state.project_id;
   const card =
     notes[0]?.card_id ??
     (notes.length
@@ -115,20 +115,49 @@ export function recordTurnWait(
       ))
   )
     return;
-  for (const id of overdue)
+  handoffUnread(
+    tx,
+    store,
+    state,
+    at,
+    { ...common, type: "bell_wake_escalated" },
+    overdue,
+    notes,
+    input.standing,
+  );
+}
+
+/** Transfer the original rows and notify a different recipient in the same transaction. */
+export function handoffUnread(
+  tx: StoreTransactionContext,
+  store: Store,
+  state: CommandState,
+  at: string,
+  incident: {
+    assignment: Assignment;
+    card_id: CardId | undefined;
+    type: "standing_inbox_stalled" | "bell_wake_escalated";
+    reason: string;
+    run_id?: Run["id"];
+    activity_source?: string;
+  },
+  ids: readonly string[],
+  notes: readonly Notification[],
+  standing?: StandingResolver,
+) {
+  for (const id of ids)
     moveNotification(store.database, {
-      project_id: project,
+      project_id: state.project_id,
       id,
       event: "needs_attention",
       at,
     });
   dispatchAlert(tx, store, state, at, {
-    ...common,
-    type: "bell_wake_escalated",
-    notification_ids: overdue,
+    ...incident,
+    notification_ids: ids,
     notifyHostOps: true,
-    audience: hostOpsAlertRecipient(state, owner)
+    audience: hostOpsAlertRecipient(state, incident.assignment)
       ? "host_ops_only"
-      : alertAudience(owner, state, input.standing, notes),
+      : alertAudience(incident.assignment, state, standing, notes),
   });
 }
