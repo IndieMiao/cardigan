@@ -3057,3 +3057,75 @@ test("structured terminal steps display and copy the exact multiline command wit
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(terminal.command));
   expect(completeAction).not.toHaveBeenCalled();
 });
+
+test("a story proposal waits for one-click confirmation; a stale version says to refresh in the row", async () => {
+  const proposalPage = (version: number): NeedsPage => ({
+    ...page([]),
+    human_actions: [],
+    story_proposals: [
+      {
+        card_id: "C-7",
+        card_title: "需求：导出报表",
+        version,
+        entry_id: `C-7#${version}`,
+        submitted_at: "2026-01-01T00:00:00.000Z",
+        waited_ms: 60000,
+        children: [
+          { title: "导出接口", template_id: "dev", owner_role: "coder" },
+          { title: "导出按钮", template_id: "ui", owner_role: "coder" },
+        ],
+      },
+    ],
+  });
+  let data = proposalPage(2);
+  const needsYou = vi.fn(async () => data);
+  const confirm = vi.fn<CardiganClient["confirmStoryProposal"]>(async () => {
+    throw new ApiError(409, "stale_target", "已更新");
+  });
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou, confirmStoryProposal: confirm })}
+      projectId="p-1"
+      revision={0}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "确认拆解" });
+  expect(
+    within(group).getByRole("heading", { name: "确认拆解（1）" }),
+  ).toBeTruthy();
+  const row = within(group).getByRole("article", { name: "确认拆解 C-7" });
+  expect(within(row).getByText("确认拆解：第 2 版，2 张子卡")).toBeTruthy();
+  expect(within(row).getByText("导出接口、导出按钮")).toBeTruthy();
+  expect(
+    within(row)
+      .getByRole("link", { name: "回到需求卡提修改意见" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-7");
+  const action = within(row).getByRole("button", {
+    name: "确认开卡 C-7 第 2 版",
+  });
+  fireEvent.click(action);
+  await waitFor(() =>
+    expect(confirm).toHaveBeenCalledWith("p-1", "C-7", 2, expect.any(String)),
+  );
+  const alert = await within(row).findByRole("alert");
+  expect(alert.textContent).toContain("拆解方案已更新，请刷新后再确认");
+  data = proposalPage(3);
+  fireEvent.click(within(alert).getByRole("button", { name: "刷新" }));
+  expect(
+    await screen.findByRole("button", { name: "确认开卡 C-7 第 3 版" }),
+  ).toBeTruthy();
+
+  confirm.mockResolvedValueOnce({
+    card_id: "C-7",
+    version: 3,
+    card_ids: ["C-8", "C-9"],
+    replayed: false,
+  });
+  data = { ...proposalPage(3), story_proposals: [] };
+  fireEvent.click(screen.getByRole("button", { name: "确认开卡 C-7 第 3 版" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("region", { name: "确认拆解" })).toBeNull(),
+  );
+  expect(await screen.findByText("没有需要你处理的事")).toBeTruthy();
+});

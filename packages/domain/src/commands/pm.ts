@@ -24,6 +24,7 @@ import { parseCardPriority } from "../priority.js";
 import { storyProgress, storyTerminal } from "../story.js";
 import {
   builtinCardTemplatesForFlow,
+  type CardTemplate,
   isStoryTemplate,
   latestCardTemplate,
   requiresUiStateAndSave,
@@ -137,13 +138,51 @@ function stateAndSaveCriterion(
   return `设计验收须确认状态与保存：${fields.join("；")}`;
 }
 
+/** The latest active template a new card may use, resolved like `create_card`. */
+export function creatableCardTemplate(
+  d: CommandDraft,
+  templateId: string,
+): CardTemplate {
+  const state = d.state;
+  const template =
+    latestCardTemplate(d.ports?.templates ?? [], templateId) ??
+    latestCardTemplate(
+      [
+        ...d.list("card_templates"),
+        ...builtinCardTemplatesForFlow(
+          projectFlowVersion(
+            state.project_preferences?.find((p) => p.id === state.project_id),
+          ),
+        ),
+      ],
+      templateId,
+    );
+  ensure(template, "not_found", "模板不存在");
+  ensure(template.status === "active", "validation_failed", "停用模板不能建卡");
+  return template;
+}
+
 export function createCard(
   state: CommandState,
   actor: Actor,
   p: CreateCardParams,
   ports: CommandPorts,
 ) {
-  return command(state, actor, "create_card", ports, (d) => {
+  return command(state, actor, "create_card", ports, (d) =>
+    createCardInDraft(d, p),
+  );
+}
+
+/**
+ * The whole of `create_card` inside an existing draft, so one command can open
+ * several cards and roll every one of them back together (C-503).
+ */
+export function createCardInDraft(
+  d: CommandDraft,
+  p: CreateCardParams & { readonly story_source?: Card["story_source"] },
+): Card {
+  const state = d.state;
+  {
     d.pm();
     d.projectAccess();
     const acceptance = p.acceptance_criteria ?? [];
@@ -155,25 +194,7 @@ export function createCard(
       "template 与 template_id 不一致",
     );
     const templateId = p.template_id ?? p.template ?? "dev";
-    const template =
-      latestCardTemplate(ports.templates ?? [], templateId) ??
-      latestCardTemplate(
-        [
-          ...d.list("card_templates"),
-          ...builtinCardTemplatesForFlow(
-            projectFlowVersion(
-              state.project_preferences?.find((p) => p.id === state.project_id),
-            ),
-          ),
-        ],
-        templateId,
-      );
-    ensure(template, "not_found", "模板不存在");
-    ensure(
-      template.status === "active",
-      "validation_failed",
-      "停用模板不能建卡",
-    );
+    const template = creatableCardTemplate(d, templateId);
     const story = isStoryTemplate(template);
     validateCardTemplate(template, state.roles, { story });
     ensure(
@@ -275,6 +296,7 @@ export function createCard(
       ...(p.base_branch === undefined ? {} : { base_branch: p.base_branch }),
       ...(story ? { story: {} } : {}),
       ...(p.parent_card_id ? { parent_card_id: p.parent_card_id } : {}),
+      ...(p.story_source ? { story_source: p.story_source } : {}),
       priority,
       status: "todo",
       template: template.id,
@@ -390,7 +412,7 @@ export function createCard(
       );
     recordFrameworkLinks(d, card);
     return card;
-  });
+  }
 }
 export interface StoryChildChoice {
   readonly action: "cancel" | "detach";

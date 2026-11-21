@@ -2894,3 +2894,55 @@ test("Office posts a checklist and proposal through MCP; reads show defaults, th
     await ok(office, "get_updates", { card_id, since_seq: ask.event_seq }),
   ).toMatchObject({ timeline: [{ body: expect.stringContaining("按默认") }] });
 });
+
+test("Office submits a versioned decomposition through MCP; get_card shows every version and the human still confirms", async () => {
+  store.uow.run((tx) => {
+    const owner = tx.assignments
+      .list(project)
+      .find((a) => a.scope === "standing");
+    if (owner?.scope !== "standing") throw new Error("Missing Office");
+    tx.assignments.put(project, { ...owner, standing_mode: "office" });
+  });
+  const { id: card_id } = await ok<Card>(office, "create_card", {
+    title: "Need",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Need" },
+    template_id: "story",
+  });
+  const child = {
+    title: "Part",
+    template_id: "general",
+    goal: "Part goal",
+    acceptance_criteria: ["Part works"],
+    owner_role: "pm",
+  };
+  const first = await ok<TimelineEntry>(office, "post_comment", {
+    card_id,
+    body: "拆解",
+    story_discussion: { action: "propose", children: [child] },
+  });
+  const second = await ok<TimelineEntry>(office, "post_comment", {
+    card_id,
+    body: "修订",
+    story_discussion: {
+      action: "propose",
+      children: [child, { ...child, title: "Next", depends_on: [1] }],
+    },
+  });
+  expect(second.body).toContain("拆解方案第 2 版（2 张子卡）");
+  expect(await ok(office, "get_card", { card_id })).toMatchObject({
+    card: {
+      story: {
+        proposals: [
+          { version: 1, entry_id: first.id },
+          {
+            version: 2,
+            entry_id: second.id,
+            children: [{ title: "Part" }, { title: "Next", depends_on: [1] }],
+          },
+        ],
+      },
+      story_progress: { total: 0 },
+    },
+  });
+});

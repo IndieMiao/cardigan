@@ -143,11 +143,50 @@ const schemas = {
               .min(1),
           })
           .strict(),
-        z.object({ action: z.literal("propose") }).strict(),
+        z
+          .object({
+            action: z.literal("propose"),
+            children: z
+              .array(
+                z
+                  .object({
+                    title: text,
+                    template_id: text,
+                    goal: text.describe("子卡目标摘要"),
+                    acceptance_criteria: z
+                      .array(text)
+                      .min(1)
+                      .describe("验收要点，至少一条"),
+                    depends_on: z
+                      .array(z.number().int().positive())
+                      .optional()
+                      .describe("依赖的方案内子卡序号（从 1 起）"),
+                    depends_on_cards: z
+                      .array(id("card"))
+                      .optional()
+                      .describe("依赖的已有卡片"),
+                    priority: z.number().int().min(0).max(4).optional(),
+                    owner_role: text.describe("负责角色编号"),
+                    state_and_save: z
+                      .union([z.literal("无写入"), z.record(z.string(), text)])
+                      .optional()
+                      .describe("界面模板必填：状态与保存"),
+                    repo: text.optional(),
+                    base_branch: text.optional(),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .optional()
+              .describe(
+                "带版本的拆解方案：每项一张子卡。修订即提交新版本，人只能确认最新版本；省略时为纯正文方案",
+              ),
+          })
+          .strict(),
       ])
       .optional()
       .describe(
-        "常驻 Office 在需求卡发问题清单（ask），或用正文提交拆解方案（propose，未答题按默认，不代替确认开卡）。",
+        "常驻 Office 在需求卡发问题清单（ask），或提交拆解方案（propose，未答题按默认；带 children 时生成可由人一键确认开卡的新版本，不代替确认）。",
       ),
     story_summary: z
       .boolean()

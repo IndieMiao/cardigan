@@ -1660,6 +1660,11 @@ export function needsYou(
     pm_held_merges: [...pm_held_merges].sort(
       (left, right) => (right.waited_ms ?? 0) - (left.waited_ms ?? 0),
     ),
+    // C-503: current proposals waiting for the human's one-click confirmation.
+    story_proposals: data.story_proposals.map((proposal) => ({
+      ...proposal,
+      waited_ms: waitedMs(proposal.submitted_at, now) ?? null,
+    })),
     waiting_merge_checks_count: data.waiting_merge_checks_count,
     waiting_merge_check_items: data.waiting_merge_check_items,
     // C-212: deferred items; the page shows them folded under "稍后".

@@ -260,6 +260,12 @@ export function fakeClient(
     },
     createCard: async () => ({ id: "C-1" }),
     markCardDone: async () => {},
+    confirmStoryProposal: async (_projectId, card_id, version) => ({
+      card_id,
+      version,
+      card_ids: [],
+      replayed: false,
+    }),
     roles: async (project_id) => ({
       project_id,
       roles: [],
