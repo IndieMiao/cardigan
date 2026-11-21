@@ -1,10 +1,19 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, open, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { requireHostDirectory } from "./deployment-config.js";
 
 const snapshotName =
   /^database-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.bak$/u;
+
+async function mountId(fd: number) {
+  const m = /^mnt_id:\s*(\d+)$/mu.exec(
+    await readFile(`/proc/self/fdinfo/${fd}`, "utf8"),
+  );
+  if (!m) throw new Error("Unknown snapshot mount");
+  return m[1];
+}
 
 /** Read-only input for the site manifest. Never descend into backup directories. */
 export async function previewDeploymentSnapshots(
@@ -31,6 +40,7 @@ export async function previewDeploymentSnapshots(
     const info = await root.stat();
     if (info.uid !== process.getuid?.() || info.mode & 0o077)
       throw new Error("Unsafe deployment directory");
+    const rootMount = await mountId(root.fd);
     const pinned = `/proc/self/fd/${root.fd}`;
     const snapshots = [];
     const skipped: string[] = [],
@@ -52,9 +62,36 @@ export async function previewDeploymentSnapshots(
         skipped.push(name);
         continue;
       }
-      namespace[name] = `${stat.dev}:${stat.ino}`;
+      try {
+        const file = await open(
+          join(pinned, name),
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        try {
+          const opened = await file.stat({ bigint: true });
+          if (
+            opened.dev !== stat.dev ||
+            opened.ino !== stat.ino ||
+            opened.ctimeNs !== stat.ctimeNs ||
+            (await mountId(file.fd)) !== rootMount
+          )
+            throw new Error("Snapshot changed");
+        } finally {
+          await file.close();
+        }
+      } catch {
+        skipped.push(name);
+        continue;
+      }
+      const stamp = createHash("sha256")
+        .update(
+          `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`,
+        )
+        .digest("hex");
+      namespace[name] = stamp;
       snapshots.push({
         name,
+        stamp,
         size_bytes: Number(stat.size),
         device: String(stat.dev),
         inode: String(stat.ino),

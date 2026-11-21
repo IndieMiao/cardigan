@@ -52,12 +52,26 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
         op,
       ],
     });
+    let interruptClear = false;
     const target = async () => ({
+      ownsRef: (ref: { runtime_machine: string } | null | undefined) =>
+        ref?.runtime_machine === "fixture",
       root,
       gid: process.getgid?.() ?? -1,
       fingerprint: "test-only",
       inventory: cmd("inventory"),
-      clear: cmd("clear"),
+      clear: interruptClear
+        ? {
+            file: "/usr/bin/python3",
+            args: [
+              "-I",
+              "-B",
+              "-c",
+              `import os,json,sys
+r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['root'],'runs','cardigan','A-4','partial'));sys.exit(1)`,
+            ],
+          }
+        : cmd("clear"),
     });
     const policy = parseRetention({ snapshots: 1, daily_days: 1 });
     const backup = (n: number) =>
@@ -82,6 +96,12 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
       for (const n of [1, 2])
         tx.assignments.put(p, {
           ...assignment(n),
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "fixture",
+            agent_name: "fixture",
+            terminal_ref: "fixture/t1",
+          },
           status: "released",
           released_at: "2026-01-01T00:00:00Z",
         });
@@ -89,7 +109,15 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
     });
     const maintenance = (q = policy) =>
       new DeploymentRetention(store, dir, {}, q, target);
-    await maintenance().poll(ready);
+    const releaseName = `release-${"c".repeat(40)}-00000000-0000-4000-8000-000000000001`;
+    await mkdir(join(dir, releaseName), { mode: 0o700 });
+    await writeFile(join(dir, releaseName, "server"), "never remove");
+    const at = Date.now() - 10 * 86400000;
+    const survey = maintenance();
+    await vi.waitFor(async () => {
+      await survey.poll(ready, at);
+      await readFile(join(dir, "retention-preview-1.json"));
+    });
     const path = join(dir, "retention-preview-1.json"),
       text = await readFile(path, "utf8"),
       sha = createHash("sha256").update(text).digest("hex");
@@ -98,6 +126,16 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
         .candidates.map((i: { name: string }) => i.name)
         .sort(),
     ).toEqual(["A-1", "A-2", backup(1)]);
+    const report = JSON.parse(text);
+    expect(report.retained_releases).toEqual([
+      { name: releaseName, reason: "recent", size_bytes: expect.any(Number) },
+    ]);
+    expect(report.total_bytes).toBe(
+      report.candidates.reduce(
+        (n: number, i: { size_bytes: number }) => n + i.size_bytes,
+        0,
+      ),
+    );
     expect(JSON.parse(text).skipped).toContain(backup(3));
     await chmod(join(dir, backup(3)), 0o600);
     const auth = { sha256: sha, pm_review: "Q-1", data_deletion: "Q-2" };
@@ -154,11 +192,40 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
     await expect(readFile(join(parent, "A-2"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    await job.poll({
+    const later = {
       ...ready,
       attempt: "later",
       deployed_at: new Date(Date.now() + 10_000).toISOString(),
+    };
+    const added = join(parent, "A-4");
+    await mkdir(added);
+    await chmod(added, 0o2770);
+    await writeFile(join(added, "partial"), "partial");
+    await writeFile(join(added, "left"), "retained");
+    store.uow.run((tx) =>
+      tx.assignments.put(p, {
+        ...assignment(4),
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "fixture",
+          terminal_ref: "fixture/t4",
+          agent_name: "fixture",
+        },
+        status: "released",
+        released_at: new Date(at + 86400000).toISOString(),
+      }),
+    );
+    interruptClear = true;
+    await job.poll(later);
+    await expect(readFile(join(added, "partial"))).rejects.toMatchObject({
+      code: "ENOENT",
     });
+    interruptClear = false;
+    await apply().poll(later); // restarted supervisor sees durable intent; changed tree is never retried
+    expect(await readFile(join(added, "left"), "utf8")).toBe("retained");
+    expect(await readFile(join(dir, releaseName, "server"), "utf8")).toBe(
+      "never remove",
+    );
     expect(await readFile(join(dir, backup(3)), "utf8")).toBe("unverified");
     expect(await readFile(join(dir, backup(2)), "utf8")).toBe("db");
     expect(

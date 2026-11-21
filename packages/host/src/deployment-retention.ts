@@ -40,10 +40,15 @@ interface Inventory {
   candidates: Item[];
   skipped: string[];
   namespace: Record<string, string>;
+  retained_releases: {
+    name: string;
+    reason: string;
+    size_bytes: number | null;
+  }[];
   total_bytes: number;
 }
 interface Report extends Inventory {
-  version: 2;
+  version: 3;
   captured_at: string;
   scope: string;
   policy: Omit<RetentionPolicy, "approval">;
@@ -106,7 +111,7 @@ export class DeploymentRetention {
     return {
       ...s,
       candidates: s.candidates.map<Item>(
-        ({ name, device, inode, size_bytes, mtime_ns: stamp }) => ({
+        ({ name, device, inode, size_bytes, stamp }) => ({
           kind: "snapshot",
           name,
           device,
@@ -129,34 +134,53 @@ export class DeploymentRetention {
     ready: Ready,
     t: Target,
     scope: string,
+    preview: boolean,
   ): Promise<Inventory | undefined> {
-    const releases = await this.releases.poll(scope, this.releaseInput(ready));
+    const releases = preview
+      ? await this.releases.poll(scope, this.releaseInput(ready))
+      : [];
     if (!releases) return;
     const snapshots = await this.snapshots(ready);
-    const candidates = [...snapshots.candidates, ...releases.candidates];
-    const skipped = [...snapshots.skipped, ...releases.skipped];
+    const candidates = snapshots.candidates;
+    const skipped = [...snapshots.skipped];
     const namespace: Record<string, string> = {
       ...snapshots.namespace,
-      ...releases.namespace,
     };
     if (t) {
       // Record only the host-owned namespace bindings, not the content of live runs.
       // An old but still-protected assignment may legitimately age out later.
       const parent = join(t.root, "runs", project);
       await requireHostDirectory(parent);
-      for (const name of await readdir(parent))
-        if (/^A-[1-9][0-9]*$/u.test(name)) {
-          const st = await lstat(join(parent, name), { bigint: true });
+      const state = this.state();
+      const owners = new Map<string, boolean>(
+        state.assignments.map((a) => [
+          a.id,
+          a.machine_id === "local" && t.ownsRef(a.runtime_ref),
+        ]),
+      );
+      for (const name of await readdir(parent)) {
+        if (!/^A-[1-9][0-9]*$/u.test(name)) continue;
+        const st = await lstat(join(parent, name), { bigint: true }).catch(
+          () => undefined,
+        );
+        if (
+          owners.get(name) &&
+          st?.isDirectory() &&
+          Number(st.uid) === process.getuid?.() &&
+          Number(st.gid) === t.gid &&
+          (st.mode & 0o7777n) === 0o2770n
+        )
           namespace[name] = `${st.dev}:${st.ino}`;
-        }
+        else skipped.push(name);
+      }
       const names = [
         ...eligibleRuns(
-          this.state(),
+          state,
           this.policy.released_days,
           Date.now(),
-          t.fingerprint,
+          t.ownsRef,
         ).keys(),
-      ];
+      ].filter((n) => Object.hasOwn(namespace, n));
       for (let start = 0; start < names.length; start += 128) {
         const batch = names.slice(start, start + 128);
         try {
@@ -181,6 +205,7 @@ export class DeploymentRetention {
       candidates,
       skipped,
       namespace,
+      retained_releases: releases,
       total_bytes: candidates.reduce((n, i) => n + i.size_bytes, 0),
     };
   }
@@ -264,19 +289,19 @@ export class DeploymentRetention {
       ]),
     );
     if (!text) {
-      const current = await this.inventory(ready, t, scope);
+      const current = await this.inventory(ready, t, scope, true);
       if (!current) {
         this.next = 0;
         return;
       }
       if (!(await ready.stillReady())) return;
       await this.publish(path, {
-        version: 2,
+        version: 3,
         captured_at: new Date(now).toISOString(),
         scope,
         policy,
         authorization_scope:
-          "首轮仅处理清单原件。批准持续启用后，后续成功部署按同一策略回收新增或退出保留期的对象。旧清单中跳过或变更的实例仍保留。",
+          "历史发布仅供盘点，不参与删除或可回收总量。首轮仅处理清单原件。批准持续启用后，后续成功部署按同一策略回收新增或退出保留期的对象。旧清单中跳过或变更的实例仍保留。",
         ...current,
       });
       return;
@@ -284,7 +309,7 @@ export class DeploymentRetention {
     if (!approval) return;
     const report = JSON.parse(text) as Report;
     if (
-      report.version !== 2 ||
+      report.version !== 3 ||
       scope !== report.scope ||
       JSON.stringify(policy) !== JSON.stringify(report.policy)
     ) {
@@ -293,15 +318,13 @@ export class DeploymentRetention {
       return;
     }
     if (!this.queue.length) {
-      const current = await this.inventory(ready, t, scope);
+      const current = await this.inventory(ready, t, scope, false);
       if (!current) {
         this.next = 0;
         return;
       }
       const originals = new Map(report.candidates.map((i) => [key(i), i]));
       const skipped = new Set(report.skipped);
-      for (const name of current.skipped)
-        this.audit("retained", { name, reason: "unverifiable_or_busy" });
       const state = this.state();
       const q = state.decisions.find((q) => q.id === approval.data_deletion);
       const first = this.store.uow.run((tx) => {
@@ -324,9 +347,37 @@ export class DeploymentRetention {
       const rollover =
         first !== ready.attempt &&
         Date.parse(ready.deployed_at) > Date.parse(q?.resolution?.at ?? "");
+      // A committed intent precedes either destructive phase. Even a crash before the
+      // first unlink consumes this name for this approval; only a new preview resets it.
+      const attempted = new Set<string>();
+      const notified = new Set<string>();
+      for (const e of state.events) {
+        if (e.type !== "host_retention_recorded") continue;
+        const record = e.payload as {
+          sha256?: string;
+          status?: string;
+          name?: string;
+          kind?: string;
+          reason?: string;
+        } | null;
+        if (record?.sha256 !== approval.sha256) continue;
+        if (record.status === "retained")
+          notified.add(`${record.name}/${record.reason}`);
+        if (record.status === "removing")
+          attempted.add(`${record.kind}/${record.name}`);
+      }
+      const retained = (name: string, reason: string) => {
+        const k = `${name}/${reason}`;
+        if (notified.has(k)) return;
+        this.audit("retained", { name, reason, sha256: approval.sha256 });
+        notified.add(k);
+      };
+      for (const name of current.skipped)
+        retained(name, "unverifiable_or_busy");
       const runs =
-        t && eligibleRuns(state, policy.released_days, now, t.fingerprint);
+        t && eligibleRuns(state, policy.released_days, now, t.ownsRef);
       this.queue = current.candidates.filter((i) => {
+        if (attempted.has(key(i))) return false;
         const old = originals.get(key(i));
         const permitted = old
           ? same(old, i)
@@ -337,13 +388,8 @@ export class DeploymentRetention {
                 ? report.namespace[i.name] === `${i.device}:${i.inode}`
                 : (runs?.get(i.name) ?? 0) > Date.parse(report.captured_at)
               : !Object.hasOwn(report.namespace, i.name) ||
-                report.namespace[i.name] === `${i.device}:${i.inode}`);
-        if (!permitted)
-          this.audit("retained", {
-            name: i.name,
-            kind: i.kind,
-            reason: "outside_reviewed_inventory",
-          });
+                report.namespace[i.name] === i.stamp);
+        if (!permitted) retained(i.name, "outside_reviewed_inventory");
         return permitted;
       });
     }
@@ -360,7 +406,7 @@ export class DeploymentRetention {
       this.audit("retained", { ...details, reason: "deployment_changed" });
       return;
     }
-    this.audit("removing", details);
+    this.audit("removing", { ...details, sha256: approval.sha256 });
     try {
       if (item.kind === "run" && t) {
         const input = {
@@ -379,7 +425,7 @@ export class DeploymentRetention {
                 fresh,
                 policy.released_days,
                 Date.now(),
-                t.fingerprint,
+                t.ownsRef,
               ).has(item.name)
             )
               throw new Error("Run protected");
@@ -398,7 +444,7 @@ export class DeploymentRetention {
           if (String(st.dev) !== item.device || String(st.ino) !== item.inode)
             throw new Error("Run directory changed");
           transact(() =>
-            single(t.clear, { ...input, deadline_ms: Date.now() + 4000 }, item),
+            single(t.clear, { ...input, deadline_ms: Date.now() + 2200 }, item),
           );
           transact(() => single(localCommand("shell"), input, item));
         } finally {
@@ -409,23 +455,15 @@ export class DeploymentRetention {
           (s) => s.name === item.name,
         );
         if (!fresh || !same(fresh, item)) throw new Error("Snapshot retained");
-        if (!approved(this.state(), approval))
-          throw new Error("Approval changed");
-        single(
-          localCommand("snapshot"),
-          { root: this.dir, uid: process.getuid?.(), item },
-          item,
-        );
-      } else if (item.kind === "release") {
-        if (!approved(this.state(), approval))
-          throw new Error("Approval changed");
-        const result = await scan(
-          localCommand("releases"),
-          { ...this.releaseInput(ready), item },
-          "release",
-          new Set([item.name]),
-        );
-        if (result.candidates.length !== 1) throw new Error("Release retained");
+        this.store.uow.run((tx) => {
+          if (!approved(loadCommandState(tx, project), approval))
+            throw new Error("Approval changed");
+          single(
+            localCommand("snapshot"),
+            { root: this.dir, uid: process.getuid?.(), item },
+            item,
+          );
+        });
       } else throw new Error("No target");
     } catch {
       this.audit("retained", {

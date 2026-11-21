@@ -1,11 +1,13 @@
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { RuntimeRef, RuntimeTargetBinding } from "@cardigan/domain";
 import {
   agentProcessCommand,
   readRegisteredRuntime,
   resolveExecutionConfig,
   runtimeDifferences,
+  runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
@@ -108,7 +110,7 @@ export function single(cmd: Command, input: object, item: Item) {
   const out = execFileSync(cmd.file, cmd.args, {
     ...opts,
     input: JSON.stringify(input),
-    timeout: 8000,
+    timeout: 2700,
     stdio: ["pipe", "pipe", "ignore"],
   });
   const r = response(out, item.kind, new Set([item.name]));
@@ -118,6 +120,30 @@ export function single(cmd: Command, input: object, item: Item) {
     r.candidates[0]?.inode !== item.inode
   )
     throw new Error("Resource retained");
+}
+
+/** An unbound terminal is evidence only on the verified legacy registration, never on an explicit worker. */
+export function retentionBinding(
+  machine: string,
+  target: RuntimeTargetBinding,
+  registeredLegacy: boolean,
+) {
+  return (ref: RuntimeRef | null | undefined) => {
+    if (
+      !ref ||
+      ref.runtime_machine === "local" ||
+      (!ref.target && !registeredLegacy)
+    )
+      return false;
+    return (
+      runtimeOwnsRef(
+        { mode: "agent-ssh", machine, ...(ref.target ? { target } : {}) },
+        ref,
+      ) &&
+      ref.terminal_ref.startsWith(`${machine}/`) &&
+      /^t[a-z0-9]+$/u.test(ref.terminal_ref.slice(machine.length + 1))
+    );
+  };
 }
 
 export async function localRunTarget(env: NodeJS.ProcessEnv, dataDir: string) {
@@ -139,13 +165,13 @@ export async function localRunTarget(env: NodeJS.ProcessEnv, dataDir: string) {
     )
       return;
   }
-  const fingerprint = runtimeTargetBinding({
+  const binding = runtimeTargetBinding({
     machine_id: "local",
     project_id: "cardigan",
     execution,
     generation: w?.generation ?? "legacy",
     session: w?.session ?? env.CARDIGAN_HC_SESSION ?? "cardigan",
-  }).fingerprint;
+  });
   const src = readFileSync(helper, "utf8");
   const cmd = (op: string) =>
     agentProcessCommand(execution, [
@@ -157,7 +183,8 @@ export async function localRunTarget(env: NodeJS.ProcessEnv, dataDir: string) {
       op,
     ]);
   return {
-    fingerprint,
+    fingerprint: binding.fingerprint,
+    ownsRef: retentionBinding(execution.machine, binding, !w),
     root: execution.agentRoot,
     gid: execution.gid,
     inventory: await cmd("inventory"),

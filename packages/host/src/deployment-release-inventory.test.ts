@@ -43,13 +43,30 @@ test("surveying a backlog never waits for the tree walk, isolates timeouts, and 
     await vi.waitFor(async () => {
       const result = await survey.poll("scope", later);
       expect(result).toBeDefined();
-      expect(result?.skipped.sort()).toEqual([name(0), name(1), name(2)]);
-      expect(result?.candidates.map((x) => x.name)).toHaveLength(27);
-      expect(result?.candidates.some((x) => later.keep.includes(x.name))).toBe(
-        false,
-      );
+      expect(result).toHaveLength(32);
+      expect(
+        result
+          ?.filter((x) => x.reason === "unverified")
+          .map((x) => x.name)
+          .sort(),
+      ).toEqual([name(0), name(2)]);
+      expect(result).toContainEqual({
+        name: name(3),
+        reason: "state_reference",
+        size_bytes: 0,
+      });
+      expect(result).toContainEqual({
+        name: name(31),
+        reason: "recent",
+        size_bytes: 0,
+      });
+      expect(result).toContainEqual({
+        name: name(1),
+        reason: "inventory_only",
+        size_bytes: 0,
+      });
     });
-    expect(observe).toHaveBeenCalledTimes(29);
+    expect(observe).toHaveBeenCalledTimes(31);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

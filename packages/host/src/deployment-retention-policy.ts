@@ -3,6 +3,7 @@ import {
   categoryAuthorization,
   categoryDelegated,
   hostOpsPending,
+  type RuntimeRef,
 } from "@cardigan/domain";
 
 export interface RetentionPolicy {
@@ -55,7 +56,7 @@ export function eligibleRuns(
   s: CommandState,
   days: number,
   now: number,
-  target: string,
+  ownsRef: (ref: RuntimeRef | null | undefined) => boolean,
 ) {
   const blocked = new Set<string>(
     s.runs
@@ -100,8 +101,7 @@ export function eligibleRuns(
           /^A-[1-9][0-9]*$/u.test(a.id) &&
           a.status === "released" &&
           Date.parse(a.released_at ?? "") < now - days * 86400000 &&
-          (!a.runtime_ref?.target ||
-            a.runtime_ref.target.fingerprint === target) &&
+          ownsRef(a.runtime_ref) &&
           !blocked.has(a.id) &&
           !hostOpsPending(s.events, a.id) &&
           (!a.work_item_id || !protectedWork.has(a.work_item_id)),

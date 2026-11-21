@@ -1,5 +1,6 @@
 import type { CommandState } from "@cardigan/domain";
 import { expect, test } from "vitest";
+import { retentionBinding } from "./deployment-retention-io.js";
 import { eligibleRuns, parseRetention } from "./deployment-retention-policy.js";
 
 const now = Date.parse("2026-11-20T12:00:00Z");
@@ -9,6 +10,7 @@ test("local released strictly past deadline; all nonterminal Runs, host operatio
     machine_id: "local",
     status: "released",
     released_at: "2026-11-17T11:59:59Z",
+    runtime_ref: { target: { fingerprint: "target" } },
   });
   const state = {
     assignments: [
@@ -48,7 +50,14 @@ test("local released strictly past deadline; all nonterminal Runs, host operatio
       },
     ],
   } as unknown as CommandState;
-  expect([...eligibleRuns(state, 3, now, "target").keys()]).toEqual(["A-1"]);
+  expect([
+    ...eligibleRuns(
+      state,
+      3,
+      now,
+      (r) => r?.target?.fingerprint === "target",
+    ).keys(),
+  ]).toEqual(["A-1"]);
 });
 test("retention configuration defaults to preview and rejects partially bound authorization", () => {
   expect(parseRetention({})).toEqual({
@@ -67,4 +76,32 @@ test("retention configuration defaults to preview and rejects partially bound au
     null,
   ])
     expect(() => parseRetention(policy)).toThrow();
+});
+
+test("release of a session is not proof of ownership on a different worker", () => {
+  const binding = {
+    project_id: "cardigan",
+    machine_id: "local",
+    session: "test-only",
+    generation: "legacy",
+    fingerprint: "test-fingerprint",
+  };
+  const ref = {
+    machine_id: "local",
+    runtime_machine: "fixture",
+    terminal_ref: "fixture/t1",
+    agent_name: "fixture",
+  };
+  const modern = retentionBinding("fixture", binding, false),
+    legacy = retentionBinding("fixture", binding, true);
+  expect(modern(ref)).toBe(false);
+  expect(modern(null)).toBe(false);
+  expect(legacy(null)).toBe(false);
+  expect(legacy(ref)).toBe(true);
+  expect(legacy({ ...ref, runtime_machine: "other" })).toBe(false);
+  expect(legacy({ ...ref, terminal_ref: "other/t1" })).toBe(false);
+  expect(modern({ ...ref, target: binding })).toBe(true);
+  expect(modern({ ...ref, target: { ...binding, session: "other" } })).toBe(
+    false,
+  );
 });

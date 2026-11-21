@@ -40,7 +40,7 @@ async function catalog(input: Input) {
       skipped.push(name);
     }
   }
-  // Match the helper's reverse (mtime_ns, name) ordering, including ties.
+  // Rank by (mtime_ns, name); rank is informational and never authorizes deletion.
   valid.sort((a, b) =>
     a.mtime === b.mtime
       ? a.name < b.name
@@ -50,11 +50,18 @@ async function catalog(input: Input) {
         ? 1
         : -1,
   );
-  const names = valid
-    .slice(input.latest)
-    .map((v) => v.name)
-    .filter((n) => !input.keep.includes(n));
-  return { namespace, names, skipped };
+  const names = valid.map((v) => v.name);
+  const reasons = new Map(
+    names.map((n, i) => [
+      n,
+      input.keep.includes(n)
+        ? "state_reference"
+        : i < input.latest
+          ? "recent"
+          : "inventory_only",
+    ]),
+  );
+  return { namespace, names, skipped, reasons };
 }
 
 /** Read-only background work. A single helper sees only one tree and times out independently.
@@ -70,7 +77,7 @@ export class ReleaseSurvey {
   constructor(
     private readonly observe = async (input: Input, name: string) => {
       const result = await scan(
-        localCommand("releases"),
+        localCommand("release_inventory"),
         { ...input, names: [name] },
         "release",
         new Set([name]),
@@ -85,25 +92,36 @@ export class ReleaseSurvey {
     if (this.job?.scope === scope) {
       const { items, skipped } = this.job;
       delete this.job;
-      const candidates: Item[] = [];
-      for (const name of current.names) {
+      const retained = current.names.map((name) => {
         const i = items.get(name);
-        if (
+        const known =
           !skipped.has(name) &&
           i &&
-          current.namespace[name] === `${i.device}:${i.inode}`
-        )
-          candidates.push(i);
-        else current.skipped.push(name);
-      }
-      return {
-        ...current,
-        candidates,
-        skipped: [...new Set([...skipped, ...current.skipped])],
-      };
+          current.namespace[name] === `${i.device}:${i.inode}`;
+        return {
+          name,
+          reason: known
+            ? (current.reasons.get(name) ?? "inventory_only")
+            : "unverified",
+          size_bytes: known ? i.size_bytes : null,
+        };
+      });
+      return [
+        ...retained,
+        ...current.skipped.map((name) => ({
+          name,
+          reason: "unverified",
+          size_bytes: null,
+        })),
+      ];
     }
     delete this.job;
-    if (!current.names.length) return { ...current, candidates: [] };
+    if (!current.names.length)
+      return current.skipped.map((name) => ({
+        name,
+        reason: "unverified",
+        size_bytes: null,
+      }));
     const job = {
       scope,
       done: false,

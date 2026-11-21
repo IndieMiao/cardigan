@@ -1,5 +1,7 @@
 """Linux-only, fd-relative maintenance of generated resources. No shell or path from an Agent."""
 import contextlib
+import ctypes
+import secrets
 import hashlib
 import json
 import os
@@ -56,79 +58,84 @@ def anchor(path, uid):
         yield fd
 
 
-def proc_refs():
-    """Incomplete observation protects all releases, never treat lsof's empty stdout as proof."""
-    with open('/proc/mounts') as f:
-        require(any(x.split()[1:3] == ['/proc', 'proc'] and not re.search(r'hidepid=(?!0(?:,|$)|off(?:,|$))', x.split()[3]) for x in f))
-    refs = set()
-    for pid in os.listdir('/proc'):
-        if not pid.isdigit() or int(pid) == os.getpid():
-            continue
-        task = f'/proc/{pid}/task'
-        try:
-            tids = os.listdir(task)
-        except FileNotFoundError:
-            continue
-        for tid in tids:
-            t = f'{task}/{tid}'
-            try:
-                with open(t+'/stat') as file:
-                    fields = file.read().rsplit(')', 1)[1].split()
-                if fields[0] == 'Z' or int(fields[6]) & 0x200000:  # PF_KTHREAD
-                    continue
-                for link in ['cwd','root','exe'] + ['fd/'+f for f in os.listdir(t+'/fd')]:
-                    try:
-                        s = os.stat(t+'/'+link)
-                    except FileNotFoundError:
-                        if link.startswith('fd/'):
-                            continue
-                        raise
-                    refs.add((s.st_dev, s.st_ino))
-                # Device/inode also catches mappings whose fd was closed or whose path is an alias.
-                with open(t+'/maps') as file:
-                    for line in file:
-                        _, _, _, dev, ino, *_ = line.split(None, 5)
-                        if int(ino):
-                            a,b = dev.split(':'); refs.add((os.makedev(int(a,16),int(b,16)),int(ino)))
-            except (FileNotFoundError, ProcessLookupError):
-                if os.path.exists(t):
-                    raise ValueError('process_uncertain')
-    return refs
+STAGED = '.retention-claim-'
 
 
-def tree(fd, *, run, refs, remove=False, check=lambda: None):
-    """Never traverse links, submounts (including same-device binds) or embedded run checkouts."""
+def facts(s):
+    return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+
+
+def observe(fd, guard, run):
+    # The local plan (never exported) and the digest describe exactly the same entries.
     digest = hashlib.sha256()
-    if run: digest.update(str(os.fstat(fd).st_ctime_ns).encode())
-    def visit(d, guard):
-        s = os.fstat(d)
-        require((s.st_dev,s.st_ino) not in refs)
+    def visit(d):
+        guard()
+        before = facts(os.fstat(d))
+        digest.update(repr(before).encode())
         names = sorted(os.listdir(d))
         if run:
             require('.git' not in names and not {'HEAD','objects','refs'}.issubset(names))
-        total = s.st_blocks * 512
+            require(not any(n.startswith(STAGED) for n in names))
+        total = os.fstat(d).st_blocks * 512
+        entries = {}
         for name in names:
             guard()
             with opened(name, os.O_PATH | os.O_NOFOLLOW, d) as handle:
                 same(d,name,handle)
                 st = os.fstat(handle)
-                require((st.st_dev,st.st_ino) not in refs)
-                digest.update(repr((os.fsencode(name),st.st_dev,st.st_ino,st.st_ctime_ns,st.st_size)).encode())
+                digest.update(repr((os.fsencode(name),facts(st))).encode())
+                nested = None
                 if stat.S_ISDIR(st.st_mode):
                     with opened(name, DIR, d) as child:
-                        require(identity(st) == identity(os.fstat(child)))
-                        def bound():
-                            guard(); same(d,name,child)
-                        total += visit(child,bound)
+                        require(facts(os.fstat(child)) == facts(st))
+                        size, nested = visit(child)
+                        total += size
                 else:
                     total += st.st_blocks * 512
-                if remove:
-                    guard(); same(d,name,handle)
-                    if stat.S_ISDIR(st.st_mode): os.rmdir(name,dir_fd=d)
-                    else: os.unlink(name,dir_fd=d)
-        return total
-    size = visit(fd,check)
-    return size, digest.hexdigest()
+                if run: entries[name] = (facts(st), nested)
+                same(d,name,handle); require(facts(os.fstat(handle)) == facts(st))
+        require(facts(os.fstat(d)) == before)
+        digest.update(b'/')
+        return total, entries
+    size, entries = visit(fd)
+    return size, digest.hexdigest(), entries
+
+
+def rename_new(d, src, dst):
+    # Atomic no-replace in both directions. No path-based fallback on older kernels.
+    ret = ctypes.CDLL(None,use_errno=True).renameat2(d, os.fsencode(src), d, os.fsencode(dst), 1)
+    if ret: raise OSError(ctypes.get_errno(), 'claim failed')
+
+
+def discard(d, name, fd, expected, directory, guard):
+    guard(); same(d,name,fd); require(facts(os.fstat(fd)) == expected)
+    # A replacement between stat and rename must not be unlinked. Claim under a private
+    # random name, confirm against the still-held original fd, restore without overwrite on error.
+    claim = STAGED + secrets.token_hex(16)
+    rename_new(d,name,claim)
+    try:
+        guard(); same(d,claim,fd)
+        require(facts(os.fstat(fd))[:-1] == expected[:-1])  # rename changes ctime
+        if directory: os.rmdir(claim,dir_fd=d)
+        else: os.unlink(claim,dir_fd=d)
+    except BaseException:
+        rename_new(d,claim,name)
+        raise
+
+
+def clear_plan(d, entries, guard):
+    guard(); require(set(os.listdir(d)) == set(entries))
+    for name, (expected, nested) in entries.items():
+        with opened(name, DIR if nested is not None else os.O_PATH | os.O_NOFOLLOW, d) as child:
+            def bound():
+                guard(); same(d,name,child)
+            bound(); require(facts(os.fstat(child)) == expected)
+            if nested is not None:
+                clear_plan(child, nested, bound)
+                require(not os.listdir(child))
+                expected = facts(os.fstat(child))  # our removals changed this directory's times
+            discard(d,name,child,expected,nested is not None,guard)
+    guard(); require(not os.listdir(d))
 
 
 def entry(kind,name,fd,size,digest):
@@ -136,61 +143,15 @@ def entry(kind,name,fd,size,digest):
     return dict(kind=kind,name=name,device=str(st.st_dev),inode=str(st.st_ino),size_bytes=size,stamp=digest)
 
 
-def generated(root, pattern):
-    items = []
-    for name in os.listdir(root):
-        if pattern.fullmatch(name):
-            st = os.stat(name,dir_fd=root,follow_symlinks=False)
-            if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077:
-                items.append((st.st_mtime_ns,name))
-    return [name for _,name in sorted(items,reverse=True)]
-
-
-def releases(req,root):
-    kept = set(req['keep'])
-    names = generated(root,RELEASE)[req['latest']:]
-    names = [n for n in names if n not in kept]
-    if 'names' in req:
-        requested = req['names']; require(len(requested) == 1 and RELEASE.fullmatch(requested[0]))
-        names = [n for n in names if n == requested[0]]
-    if 'item' in req:
-        names = [n for n in names if n == req['item']['name']]; require(len(names)==1)
-    result = {'candidates':[], 'skipped':[]}
-    if not names: return result
-    try: refs = proc_refs()
-    except (OSError,ValueError,StopIteration):
-        result['skipped'] = names; return result
-    for name in names:
-        try:
-            with opened(name,DIR,root) as fd:
-                def guard(): same(root,name,fd)
-                guard()
-                size, digest = tree(fd,run=False,refs=refs)
-                item = entry('release',name,fd,size,digest)
-                if 'item' in req:
-                    require(item == req['item']); guard()
-                    # Detach the old public name before the final process observation. An opener
-                    # racing the rename is now observable by inode; no new open via the old name.
-                    staged = '.retiring-' + name
-                    require(staged not in os.listdir(root))
-                    os.rename(name,staged,src_dir_fd=root,dst_dir_fd=root)
-                    def fenced(): same(root,staged,fd)
-                    try:
-                        fenced()
-                        refs = proc_refs()
-                        size, digest = tree(fd,run=False,refs=refs)
-                        require(entry('release',name,fd,size,digest)==item)
-                        tree(fd,run=False,refs=refs,remove=True,check=fenced)
-                        fenced(); os.rmdir(staged,dir_fd=root)
-                    except BaseException:
-                        # Do not overwrite a reused name; a crash leaves the staged directory
-                        # outside automatic discovery for a host operator to reconcile.
-                        if name not in os.listdir(root):
-                            fenced(); os.rename(staged,name,src_dir_fd=root,dst_dir_fd=root)
-                        raise
-                result['candidates'].append(item)
-        except (OSError,ValueError): result['skipped'].append(name)
-    return result
+def release_inventory(req,root):
+    # Q-979: this operation only reports observations. There is no release mutator.
+    names=req['names']; require(len(names)==1 and RELEASE.fullmatch(names[0]) and 'item' not in req)
+    name=names[0]
+    with opened(name,DIR,root) as fd:
+        def guard():
+            same(root,name,fd); st=os.fstat(fd); require(st.st_uid==req['uid'] and not st.st_mode & 0o077)
+        size,digest,_=observe(fd,guard,False)
+        guard(); return {'candidates':[entry('release',name,fd,size,digest)],'skipped':[]}
 
 
 def runs(req,root,op):
@@ -216,14 +177,14 @@ def runs(req,root,op):
                         item=req['item']; require(identity(os.fstat(fd))==[item['device'],item['inode']] and not os.listdir(fd)); guard()
                         os.rmdir(name,dir_fd=parent)  # Q-970: no recursive fallback, even on ENOTEMPTY.
                     else:
-                        size,digest=tree(fd,run=True,refs=set())
+                        size,digest,plan=observe(fd,guard,True)
                         item=entry('run',name,fd,size,digest)
                         if op=='clear':
                             require(req['item']==item); guard()
-                            tree(fd,run=True,refs=set(),remove=True,check=guard)
+                            clear_plan(fd,plan,guard)
                     result['candidates'].append(item)
             except FileNotFoundError:
-                if op!='inventory': result['skipped'].append(name)
+                result['skipped'].append(name)
             except (OSError,ValueError): result['skipped'].append(name)
     return result
 
@@ -232,17 +193,17 @@ def main(op,req):
     with anchor(req['root'],req['uid']) as root:
         if op in ('clear','shell','inventory'): return runs(req,root,op)
         st=os.fstat(root); require(st.st_uid==os.getuid()==req['uid'] and not st.st_mode & 0o077)
-        if op=='releases': return releases(req,root)
+        if op=='release_inventory': return release_inventory(req,root)
         require(op=='snapshot')
         item=req['item']; name=item['name']; require(SNAP.fullmatch(name))
         with opened(name,os.O_PATH|os.O_NOFOLLOW,root) as fd:
             same(root,name,fd); st=os.fstat(fd)
-            require(stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode)==0o600 and st.st_nlink==1 and st.st_uid==os.getuid() and identity(st)==[item['device'],item['inode']] and str(st.st_mtime_ns)==item['stamp'] and st.st_size==item['size_bytes'])
+            require(stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode)==0o600 and st.st_nlink==1 and st.st_uid==os.getuid() and identity(st)==[item['device'],item['inode']] and hashlib.sha256(f'{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}'.encode()).hexdigest()==item['stamp'] and st.st_size==item['size_bytes'])
             os.unlink(name,dir_fd=root); return {'candidates':[item],'skipped':[]}
 
 
 if __name__=='__main__':
     try:
-        if sys.argv[1]=='clear': signal.alarm(4)  # An interrupted SSH session must not continue cleaning.
+        if sys.argv[1]=='clear': signal.alarm(2)  # An interrupted SSH session must not continue cleaning.
         print(json.dumps(main(sys.argv[1],json.load(sys.stdin)),separators=(',',':')))
     except Exception: sys.exit(1)  # Never export process, file or private error details.
