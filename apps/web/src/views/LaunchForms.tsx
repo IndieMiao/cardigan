@@ -1268,6 +1268,7 @@ export function ProviderForm({
         "secrets",
         "secrets_mixed",
         "secret_pending",
+        "secret_key_conflict",
         "env",
       ]}
       reviewFacts={
@@ -1305,6 +1306,7 @@ export function ProviderForm({
               (server?.field === "secrets" ||
               server?.field === "secrets_mixed" ||
               server?.field === "secret_pending" ||
+              server?.field === "secret_key_conflict" ||
               server?.field === "secret_env" ||
               server?.field === "env"
                 ? server.message

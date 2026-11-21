@@ -119,6 +119,9 @@ const FIELD_MESSAGES: Record<string, Record<string, string>> = {
   },
   secrets: { default: "密钥未通过校验，没有写入，请重新输入。" },
   secrets_mixed: { default: MIXED_SECRETS },
+  secret_key_conflict: {
+    default: "密钥键名冲突，请改用其它键名。",
+  },
   secret_pending: {
     default: "这个密钥键正由另一次保存写入，暂时不能选用，请稍后刷新。",
   },

@@ -302,12 +302,25 @@ export function candidate(
         .replace(/[^0-9a-f]/giu, "")
         .slice(0, 8)
         .toUpperCase();
+      // V-2727:1: fresh names are also unique within this change; a name
+      // that cannot be made unique within 128 characters is refused here,
+      // before anything is written.
+      const allocated = new Set<string>();
+      const taken = (k: string) =>
+        inUse(k) || allocated.has(k) || plan.set.includes(k);
       for (const key of plan.set) {
         let final = key;
-        if (inUse(key)) {
-          final = `${key.slice(0, 119)}_${suffix}`;
-          if (!suffix || inUse(final)) throw invalid("secrets");
+        if (inUse(key) || allocated.has(key)) {
+          if (!suffix) throw invalid("secret_key_conflict");
+          final = "";
+          for (let n = 0; n < 100 && !final; n++) {
+            const tail = n ? `_${suffix}_${n}` : `_${suffix}`;
+            const name = `${key.slice(0, 128 - tail.length)}${tail}`;
+            if (!taken(name)) final = name;
+          }
+          if (!final) throw invalid("secret_key_conflict");
         }
+        allocated.add(final);
         keyMap[key] = final;
         if (final !== key) {
           const refs = doc.toJS()?.providers?.[change.name]?.secret_env ?? {};

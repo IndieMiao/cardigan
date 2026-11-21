@@ -676,3 +676,27 @@ test("the preview names the fresh key and the moved reference; a pending key is 
     await within(d).findByText(/正由另一次保存写入，暂时不能选用/u),
   ).toBeTruthy();
 });
+
+test("a key name the server cannot make unique is refused in place before any write", async () => {
+  const api = harness({
+    previewLaunchChange: vi.fn().mockRejectedValue(
+      new ApiError(400, "validation_failed", "x", false, {
+        field: "secret_key_conflict",
+      }),
+    ),
+  });
+  const table = await openModels(api.client);
+  fireEvent.click(within(table).getByRole("button", { name: "relay" }));
+  const d = await screen.findByRole("dialog", { name: "Relay" });
+  click(d, "编辑");
+  const group = within(d).getByRole("group", {
+    name: "密钥变量 ANTHROPIC_AUTH_TOKEN",
+  });
+  click(group, "填写");
+  fireEvent.change(password(group)[0] as HTMLInputElement, {
+    target: { value: FAKE },
+  });
+  click(d, "预览修改");
+  expect(await within(d).findByText(/密钥键名冲突/u)).toBeTruthy();
+  expect(api.confirmLaunchChange).not.toHaveBeenCalled();
+});
