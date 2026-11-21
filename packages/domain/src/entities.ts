@@ -502,6 +502,9 @@ interface AssignmentFields {
     readonly retry_at?: Timestamp;
     readonly failures: number;
     readonly evidence?: import("./runtime-types.js").RetirementEvidence;
+    readonly dispatch_wait?: import("./runtime-types.js").RetirementDispatchWait & {
+      readonly event_id: EventId;
+    };
     readonly last_failure?: "timeout" | "uncertain" | "unavailable";
     readonly notice_sent?: boolean;
   };

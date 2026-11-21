@@ -120,7 +120,11 @@ export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
-export { observeRetirementForDispatch } from "./idle-session-retirement.js";
+export {
+  boundedRetirementError,
+  observeRetirementForDispatch,
+  recordRetirementDispatch,
+} from "./idle-session-retirement.js";
 export {
   type LaunchedRun,
   type LaunchHost,

@@ -39,6 +39,11 @@ export const retirementReasons = {
   confirmation_pending: "尚未确认原会话退出",
 } as const;
 
+export type RetirementDispatchWait =
+  | { source: "owner"; status: RuntimeErrorCode | "unknown" | "unsupported" }
+  | { source: "snapshot"; status: RuntimeErrorCode | "unknown" | "exited" }
+  | { source: "replacement"; status: "replacement_required" };
+
 /** Only structured, bounded facts may cross the runtime/host boundary. */
 export type RetirementEvidence = {
   readonly reason: keyof typeof retirementReasons;

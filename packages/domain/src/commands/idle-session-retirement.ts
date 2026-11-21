@@ -1,6 +1,8 @@
 import type { Actor, Assignment, RuntimeRef } from "../entities.js";
-import type { AssignmentId } from "../ids.js";
+import type { AssignmentId, RunId } from "../ids.js";
+import { retirementWaitReceipt } from "../retirement-session.js";
 import {
+  type RetirementDispatchWait,
   type RetirementSettlement,
   retirementObserveOnly,
   retirementReasons,
@@ -65,6 +67,7 @@ export function beginIdleSessionRetirement(
         retirementObserveOnly(prior.evidence)
           ? { observe_only: true, evidence: prior.evidence }
           : {}),
+        ...(prior?.dispatch_wait ? { dispatch_wait: prior.dispatch_wait } : {}),
         ...(prior?.notice_sent ? { notice_sent: true } : {}),
       },
     };
@@ -102,6 +105,7 @@ function finishRetirement(d: CommandDraft, state: CommandState, a: Assignment) {
   d.emit("session_replaced", d.work(a.work_item_id!).card_id, {
     assignment_id: a.id,
     reason: "idle_session_retired",
+    ...retirementWaitReceipt(a),
     handoff: "空闲会话已回收；保留身份、工作区和分支，下次合法唤醒创建新会话。",
   });
   return next;
@@ -131,6 +135,109 @@ export function confirmWaitingRetirementExit(
       "Waiting retirement changed",
     );
     return finishRetirement(d, state, a);
+  });
+}
+
+/** A read-only dispatch probe must not change the stop fence, signal policy or retry budget. */
+export function trackRetirementDispatch(
+  state: CommandState,
+  actor: Actor,
+  expected: Assignment,
+  runId: RunId,
+  observation: RetirementDispatchWait | "woken",
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may report dispatch observations",
+    );
+    const a = d.get("assignments", expected.id),
+      pending = a.idle_retirement;
+    const run = d.get("runs", runId);
+    if (
+      a.scope !== "work_item" ||
+      pending?.phase !== "waiting" ||
+      pending.started_at !== expected.idle_retirement?.started_at ||
+      !retirementOwnsSession(a) ||
+      JSON.stringify(a.runtime_ref) !== JSON.stringify(expected.runtime_ref) ||
+      run.assignment_id !== a.id
+    )
+      return;
+    const card = d.work(a.work_item_id).card_id;
+    const previous = pending.dispatch_wait;
+    if (observation === "woken") {
+      // Only a positive send receipt for the same incident can close a live wait.
+      if (
+        !previous ||
+        previous.event_id !== expected.idle_retirement?.dispatch_wait?.event_id
+      )
+        return;
+      const { dispatch_wait: _wait, ...rest } = pending;
+      d.put("assignments", {
+        ...a,
+        idle_retirement: {
+          ...rest,
+          ...(rest.evidence
+            ? { evidence: { ...rest.evidence, observation: "alive" as const } }
+            : {}),
+        },
+      });
+      d.emit("retirement_dispatch_resumed", card, {
+        assignment_id: a.id,
+        run_id: runId,
+        ...retirementWaitReceipt(a),
+      });
+      return;
+    }
+    if (run.status !== "queued") return;
+    if (run.queue_reason !== "runtime_unavailable")
+      d.put("runs", { ...run, queue_reason: "runtime_unavailable" });
+    const { source, status } = observation;
+    if (previous?.source === source && previous.status === status) return;
+    if (previous)
+      d.emit("retirement_dispatch_wait_changed", card, {
+        assignment_id: a.id,
+        run_id: runId,
+        evidence: observation,
+        ...retirementWaitReceipt(a),
+      });
+    const stage = {
+      owner: "原会话归属复查",
+      snapshot: "会话状态读取",
+      replacement: "等待确认旧会话退出后替换",
+    }[source];
+    const reason = status === "runtime_conflict" ? "归属冲突" : "续办仍在排队";
+    const eventId =
+      previous?.event_id ??
+      d.emit("session_maintenance_attention", card, {
+        assignment_id: a.id,
+        run_id: runId,
+        reason: "retirement_dispatch_wait",
+        evidence: observation,
+        notice: `${a.id}（${a.machine_id}）：${stage}：${reason}（${status}）。保留原会话、凭据及排队工作；请主机操作员用 hc get 只读核对终端地址、项目、指派和启动代次；未确认归属或退出前不停止、不替换。`,
+      }).id;
+    d.put("assignments", {
+      ...a,
+      idle_retirement: {
+        ...pending,
+        ...(pending.evidence
+          ? {
+              evidence: {
+                ...pending.evidence,
+                observation:
+                  source === "owner"
+                    ? status === "unsupported"
+                      ? "unknown"
+                      : status
+                    : "alive",
+              },
+            }
+          : {}),
+        dispatch_wait: { ...observation, event_id: eventId },
+      },
+    });
   });
 }
 
@@ -205,7 +312,8 @@ export function settleIdleSessionRetirement(
         ? "unavailable"
         : result.outcome;
     const failures = pending.failures + 1;
-    const notify = failures >= 3 && !pending.notice_sent;
+    const notify =
+      failures >= 3 && !pending.notice_sent && !pending.dispatch_wait;
     const next: Assignment = {
       ...a,
       idle_retirement: {

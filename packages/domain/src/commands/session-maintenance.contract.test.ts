@@ -10,6 +10,7 @@ import {
   beginIdleSessionRetirement,
   confirmWaitingRetirementExit,
   settleIdleSessionRetirement,
+  trackRetirementDispatch,
 } from "./idle-session-retirement.js";
 import { queueRun } from "./launch.js";
 import { recordSessionMaintenance } from "./session-maintenance.js";
@@ -102,6 +103,102 @@ test("maintenance publication basis preserves project/actor scope and sequence o
     ).publication,
   ).toBe(next.id);
   expect(sessionMaintenanceBasis(before, owner)).toBe(basis);
+});
+
+test("retirement dispatch diagnostics follow one waiting session, not the Run or terminal address alone", () => {
+  const initial = setup(),
+    owner = initial.assignments[0]!,
+    run = initial.runs[0]!,
+    ref = owner.runtime_ref!;
+  const io = { ...ports(), clock: { now: () => now } };
+  const a = {
+    ...owner,
+    idle_retirement: {
+      phase: "waiting" as const,
+      runtime_ref: ref,
+      started_at: now,
+      threshold_minutes: 60,
+      failures: 2,
+    },
+  };
+  const state = {
+    ...initial,
+    assignments: [a],
+    runs: [{ ...run, status: "queued" as const }],
+  };
+  const conflict = { source: "owner", status: "runtime_conflict" } as const;
+  expect(
+    trackRetirementDispatch(state, actor(), a, run.id, conflict, io).ok,
+  ).toBe(false);
+  const first = value(
+    trackRetirementDispatch(state, system, a, run.id, conflict, io),
+  );
+  const waiting = apply(state, first),
+    current = waiting.assignments[0]!;
+  const eventId = first.events[0]!.id;
+  expect(current.idle_retirement).toMatchObject({
+    failures: 2,
+    dispatch_wait: { ...conflict, event_id: eventId },
+  });
+  expect(
+    value(
+      trackRetirementDispatch(waiting, system, current, run.id, conflict, io),
+    ).changes,
+  ).toEqual([]);
+  expect(
+    value(trackRetirementDispatch(waiting, system, a, run.id, "woken", io))
+      .changes,
+  ).toEqual([]);
+  const reusedAddress = {
+    ...current,
+    runtime_ref: {
+      ...ref,
+      launch_generation: { run_id: run.id, generation: "other" },
+    },
+  };
+  expect(
+    value(
+      trackRetirementDispatch(
+        waiting,
+        system,
+        reusedAddress,
+        run.id,
+        "woken",
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  const changed = value(
+    trackRetirementDispatch(
+      waiting,
+      system,
+      current,
+      run.id,
+      { source: "owner", status: "runtime_timeout" },
+      io,
+    ),
+  );
+  expect(changed.events.map((e) => e.type)).toEqual([
+    "retirement_dispatch_wait_changed",
+  ]);
+  const resumed = value(
+    trackRetirementDispatch(
+      apply(waiting, changed),
+      system,
+      current,
+      run.id,
+      "woken",
+      io,
+    ),
+  );
+  expect(resumed.events).toMatchObject([
+    {
+      type: "retirement_dispatch_resumed",
+      payload: { retirement_wait_event_id: eventId },
+    },
+  ]);
+  expect(resumed.token_requests).toEqual([]);
+  expect(apply(waiting, resumed).assignments[0]?.runtime_ref).toEqual(ref);
 });
 
 test("retirement fences launch without revoking identity; only trusted exit clears the exact session", () => {

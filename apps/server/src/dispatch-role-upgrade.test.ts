@@ -245,6 +245,15 @@ async function recoveredWaitingRun() {
   return { f, queued, retire, owner, token };
 }
 
+function waitNotices(f: ReturnType<typeof setup>) {
+  const notices = f
+    .state()
+    .events.filter((e) => e.type === "session_maintenance_attention");
+  return f.store
+    .listNotifications({ project_id: f.project, recipient_kind: "pm_ops" })
+    .filter((n) => notices.some((e) => e.id === n.event_id));
+}
+
 test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
   const { f, queued, retire, owner, token } = await recoveredWaitingRun();
   vi.mocked(f.runtime.status).mockResolvedValueOnce({
@@ -252,6 +261,11 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
     error: { code: "runtime_not_found", message: "snapshot gap" },
   });
   await f.dispatcher.tick();
+  expect(waitNotices(f)).toMatchObject([{ status: "pending" }]);
+  expect(f.owner().idle_retirement?.dispatch_wait).toMatchObject({
+    source: "snapshot",
+    status: "runtime_not_found",
+  });
   expect(f.startRun).not.toHaveBeenCalled();
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
   await f.dispatcher.tick();
@@ -259,6 +273,10 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
     "dispatched",
   );
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  expect(waitNotices(f)).toMatchObject([{ status: "resolved" }]);
+  expect(f.owner().idle_retirement?.dispatch_wait).toBeUndefined();
+  expect(f.owner().idle_retirement?.evidence?.reason).toBe("pidfd_unavailable");
   expect(f.runtime.wake).toHaveBeenCalledOnce();
   expect(
     vi.mocked(f.runtime.wake).mock.calls[0]?.[2]?.retirement_owner,
@@ -293,8 +311,43 @@ test.each([
         ok: false,
         error: { code: missing, message: "missing snapshot" },
       });
-    await f.dispatcher.tick();
-    await f.dispatcher.tick();
+    for (let i = 0; i < 5; i++) {
+      f.advance(15 * 60_000);
+      await host.upgradeIdleAssignmentRoles(
+        f.store,
+        f.project,
+        f.runtime,
+        f.clock,
+      );
+      await f.dispatcher.tick();
+    }
+    const detail =
+      missing === "owner_conflict"
+        ? { source: "owner", status: "runtime_conflict" }
+        : { source: "snapshot", status: missing };
+    expect(f.owner().idle_retirement).toMatchObject({
+      failures: 2,
+      phase: "waiting",
+      dispatch_wait: detail,
+      evidence: {
+        reason: "pidfd_unavailable",
+        observation:
+          missing === "owner_conflict" ? "runtime_conflict" : "alive",
+      },
+    });
+    const notices = waitNotices(f);
+    expect(notices).toMatchObject([{ status: "pending" }]);
+    const event = f.state().events.find((e) => e.id === notices[0]?.event_id);
+    expect(event?.payload).toMatchObject({
+      evidence: detail,
+      notice: expect.stringContaining("hc get 只读核对"),
+    });
+    expect(JSON.stringify(event?.payload)).not.toMatch(
+      /owner changed|missing snapshot|cardigan assignment stop/,
+    );
+    expect(
+      f.state().events.some((e) => e.type === "queued_runtime_unavailable"),
+    ).toBe(false);
     expect(f.state().runs.find((r) => r.id === queued)).toMatchObject({
       status: "queued",
       queue_reason: "runtime_unavailable",
@@ -318,6 +371,28 @@ test.each([
     expect(f.startRun.mock.calls[0]?.[0].run.id).toBe(queued);
     expect(f.startRun.mock.calls[0]?.[0].replacement).toBeUndefined();
     expect(f.runtime.release).not.toHaveBeenCalled();
+    const caller = f.actorFor(f.owner());
+    f.apply((s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p), caller);
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: queued, outcome: "completed", summary: "Resumed" },
+          p,
+        ),
+      caller,
+    );
+    await host.upgradeIdleAssignmentRoles(
+      f.store,
+      f.project,
+      f.runtime,
+      f.clock,
+    );
+    expect(waitNotices(f)).toMatchObject([
+      { event_id: event?.id, status: "resolved" },
+    ]);
+    expect(f.owner().idle_retirement).toBeUndefined();
   },
 );
 

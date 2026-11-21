@@ -1,6 +1,7 @@
 import type { Actor, Assignment } from "../entities.js";
 import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
+import { retirementWaitReceipt } from "../retirement-session.js";
 import { retirementOwnsSession } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
 import {
@@ -213,7 +214,12 @@ export function finishIdleAssignmentRoleUpgrade(
       {
         assignment_id: previous.id,
         reason: "default_role_upgraded",
-        ...(retired ? { idle_retirement_confirmed: true } : {}),
+        ...(retired
+          ? {
+              idle_retirement_confirmed: true,
+              ...retirementWaitReceipt(previous),
+            }
+          : {}),
         from_version: previous.role_version,
         to_version: next.role_version,
         old_runtime_ref: upgrade.previous_runtime_ref

@@ -38,6 +38,7 @@ import {
   pmNotificationState,
   providerAdmission,
   queueRun,
+  type RetirementDispatchWait,
   refreshRunTargetWait,
   refreshTestReviewLimits,
   remainingResourceRatio,
@@ -50,6 +51,7 @@ import {
   runsOf,
   standingRunDormant,
   stoppedByHuman,
+  trackRetirementDispatch,
   unreadableCommentTrigger,
   unreceivedBell,
 } from "@cardigan/domain";
@@ -57,6 +59,7 @@ import {
   armBellReceipt,
   assignmentResourceKeys,
   bindRepairAttempt,
+  boundedRetirementError,
   crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
@@ -77,6 +80,7 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
+  recordRetirementDispatch,
   recordWakeRefusal,
   redactFailureLine,
   runCapacitySnapshot,
@@ -857,20 +861,32 @@ export class Dispatcher {
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
     const retirementHeld = retirementOwnsSession(a);
+    const retirementWait = (observation: RetirementDispatchWait) => {
+      if (queued)
+        recordRetirementDispatch(
+          this.options.store,
+          project,
+          a,
+          queued.id,
+          observation,
+          this.clock,
+        );
+    };
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
-      if (
-        retirementHeld &&
-        (await observeRetirementForDispatch(
+      if (retirementHeld) {
+        const owner = await observeRetirementForDispatch(
           this.options.store,
           project,
           a,
           this.options.runtime,
           this.clock,
-        )) !== "alive"
-      ) {
-        this.waitForRuntime(project, a);
-        return; // A confirmed exit cleared the ref; claim a fresh launch next tick.
+        );
+        if (owner !== "alive") {
+          if (owner !== "deferred" && owner !== "exited")
+            retirementWait({ source: "owner", status: owner });
+          return; // Lock contention is not a runtime failure; confirmed exit allows a fresh launch next tick.
+        }
       }
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
@@ -879,7 +895,14 @@ export class Dispatcher {
         retirementHeld &&
         (!observed?.ok || observed.value.process !== "alive")
       ) {
-        this.waitForRuntime(project, a);
+        retirementWait({
+          source: "snapshot",
+          status: observed?.ok
+            ? observed.value.process === "exited"
+              ? "exited"
+              : "unknown"
+            : boundedRetirementError(observed?.error.code),
+        });
         return; // Missing, conflicting or exited generic status is not exit proof.
       }
       if (observed?.ok && observed.value.process === "alive") {
@@ -1004,7 +1027,7 @@ export class Dispatcher {
       replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
     }
     if (retirementHeld && !live) {
-      this.waitForRuntime(project, a);
+      retirementWait({ source: "replacement", status: "replacement_required" });
       return; // Catalog/profile/lease changes cannot force-release a held reference.
     }
     // A reused session keeps the catalog it listed; a new one lists this deploy's.
@@ -1283,7 +1306,16 @@ export class Dispatcher {
           }),
         ),
       );
-    this.settle(job.attempt, sent, reason, job.bell, failure);
+    this.settle(
+      job.attempt,
+      sent,
+      reason,
+      job.bell,
+      failure,
+      sent && live && retirementHeld && a.idle_retirement?.dispatch_wait
+        ? a
+        : undefined,
+    );
   }
   private catalog(a: Assignment, project: ProjectId): string | undefined {
     try {
@@ -2012,6 +2044,7 @@ export class Dispatcher {
     reason: string,
     bell?: string,
     failure?: DeliveryFailure,
+    resumedRetirement?: Assignment,
   ) {
     const { store } = this.options,
       { project_id: project, continuation } = attempt;
@@ -2036,6 +2069,23 @@ export class Dispatcher {
         tx.assignments.put(project, cleared);
       }
       let state = this.loadState(tx, project);
+      if (resumedRetirement) {
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            trackRetirementDispatch(
+              state,
+              { kind: "system", project_id: project },
+              resumedRetirement,
+              attempt.run_id,
+              "woken",
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
+        state = this.loadState(tx, project);
+      }
       // A queued Run has never crossed dispatch/sentinel. Fence it atomically
       // with lease recovery so a late provision cannot dispatch after its slot
       // has been handed to another Run. Dispatched/unknown work stays uncertain.
