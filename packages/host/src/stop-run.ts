@@ -24,20 +24,36 @@ export async function stopRunRuntime(
    */
   releaseLive = true,
   beforeMayStop?: () => Promise<void>,
+  owner?: Parameters<Runtime["release"]>[1]["owner"],
 ) {
-  const observe = () =>
-    ref ? runtime.status(ref).catch(() => undefined) : undefined;
-  const before = await observe();
+  const observedExit = async () => {
+    if (!ref) return true;
+    if (!owner) return exited(await runtime.status(ref).catch(() => undefined));
+    // The generic status feed can omit a live terminal. Only the dedicated
+    // get of the bound address/labels may confirm exit on this recovery path.
+    const proof = await runtime
+      .observe_retirement?.(ref, owner)
+      .catch(() => undefined);
+    return proof?.ok
+      ? proof.value === "exited"
+      : proof?.error.code === "runtime_not_found";
+  };
+  const before = await observedExit();
   // A previous release may finish after fresh activity or process loss. Settle
   // its original fence without asking to issue another stop; ownership and the
   // exact runtime reference are checked again by the settlement transaction.
-  if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
-  if (!releaseLive && ref && !exited(before)) return "not_exited" as const;
+  if (alreadyStopping && before) return "exited" as const;
+  if (!releaseLive && ref && !before) return "not_exited" as const;
   if (beforeMayStop) await beforeMayStop();
   if (!mayStop()) return "withdrawn" as const;
-  if (!ref || exited(before)) return "exited" as const;
-  await runtime.release(ref, { force: true }).catch(() => undefined);
-  return exited(await observe())
+  if (!ref || before)
+    return !owner || (await observedExit())
+      ? ("exited" as const)
+      : ("unconfirmed" as const);
+  await runtime
+    .release(ref, { force: true, ...(owner ? { owner } : {}) })
+    .catch(() => undefined);
+  return (await observedExit())
     ? ("exited" as const)
     : ("unconfirmed" as const);
 }

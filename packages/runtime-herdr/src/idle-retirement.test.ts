@@ -72,6 +72,20 @@ test("legacy retirement-held wake rechecks live ownership inside the send slot",
   f.terminal.labels.assignment = "A-1";
   expect(value(await runtime.wake(ref, "bell", guard))).toEqual({ sent: true });
 });
+test("owned release rechecks project/assignment at the terminal before signaling", async () => {
+  const f = adapter(),
+    runtime = await f.create();
+  expect(value(await runtime.observe_retirement(ref, options()))).toBe("alive");
+  f.terminal.labels.assignment = "A-2";
+  expect(
+    await runtime.release(ref, { force: true, owner: options() }),
+  ).toMatchObject({ ok: false, error: { code: "runtime_conflict" } });
+  expect(
+    vi
+      .mocked(f.client.exec)
+      .mock.calls.some(([args]) => args[0] === "kill" || args[0] === "rm"),
+  ).toBe(false);
+});
 test.each(["HUP", "TERM", undefined])(
   "retirement uses only HUP/TERM; finish after %s",
   async (finishAfter) => {
