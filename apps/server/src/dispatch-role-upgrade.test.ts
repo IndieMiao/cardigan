@@ -268,6 +268,14 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
   });
   expect(f.startRun).not.toHaveBeenCalled();
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
+  // The previous Run finished explicitly. The ordinary new-work fast path
+  // must not wake a busy session whose retirement is still unresolved.
+  f.setBusy(true);
+  await f.dispatcher.tick();
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(waitNotices(f)).toMatchObject([{ status: "pending" }]);
+  f.setBusy(false);
   await f.dispatcher.tick();
   await f.dispatcher.tick();
   expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
@@ -278,9 +286,10 @@ test("restart after a read-only claim lets a queued Run wake the same live sessi
   expect(f.owner().idle_retirement?.dispatch_wait).toBeUndefined();
   expect(f.owner().idle_retirement?.evidence?.reason).toBe("pidfd_unavailable");
   expect(f.runtime.wake).toHaveBeenCalledOnce();
-  expect(
-    vi.mocked(f.runtime.wake).mock.calls[0]?.[2]?.retirement_owner,
-  ).toEqual({ project_id: f.project, assignment_id: owner.id });
+  expect(vi.mocked(f.runtime.wake).mock.calls[0]?.[2]).toMatchObject({
+    if_idle: true,
+    retirement_owner: { project_id: f.project, assignment_id: owner.id },
+  });
   expect(f.startRun).not.toHaveBeenCalled();
   expect(retire).toHaveBeenCalledOnce();
   expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
