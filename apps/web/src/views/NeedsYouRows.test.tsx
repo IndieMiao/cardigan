@@ -7,6 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { CardiganClient, NeedsDecision, NeedsPage } from "../api.js";
 import { changeControl } from "../testing/controls.js";
@@ -112,6 +113,35 @@ async function openTab(label: string) {
     await screen.findByRole("tabpanel", { name: new RegExp(`^${label}`) }),
   );
 }
+
+test("a single click when counts first enable the merge tab survives default selection", async () => {
+  let clicked = false;
+  render(
+    <Profiler
+      id="needs-tabs"
+      onRender={() => {
+        if (clicked) return;
+        const merge = screen.getByRole<HTMLButtonElement>("tab", {
+          name: /^合并确认/,
+        });
+        if (merge.disabled) return;
+        // Click in the first enabled commit, before passive effects run.
+        clicked = true;
+        merge.click();
+      }}
+    >
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({ needsYou: async () => data })}
+      />
+    </Profiler>,
+  );
+  const panel = await screen.findByRole("tabpanel", { name: /^合并确认/ });
+  await within(panel).findByRole("article", { name: "合并确认 Q-3" });
+  expect(screen.getByRole("tab", { selected: true }).textContent).toMatch(
+    /^合并确认/,
+  );
+});
 
 test.each(tabs)(
   "C-459: the %s tab uses the shared row: ids and title left, primary action last on the right",
