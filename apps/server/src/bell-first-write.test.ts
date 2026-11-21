@@ -1,4 +1,4 @@
-import type { Runtime } from "@cardigan/domain";
+import { acknowledgeRun, type Runtime } from "@cardigan/domain";
 import { armBellReceipt, confirmBellWrite } from "@cardigan/host";
 import { expect, onTestFinished, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
@@ -44,6 +44,25 @@ test("a proven guard refusal preserves the first write across the dispatch timeo
   expect(writes[0]).toContain(`run=${id}`);
   expect(f.latest().bell_delivery).toMatchObject({ sent_at: f.clock.now() });
   expect(f.latest().bell_delivery?.retry_at).toBeUndefined();
+  expect(f.notes()).toEqual([
+    expect.objectContaining({ run_id: id, status: "belled" }),
+  ]);
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: id }, p),
+    f.actorFor(f.target.assignment),
+  );
+  for (let i = 0; i < 3; i++) {
+    f.advance(1001);
+    await new Dispatcher(opts).tick();
+  }
+  expect(f.latest().bell_delivery?.escalated_at).toBeTruthy();
+  expect(writes).toHaveLength(2);
+  f.comment();
+  await new Dispatcher(opts).tick();
+  expect(writes).toHaveLength(3);
+  expect(f.notes().every((n) => n.status === "belled" && n.run_id === id)).toBe(
+    true,
+  );
 });
 
 test("the cold publication boundary pins ordinary rework; supersession retires it without replay", async () => {

@@ -631,13 +631,13 @@ export async function retryDispatchedRuns(
         state.decisions.some(
           (q) => q.review_limit_group?.delivery_id === binding.delivery_id,
         );
-      const refusedFirstWrite =
-        !shared &&
+      const refusedClaim =
         !disposition &&
         !run.bell_delivery?.sent_at &&
         last?.outcome === "failed" &&
         (run.bell_delivery?.refused_attempt_id === last.id ||
           (sameTarget && binding?.refused_at && !binding.sending_at));
+      const refusedFirstWrite = !shared && refusedClaim;
       // Keep every receipt for audit. A positive refusal for this shared target
       // neither spends nor resets the ordinary failure budget since the last send.
       let failures = 0;
@@ -729,6 +729,7 @@ export async function retryDispatchedRuns(
         recover,
         reconcile,
         readmit,
+        refusedNotes: refusedClaim ? last.notification_ids : [],
         legacyRetry: legacy === "unsent",
         withdrawn,
         retry:
@@ -835,12 +836,23 @@ export async function retryDispatchedRuns(
         current.last?.id !== observed.last?.id
       )
         return;
+      // A refused first claim never settled its inbox rows. Reclaim exactly
+      // those IDs alongside Run-owned rows, not unrelated newer comments.
+      const refusedNotes = new Set(current.refusedNotes);
       const notes = store
         .listNotifications({
           project_id: project,
           statuses: ["pending", "belled", "delivery_failed"],
         })
-        .filter((n) => n.run_id === current.run.id);
+        .filter(
+          (n) =>
+            n.run_id === current.run.id ||
+            (!n.run_id &&
+              n.status === "pending" &&
+              refusedNotes.has(n.id) &&
+              (n.recipient.kind !== "assignment" ||
+                n.recipient.assignment_id === current.a.id)),
+        );
       const item = current.state.work_items.find(
         (w) => w.id === current.a.work_item_id,
       );

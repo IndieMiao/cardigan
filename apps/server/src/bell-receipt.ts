@@ -66,13 +66,13 @@ export async function checkBellReceipts(
     const unlock = await tryHostOpsLock(store, project, owner.id, "launch");
     if (!unlock) continue;
     try {
-      const current = (s: CommandState) => {
+      const current = (s: CommandState, reservation?: string) => {
         const run = s.runs.find((r) => r.id === original.id);
         if (
           !run ||
           closing() ||
-          !due(run) ||
-          run.bell_delivery?.retry_at !== bell.retry_at ||
+          !(reservation ? unreceivedBell(run) : due(run)) ||
+          run.bell_delivery?.retry_at !== (reservation ?? bell.retry_at) ||
           !wakeIsCurrent(s, owner, run.id) ||
           !hasRunTarget(owner, s) ||
           !assignmentDependenciesAllowStart(s, owner) ||
@@ -125,32 +125,42 @@ export async function checkBellReceipts(
       const review = store.uow.read((tx) => scope(load(tx, project)));
       // A running Run does not publish a new start. Its original resource
       // grant still has to pass startBlocked inside the write boundary.
-      const gated =
-        original.status === "dispatched" &&
+      let resourceDenied = false;
+      let reservedAt: string | undefined;
+      const readCurrent = () =>
+        store.uow.read((tx) => current(load(tx, project)));
+      const preflight =
         leases &&
         (leases.configured(project, owner.machine_id) ||
-          leases.hasProbeTarget(project, original));
+          leases.hasProbeTarget(project, original))
+          ? async () => {
+              const run = readCurrent();
+              if (!run) return false;
+              if (run.status === "running") return true;
+              // A failed resource inspection is not an idle-guard withdrawal.
+              const allowed = await leases
+                .canPublish(project, owner, run, () => clock.now())
+                .catch(() => false);
+              if (allowed) return true;
+              // canPublish also declines when the Run started during its probe.
+              // Defer that transition, rather than treating it as a revoked grant.
+              resourceDenied = readCurrent()?.status === "dispatched";
+              return false;
+            }
+          : undefined;
       const text = `[bell] ${bell.card_id ? `card=${bell.card_id}` : `project=${project}`} asg=${owner.id} run=${original.id}\n→ 请调用 get_updates 读取详情`;
       const result = await runtime.wake(
         ref,
         [text, review].filter(Boolean).join("\n"),
         {
           ...guard,
-          ...(gated
-            ? {
-                resource_preflight: () =>
-                  leases.canPublish(project, owner, original, () =>
-                    clock.now(),
-                  ),
-              }
-            : {}),
+          ...(preflight ? { resource_preflight: preflight } : {}),
           before_send: () =>
             store.uow.run((tx) => {
               const s = load(tx, project),
                 run = current(s);
+              if (!run?.bell_delivery || scope(s) !== review) return false;
               if (
-                !run?.bell_delivery ||
-                scope(s) !== review ||
                 leases?.startBlocked(
                   project,
                   owner,
@@ -159,17 +169,32 @@ export async function checkBellReceipts(
                   undefined,
                   tx,
                 )
-              )
+              ) {
+                resourceDenied = true;
                 return false;
+              }
               // Persist before IO: another dispatcher or a lost hc response cannot replay twice.
+              reservedAt = clock.now();
               tx.runs.put(project, {
                 ...run,
-                bell_delivery: { ...run.bell_delivery, retry_at: clock.now() },
+                bell_delivery: { ...run.bell_delivery, retry_at: reservedAt },
               });
               return true;
             }),
         },
       );
+      if (result.ok && result.value.withdrawn && !resourceDenied) {
+        // Only the adapter's positive non-write proof may refund our own
+        // reservation. Never refund a transport error or an unknown response.
+        if (reservedAt)
+          store.uow.run((tx) => {
+            const run = current(load(tx, project), reservedAt);
+            if (!run?.bell_delivery) return;
+            const { retry_at: _unused, ...pending } = run.bell_delivery;
+            tx.runs.put(project, { ...run, bell_delivery: pending });
+          });
+        continue;
+      }
       // The transport can fail before even reaching its send-slot callback. Do
       // not tight-loop a broken adapter or turn a late receipt into an alarm.
       if (!result.ok || !result.value.sent)
