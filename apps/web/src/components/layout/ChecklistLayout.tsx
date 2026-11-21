@@ -59,3 +59,33 @@ export function ChecklistItem({
     </li>
   );
 }
+
+/** C-503: one item's longer text, folded until opened; one per item. */
+export function ChecklistDetails({
+  summary,
+  children,
+}: {
+  summary: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <details className={styles.details}>
+      <summary>{summary}</summary>
+      {children}
+    </details>
+  );
+}
+
+/** C-503: the panel's buttons in one wrapping row, primary first. */
+export function ChecklistActions({ children }: { children: ReactNode }) {
+  return <div className={styles.actions}>{children}</div>;
+}
+
+/** C-503: a refusal shown where the action was taken, with what to do next. */
+export function ChecklistAlert({ children }: { children: ReactNode }) {
+  return (
+    <div className={styles.alert} role="alert">
+      {children}
+    </div>
+  );
+}

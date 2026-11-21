@@ -1,9 +1,11 @@
-import { useCallback, useState } from "react";
-import type {
-  AttachmentView,
-  CardDetail,
-  CardiganClient,
-  CardListItem,
+import { useCallback, useRef, useState } from "react";
+import {
+  ApiError,
+  type AttachmentView,
+  type CardDetail,
+  type CardiganClient,
+  type CardListItem,
+  describeWriteError,
 } from "../api.js";
 import {
   dependencyStatusLabel,
@@ -17,6 +19,7 @@ import { AttachmentGrid } from "./AttachmentGrid.js";
 import { DependencyPeek } from "./CardDependencies.js";
 import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import { ChecklistActions, ChecklistAlert } from "./layout/ChecklistLayout.js";
 import {
   DependencyGraph,
   DependencyGraphFacts,
@@ -26,6 +29,8 @@ import {
   DependencyGraphNodeTitle,
 } from "./layout/DependencyGraphLayout.js";
 import { Markdown, MarkdownBody } from "./Operations.js";
+import { RequestFeedback } from "./RequestFeedback.js";
+import { StoryProposalSection } from "./StoryProposal.js";
 import { Button } from "./ui/button.js";
 import { Skeleton } from "./ui/skeleton.js";
 
@@ -33,9 +38,9 @@ import { Skeleton } from "./ui/skeleton.js";
 const ID_BATCH = 100;
 
 /**
- * C-505: the read-only frame of a story card's overview. Decomposition
- * proposals, confirmation and change requests arrive with C-503; until then
- * their place shows an empty state and no control.
+ * C-505: the frame of a story card's overview. C-503 adds the current
+ * decomposition proposal (confirm, change request) and the human's completion
+ * confirmation after the summary.
  */
 export function StoryOverview({
   detail,
@@ -46,6 +51,7 @@ export function StoryOverview({
   revision,
   onLocate,
   onShowTimeline,
+  onSaved,
 }: {
   detail: CardDetail;
   /** Undefined while the overview has only the count; see `StoryAttachments`. */
@@ -56,6 +62,8 @@ export function StoryOverview({
   revision: number;
   onLocate: ((anchor: string) => void) | undefined;
   onShowTimeline: () => void;
+  /** Reread the card after a confirmation, change request or completion. */
+  onSaved: () => void;
 }) {
   const card = detail.card;
   return (
@@ -92,10 +100,13 @@ export function StoryOverview({
         projectId={projectId}
         revision={revision}
       />
-      <section className="card-purpose" aria-label="拆解方案">
-        <h2>拆解方案</h2>
-        <EmptyState>没有拆解方案</EmptyState>
-      </section>
+      <StoryProposalSection
+        detail={detail}
+        client={client}
+        projectId={projectId}
+        cardId={cardId}
+        onSaved={onSaved}
+      />
       <StoryDiscussionFacts detail={detail} onShowTimeline={onShowTimeline} />
       <StorySummary
         detail={detail}
@@ -104,6 +115,7 @@ export function StoryOverview({
         cardId={cardId}
         revision={revision}
         onLocate={onLocate}
+        onSaved={onSaved}
       />
     </>
   );
@@ -390,6 +402,7 @@ function StorySummary({
   cardId,
   revision,
   onLocate,
+  onSaved,
 }: {
   detail: CardDetail;
   client: CardiganClient;
@@ -397,6 +410,7 @@ function StorySummary({
   cardId: string;
   revision: number;
   onLocate: ((anchor: string) => void) | undefined;
+  onSaved: () => void;
 }) {
   const id = detail.card.story?.summary_entry_id;
   const anchor = `entry-${id}`;
@@ -456,9 +470,116 @@ function StorySummary({
           ) : (
             !read.error && read.pending && <Skeleton />
           )}
+          {/* Only a summary the person can read may be confirmed against. */}
+          {entry && (
+            <StoryCompletion
+              // Each summary has its own confirmation state and retry key: a
+              // refusal of an older summary never locks out the newer one.
+              key={id}
+              detail={detail}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              summaryId={id}
+              onSaved={onSaved}
+            />
+          )}
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * C-503: once every child has ended and the Office summarized, the human
+ * confirms the story done through the existing mark-done command.
+ */
+function StoryCompletion({
+  detail,
+  client,
+  projectId,
+  cardId,
+  summaryId,
+  onSaved,
+}: {
+  detail: CardDetail;
+  client: CardiganClient;
+  projectId: string;
+  cardId: string;
+  summaryId: string;
+  onSaved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ message: string; stale: boolean }>();
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  const key = useRef(crypto.randomUUID());
+  const progress = detail.card.story_progress;
+  const ready =
+    !["done", "cancelled"].includes(detail.card.status) &&
+    !!progress?.total &&
+    progress.finished === progress.total &&
+    detail.mark_done?.allowed === true;
+  if (!ready) return <RequestFeedback message={message} />;
+  return (
+    <>
+      {error && (
+        <ChecklistAlert>
+          <span>{error.message}</span>
+          {error.stale && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                setError(undefined);
+                onSaved();
+              }}
+            >
+              刷新
+            </Button>
+          )}
+        </ChecklistAlert>
+      )}
+      <ChecklistActions>
+        <Button
+          variant="primary"
+          // Stays focusable while busy, so a refusal does not drop focus.
+          aria-disabled={busy || error?.stale}
+          onClick={async () => {
+            if (sending.current || error?.stale) return;
+            sending.current = true;
+            setBusy(true);
+            setError(undefined);
+            try {
+              await client.markCardDone(
+                projectId,
+                cardId,
+                `已对照总结 ${summaryId} 确认需求完成`,
+                [],
+                key.current,
+                summaryId,
+              );
+              setMessage("需求卡已确认完成");
+              onSaved();
+            } catch (cause) {
+              const stale =
+                cause instanceof ApiError && cause.code === "stale_target";
+              setError({
+                stale,
+                message: stale
+                  ? "对照总结已更新，请刷新后再确认"
+                  : `确认完成失败：${describeWriteError(cause).replace(/^请求失败：/u, "")}`,
+              });
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        >
+          确认完成
+        </Button>
+      </ChecklistActions>
+      <RequestFeedback message={message} />
+    </>
   );
 }
 

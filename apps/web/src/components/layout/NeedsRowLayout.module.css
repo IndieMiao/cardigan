@@ -117,6 +117,16 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
+  /* C-503: a refusal of the row's own action, visible while folded. */
+  .alert {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+    color: var(--danger);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
   /* The full plain summary inside the details replaces the one-liner. */
   .row[data-open] .summary {
     display: none;

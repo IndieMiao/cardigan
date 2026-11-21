@@ -13,6 +13,7 @@ import {
   canRecheckMerge,
   completeHumanAction,
   confirmSourceMergeUnrelated,
+  confirmStoryProposal,
   copyRole,
   createCard,
   createRole,
@@ -626,7 +627,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive|merge-solo|merge-window|source-unrelated)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|story-confirm|sensitive|merge-solo|merge-window|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -1138,6 +1139,7 @@ export async function serveWrite(
           "supersede",
           "recheck-merge",
           "mark-done",
+          "story-confirm",
           "sensitive",
           "merge-solo",
           "merge-window",
@@ -1156,6 +1158,8 @@ export async function serveWrite(
   const header = c.req.headers["idempotency-key"];
   if (operation === "mark-done")
     parsed(requiredKey, header, "标记完成需要 Idempotency-Key");
+  if (operation === "story-confirm")
+    parsed(requiredKey, header, "确认开卡需要 Idempotency-Key");
   const context: CommandContext = {
     ...c,
     ...(header === undefined
@@ -1197,6 +1201,8 @@ export async function serveWrite(
             .object({
               result: text,
               attachments: z.array(z.string()).optional(),
+              // C-503: the story summary the person confirmed against.
+              story_summary_entry_id: entryId.optional(),
             })
             .strict(),
           body,
@@ -1205,6 +1211,17 @@ export async function serveWrite(
       );
       output = run(context, (s, a, ports) =>
         markCardDone(s, a, { card_id, ...input }, ports),
+      );
+    } else if (operation === "story-confirm") {
+      // C-503: the human session confirms the version it saw; the domain opens
+      // every child in this one transaction or none.
+      const input = parsed(
+        z.object({ version: z.number().int().positive() }).strict(),
+        body,
+        "请提交所确认的拆解方案版本号。",
+      );
+      output = run(context, (s, a, ports) =>
+        confirmStoryProposal(s, a, { card_id, version: input.version }, ports),
       );
     } else if (operation === "recheck-merge") {
       const input = parsed(

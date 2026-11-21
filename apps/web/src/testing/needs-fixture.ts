@@ -9,7 +9,13 @@ export function fixtureNeedsSection(
   const merge = (q: NeedsPage["decisions"][number]) =>
     q.trigger === "merge_confirmation" && !q.followup_notice;
   if (section === "decisions")
-    return { ...empty, decisions: page.decisions.filter((q) => !merge(q)) };
+    return {
+      ...empty,
+      decisions: page.decisions.filter((q) => !merge(q)),
+      ...(page.story_proposals
+        ? { story_proposals: page.story_proposals }
+        : {}),
+    };
   if (section === "merges")
     return {
       ...empty,
@@ -49,7 +55,9 @@ export function fixtureNeedsSection(
   };
 }
 export function fixtureNeedsCounts(page: NeedsPage): NeedsCounts {
-  const decisions = fixtureNeedsSection(page, "decisions").decisions.length;
+  const decisions =
+    fixtureNeedsSection(page, "decisions").decisions.length +
+    (page.story_proposals?.length ?? 0);
   const merges = fixtureNeedsSection(page, "merges").decisions.length;
   const actions = page.human_actions.filter((a) => a.triage !== "host").length;
   const attention = page.incidents.length + (page.attention?.length ?? 0);
