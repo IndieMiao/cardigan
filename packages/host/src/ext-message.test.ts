@@ -1002,47 +1002,95 @@ test.each(
   },
 );
 
-test("an older source first released during quiet hours is not a rate member", async () => {
-  config = {
-    ...config,
-    policy: { ...config.policy, max_per_minute: 1 },
-    quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
-  };
-  const active = sender();
-  active.recordStatus();
-  addAction(90);
-  const held = { ...action, id: "H-90", key: "H-90" } as const;
-  store.uow.run((tx) =>
-    tx.human_actions.put(project_id, {
-      ...held,
-      ready_when: { kind: "manual" },
-    }),
-  );
-  await active.tick();
-  expect(fake.messages).toHaveLength(0);
-  for (let n = 1; n <= 3; n++) addTitledAction(n);
-  await active.tick();
-  expect(fake.messages).toHaveLength(1);
-  advance(120_000);
-  store.uow.run((tx) => tx.human_actions.put(project_id, held));
-  await sender().tick();
-  expect(fake.messages).toHaveLength(1);
-  advance(60_000);
-  await sender().tick();
-  advance(60_000);
-  await sender().tick();
-  expect(fake.messages.slice(1)).toHaveLength(2);
-  expect(fake.messages.slice(1)).toContainEqual({
-    title: "2 条待处理",
-    url: config.workbench_url,
-  });
-  expect(fake.messages.slice(1)).toContainEqual(
-    expect.objectContaining({
-      total: 1,
-      items: [expect.objectContaining({ item: "H-90" })],
-    }),
-  );
-});
+test.each(
+  [1, 2].flatMap((limit) =>
+    ["during quiet", "wake after read", "restart after projection"].map(
+      (edge) => ({ limit, edge }),
+    ),
+  ),
+)(
+  "an older source first released during quiet hours is not a rate member: $edge, limit $limit",
+  async ({ limit, edge }) => {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: limit },
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+    };
+    const active = sender();
+    active.recordStatus();
+    addAction(90);
+    const held = { ...action, id: "H-90", key: "H-90" } as const;
+    store.uow.run((tx) =>
+      tx.human_actions.put(project_id, {
+        ...held,
+        ready_when: { kind: "manual" },
+      }),
+    );
+    await active.tick();
+    expect(fake.messages).toHaveLength(0);
+    for (let n = 1; n <= limit + 2; n++) addTitledAction(n);
+    await active.tick();
+    expect(fake.messages).toHaveLength(limit);
+    advance(179_999);
+    store.uow.run((tx) => tx.human_actions.put(project_id, held));
+    if (edge === "during quiet") {
+      await active.tick();
+      expect(fake.messages).toHaveLength(limit);
+      advance(1);
+    } else {
+      let sawRead = false;
+      store.observe({
+        transaction(kind) {
+          if (kind === "read" && !sawRead) {
+            sawRead = true;
+            advance(1);
+          } else if (
+            kind === "run" &&
+            sawRead &&
+            edge === "restart after projection"
+          ) {
+            store.observe(undefined);
+            void active.stop();
+          }
+        },
+      });
+      await active.tick();
+      expect(sawRead).toBe(true);
+      store.observe(undefined);
+      if (edge === "restart after projection") {
+        expect(fake.messages).toHaveLength(limit);
+        expect(rows().find((r) => r.item_id === "H-90")).toMatchObject({
+          status: "pending",
+          digest_id: "queued",
+          attempts: 0,
+        });
+        store.close();
+        store = Store.open({ dataDir: dir });
+      }
+    }
+    await sender().tick();
+    advance(60_000);
+    await sender().tick();
+    advance(60_000);
+    await sender().tick();
+    expect(fake.messages.slice(limit)).toHaveLength(2);
+    expect(fake.messages.slice(limit)).toContainEqual({
+      title: "2 条待处理",
+      url: config.workbench_url,
+    });
+    expect(fake.messages.slice(limit)).toContainEqual(
+      expect.objectContaining({
+        total: 1,
+        items: [
+          expect.objectContaining({
+            item: "H-90",
+            url: expect.stringContaining("human-action-H-90"),
+          }),
+        ],
+      }),
+    );
+  },
+);
 
 test.each(["claim", "dispatch"])(
   "entering quiet hours at %s preserves the overflow without spending a slot",

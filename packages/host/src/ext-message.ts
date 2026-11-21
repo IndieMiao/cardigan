@@ -137,12 +137,16 @@ function planChannel(
   const collecting = collectingExtRateBatch(store.database, channel);
   const batchOpen = through !== null || collecting;
   const unassigned = config.quiet_hours
-    ? new Set(
+    ? new Map(
         pendingExtMessages(store.database, project, channel)
           .filter((row) => row.digest_id === null && row.attempts === 0)
-          .map((row) => itemKey(row.item_kind, row.item_id)),
+          .map((row) => [itemKey(row.item_kind, row.item_id), row] as const),
       )
     : undefined;
+  const admissions: {
+    row: ExtMessageRow;
+    group: "queued" | typeof rateQueue;
+  }[] = [];
   const remaining: string[] = [];
   const writes: {
     item: ExtMessageItem;
@@ -160,7 +164,7 @@ function planChannel(
       continue;
     const key = itemKey(item.kind, item.item_id);
     const observed = remembered.has(key);
-    const pendingSingle = unassigned?.has(key);
+    const pendingSingle = unassigned?.get(key);
     if (!pendingSingle && hasExtMessage(store.database, item, channel))
       continue;
     // A fence bounds the batch, but is not evidence of ordinary readiness:
@@ -180,11 +184,14 @@ function planChannel(
     }
     const deferred = !rateMember && (quiet || observed || sourceQuiet);
     if (!deferred && !inRange) continue;
+    const group = rateMember ? rateQueue : deferred ? "queued" : null;
     if (pendingSingle) {
-      if (readyOutsideQuiet || rateMember) ordinary.add(key);
+      // A held webhook item can already have an ungrouped outbox row. Commit
+      // its observed class with the projection, not when a later clock permits sending.
+      if (item.ready && group) admissions.push({ row: pendingSingle, group });
+      else if (readyOutsideQuiet || rateMember) ordinary.add(key);
       continue;
     }
-    const group = rateMember ? rateQueue : deferred ? "queued" : null;
     if (writes.length < projectionBatch) {
       writes.push({ item, channel, group });
       if (config.quiet_hours && group === null && readyOutsideQuiet)
@@ -212,6 +219,7 @@ function planChannel(
   return {
     channel,
     writes,
+    admissions,
     collecting,
     ordinary,
     complete: complete && next === null,
@@ -580,7 +588,9 @@ export class ExtMessageSender {
     if (!plan) return;
     const { projection } = plan;
     if (
-      plan.plans.some((p) => p.writes.length || p.previous !== p.next) &&
+      plan.plans.some(
+        (p) => p.writes.length || p.admissions.length || p.previous !== p.next,
+      ) &&
       !store.uow.run(() => {
         if (
           store.snapshotVersion(projectId) !== projection.version ||
@@ -610,6 +620,8 @@ export class ExtMessageSender {
             deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, group } of p.writes)
             projectExtMessage(store.database, item, channel, now, group);
+          for (const { row, group } of p.admissions)
+            groupExtMessage(store.database, row, group);
           if (p.previous !== p.next)
             saveExtQuietOverflow(store.database, projectId, p.channel, p.next);
         }
