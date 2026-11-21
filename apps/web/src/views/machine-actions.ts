@@ -48,6 +48,12 @@ export interface MachineActionState {
   readonly following?:
     | { readonly id: string; readonly step: string }
     | undefined;
+  /**
+   * Q-1076 R3: evidence sent before the fence said another check is
+   * running. Nothing may be sent until a detail read started after `at`
+   * answers; a failed or refused read does not count.
+   */
+  readonly verify?: { readonly at: number } | undefined;
   readonly check: ActionFeedback;
   readonly drain: ActionFeedback;
 }
@@ -149,6 +155,15 @@ class MachineActions {
   private readonly links = new Set<Link>();
   /** Checks this page saw end: a later read never follows them again. */
   private readonly ended = new Set<string>();
+  /**
+   * Q-1076: the page tick at which the followed check last changed or
+   * ended, or a verification began. Only evidence sent after it (a detail
+   * read started later, or a start request sent later) may start following
+   * a check or switch to another one; the server runs one check per machine
+   * at a time, so such evidence names the one running now. Host times
+   * (`started_at`) are never compared.
+   */
+  private fence = 0;
   /**
    * Bumped whenever the followed check changes or ends and whenever the
    * progress loop restarts: a progress reply is used only with its token.
@@ -309,21 +324,44 @@ class MachineActions {
     this.poll();
   };
 
-  private follow(job: { id: string; step: string }) {
-    if (this.ended.has(job.id)) return;
+  /**
+   * Q-1076: the one way a check reported running is taken up, from the start
+   * reply or a detail read sent at page tick `at` (progress reads only ever
+   * concern the followed check, by token).
+   */
+  private offer(job: { id: string; step: string }, at: number) {
+    if (this.ended.has(job.id)) return; // R4: it has ended, whatever says so
     const current = this.state.following;
     if (current?.id === job.id) {
       if (current.step !== job.step)
         this.set({ following: { id: job.id, step: job.step } });
       return;
     }
+    // R1: sent after the fence, so it says what runs now.
+    if (at > this.fence) {
+      this.switchTo(job, at);
+      return;
+    }
+    // R3: older than what this page acted on; read again before trusting it.
+    this.verifyAgain();
+  }
+  private switchTo(job: { id: string; step: string }, at: number) {
     // Another check: the previous one's replies and progress error go.
     this.stopPolling();
+    this.fence = machineReadTick();
+    const verify = this.state.verify;
     this.set({
       following: { id: job.id, step: job.step },
       ...(this.state.check.retry ? { check: blank } : {}),
+      // A mark only a read sent after the change may lift (unless this is it).
+      ...(verify && at <= verify.at ? { verify: { at: this.fence } } : {}),
     });
     this.poll();
+  }
+  private verifyAgain() {
+    this.fence = machineReadTick();
+    this.set({ verify: { at: this.fence } });
+    this.reread();
   }
 
   /**
@@ -355,7 +393,10 @@ class MachineActions {
         });
       return;
     }
-    if (current) this.stopPolling();
+    if (current) {
+      this.stopPolling();
+      this.fence = machineReadTick();
+    }
     const passed = job.status === "passed";
     const steps =
       job.failed_steps.map(checkStepLabel).join("、") || "原因未记录";
@@ -367,9 +408,12 @@ class MachineActions {
       : passed
         ? "检查通过"
         : `检查未通过：${steps}`;
+    const verify = this.state.verify;
     this.set({
       following: undefined,
       ...(seen ? { unknownCheck: undefined } : {}),
+      // The followed check changed under a pending mark: judge by a new one.
+      ...(current && verify ? { verify: { at: this.fence } } : {}),
     });
     this.notice("check", {
       error: passed ? "" : text,
@@ -381,9 +425,10 @@ class MachineActions {
 
   /** An allowed detail read, started at page tick `at`. */
   observe(machine: MachineView, at: number) {
+    const verify = this.state.verify;
     const running = runningCheck(machine);
     if (running && !this.ended.has(running.id)) {
-      this.follow(running);
+      this.offer(running, at);
       const unknown = this.state.unknownCheck;
       if (unknown && at > unknown.at && !unknown.seen.includes(running.id))
         this.set({
@@ -397,6 +442,9 @@ class MachineActions {
           status: record.status === "failed" ? "failed" : "passed",
           failed_steps: record.failed_steps,
         });
+    // R3: a read started after the mark answered; unless it raised a newer one.
+    if (verify && at > verify.at && this.state.verify === verify)
+      this.set({ verify: undefined });
     const drain = this.state.unknownDrain;
     const target = drain?.op === "drain" ? "draining" : "online";
     if (drain && at > drain.at && machine.status === target) {
@@ -418,11 +466,13 @@ class MachineActions {
    */
   async start(client: CardiganClient, again = false) {
     const post = client.checkMachine;
-    const { sending, following, unknownCheck } = this.state;
-    if (!post || sending || following) return;
+    const { sending, following, unknownCheck, verify } = this.state;
+    if (!post || sending || following || verify) return;
     if (unknownCheck ? !again : again) return;
     window.clearTimeout(this.notices.check);
     this.set({ sending: "check", unknownCheck: undefined, check: blank });
+    // Q-1076: the reply describes the machine no earlier than this.
+    const sent = machineReadTick();
     try {
       const { check: job } = await post.call(
         client,
@@ -431,7 +481,7 @@ class MachineActions {
         crypto.randomUUID(),
       );
       this.set({ sending: undefined });
-      if (job.status === "running") this.follow(job);
+      if (job.status === "running") this.offer(job, sent);
       else this.end(job, true);
     } catch (cause) {
       if (uncertain(cause))

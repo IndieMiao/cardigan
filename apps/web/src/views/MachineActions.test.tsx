@@ -1153,3 +1153,553 @@ test("Q-1074: the question returns focus to its opener, or to 立即检查 when 
   );
   expect(document.activeElement).not.toBe(document.body);
 });
+
+// V-2655 (attachment-8197), appended verbatim; uses this file's fixtures.
+// Only the progress for A may end; B and the subsequent detail read remain pending.
+async function assertNoStaleUnlock(
+  drawer: ReturnType<typeof within>,
+  c: CardiganClient,
+) {
+  // The fixture polls after 5 ms. Watch for an enabled button while B is still running.
+  const exposed = await waitFor(
+    () => {
+      const b = drawer.getByRole("button", { name: "立即检查" });
+      expect(b.getAttribute("aria-disabled")).not.toBe("true");
+      return b;
+    },
+    { timeout: 500 },
+  ).catch(() => undefined);
+  if (exposed) fireEvent.click(exposed);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  expect(drawer.queryByText("检查通过")).toBeNull();
+}
+
+test("D2071: an old start reply cannot replace the newer check already shown by a reopened drawer", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const refresh = Promise.withResolvers<{ machine: MachineView }>();
+  let holdDetail = false;
+  let machine = byId("local");
+  const c = client({
+    checkMachine: vi.fn(() => postA.promise),
+    machine: vi.fn(async () => (holdDetail ? refresh.promise : { machine })),
+    machineCheck: vi.fn(async (_p, _m, id) =>
+      id === "job-B"
+        ? pollB.promise
+        : { check: job({ id, status: "passed", step: "finished" }) },
+    ),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  // The first start was accepted as A; while its HTTP reply is still on the wire, A ends and B starts on the same binding.
+  machine = withBinding(
+    { last_requested_check: requested("job-B", "running", { step: "mcp" }) },
+    "p-1",
+  );
+  const next = await reopen();
+  await next.findByText("正在检查：MCP…");
+  await waitFor(() =>
+    expect(c.machineCheck).toHaveBeenCalledWith("p-1", "local", "job-B"),
+  );
+  holdDetail = true; // No immediate fresh detail to hide the state reached by this branch.
+  await act(async () =>
+    postA.resolve({
+      check: job({ id: "job-A", status: "running", step: "queued" }),
+    }),
+  );
+  await assertNoStaleUnlock(next, c);
+});
+
+test("D2071: a detail snapshot taken before starting B cannot replace it with completed job A", async () => {
+  const earlierDetail = Promise.withResolvers<{ machine: MachineView }>();
+  const nextDetail = Promise.withResolvers<{ machine: MachineView }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  let detailCount = 0;
+  const c = client({
+    machine: vi.fn(async () =>
+      ++detailCount === 1
+        ? { machine: byId("local") }
+        : detailCount === 2
+          ? earlierDetail.promise
+          : nextDetail.promise,
+    ),
+    checkMachine: vi.fn(async () => ({
+      check: job({ id: "job-B", step: "mcp" }),
+    })),
+    machineCheck: vi.fn(async (_p, _m, id) =>
+      id === "job-B"
+        ? pollB.promise
+        : { check: job({ id, status: "passed", step: "finished" }) },
+    ),
+  });
+  const { rerender } = render(<Page c={c} />);
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  const drawer = within(await screen.findByRole("dialog"));
+  await drawer.findByText("概况");
+  rerender(<Page c={c} revision={1} />);
+  await waitFor(() => expect(c.machine).toHaveBeenCalledTimes(2));
+  // A was running when this background GET took its snapshot, and has ended before B is requested.
+  fireEvent.click(drawer.getByRole("button", { name: "立即检查" }));
+  await waitFor(() =>
+    expect(c.machineCheck).toHaveBeenCalledWith("p-1", "local", "job-B"),
+  );
+  await act(async () =>
+    earlierDetail.resolve({
+      machine: withBinding(
+        { last_requested_check: requested("job-A", "running") },
+        "p-1",
+      ),
+    }),
+  );
+  await assertNoStaleUnlock(drawer, c);
+});
+
+/**
+ * Q-1076: host start times never decide which check is current. A starts
+ * before B; each case runs with A's time later (clock stepped back), equal,
+ * and missing, and must behave the same.
+ */
+const clocks = [
+  [
+    "A later than B (clock stepped back)",
+    "2026-01-01T00:00:09.000Z",
+    "2026-01-01T00:00:01.000Z",
+  ],
+  [
+    "the same millisecond",
+    "2026-01-01T00:00:01.000Z",
+    "2026-01-01T00:00:01.000Z",
+  ],
+  ["missing", undefined, undefined],
+] as const;
+/** A check record or job carrying `started_at` only when given. */
+const startedAt = (time: string | undefined) =>
+  (time === undefined ? {} : { started_at: time }) as object;
+const runningJob = (id: string, time: string | undefined, step = "queued") => {
+  const { started_at: _drop, ...rest } = job({ id, step });
+  return { ...rest, ...startedAt(time) } as MachineCheckJob;
+};
+const runningRecord = (id: string, time: string | undefined, step = "ssh") =>
+  ({ ...requested(id, "running", { step }), ...startedAt(time) }) as ReturnType<
+    typeof requested
+  >;
+/** Ids the progress loop asked for, in order. */
+const progressIds = (c: CardiganClient) =>
+  vi
+    .mocked(c.machineCheck as NonNullable<CardiganClient["machineCheck"]>)
+    .mock.calls.map((call) => call[2]);
+/**
+ * A detail read that answers the current machine, or (while `hold`) waits
+ * for the test to answer it; every held read gets its own resolver.
+ */
+function heldDetails() {
+  const state = { machine: byId("local"), hold: false };
+  const held: PromiseWithResolvers<{ machine: MachineView }>[] = [];
+  const machine = vi.fn(async () => {
+    if (!state.hold) return { machine: state.machine };
+    const read = Promise.withResolvers<{ machine: MachineView }>();
+    held.push(read);
+    return read.promise;
+  });
+  return { state, held, machine };
+}
+const onBinding = (record: ReturnType<typeof requested> | null) =>
+  withBinding({ last_requested_check: record }, "p-1");
+
+test.each(clocks)(
+  "Q-1076 ①: a late start reply for A, with A's start time %s, keeps B followed and locked; the check adds a read, not a POST",
+  async (_name, timeA, timeB) => {
+    const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+    const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+    const details = heldDetails();
+    let posts = 0;
+    const c = client({
+      machine: details.machine,
+      checkMachine: vi.fn(async () =>
+        ++posts === 1 ? postA.promise : { check: job({ id: "job-C" }) },
+      ),
+      machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+        id === "job-B"
+          ? pollB.promise
+          : { check: job({ id, status: "passed", step: "finished" }) },
+      ),
+    });
+    const first = await openDetail(c);
+    fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+    details.state.machine = onBinding(runningRecord("job-B", timeB, "mcp"));
+    const d = await reopen();
+    await d.findByText("正在检查：MCP…");
+    await waitFor(() => expect(progressIds(c)).toEqual(["job-B"]));
+    details.state.hold = true;
+    const reads = vi.mocked(c.machine).mock.calls.length;
+    await act(async () => postA.resolve({ check: runningJob("job-A", timeA) }));
+    // One read-only check of the machine; B stays followed and locked.
+    await waitFor(() => expect(details.held).toHaveLength(1));
+    expect(vi.mocked(c.machine).mock.calls.length).toBe(reads + 1);
+    expect(disabled(d, "检查中…")).toBe(true);
+    expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+    fireEvent.click(d.getByRole("button", { name: "检查中…" }));
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+    // The check confirms B: still B, never A, no second look.
+    await act(async () =>
+      details.held[0]?.resolve({
+        machine: onBinding(runningRecord("job-B", timeB, "mcp")),
+      }),
+    );
+    expect(disabled(d, "检查中…")).toBe(true);
+    expect(d.queryByText("检查通过")).toBeNull();
+    expect(details.held).toHaveLength(1);
+    // B ends by its own progress; then a new check may be asked for.
+    details.state.hold = false;
+    details.state.machine = onBinding(requested("job-B", "passed"));
+    await act(async () =>
+      pollB.resolve({
+        check: job({ id: "job-B", status: "passed", step: "finished" }),
+      }),
+    );
+    await d.findByText("检查通过");
+    await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+    expect(progressIds(c).every((id) => id === "job-B")).toBe(true);
+    fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+    await waitFor(() => expect(c.checkMachine).toHaveBeenCalledTimes(2));
+  },
+);
+
+test.each(clocks)(
+  "Q-1076 ②: an old detail snapshot of A, with A's start time %s, keeps B followed and locked",
+  async (_name, timeA, timeB) => {
+    const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+    const details = heldDetails();
+    const c = client({
+      machine: details.machine,
+      checkMachine: vi.fn(async () => ({
+        check: runningJob("job-B", timeB, "mcp"),
+      })),
+      machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+        id === "job-B"
+          ? pollB.promise
+          : { check: job({ id, status: "passed", step: "finished" }) },
+      ),
+    });
+    const { rerender } = render(<Page c={c} />);
+    const table = await screen.findByRole("table", { name: "机器列表" });
+    fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+    const d = within(await screen.findByRole("dialog"));
+    await d.findByText("概况");
+    details.state.hold = true;
+    rerender(<Page c={c} revision={1} />);
+    await waitFor(() => expect(details.held).toHaveLength(1));
+    fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+    await waitFor(() => expect(progressIds(c)).toEqual(["job-B"]));
+    // The snapshot was taken while A still ran, before B was requested.
+    await act(async () =>
+      details.held[0]?.resolve({
+        machine: onBinding(runningRecord("job-A", timeA)),
+      }),
+    );
+    await waitFor(() => expect(details.held).toHaveLength(2));
+    expect(disabled(d, "检查中…")).toBe(true);
+    expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+    expect(d.queryByText("检查通过")).toBeNull();
+    fireEvent.click(d.getByRole("button", { name: "检查中…" }));
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      details.held[1]?.resolve({
+        machine: onBinding(runningRecord("job-B", timeB, "mcp")),
+      }),
+    );
+    expect(disabled(d, "检查中…")).toBe(true);
+    details.state.hold = false;
+    details.state.machine = onBinding(requested("job-B", "passed"));
+    await act(async () =>
+      pollB.resolve({
+        check: job({ id: "job-B", status: "passed", step: "finished" }),
+      }),
+    );
+    await d.findByText("检查通过");
+    await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+    expect(progressIds(c)).not.toContain("job-A");
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each(clocks)(
+  "Q-1076 P1: a read sent after following A that finds B running (start times %s) takes B up; A's late progress is void",
+  async (_name, timeA, timeB) => {
+    const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
+    const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+    const details = heldDetails();
+    const c = client({
+      machine: details.machine,
+      checkMachine: vi.fn(async () => ({ check: runningJob("job-A", timeA) })),
+      machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+        id === "job-A" ? pollA.promise : pollB.promise,
+      ),
+    });
+    const { rerender } = render(<Page c={c} />);
+    const table = await screen.findByRole("table", { name: "机器列表" });
+    fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+    const d = within(await screen.findByRole("dialog"));
+    await d.findByText("概况");
+    fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+    await waitFor(() => expect(progressIds(c)).toEqual(["job-A"]));
+    // A ended on the host and the CLI started B; a new read finds B.
+    details.state.machine = onBinding(runningRecord("job-B", timeB, "mcp"));
+    rerender(<Page c={c} revision={1} />);
+    await d.findByText("正在检查：MCP…");
+    await waitFor(() => expect(progressIds(c)).toEqual(["job-A", "job-B"]));
+    expect(disabled(d, "检查中…")).toBe(true);
+    // A's progress, still on the wire, is no longer the followed check's.
+    await act(async () =>
+      pollA.resolve({
+        check: job({ id: "job-A", status: "passed", step: "finished" }),
+      }),
+    );
+    expect(d.queryByText("检查通过")).toBeNull();
+    expect(disabled(d, "检查中…")).toBe(true);
+    details.state.machine = onBinding(requested("job-B", "passed"));
+    await act(async () =>
+      pollB.resolve({
+        check: job({ id: "job-B", status: "passed", step: "finished" }),
+      }),
+    );
+    await d.findByText("检查通过");
+    await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("Q-1076 P1: after A ends, the reread finding B running follows B without a POST", async () => {
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(async () => ({ check: job({ id: "job-A" }) })),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+      id === "job-A"
+        ? { check: job({ id, status: "passed", step: "finished" }) }
+        : pollB.promise,
+    ),
+  });
+  const d = await openDetail(c);
+  details.state.machine = onBinding(
+    requested("job-B", "running", { step: "mcp" }),
+  );
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("正在检查：MCP…");
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(disabled(d, "检查中…")).toBe(true);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1076 P3: a start reply for A after B was followed and ended is checked by a read, which takes A up", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
+      id === "job-B"
+        ? { check: job({ id, status: "passed", step: "finished" }) }
+        : pollA.promise,
+    ),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-B", "running"));
+  const d = await reopen();
+  // B ended by its progress; the start request is still out.
+  await d.findByText("正在开始检查…");
+  expect(progressIds(c)).toEqual(["job-B"]);
+  details.state.hold = true;
+  const reads = vi.mocked(c.machine).mock.calls.length;
+  await act(async () => postA.resolve({ check: job({ id: "job-A" }) }));
+  await waitFor(() => expect(details.held.length).toBeGreaterThan(0));
+  // B's result stays readable while the read is out; nothing may be sent.
+  expect(disabled(d, "立即检查")).toBe(true);
+  expect(d.getByText("检查通过")).toBeTruthy();
+  const check = details.held.at(-1);
+  await act(async () =>
+    check?.resolve({
+      machine: onBinding(requested("job-A", "running", { step: "mcp" })),
+    }),
+  );
+  await d.findByText("正在检查：MCP…");
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-B", "job-A"]));
+  expect(vi.mocked(c.machine).mock.calls.length).toBeGreaterThan(reads);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1076 P3: when the check read finds nothing running, 立即检查 opens again", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) => ({
+      check: job({ id, status: "passed", step: "finished" }),
+    })),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-B", "running"));
+  const d = await reopen();
+  // B ended by its progress; the start request is still out.
+  await d.findByText("正在开始检查…");
+  expect(progressIds(c)).toEqual(["job-B"]);
+  details.state.hold = true;
+  await act(async () => postA.resolve({ check: job({ id: "job-A" }) }));
+  await waitFor(() => expect(details.held.length).toBeGreaterThan(0));
+  expect(disabled(d, "立即检查")).toBe(true);
+  for (const read of details.held)
+    await act(async () =>
+      read.resolve({ machine: onBinding(requested("job-A", "passed")) }),
+    );
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(progressIds(c)).toEqual(["job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+test("Q-1076 P4: a start reply joining the check already followed only updates its step", async () => {
+  const postB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postB.promise),
+    machineCheck: vi.fn(() => pollB.promise),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-B", "running"));
+  const d = await reopen();
+  await d.findByText("正在检查：SSH…");
+  const reads = vi.mocked(c.machine).mock.calls.length;
+  await act(async () =>
+    postB.resolve({ check: job({ id: "job-B", step: "mcp" }) }),
+  );
+  await d.findByText("正在检查：MCP…");
+  expect(vi.mocked(c.machine).mock.calls.length).toBe(reads);
+  expect(progressIds(c)).toEqual(["job-B"]);
+  expect(disabled(d, "检查中…")).toBe(true);
+});
+
+test("Q-1076 P5: a late snapshot cannot bring back A, which this page saw end", async () => {
+  const details = heldDetails();
+  let posts = 0;
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(async () => ({
+      check: job({ id: ++posts === 1 ? "job-A" : "job-B" }),
+    })),
+    machineCheck: vi.fn(async (_p: string, _m: string, id: string) => ({
+      check: job({ id, status: "passed", step: "finished" }),
+    })),
+  });
+  const { rerender } = render(<Page c={c} />);
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  const d = within(await screen.findByRole("dialog"));
+  await d.findByText("概况");
+  details.state.hold = true;
+  rerender(<Page c={c} revision={1} />); // a snapshot taken while A runs
+  await waitFor(() => expect(details.held).toHaveLength(1));
+  details.state.hold = false;
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await d.findByText("检查通过");
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  fireEvent.click(d.getByRole("button", { name: "立即检查" }));
+  await waitFor(() => expect(progressIds(c)).toEqual(["job-A", "job-B"]));
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  await act(async () =>
+    details.held[0]?.resolve({
+      machine: onBinding(requested("job-A", "running")),
+    }),
+  );
+  expect(d.queryByText("正在检查：SSH…")).toBeNull();
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(2);
+});
+
+test("Q-1076 R3: a failed check read keeps 立即检查 locked and offers only a reread", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(() => pollB.promise),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-B", "running"));
+  const d = await reopen();
+  await d.findByText("正在检查：SSH…");
+  details.state.hold = true;
+  await act(async () => postA.resolve({ check: job({ id: "job-A" }) }));
+  await waitFor(() => expect(details.held).toHaveLength(1));
+  await act(async () =>
+    details.held[0]?.reject(new ApiError(500, "fixture", "fixture failure")),
+  );
+  await d.findByText("未能确认正在进行的检查");
+  expect(disabled(d, "检查中…")).toBe(true);
+  const posts = vi.mocked(
+    c.checkMachine as NonNullable<CardiganClient["checkMachine"]>,
+  ).mock.calls.length;
+  // The only way on is to read again; nothing is sent.
+  details.state.hold = false;
+  const retry = d.getAllByRole("button", { name: "重新读取" });
+  for (const button of retry) fireEvent.click(button);
+  await waitFor(() =>
+    expect(d.queryByText("未能确认正在进行的检查")).toBeNull(),
+  );
+  await d.findByText("正在检查：SSH…");
+  expect(disabled(d, "检查中…")).toBe(true);
+  expect(c.checkMachine).toHaveBeenCalledTimes(posts);
+  expect(progressIds(c).every((id) => id === "job-B")).toBe(true);
+});
+
+test("Q-1076 R3: when the followed check ends while a check read is out, only a later read can open 立即检查", async () => {
+  const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const details = heldDetails();
+  const c = client({
+    machine: details.machine,
+    checkMachine: vi.fn(() => postA.promise),
+    machineCheck: vi.fn(() => pollB.promise),
+  });
+  const first = await openDetail(c);
+  fireEvent.click(first.getByRole("button", { name: "立即检查" }));
+  details.state.machine = onBinding(requested("job-B", "running"));
+  const d = await reopen();
+  await d.findByText("正在检查：SSH…");
+  details.state.hold = true;
+  await act(async () => postA.resolve({ check: job({ id: "job-A" }) }));
+  await waitFor(() => expect(details.held).toHaveLength(1));
+  // B ends by its progress while that read is out: the mark moves on.
+  await act(async () =>
+    pollB.resolve({
+      check: job({ id: "job-B", status: "passed", step: "finished" }),
+    }),
+  );
+  await d.findByText("检查通过");
+  await waitFor(() => expect(details.held.length).toBeGreaterThan(1));
+  expect(disabled(d, "立即检查")).toBe(true);
+  // The earlier read finds nothing running: it was sent before the change.
+  await act(async () =>
+    details.held[0]?.resolve({
+      machine: onBinding(requested("job-B", "passed")),
+    }),
+  );
+  expect(disabled(d, "立即检查")).toBe(true);
+  await act(async () =>
+    details.held.at(-1)?.resolve({
+      machine: onBinding(requested("job-B", "passed")),
+    }),
+  );
+  await waitFor(() => expect(disabled(d, "立即检查")).toBe(false));
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});

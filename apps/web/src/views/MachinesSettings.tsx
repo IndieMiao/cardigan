@@ -791,7 +791,7 @@ function useMachineActions({
     if (machine && at !== undefined) store.observe(machine, at);
   }, [store, machine, at]);
 
-  const { sending, following, unknownCheck, unknownDrain } = state;
+  const { sending, following, unknownCheck, unknownDrain, verify } = state;
   /** A read answered and allowed after the write became unknown. */
   const fresh = (since: number) => at !== undefined && at > since;
   const freshCheck = !!unknownCheck && fresh(unknownCheck.at) && !!machine;
@@ -817,7 +817,14 @@ function useMachineActions({
   const againable =
     freshCheck && !runningNow && !quietlyChecking && !following && !sending;
   const checkLocked =
-    !!sending || reading || !!following || !!unknownCheck || state.check.retry;
+    !!sending ||
+    reading ||
+    !!following ||
+    !!unknownCheck ||
+    !!verify ||
+    state.check.retry;
+  // Q-1076 R3: the read meant to settle a mark failed or was refused.
+  const verifyFailed = !!verify && !fresh(verify.at) && !read.pending;
   const drainLocked = !!sending || reading;
   const [asking, setAsking] = useState(false);
   const askable = useRef(againable);
@@ -825,31 +832,48 @@ function useMachineActions({
 
   const lostText = "上次检查请求结果未知";
   const progress = (step: string) => checkStepLabel(step);
-  const checkFeedback: RequestFeedbackProps = !unknownCheck
+  const checkFeedback: RequestFeedbackProps = verifyFailed
     ? {
-        pending: !!following || sending === "check",
-        pendingMessage: following
-          ? `正在检查：${progress(following.step)}…`
-          : "正在开始检查…",
-        error: state.check.error,
-        retry: state.check.retry ? store.retryProgress : undefined,
-        message: state.check.message,
+        error: "未能确认正在进行的检查",
+        retry: reread,
+        retryLabel: "重新读取",
       }
-    : following
+    : verify && !following && !unknownCheck
       ? {
-          pending: true,
-          pendingMessage: `这台机器正在检查：${progress(following.step)}…`,
+          // A result just shown (the followed check ended) stays readable.
+          pending: !state.check.message && !state.check.error,
+          pendingMessage: "正在读回机器状态…",
           error: state.check.error,
-          retry: state.check.retry ? store.retryProgress : undefined,
+          message: state.check.message,
         }
-      : !freshCheck
-        ? read.pending
-          ? { pending: true, pendingMessage: "正在读回机器状态…" }
-          : // The read failed or was refused: its own feedback retries.
-            { error: lostText }
-        : quietlyChecking
-          ? { pending: true, pendingMessage: "这台机器正在检查，正在等待结果…" }
-          : { error: lostText, retry: reread, retryLabel: "重新读取" };
+      : !unknownCheck
+        ? {
+            pending: !!following || sending === "check",
+            pendingMessage: following
+              ? `正在检查：${progress(following.step)}…`
+              : "正在开始检查…",
+            error: state.check.error,
+            retry: state.check.retry ? store.retryProgress : undefined,
+            message: state.check.message,
+          }
+        : following
+          ? {
+              pending: true,
+              pendingMessage: `这台机器正在检查：${progress(following.step)}…`,
+              error: state.check.error,
+              retry: state.check.retry ? store.retryProgress : undefined,
+            }
+          : !freshCheck
+            ? read.pending
+              ? { pending: true, pendingMessage: "正在读回机器状态…" }
+              : // The read failed or was refused: its own feedback retries.
+                { error: lostText }
+            : quietlyChecking
+              ? {
+                  pending: true,
+                  pendingMessage: "这台机器正在检查，正在等待结果…",
+                }
+              : { error: lostText, retry: reread, retryLabel: "重新读取" };
   const op = unknownDrain?.op;
   const what = op === "drain" ? "排空" : "恢复";
   const origin = op === "drain" ? "online" : "draining";
