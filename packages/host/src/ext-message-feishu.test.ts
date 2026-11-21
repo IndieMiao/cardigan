@@ -235,6 +235,7 @@ test("real HTTP digest retries once per attempt and reprojects handled/sensitive
     });
   try {
     store.createProject({ id: project_id, name: "Fictional" });
+    sender().recordStatus();
     store.uow.run((tx) => {
       tx.cards.put(project_id, card());
       for (let n = 1; n <= 22; n++) {
