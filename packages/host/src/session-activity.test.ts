@@ -693,3 +693,147 @@ test("C-541: sidechain-only writes cannot refresh a main-thread transcript", asy
   expect(row?.fileActivity).toBeUndefined();
   expect(row?.activity?.updated_at).toBe(old);
 });
+
+const claudeFile = () =>
+  join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl");
+const mainRecord = { sessionId: "session-1", cwd, timestamp: now };
+const oldAt = "2026-01-01T00:05:00.000Z";
+const timer = line({
+  ...mainRecord,
+  type: "progress",
+  data: { type: "bash_progress", elapsedTimeSeconds: 60 },
+});
+
+test.each([false, true])(
+  "C-541: a large crossing screenshot can refresh only its own main thread (sidechain=%s)",
+  async (sidechain) => {
+    const file = claudeFile();
+    await write(
+      file,
+      line({ type: "header", padding: "x".repeat(128 * 1024) }) +
+        line({
+          ...mainRecord,
+          timestamp: oldAt,
+          type: "assistant",
+          message: { model: "fixture" },
+        }) +
+        line({
+          ...mainRecord,
+          type: "progress",
+          data: {
+            type: "mcp_progress",
+            image: "x".repeat(4 * 1024 * 1024 + 1024),
+          },
+          isSidechain: sidechain,
+        }),
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const result = await read(state("claude-code"));
+    expect(result?.fileActivity?.updated_at).toBe(sidechain ? oldAt : now);
+    expect(result?.activity).toBeUndefined();
+  },
+);
+
+test.each(["assistant", "error"])(
+  "C-541: browser progress after %s is not erased or advanced by a later timer",
+  async (first) => {
+    const file = claudeFile(),
+      browserAt = "2026-01-01T00:48:00.000Z";
+    const prior =
+      first === "error"
+        ? { type: "system", subtype: "api_error", error: { status: 503 } }
+        : { type: "assistant" };
+    await write(
+      file,
+      line({ ...mainRecord, ...prior, timestamp: oldAt }) +
+        line({
+          ...mainRecord,
+          type: "progress",
+          data: { type: "mcp_progress" },
+          timestamp: browserAt,
+        }) +
+        timer,
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const row = await read(state("claude-code"));
+    expect(row?.fileActivity?.updated_at).toBe(browserAt);
+    expect(row?.activity?.updated_at).toBe(oldAt);
+    if (first === "error") expect(row?.activity?.error).toBe("server_error");
+  },
+);
+
+test.each([
+  ["node /foo/web.mjs --secret PRIVATE", "node web.mjs"],
+  ['printf "node web.mjs"; sleep 1800', "Bash"],
+  ["node --eval web.mjs", "Bash"],
+])(
+  "C-541: a long pending foreground tool reports only its verified command category (%s)",
+  async (cmd, expected) => {
+    const file = claudeFile();
+    await write(
+      file,
+      line({
+        ...mainRecord,
+        type: "assistant",
+        timestamp: oldAt,
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Bash",
+              id: "t",
+              input: { command: cmd },
+            },
+          ],
+        },
+      }) + timer.repeat(260),
+    );
+    const inspect = () => read(state("claude-code"));
+    const row = await inspect();
+    expect(row?.foreground).toEqual({ command: expected, since: oldAt });
+    expect(row?.fileActivity?.updated_at).toBe(oldAt);
+    expect(JSON.stringify(row)).not.toContain(cmd);
+    await appendFile(
+      file,
+      line({
+        ...mainRecord,
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t" }] },
+      }) + timer.repeat(260),
+    );
+    expect((await inspect())?.foreground).toBeUndefined();
+  },
+);
+
+test("C-541: an unread record boundary cannot refresh an old main thread or prove a command is still pending", async () => {
+  const file = claudeFile();
+  await write(
+    file,
+    line({
+      ...mainRecord,
+      type: "assistant",
+      timestamp: oldAt,
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Bash",
+            id: "t",
+            input: { command: "vite" },
+          },
+        ],
+      },
+    }) +
+      line({
+        ...mainRecord,
+        type: "progress",
+        data: { image: "x".repeat(5 * 1024 * 1024) },
+        isSidechain: true,
+      }),
+  );
+  await utimes(file, new Date(now), new Date(now));
+  const row = await read(state("claude-code"));
+  expect(row?.activity_status).toBe("missing");
+  expect(row?.fileActivity).toBeUndefined();
+  expect(row?.foreground).toBeUndefined();
+});

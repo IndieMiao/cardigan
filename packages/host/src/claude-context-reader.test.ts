@@ -160,13 +160,15 @@ const line = (input = 100) =>
     },
   });
 
-test("only complete tail records supply usage; a verified prefix can identify the file write", async () => {
+test("only complete tail records supply usage; a verified crossing record identifies the file write", async () => {
   root = await mkdtemp(join(tmpdir(), "claude-tail-"));
   const dir = join(root, "claude", "projects", "-fixture");
   await mkdir(dir, { recursive: true });
   const file = join(dir, "session.jsonl");
   const padding = JSON.stringify({
     type: "user",
+    sessionId: "session",
+    cwd: "/fixture",
     content: "x".repeat(4 * 1024 * 1024),
   });
   await writeFile(file, `${line(1)}\n${padding}\n${line()}\n{"partial`);

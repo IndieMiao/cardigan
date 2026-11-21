@@ -345,7 +345,9 @@ export async function readSessionContexts(
     const activity = bindActivity(activityMetadata, progress);
     const file = bindActivity(fileMetadata);
     const fileActivity =
-      file && !activity?.error && !activityReadFailed
+      file &&
+      (!activity?.error || harness === "claude-code") &&
+      !activityReadFailed
         ? { ...file, source: `${harness}:transcript_mtime` }
         : undefined;
     const startupFailure = bindActivity(startupMetadata);

@@ -336,9 +336,114 @@ test("C-541: a missing-source notice does not consume a later confirmed stall; c
   await tick();
   expect(t.alerts().map((e) => e.payload)).toMatchObject([
     {
-      activity_source: "codex:transcript_mtime",
+      activity_source: "codex:session_metadata", // Corroborated by a stalled protocol record.
       reason: "前台命令 node web.mjs 已运行至少 47 分钟，无近期输出",
     },
   ]);
   expect(t.notices()).toHaveLength(1);
 });
+
+test.each(["transcript", "terminal"])(
+  "C-541: a partial %s timeout cannot confirm a stall, even without cached progress",
+  async (slow) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const t = fixture(true, 50),
+      late = Promise.withResolvers<void>();
+    let pending = false;
+    const d = new Dispatcher({
+      ...t.options,
+      inactiveCancelAfterMs: null,
+      runtime: {
+        ...t.runtime,
+        terminalActivity: async () => {
+          if (pending && slow === "terminal") await late.promise;
+          return {
+            ok: true as const,
+            value: {
+              digest: pending && slow === "terminal" ? "changed" : "same",
+            },
+          };
+        },
+      },
+      inspectHarnessActivity: async () => {
+        if (pending && slow === "transcript") await late.promise;
+        return new Map([
+          [
+            t.a.id,
+            {
+              status: "stale" as const,
+              activity: {
+                ...t.activity,
+                updated_at:
+                  pending && slow === "transcript"
+                    ? t.f.clock.now()
+                    : t.activity.updated_at,
+              },
+            },
+          ],
+        ]);
+      },
+    });
+    dispatchers.push(d);
+    // Seed only the first screen; by the second poll both old signals have aged out.
+    await d.tick();
+    await flush();
+    t.f.advance(16 * 60_000);
+    pending = true;
+    await d.tick();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(t.alerts()).toEqual([]);
+    expect(t.notices().map((e) => e.payload)).toMatchObject([
+      { activity_check: "timeout" },
+    ]);
+    late.resolve();
+    await flush();
+    expect(t.alerts()).toEqual([]);
+  },
+);
+
+test.each([false, true])(
+  "C-541: retain verified progress through a missing read only in the same runtime generation (replace=%s)",
+  async (replace) => {
+    const t = fixture();
+    let row: HarnessActivityInspection = {
+      status: "missing",
+      fileActivity: { ...t.activity, source: "codex:transcript_mtime" },
+    };
+    const d = new Dispatcher({
+      ...t.options,
+      inactiveCancelAfterMs: null,
+      inspectHarnessActivity: async () => new Map([[t.a.id, row]]),
+    });
+    dispatchers.push(d);
+    const tick = async () => {
+      await d.tick();
+      await flush();
+    };
+    await tick();
+    t.f.advance(30_000);
+    if (!t.a.runtime_ref) throw new Error("Missing fixture runtime");
+    const ref = {
+      ...t.a.runtime_ref,
+      ...(replace ? { terminal_ref: "replacement" } : {}),
+    };
+    if (replace)
+      t.f.store.uow.run((tx) =>
+        tx.assignments.put(t.f.project, { ...t.a, runtime_ref: ref }),
+      );
+    // The file evidence disappears; the protocol record by itself is already old.
+    row = {
+      status: "stale",
+      activity: {
+        ...t.activity,
+        updated_at: t.a.created_at,
+        runtime_key: JSON.stringify(ref),
+      },
+    };
+    await tick();
+    expect(t.alerts()).toHaveLength(replace ? 1 : 0);
+    t.f.advance(15 * 60_000 - 30_000);
+    await tick();
+    expect(t.alerts()).toHaveLength(1);
+  },
+);

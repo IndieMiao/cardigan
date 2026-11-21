@@ -102,39 +102,48 @@ function summarize(lines, path, attributable, activityOnly, complete) {
   }
   return activity ? { path, activity } : undefined;
 }
-// Alert-only metadata. A large screenshot can consume the entire bounded tail;
-// establish file ownership independently from a bounded prefix in that case.
-function alertMetadata(head, tail, path, mtime) {
+// Alert-only classification, never a shell parser. Only simple unquoted argv
+// with a recognized executable and operand are specific enough to name.
+function foregroundName(cmd) {
+  const simple = cmd.trim();
+  if (!/^[\w./:@=+%,-]+(?:[ \t]+[\w./:@=+%,-]+)*$/.test(simple)) return 'Bash';
+  const [exe, arg, next] = simple.split(/[ \t]+/);
+  if (exe === 'node' && arg && !arg.startsWith('-') && basename(arg) === 'web.mjs') return 'node web.mjs';
+  if (['python', 'python3'].includes(exe) && arg === '-m' && next === 'http.server') return 'python -m http.server';
+  if (['npm', 'pnpm'].includes(exe) && (arg === 'dev' || (arg === 'run' && next === 'dev'))) return 'dev server';
+  return exe === 'vite' ? 'vite' : 'Bash';
+}
+// Only the final attributable main-thread record may claim the file mtime.
+// A later timer, fault, sidechain or unread gap leaves only verified record times.
+function alertMetadata(lines, path, mtime, activity) {
   const id = basename(path, '.jsonl');
-  let cwd, pending, clockOnly = false;
-  const lines = head.concat(tail);
-  for (const [index, line] of lines.entries()) {
-    let e; try { e = object(JSON.parse(line)); } catch { continue; }
-    if (!e) continue;
-    if (e.isSidechain === true || e.message?.model === '<synthetic>') {
-      if (index >= head.length) clockOnly = true;
-      continue;
-    }
+  let last, finalWrite, pending;
+  const writeTime = new Date(mtime).toISOString();
+  for (const line of lines) {
+    if (line === '') continue;
+    finalWrite = undefined;
+    let e;
+    try { e = object(JSON.parse(line)); } catch { pending = undefined; continue; }
+    if (!e || e.isSidechain === true || e.message?.model === '<synthetic>') continue;
     if (e.sessionId && e.sessionId !== id) return;
     if (e.sessionId !== id || !text(e.cwd, 4096)) continue;
-    cwd = e.cwd;
-    if (index < head.length) continue; // Never infer a pending command across an unread gap.
-    clockOnly = e.type === 'progress' && e.data?.type === 'bash_progress';
+    if (e.isApiErrorMessage === true || (e.type === 'system' && e.subtype === 'api_error') ||
+        (e.type === 'progress' && e.data?.type === 'bash_progress') ||
+        !['user', 'assistant', 'progress'].includes(e.type)) continue;
+    finalWrite = {session_id: id, cwd: e.cwd, updated_at: writeTime};
+    const ts = Date.parse(text(e.timestamp, 64));
+    const timestamp = Number.isFinite(ts) ? new Date(ts).toISOString() : undefined;
+    if (timestamp && (!last || ts >= Date.parse(last.updated_at))) last = {...finalWrite, updated_at: timestamp};
     if (!Array.isArray(e.message?.content)) continue;
     for (const block of e.message.content) {
       if (block?.type === 'tool_result' && pending?.id === block.tool_use_id) pending = undefined;
       if (block?.type !== 'tool_use' || block.name !== 'Bash' || block.input?.run_in_background || typeof block.input?.command !== 'string') continue;
-      // Never export arguments, filenames, environment assignments or shell text.
-      const cmd = block.input.command;
-      const command = /(?:^|\s)node\s+[^\n;&|]*\bweb\.mjs\b/.test(cmd) ? 'node web.mjs' :
-        /(?:^|\s)python3?\s+-m\s+http\.server\b/.test(cmd) ? 'python -m http.server' :
-        /(?:^|\s)(?:pnpm|npm)\s+(?:run\s+)?dev\b/.test(cmd) ? 'dev server' :
-        /(?:^|\s)vite(?:\s|$)/.test(cmd) ? 'vite' : 'Bash';
-      if (text(block.id, 128) && Number.isFinite(Date.parse(e.timestamp))) pending = {id: block.id, command, since: e.timestamp};
+      if (text(block.id, 128) && timestamp) pending = {id: block.id, command: foregroundName(block.input.command), since: timestamp};
     }
   }
-  return cwd ? {file_activity: {session_id: id, cwd, updated_at: new Date(mtime).toISOString()},
-    ...(pending ? {foreground: {command: pending.command, since: pending.since}} : {}), clock_only: clockOnly} : undefined;
+  const progressAt = activity?.error ? activity.progress?.updated_at : activity?.updated_at;
+  const file = finalWrite ?? (last && (!progressAt || Date.parse(last.updated_at) > Date.parse(progressAt)) ? last : undefined);
+  return file || pending ? {...(file ? {file_activity: file} : {}), ...(pending ? {foreground: {command: pending.command, since: pending.since}} : {})} : undefined;
 }
 function readTail(fd, path, attributable, activityOnly = false) {
   const { fstatSync, readSync } = require('node:fs');
@@ -147,11 +156,19 @@ function readTail(fd, path, attributable, activityOnly = false) {
   if (start) lines.shift();
   const sample = summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
   if (!attributable) return sample;
-  const prefix = Buffer.alloc(start ? Math.min(start, 65536) : 0);
-  const count = prefix.length ? readSync(fd, prefix, 0, prefix.length, 0) : 0;
-  const extra = alertMetadata(prefix.subarray(0, count).toString('utf8').split('\n').slice(0, 32), lines.slice(-256), path, stat.mtimeMs);
-  if (!extra) return sample;
-  return {path, ...sample, ...(!sample?.activity?.error && !extra.clock_only ? {file_activity: extra.file_activity} : {}), ...(extra.foreground ? {foreground: extra.foreground} : {})};
+  // For alert metadata only, spend the extra 64 KiB immediately before the
+  // tail, so a crossing screenshot can be attributed even in a long-lived file.
+  // If its opening is still outside the window, never guess its thread or mtime.
+  if (size !== stat.size - start) return sample;
+  let diagnosticLines = lines;
+  if (start) {
+    const prefix = Buffer.alloc(Math.min(start, 65536));
+    if (readSync(fd, prefix, 0, prefix.length, start - prefix.length) !== prefix.length) return sample;
+    diagnosticLines = Buffer.concat([prefix, buffer]).toString('utf8').split('\n');
+    if (start > prefix.length) diagnosticLines.shift();
+  }
+  const extra = alertMetadata(diagnosticLines, path, stat.mtimeMs, sample?.activity);
+  return extra ? {path, ...sample, ...extra} : sample;
 }
 async function read() {
   // The worker opener passed a no-follow regular file as stdin. This is

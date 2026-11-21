@@ -56,6 +56,12 @@ export class InactivityAlerts {
     { targets: Map<Run["id"], Target>; cancel: () => void }
   >();
   private readonly terminals = new TerminalHistory();
+  // Positive evidence is a veto only. A missed poll must not become proof
+  // of continued silence or extend the original grace period.
+  private readonly lastProgress = new Map<
+    string,
+    { session: Assignment["session_ref"]; sample: HarnessActivity }
+  >();
   private readonly nextRead = new Map<string, number>();
   private closed = false;
   private readonly timeoutMs: number;
@@ -108,6 +114,12 @@ export class InactivityAlerts {
       state.runs.filter((r) => r.status === "running").map((r) => r.id),
     );
     this.terminals.retain(project, running);
+    for (const key of this.lastProgress.keys())
+      if (
+        key.startsWith(`${project}/`) &&
+        !running.has(key.slice(project.length + 1))
+      )
+        this.lastProgress.delete(key);
     for (const key of this.nextRead.keys())
       if (
         key.startsWith(`${project}/`) &&
@@ -161,6 +173,23 @@ export class InactivityAlerts {
             });
           }
         }
+      }
+      if (
+        assignment &&
+        sample &&
+        !sample.error &&
+        Date.parse(at) - Date.parse(sample.updated_at) < this.options.graceMs &&
+        this.lastProgress.get(`${project}/${run.id}`)?.sample !== sample &&
+        (!run.harness || sample.source === `${run.harness}:session_metadata`)
+      ) {
+        const verified = associatedHarnessActivity(
+          state,
+          assignment,
+          at,
+          sample,
+        );
+        if (verified)
+          this.hasRecentProgress(state, assignment, run, at, verified);
       }
       if (!assignment || !this.due(state, assignment, run, at, sample))
         continue;
@@ -221,6 +250,7 @@ export class InactivityAlerts {
       return;
     }
     let terminal: TerminalEvidence | undefined;
+    let terminalFailed = false;
     let partial:
       | ReadonlyMap<Assignment["id"], HarnessActivityInspection>
       | undefined;
@@ -280,6 +310,7 @@ export class InactivityAlerts {
                   single.assignment.id,
                 )
                 .then((result) => {
+                  terminalFailed = !result.ok;
                   if (!cancelled && !this.closed)
                     terminal = this.terminals.observe(
                       project,
@@ -293,10 +324,15 @@ export class InactivityAlerts {
         const results = await Promise.allSettled([transcript, output]);
         finish(
           partial,
-          results[0]?.status === "rejected" ? "read_failed" : "completed",
+          terminalFailed || results.some((r) => r.status === "rejected")
+            ? "read_failed"
+            : "completed",
         );
       })
-      .catch((error) => this.options.onError?.(error));
+      .catch((error) => {
+        finish(undefined, "read_failed");
+        this.options.onError?.(error);
+      });
   }
   private publish(
     project: ProjectId,
@@ -344,6 +380,37 @@ export class InactivityAlerts {
       }
     });
   }
+  private hasRecentProgress(
+    state: CommandState,
+    a: Assignment,
+    run: Run,
+    at: string,
+    evidence?: HarnessActivity,
+    session = evidence?.session_id,
+  ) {
+    const key = `${state.project_id}/${run.id}`;
+    const cutoff = Date.parse(at) - this.options.graceMs;
+    const cached = this.lastProgress.get(key);
+    const cachedTime = cached
+      ? Date.parse(cached.sample.updated_at)
+      : -Infinity;
+    const freshTime = evidence ? Date.parse(evidence.updated_at) : -Infinity;
+    if (
+      cached &&
+      cachedTime > cutoff &&
+      cachedTime >= freshTime &&
+      cached.session === a.session_ref &&
+      (!session || cached.sample.session_id === session) &&
+      associatedHarnessActivity(state, a, at, cached.sample)
+    )
+      return true;
+    if (evidence && freshTime > cutoff) {
+      this.lastProgress.set(key, { session: a.session_ref, sample: evidence });
+      return true;
+    }
+    this.lastProgress.delete(key);
+    return false;
+  }
   private alert(
     tx: StoreTransactionContext,
     state: CommandState,
@@ -358,7 +425,7 @@ export class InactivityAlerts {
       return;
     const now = Date.parse(at);
     // A failed/slow terminal recheck cannot erase output just witnessed for this Run.
-    if (
+    const recentTerminal =
       !terminal &&
       this.terminals.interrupted(
         state.project_id,
@@ -366,9 +433,7 @@ export class InactivityAlerts {
         a,
         now,
         this.options.graceMs,
-      )
-    )
-      return;
+      );
     const associated = (sample: HarnessActivity | undefined, kind: string) =>
       run.harness && sample?.source !== `${run.harness}:${kind}`
         ? undefined
@@ -387,16 +452,29 @@ export class InactivityAlerts {
     const evidence = [progress, file]
       .filter((v): v is HarnessActivity => !!v)
       .sort((l, r) => Date.parse(r.updated_at) - Date.parse(l.updated_at))[0];
+    const recentProgress = this.hasRecentProgress(
+      state,
+      a,
+      run,
+      at,
+      evidence,
+      (activity ?? file)?.session_id,
+    );
     if (
-      (evidence &&
-        now - Date.parse(evidence.updated_at) < this.options.graceMs) ||
+      recentTerminal ||
+      recentProgress ||
       (terminal && now - terminal.observedSince < this.options.graceMs)
     )
       return;
     const card_id = state.work_items.find(
       (w) => w.id === a.work_item_id,
     )?.card_id;
-    if (!evidence && !terminal && !activity?.error) {
+    if (
+      check === "timeout" ||
+      check === "read_failed" ||
+      inspection.status === "read_failed" ||
+      (!evidence && !terminal && !activity?.error)
+    ) {
       const remote = a.machine_id !== "local";
       const type = remote
         ? "run_remote_activity_missing"
@@ -436,7 +514,7 @@ export class InactivityAlerts {
         ? `前台命令 ${fg.command} 已运行至少 ${Math.floor((now - fg.since) / 60_000)} 分钟，无近期输出`
         : "mcp_inactivity",
       activity_source:
-        evidence?.source ?? activity?.source ?? "terminal_output",
+        activity?.source ?? evidence?.source ?? "terminal_output",
       activity_status: "stale",
       notifyHostOps: true,
       activity_check: check,
