@@ -38,17 +38,20 @@ import {
   pmNotificationState,
   providerAdmission,
   queueRun,
+  type RetirementDispatchWait,
   refreshRunTargetWait,
   refreshTestReviewLimits,
   remainingResourceRatio,
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
+  retirementOwnsSession,
   reviewRunWakeDisposition,
   runnableQueuedRun,
   runsOf,
   standingRunDormant,
   stoppedByHuman,
+  trackRetirementDispatch,
   unreadableCommentTrigger,
   unreceivedBell,
 } from "@cardigan/domain";
@@ -56,6 +59,7 @@ import {
   armBellReceipt,
   assignmentResourceKeys,
   bindRepairAttempt,
+  boundedRetirementError,
   crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
@@ -67,6 +71,7 @@ import {
   hasEarlierCapacityWait,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   type MachineLeases,
+  observeRetirementForDispatch,
   type ReadProjectQuota,
   type ReadResourceLimits,
   type ResourceAccess,
@@ -75,6 +80,7 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
+  recordRetirementDispatch,
   redactFailureLine,
   runCapacitySnapshot,
   settleTestReviewLimits,
@@ -86,6 +92,7 @@ import {
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
+import type { HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
   type BellAttempt,
   beginBellAttempt,
@@ -195,7 +202,7 @@ export interface DispatcherOptions {
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
-  readonly runtime: Runtime;
+  readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "terminalActivity">>;
   readonly clock?: Clock;
   readonly standing?: StandingResolver;
   readonly deliveryLeaseMs?: number;
@@ -367,17 +374,6 @@ export class Dispatcher {
       clock: this.clock,
       afterMs: cancelAfterMs,
       onError: (error) => options.onError?.(error),
-      onUnknown: (project, assignment, run, row) =>
-        this.inactivityAlerts.publish(
-          project,
-          [{ assignment, run }],
-          new Map([[assignment.id, row]]),
-          !options.inspectHarnessActivity
-            ? "unavailable"
-            : row.status === "read_failed"
-              ? "read_failed"
-              : "completed",
-        ),
       ...(options.inspectHarnessActivity
         ? { inspectHarnessActivity: options.inspectHarnessActivity }
         : {}),
@@ -729,8 +725,7 @@ export class Dispatcher {
           maxRetries: this.maxRetries,
           leaseMs: this.leaseMs,
         },
-        (attempt, sent, reason, bell, failure) =>
-          this.settle(attempt, sent, reason, bell, failure),
+        this.settle.bind(this),
       ),
     );
     // Recovery and escalation are durable events, including CLI starts without an inbox row.
@@ -860,6 +855,18 @@ export class Dispatcher {
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
+    const retirementHeld = retirementOwnsSession(a);
+    const retirementWait = (observation: RetirementDispatchWait) => {
+      if (queued)
+        recordRetirementDispatch(
+          this.options.store,
+          project,
+          a,
+          queued.id,
+          observation,
+          this.clock,
+        );
+    };
     const guardedTurn = continuing
       ? ({ turn: continuing, reason: "continuing_turn" } as const)
       : previousInboxTurn(state, a, notes);
@@ -879,25 +886,62 @@ export class Dispatcher {
     let observation = "unavailable";
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
+      if (retirementHeld) {
+        const owner = await observeRetirementForDispatch(
+          this.options.store,
+          project,
+          a,
+          this.options.runtime,
+          this.clock,
+        );
+        if (owner !== "alive") {
+          if (owner !== "deferred" && owner !== "exited")
+            retirementWait({ source: "owner", status: owner });
+          return; // Lock contention is not a runtime failure; confirmed exit allows a fresh launch next tick.
+        }
+      }
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
+      if (
+        retirementHeld &&
+        (!observed?.ok || observed.value.process !== "alive")
+      ) {
+        retirementWait({
+          source: "snapshot",
+          status: observed?.ok
+            ? observed.value.process === "exited"
+              ? "exited"
+              : "unknown"
+            : boundedRetirementError(observed?.error.code),
+        });
+        return; // Missing, conflicting or exited generic status is not exit proof.
+      }
       observation = observed?.ok
         ? `${observed.value.process}/${observed.value.agent}`
         : (observed?.error.code ?? "unavailable");
-      if (guardedTurn) {
+      if (retirementHeld || guardedTurn) {
         guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
-        // Only a new Run can fall through to the existing replacement policy.
+        // An explicit finish does not waive the idle check for a retirement-held session.
         if (
           !guard &&
-          (continuing ||
+          (retirementHeld ||
+            continuing ||
             reminder ||
             (observed?.ok
               ? observed.value.process !== "exited"
               : observed?.error.code !== "runtime_not_found" &&
                 observed?.error.code !== "runtime_unavailable"))
         ) {
-          this.waitForTurn(project, a, guardedTurn, notes, observation, queued);
+          if (guardedTurn)
+            this.waitForTurn(
+              project,
+              a,
+              guardedTurn,
+              notes,
+              observation,
+              queued,
+            );
           return;
         }
       }
@@ -1025,6 +1069,10 @@ export class Dispatcher {
       live = false;
       replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
     }
+    if (retirementHeld && !live) {
+      retirementWait({ source: "replacement", status: "replacement_required" });
+      return; // Catalog/profile/lease changes cannot force-release a held reference.
+    }
     // A reused session keeps the catalog it listed; a new one lists this deploy's.
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
     // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
@@ -1144,6 +1192,14 @@ export class Dispatcher {
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
               ...guard,
+              ...(retirementHeld
+                ? {
+                    retirement_owner: {
+                      project_id: project,
+                      assignment_id: a.id,
+                    },
+                  }
+                : {}),
               ...(preflight ? { resource_preflight: preflight } : {}),
               before_send: () =>
                 !this.withdrawOnClose(job, queued?.queue_reason) &&
@@ -1307,7 +1363,16 @@ export class Dispatcher {
           }),
         ),
       );
-    this.settle(job.attempt, sent, reason, job.bell, failure);
+    this.settle(
+      job.attempt,
+      sent,
+      reason,
+      job.bell,
+      failure,
+      sent && live && retirementHeld && a.idle_retirement?.dispatch_wait
+        ? a
+        : undefined,
+    );
   }
   private catalog(a: Assignment, project: ProjectId): string | undefined {
     try {
@@ -1556,6 +1621,7 @@ export class Dispatcher {
         a?.status !== "active" ||
         a.external ||
         !sameRef(a, expected) ||
+        retirementOwnsSession(a) !== retirementOwnsSession(expected) ||
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
         return;
@@ -2164,6 +2230,7 @@ export class Dispatcher {
     reason: string,
     bell?: string,
     failure?: DeliveryFailure,
+    resumedRetirement?: Assignment,
   ) {
     const { store } = this.options,
       { project_id: project, continuation } = attempt;
@@ -2188,6 +2255,23 @@ export class Dispatcher {
         tx.assignments.put(project, cleared);
       }
       let state = this.loadState(tx, project);
+      if (resumedRetirement) {
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            trackRetirementDispatch(
+              state,
+              { kind: "system", project_id: project },
+              resumedRetirement,
+              attempt.run_id,
+              "woken",
+              { ids: tx.ids, clock: this.clock },
+            ),
+          ),
+        );
+        state = this.loadState(tx, project);
+      }
       // A queued Run has never crossed dispatch/sentinel. Fence it atomically
       // with lease recovery so a late provision cannot dispatch after its slot
       // has been handed to another Run. Dispatched/unknown work stays uncertain.

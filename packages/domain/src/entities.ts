@@ -493,12 +493,18 @@ interface AssignmentFields {
   };
   readonly idle_retirement?: {
     readonly phase: "stopping" | "waiting";
+    /** This claim cannot send signals. Absent on legacy or signal-capable claims. */
+    readonly observe_only?: true;
     readonly runtime_ref: RuntimeRef;
     readonly started_at: Timestamp;
     readonly activity_at?: Timestamp;
     readonly threshold_minutes: number;
     readonly retry_at?: Timestamp;
     readonly failures: number;
+    readonly evidence?: import("./runtime-types.js").RetirementEvidence;
+    readonly dispatch_wait?: import("./runtime-types.js").RetirementDispatchWait & {
+      readonly event_id: EventId;
+    };
     readonly last_failure?: "timeout" | "uncertain" | "unavailable";
     readonly notice_sent?: boolean;
   };

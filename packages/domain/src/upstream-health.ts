@@ -132,6 +132,14 @@ function lastUpstreamInactivityFromSnapshot(
   return snapshot
     .matching("run_inactive|run_dispatch_stalled", id)
     .findLast((e) => {
+      const source = fields(e).activity_source;
+      // A frozen screen or file is a host-ops diagnostic, not an upstream failure.
+      if (
+        e.type === "run_inactive" &&
+        (source === "terminal_output" ||
+          (typeof source === "string" && source.endsWith(":transcript_mtime")))
+      )
+        return false;
       const run = snapshot.run(id, fields(e).run_id);
       return (
         run &&

@@ -269,7 +269,7 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
   using capture = vi
     .spyOn(transcript, "captureTranscript")
     .mockImplementation(async (_file, args) => {
-      const [dir, session] = args.slice(-2);
+      const [dir, session] = args.slice(-6);
       const first = session === one.id;
       if (
         (!first && session !== ten.id) ||
@@ -305,6 +305,29 @@ test("C-462: parallel Claude sessions may work below their own worktree, not a s
   expect((await inspect())[0]?.activity_status).toBe("unassociated");
   expect(capture).toHaveBeenCalledTimes(4);
 });
+
+test.each([
+  { cwd: `${cwd}-other` },
+  { session_id: "different" },
+  { updated_at: "2025-12-31T23:59:59.000Z" },
+])(
+  "the host rejects an unrelated command start even beside valid activity: %j",
+  async (unrelated) => {
+    const activity = { session_id: "session-1", cwd, updated_at: now };
+    using _capture = vi
+      .spyOn(transcript, "captureTranscript")
+      .mockResolvedValue(
+        JSON.stringify({
+          path: claudeFile(),
+          activity,
+          foreground: { command: "vite", start: { ...activity, ...unrelated } },
+        }),
+      );
+    const row = await read(state("claude-code"));
+    expect(row?.activity_status).toBe("fresh");
+    expect(row?.foreground).toBeUndefined();
+  },
+);
 
 test("regressed record clocks, mismatched session/cwd and old generations fail association", async () => {
   await write(rollout(), codex(progress() + progress("2026-01-01T00:59:00Z")));
@@ -588,3 +611,439 @@ test("C-499: an unfinished Claude line after a 503 invalidates silence on every 
   expect(row?.activity).toMatchObject({ updated_at: now });
   expect(row?.startupFailure).toBeUndefined();
 });
+
+test.each(["codex", "pi", "claude-code"])(
+  "C-541: %s alert-only file evidence survives missing protocol activity",
+  async (harness) => {
+    const stamp = new Date(now);
+    const path =
+      harness === "pi"
+        ? join(runDir(), "pi", "sessions", "current.jsonl")
+        : harness === "codex"
+          ? rollout()
+          : join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl");
+    const browser = {
+      type: "progress",
+      sessionId: "session-1",
+      cwd,
+      timestamp: now,
+      data: { type: "mcp_progress", message: "PRIVATE-SCREENSHOT" },
+    };
+    // A single browser screenshot larger than the tail contains no complete record in that tail.
+    await write(
+      path,
+      harness === "codex"
+        ? codex("")
+        : harness === "pi"
+          ? line({ type: "session", ...metadata })
+          : line(browser) +
+            line({ ...browser, data: { image: "x".repeat(4 * 1024 * 1024) } }),
+    );
+    await utimes(path, stamp, stamp);
+    const diagnostic = await read(state(harness));
+    expect(diagnostic?.activity).toBeUndefined(); // Cannot feed stop / upstream evidence.
+    expect(diagnostic?.fileActivity).toMatchObject({
+      session_id: "session-1",
+      source: `${harness}:transcript_mtime`,
+      updated_at: now,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE-SCREENSHOT");
+  },
+);
+
+test("C-541: only a still-pending foreground tool yields a safe command and start time", async () => {
+  const path = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const e = { sessionId: "session-1", cwd, timestamp: now };
+  await write(
+    path,
+    line({
+      ...e,
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Bash",
+            id: "tool",
+            input: { command: "node /private/web.mjs --secret PRIVATE-ARG" },
+          },
+        ],
+      },
+    }) +
+      line({
+        ...e,
+        type: "progress",
+        data: { type: "bash_progress", elapsedTimeSeconds: 60 },
+      }),
+  );
+  const row = await read(state("claude-code"));
+  expect(row?.foreground).toEqual({ command: "node web.mjs", since: now });
+  expect(row?.fileActivity).toBeUndefined(); // Elapsed-time ticks are not output.
+  expect(JSON.stringify(row)).not.toContain("PRIVATE-ARG");
+  await appendFile(
+    path,
+    line({
+      ...e,
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "tool" }] },
+    }),
+  );
+  expect((await read(state("claude-code")))?.foreground).toBeUndefined();
+});
+
+test("C-541: sidechain-only writes cannot refresh a main-thread transcript", async () => {
+  const file = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const old = "2026-01-01T00:10:00.000Z";
+  const e = { sessionId: "session-1", cwd, type: "assistant" };
+  await write(
+    file,
+    line({ ...e, timestamp: old }) +
+      line({ ...e, timestamp: now, isSidechain: true }),
+  );
+  const row = await read(state("claude-code"));
+  expect(row?.fileActivity).toBeUndefined();
+  expect(row?.activity?.updated_at).toBe(old);
+});
+
+const claudeFile = () =>
+  join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl");
+const mainRecord = { sessionId: "session-1", cwd, timestamp: now };
+const oldAt = "2026-01-01T00:05:00.000Z";
+const timer = line({
+  ...mainRecord,
+  type: "progress",
+  data: { type: "bash_progress", elapsedTimeSeconds: 60 },
+});
+
+test.each([false, true])(
+  "C-541: a large crossing screenshot can refresh only its own main thread (sidechain=%s)",
+  async (sidechain) => {
+    const file = claudeFile();
+    await write(
+      file,
+      line({ type: "header", padding: "x".repeat(128 * 1024) }) +
+        line({
+          ...mainRecord,
+          timestamp: oldAt,
+          type: "assistant",
+          message: { model: "fixture" },
+        }) +
+        line({
+          ...mainRecord,
+          type: "progress",
+          data: {
+            type: "mcp_progress",
+            image: "x".repeat(4 * 1024 * 1024 + 1024),
+          },
+          isSidechain: sidechain,
+        }),
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const result = await read(state("claude-code"));
+    expect(result?.fileActivity?.updated_at).toBe(sidechain ? oldAt : now);
+    expect(result?.activity).toBeUndefined();
+  },
+);
+
+test.each(["assistant", "error"])(
+  "C-541: browser progress after %s is not erased or advanced by a later timer",
+  async (first) => {
+    const file = claudeFile(),
+      browserAt = "2026-01-01T00:48:00.000Z";
+    const prior =
+      first === "error"
+        ? { type: "system", subtype: "api_error", error: { status: 503 } }
+        : { type: "assistant" };
+    await write(
+      file,
+      line({ ...mainRecord, ...prior, timestamp: oldAt }) +
+        line({
+          ...mainRecord,
+          type: "progress",
+          data: { type: "mcp_progress" },
+          timestamp: browserAt,
+        }) +
+        timer,
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const row = await read(state("claude-code"));
+    expect(row?.fileActivity?.updated_at).toBe(browserAt);
+    expect(row?.activity?.updated_at).toBe(oldAt);
+    if (first === "error") expect(row?.activity?.error).toBe("server_error");
+  },
+);
+
+test.each([
+  ["node /foo/web.mjs --secret PRIVATE", "node web.mjs"],
+  ['printf "node web.mjs"; sleep 1800', "Bash"],
+  ["node --eval web.mjs", "Bash"],
+])(
+  "C-541: a long pending foreground tool reports only its verified command category (%s)",
+  async (cmd, expected) => {
+    const file = claudeFile();
+    await write(
+      file,
+      line({
+        ...mainRecord,
+        type: "assistant",
+        timestamp: oldAt,
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Bash",
+              id: "t",
+              input: { command: cmd },
+            },
+          ],
+        },
+      }) + timer.repeat(260),
+    );
+    const inspect = () => read(state("claude-code"));
+    const row = await inspect();
+    expect(row?.foreground).toEqual({ command: expected, since: oldAt });
+    expect(row?.fileActivity?.updated_at).toBe(oldAt);
+    expect(JSON.stringify(row)).not.toContain(cmd);
+    await appendFile(
+      file,
+      line({
+        ...mainRecord,
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t" }] },
+      }) + timer.repeat(260),
+    );
+    expect((await inspect())?.foreground).toBeUndefined();
+  },
+);
+
+test("C-541: an unread record boundary cannot refresh an old main thread or prove a command is still pending", async () => {
+  const file = claudeFile();
+  await write(
+    file,
+    line({
+      ...mainRecord,
+      type: "assistant",
+      timestamp: oldAt,
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Bash",
+            id: "t",
+            input: { command: "vite" },
+          },
+        ],
+      },
+    }) +
+      line({
+        ...mainRecord,
+        type: "progress",
+        data: { image: "x".repeat(5 * 1024 * 1024) },
+        isSidechain: true,
+      }),
+  );
+  await utimes(file, new Date(now), new Date(now));
+  const row = await read(state("claude-code"));
+  expect(row?.activity_status).toBe("missing");
+  expect(row?.fileActivity).toBeUndefined();
+  expect(row?.foreground).toBeUndefined();
+});
+
+// Unrelated or repeated progress must not push the time of the last output forward.
+test.each(["totalLines", "totalBytes"])(
+  "C-541: only advances of %s in the pending foreground invocation count",
+  async (counter) => {
+    const started = line({
+      ...mainRecord,
+      timestamp: oldAt,
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "cmd",
+            name: "Bash",
+            input: { command: "vite" },
+          },
+        ],
+      },
+    });
+    const output = (data: object, event: object = {}) =>
+      line({
+        ...mainRecord,
+        type: "progress",
+        parentToolUseID: "cmd",
+        data: { type: "bash_progress", fullOutput: "PRIVATE-OUTPUT", ...data },
+        ...event,
+      });
+    const at = "2026-01-01T00:21:00.000Z";
+    const other = counter === "totalBytes" ? "totalLines" : "totalBytes";
+    const file = claudeFile();
+    await write(
+      file,
+      started +
+        output({ [counter]: 2 }, { timestamp: at }) +
+        [
+          output({ elapsedTimeSeconds: 999 }),
+          output({ [counter]: 2, [other]: 1 }),
+          output({ [counter]: 1 }),
+          output({ [counter]: 2 }),
+          output({ [counter]: 3 }, { parentToolUseID: "background" }),
+          output({ [counter]: 3 }, { isSidechain: true }),
+          output({ [counter]: 3 }, { cwd: "/unrelated" }),
+          output({ [counter]: "3" }),
+        ].join(""),
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const sample = await read(state("claude-code"));
+    expect(sample?.fileActivity?.updated_at).toBe(at);
+    expect(sample?.activity?.updated_at).toBe(oldAt);
+    expect(sample?.foreground).toEqual({ command: "vite", since: oldAt });
+    expect(JSON.stringify(sample)).not.toContain("PRIVATE-OUTPUT");
+    await appendFile(
+      file,
+      line({
+        ...mainRecord,
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "cmd" }] },
+      }) + output({ [counter]: 3 }),
+    );
+    const ended = await read(state("claude-code"));
+    expect(ended?.foreground).toBeUndefined();
+    expect(ended?.fileActivity).toBeUndefined();
+  },
+);
+
+const bashUse = (id: string, command: string) => ({
+  type: "tool_use",
+  name: "Bash",
+  id,
+  input: { command },
+});
+const bashOutput = (
+  parentToolUseID: string,
+  timestamp: string,
+  totalBytes: number,
+) =>
+  line({
+    ...mainRecord,
+    type: "progress",
+    parentToolUseID,
+    timestamp,
+    data: { type: "bash_progress", totalBytes },
+  });
+
+test("C-541: interleaved calls keep independent output counters and do not name an ambiguous foreground", async () => {
+  const file = claudeFile();
+  const a = "PRIVATE-ID-A",
+    b = "PRIVATE-ID-B";
+  const minute = (m: number) => `2026-01-01T00:${m}:00.000Z`;
+  const inspect = () => read(state("claude-code"));
+  await write(
+    file,
+    line({
+      ...mainRecord,
+      timestamp: oldAt,
+      type: "assistant",
+      message: { content: [bashUse(a, "vite"), bashUse(b, "node web.mjs")] },
+    }) +
+      bashOutput(b, oldAt, 100) +
+      bashOutput(a, minute(16), 1),
+  );
+  const both = await inspect();
+  expect(both?.foreground).toBeUndefined();
+  expect(both?.fileActivity?.updated_at).toBe(minute(16));
+  await appendFile(
+    file,
+    bashOutput(b, minute(24), 101) + bashOutput(a, minute(25), 1),
+  );
+  expect((await inspect())?.fileActivity?.updated_at).toBe(minute(24));
+  // Complete B, then send late B progress; A's high-water mark and start survive.
+  await appendFile(
+    file,
+    line({
+      ...mainRecord,
+      timestamp: minute(30),
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: b }] },
+    }) +
+      bashOutput(a, minute(32), 2) +
+      bashOutput(b, now, 102) +
+      bashOutput(a, now, 2) +
+      timer,
+  );
+  const one = await inspect();
+  expect(one?.fileActivity?.updated_at).toBe(minute(32));
+  expect(one?.foreground).toEqual({ command: "vite", since: oldAt });
+  expect(JSON.stringify(one)).not.toContain("PRIVATE-ID");
+  await appendFile(file, "invalid-record\n" + bashOutput(a, now, 3));
+  const gap = await inspect();
+  expect(gap?.fileActivity?.updated_at).toBe(minute(32));
+  expect(gap?.foreground).toBeUndefined();
+});
+
+test.each(["session", "run", "generation"])(
+  "C-541: reusing a Bash call ID after a %s change does not import an old start",
+  async (boundary) => {
+    const file = claudeFile(),
+      id = "same-id",
+      cut = "2026-01-01T00:30:00.000Z";
+    const s = state("claude-code");
+    const current =
+      boundary === "run"
+        ? { ...s, runs: s.runs.map((r) => ({ ...r, started_at: cut })) }
+        : boundary === "generation"
+          ? ({
+              ...s,
+              events: [
+                {
+                  type: "session_replaced",
+                  payload: { assignment_id: "A-1" },
+                  created_at: cut,
+                },
+              ],
+            } as unknown as CommandState)
+          : s;
+    const start = (
+      timestamp: string,
+      command: string,
+      sessionId = mainRecord.sessionId,
+    ) =>
+      line({
+        ...mainRecord,
+        sessionId,
+        timestamp,
+        type: "assistant",
+        message: { content: [bashUse(id, command)] },
+      });
+    await write(
+      file,
+      boundary === "session" ? "" : start(oldAt, "node web.mjs"),
+    );
+    if (boundary === "session")
+      await write(
+        join(file, "..", "old.jsonl"),
+        start(oldAt, "node web.mjs", "old"),
+      );
+    await appendFile(file, bashOutput(id, now, 90));
+    const old = await read(current);
+    expect(old?.fileActivity).toBeUndefined();
+    expect(old?.foreground).toBeUndefined();
+    await appendFile(file, start(cut, "vite") + bashOutput(id, now, 1));
+    const fresh = await read(current);
+    expect(fresh?.fileActivity?.updated_at).toBe(now);
+    expect(fresh?.foreground).toEqual({ command: "vite", since: cut });
+  },
+);

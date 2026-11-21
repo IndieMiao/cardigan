@@ -64,7 +64,6 @@ export function recordSessionMaintenance(
         "observation_incomplete",
         "runtime_unavailable",
         "publication_pending",
-        "retirement_unavailable",
       ].includes(observation.reason);
     const notify =
       alert &&

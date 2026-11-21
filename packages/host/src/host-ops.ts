@@ -890,6 +890,8 @@ export class HostOpsService {
               [
                 s.assignment_id,
                 {
+                  ...(s.fileActivity ? { fileActivity: s.fileActivity } : {}),
+                  ...(s.foreground ? { foreground: s.foreground } : {}),
                   status: s.activity_status ?? "missing",
                   ...(s.activity ? { activity: s.activity } : {}),
                   ...(s.startupFailure

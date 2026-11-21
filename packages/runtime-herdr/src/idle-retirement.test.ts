@@ -55,6 +55,23 @@ const options = () => ({
   terminate_ms: 1,
   before_signal: () => true,
 });
+test("legacy retirement-held wake rechecks live ownership inside the send slot", async () => {
+  const f = adapter(),
+    runtime = await f.create();
+  const guard = { if_idle: true, retirement_owner: options() };
+  Object.assign(f.terminal, { status: { state: "idle" } });
+  expect(value(await runtime.observe_retirement(ref, options()))).toBe("alive");
+  f.terminal.labels.assignment = "A-2";
+  expect(value(await runtime.wake(ref, "bell", guard))).toEqual({
+    sent: false,
+    withdrawn: true,
+  });
+  expect(
+    vi.mocked(f.client.exec).mock.calls.some(([args]) => args[0] === "send"),
+  ).toBe(false);
+  f.terminal.labels.assignment = "A-1";
+  expect(value(await runtime.wake(ref, "bell", guard))).toEqual({ sent: true });
+});
 test.each(["HUP", "TERM", undefined])(
   "retirement uses only HUP/TERM; finish after %s",
   async (finishAfter) => {
@@ -63,7 +80,7 @@ test.each(["HUP", "TERM", undefined])(
     const result = await runtime.retire_idle(ref, options());
     expect(result).toMatchObject({
       ok: true,
-      value: { exited: !!finishAfter },
+      value: { outcome: finishAfter ? "exited" : "timeout" },
     });
     const calls = vi.mocked(f.client.exec).mock.calls.map(([args]) => args);
     expect(
@@ -91,7 +108,10 @@ test("new work at the final guard and uncertain identity prevent every signal", 
       ...options(),
       before_signal: () => false,
     }),
-  ).toMatchObject({ ok: true, value: { exited: false, withdrawn: true } });
+  ).toMatchObject({
+    ok: true,
+    value: { outcome: "withdrawn", evidence: { reason: "guard_changed" } },
+  });
   expect(
     vi
       .mocked(f.client.exec)
@@ -100,15 +120,48 @@ test("new work at the final guard and uncertain identity prevent every signal", 
   f.terminal.keep = true;
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
     ok: true,
-    value: { withdrawn: true },
+    value: { outcome: "withdrawn", evidence: { reason: "kept_terminal" } },
   });
   f.terminal.keep = false;
   f.terminal.labels.assignment = "A-99";
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
     ok: true,
-    value: { withdrawn: true },
+    value: { outcome: "withdrawn", evidence: { reason: "identity_changed" } },
   });
 });
+test("only a single exact get can prove retirement exit; snapshot, missing labels or a recycled address cannot", async () => {
+  const f = adapter(),
+    runtime = await f.create(),
+    get = vi.mocked(f.client.exec);
+  const generation = { run_id: "R-1" as const, generation: "g1" };
+  const generated = { ...ref, launch_generation: generation };
+  const labels = { ...f.terminal.labels, run: "R-1", generation: "g1" };
+  for (const [owned, address, tags, ok] of [
+    [ref, ref.terminal_ref, f.terminal.labels, true],
+    [ref, ref.terminal_ref, { project: "fixture", assignment: "A-2" }, false],
+    [ref, ref.terminal_ref, { project: "other", assignment: "A-1" }, false],
+    [ref, ref.terminal_ref, undefined, false],
+    [ref, "t2", f.terminal.labels, false],
+    [ref, ref.terminal_ref, labels, false],
+    [generated, ref.terminal_ref, { ...labels, run: "R-2" }, false],
+    [generated, ref.terminal_ref, { ...labels, generation: "g2" }, false],
+    [generated, ref.terminal_ref, labels, true],
+  ] as const) {
+    get
+      .mockClear()
+      .mockResolvedValueOnce(
+        JSON.stringify({ address, state: "finished", labels: tags }),
+      );
+    const observed = await runtime.observe_retirement(owned, options());
+    expect(observed).toMatchObject(
+      ok ? { ok: true, value: "exited" } : { ok: false },
+    );
+    expect(get.mock.calls.map(([args]) => args)).toEqual([
+      ["get", ref.terminal_ref, "--json"],
+    ]);
+  }
+});
+
 test("a changed process after HUP cannot receive TERM and is not reported exited", async () => {
   const f = adapter(),
     runtime = await f.create();
@@ -119,8 +172,11 @@ test("a changed process after HUP cannot receive TERM and is not reported exited
     return result;
   });
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
-    ok: false,
-    error: { code: "runtime_conflict" },
+    ok: true,
+    value: {
+      outcome: "uncertain",
+      evidence: { reason: "identity_changed", terminal_state: "live" },
+    },
   });
   expect(
     vi.mocked(f.client.exec).mock.calls.some(([args]) => args.includes("TERM")),
@@ -162,6 +218,9 @@ test.skipIf(process.platform !== "linux")(
     try {
       await vi.waitFor(() => expect(output).toContain("ready"));
       const identity = JSON.parse((await helper("probe")).stdout);
+      await expect(
+        helper("probe", undefined, "other-terminal"),
+      ).rejects.toMatchObject({ code: 22 });
       await expect(
         helper("HUP", JSON.stringify({ ...identity, start: "wrong" })),
       ).rejects.toThrow();

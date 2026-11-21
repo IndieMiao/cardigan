@@ -70,7 +70,7 @@ test.skipIf(!available || process.platform !== "linux")(
         terminate_ms: 2000,
         before_signal: () => true,
       });
-      expect(result).toEqual({ ok: true, value: { exited: true } });
+      expect(result).toEqual({ ok: true, value: { outcome: "exited" } });
       expect((await inspect()).state).toBe("finished");
       expect(await readFile(join(dir, "dirty.txt"), "utf8")).toBe(
         "uncommitted fixture",

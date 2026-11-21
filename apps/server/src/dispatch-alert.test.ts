@@ -9,6 +9,7 @@ import {
 } from "@cardigan/domain";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { stalledCache } from "../test-support/dispatch.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
 import { standingResolver } from "./assembly.js";
@@ -42,6 +43,7 @@ function pm(mode: "ops" | "office") {
 }
 const options = () => ({
   ...f.options,
+  harnessActivity: stalledCache(f.state()),
   standing: standingResolver(f.store),
   inactivityGraceMs: 100,
   inactiveCancelAfterMs: null,
@@ -273,8 +275,8 @@ test.each(["inactive", "lost", "timeout"] as const)(
   "C-220 ordinary Assignment %s retains its existing recipients",
   async (cause) => {
     const event = await trigger(f.target.assignment, cause);
-    expect(hostNotes()).toEqual([]);
-    expect(hostBells()).toHaveLength(0);
+    expect(hostNotes()).toHaveLength(cause === "inactive" ? 1 : 0);
+    expect(hostBells()).toHaveLength(cause === "inactive" ? 1 : 0);
     if (cause !== "timeout")
       expect(
         f.store
@@ -328,7 +330,7 @@ test("C-220 audience recognizes standing roles without a logical-recipient resol
 });
 
 test.each(["missing", "unassociated", "read_failed"] as const)(
-  "C-462: %s Claude activity alerts host ops once without reaping the Run",
+  "C-462: %s Claude activity records a notice without paging host ops or reaping the Run",
   async (status) => {
     const run = f.session(f.target.assignment, false);
     f.store.uow.run((tx) => {
@@ -348,15 +350,18 @@ test.each(["missing", "unassociated", "read_failed"] as const)(
       await dispatcher.tick();
       await new Promise<void>((resolve) => setImmediate(resolve));
       await dispatcher.tick();
-      const alerts = f.state().events.filter((e) => e.type === "run_inactive");
-      expect(alerts).toHaveLength(1);
-      expect(alerts[0]?.payload).toMatchObject({
-        run_id: run.id,
-        activity_status: status,
-      });
       expect(
-        hostNotes().filter((n) => n.event_id === alerts[0]?.id),
-      ).toHaveLength(1);
+        f.state().events.filter((e) => e.type === "run_inactive"),
+      ).toHaveLength(0);
+      const notices = f
+        .state()
+        .events.filter((e) => e.type === "run_local_activity_missing");
+      expect(notices.map((e) => e.payload)).toMatchObject([
+        { run_id: run.id, activity_status: status },
+      ]);
+      expect(
+        hostNotes().filter((n) => n.event_id === notices[0]?.id),
+      ).toHaveLength(0);
       expect(f.runtime.release).not.toHaveBeenCalled();
       expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
         "running",
@@ -368,7 +373,7 @@ test.each(["missing", "unassociated", "read_failed"] as const)(
 );
 
 test.each(["missing", "unassociated"] as const)(
-  "C-462: stale then %s notifies host ops without repeating the original alert",
+  "C-462: stale then %s does not duplicate the confirmed stall handoff",
   async (unknown) => {
     const run = f.session(f.target.assignment, false);
     const updated_at = f.clock.now();
@@ -418,7 +423,7 @@ test.each(["missing", "unassociated"] as const)(
           .events.filter((e) => e.type === "run_inactive")
           .map((e) => e.payload),
       ).toMatchObject([{ activity_status: "stale" }]);
-      expect(hostNotes()).toHaveLength(0);
+      expect(hostNotes()).toHaveLength(1);
       stale = false;
       f.advance(41 * 60_000);
       await tick();
@@ -431,15 +436,8 @@ test.each(["missing", "unassociated"] as const)(
       const followup = f
         .state()
         .events.filter((e) => e.type === "run_activity_unknown");
-      expect(followup.map((e) => e.payload)).toMatchObject([
-        { activity_status: unknown, run_id: run.id },
-      ]);
-      expect(
-        f.store
-          .listNotifications({ project_id: f.project })
-          .filter((n) => n.event_id === followup[0]?.id)
-          .map((n) => n.recipient),
-      ).toEqual([{ kind: "assignment", assignment_id: hostOps.id }]);
+      expect(followup).toHaveLength(0);
+      expect(hostNotes()).toHaveLength(1);
       expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
         "running",
       );

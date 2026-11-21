@@ -70,6 +70,9 @@ function setup(dbPath = ":memory:", version = 1, manual = false) {
   let at = "2030-01-01T02:00:00Z";
   const runtime = {
     release: vi.fn(),
+    observe_retirement: vi
+      .fn<NonNullable<Runtime["observe_retirement"]>>()
+      .mockResolvedValue({ ok: true, value: "alive" }),
     status: vi.fn(async () => ({
       ok: true as const,
       value: {
@@ -317,8 +320,16 @@ test("unsupported older sessions back off and cannot starve an untried eligible 
     ok: true as const,
     value:
       ref.terminal_ref === "t3"
-        ? { exited: true }
-        : { exited: false, withdrawn: true },
+        ? { outcome: "exited" }
+        : {
+            outcome: "withdrawn",
+            evidence: {
+              stage: "get",
+              reason: "hc_failed",
+              hc_kind: "blocked",
+              runtime_code: "runtime_conflict",
+            },
+          },
   }));
   Object.assign(f.runtime, { retire_idle: retire });
   try {
@@ -347,7 +358,7 @@ test("idle retirement preserves the Assignment and only revokes credentials afte
   const f = setup(":memory:", 2);
   const retire = vi.fn(async (_ref, options) => ({
     ok: true as const,
-    value: { exited: options.before_signal() },
+    value: { outcome: options.before_signal() ? "exited" : "withdrawn" },
   }));
   Object.assign(f.runtime, { retire_idle: retire });
   try {
@@ -377,7 +388,18 @@ test.each(["host-ops", "launch"] as const)(
         tx.runs.put(f.project, { ...fixture().runs[0]!, status: "queued" }),
       );
       expect(options.before_signal()).toBe(false);
-      return { ok: true as const, value: { exited: false, withdrawn: true } };
+      return {
+        ok: true as const,
+        value: {
+          outcome: "withdrawn",
+          evidence: {
+            stage: "get",
+            reason: "hc_failed",
+            hc_kind: "blocked",
+            runtime_code: "runtime_conflict",
+          },
+        },
+      };
     });
     Object.assign(f.runtime, { retire_idle: retire });
     try {
@@ -391,6 +413,7 @@ test.each(["host-ops", "launch"] as const)(
       await f.tick();
       expect(retire).toHaveBeenCalledOnce();
       expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+      expect(f.state().assignments[0]?.idle_retirement?.phase).toBe("waiting");
       expect(f.state().assignments[0]?.runtime_ref).toEqual(f.a.runtime_ref);
     } finally {
       f.store.close();
@@ -401,7 +424,14 @@ test("timeout retains the session and retries with durable backoff and one failu
   const f = setup(":memory:", 2);
   const retire = vi.fn(async () => ({
     ok: true as const,
-    value: { exited: false },
+    value: {
+      outcome: "timeout",
+      evidence: {
+        stage: "confirm",
+        reason: "still_live",
+        terminal_state: "live",
+      },
+    },
   }));
   Object.assign(f.runtime, { retire_idle: retire });
   try {
@@ -420,6 +450,25 @@ test("timeout retains the session and retries with durable backoff and one failu
     );
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
     expect(f.state().assignments[0]?.idle_retirement?.phase).toBe("waiting");
+    const alert = f
+      .state()
+      .events.filter((e) => e.type === "session_maintenance_attention");
+    expect(alert).toHaveLength(1);
+    expect(alert[0]?.payload).toMatchObject({
+      evidence: { terminal_state: "live" },
+      notice: expect.stringContaining(
+        `cardigan assignment stop ${f.a.id} --project ${f.project}`,
+      ),
+    });
+    Object.assign(f.runtime, {
+      retire_idle: async () => ({ ok: true, value: { outcome: "exited" } }),
+    });
+    f.setTime("2030-01-01T02:12:00Z");
+    await f.tick();
+    expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
+      { status: "resolved" },
+    ]);
+    expect(f.state().assignments[0]?.idle_retirement).toBeUndefined();
   } finally {
     f.store.close();
   }
@@ -433,17 +482,165 @@ test("lost acknowledgements preserve the fence; restart only observes exit and n
   try {
     await f.tick();
     expect(f.state().assignments[0]?.idle_retirement?.phase).toBe("stopping");
-    f.setTime("2030-01-01T02:01:00Z");
-    await f.tick();
-    expect(retire).toHaveBeenCalledOnce();
-    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
     f.runtime.status.mockResolvedValue({
       ok: true,
       value: { process: "exited", agent: "idle", observed_seq: 1 },
     });
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: false,
+      error: { code: "runtime_not_found", message: "snapshot missing" },
+    });
+    f.setTime("2030-01-01T02:01:00Z");
+    await f.tick();
+    expect(retire).toHaveBeenCalledOnce();
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
     f.setTime("2030-01-01T02:03:00Z");
     await f.tick();
     expect(f.state().assignments[0]?.runtime_ref).toBeNull();
+    expect(f.store.verifyToken(f.token.token)).toBeUndefined();
+    expect(retire).toHaveBeenCalledOnce();
+  } finally {
+    f.store.close();
+  }
+});
+
+test.each(["alive", "runtime_conflict"] as const)(
+  "no pidfd: %s recheck retains credentials and gives ownership-safe guidance until exit",
+  async (observation) => {
+    const f = setup(":memory:", 2);
+    const evidence = {
+      stage: "probe",
+      reason: "pidfd_unavailable",
+      terminal_state: "live",
+      exit_code: 20,
+    };
+    const retire = vi.fn(async () => ({
+      ok: true,
+      value: { outcome: "withdrawn", evidence },
+    }));
+    Object.assign(f.runtime, { retire_idle: retire });
+    if (observation === "runtime_conflict")
+      f.runtime.observe_retirement.mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_conflict", message: "owner changed" },
+      });
+    try {
+      for (const minute of [0, 1, 3, 7]) {
+        f.setTime(`2030-01-01T02:0${minute}:00Z`);
+        await f.tick();
+      }
+      expect(retire).toHaveBeenCalledOnce();
+      expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
+      expect(f.runtime.status).not.toHaveBeenCalled();
+      expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
+        phase: "waiting",
+        evidence,
+      });
+      expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+      expect(
+        f
+          .state()
+          .events.filter((e) => e.type === "session_maintenance_attention"),
+      ).toMatchObject([
+        {
+          payload: { evidence, notice: expect.stringContaining("只复查退出") },
+        },
+      ]);
+      const notice = f
+        .state()
+        .events.find((e) => e.type === "session_maintenance_attention")
+        ?.payload.notice;
+      expect(notice).toContain("只读核对终端地址、项目、指派和启动代次");
+      if (observation === "runtime_conflict") {
+        expect(notice).toContain("runtime_conflict");
+        expect(notice).not.toContain("cardigan assignment stop");
+      }
+      expect(
+        f.store.listNotifications({ project_id: f.project }),
+      ).toMatchObject([{ status: "pending" }]);
+      f.runtime.observe_retirement.mockResolvedValue({
+        ok: true,
+        value: "exited",
+      });
+      f.setTime("2030-01-01T02:12:00Z");
+      await f.tick();
+      expect(
+        f.store.listNotifications({ project_id: f.project }),
+      ).toMatchObject([{ status: "resolved" }]);
+      expect(f.store.verifyToken(f.token.token)).toBeUndefined();
+      expect(retire).toHaveBeenCalledOnce();
+    } finally {
+      f.store.close();
+    }
+  },
+);
+
+test("a published role waits for retirement of the same ref; neither missing status nor another session can revoke its token", async () => {
+  const f = setup(":memory:", 1);
+  const retire = vi.fn(async () => ({
+    ok: true,
+    value: {
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "pidfd_unavailable" },
+    },
+  }));
+  Object.assign(f.runtime, {
+    retire_idle: retire,
+    status: vi.fn(async () => ({
+      ok: false,
+      error: { code: "runtime_not_found", message: "missing" },
+    })),
+  });
+  try {
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      { coder: deploymentRolePolicyHash(f.source) },
+      new Set(["fixture"]),
+    );
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: false,
+      error: { code: "runtime_conflict", message: "wrong owner" },
+    });
+    await f.tick();
+    f.setTime("2030-01-01T02:01:00Z");
+    await f.tick();
+    expect(f.runtime.status).not.toHaveBeenCalled();
+    expect(f.state().assignments[0]).toMatchObject({
+      role_version: 1,
+      runtime_ref: f.a.runtime_ref,
+      idle_retirement: { phase: "waiting" },
+    });
+    expect(
+      f
+        .state()
+        .events.some((e) => e.type === "assignment_role_upgrade_started"),
+    ).toBe(false);
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
+    f.setTime("2030-01-01T02:03:00Z");
+    await f.tick();
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "session_replaced")
+        .map((e) => e.payload),
+    ).toMatchObject([
+      { reason: "idle_session_retired" },
+      { reason: "default_role_upgraded" },
+    ]);
+    expect(f.state().assignments[0]).toMatchObject({
+      role_version: 2,
+      runtime_ref: null,
+    });
     expect(f.store.verifyToken(f.token.token)).toBeUndefined();
     expect(retire).toHaveBeenCalledOnce();
   } finally {
@@ -466,13 +663,18 @@ test("a retirement claim appearing while locks are acquired is recovered, never 
           started_at: "2030-01-01T02:00:00Z",
           threshold_minutes: 60,
           failures: 0,
+          evidence: { stage: "HUP", reason: "pidfd_unavailable" },
           activity_at: f.a.last_mcp_activity_at,
         },
       }),
     );
     await tick;
     expect(retire).not.toHaveBeenCalled();
-    expect(f.runtime.status).toHaveBeenCalledOnce();
+    expect(f.runtime.observe_retirement).toHaveBeenCalledOnce();
+    expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
+      phase: "stopping",
+      last_failure: "uncertain",
+    });
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
   } finally {
     f.store.close();
