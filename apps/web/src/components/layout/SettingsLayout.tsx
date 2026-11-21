@@ -341,10 +341,13 @@ export function SettingsDiscardDialog({
   open,
   onKeep,
   onDiscard,
+  title = "放弃未应用的修改？",
 }: {
   open: boolean;
   onKeep: () => void;
   onDiscard: () => void;
+  /** C-503: what is being discarded, e.g. an unsent comment draft. */
+  title?: string;
 }) {
   return (
     <Dialog
@@ -357,7 +360,7 @@ export function SettingsDiscardDialog({
         className={cn(styles.dialog, styles.confirm)}
         overlayClassName={styles.confirm}
       >
-        <DialogTitle>放弃未应用的修改？</DialogTitle>
+        <DialogTitle>{title}</DialogTitle>
         <DialogDescription className="visually-hidden">
           关闭后这次填写的内容不会保留。
         </DialogDescription>

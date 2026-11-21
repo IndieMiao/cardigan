@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,7 +9,13 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { CardDetail, CardListItem, CardStatus } from "../api.js";
+import {
+  ApiError,
+  type CardDetail,
+  type CardListItem,
+  type CardStatus,
+} from "../api.js";
+import { guardLeave } from "../leave-guard.js";
 import { routeHash } from "../route.js";
 import {
   attachment,
@@ -557,4 +564,490 @@ test("a story the person marked done shows 已完成 on its node, never 待核",
   );
   await waitFor(() => expect(nodeText("C-1")).toContain("已完成"));
   expect(nodeText("C-1")).not.toContain("待核");
+});
+
+const proposal = (
+  version: number,
+  confirmed?: readonly string[],
+): NonNullable<
+  NonNullable<CardDetail["card"]["story"]>["proposals"]
+>[number] => ({
+  version,
+  entry_id: `C-1#${10 + version}`,
+  submitted_at: "2026-01-01T00:00:00.000Z",
+  children: [
+    {
+      title: "导出接口",
+      template_id: "dev",
+      goal: "提供 CSV 导出。",
+      acceptance_criteria: ["返回 CSV"],
+      depends_on: [],
+      priority: 3,
+      owner_role: "coder",
+    },
+    {
+      title: "导出按钮",
+      template_id: "ui",
+      goal: "在看板放导出按钮。",
+      acceptance_criteria: ["按钮遵守界面规范"],
+      depends_on: [1],
+      depends_on_cards: ["C-9"],
+      priority: 2,
+      owner_role: "frontend_engineer",
+    },
+  ],
+  ...(confirmed
+    ? {
+        confirmed: {
+          at: "2026-01-01T00:00:00.000Z",
+          entry_id: "C-1#20",
+          card_ids: confirmed,
+        },
+      }
+    : {}),
+});
+const proposalDetail = (
+  proposals: ReturnType<typeof proposal>[],
+  extra: Partial<CardDetail> = {},
+) =>
+  storyDetail(
+    { children: [], story: { discussion_rounds: 0, proposals } },
+    extra,
+  );
+
+test("the current proposal lists each child, folds its goal and confirms the version seen with one click", async () => {
+  const confirm = vi.fn(async () => ({
+    card_id: "C-1",
+    version: 2,
+    card_ids: ["C-5", "C-6"],
+    replayed: false,
+  }));
+  let detail = proposalDetail([proposal(1), proposal(2)]);
+  const card = vi.fn(async () => detail);
+  render(
+    <CardDetailPage
+      client={fakeClient({ card, confirmStoryProposal: confirm })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  // Only the newest version is shown and can be confirmed.
+  expect(within(plan).getByText(/第 2 版/)).toBeTruthy();
+  expect(within(plan).queryByText(/第 1 版/)).toBeNull();
+  expect(within(plan).getByText("待确认")).toBeTruthy();
+  expect(
+    within(plan).getByText("模板 dev · 负责 coder · 优先级 高"),
+  ).toBeTruthy();
+  expect(
+    within(plan).getByText(
+      "模板 ui · 负责 frontend_engineer · 优先级 中 · 依赖 第 1 张、C-9",
+    ),
+  ).toBeTruthy();
+  const folds = plan.querySelectorAll("details");
+  expect(folds).toHaveLength(2);
+  expect(folds[0]?.open).toBe(false);
+  expect(within(folds[0] as HTMLElement).getByText("返回 CSV")).toBeTruthy();
+
+  detail = proposalDetail([proposal(1), proposal(2, ["C-5", "C-6"])]);
+  const before = card.mock.calls.length;
+  fireEvent.click(
+    within(plan).getByRole("button", { name: "确认开卡：拆解方案第 2 版" }),
+  );
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(confirm).toHaveBeenCalledWith("p-1", "C-1", 2, expect.any(String));
+  // Success rereads the story: the children appear as links, no more buttons.
+  await waitFor(() => expect(card.mock.calls.length).toBeGreaterThan(before));
+  const after = await screen.findByRole("region", { name: "拆解方案" });
+  await within(after).findByText("已开卡");
+  expect(
+    within(after).getByRole("link", { name: /C-6/ }).getAttribute("href"),
+  ).toBe(routeHash({ kind: "card", projectId: "p-1", cardId: "C-6" }));
+  expect(within(after).queryByRole("button", { name: /确认开卡/ })).toBeNull();
+  expect(
+    within(after).queryByRole("button", { name: "提修改意见" }),
+  ).toBeNull();
+});
+
+test("a stale version says to refresh in place; other refusals keep the reason and the same key", async () => {
+  let fail: Error = new ApiError(409, "stale_target", "已更新");
+  const confirm = vi.fn(async () => {
+    throw fail;
+  });
+  const card = vi.fn(async () => proposalDetail([proposal(1)]));
+  render(
+    <CardDetailPage
+      client={fakeClient({ card, confirmStoryProposal: confirm })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  const button = within(plan).getByRole("button", { name: /确认开卡/ });
+  fireEvent.click(button);
+  const alert = await within(plan).findByRole("alert");
+  expect(alert.textContent).toContain("拆解方案已更新，请刷新后再确认");
+  const reads = card.mock.calls.length;
+  fireEvent.click(within(alert).getByRole("button", { name: "刷新" }));
+  await waitFor(() => expect(card.mock.calls.length).toBeGreaterThan(reads));
+
+  fail = new ApiError(
+    400,
+    "validation_failed",
+    "第 2 张子卡「导出按钮」无法开出：缺少 repo",
+  );
+  fireEvent.click(
+    within(await screen.findByRole("region", { name: "拆解方案" })).getByRole(
+      "button",
+      { name: /确认开卡/ },
+    ),
+  );
+  const refused = await within(
+    screen.getByRole("region", { name: "拆解方案" }),
+  ).findByText(/开卡失败：.*第 2 张子卡「导出按钮」无法开出/);
+  expect(refused).toBeTruthy();
+  const keys = confirm.mock.calls.map((call) => (call as unknown[])[3]);
+  expect(new Set(keys).size).toBe(1);
+});
+
+test("a change request replies to the proposal; leaving a written draft asks first", async () => {
+  const addComment = vi.fn(async () => ({}) as never);
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => proposalDetail([proposal(3)]),
+        addComment,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  fireEvent.click(within(plan).getByRole("button", { name: "提修改意见" }));
+  const form = await screen.findByRole("form", {
+    name: "对拆解方案第 3 版提修改意见",
+  });
+  const field = within(form).getByRole("textbox", { name: "修改意见" });
+  // An empty draft closes without asking.
+  fireEvent.click(within(form).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("form", { name: /提修改意见/ })).toBeNull();
+
+  fireEvent.click(within(plan).getByRole("button", { name: "提修改意见" }));
+  const again = await screen.findByRole("form", { name: /提修改意见/ });
+  fireEvent.change(within(again).getByRole("textbox", { name: "修改意见" }), {
+    target: { value: "导出按钮先不做" },
+  });
+  expect(field).toBeTruthy();
+  // Following a link to another page asks; keeping the draft stays here.
+  const away = document.createElement("a");
+  away.href = routeHash({ kind: "cards", projectId: "p-1" });
+  away.textContent = "看板";
+  document.body.append(away);
+  fireEvent.click(away);
+  const ask = await screen.findByRole("dialog", {
+    name: "放弃未发送的修改意见？",
+  });
+  fireEvent.click(within(ask).getByRole("button", { name: "继续编辑" }));
+  expect(window.location.hash).not.toBe(away.getAttribute("href"));
+  away.remove();
+
+  fireEvent.click(within(again).getByRole("button", { name: "取消" }));
+  const discard = await screen.findByRole("dialog", {
+    name: "放弃未发送的修改意见？",
+  });
+  fireEvent.click(within(discard).getByRole("button", { name: "继续编辑" }));
+  fireEvent.click(within(again).getByRole("button", { name: "发送意见" }));
+  await waitFor(() => expect(addComment).toHaveBeenCalledTimes(1));
+  expect(addComment).toHaveBeenCalledWith(
+    "p-1",
+    "C-1",
+    {
+      body: "对拆解方案第 3 版的修改意见：\n\n导出按钮先不做",
+      reply_to: "C-1#13",
+    },
+    expect.any(String),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("form", { name: /提修改意见/ })).toBeNull(),
+  );
+});
+
+test("after every child ended and the summary arrived, the person confirms the story done", async () => {
+  const markCardDone = vi.fn(async () => {});
+  const ended = children.map((c) => ({ ...c, status: "done" as const }));
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () =>
+          storyDetail(
+            { children: ended, summary: true },
+            { mark_done: { allowed: true, reason: null } },
+          ),
+        cards: async () => ({
+          project_id: "p-1",
+          filter: "all" as const,
+          cards: rows,
+          counts: { total: rows.length, needs_me: 0, agent: 0 },
+        }),
+        markCardDone,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  fireEvent.click(within(summary).getByRole("button", { name: "确认完成" }));
+  await waitFor(() => expect(markCardDone).toHaveBeenCalledTimes(1));
+  expect(markCardDone).toHaveBeenCalledWith(
+    "p-1",
+    "C-1",
+    "已对照总结 C-1#9 确认需求完成",
+    [],
+    expect.any(String),
+    // V-2625: the server checks the summary the person saw is still current.
+    "C-1#9",
+  );
+});
+
+test("V-2625: no completion button until the summary text itself is read", async () => {
+  const ended = children.map((c) => ({ ...c, status: "done" as const }));
+  const detail = storyDetail(
+    { children: ended, summary: true },
+    { mark_done: { allowed: true, reason: null } },
+  );
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        // The summary sits outside the loaded window and its read never ends.
+        card: async (_p, _c, options) =>
+          options?.at ? new Promise(() => {}) : { ...detail, timeline: [] },
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  expect(
+    within(summary).queryByRole("button", { name: "确认完成" }),
+  ).toBeNull();
+});
+
+test("V-2625: a stale version disables confirmation and focus moves to 刷新", async () => {
+  const confirm = vi.fn(async () => {
+    throw new ApiError(409, "stale_target", "已更新");
+  });
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () => proposalDetail([proposal(1)]),
+        confirmStoryProposal: confirm,
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  const button = within(plan).getByRole("button", { name: /确认开卡/ });
+  button.focus();
+  fireEvent.click(button);
+  const refresh = await within(plan).findByRole("button", { name: "刷新" });
+  await waitFor(() => expect(document.activeElement).toBe(refresh));
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(button);
+  expect(confirm).toHaveBeenCalledTimes(1);
+});
+
+test("V-2625: a paused or unscheduled story offers change requests but no confirmation", async () => {
+  for (const extra of [
+    { status: "backlog" as const },
+    {
+      hold: {
+        reason: "x",
+        resume_condition: "y",
+        set_by: "human",
+        set_at: "2026-01-01T00:00:00.000Z",
+      },
+    },
+  ]) {
+    const detail = proposalDetail([proposal(1)]);
+    render(
+      <CardDetailPage
+        client={fakeClient({
+          card: async () =>
+            ({ ...detail, card: { ...detail.card, ...extra } }) as CardDetail,
+        })}
+        projectId="p-1"
+        cardId="C-1"
+      />,
+    );
+    const plan = await screen.findByRole("region", { name: "拆解方案" });
+    expect(within(plan).queryByRole("button", { name: /确认开卡/ })).toBeNull();
+    expect(
+      within(plan).getByRole("button", { name: "提修改意见" }),
+    ).toBeTruthy();
+    cleanup();
+  }
+});
+
+test("V-2625: a draft survives a new version and closing the drawer asks first", async () => {
+  let detail = proposalDetail([proposal(1)]);
+  const view = render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+      revision={0}
+    />,
+  );
+  const plan = await screen.findByRole("region", { name: "拆解方案" });
+  fireEvent.click(within(plan).getByRole("button", { name: "提修改意见" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "修改意见" }), {
+    target: { value: "先做接口" },
+  });
+  // The Office revises while the person is writing.
+  detail = proposalDetail([proposal(1), proposal(2)]);
+  view.rerender(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  await screen.findByRole("form", { name: "对拆解方案第 2 版提修改意见" });
+  expect(
+    (screen.getByRole("textbox", { name: "修改意见" }) as HTMLTextAreaElement)
+      .value,
+  ).toBe("先做接口");
+  // The drawer's close path goes through the shared guard.
+  const close = vi.fn();
+  act(() => guardLeave(close));
+  const ask = await screen.findByRole("dialog", {
+    name: "放弃未发送的修改意见？",
+  });
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(within(ask).getByRole("button", { name: "放弃修改" }));
+  expect(close).toHaveBeenCalledTimes(1);
+  // Discarded: the drawer is gone and the draft does not come back.
+  view.unmount();
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const again = await screen.findByRole("region", { name: "拆解方案" });
+  expect(
+    within(again).getByRole("button", { name: "提修改意见" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("form", { name: /提修改意见/ })).toBeNull();
+});
+
+test("no completion button while a child is still open", async () => {
+  render(
+    <CardDetailPage
+      client={fakeClient({
+        card: async () =>
+          storyDetail(
+            { summary: true },
+            { mark_done: { allowed: true, reason: null } },
+          ),
+      })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const summary = await screen.findByRole("region", { name: "对照总结" });
+  expect(
+    within(summary).queryByRole("button", { name: "确认完成" }),
+  ).toBeNull();
+});
+
+test("V-2637: after a stale summary is refused, the refreshed summary can be confirmed with a new key", async () => {
+  const ended = children.map((c) => ({ ...c, status: "done" as const }));
+  let number = 9;
+  const detail = () =>
+    storyDetail(
+      {
+        children: ended,
+        story: { discussion_rounds: 0, summary_entry_id: `C-1#${number}` },
+      },
+      {
+        mark_done: { allowed: true, reason: null },
+        timeline: [
+          timelineEntry({
+            id: `C-1#${number}`,
+            event_seq: number,
+            body: `Summary ${number}`,
+          }),
+        ],
+      },
+    );
+  const markCardDone = vi.fn(async () => {
+    if (number === 9) {
+      number = 10;
+      throw new ApiError(409, "stale_target", "已更新");
+    }
+  });
+  render(
+    <CardDetailPage
+      client={fakeClient({ card: async () => detail(), markCardDone })}
+      projectId="p-1"
+      cardId="C-1"
+    />,
+  );
+  const area = await screen.findByRole("region", { name: "对照总结" });
+  fireEvent.click(within(area).getByRole("button", { name: "确认完成" }));
+  fireEvent.click(await within(area).findByRole("button", { name: "刷新" }));
+  await within(area).findByText("Summary 10");
+  const button = within(area).getByRole("button", { name: "确认完成" });
+  expect(button.getAttribute("aria-disabled")).toBeNull();
+  fireEvent.click(button);
+  await waitFor(() => expect(markCardDone).toHaveBeenCalledTimes(2));
+  const calls = markCardDone.mock.calls as unknown as unknown[][];
+  expect(calls[0]?.[5]).toBe("C-1#9");
+  expect(calls[1]?.[5]).toBe("C-1#10");
+  // A different summary is a different confirmation: a new idempotency key.
+  expect(calls[1]?.[4]).not.toBe(calls[0]?.[4]);
+});
+
+test("V-2637: a story waiting on unmet prerequisites offers no confirmation unless started early", async () => {
+  const waiting = {
+    predecessors: [],
+    successors: [],
+    waiting_on: ["C-9"],
+    critical_path_length: 1,
+  };
+  for (const [extra, offered] of [
+    [{ dependency: waiting }, false],
+    [
+      {
+        dependency: waiting,
+        early_start: {
+          reason: "先拆",
+          set_by: "human",
+          set_at: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      true,
+    ],
+  ] as const) {
+    const detail = proposalDetail([proposal(1)]);
+    render(
+      <CardDetailPage
+        client={fakeClient({
+          card: async () =>
+            ({ ...detail, card: { ...detail.card, ...extra } }) as CardDetail,
+        })}
+        projectId="p-1"
+        cardId="C-1"
+      />,
+    );
+    const plan = await screen.findByRole("region", { name: "拆解方案" });
+    expect(!!within(plan).queryByRole("button", { name: /确认开卡/ })).toBe(
+      offered,
+    );
+    cleanup();
+  }
 });

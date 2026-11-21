@@ -1892,3 +1892,121 @@ test("Web answers bind to a story group, retry exactly once, and leave the rest 
     },
   });
 });
+
+test("Web confirms the current story proposal once: every child opens in one transaction, stale versions and retries open nothing more", async () => {
+  const entry_id =
+    `${s.card.id}#1` as import("@cardigan/domain").TimelineEntryId;
+  const child = (title: string, extra: Record<string, unknown> = {}) => ({
+    title,
+    template_id: "general",
+    goal: `${title} goal`,
+    acceptance_criteria: [`${title} works`],
+    depends_on: [] as number[],
+    priority: 1,
+    owner_role: "coder",
+    ...extra,
+  });
+  const putStory = (children: ReturnType<typeof child>[]) =>
+    s.store().uow.run((tx) =>
+      tx.cards.put(s.project.project_id, {
+        ...s.card,
+        story: {
+          proposals: [
+            {
+              version: 1,
+              entry_id,
+              submitted_at: "2026-01-01T00:00:00.000Z",
+              children,
+            },
+          ],
+        },
+      }),
+    );
+  const confirm = (body: unknown, key?: string) =>
+    request(
+      cardPath("story-confirm"),
+      body,
+      key ? { "idempotency-key": key } : {},
+    );
+  const childrenOf = () =>
+    s.state().cards.filter((c) => c.parent_card_id === s.card.id);
+  const readNeeds = async () =>
+    (await fetch(web.url + path("/needs-you"), { headers: { cookie } })).json();
+
+  // A child that create_card refuses rolls every child back.
+  putStory([child("A"), child("B", { template_id: "dev" })]);
+  const before = snapshot();
+  const refused = await confirm({ version: 1 }, "refused");
+  expect(refused).toMatchObject({
+    status: 400,
+    body: {
+      error: { message: expect.stringContaining("第 2 张子卡「B」无法开出") },
+    },
+  });
+  expect(snapshot()).toBe(before);
+
+  putStory([child("A"), child("B", { depends_on: [1] })]);
+  expect((await readNeeds()).story_proposals).toMatchObject([
+    { card_id: s.card.id, version: 1, entry_id, children: [{}, {}] },
+  ]);
+  expect((await confirm({ version: 1 })).status).toBe(400);
+  expect((await confirm({ version: "1" }, "bad-version")).status).toBe(400);
+  const stale = await confirm({ version: 2 }, "stale");
+  expect(stale).toMatchObject({
+    status: 409,
+    body: { error: { code: "stale_target" } },
+  });
+  expect(childrenOf()).toEqual([]);
+
+  const first = await confirm({ version: 1 }, "confirm-once");
+  expect(first).toMatchObject({
+    status: 200,
+    body: { version: 1, replayed: false },
+  });
+  const [a, b] = first.body.card_ids as string[];
+  expect(childrenOf().map((c) => c.id)).toEqual([a, b]);
+  expect(childrenOf()[1]).toMatchObject({
+    depends_on_cards: [a],
+    story_source: { card_id: s.card.id, version: 1, entry_id, number: 2 },
+  });
+  expect(await confirm({ version: 1 }, "confirm-once")).toEqual(first);
+  expect(await confirm({ version: 1 }, "confirm-again")).toMatchObject({
+    status: 200,
+    body: { card_ids: [a, b], replayed: true },
+  });
+  expect(childrenOf()).toHaveLength(2);
+  expect((await readNeeds()).story_proposals).toEqual([]);
+});
+
+test("V-2625: mark-done carries the story summary the person saw and refuses a stale one", async () => {
+  const summary =
+    `${s.card.id}#9` as import("@cardigan/domain").TimelineEntryId;
+  s.store().uow.run((tx) =>
+    tx.cards.put(s.project.project_id, {
+      ...s.card,
+      template: "story",
+      story: { summary_entry_id: summary },
+    }),
+  );
+  const before = snapshot();
+  const done = (body: Record<string, unknown>, key: string) =>
+    request(
+      cardPath("mark-done"),
+      { result: "已对照", ...body },
+      { "idempotency-key": key },
+    );
+  expect(
+    (await done({ story_summary_entry_id: "not an entry" }, "bad-entry"))
+      .status,
+  ).toBe(400);
+  // No child has ended (there are none), and the summary differs.
+  for (const [entry, key] of [
+    [summary, "no-children"],
+    [`${s.card.id}#8`, "other-summary"],
+  ] as const)
+    expect(await done({ story_summary_entry_id: entry }, key)).toMatchObject({
+      status: 409,
+      body: { error: { code: "stale_target" } },
+    });
+  expect(snapshot()).toBe(before);
+});
