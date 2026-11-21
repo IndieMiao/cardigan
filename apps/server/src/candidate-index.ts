@@ -2,6 +2,7 @@ import {
   type Assignment,
   type AssignmentId,
   assignmentCardHeld,
+  assignmentCardId,
   assignmentDependenciesAllowStart,
   type Card,
   type CommandState,
@@ -16,6 +17,7 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
+  type Run,
   reviewWakeBlocked,
   runById,
   runnableQueuedRun,
@@ -41,6 +43,18 @@ export function notificationBlocked(
         a.work_item_id,
       ))
   );
+}
+
+/** Standing recipients share an inbox across streams, not a queued Run across streams. */
+export function queuedStreamMismatch(
+  state: CommandState,
+  assignment: Assignment,
+  queued: Run | undefined,
+  notes: readonly Notification[],
+): boolean {
+  if (assignment.scope !== "standing" || !queued || !notes.length) return false;
+  const card = assignmentCardId(assignment, state, queued.trigger_event_id);
+  return notes.some((n) => n.card_id !== card);
 }
 
 export interface Candidate {
@@ -607,6 +621,9 @@ function candidateResult(
     skip("trigger_missing");
     return { candidate: undefined, volatile: true };
   }
+  // A different stream must not suppress the queued-only capacity retry below.
+  if (queuedStreamMismatch(state, assignment, queued, notes))
+    return omit("queued_stream_mismatch");
   const candidate: Candidate = {
     project,
     notes,

@@ -4,6 +4,9 @@ import { join } from "node:path";
 import {
   type Assignment,
   abortDispatch,
+  acknowledgeRun,
+  finishRun,
+  queueRun,
   recordDecision,
   requestDecision,
 } from "@cardigan/domain";
@@ -330,17 +333,20 @@ test.each(["ops", "office"] as const)(
 );
 
 test.each([
-  ["card", false],
-  ["project", false],
-  ["card", true],
-  ["project", true],
+  ["card", false, "project"],
+  ["project", false, "other card"],
+  ["card", true, "project"],
+  ["project", true, "other card"],
+  ["card", true, "other card"],
 ] as const)(
-  "a standing PM recovery keeps the %s stream through queued dispatch (notification already read: %s)",
-  async (stream, alreadyRead) => {
+  "a standing PM recovery keeps the %s stream through queued dispatch (already read: %s, competing stream: %s)",
+  async (stream, alreadyRead, competitor) => {
     const f = setup();
     const pm = { ...f.pm(), standing_mode: "office" as const };
     const card = f.target.card;
     const sourceCard = stream === "card" ? card.id : undefined;
+    const otherCard =
+      competitor === "other card" ? f.create().card.id : undefined;
     f.store.uow.run((tx) =>
       tx.assignments.put(f.project, {
         ...pm,
@@ -417,15 +423,16 @@ test.each([
           },
         }),
       );
-      await dispatcher.tick();
       if (sourceCard) {
+        await dispatcher.tick();
         expect(start()).toHaveLength(0);
         expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
           "queued",
         );
         f.store.uow.run((tx) => tx.cards.put(f.project, card));
-        await dispatcher.tick();
       }
+      const competing = f.event("fixture_notice", {}, pm, otherCard);
+      await dispatcher.tick();
       expect(start()).toHaveLength(1);
       expect(start()[0]?.[0].bell).toContain(
         sourceCard ? `card=${sourceCard} ` : `project=${f.project} `,
@@ -433,14 +440,83 @@ test.each([
       expect(
         f.state().events.find((e) => e.id === queued.trigger_event_id)?.card_id,
       ).toBe(sourceCard);
-      expect(
-        f.state().runs.find((r) => r.id === queued.id)?.bell_delivery?.card_id,
-      ).toBe(sourceCard);
+      const receipt = f
+        .state()
+        .runs.find((r) => r.id === queued.id)?.bell_delivery;
+      expect(receipt?.run_id).toBe(queued.id);
+      expect(receipt?.card_id).toBe(sourceCard);
+      const otherNote = () =>
+        f.store
+          .listNotifications({ project_id: f.project, assignment_id: pm.id })
+          .find((n) => n.event_id === competing.id);
+      expect(otherNote()).toMatchObject({ status: "pending", attempts: 0 });
+
+      const actor = f.actorFor(pm);
+      f.apply(
+        (s, a, p) => acknowledgeRun(s, a, { run_id: queued.id }, p),
+        actor,
+      );
+      f.apply(
+        (s, a, p) =>
+          finishRun(
+            s,
+            a,
+            { run_id: queued.id, outcome: "completed", summary: "Recovered" },
+            p,
+          ),
+        actor,
+      );
+      await dispatcher.tick();
+      const delivered = otherNote();
+      expect(delivered?.run_id).toBeDefined();
+      expect(delivered?.run_id).not.toBe(queued.id);
+      expect(delivered?.card_id).toBe(otherCard);
     } finally {
       await dispatcher.close();
     }
   },
 );
+
+test("a standing stream is rechecked when its queue changes during launch preparation", async () => {
+  const f = setup();
+  const pm = f.pm();
+  const notice = f.event("fixture_project_notice", {}, pm);
+  const dispatcher = new Dispatcher({
+    ...f.options,
+    snapshot: async (a, project) => {
+      const snapshot = await f.options.snapshot(a, project);
+      if (a.id === pm.id) {
+        const source = f.event("fixture_card_notice", {}, pm, f.target.card.id);
+        f.apply((state, actor, ports) =>
+          queueRun(
+            state,
+            actor,
+            {
+              ...snapshot,
+              assignment_id: pm.id,
+              trigger_event_id: source.id,
+            },
+            ports,
+          ),
+        );
+      }
+      return snapshot;
+    },
+  });
+  try {
+    await dispatcher.tick();
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === pm.id),
+    ).toMatchObject([{ status: "queued" }]);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: pm.id })
+        .find((n) => n.event_id === notice.id),
+    ).toMatchObject({ status: "pending", attempts: 0 });
+  } finally {
+    await dispatcher.close();
+  }
+});
 
 test.each([false, true])(
   "patrol supervisor recovers its own overdue bell once, including after dispatch handoff=%s",

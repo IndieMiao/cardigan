@@ -115,6 +115,7 @@ import {
   type Candidate,
   CandidateIndex,
   notificationBlocked,
+  queuedStreamMismatch,
 } from "./candidate-index.js";
 import {
   DECISION_FOLLOWUP_FEED,
@@ -833,6 +834,8 @@ export class Dispatcher {
       );
     if (this.closing) return skip("shutting_down");
     if (!a) return skip("assignment_missing");
+    if (queuedStreamMismatch(state, a, queued, notes))
+      return skip("queued_stream_mismatch");
     if (queued) this.queuedRunPatrol.evaluated(queued, this.clock.now());
     if (a.status === "released") {
       this.reject(project, notes, a, "assignment_released");
@@ -1655,9 +1658,13 @@ export class Dispatcher {
           ))
       )
         return skip("continuation_changed");
+      const waiting = this.queued(state, a);
+      // The runnable queue may have changed during snapshot/runtime I/O.
+      if (queuedStreamMismatch(state, a, waiting, notes))
+        return skip("queued_stream_mismatch");
       if (
         !assignmentDependenciesAllowStart(state, a) ||
-        assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
+        assignmentCardHeld(a, state, waiting?.trigger_event_id) ||
         (a.scope === "standing" &&
           notes.some((n) =>
             state.cards.some((c) => c.id === n.card_id && !!c.hold),
@@ -1667,7 +1674,6 @@ export class Dispatcher {
       // A delivery may have been superseded while runtime/snapshot IO was in flight.
       // Keep notifications pending without allocating a Run or a bell attempt.
       if (!hasRunTarget(a, state)) {
-        const waiting = this.queued(state, a);
         if (waiting)
           persistEffect(
             tx,
@@ -1745,7 +1751,6 @@ export class Dispatcher {
         : previousInboxTurn(state, a, ready);
       if (!continuing && previous?.turn.id !== guardedTurn)
         return skip("guarded_turn_changed");
-      const waiting = this.queued(state, a);
       if (
         (!ready.length &&
           waiting?.queue_reason === undefined &&
