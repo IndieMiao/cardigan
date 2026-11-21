@@ -1,15 +1,12 @@
 """Linux-only, fd-relative maintenance of generated resources. No shell or path from an Agent."""
 import contextlib
-import ctypes
-import secrets
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
-import signal
 import sys
-import time
 
 UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
 RELEASE = re.compile(f'release-[a-f0-9]{{40}}-{UUID}')
@@ -58,92 +55,36 @@ def anchor(path, uid):
         yield fd
 
 
-STAGED = '.retention-claim-'
-
-
-class HardLinkedRun(ValueError):
-    pass
-
-
 def facts(s):
     return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
-def observe(fd, guard, run):
-    # The local plan (never exported) and the digest describe exactly the same entries.
+def observe_release(fd, guard):
     digest = hashlib.sha256()
     def visit(d):
         guard()
         before = facts(os.fstat(d))
         digest.update(repr(before).encode())
         names = sorted(os.listdir(d))
-        if run:
-            require('.git' not in names and not {'HEAD','objects','refs'}.issubset(names))
-            require(not any(n.startswith(STAGED) for n in names))
         total = os.fstat(d).st_blocks * 512
-        entries = {}
         for name in names:
             guard()
             with opened(name, os.O_PATH | os.O_NOFOLLOW, d) as handle:
                 same(d,name,handle)
                 st = os.fstat(handle)
-                # Removing one alias changes ctime for every other alias, including
-                # ones outside this tree. Never offer a partial cleanup of this run.
-                if run and not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
-                    raise HardLinkedRun()
                 digest.update(repr((os.fsencode(name),facts(st))).encode())
-                nested = None
                 if stat.S_ISDIR(st.st_mode):
                     with opened(name, DIR, d) as child:
                         require(facts(os.fstat(child)) == facts(st))
-                        size, nested = visit(child)
-                        total += size
+                        total += visit(child)
                 else:
                     total += st.st_blocks * 512
-                if run: entries[name] = (facts(st), nested)
                 same(d,name,handle); require(facts(os.fstat(handle)) == facts(st))
         require(facts(os.fstat(d)) == before)
         digest.update(b'/')
-        return total, entries
-    size, entries = visit(fd)
-    return size, digest.hexdigest(), entries
-
-
-def rename_new(d, src, dst):
-    # Atomic no-replace in both directions. No path-based fallback on older kernels.
-    ret = ctypes.CDLL(None,use_errno=True).renameat2(d, os.fsencode(src), d, os.fsencode(dst), 1)
-    if ret: raise OSError(ctypes.get_errno(), 'claim failed')
-
-
-def discard(d, name, fd, expected, directory, guard):
-    guard(); same(d,name,fd); require(facts(os.fstat(fd)) == expected)
-    # A replacement between stat and rename must not be unlinked. Claim under a private
-    # random name, confirm against the still-held original fd, restore without overwrite on error.
-    claim = STAGED + secrets.token_hex(16)
-    rename_new(d,name,claim)
-    try:
-        guard(); same(d,claim,fd)
-        require(facts(os.fstat(fd))[:-1] == expected[:-1])  # rename changes ctime
-        if directory: os.rmdir(claim,dir_fd=d)
-        else: os.unlink(claim,dir_fd=d)
-    except BaseException:
-        rename_new(d,claim,name)
-        raise
-
-
-def clear_plan(d, entries, guard):
-    guard(); require(set(os.listdir(d)) == set(entries))
-    for name, (expected, nested) in entries.items():
-        with opened(name, DIR if nested is not None else os.O_PATH | os.O_NOFOLLOW, d) as child:
-            def bound():
-                guard(); same(d,name,child)
-            bound(); require(facts(os.fstat(child)) == expected)
-            if nested is not None:
-                clear_plan(child, nested, bound)
-                require(not os.listdir(child))
-                expected = facts(os.fstat(child))  # our removals changed this directory's times
-            discard(d,name,child,expected,nested is not None,guard)
-    guard(); require(not os.listdir(d))
+        return total
+    size = visit(fd)
+    return size, digest.hexdigest()
 
 
 def entry(kind,name,fd,size,digest):
@@ -158,7 +99,7 @@ def release_inventory(req,root):
     with opened(name,DIR,root) as fd:
         def guard():
             same(root,name,fd); st=os.fstat(fd); require(st.st_uid==req['uid'] and not st.st_mode & 0o077)
-        size,digest,_=observe(fd,guard,False)
+        size,digest=observe_release(fd,guard)
         guard(); return {'candidates':[entry('release',name,fd,size,digest)],'skipped':[]}
 
 
@@ -167,40 +108,49 @@ def runs(req,root,op):
     def perms(fd,mode):
         s=os.fstat(fd); require(s.st_uid==uid and s.st_gid==gid and stat.S_IMODE(s.st_mode)==mode)
     agent = os.getuid() not in (0,uid) and gid in [os.getgid(),*os.getgroups()]
-    require((op in ('inventory','clear') and agent) or (op=='shell' and os.getuid()==uid))
-    perms(root,0o2750)
+    require((op=='inventory' and agent and 'item' not in req) or
+            (op=='shell' and os.getuid()==uid and req['names']==[req['item']['name']]))
     result={'candidates':[], 'skipped':[]}
     with opened('runs',DIR,root) as area, opened('cardigan',DIR,area) as parent:
-        for fd in [area,parent]: perms(fd,0o2750)
-        same(root,'runs',area); same(area,'cardigan',parent)
+        def protected_parent():
+            for directory in (root,area,parent): perms(directory,0o2750)
+            same(root,'runs',area); same(area,'cardigan',parent)
+        protected_parent()
         for name in req['names']:
             require(ASSIGN.fullmatch(name))
             try:
                 with opened(name,DIR,parent) as fd:
                     def guard():
-                        if op=='clear': require(time.time_ns() // 1_000_000 < req['deadline_ms'])
-                        same(root,'runs',area); same(area,'cardigan',parent); same(parent,name,fd); perms(fd,0o2770)
+                        protected_parent(); same(parent,name,fd); perms(fd,0o2770)
                     guard()
+                    before = os.fstat(fd)
+                    # Q-1057: finding one entry is sufficient. Never open, rename or unlink it.
+                    with os.scandir(fd) as children:
+                        if next(children,None) is not None:
+                            result['skipped'].append(name)
+                            result.setdefault('skip_reasons',{})[name] = 'nonempty_run'
+                            continue
+                    guard(); require(facts(os.fstat(fd)) == facts(before))
+                    stamp = hashlib.sha256(repr(('empty-run-v1',facts(before))).encode()).hexdigest()
+                    item = entry('run',name,fd,before.st_blocks * 512,stamp)
                     if op=='shell':
-                        item=req['item']; require(identity(os.fstat(fd))==[item['device'],item['inode']] and not os.listdir(fd)); guard()
-                        os.rmdir(name,dir_fd=parent)  # Q-970: no recursive fallback, even on ENOTEMPTY.
-                    else:
-                        size,digest,plan=observe(fd,guard,True)
-                        item=entry('run',name,fd,size,digest)
-                        if op=='clear':
-                            require(req['item']==item); guard()
-                            clear_plan(fd,plan,guard)
+                        require(req['item']==item)
+                        # Only the trusted host can change this parent entry. A concurrent
+                        # write INSIDE the shell makes rmdir fail; there is no fallback.
+                        try:
+                            os.rmdir(name,dir_fd=parent)
+                        except OSError as error:
+                            if error.errno in (errno.ENOTEMPTY,errno.EEXIST):
+                                result.setdefault('skip_reasons',{})[name] = 'nonempty_run'
+                            raise
                     result['candidates'].append(item)
-            except HardLinkedRun:
-                result.setdefault('skip_reasons', {})[name] = 'hard_linked_run'
-                result['skipped'].append(name)
             except (OSError,ValueError): result['skipped'].append(name)
     return result
 
 
 def main(op,req):
     with anchor(req['root'],req['uid']) as root:
-        if op in ('clear','shell','inventory'): return runs(req,root,op)
+        if op in ('shell','inventory'): return runs(req,root,op)
         st=os.fstat(root); require(st.st_uid==os.getuid()==req['uid'] and not st.st_mode & 0o077)
         if op=='release_inventory': return release_inventory(req,root)
         require(op=='snapshot')
@@ -213,6 +163,5 @@ def main(op,req):
 
 if __name__=='__main__':
     try:
-        if sys.argv[1]=='clear': signal.alarm(2)  # An interrupted SSH session must not continue cleaning.
         print(json.dumps(main(sys.argv[1],json.load(sys.stdin)),separators=(',',':')))
     except Exception: sys.exit(1)  # Never export process, file or private error details.

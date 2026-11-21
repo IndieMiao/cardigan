@@ -29,7 +29,7 @@ export interface Item {
 export interface Scan {
   candidates: Item[];
   skipped: string[];
-  skip_reasons?: Record<string, "hard_linked_run">;
+  skip_reasons?: Record<string, "nonempty_run">;
 }
 export interface Command {
   file: string;
@@ -62,7 +62,7 @@ function response(
         Array.isArray(skip_reasons) ||
         !Object.entries(skip_reasons).every(
           ([name, reason]) =>
-            skipped.includes(name) && reason === "hard_linked_run",
+            skipped.includes(name) && reason === "nonempty_run",
         ))) ||
     !candidates.every(
       (i) =>
@@ -84,7 +84,9 @@ function response(
     throw new Error("Invalid maintenance observation");
   return { candidates, skipped, ...(skip_reasons && { skip_reasons }) };
 }
-export const localCommand = (op: string): Command => ({
+export const localCommand = (
+  op: "shell" | "snapshot" | "release_inventory",
+): Command => ({
   file: "/usr/bin/python3",
   args: ["-I", "-B", helper, op],
 });
@@ -115,7 +117,9 @@ export async function scan(
   });
   return response(text, kind, allowed);
 }
-/** Only short run cleanup under a serialized eligibility recheck. No transport diagnostics escape. */
+export class NonemptyRun extends Error {}
+
+/** Only a short removal under a serialized eligibility recheck. No transport diagnostics escape. */
 export function single(cmd: Command, input: object, item: Item) {
   const out = execFileSync(cmd.file, cmd.args, {
     ...opts,
@@ -124,6 +128,7 @@ export function single(cmd: Command, input: object, item: Item) {
     stdio: ["pipe", "pipe", "ignore"],
   });
   const r = response(out, item.kind, new Set([item.name]));
+  if (r.skip_reasons?.[item.name] === "nonempty_run") throw new NonemptyRun();
   if (
     r.candidates.length !== 1 ||
     r.candidates[0]?.device !== item.device ||
@@ -183,21 +188,18 @@ export async function localRunTarget(env: NodeJS.ProcessEnv, dataDir: string) {
     session: w?.session ?? env.CARDIGAN_HC_SESSION ?? "cardigan",
   });
   const src = readFileSync(helper, "utf8");
-  const cmd = (op: string) =>
-    agentProcessCommand(execution, [
-      "/usr/bin/python3",
-      "-I",
-      "-B",
-      "-c",
-      src,
-      op,
-    ]);
   return {
     fingerprint: binding.fingerprint,
     ownsRef: retentionBinding(execution.machine, binding, !w),
     root: execution.agentRoot,
     gid: execution.gid,
-    inventory: await cmd("inventory"),
-    clear: await cmd("clear"),
+    inventory: await agentProcessCommand(execution, [
+      "/usr/bin/python3",
+      "-I",
+      "-B",
+      "-c",
+      src,
+      "inventory",
+    ]),
   };
 }

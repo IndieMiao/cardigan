@@ -4,6 +4,7 @@ import {
   link,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   utimes,
@@ -24,7 +25,7 @@ import { NodeDeploymentDriver } from "./deployment-node.js";
 import { DeploymentRetention } from "./deployment-retention.js";
 import { parseRetention } from "./deployment-retention-policy.js";
 
-test("frozen site inventory, two bound approvals, fresh run checks and audited nonrecursive cleanup", async () => {
+async function verifyApprovedReport(version: 4 | 5) {
   const p = "cardigan",
     tmp = await mkdtemp(join(tmpdir(), "cg-retention-")),
     dir = join(tmp, "self-deploy"),
@@ -36,11 +37,11 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
     await mkdir(parent, { recursive: true });
     for (const path of [root, join(root, "runs"), parent])
       await chmod(path, 0o2750);
-    for (const n of [1, 2, 5]) {
+    for (const n of [1, 2, 5, 6, 7]) {
       const path = join(parent, `A-${n}`);
       await mkdir(path);
       await chmod(path, 0o2770);
-      await writeFile(join(path, "cache"), "cache");
+      if (n === 5 || n === 7) await writeFile(join(path, "cache"), "cache");
     }
     await link(join(parent, "A-5/cache"), join(parent, "A-5/alias"));
     const cmd = (op: string) => ({
@@ -54,7 +55,6 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
         op,
       ],
     });
-    let interruptClear = false;
     const target = async () => ({
       ownsRef: (ref: { runtime_machine: string } | null | undefined) =>
         ref?.runtime_machine === "fixture",
@@ -62,18 +62,6 @@ test("frozen site inventory, two bound approvals, fresh run checks and audited n
       gid: process.getgid?.() ?? -1,
       fingerprint: "test-only",
       inventory: cmd("inventory"),
-      clear: interruptClear
-        ? {
-            file: "/usr/bin/python3",
-            args: [
-              "-I",
-              "-B",
-              "-c",
-              `import os,json,sys
-r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['root'],'runs','cardigan','A-4','partial'));sys.exit(1)`,
-            ],
-          }
-        : cmd("clear"),
     });
     const policy = parseRetention({ snapshots: 1, daily_days: 1 });
     const backup = (n: number) =>
@@ -95,7 +83,7 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     store.createProject({ id: p });
     store.uow.run((tx) => {
       tx.cards.put(p, { ...card(), project_id: p });
-      for (const n of [1, 2, 5])
+      for (const n of [1, 2, 5, 6, 7])
         tx.assignments.put(p, {
           ...assignment(n),
           runtime_ref: {
@@ -121,16 +109,14 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
       await readFile(join(dir, "retention-preview-1.json"));
     });
     const path = join(dir, "retention-preview-1.json"),
-      text = await readFile(path, "utf8"),
-      sha = createHash("sha256").update(text).digest("hex");
+      preview = await readFile(path, "utf8");
+    const report = JSON.parse(preview);
     expect(
-      JSON.parse(text)
-        .candidates.map((i: { name: string }) => i.name)
-        .sort(),
-    ).toEqual(["A-1", "A-2", backup(1)]);
-    const report = JSON.parse(text);
-    expect(report.skipped).toContain("A-5");
-    expect(report.skip_reasons["A-5"]).toBe("hard_linked_run");
+      report.candidates.map((i: { name: string }) => i.name).sort(),
+    ).toEqual(["A-1", "A-2", "A-6", backup(1)]);
+    expect(report.version).toBe(5);
+    expect(report.skipped).toEqual(expect.arrayContaining(["A-5", "A-7"]));
+    expect(report.skip_reasons["A-5"]).toBe("nonempty_run");
     expect(report.retained_releases).toEqual([
       { name: releaseName, reason: "recent", size_bytes: expect.any(Number) },
     ]);
@@ -140,13 +126,18 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
         0,
       ),
     );
-    expect(JSON.parse(text).skipped).toContain(backup(3));
+    expect(report.skipped).toContain(backup(3));
+    const text =
+      version === 5 ? preview : JSON.stringify({ ...report, version });
+    if (version !== 5) await writeFile(path, text);
+    const sha = createHash("sha256").update(text).digest("hex");
     await chmod(join(dir, backup(3)), 0o600);
     const auth = { sha256: sha, pm_review: "Q-1", data_deletion: "Q-2" };
     const apply = () => maintenance({ ...policy, approval: auth });
     const check = async () => {
       expect(await readFile(join(dir, backup(1)), "utf8")).toBe("db");
       expect(await readFile(path, "utf8")).toBe(text);
+      expect(await readdir(join(parent, "A-2"))).toEqual([]);
     };
     await apply().poll(ready);
     await check();
@@ -182,20 +173,31 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     store.uow.run((tx) => tx.decisions.put(p, q(2, "enable_retention")));
     const job = apply();
     await job.poll(ready);
+    if (version === 4) {
+      await check();
+      expect(
+        store.uow
+          .read((tx) => tx.events.listAfter(p, undefined, 0))
+          .filter((e) => e.type === "host_retention_recorded")
+          .at(-1)?.payload,
+      ).toMatchObject({
+        status: "retained",
+        reason: "scope_or_policy_changed",
+      });
+      return;
+    }
     await expect(readFile(join(dir, backup(1)))).rejects.toMatchObject({
       code: "ENOENT",
     });
     // Candidate was queued while released, but is no longer eligible at the deletion boundary.
     store.uow.run((tx) => tx.assignments.put(p, assignment(1)));
-    await job.poll(ready);
-    await job.poll(ready);
-    expect(await readFile(join(parent, "A-1", "cache"), "utf8")).toBe("cache");
-    await expect(readFile(join(parent, "A-2", "cache"))).rejects.toMatchObject({
+    await writeFile(join(parent, "A-6", "new"), "keep");
+    for (let n = 0; n < 3; n++) await job.poll(ready);
+    expect(await readdir(join(parent, "A-1"))).toEqual([]);
+    await expect(readdir(join(parent, "A-2"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    await expect(readFile(join(parent, "A-2"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    expect(await readFile(join(parent, "A-6", "new"), "utf8")).toBe("keep");
     const later = {
       ...ready,
       attempt: "later",
@@ -204,8 +206,8 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     const added = join(parent, "A-4");
     await mkdir(added);
     await chmod(added, 0o2770);
-    await writeFile(join(added, "partial"), "partial");
-    await writeFile(join(added, "left"), "retained");
+    // A-4 is new; A-7 was nonempty in the approved preview. Neither can roll over.
+    await rm(join(parent, "A-7", "cache"));
     store.uow.run((tx) =>
       tx.assignments.put(p, {
         ...assignment(4),
@@ -219,14 +221,10 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
         released_at: new Date(at + 86400000).toISOString(),
       }),
     );
-    interruptClear = true;
     await job.poll(later);
-    await expect(readFile(join(added, "partial"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    interruptClear = false;
-    await apply().poll(later); // restarted supervisor sees durable intent; changed tree is never retried
-    expect(await readFile(join(added, "left"), "utf8")).toBe("retained");
+    await apply().poll(later);
+    expect(await readdir(added)).toEqual([]);
+    expect(await readdir(join(parent, "A-7"))).toEqual([]);
     for (const name of ["cache", "alias"])
       expect(await readFile(join(parent, "A-5", name), "utf8")).toBe("cache");
     expect(await readFile(join(dir, releaseName, "server"), "utf8")).toBe(
@@ -244,7 +242,19 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
         expect.objectContaining({
           name: "A-5",
           status: "retained",
-          reason: "hard_linked_run",
+          reason: "nonempty_run",
+        }),
+        ...["A-4", "A-7"].map((name) =>
+          expect.objectContaining({
+            name,
+            status: "retained",
+            reason: "outside_reviewed_inventory",
+          }),
+        ),
+        expect.objectContaining({
+          name: "A-6",
+          status: "retained",
+          reason: "nonempty_run",
         }),
         expect.objectContaining({ name: "A-1", status: "retained" }),
         expect.objectContaining({ name: "A-2", status: "removed" }),
@@ -259,7 +269,12 @@ r=json.load(sys.stdin); assert r['names']==['A-4']; os.unlink(os.path.join(r['ro
     store.close();
     await rm(tmp, { recursive: true, force: true });
   }
-});
+}
+
+test("two bound approvals permit only exact empty shells, with fresh checks and a durable audit", () =>
+  verifyApprovedReport(5));
+test("even two matching approvals cannot activate a legacy report", () =>
+  verifyApprovedReport(4));
 
 test("supervisor never starts retention on rollback, pre-ready, dead server, or mismatched running build", async () => {
   const tmp = await mkdtemp(join(tmpdir(), "cg-retention-ready-")),
