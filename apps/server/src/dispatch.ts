@@ -936,6 +936,8 @@ export class Dispatcher {
       if (retirementHeld || guardedTurn) {
         guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
         // An explicit finish does not waive the idle check for a retirement-held session.
+        // Preserve missing-session replacement for an already queued Run; an unread
+        // bell alone cannot authorize replacement when the observation disappears.
         if (
           !guard &&
           (retirementHeld ||
@@ -943,7 +945,7 @@ export class Dispatcher {
             reminder ||
             (observed?.ok
               ? observed.value.process !== "exited"
-              : guardedTurn?.reason === "system_finished_turn" ||
+              : (guardedTurn?.reason === "system_finished_turn" && !queued) ||
                 (observed?.error.code !== "runtime_not_found" &&
                   observed?.error.code !== "runtime_unavailable")))
         ) {

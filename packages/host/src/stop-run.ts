@@ -6,11 +6,6 @@ import type {
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
 
-const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
-  result?.ok
-    ? result.value.process === "exited"
-    : result?.error.code === "runtime_not_found";
-
 /** Shared automatic-stop primitive: recheck eligibility, stop, independently prove exit. */
 export async function stopRunRuntime(
   runtime: Runtime,
@@ -26,34 +21,39 @@ export async function stopRunRuntime(
   beforeMayStop?: () => Promise<void>,
   owner?: Parameters<Runtime["release"]>[1]["owner"],
 ) {
-  const observedExit = async () => {
-    if (!ref) return true;
-    if (!owner) return exited(await runtime.status(ref).catch(() => undefined));
-    // The generic status feed can omit a live terminal. Only the dedicated
-    // get of the bound address/labels may confirm exit on this recovery path.
-    const proof = await runtime
-      .observe_retirement?.(ref, owner)
-      .catch(() => undefined);
-    return proof?.ok
-      ? proof.value === "exited"
-      : proof?.error.code === "runtime_not_found";
+  // For an owner-bound stop the generic feed may omit a live terminal. Only
+  // a dedicated read of the bound address/labels can prove exit.
+  const observe = () => {
+    if (!ref) return;
+    const read = owner
+      ? runtime.observe_retirement?.(ref, owner)
+      : runtime.status(ref);
+    return read?.catch(() => undefined);
   };
-  const before = await observedExit();
+  const exited = (result: Awaited<ReturnType<typeof observe>>) => {
+    if (!result?.ok) return result?.error.code === "runtime_not_found";
+    return typeof result.value === "string"
+      ? result.value === "exited"
+      : result.value.process === "exited";
+  };
+  if (owner && !ref) return "unconfirmed" as const;
+  const before = exited(await observe());
   // A previous release may finish after fresh activity or process loss. Settle
   // its original fence without asking to issue another stop; ownership and the
   // exact runtime reference are checked again by the settlement transaction.
-  if (alreadyStopping && before) return "exited" as const;
+  if (alreadyStopping && (!ref || before)) return "exited" as const;
   if (!releaseLive && ref && !before) return "not_exited" as const;
   if (beforeMayStop) await beforeMayStop();
   if (!mayStop()) return "withdrawn" as const;
-  if (!ref || before)
-    return !owner || (await observedExit())
+  if (!ref) return "exited" as const;
+  if (before)
+    return !owner || exited(await observe())
       ? ("exited" as const)
       : ("unconfirmed" as const);
   await runtime
     .release(ref, { force: true, ...(owner ? { owner } : {}) })
     .catch(() => undefined);
-  return (await observedExit())
+  return exited(await observe())
     ? ("exited" as const)
     : ("unconfirmed" as const);
 }

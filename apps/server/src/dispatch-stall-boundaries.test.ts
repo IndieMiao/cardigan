@@ -340,6 +340,7 @@ test.each([
   "tool",
   "dirty",
   "owner_mismatch",
+  "lost_observation",
   "in_flight",
   "exit_unconfirmed",
 ] as const)("C-554: overdue reviewer bell (%s)", async (mode) => {
@@ -377,6 +378,13 @@ test.each([
     f.state().events.filter((e) => e.type === type);
   try {
     await dispatcher.tick();
+    if (mode === "lost_observation") {
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_unavailable", message: "Lost" },
+      });
+      delete f.runtime.observe_retirement;
+    }
     f.advance(599999);
     await dispatcher.tick();
     expect(events("bell_turn_recovery_due")).toHaveLength(0);
@@ -384,7 +392,15 @@ test.each([
     await dispatcher.tick();
     await dispatcher.tick();
     expect(events("bell_turn_recovery_due")).toMatchObject([
-      { payload: { run_id: run.id, activity_source: "alive/unknown" } },
+      {
+        payload: {
+          run_id: run.id,
+          activity_source:
+            mode === "lost_observation"
+              ? "runtime_unavailable"
+              : "alive/unknown",
+        },
+      },
     ]);
     const cause = events("bell_turn_recovery_due")[0]?.id as string;
     if (mode === "dirty") writeFileSync(join(tree, "keep"), "original");
