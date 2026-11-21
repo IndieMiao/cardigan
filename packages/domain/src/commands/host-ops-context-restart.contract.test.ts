@@ -14,6 +14,7 @@ import {
   automaticContextRestartReady,
   beginAutomaticContextRestart,
   beginStalledPatrolRestart,
+  beginSystemTurnRestart,
   recordAutomaticContextRestartResult,
 } from "./host-ops-context-restart.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
@@ -356,6 +357,108 @@ test("new-session queue is not success; dispatch records replacement, actual sta
   expect(success.changes.some((c) => c.collection === "human_actions")).toBe(
     false,
   );
+});
+
+test("system turn recovery binds the ended Run, target and expiry; uncertain exit keeps the intent and never creates a HumanAction", () => {
+  const f = setup(),
+    a = required(f.state.assignments[0]),
+    prior = required(f.state.runs[0]);
+  const finish: Event = {
+    id: f.io.ids.nextEventId(),
+    actor: actor(1, "coder"),
+    seq: 1,
+    type: "run_finished",
+    created_at: now,
+    payload: { finished_by: "system", run_id: prior.id },
+  };
+  const due: Event = {
+    ...finish,
+    id: f.io.ids.nextEventId(),
+    actor: system,
+    seq: 2,
+    type: "bell_turn_recovery_due",
+    payload: { run_id: prior.id, assignment_id: a.id },
+  };
+  const state: CommandState = {
+    ...f.state,
+    assignments: f.state.assignments.map((v) =>
+      v.id === a.id ? { ...v, runtime_ref: ref } : v,
+    ),
+    runs: f.state.runs.map((r) =>
+      r.id === prior.id
+        ? {
+            ...r,
+            status: "completed",
+            outcome: "blocked",
+            started_at: now,
+            finished_at: now,
+          }
+        : r,
+    ),
+    events: [finish, due],
+  };
+  const begin = (
+    s: CommandState,
+    who: Parameters<typeof beginSystemTurnRestart>[1] = system,
+  ) =>
+    beginSystemTurnRestart(
+      s,
+      who,
+      { assignment_id: a.id, cause_id: due.id, snapshot },
+      f.io,
+    );
+  expect(begin(state, human).ok).toBe(false);
+  expect(begin({ ...state, events: [due] }).ok).toBe(false);
+  expect(
+    begin({ ...state, events: [finish, { ...due, actor: human }] }).ok,
+  ).toBe(false);
+  expect(
+    begin({
+      ...state,
+      runs: [...state.runs, { ...prior, id: id("run", 99), status: "queued" }],
+    }).ok,
+  ).toBe(false);
+  const started = value(begin(state));
+  const pending = apply(state, started);
+  const result = value(
+    recordAutomaticContextRestartResult(
+      pending,
+      system,
+      {
+        action_id: started.data.action_id,
+        result: "failed",
+        reason: "terminal_exit_unconfirmed",
+      },
+      f.io,
+    ),
+  );
+  expect(result.events).toMatchObject([
+    { type: "host_ops_action_deferred", payload: { notify_pm: true } },
+  ]);
+  expect(result.changes).toEqual([]);
+  expect(pendingHostOpsActions(apply(pending, result).events)).toHaveLength(1);
+  expect(begin(apply(pending, result)).ok).toBe(false);
+  const stopped = value(
+    finishHostOpsAction(pending, system, started.data.action_id, f.io, {
+      cause_id: due.id,
+      card_id: null,
+    }),
+  );
+  const failed = value(
+    recordAutomaticContextRestartResult(
+      apply(pending, stopped),
+      system,
+      {
+        action_id: started.data.action_id,
+        result: "failed",
+        reason: "replacement_launch_unconfirmed",
+      },
+      f.io,
+    ),
+  );
+  const fenced = apply(apply(pending, stopped), failed);
+  expect(fenced.human_actions.at(-1)).toMatchObject({ triage: "pm_ops" });
+  expect(hostOpsPending(fenced.events, a.id)).toBe(true);
 });
 
 test("only the system may replace a stalled patrol, once per cause and never with unfinished work", () => {

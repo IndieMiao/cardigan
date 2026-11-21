@@ -943,8 +943,9 @@ export class Dispatcher {
             reminder ||
             (observed?.ok
               ? observed.value.process !== "exited"
-              : observed?.error.code !== "runtime_not_found" &&
-                observed?.error.code !== "runtime_unavailable"))
+              : guardedTurn?.reason === "system_finished_turn" ||
+                (observed?.error.code !== "runtime_not_found" &&
+                  observed?.error.code !== "runtime_unavailable")))
         ) {
           if (guardedTurn)
             this.waitForTurn(

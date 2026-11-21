@@ -265,7 +265,8 @@ export class HostOpsService {
       }
       throw new ToolError(
         "illegal_transition",
-        "Worker unavailable or unconfigured",
+        "Worker inspection unavailable: worker_binding_unconfigured",
+        { reason: "worker_binding_unconfigured" },
       );
     };
     const execution = resolve();
@@ -525,13 +526,12 @@ export class HostOpsService {
     });
     if (p.dispatch_stall_id) {
       const state = store.uow.read((tx) => loadCommandState(tx, project));
-      if (
-        !this.stallPatrol.current(
-          state,
-          preflight.assignment.id,
-          p.dispatch_stall_id,
-        )
-      )
+      const stall = this.stallPatrol.current(
+        state,
+        preflight.assignment.id,
+        p.dispatch_stall_id,
+      );
+      if (!stall)
         throw new ToolError(
           "stale_target",
           "该指派已没有可以按此原因恢复的积压",
@@ -540,6 +540,7 @@ export class HostOpsService {
       const evidence = await this.stallPatrol.evidence(
         state,
         preflight.assignment,
+        stall,
       );
       if (!evidence.can_restart) {
         const unsafeWorkspace =
@@ -557,6 +558,7 @@ export class HostOpsService {
             workspace: evidence.workspace,
             process_state: evidence.process_state,
             terminal_state: evidence.terminal_state,
+            terminal_owner: evidence.terminal_owner,
           },
         );
       }
@@ -1216,6 +1218,7 @@ export class HostOpsService {
                 { kind: "system", project_id: project },
                 action.action_id,
                 { clock: this.clock, ids: tx.ids },
+                reason,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1245,7 +1248,7 @@ export class HostOpsService {
       };
       const current = () => {
         const state = read();
-        return (
+        const claimed =
           state.events.findLast(
             (e) =>
               e.type === "host_ops_action_claimed" &&
@@ -1254,12 +1257,16 @@ export class HostOpsService {
           )?.id === lease &&
           pendingHostOpsActions(state.events).some(
             (a) => a.action_id === action.action_id,
-          ) &&
+          );
+        if (!claimed) return false;
+        const bound =
           JSON.stringify(
             state.assignments.find((a) => a.id === action.assignment_id)
               ?.runtime_ref,
-          ) === JSON.stringify(action.runtime_ref)
-        );
+          ) === JSON.stringify(action.runtime_ref);
+        if (!bound && action.system_finished_run_id)
+          fail("terminal_binding_changed");
+        return bound;
       };
       // Do not revoke credentials or release the Run slot until exit is proven.
       if (!current()) return;
@@ -1295,28 +1302,33 @@ export class HostOpsService {
           return;
         }
       }
-      let evidenceSafe = true;
+      let evidenceFailure: string | undefined;
       const checkStall = async () => {
         if (!action.dispatch_stall_id) return;
         const state = read();
         const a = state.assignments.find((a) => a.id === action.assignment_id);
-        evidenceSafe =
-          !!a &&
-          !!this.stallPatrol.current(state, a.id, action.dispatch_stall_id) &&
-          (await this.stallPatrol.evidence(state, a)).can_restart;
+        const stall =
+          a && this.stallPatrol.current(state, a.id, action.dispatch_stall_id);
+        const view =
+          a && stall && (await this.stallPatrol.evidence(state, a, stall));
+        evidenceFailure = !view
+          ? "stall_not_current"
+          : !view.can_restart
+            ? `workspace=${view.workspace}; terminal_owner=${view.terminal_owner ?? "unknown"}; terminal_state=${view.terminal_state ?? "unknown"}`
+            : undefined;
       };
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (
           action.dispatch_stall_id &&
-          (!evidenceSafe ||
+          (evidenceFailure ||
             !this.stallPatrol.current(
               read(),
               action.assignment_id,
               action.dispatch_stall_id,
             ))
         ) {
-          fail("停止前积压、工作区或终端状态已改变");
+          fail(evidenceFailure ?? "stall_not_current");
           return false;
         }
         if (action.tool === "host_ops_cancel_run") return true;
@@ -1375,7 +1387,6 @@ export class HostOpsService {
           return false;
         }
       };
-      if (!mayStop()) return;
       const foreign =
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
@@ -1390,6 +1401,9 @@ export class HostOpsService {
             (e.payload as { reason?: string }).reason ===
               "automatic_context_stop_started",
         );
+      // A started stop can only observe its exit. The original notice may
+      // already be ACKed; settlement rechecks it before allowing a new Run.
+      if (!(action.system_finished_run_id && stopStarted) && !mayStop()) return;
       if (foreign) {
         if (action.automatic_context_restart || action.dispatch_stall_id) {
           fail("当前主机无法确认旧会话退出");
@@ -1414,6 +1428,9 @@ export class HostOpsService {
           stopStarted,
           !stopStarted,
           action.dispatch_stall_id ? checkStall : undefined,
+          action.system_finished_run_id
+            ? { project_id: project, assignment_id: action.assignment_id }
+            : undefined,
         )) !== "exited"
       ) {
         if (!this.closing) fail("terminal_exit_unconfirmed");

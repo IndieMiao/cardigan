@@ -103,6 +103,6 @@ export interface Runtime {
   /** Runtime terminal only; never removes a worktree. */
   release(
     ref: RuntimeRef,
-    options: { readonly force: boolean },
+    options: { readonly force: boolean; readonly owner?: RetirementIdentity },
   ): Promise<RuntimeResult<void>>;
 }
