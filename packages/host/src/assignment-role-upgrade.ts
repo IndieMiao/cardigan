@@ -6,6 +6,7 @@ import {
   type ProjectId,
   type Runtime,
   requestDeploymentAction,
+  retirementOwnsSession,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import {
@@ -108,7 +109,8 @@ async function upgradeRoles(
           !a.external &&
           a.idle_retirement?.phase !== "stopping" &&
           (a.role_upgrade ||
-            (latest.get(a.role_id)?.version ?? 0) > a.role_version),
+            (!retirementOwnsSession(a) &&
+              (latest.get(a.role_id)?.version ?? 0) > a.role_version)),
       );
     candidates.sort(
       (a, b) =>
@@ -177,7 +179,12 @@ async function upgradeRoles(
       )
         continue;
       const ref = before.runtime_ref;
-      if (ref) {
+      if (
+        before.idle_retirement?.phase === "stopping" ||
+        (!before.role_upgrade && retirementOwnsSession(before))
+      )
+        continue;
+      if (ref && !retirementOwnsSession(before)) {
         try {
           const observed = await runtime.status(ref);
           // Agent state and control-plane silence cannot prove that a live
@@ -265,18 +272,29 @@ async function upgradeRoles(
       });
       if (!pending?.role_upgrade) continue;
       attempted++;
+      let observedRetirementExit: NonNullable<typeof ref> | undefined;
       // Human stop may already have confirmed exit and cleared runtime_ref.
       if (ref) {
         try {
           // The general release API can kill a live terminal even with
           // force:false. Do not invoke it: preserve terminal history and only
           // settle the fenced identity after another observation of exit.
-          const observed = await runtime.status(ref);
-          if (
-            !(observed.ok
+          let exited: boolean;
+          if (retirementOwnsSession(pending)) {
+            // Legacy overlap: never use a missing snapshot to finish this upgrade.
+            const observed = await runtime.observe_retirement?.(ref, {
+              project_id: project,
+              assignment_id: id,
+            });
+            exited = observed?.ok === true && observed.value === "exited";
+            if (exited) observedRetirementExit = ref;
+          } else {
+            const observed = await runtime.status(ref);
+            exited = observed.ok
               ? observed.value.process === "exited"
-              : observed.error.code === "runtime_not_found")
-          ) {
+              : observed.error.code === "runtime_not_found";
+          }
+          if (!exited) {
             defer("exit_unconfirmed");
             continue;
           }
@@ -291,6 +309,7 @@ async function upgradeRoles(
           { kind: "system", project_id: project },
           id,
           { ids: tx.ids, clock },
+          observedRetirementExit,
         );
         if (!effect.ok) return false;
         persistEffect(tx, project, effect.value);

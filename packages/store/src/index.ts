@@ -34,6 +34,7 @@ export {
   type RecordNotificationInput,
   reassignNotifications,
   recordNotification,
+  resolveRetirementNotifications,
   retireReconcileNotifications,
   routerCursor,
 } from "./inbox.js";

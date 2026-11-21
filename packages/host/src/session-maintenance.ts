@@ -11,7 +11,11 @@ import {
   sessionMaintenanceCandidate,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import { recordNotification, type Store } from "@cardigan/store";
+import {
+  recordNotification,
+  resolveRetirementNotifications,
+  type Store,
+} from "@cardigan/store";
 import { idleRolePolicies } from "./deployment-roles.js";
 
 /** Candidate display only; this setting never authorizes retirement. */
@@ -51,6 +55,12 @@ export function sessionMaintenanceScan(
       let reuse: { version: string; state: CommandState } | undefined;
       for (;;) {
         const more = store.uow.run((tx) => {
+          if (!ids)
+            resolveRetirementNotifications(
+              store.database,
+              project,
+              clock.now(),
+            );
           // Earlier slices wrote only diagnostics of already-visited owners.
           // Those fields/events are not inputs for other owners. Any external
           // command-state write (even between slices) requires a fresh basis.

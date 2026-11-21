@@ -140,6 +140,12 @@ async function checkStalledTurn(agent: "unknown" | "blocked" | "error") {
     ?.cause_id as string;
   await expect(f.restart(a, cause)).rejects.toMatchObject({
     code: "stale_target",
+    details: {
+      reason: "turn_end_unconfirmed",
+      workspace: "clean",
+      process_state: "alive",
+      terminal_state: agent,
+    },
   });
   expect(f.state().events.some((e) => e.type === "host_ops_action_taken")).toBe(
     false,
@@ -244,7 +250,49 @@ test("a lost instruction bell remains visible with no notification; dirty files 
     }),
   ]);
   expect(JSON.stringify(view.dispatch_stalls)).not.toContain("private-name");
-  await expect(f.restart(a, e.id)).rejects.toThrow();
+  await expect(f.restart(a, e.id)).rejects.toMatchObject({
+    code: "stale_target",
+    details: { reason: "workspace_unconfirmed", workspace: "dirty" },
+  });
+  expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
+test("a waiting retirement keeps its session even when the host sees an idle terminal and an overdue note", async () => {
+  const f = setup(),
+    a = f.target.assignment;
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id);
+    if (!owner?.runtime_ref) throw Error("missing session");
+    tx.assignments.put(f.project, {
+      ...owner,
+      idle_retirement: {
+        phase: "waiting",
+        runtime_ref: owner.runtime_ref,
+        started_at: f.clock.now(),
+        threshold_minutes: 60,
+        failures: 1,
+      },
+    });
+  });
+  f.advance(1);
+  const event = f.event("fixture", {}, a, f.target.card.id);
+  const note = f.notes().find((n) => n.event_id === event.id);
+  if (!note) throw Error("missing note");
+  f.advance(600_000);
+  expect((await f.view()).dispatch_stalls).toMatchObject([
+    {
+      cause_id: note.id,
+      restart_blocked: "session_maintenance",
+      can_restart: false,
+    },
+  ]);
+  await expect(f.restart(a, note.id)).rejects.toMatchObject({
+    code: "stale_target",
+    details: { reason: "stall_not_current" },
+  });
+  expect(f.state().events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
+  );
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
 

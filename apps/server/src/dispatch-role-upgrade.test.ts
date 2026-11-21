@@ -1,5 +1,6 @@
 import {
   acknowledgeRun,
+  beginIdleSessionRetirement,
   cancelHumanAction,
   completeHumanAction,
   dispatchRun,
@@ -155,13 +156,13 @@ test("idle retirement defers bells and the next legal wake starts exactly one re
   f.store.touchAssignmentActivity(f.project, f.owner().id, f.clock.now());
   f.advance(60 * 60_000 + 1);
   let finish!: () => void;
-  f.runtime.retire_idle = vi.fn(async (_ref, options) => {
+  f.runtime.retire_idle = async (_ref, options) => {
     expect(options.before_signal()).toBe(true);
     await new Promise<void>((resolve) => {
       finish = resolve;
     });
-    return { ok: true, value: { exited: true } };
-  });
+    return { ok: true, value: { outcome: "exited" } };
+  };
   const retirement = host.upgradeIdleAssignmentRoles(
     f.store,
     f.project,
@@ -181,6 +182,364 @@ test("idle retirement defers bells and the next legal wake starts exactly one re
   expect(f.startRun).toHaveBeenCalledOnce();
   expect(f.runtime.release).not.toHaveBeenCalled();
 });
+
+async function recoveredWaitingRun() {
+  const f = setup(false),
+    owner = f.owner(),
+    system = { kind: "system" as const, project_id: f.project };
+  const token = f.store.issueToken({
+    project_id: f.project,
+    assignment_id: owner.id,
+    role: { role_version: owner.role_version, allowed_tools: ["get_card"] },
+  });
+  f.store.touchAssignmentActivity(f.project, owner.id, f.clock.now());
+  f.advance(60 * 60_000 + 1);
+  const retire = vi
+    .fn<NonNullable<typeof f.runtime.retire_idle>>()
+    .mockResolvedValue({
+      ok: true,
+      value: {
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason: "pidfd_unavailable" },
+      },
+    });
+  f.runtime.retire_idle = retire;
+  f.runtime.observe_retirement = vi
+    .fn<NonNullable<typeof f.runtime.observe_retirement>>()
+    .mockResolvedValue({ ok: true, value: "alive" });
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  f.advance(60_000);
+  f.apply(
+    (s, a, p) => beginIdleSessionRetirement(s, a, owner.id, 60, p),
+    system,
+  );
+  expect(f.owner().idle_retirement).toMatchObject({
+    phase: "stopping",
+    observe_only: true,
+  });
+  // Crash after commit, before I/O. New business work arrives during the interruption.
+  f.comment();
+  const trigger = f
+    .state()
+    .events.filter((e) => e.type === "comment_posted")
+    .at(-1)!;
+  const queued = f.store.uow.run((tx) => {
+    const id = tx.ids.next(f.project, "run");
+    tx.runs.put(f.project, {
+      id,
+      assignment_id: owner.id,
+      role_version: owner.role_version,
+      trigger_event_id: trigger.id,
+      kind: "followup",
+      status: "queued",
+      model: "fixture",
+      agent_cli_version: "1",
+      queue_entered_at: f.clock.now(),
+      outcome: null,
+      summary: "",
+    });
+    return id;
+  });
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  expect(f.owner().idle_retirement).toMatchObject({ phase: "waiting" });
+  return { f, queued, retire, owner, token };
+}
+
+function waitNotices(f: ReturnType<typeof setup>) {
+  const notices = f
+    .state()
+    .events.filter((e) => e.type === "session_maintenance_attention");
+  return f.store
+    .listNotifications({ project_id: f.project, recipient_kind: "pm_ops" })
+    .filter((n) => notices.some((e) => e.id === n.event_id));
+}
+
+test("retirement alone guards an author-ended turn: report the refusal once and leave its Run queued", async () => {
+  const logs = vi.spyOn(console, "info").mockImplementation(() => {});
+  const { f, queued } = await recoveredWaitingRun();
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "unknown", observed_seq: 2 },
+  });
+  await f.dispatcher.tick();
+  f.advance(1);
+  await f.dispatcher.tick();
+  const refused = logs.mock.calls.filter(([line]) =>
+    String(line).includes("reason=wake_guard:alive/unknown"),
+  );
+  expect(refused).toHaveLength(1);
+  expect(refused[0]?.[0]).toContain("age_ms=");
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
+test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
+  const { f, queued, retire, owner, token } = await recoveredWaitingRun();
+  vi.mocked(f.runtime.status).mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_not_found", message: "snapshot gap" },
+  });
+  await f.dispatcher.tick();
+  expect(waitNotices(f)).toMatchObject([{ status: "pending" }]);
+  expect(f.owner().idle_retirement?.dispatch_wait).toMatchObject({
+    source: "snapshot",
+    status: "runtime_not_found",
+  });
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("queued");
+  // The previous Run finished explicitly. The ordinary new-work fast path
+  // must not wake a busy session whose retirement is still unresolved.
+  f.setBusy(true);
+  await f.dispatcher.tick();
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(waitNotices(f)).toMatchObject([{ status: "pending" }]);
+  f.setBusy(false);
+  await f.dispatcher.tick();
+  await f.dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  expect(waitNotices(f)).toMatchObject([{ status: "resolved" }]);
+  expect(f.owner().idle_retirement?.dispatch_wait).toBeUndefined();
+  expect(f.owner().idle_retirement?.evidence?.reason).toBe("pidfd_unavailable");
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(vi.mocked(f.runtime.wake).mock.calls[0]?.[2]).toMatchObject({
+    if_idle: true,
+    retirement_owner: { project_id: f.project, assignment_id: owner.id },
+  });
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(retire).toHaveBeenCalledOnce();
+  expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+  expect(f.store.verifyToken(token.token)).toBeTruthy();
+});
+
+async function retirementWakeToRetry(firstWake: "withdrawn" | "queue_timeout") {
+  const fixture = await recoveredWaitingRun();
+  const { f, queued } = fixture;
+  vi.mocked(f.runtime.status).mockResolvedValueOnce({
+    ok: false,
+    error: { code: "runtime_not_found", message: "snapshot gap" },
+  });
+  await f.dispatcher.tick();
+  const wait = f.owner().idle_retirement?.dispatch_wait;
+  expect(wait?.event_id).toBeTruthy();
+
+  const wake = vi.mocked(f.runtime.wake);
+  wake.mockResolvedValueOnce(
+    firstWake === "withdrawn"
+      ? { ok: true, value: { sent: false, withdrawn: true } }
+      : {
+          ok: false,
+          error: {
+            code: "runtime_queue_timeout",
+            message: "pre-send timeout",
+          },
+        },
+  );
+  await f.dispatcher.tick();
+  expect(wake).toHaveBeenCalledOnce();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  expect(waitNotices(f)).toMatchObject([
+    { event_id: wait?.event_id, status: "pending" },
+  ]);
+
+  return { ...fixture, wake, wait };
+}
+
+test.each(["withdrawn", "queue_timeout"] as const)(
+  "a confirmed retry after %s resolves the original retirement wait",
+  async (firstWake) => {
+    const { f, queued, owner, token, wake, wait } =
+      await retirementWakeToRetry(firstWake);
+    wake.mockImplementationOnce(async (ref, _bell, options) => {
+      expect(ref).toEqual(owner.runtime_ref);
+      expect(options?.retirement_owner).toEqual({
+        project_id: f.project,
+        assignment_id: owner.id,
+      });
+      expect(await options?.before_send?.()).toBe(true);
+      return { ok: true, value: { sent: true } };
+    });
+    f.advance(31_000);
+    await f.dispatcher.tick();
+    expect(wake).toHaveBeenCalledTimes(2);
+    const actor = f.actorFor(f.owner());
+    f.apply((s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p), actor);
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: queued, outcome: "completed", summary: "resumed" },
+          p,
+        ),
+      actor,
+    );
+    await host.upgradeIdleAssignmentRoles(
+      f.store,
+      f.project,
+      f.runtime,
+      f.clock,
+    );
+    expect(waitNotices(f)).toMatchObject([
+      { event_id: wait?.event_id, status: "resolved" },
+    ]);
+    expect(f.owner().idle_retirement?.dispatch_wait).toBeUndefined();
+    expect(
+      f.state().events.filter((e) => e.type === "retirement_dispatch_resumed"),
+    ).toMatchObject([
+      {
+        payload: {
+          assignment_id: owner.id,
+          run_id: queued,
+          retirement_wait_event_id: wait?.event_id,
+        },
+      },
+    ]);
+    expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+    expect(f.store.verifyToken(token.token)).toBeTruthy();
+    expect(f.startRun).not.toHaveBeenCalled();
+  },
+);
+
+test("a Run acknowledged before the retry sends is not a guarded wake receipt", async () => {
+  const { f, queued, wake, wait } = await retirementWakeToRetry("withdrawn");
+  const dispatcher = new Dispatcher({
+    store: f.store,
+    clock: f.clock,
+    runtime: f.runtime,
+    startRun: f.startRun,
+    snapshot: f.snapshot,
+    beforeWake: async () => {
+      f.apply(
+        (s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p),
+        f.actorFor(f.owner()),
+      );
+    },
+  });
+  f.advance(31_000);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe("running");
+  expect(wake).toHaveBeenCalledOnce(); // The first, withdrawn call only.
+  expect(f.owner().idle_retirement?.dispatch_wait).toEqual(wait);
+  expect(
+    f.state().events.some((e) => e.type === "retirement_dispatch_resumed"),
+  ).toBe(false);
+});
+
+test.each([
+  "runtime_not_found",
+  "runtime_unavailable",
+  "exited",
+  "owner_conflict",
+] as const)(
+  "retirement-held Run with %s waits for exact exit before one fresh launch",
+  async (missing) => {
+    const { f, queued, retire, owner, token } = await recoveredWaitingRun();
+    if (missing === "owner_conflict")
+      vi.mocked(f.runtime.observe_retirement!).mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_conflict", message: "owner changed" },
+      });
+    else if (missing === "exited")
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: true,
+        value: { process: "exited", agent: "done", observed_seq: 2 },
+      });
+    else
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: false,
+        error: { code: missing, message: "missing snapshot" },
+      });
+    for (let i = 0; i < 5; i++) {
+      f.advance(15 * 60_000);
+      await host.upgradeIdleAssignmentRoles(
+        f.store,
+        f.project,
+        f.runtime,
+        f.clock,
+      );
+      await f.dispatcher.tick();
+    }
+    const detail =
+      missing === "owner_conflict"
+        ? { source: "owner", status: "runtime_conflict" }
+        : { source: "snapshot", status: missing };
+    expect(f.owner().idle_retirement).toMatchObject({
+      failures: 2,
+      phase: "waiting",
+      dispatch_wait: detail,
+      evidence: {
+        reason: "pidfd_unavailable",
+        observation:
+          missing === "owner_conflict" ? "runtime_conflict" : "alive",
+      },
+    });
+    const notices = waitNotices(f);
+    expect(notices).toMatchObject([{ status: "pending" }]);
+    const event = f.state().events.find((e) => e.id === notices[0]?.event_id);
+    expect(event?.payload).toMatchObject({
+      evidence: detail,
+      notice: expect.stringContaining("hc get 只读核对"),
+    });
+    expect(JSON.stringify(event?.payload)).not.toMatch(
+      /owner changed|missing snapshot|cardigan assignment stop/,
+    );
+    expect(
+      f.state().events.some((e) => e.type === "queued_runtime_unavailable"),
+    ).toBe(false);
+    expect(f.state().runs.find((r) => r.id === queued)).toMatchObject({
+      status: "queued",
+      queue_reason: "runtime_unavailable",
+    });
+    expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+    expect(f.store.verifyToken(token.token)).toBeTruthy();
+    expect(f.startRun).not.toHaveBeenCalled();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.runtime.wake).not.toHaveBeenCalled();
+    vi.mocked(f.runtime.observe_retirement!).mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
+    await f.dispatcher.tick();
+    expect(f.owner().runtime_ref).toBeNull();
+    expect(f.store.verifyToken(token.token)).toBeUndefined();
+    await f.dispatcher.tick();
+    await f.dispatcher.tick();
+    expect(retire).toHaveBeenCalledOnce();
+    expect(f.startRun).toHaveBeenCalledOnce();
+    expect(f.startRun.mock.calls[0]?.[0].run.id).toBe(queued);
+    expect(f.startRun.mock.calls[0]?.[0].replacement).toBeUndefined();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    const caller = f.actorFor(f.owner());
+    f.apply((s, a, p) => acknowledgeRun(s, a, { run_id: queued }, p), caller);
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: queued, outcome: "completed", summary: "Resumed" },
+          p,
+        ),
+      caller,
+    );
+    await host.upgradeIdleAssignmentRoles(
+      f.store,
+      f.project,
+      f.runtime,
+      f.clock,
+    );
+    expect(waitNotices(f)).toMatchObject([
+      { event_id: event?.id, status: "resolved" },
+    ]);
+    expect(f.owner().idle_retirement).toBeUndefined();
+  },
+);
 
 test.each(["triage", "legacy", "complete", "cancel"] as const)(
   "upgraded human-action recovery via %s dispatches once even when the follow-up is deferred",

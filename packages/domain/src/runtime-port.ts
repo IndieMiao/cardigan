@@ -1,23 +1,9 @@
 import type { Assignment, Machine, RuntimeRef } from "./entities.js";
 import type { Role } from "./role.js";
+import type { IdleRetirementResult, RuntimeResult } from "./runtime-types.js";
 
-export const runtimeErrorCodes = [
-  "runtime_not_found",
-  "runtime_unavailable",
-  "version_mismatch",
-  "runtime_timeout",
-  "runtime_queue_timeout",
-  "runtime_conflict",
-  "invalid_launch",
-] as const;
-export type RuntimeErrorCode = (typeof runtimeErrorCodes)[number];
-export interface RuntimeError {
-  readonly code: RuntimeErrorCode;
-  readonly message: string;
-}
-export type RuntimeResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: RuntimeError };
+export * from "./runtime-types.js";
+
 /** Host-compiled launch instructions, with no Token or provider secret values. */
 export interface RuntimeLaunch {
   readonly command: string;
@@ -50,6 +36,8 @@ export interface RuntimeLaunchRecovery {
   ): Promise<RuntimeResult<RuntimeRef>>;
 }
 export interface RuntimeWakeOptions {
+  /** A retirement-held ref must still belong to this owner at the send slot. */
+  readonly retirement_owner?: RetirementIdentity;
   readonly if_idle?: boolean;
   /** For exact states hc cannot compare with --if. Re-read after the send slot is held.
    * Unknown requires additional positive evidence from this exact harness turn. */
@@ -74,20 +62,25 @@ export interface RuntimeInteractionReader {
     identity: { project_id: string; assignment_id: string; harness: string },
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
+export interface RetirementIdentity {
+  readonly project_id: string;
+  readonly assignment_id: string;
+}
 export interface Runtime {
+  /** Read-only. Only a finished terminal with this exact identity proves exit. */
+  observe_retirement?(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+  ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
   /** Optional host-only idle retirement. Never escalates beyond HUP/TERM. */
   retire_idle?(
     ref: RuntimeRef,
-    options: {
-      readonly project_id: string;
-      readonly assignment_id: string;
+    options: RetirementIdentity & {
       readonly hangup_ms: number;
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
     },
-  ): Promise<
-    RuntimeResult<{ readonly exited: boolean; readonly withdrawn?: boolean }>
-  >;
+  ): Promise<RuntimeResult<IdleRetirementResult>>;
   provision(
     assignment: Assignment,
     role: Role,

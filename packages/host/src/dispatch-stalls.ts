@@ -160,8 +160,7 @@ export function dispatchStallCauses(
       return;
     const blocked = (() => {
       if (stoppedByHuman(state.events, a.id)) return "human_stopped";
-      if (a.role_upgrade || a.idle_retirement?.phase === "stopping")
-        return "session_maintenance";
+      if (a.role_upgrade || a.idle_retirement) return "session_maintenance";
       const parent = card && cards.get(card);
       if (parent && ["done", "cancelled"].includes(parent.status))
         return "closed_card";

@@ -530,14 +530,36 @@ export class HostOpsService {
           state,
           preflight.assignment.id,
           p.dispatch_stall_id,
-        ) ||
-        !(await this.stallPatrol.evidence(state, preflight.assignment))
-          .can_restart
+        )
       )
         throw new ToolError(
           "stale_target",
-          "积压、工作区或终端不满足换会话条件",
+          "该指派已没有可以按此原因恢复的积压",
+          { reason: "stall_not_current" },
         );
+      const evidence = await this.stallPatrol.evidence(
+        state,
+        preflight.assignment,
+      );
+      if (!evidence.can_restart) {
+        const unsafeWorkspace =
+          evidence.workspace !== "clean" &&
+          evidence.workspace !== "no_worktree";
+        throw new ToolError(
+          "stale_target",
+          unsafeWorkspace
+            ? "工作区有改动或不能确认干净"
+            : "不能确认原终端轮次已结束",
+          {
+            reason: unsafeWorkspace
+              ? "workspace_unconfirmed"
+              : "turn_end_unconfirmed",
+            workspace: evidence.workspace,
+            process_state: evidence.process_state,
+            terminal_state: evidence.terminal_state,
+          },
+        );
+      }
     }
     const snapshot =
       tool === "host_ops_cancel_run"
@@ -570,12 +592,19 @@ export class HostOpsService {
                 freshActivity,
               );
         if (
-          (p.dispatch_stall_id &&
-            !this.stallPatrol.current(
-              state,
-              fresh.assignment.id,
-              p.dispatch_stall_id,
-            )) ||
+          p.dispatch_stall_id &&
+          !this.stallPatrol.current(
+            state,
+            fresh.assignment.id,
+            p.dispatch_stall_id,
+          )
+        )
+          throw new ToolError(
+            "stale_target",
+            "该指派已没有可以按此原因恢复的积压",
+            { reason: "stall_not_current" },
+          );
+        if (
           JSON.stringify(fresh.assignment) !==
             JSON.stringify(preflight.assignment) ||
           fresh.run?.id !== preflight.run?.id ||
@@ -584,6 +613,7 @@ export class HostOpsService {
           throw new ToolError(
             "stale_target",
             "Target changed during preflight; read diagnostics again",
+            { reason: "preflight_target_changed" },
           );
         if (
           unfinishedBellAttempts(store.database, project).some(
