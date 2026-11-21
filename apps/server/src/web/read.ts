@@ -52,12 +52,14 @@ import {
   type Result,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
+  requiresUiStateAndSave,
   resolveReferences,
   roleKind,
   runAuthorView,
   screenshotCheckEnforced,
   sessionMaintenanceView,
   sourceMergeSuggestionView,
+  storyProgress,
   suggestionView,
   verificationActivity,
 } from "@cardigan/domain";
@@ -174,9 +176,19 @@ export function templateList(state: CommandState) {
         ?.flow_version,
     ),
   ];
-  return [...new Set(templates.map((t) => t.id))]
-    .sort()
-    .map((id) => latestCardTemplate(templates, id));
+  return [...new Set(templates.map((t) => t.id))].sort().flatMap((id) => {
+    const t = latestCardTemplate(templates, id);
+    return t
+      ? [
+          {
+            ...t,
+            ...(requiresUiStateAndSave(t)
+              ? { requires_state_and_save: true }
+              : {}),
+          },
+        ]
+      : [];
+  });
 }
 
 /** Members use the same avatar references and authenticated upload route as employees. */
@@ -747,6 +759,7 @@ export function cardDetail(
   card_id: CardId,
   options: {
     readonly mergeGateStatus?: ProjectMergeGate["status"];
+    readonly storyProgress?: ReturnType<typeof storyProgress>;
     readonly timelineLimit?: number;
     readonly timelineAnchor?: string;
     readonly recordTiming?: RecordReadTiming;
@@ -1067,6 +1080,13 @@ export function cardDetail(
       : {}),
     card: {
       ...card,
+      ...(graphSource?.story
+        ? {
+            story_progress:
+              options.storyProgress ??
+              storyProgress(dependencySource.cards, graphSource),
+          }
+        : {}),
       ...(card.dependency && graphSource
         ? {
             dependency: {

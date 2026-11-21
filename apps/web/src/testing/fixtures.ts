@@ -244,6 +244,7 @@ export function fakeClient(
     manageTemplate: async () => {
       throw new Error("Missing template fixture");
     },
+    createCard: async () => ({ id: "C-1" }),
     markCardDone: async () => {},
     roles: async (project_id) => ({
       project_id,

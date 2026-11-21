@@ -35,7 +35,9 @@ import { extractReferences } from "../references.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
+import { storyProgress, storyTerminal } from "../story.js";
 import type { ResumeCondition } from "../work-wait.js";
+import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -179,6 +181,7 @@ export function postComment(
   state: CommandState,
   actor: Actor,
   p: Pick<TimelineEntry, "card_id" | "body"> & {
+    story_summary?: boolean;
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
@@ -274,6 +277,50 @@ export function postComment(
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       },
     );
+    if (p.story_summary) {
+      const card = d.card(p.card_id);
+      ensure(
+        d.assignment?.scope === "standing" &&
+          d.assignment.role_id === "pm" &&
+          d.assignment.standing_mode === "office",
+        "unauthorized",
+        "只有常驻 Office 可提交需求总结",
+      );
+      ensure(
+        !card.hold && card.status !== "backlog",
+        "illegal_transition",
+        "需求卡尚未排期或已暂停",
+      );
+      requireCardDependencyStart(d, card);
+      const progress = storyProgress(d.list("cards"), card);
+      ensure(
+        card.story &&
+          !storyTerminal(card) &&
+          progress.total > 0 &&
+          progress.finished === progress.total,
+        "illegal_transition",
+        "需求卡的子卡尚未全部结束或需求卡已关闭",
+      );
+      const item = d
+        .list("work_items")
+        .find(
+          (w) => w.card_id === card.id && w.template_key === "decomposition",
+        );
+      ensure(
+        item && d.timeline[0],
+        "invariant_violation",
+        "缺少拆解项或总结记录",
+      );
+      if (item.status !== "delivered")
+        d.put("work_items", d.move(item, "story_summary_submitted"));
+      d.put("cards", {
+        ...card,
+        story: { summary_entry_id: d.timeline[0].id },
+      });
+      d.emit("story_summary_submitted", card.id, {
+        entry_id: d.timeline[0].id,
+      });
+    }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
     if (p.host_result_for) {

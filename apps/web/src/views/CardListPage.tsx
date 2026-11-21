@@ -23,6 +23,7 @@ import {
   CardSupersededTip,
 } from "../components/CardStatusTip.js";
 import { CardsViewSwitch } from "../components/CardsViewSwitch.js";
+import { CreateCardButton } from "../components/CreateCardButton.js";
 import { DisplayMenu } from "../components/DisplayMenu.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
@@ -609,7 +610,23 @@ export function CardListPage({
       </PageToolbar>
 
       {state.kind === "ready" && cards.length === 0 && (
-        <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>
+        <EmptyState
+          action={
+            !activeFilters && (
+              <CreateCardButton
+                key={projectId}
+                projectId={projectId}
+                client={client}
+                onCreated={(id) => {
+                  reload();
+                  openCard(id);
+                }}
+              />
+            )
+          }
+        >
+          {activeFilters ? "没有匹配的卡片" : "没有卡片"}
+        </EmptyState>
       )}
       {state.kind === "ready" &&
         (view === "board" ? (

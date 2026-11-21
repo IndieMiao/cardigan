@@ -9,6 +9,7 @@ import { mergeBatches } from "../merge-batch.js";
 import type { Clock, IdAllocator } from "../ports.js";
 import type { ProjectPreferences } from "../preferences.js";
 import { assignmentExternalError } from "../standing.js";
+import { storyProgress, storyTerminal } from "../story.js";
 import type { CardTemplate } from "../templates.js";
 import { transition } from "../transitions.js";
 
@@ -651,13 +652,14 @@ export class CommandDraft {
     card_id: I.CardId | undefined,
     payload: E.JsonValue,
     entry?: Entry,
+    actor = this.actor,
   ): E.Event {
     const event: E.Event = {
       id: this.ids.nextEventId(),
       ...(card_id ? { card_id } : {}),
       seq: this.ids.nextEventSequence(this.state.project_id, card_id),
       type,
-      actor: this.actor,
+      actor,
       payload,
       created_at: this.now,
     };
@@ -713,6 +715,32 @@ export function command<T>(
       if (status !== card.status) draft.put("cards", { ...card, status });
     }
     afterOperation?.(draft);
+    // Edge-triggered from the final draft, including merge and human completion.
+    const parents = new Set<I.CardId>();
+    for (const change of draft.changes) {
+      if (change.collection !== "cards") continue;
+      const child = change.entity;
+      if (!child.parent_card_id || !storyTerminal(child)) continue;
+      const before = stateIndex(state.cards).get(child.id);
+      if (before && !storyTerminal(before)) parents.add(child.parent_card_id);
+    }
+    for (const id of parents) {
+      const parent = draft.get("cards", id);
+      if (!parent.story || storyTerminal(parent)) continue;
+      const { finished, total } = storyProgress(draft.list("cards"), parent);
+      if (total && total === finished)
+        draft.emit(
+          "story_children_settled",
+          id,
+          { total },
+          {
+            type: "system",
+            author: "system",
+            body: `${total} 张子卡均已结束，请 Office 提交对照总结。`,
+          },
+          { kind: "system", project_id: state.project_id },
+        );
+    }
     return {
       data,
       changes: draft.changes,

@@ -4,6 +4,7 @@ import {
   activateRole,
   activeOwner,
   autoMergeSchedule,
+  builtinCardTemplatesForFlow,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -13,11 +14,13 @@ import {
   completeHumanAction,
   confirmSourceMergeUnrelated,
   copyRole,
+  createCard,
   createRole,
   DEFAULT_MAX_RUN_LIMIT,
   type DomainError,
   deactivateRole,
   issueInstruction,
+  latestCardTemplate,
   manageCardTemplate,
   markCardDone,
   markNoticesRead,
@@ -189,7 +192,18 @@ const cardUpdate = z
   })
   .strict()
   .refine((p) => Object.keys(p).length > 0);
-const cardCancel = z.object({ reason: z.string().optional() }).strict();
+const cardCancel = z
+  .object({
+    reason: z.string().optional(),
+    story_children: z
+      .object({
+        action: z.enum(["cancel", "detach"]),
+        ids: z.array(id("card")),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 const cardSupersede = z.object({ superseded_by: id("card") }).strict();
 const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
@@ -347,7 +361,11 @@ function applyCommand<T>(
   return effect.data;
 }
 function cardResult<T>(result: Result<T>, operation: string): Result<T> {
-  if (result.ok) return result;
+  if (
+    result.ok ||
+    (operation === "cancel" && /[\u3400-\u9fff]/u.test(result.error.message))
+  )
+    return result;
   const code = result.error.code;
   const message =
     code === "not_found"
@@ -679,6 +697,81 @@ export async function serveWrite(
     return true;
   }
   if (await serveEmployees(c, rest)) return true;
+  if (rest === "/cards" && c.req.method === "POST") {
+    c.authorize();
+    const body = await readJsonBody(c.req);
+    const key = parsed(
+      requiredKey,
+      c.req.headers["idempotency-key"],
+      "创建卡片需要 Idempotency-Key",
+    );
+    const input = parsed(
+      z
+        .object({
+          template_id: text,
+          title: text,
+          goal: text,
+          acceptance_criteria: z.array(text).optional(),
+          parent_card_id: id("card").optional(),
+          state_and_save: z
+            .union([
+              z.literal("无写入"),
+              z
+                .object({
+                  save_timing: text,
+                  leave_behavior: text,
+                  failure_feedback: text,
+                  consistency: text,
+                })
+                .strict(),
+            ])
+            .optional(),
+        })
+        .strict(),
+      body,
+    );
+    const card = run(
+      { ...c, idempotency: { key, request: { method: "POST", rest, body } } },
+      (state, actor, ports) => {
+        const template = latestCardTemplate(
+          [
+            ...(state.card_templates ?? []),
+            ...builtinCardTemplatesForFlow(
+              state.project_preferences?.find((p) => p.id === state.project_id)
+                ?.flow_version,
+            ),
+          ],
+          input.template_id,
+        );
+        const project = template?.requires_repo
+          ? c.store.getProject(c.project_id)
+          : undefined;
+        return createCard(
+          state,
+          actor,
+          {
+            title: input.title,
+            goal: input.goal,
+            template_id: input.template_id,
+            acceptance_criteria: input.acceptance_criteria ?? [],
+            source: { kind: "quote", text: input.goal },
+            ...(input.parent_card_id
+              ? { parent_card_id: input.parent_card_id }
+              : {}),
+            ...(input.state_and_save
+              ? { state_and_save: input.state_and_save }
+              : {}),
+            ...(project?.repo_path && project.base_branch
+              ? { repo: project.repo_path, base_branch: project.base_branch }
+              : {}),
+          },
+          ports,
+        );
+      },
+    );
+    sendJson(c.res, 201, { id: card.id });
+    return true;
+  }
   if (rest === "/card-templates" || rest === "/card-templates/validate") {
     // "validate" is also a legal template ID: GET reads its details, POST previews.
     if (c.req.method === "GET") return false;
@@ -1154,12 +1247,25 @@ export async function serveWrite(
         cardResult(updateCard(s, a, { ...p, card_id }, ports), "update"),
       );
     } else if (operation === "cancel") {
-      const { reason } = parsed(cardCancel, body, "取消原因须为文字，可留空。");
+      const { reason, story_children } = parsed(
+        cardCancel,
+        body,
+        "取消原因须为文字，可留空。",
+      );
       // Cancellation and its optional explanation share the idempotent transaction.
       output = execute(context, (tx) => {
         const card = applyCommand(context, tx, (s, a, ports) =>
           cardResult(
-            updateCard(s, a, { card_id, status: "cancelled" }, ports),
+            updateCard(
+              s,
+              a,
+              {
+                card_id,
+                status: "cancelled",
+                ...(story_children ? { story_children } : {}),
+              },
+              ports,
+            ),
             "cancel",
           ),
         );

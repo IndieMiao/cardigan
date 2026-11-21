@@ -28,6 +28,7 @@ export interface CardTemplateDefinition {
 export interface CardTemplate extends CardTemplateDefinition {
   readonly version: number;
   readonly builtin: boolean;
+  readonly story?: true;
   readonly status: "active" | "inactive";
 }
 export const PM_ACCEPTANCE_WORK_ITEM_KEY = "pm_acceptance";
@@ -162,6 +163,28 @@ export const generalCardTemplate = {
   completion: { mode: "human_mark_done" },
   work_items: [],
 } as const satisfies CardTemplate;
+export const storyCardTemplate = {
+  ...generalCardTemplate,
+  id: "story",
+  story: true,
+  title: "需求卡",
+  description: "由 Office 拆解需求，人确认完成",
+  work_items: [
+    {
+      key: "decomposition",
+      title: "拆解",
+      kind: "produce",
+      role_id: "pm",
+      required: true,
+    },
+  ],
+} as const satisfies CardTemplate;
+/** Only immutable, store-registered templates carry story behavior. */
+export function isStoryTemplate(template: CardTemplate): boolean {
+  return (
+    template.builtin && (template.story === true || template.id === "story")
+  );
+}
 export const artifactCardTemplate = {
   id: "artifact",
   title: "产出物",
@@ -226,6 +249,7 @@ export const designCardTemplate = {
 export const builtinCardTemplates: readonly CardTemplate[] = [
   developmentCardTemplate,
   generalCardTemplate,
+  storyCardTemplate,
   artifactCardTemplate,
   designCardTemplate,
 ];
@@ -237,6 +261,7 @@ export function builtinCardTemplatesForFlow(
     ? [
         developmentCardTemplateV2,
         generalCardTemplate,
+        storyCardTemplate,
         artifactCardTemplate,
         designCardTemplate,
         productCardTemplate,

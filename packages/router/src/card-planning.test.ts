@@ -81,3 +81,38 @@ test("promoting an existing card to todo wakes Ops; editing its title does not",
     expect(result.notifications).toHaveLength(status === "backlog" ? 1 : 0);
   }
 });
+
+test("story planning and settlement ring Office; the summary requests human confirmation", () => {
+  for (const [type, recipient] of [
+    ["card_created", "pm_office"],
+    ["story_children_settled", "pm_office"],
+    ["story_summary_submitted", "needs_you"],
+  ] as const) {
+    const state = snapshot({
+      cards: [
+        card({
+          story:
+            type === "story_summary_submitted"
+              ? { summary_entry_id: "C-1#3" }
+              : {},
+          status: "todo",
+        }),
+      ],
+    });
+    expect(
+      routeEvent({
+        event: event(
+          type,
+          { entry_id: "C-1#3" },
+          {
+            actor:
+              type === "story_summary_submitted"
+                ? agent("A-office")
+                : { kind: "system", project_id: state.project_id },
+          },
+        ),
+        snapshot: state,
+      }).notifications.map((n) => n.recipient.kind),
+    ).toEqual([recipient]);
+  }
+});

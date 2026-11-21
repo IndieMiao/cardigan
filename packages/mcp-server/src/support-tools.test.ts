@@ -1185,6 +1185,7 @@ test("V12b list_templates and list_roles only show this project's catalog", asyn
     "dev",
     "general",
     "ours",
+    "story",
   ]);
   expect(JSON.stringify(templates)).not.toContain("Private other template");
   const roles = await office.callTool({

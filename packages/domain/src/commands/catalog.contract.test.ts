@@ -68,6 +68,7 @@ test("list_templates returns the latest active version of every template", () =>
     ["design", 1, true],
     ["dev", 1, true],
     ["general", 1, true],
+    ["story", 1, true],
   ]);
   expect(templates.find((t) => t.id === "dev")).toEqual({
     id: "dev",
