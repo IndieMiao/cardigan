@@ -16,7 +16,9 @@ const isStaging = (path) => String(path).includes("/.secrets-staging/");
 const secretsTarget = (path) => String(path).endsWith("/secrets.env");
 const yamlBackup = (path) => /\/launch\.yaml\.[^/]+\.bak$/u.test(String(path));
 
-const { mkdirSync, writeFileSync, renameSync, readFileSync } = fs;
+const { mkdirSync, writeFileSync, renameSync, readFileSync, rmSync } = fs;
+const ownStagingDir = (path) =>
+  /\/\.secrets-staging\/[^/]+$/u.test(String(path));
 fs.mkdirSync = (path, opts) => {
   const own = isStaging(path) && !String(path).endsWith(".secrets-staging");
   if (own && mode === "exit-before-mkdir") crash();
@@ -38,6 +40,18 @@ fs.writeFileSync = (path, data, opts) => {
     writeFileSync(path, String(data).slice(0, 7), opts);
     crash();
   }
+  if (
+    mode === "short-temp-exit-at-drop" &&
+    isStaging(p) &&
+    p.endsWith("/secrets.env")
+  ) {
+    writeFileSync(path, String(data).slice(0, 7), opts);
+    throw Object.assign(new Error("fixture: ENOSPC"), { code: "ENOSPC" });
+  }
+  if (mode === "exit-at-cleanup" && isStaging(p) && p.endsWith("/cleanup")) {
+    writeFileSync(path, data, opts);
+    crash();
+  }
   if (yamlBackup(p) && mode === "exit-before-yaml") crash();
   if (yamlBackup(p) && mode === "pause-before-yaml") {
     process.send({ paused: true });
@@ -52,6 +66,10 @@ fs.renameSync = (from, to) => {
   if (secretsTarget(to) && isStaging(from) && mode === "exit-after-rename")
     crash();
   return result;
+};
+fs.rmSync = (path, opts) => {
+  if (mode === "short-temp-exit-at-drop" && ownStagingDir(path)) crash();
+  return rmSync(path, opts);
 };
 syncBuiltinESMExports();
 globalThis.fetch = async () => {

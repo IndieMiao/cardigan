@@ -1,6 +1,7 @@
 import { execFileSync, fork } from "node:child_process";
 import { once } from "node:events";
 import {
+  appendFileSync,
   existsSync,
   mkdtempSync,
   readdirSync,
@@ -32,6 +33,12 @@ const faults = vi.hoisted(() => ({
   beforePublish: undefined as (() => void) | undefined,
   afterPublish: undefined as (() => void) | undefined,
   shortWrite: false,
+  /** Right after the staged secrets.env is renamed into place. */
+  afterSecretsRename: undefined as (() => void) | undefined,
+  /** When the key clean-up writes its staged file. */
+  onCleanupWrite: undefined as (() => void) | undefined,
+  /** Remaining failures of removing an own staging directory. */
+  stagingRmFailures: 0,
 }));
 vi.mock("@cardigan/host", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@cardigan/host")>();
@@ -47,18 +54,41 @@ vi.mock("@cardigan/host", async (importOriginal) => {
 });
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
+  const staged = (path: unknown) => String(path).includes("/.secrets-staging/");
   const writeFileSync: typeof actual.writeFileSync = (path, data, opts) => {
     if (
       faults.shortWrite &&
-      String(path).includes("/.secrets-staging/") &&
+      staged(path) &&
       String(path).endsWith("/secrets.env")
     ) {
       actual.writeFileSync(path, String(data).slice(0, 5), opts);
       throw Object.assign(new Error("fixture: ENOSPC"), { code: "ENOSPC" });
     }
+    if (staged(path) && String(path).endsWith("/cleanup"))
+      faults.onCleanupWrite?.();
     return actual.writeFileSync(path, data, opts);
   };
-  return { ...actual, default: { ...actual, writeFileSync }, writeFileSync };
+  const renameSync: typeof actual.renameSync = (from, to) => {
+    actual.renameSync(from, to);
+    if (
+      staged(from) &&
+      String(from).endsWith("/secrets.env") &&
+      String(to).endsWith("/secrets.env")
+    )
+      faults.afterSecretsRename?.();
+  };
+  const rmSync: typeof actual.rmSync = (path, opts) => {
+    if (
+      faults.stagingRmFailures > 0 &&
+      /\/\.secrets-staging\/[^/]+$/u.test(String(path))
+    ) {
+      faults.stagingRmFailures -= 1;
+      throw Object.assign(new Error("fixture: EIO"), { code: "EIO" });
+    }
+    return actual.rmSync(path, opts);
+  };
+  const patched = { writeFileSync, renameSync, rmSync };
+  return { ...actual, ...patched, default: { ...actual, ...patched } };
 });
 
 const secret = "fixture-value-private",
@@ -228,6 +258,9 @@ beforeEach(async () => {
   faults.beforePublish = undefined;
   faults.afterPublish = undefined;
   faults.shortWrite = false;
+  faults.afterSecretsRename = undefined;
+  faults.onCleanupWrite = undefined;
+  faults.stagingRmFailures = 0;
   dir = mkdtempSync(join(tmpdir(), "launch-matrix-"));
   file = join(dir, "launch.yaml");
   writeFileSync(file, config, { mode: 0o600 });
@@ -356,10 +389,10 @@ const crashRows = [
     replay: "stale_snapshot",
   },
   {
-    name: "B4 directory made, identity not yet recorded (empty directory stays)",
+    name: "B4 directory made, identity not yet recorded (empty directory removed)",
     mode: "exit-after-mkdir",
     kind: "write",
-    staging: "empty",
+    staging: "none",
     secrets: "unchanged",
     status: "not_applied",
     replay: "stale_snapshot",
@@ -473,7 +506,6 @@ test.each(crashRows)("$name", async (row) => {
   expect(readFileSync(file, "utf8")).not.toContain(fresher(preview.preview_id));
   const own = join(stagingRoot(), preview.preview_id);
   if (row.staging === "none") expect(existsSync(own)).toBe(false);
-  if (row.staging === "empty") expect(readdirSync(own)).toEqual([]);
   if (row.staging === "occupied")
     expect(readFileSync(join(own, "keep.txt"), "utf8")).toBe("keep");
   const mine = audit().slice(statusBefore);
@@ -641,4 +673,228 @@ test("H2: an unconfirmed answer is settled later without a restart", async () =>
   expect(audit().map((r) => r.status)).toEqual(["applied"]);
   expect((await confirm(data, undefined, "one")).status).toBe(200);
   expect(intentsLeft()).toEqual([]);
+});
+
+/*
+ * C-549#320 (confirmed in #336 / #337): single writer. Outside changes stop
+ * the operation; the outcome is committed on its own; clean-up is staged in
+ * the operation's own directory and retried until that directory is gone.
+ */
+const outside = `${secretsText}OUTSIDE=outside-private-value\n`;
+const replaceOutside = () => {
+  writeFileSync(`${secretsFile()}.outside`, outside, { mode: 0o600 });
+  renameSync(`${secretsFile()}.outside`, secretsFile());
+};
+const receiptsOf = (op: string) =>
+  rows(`SELECT installed FROM launch_web_changes WHERE operation='${op}'`);
+
+// T1 (V-2748:1): replaced right after our rename, before the stamp.
+test("T1: an outside file swapped in right after the rename stops the save and is kept", async () => {
+  const data = await confirmation(REPLACE);
+  faults.afterSecretsRename = replaceOutside;
+  const refused = await confirm(data, { KEY: fresh });
+  faults.afterSecretsRename = undefined;
+  expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
+  expect(readFileSync(secretsFile(), "utf8")).toBe(outside);
+  expect(readFileSync(file, "utf8")).toBe(config);
+  expect(receiptsOf(data.preview_id)).toEqual([]);
+  expect(audit()).toEqual([
+    { key: fresher(data.preview_id), action: "set", status: "not_applied" },
+  ]);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect((await confirm(data, undefined)).json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(outside);
+});
+
+// T2 (V-2748:1): edited in place right after our rename, before the stamp.
+test("T2: an outside line appended right after the rename stops the save and is kept", async () => {
+  const data = await confirmation(REPLACE);
+  faults.afterSecretsRename = () =>
+    appendFileSync(secretsFile(), "OUTSIDE=1\n");
+  const refused = await confirm(data, { KEY: fresh });
+  faults.afterSecretsRename = undefined;
+  expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
+  const expected = `${secretsText}${fresher(data.preview_id)}=${fresh}\nOUTSIDE=1\n`;
+  expect(readFileSync(secretsFile(), "utf8")).toBe(expected);
+  expect(readFileSync(file, "utf8")).toBe(config);
+  expect(receiptsOf(data.preview_id)).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(intentsLeft()).toEqual([]);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(expected);
+});
+
+// T3 (V-2748:1): replaced after the stamp, before the YAML publication.
+test("T3: an outside file swapped in before the YAML step stops the save and is kept", async () => {
+  const data = await confirmation(REPLACE);
+  faults.beforePublish = replaceOutside;
+  const refused = await confirm(data, { KEY: fresh });
+  faults.beforePublish = undefined;
+  expect(refused.json).toMatchObject({ error: { code: "stale_snapshot" } });
+  expect(readFileSync(secretsFile(), "utf8")).toBe(outside);
+  expect(readFileSync(file, "utf8")).toBe(config);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+});
+
+// Clear variant of T1: whether the clear still holds cannot be proved.
+test("T1 clear: an outside file swapped in right after a clear's rename is kept, unconfirmed", async () => {
+  await withSpare();
+  const data = await confirmation(CLEAR);
+  faults.afterSecretsRename = replaceOutside;
+  const unknown = await confirm(data, undefined, "clear");
+  faults.afterSecretsRename = undefined;
+  expect(unknown.json).toMatchObject({ error: { code: "write_unsettled" } });
+  expect(readFileSync(secretsFile(), "utf8")).toBe(outside);
+  expect(audit().at(-1)).toEqual({
+    key: "SPARE",
+    action: "clear",
+    status: "unconfirmed",
+  });
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect((await confirm(data, undefined, "clear")).json).toMatchObject({
+    error: { code: "write_unsettled" },
+  });
+});
+
+// T4 (V-2748:1 operator-update): the rotation is in effect; an outside line
+// arrives after the clean-up read the file.
+test("T4: an outside change during the old-key clean-up keeps the file and the old key", async () => {
+  const data = await confirmation(REPLACE);
+  faults.onCleanupWrite = () => {
+    faults.onCleanupWrite = undefined;
+    appendFileSync(secretsFile(), "OPERATOR=1\n");
+  };
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).toContain("OPERATOR=1");
+  expect(text).toContain(`KEY=${secret}`);
+  expect(text).toContain(`${fresher(data.preview_id)}=${fresh}`);
+  expect(readFileSync(file, "utf8")).toContain(fresher(data.preview_id));
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).toBe(text);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T5 (V-2748:2): short write, then removing the staging directory fails once.
+test("T5: a failed staging removal after a short write keeps the intent until it is removed", async () => {
+  const data = await confirmation(REPLACE);
+  faults.shortWrite = true;
+  faults.stagingRmFailures = 1;
+  const failed = await confirm(data, { KEY: fresh });
+  faults.shortWrite = false;
+  expect(failed.json).toMatchObject({ error: { code: "write_failed" } });
+  expect(faults.stagingRmFailures).toBe(0);
+  expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(rows("SELECT resolved, keys_done FROM launch_secret_intents")).toEqual(
+    [{ resolved: "failed", keys_done: 1 }],
+  );
+  expect(stagingEntries()).toEqual([data.preview_id]);
+  // The fault is gone: the next read finishes the clean-up.
+  await reread();
+  expect(stagingEntries()).toEqual([]);
+  expect(intentsLeft()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect((await confirm(data, undefined)).json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
+});
+
+// T6 (V-2748:2): short write, outcome committed, the process exits before
+// the staging directory goes.
+test("T6: an exit between the recorded failure and the staging removal is recovered", async () => {
+  const preview = await crashed("short-temp-exit-at-drop", REPLACE, {
+    KEY: fresh,
+  });
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(stagingEntries()).toEqual([preview.preview_id]);
+  await reread();
+  await reread();
+  expect(stagingEntries()).toEqual([]);
+  expect(intentsLeft()).toEqual([]);
+  expect(readFileSync(secretsFile(), "utf8")).toBe(secretsText);
+  expect(audit().map((r) => r.status)).toEqual(["not_applied"]);
+  expect(await replayIn(preview)).toEqual({ code: "stale_snapshot" });
+});
+
+// T7 (V-2748:3): published, then the old-key clean-up cannot write.
+test("T7: a failing old-key clean-up never changes the published result", async () => {
+  const data = await confirmation(REPLACE);
+  faults.onCleanupWrite = () => {
+    throw Object.assign(new Error("fixture: EIO"), { code: "EIO" });
+  };
+  const ok = await confirm(data, { KEY: fresh });
+  expect(ok.status, ok.body).toBe(200);
+  expect(receiptsOf(data.preview_id)).toEqual([{ installed: 1 }]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(rows("SELECT resolved, keys_done FROM launch_secret_intents")).toEqual(
+    [{ resolved: "applied", keys_done: 0 }],
+  );
+  await reread();
+  expect((await confirm(data, undefined)).status).toBe(200);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(readFileSync(secretsFile(), "utf8")).toContain(`KEY=${secret}`);
+  expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  // The fault is gone: the next read removes the old key and finishes.
+  faults.onCleanupWrite = undefined;
+  await reread();
+  expect(readFileSync(secretsFile(), "utf8")).not.toContain(`KEY=${secret}`);
+  expect(intentsLeft()).toEqual([]);
+  expect(stagingEntries()).toEqual([]);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect((await confirm(data, undefined)).status).toBe(200);
+});
+
+// T8 (V-2749:1): the clean-up copy is written, the process exits before its
+// rename; the copy is inside the own staging directory and is recovered.
+test("T8: an exit during the old-key clean-up leaves no secrets copy behind", async () => {
+  const preview = await crashed("exit-at-cleanup", REPLACE, { KEY: fresh });
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  expect(readdirSync(join(stagingRoot(), preview.preview_id))).toContain(
+    "cleanup",
+  );
+  await reread();
+  await reread();
+  expect(stagingEntries()).toEqual([]);
+  expect(intentsLeft()).toEqual([]);
+  expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  const text = readFileSync(secretsFile(), "utf8");
+  expect(text).not.toContain(`KEY=${secret}`);
+  expect(text).toContain(`${fresher(preview.preview_id)}=${fresh}`);
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(await replayIn(preview)).toEqual({ ok: true });
+});
+
+// T9: two Workbench confirmations at once run one after the other.
+test("T9: concurrent confirmations are serialised; the second sees the new version", async () => {
+  const one = await confirmation(REPLACE);
+  const two = await confirmation({
+    op: "edit_provider",
+    name: "gateway",
+    fields: { name: "Second" },
+  });
+  const answers = await Promise.all([
+    confirm(one, { KEY: fresh }, "first"),
+    confirm(two, undefined, "second"),
+  ]);
+  expect(answers.map((a) => a.status)).toEqual([200, 409]);
+  expect(answers[1]?.json).toMatchObject({
+    error: { code: "stale_snapshot" },
+  });
+  expect(audit().map((r) => r.status)).toEqual(["applied"]);
+  expect(intentsLeft()).toEqual([]);
+  expect(readFileSync(file, "utf8")).not.toContain("Second");
 });

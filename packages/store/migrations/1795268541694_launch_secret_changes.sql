@@ -23,7 +23,10 @@ CREATE INDEX launch_secret_changes_by_request ON launch_secret_changes(request_k
 -- (`staging_id`, recorded before any secret byte is written), its temp file
 -- (`temp_id`, recorded before the rename) and secrets.env right after the
 -- rename (`after_stamp`). `phase` records how far it got; `yaml_reserved` is
--- written in the same transaction as the host's receipt reservation. The
+-- written in the same transaction as the host's receipt reservation.
+-- `resolved` is committed on its own and never changes afterwards; key
+-- clean-up (`keys_done`) and removing the staging directory follow, and the
+-- row goes only once that directory is gone (C-549#320). The
 -- owner (process token, pid, start time) and `released` decide who may settle
 -- it. Key names and file identities only; nothing derived from a value.
 CREATE TABLE launch_secret_intents (
@@ -45,5 +48,6 @@ CREATE TABLE launch_secret_intents (
   owner_start TEXT NOT NULL,
   released INTEGER NOT NULL DEFAULT 0,
   resolved TEXT CHECK (resolved IN ('applied', 'failed', 'unconfirmed')),
+  keys_done INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );

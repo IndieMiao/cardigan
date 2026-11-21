@@ -56,6 +56,7 @@ import {
   SecretsUnsettled,
   secretTimes,
   secretValues,
+  serialSecrets,
   settleSecretIntents,
   settleSecrets,
 } from "./launch-settings-secrets.js";
@@ -298,7 +299,18 @@ export class LaunchSettings {
     this.previews.set(id, { change, version, owner, after: digest(text) });
     return { preview_id: id, version, diff };
   }
-  private async confirm(
+  /** Single writer (C-549#300): one confirmation at a time per directory. */
+  private confirm(
+    body: unknown,
+    key: unknown,
+    owner: string,
+    authorize: () => WebSession,
+  ) {
+    return serialSecrets(this.dir, () =>
+      this.confirmNow(body, key, owner, authorize),
+    );
+  }
+  private async confirmNow(
     body: unknown,
     key: unknown,
     owner: string,
