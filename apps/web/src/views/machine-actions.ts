@@ -153,8 +153,16 @@ class MachineActions {
   private state: MachineActionState;
   private readonly listeners = new Set<() => void>();
   private readonly links = new Set<Link>();
-  /** Checks this page saw end: a later read never follows them again. */
-  private readonly ended = new Set<string>();
+  /**
+   * Q-1083: what this page knows of checks that ended, by id, from any
+   * source (a detail record, a progress read or a start reply), whether
+   * followed or not. A check in here is never followed or read again.
+   * Recording a fact changes no button or feedback by itself.
+   */
+  private readonly ended = new Map<
+    string,
+    { readonly status: string; readonly failed_steps: readonly string[] }
+  >();
   /**
    * Q-1076: the page tick at which the followed check last changed or
    * ended, or a verification began. Only evidence sent after it (a detail
@@ -329,8 +337,18 @@ class MachineActions {
    * reply or a detail read sent at page tick `at` (progress reads only ever
    * concern the followed check, by token).
    */
-  private offer(job: { id: string; step: string }, at: number) {
-    if (this.ended.has(job.id)) return; // R4: it has ended, whatever says so
+  private offer(
+    job: { id: string; step: string },
+    at: number,
+    fromReply = false,
+  ) {
+    // R4: it has ended, whatever says so. The start reply only names this
+    // request's check; its result is the one already seen.
+    const known = this.ended.get(job.id);
+    if (known) {
+      if (fromReply) this.end({ id: job.id, ...known }, true);
+      return;
+    }
     const current = this.state.following;
     if (current?.id === job.id) {
       if (current.step !== job.step)
@@ -346,13 +364,15 @@ class MachineActions {
     this.verifyAgain();
   }
   private switchTo(job: { id: string; step: string }, at: number) {
-    // Another check: the previous one's replies and progress error go.
+    // Another check: the previous one's replies, result and errors go; its
+    // result stays in the machine's history (Q-1083).
     this.stopPolling();
     this.fence = machineReadTick();
+    window.clearTimeout(this.notices.check);
     const verify = this.state.verify;
     this.set({
       following: { id: job.id, step: job.step },
-      ...(this.state.check.retry ? { check: blank } : {}),
+      check: blank,
       // A mark only a read sent after the change may lift (unless this is it).
       ...(verify && at <= verify.at ? { verify: { at: this.fence } } : {}),
     });
@@ -378,11 +398,15 @@ class MachineActions {
     },
     fromReply = false,
   ) {
+    // Q-1083: the fact first, whoever follows what.
+    this.ended.set(job.id, {
+      status: job.status,
+      failed_steps: job.failed_steps,
+    });
     const { following, unknownCheck } = this.state;
     const current = following?.id === job.id;
     const seen = unknownCheck?.seen.includes(job.id) ?? false;
     if (!current && !seen && !fromReply) return;
-    this.ended.add(job.id);
     if (following && !current) {
       if (seen && unknownCheck)
         this.set({
@@ -481,7 +505,7 @@ class MachineActions {
         crypto.randomUUID(),
       );
       this.set({ sending: undefined });
-      if (job.status === "running") this.offer(job, sent);
+      if (job.status === "running") this.offer(job, sent, true);
       else this.end(job, true);
     } catch (cause) {
       if (uncertain(cause))
