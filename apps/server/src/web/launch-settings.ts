@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { realpathSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   launchRevision,
@@ -27,8 +27,9 @@ import {
   type Change,
   candidate,
   changeSchema,
+  providerUsers,
 } from "./launch-settings-change.js";
-import { ProfileChecks } from "./launch-settings-check.js";
+import { ProfileChecks, providerCheck } from "./launch-settings-check.js";
 import {
   digest,
   invalid,
@@ -40,6 +41,16 @@ import {
   snapshot,
   stale,
 } from "./launch-settings-file.js";
+import {
+  installSecrets,
+  planKeys,
+  plannedSecrets,
+  readSecretsText,
+  restoreSecrets,
+  secretTimes,
+  secretValues,
+  updateSecretsText,
+} from "./launch-settings-secrets.js";
 
 const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 const previewBody = z.strictObject({
@@ -49,12 +60,44 @@ const previewBody = z.strictObject({
 const confirmBody = z.strictObject({
   version: versionSchema,
   preview_id: z.uuid(),
+  /** C-549: values for exactly the keys the preview set; never stored or echoed. */
+  secrets: secretValues.optional(),
 });
-const checkBody = z.strictObject({
-  version: versionSchema,
-  profile: z.string(),
-  mode: z.enum(["metadata", "online"]),
-});
+const checkBody = z.union([
+  z.strictObject({
+    version: versionSchema,
+    profile: z.string(),
+    mode: z.enum(["metadata", "online"]),
+  }),
+  z.strictObject({
+    version: versionSchema,
+    provider: z.string(),
+    mode: z.literal("online"),
+  }),
+]);
+/** Nothing changed: our own partial write was undone (C-549). */
+const writeFailed = () =>
+  new HttpRejection(500, "write_failed", "写入失败，已恢复原文件，没有改动");
+/** Env names that usually hold a credential: their values are never shown. */
+const CREDENTIAL_NAME =
+  /KEY|TOKEN|SECRET|PASSW|AUTH|CREDENTIAL|COOKIE|PRIVATE|SESSION/iu;
+function envView(
+  env: Readonly<Record<string, string>>,
+  secrets: Record<string, string>,
+) {
+  return Object.entries(env).map(([name, value]) => {
+    const url = URL.parse(value);
+    const hidden =
+      CREDENTIAL_NAME.test(name) ||
+      publicFields(value, secrets) !== value ||
+      !!url?.username ||
+      !!url?.password;
+    return {
+      name: publicFields(name, secrets) as string,
+      value: hidden ? null : value,
+    };
+  });
+}
 
 function redactedFields(
   values: Record<string, unknown>,
@@ -136,17 +179,38 @@ export class LaunchSettings {
         };
       }),
     );
-    const providers = Object.entries(config.providers).map(([id, p]) => ({
-      ...redactedFields(
-        {
-          id,
-          name: p.name ?? p.codex?.name ?? id,
-          base_url: p.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null,
+    const times = secretTimes(this.store);
+    const providers = Object.entries(config.providers).map(([id, p]) => {
+      const users = providerUsers(f, id);
+      const last = this.checks.latest(providerCheck(id));
+      return {
+        ...redactedFields(
+          {
+            id,
+            name: p.name ?? p.codex?.name ?? id,
+            base_url:
+              p.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null,
+            harness: p.harness ?? null,
+            api: p.api ?? null,
+            profiles: users.profiles,
+            models: users.models,
+            secrets: Object.entries(p.secret_env).map(([env, key]) => ({
+              env,
+              key,
+              set: Object.hasOwn(secrets, key) && !!secrets[key],
+              updated_at: times.get(key) ?? null,
+            })),
+          },
+          secrets,
+        ),
+        secret_env: publicFields(p.secret_env, secrets, true),
+        env: envView(p.env, secrets),
+        last_check: last && {
+          ...last,
+          cli_version: publicFields(last.cli_version, secrets),
         },
-        secrets,
-      ),
-      secret_env: publicFields(p.secret_env, secrets, true),
-    }));
+      };
+    });
     return {
       version: f.version,
       profiles,
@@ -170,6 +234,19 @@ export class LaunchSettings {
         publicFields({ references: refs }, f.secrets),
       );
   }
+  /** The candidate must hold both before and after the secrets.env write. */
+  private checkSecrets(
+    f: SettingsFile,
+    next: LaunchConfig,
+    secrets: Record<string, string>,
+  ) {
+    try {
+      validateLaunchSecrets(next, secrets);
+      validateLaunchSecrets(f.config, secrets);
+    } catch {
+      throw invalid();
+    }
+  }
   private preview(body: unknown, owner: string) {
     const parsed = previewBody.safeParse(body);
     if (!parsed.success) throw invalid();
@@ -177,15 +254,14 @@ export class LaunchSettings {
       f = this.file();
     if (version !== f.version) throw stale();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { diff, text, raw } = candidate(f, change);
+    const { diff, text, raw, plan } = candidate(f, change);
+    let next: LaunchConfig;
     try {
-      validateLaunchSecrets(
-        parseCachedLaunchConfig(raw, this.dataDir),
-        f.secrets,
-      );
+      next = parseCachedLaunchConfig(raw, this.dataDir);
     } catch {
       throw invalid();
     }
+    this.checkSecrets(f, next, plannedSecrets(f.secrets, plan));
     const id = randomUUID();
     if (this.previews.size >= 256)
       this.previews.delete(this.previews.keys().next().value ?? "");
@@ -242,16 +318,23 @@ export class LaunchSettings {
       throw stale();
     const { change } = pending;
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { text, raw } = candidate(f, change);
+    const { text, raw, yaml, plan } = candidate(f, change);
+    // Values for exactly the keys the confirmed preview names, nothing else.
+    const values = parsed.data.secrets ?? {};
+    const { set, clear } = planKeys(plan);
+    if (
+      Object.keys(values).length !== set.length ||
+      set.some((k) => !Object.hasOwn(values, k))
+    )
+      throw invalid("secrets");
     // The host reloads via the refresh-aware catalog loader, not the offline preview cache.
-    const staged = await stageModelLaunchConfig(raw, this.dataDir).catch(() => {
-      throw invalid();
-    });
-    try {
-      validateLaunchSecrets(staged.config, f.secrets);
-    } catch {
-      throw invalid();
-    }
+    const staged = yaml
+      ? await stageModelLaunchConfig(raw, this.dataDir).catch(() => {
+          throw invalid();
+        })
+      : { config: f.config, catalog: undefined };
+    const secrets = plannedSecrets(f.secrets, plan, values);
+    this.checkSecrets(f, staged.config, secrets);
     const actor = authorize().member_id ?? "human";
     if (replay(false)) return success; // a concurrent identical request finished during preflight
     if (digest(text) !== pending.after || this.snapshot() !== version)
@@ -259,54 +342,103 @@ export class LaunchSettings {
     // A reference can be added while awaiting the catalog. Reject before even backing up,
     // then check once more under the SQLite publication lock.
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const suffix = randomUUID(),
-      temp = `${path}.${suffix}.tmp`,
-      opts = { flag: "wx", mode: 0o600 };
-    writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
-    try {
-      writeFileSync(temp, text, opts);
-      const revision = publishModelFile(
-        this.store,
-        path,
-        temp,
-        id,
-        f.original,
-        text,
-        this.dataDir,
-        f.fence,
-        staged.catalog,
-        "人员已确认修改启动配置，新运行将使用更新后的配置。",
-        {
-          hostProfiles: Object.keys(
-            selectableLaunchConfig({
-              config: staged.config,
-              secrets: f.secrets,
-            }).profiles,
-          ),
-          reserve: () =>
-            this.store.database
-              .prepare(
-                "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
-              )
-              .run(
-                id,
-                requestKey,
-                version,
-                change.op,
-                change.name,
-                actor,
-                new Date().toISOString(),
-              ),
-          checkReferences: (tx) => this.guardDelete(f, change, tx),
-        },
-      );
-      this.adopt({ config: staged.config, secrets: f.secrets, revision });
-    } catch (error) {
-      if (error instanceof HttpRejection) throw error;
-      if (this.snapshot() !== version) throw stale();
-      throw error;
-    } finally {
-      rmSync(temp, { force: true });
+    const receipt = (installed: boolean) =>
+      this.store.database
+        .prepare(
+          "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at,installed) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          id,
+          requestKey,
+          version,
+          change.op,
+          change.name,
+          actor,
+          new Date().toISOString(),
+          installed ? 1 : 0,
+        );
+    // C-549: secrets.env first. Every key the YAML can need is already there
+    // (both the old and the new YAML were checked against the new secrets), so
+    // a crash between the two renames leaves a valid pair. A failed YAML
+    // install puts the old secrets.env back.
+    let written: { original: string | null; text: string } | undefined;
+    if (set.length || clear.length) {
+      const original = readSecretsText(this.dir);
+      const next = updateSecretsText(original, values, clear);
+      const now = new Date().toISOString();
+      try {
+        installSecrets(
+          this.store,
+          this.dir,
+          this.dataDir,
+          f.fence,
+          original,
+          next,
+          () => {
+            const journal = this.store.database.prepare(
+              "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at) VALUES(?,?,?,?,?)",
+            );
+            for (const k of set) journal.run(id, k, "set", actor, now);
+            for (const k of clear) journal.run(id, k, "clear", actor, now);
+            if (!yaml) receipt(true);
+          },
+        );
+      } catch (error) {
+        if (error instanceof HttpRejection) throw error;
+        throw writeFailed();
+      }
+      written = { original, text: next };
+    }
+    if (yaml) {
+      const rollback = () => {
+        if (!written) return false;
+        // Only while the YAML is still the old one; an installed YAML needs its keys.
+        if (readFileSync(path, "utf8") !== f.original) return false;
+        restoreSecrets(this.store, this.dir, written.text, written.original);
+        this.store.database
+          .prepare("DELETE FROM launch_secret_changes WHERE operation=?")
+          .run(id);
+        return true;
+      };
+      const suffix = randomUUID(),
+        temp = `${path}.${suffix}.tmp`,
+        opts = { flag: "wx", mode: 0o600 };
+      try {
+        // After our own secrets.env rename, publish against the files as they are now.
+        const fence = written ? this.file() : f;
+        if (fence.original !== f.original) throw stale();
+        writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+        writeFileSync(temp, text, opts);
+        const revision = publishModelFile(
+          this.store,
+          path,
+          temp,
+          id,
+          f.original,
+          text,
+          this.dataDir,
+          fence.fence,
+          staged.catalog,
+          "人员已确认修改启动配置，新运行将使用更新后的配置。",
+          {
+            hostProfiles: Object.keys(
+              selectableLaunchConfig({ config: staged.config, secrets })
+                .profiles,
+            ),
+            reserve: () => receipt(false),
+            checkReferences: (tx) => this.guardDelete(f, change, tx),
+          },
+        );
+        this.adopt({ config: staged.config, secrets, revision });
+      } catch (error) {
+        const restored = rollback();
+        if (error instanceof HttpRejection) throw error;
+        if (restored) throw writeFailed();
+        if (this.snapshot() !== version) throw stale();
+        throw error;
+      } finally {
+        rmSync(temp, { force: true });
+      }
     }
     this.previews.delete(id);
     return success;
@@ -357,7 +489,9 @@ export class LaunchSettings {
       sendJson(
         res,
         202,
-        this.checks.start(f, input.data.profile, input.data.mode, actor),
+        "provider" in input.data
+          ? this.checks.startProvider(f, input.data.provider, actor)
+          : this.checks.start(f, input.data.profile, input.data.mode, actor),
       );
     }
   }
