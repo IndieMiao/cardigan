@@ -7,8 +7,11 @@ import {
   type Run,
   runsOf,
 } from "@cardigan/domain";
+import { recordWakeRefusal } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import { payloadString, payloadStrings } from "@cardigan/router";
 import {
+  type BellAttempt,
   moveNotification,
   type Store,
   type StoreTransactionContext,
@@ -21,7 +24,7 @@ import {
 import type { StandingResolver } from "./dispatch-inbox.js";
 
 /** Queuing another Run doesn't end the CLI turn. Only consider the last one that actually started. */
-export function systemEndedTurn(state: CommandState, owner: Assignment) {
+function systemEndedTurn(state: CommandState, owner: Assignment) {
   let last: Run | undefined;
   for (const r of runsOf(state.runs, owner.id)) {
     if (!r.started_at) continue;
@@ -48,6 +51,53 @@ export function systemEndedTurn(state: CommandState, owner: Assignment) {
     : undefined;
 }
 
+/** CandidateIndex groups unread retries by their original Run, separately from new work. */
+export function previousInboxTurn(
+  state: CommandState,
+  owner: Assignment,
+  notes: readonly Notification[],
+) {
+  const note = notes[0];
+  const reminder =
+    note?.attempts &&
+    note.run_id &&
+    runsOf(state.runs, owner.id).find(
+      (r) => r.id === note.run_id && r.status === "completed",
+    );
+  if (reminder) return { turn: reminder, reason: "unread_reminder" } as const;
+  const turn = owner.runtime_ref && systemEndedTurn(state, owner);
+  if (turn) return { turn, reason: "system_finished_turn" } as const;
+}
+
+/** Commit the deadline with the positive non-write receipt, not when its next retry is due. */
+export function settleRefusedWake(
+  store: Store,
+  attempt: BellAttempt,
+  owner: Assignment,
+  at: string,
+  observation: string,
+  timeoutMs: number,
+  standing?: StandingResolver,
+) {
+  recordWakeRefusal(store, attempt, owner, at, (tx, turn) => {
+    const notes = store.listNotifications({
+      project_id: attempt.project_id,
+      ids: attempt.notification_ids,
+      statuses: ["pending", "belled", "delivery_failed"],
+    });
+    if (attempt.notification_ids.length && !notes.length) return;
+    recordTurnWait(tx, store, loadCommandState(tx, attempt.project_id), at, {
+      owner,
+      turn,
+      reason: "first_write_guard",
+      observation,
+      notes,
+      timeoutMs,
+      standing,
+    });
+  });
+}
+
 /** Durable per-notification deadline. A restart or a new note in this stream cannot reset an older wait. */
 export function recordTurnWait(
   tx: StoreTransactionContext,
@@ -57,7 +107,11 @@ export function recordTurnWait(
   input: {
     owner: Assignment;
     turn: Run;
-    reason: "continuing_turn" | "system_finished_turn" | "first_write_guard";
+    reason:
+      | "continuing_turn"
+      | "system_finished_turn"
+      | "unread_reminder"
+      | "first_write_guard";
     observation: string;
     notes: readonly Notification[];
     timeoutMs: number;

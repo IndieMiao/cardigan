@@ -1854,7 +1854,12 @@ test("a prequeued Run sorts by its original trigger, not by the later notificati
   expect(readRunQueue(f.store)[0]?.project_id).toBe(other.project);
 });
 
-test("C-255: a standing decision records the old Run ending before the next dispatch without an extra bell", async () => {
+test("C-255: a standing decision records the old Run ending before the next dispatch without an extra bell", () =>
+  checkStandingDecision(false));
+test("a guarded first send after a standing decision starts its refusal deadline in the slot", () =>
+  checkStandingDecision(true));
+
+async function checkStandingDecision(refuses: boolean) {
   const extra = f.create();
   const { work_item_id: _workItem, ...base } = extra.assignment;
   const pm: Assignment = {
@@ -1961,6 +1966,11 @@ test("C-255: a standing decision records the old Run ending before the next disp
     ok: true,
     value: { process: "alive", agent: "done", observed_seq: 2 },
   });
+  if (refuses)
+    vi.mocked(runtime.wake).mockResolvedValueOnce({
+      ok: true,
+      value: { sent: false, withdrawn: true },
+    });
   await dispatcher.tick();
   const next = f
     .state()
@@ -1970,6 +1980,21 @@ test("C-255: a standing decision records the old Run ending before the next disp
     state: "done",
   });
   expect(runtime.wake).toHaveBeenCalledTimes(1);
+  if (refuses) {
+    expect(next?.bell_delivery?.refused_attempt_id).toBeTruthy();
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "bell_wake_deferred",
+        created_at: f.clock.now(),
+        payload: expect.objectContaining({
+          run_id: next?.id,
+          reason: "first_write_guard",
+          activity_source: "alive/done (send withdrawn)",
+        }),
+      }),
+    );
+    return;
+  }
   expect(endings()).toHaveLength(1);
   expect(f.state().runs.find((r) => r.id === previous.id)).toEqual(original);
   expect(() =>
@@ -1991,7 +2016,7 @@ test("C-255: a standing decision records the old Run ending before the next disp
   await dispatcher.tick();
   expect(runtime.wake).toHaveBeenCalledTimes(1);
   expect(f.state().runs.find((r) => r.id === next?.id)).toEqual(next);
-});
+}
 
 function standingSession(role_id: string, standing_mode?: "office" | "ops") {
   const extra = f.create();

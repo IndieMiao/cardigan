@@ -75,7 +75,6 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
-  recordWakeRefusal,
   redactFailureLine,
   runCapacitySnapshot,
   settleTestReviewLimits,
@@ -143,8 +142,9 @@ import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import {
   handoffUnread,
+  previousInboxTurn,
   recordTurnWait,
-  systemEndedTurn,
+  settleRefusedWake,
 } from "./dispatch-turn-guard.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
@@ -860,36 +860,44 @@ export class Dispatcher {
     let live = false;
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
-    const guardedTurn =
-      continuing || (a.runtime_ref ? systemEndedTurn(state, a) : undefined);
+    const guardedTurn = continuing
+      ? ({ turn: continuing, reason: "continuing_turn" } as const)
+      : previousInboxTurn(state, a, notes);
+    const reminder =
+      guardedTurn?.reason === "unread_reminder" ? guardedTurn.turn : undefined;
+    if (guardedTurn?.reason === "unread_reminder" && !a.runtime_ref) {
+      this.waitForTurn(
+        project,
+        a,
+        guardedTurn,
+        notes,
+        "no_runtime_ref",
+        queued,
+      );
+      return;
+    }
+    let observation = "unavailable";
     if (a.runtime_ref) {
       const runtimeRef = a.runtime_ref;
       const observed = await profileSpan("deliver.runtime_status", () =>
         this.options.runtime.status(runtimeRef).catch(() => undefined),
       );
+      observation = observed?.ok
+        ? `${observed.value.process}/${observed.value.agent}`
+        : (observed?.error.code ?? "unavailable");
       if (guardedTurn) {
         guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
         // Only a new Run can fall through to the existing replacement policy.
         if (
           !guard &&
           (continuing ||
+            reminder ||
             (observed?.ok
               ? observed.value.process !== "exited"
               : observed?.error.code !== "runtime_not_found" &&
                 observed?.error.code !== "runtime_unavailable"))
         ) {
-          const observation = observed?.ok
-            ? `${observed.value.process}/${observed.value.agent}`
-            : (observed?.error.code ?? "unavailable");
-          this.waitForTurn(
-            project,
-            a,
-            guardedTurn,
-            notes,
-            observation,
-            queued,
-            !!continuing,
-          );
+          this.waitForTurn(project, a, guardedTurn, notes, observation, queued);
           return;
         }
       }
@@ -938,7 +946,8 @@ export class Dispatcher {
           prior?.tool_catalog !== undefined &&
           prior.tool_catalog !== catalog));
     try {
-      if (continuing) snapshot = continuing;
+      if (reminder) snapshot = reminder;
+      else if (continuing) snapshot = continuing;
       else if (
         queued?.recovery_policy &&
         queued.recovery_policy.root_run_id !== queued.id
@@ -1003,7 +1012,13 @@ export class Dispatcher {
       );
       return;
     }
-    if (!continuing && replaceCatalog && !replaceProfile && a.runtime_ref) {
+    if (
+      !continuing &&
+      !reminder &&
+      replaceCatalog &&
+      !replaceProfile &&
+      a.runtime_ref
+    ) {
       // Same replacement path as a lost runtime: resume_or_replace force-
       // releases the live terminal and starts a fresh CLI session, so the new
       // session lists the current tools.
@@ -1030,7 +1045,7 @@ export class Dispatcher {
           live,
           sessionCatalog,
           inspection,
-          guardedTurn?.id,
+          guardedTurn?.turn.id,
           continuing,
         ),
       );
@@ -1162,22 +1177,24 @@ export class Dispatcher {
           ),
         );
         if (result.ok && result.value.withdrawn) {
-          recordWakeRefusal(
+          settleRefusedWake(
             this.options.store,
             job.attempt,
             job.assignment,
             this.clock.now(),
+            `${observation} (send withdrawn)`,
+            this.dispatchTimeoutMs,
+            this.options.standing,
           );
           // The adapter may repeatedly refuse in its send slot even when the earlier probe saw idle.
-          if (continuing && guard)
+          if (guardedTurn && (continuing || reminder) && guard)
             this.waitForTurn(
               project,
               a,
-              continuing,
+              guardedTurn,
               notes,
-              `alive/${guard.if_idle ? "idle" : "done"} (send withdrawn)`,
+              `${observation} (send withdrawn)`,
               queued,
-              true,
             );
           return;
         }
@@ -1380,12 +1397,16 @@ export class Dispatcher {
   private waitForTurn(
     project: ProjectId,
     a: Assignment,
-    turn: Run,
+    guarded: {
+      turn: Run;
+      reason: "continuing_turn" | "system_finished_turn" | "unread_reminder";
+    },
     notes: readonly Notification[],
     observation: string,
     queued: Run | undefined,
-    continuing: boolean,
   ) {
+    const { turn, reason } = guarded;
+    const continuing = reason === "continuing_turn";
     this.options.store.uow.run((tx) => {
       const fresh = this.loadState(tx, project);
       const owner = fresh.assignments.find((o) => o.id === a.id);
@@ -1404,7 +1425,7 @@ export class Dispatcher {
         (continuing
           ? !wakeIsCurrent(fresh, owner, turn.id) ||
             !fresh.runs.some((r) => r.id === turn.id && r.status === "running")
-          : systemEndedTurn(fresh, owner)?.id !== turn.id)
+          : previousInboxTurn(fresh, owner, notes)?.turn.id !== turn.id)
       )
         return;
       const pending = this.pendingForOwner(fresh, owner, notes);
@@ -1417,7 +1438,7 @@ export class Dispatcher {
       recordTurnWait(tx, this.options.store, fresh, this.clock.now(), {
         owner,
         turn,
-        reason: continuing ? "continuing_turn" : "system_finished_turn",
+        reason,
         observation,
         notes: pending,
         timeoutMs: this.dispatchTimeoutMs,
@@ -1535,9 +1556,6 @@ export class Dispatcher {
         a?.status !== "active" ||
         a.external ||
         !sameRef(a, expected) ||
-        (!continuing &&
-          a.runtime_ref &&
-          systemEndedTurn(state, a)?.id !== guardedTurn) ||
         a.snapshot_retry?.ready_at !== expected.snapshot_retry?.ready_at
       )
         return;
@@ -1636,6 +1654,10 @@ export class Dispatcher {
               pmNotificationState(state, n) === "obsolete"
             ),
         );
+      const previous = continuing
+        ? undefined
+        : previousInboxTurn(state, a, ready);
+      if (!continuing && previous?.turn.id !== guardedTurn) return;
       const waiting = this.queued(state, a);
       if (
         (!ready.length &&
@@ -1661,7 +1683,8 @@ export class Dispatcher {
       if (!cause && !waiting) return;
       let run =
         continuing ??
-        this.queued(state, a) ??
+        (previous?.reason === "unread_reminder" ? previous.turn : undefined) ??
+        waiting ??
         state.runs.find(
           (r) =>
             r.assignment_id === a.id &&
@@ -2106,14 +2129,13 @@ export class Dispatcher {
     owner: Assignment,
     run: Run,
   ) {
-    if (job.run.status !== "running")
-      return (
-        ["queued", "dispatched"].includes(run.status) ||
-        (run.status === "completed" && job.run.status === "completed")
-      );
+    if (job.run.status !== "running" && job.run.status !== "completed")
+      return ["queued", "dispatched"].includes(run.status);
+    // An unread reminder is bound to the old Run: recheck its cursor and owner
+    // at the send slot just as for a continuation, including if a new Run started.
     if (
       this.closing ||
-      run.status !== "running" ||
+      run.status !== job.run.status ||
       run.heartbeat_at !== job.run.heartbeat_at ||
       owner.last_mcp_activity_at !== job.assignment.last_mcp_activity_at ||
       this.busy(state, owner, run.id) ||

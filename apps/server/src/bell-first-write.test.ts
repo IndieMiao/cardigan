@@ -21,6 +21,8 @@ test("a proven guard refusal preserves the first write across the dispatch timeo
   const writes: string[] = [];
   vi.mocked(f.runtime.wake).mockImplementation(async (_, text, opts) => {
     if (refuseNext) {
+      // Dispatch preceded the slot refusal; their deadlines are not the same.
+      f.advance(500);
       busy = true;
       refuseNext = false;
     }
@@ -34,7 +36,7 @@ test("a proven guard refusal preserves the first write across the dispatch timeo
   await new Dispatcher(opts).tick();
   const id = f.latest().id;
   expect(f.latest().bell_delivery?.refused_attempt_id).toBeTruthy();
-  f.advance(1001);
+  f.advance(501);
   await new Dispatcher(opts).tick();
   expect(f.runtime.release).not.toHaveBeenCalled();
   expect(writes).toHaveLength(0);
@@ -105,7 +107,14 @@ test.each(["probe", "send slot"])(
   },
 );
 
-test("the cold publication boundary pins ordinary rework; supersession retires it without replay", async () => {
+test("the cold publication boundary pins ordinary rework; supersession retires it without replay", () =>
+  checkSupersession("cold write"));
+test("supersession after first write handoff retires ordinary rework without replay", () =>
+  checkSupersession("first write handoff"));
+
+async function checkSupersession(
+  boundary: "cold write" | "first write handoff",
+) {
   const f = await sharedRepairStore();
   const initial = f.read();
   const owner = initial.assignments.find((a) => a.id === f.owner);
@@ -125,7 +134,13 @@ test("the cold publication boundary pins ordinary rework; supersession retires i
           observed_seq: 1,
         },
       })),
-      wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
+      wake: vi.fn(async () => ({
+        ok: true,
+        value:
+          boundary === "cold write"
+            ? { sent: true }
+            : { sent: false, withdrawn: true },
+      })),
       release: vi.fn(async () => {
         exited = true;
         return { ok: true as const, value: undefined };
@@ -148,20 +163,39 @@ test("the cold publication boundary pins ordinary rework; supersession retires i
         r.status === "dispatched",
     );
   if (!run) throw Error("missing dispatched repair");
-  // A cold launch has no live BellAttempt binding to pass into this boundary.
-  expect(
-    armBellReceipt(
-      f.store,
-      f.project,
-      run.id,
-      owner.runtime_ref,
-      review.card_id,
-    ),
-  ).toBe(true);
-  confirmBellWrite(f.store, f.project, run.id, f.clock.now());
-  expect(
-    f.read().runs.find((r) => r.id === run.id)?.bell_delivery?.review_target,
-  ).toEqual({ delivery_id: f.target.id, target_sha: f.target.subject.value });
+  if (boundary === "cold write") {
+    // A cold launch has no live BellAttempt binding to pass into this boundary.
+    expect(
+      armBellReceipt(
+        f.store,
+        f.project,
+        run.id,
+        owner.runtime_ref,
+        review.card_id,
+      ),
+    ).toBe(true);
+    confirmBellWrite(f.store, f.project, run.id, f.clock.now());
+    expect(
+      f.read().runs.find((r) => r.id === run.id)?.bell_delivery?.review_target,
+    ).toEqual({
+      delivery_id: f.target.id,
+      target_sha: f.target.subject.value,
+    });
+  } else {
+    const waitEvents = () =>
+      f
+        .read()
+        .events.filter(
+          (e) =>
+            ["bell_wake_deferred", "bell_wake_escalated"].includes(e.type) &&
+            (e.payload as { run_id?: string }).run_id === run.id,
+        )
+        .map((e) => e.type);
+    expect(waitEvents()).toEqual(["bell_wake_deferred"]);
+    f.advance(1001);
+    await new Dispatcher(opts).tick();
+    expect(waitEvents()).toEqual(["bell_wake_deferred", "bell_wake_escalated"]);
+  }
   f.store.uow.run((tx) =>
     tx.deliveries.put(f.project, { ...f.target, status: "superseded" }),
   );
@@ -180,4 +214,4 @@ test("the cold publication boundary pins ordinary rework; supersession retires i
         (r) => r.recovery_policy?.root_run_id === run.id && r.id !== run.id,
       ),
   ).toEqual([]);
-});
+}

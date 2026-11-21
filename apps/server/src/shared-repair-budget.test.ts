@@ -11,6 +11,7 @@ test.each([
   ["first ordinary failure", "F", "send"],
   ["four refusals before first failure", "RRRRF", "send"],
   ["refusal between ordinary failures", "FRF", "send"],
+  ["repeated send-slot refusals reach the handoff deadline", "RR", "handoff"],
   ["ordinary budget exhausted", "FFFFF", "recover"],
   ["same exhaustion with refusals", "FRFFRFF", "recover"],
   ["unknown fifth attempt still waits for ACK", "FFFFU", "wait"],
@@ -100,6 +101,51 @@ test.each([
       expect(rows()).toEqual([...waited]);
       expect(release).not.toHaveBeenCalled();
       f.advance(1);
+    }
+    if (finalAction === "handoff") {
+      const waits = () =>
+        f
+          .read()
+          .events.filter(
+            (e) =>
+              e.type.startsWith("bell_wake_") &&
+              (e.payload as { run_id?: string }).run_id === run.id,
+          );
+      expect(waits()).toMatchObject([
+        {
+          type: "bell_wake_deferred",
+          created_at: new Date(
+            Date.parse(f.clock.now()) - 30_000,
+          ).toISOString(),
+        },
+      ]);
+      f.advance(570_000);
+      await tick();
+      expect(waits().map((e) => e.type)).toEqual([
+        "bell_wake_deferred",
+        "bell_wake_escalated",
+      ]);
+      const ids =
+        listBellAttempts(f.store.database, f.project, run.id).at(-1)
+          ?.notification_ids ?? [];
+      expect(ids).toHaveLength(1);
+      expect(
+        f.store.listNotifications({ project_id: f.project, ids }),
+      ).toMatchObject([
+        {
+          event_id: run.trigger_event_id,
+          status: "needs_attention",
+          attempts: 0,
+        },
+      ]);
+      const history = rows();
+      step = "";
+      f.advance(600_000);
+      await tick();
+      expect(rows()).toEqual(history);
+      expect(writes).toBe(0);
+      expect(release).not.toHaveBeenCalled();
+      return;
     }
     step = "";
     await tick();
