@@ -18,6 +18,7 @@ import {
   type BellAttempt,
   finishBellAttempt,
   type Store,
+  type StoreTransactionContext,
   settleWakeWithdrawal,
 } from "@cardigan/store";
 import { HostLaunchError } from "./errors.js";
@@ -134,6 +135,7 @@ export function recordWakeRefusal(
   attempt: BellAttempt,
   expected: Assignment,
   at: string,
+  onFirstWriteRefused?: (tx: StoreTransactionContext, run: Run) => void,
 ) {
   const project = attempt.project_id;
   store.uow.run((tx) => {
@@ -156,7 +158,31 @@ export function recordWakeRefusal(
           refused_attempt_id: attempt.id,
         },
       });
-    } else settleWakeWithdrawal(store.database, attempt, at);
+      onFirstWriteRefused?.(tx, run);
+    } else if (
+      settleWakeWithdrawal(store.database, attempt, at) &&
+      attempt.review_wake &&
+      run &&
+      !run.bell_delivery?.sent_at
+    ) {
+      // The slot can refuse before before_send arms a receipt. Preserve the exact
+      // target anyway, so supersession still retires this Run without replay.
+      const { delivery_id, target_sha } = attempt.review_wake;
+      if (!run.bell_delivery?.review_target)
+        tx.runs.put(project, {
+          ...run,
+          bell_delivery: {
+            ...run.bell_delivery,
+            run_id: run.id,
+            review_target: { delivery_id, target_sha },
+          },
+        });
+      if (
+        onFirstWriteRefused &&
+        wakeIsCurrent(loadCommandState(tx, project), expected, run.id)
+      )
+        onFirstWriteRefused(tx, run);
+    }
   });
 }
 
