@@ -13,16 +13,28 @@ import {
   mergeClassificationView,
   mergeShadowComparisons,
   postComment,
+  prepareDelivery,
   prepareMergeShadow,
   recordDecision,
   recordMergeCheck,
   recordMergeShadow,
   resolveDelegatedDecision,
   setProjectPreferences,
+  submitDelivery,
+  submitReview,
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { apply, assignment, human, id, role, value } from "./test-fixtures.js";
+import {
+  actor,
+  apply,
+  assignment,
+  human,
+  id,
+  role,
+  value,
+} from "./test-fixtures.js";
+import { testReviewFixture } from "./test-review/test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const { work_item_id: _work, ...base } = assignment(900, "pm");
@@ -246,7 +258,7 @@ test("C-553: a prepared audit is system-only, appends no business changes and de
   const input = { decision_id: f.q.id, paths: f.paths };
   expect(() => prepareMergeShadow(f.state, human, input)).toThrow();
   const append = required(prepareMergeShadow(f.state, system, input));
-  const effect = value(append(f.io));
+  const effect = value(append(f.io, f.state.test_review_trust));
   expect(effect.events.map((e) => e.type)).toEqual([
     "system_merge_shadow_recorded",
   ]);
@@ -258,6 +270,76 @@ test("C-553: a prepared audit is system-only, appends no business changes and de
   expect(
     prepareMergeShadow(apply(f.state, effect), system, input),
   ).toBeUndefined();
+});
+
+test("C-553: a prepared shadow cannot outlive its incremental review evidence", async () => {
+  const f = await testReviewFixture(3);
+  const product = (await f.deliver()).data;
+  f.start();
+  const proof = required(f.commit(f.review()).data.test_review);
+  const request = {
+    ...f.params(product.subject.value),
+    kind: "card_completion" as const,
+    requested_verifiers: [id("work_item", 3)],
+    plain_summary: { changed: "更新测试", impact: "验证更新", risk: "无" },
+  };
+  const receipt = value(
+    await prepareDelivery(f.state, actor(), request, f.verifier),
+  );
+  const completion = f.commit(
+    submitDelivery(f.state, actor(), request, receipt, f.io),
+  ).data;
+  f.commit(
+    submitReview(
+      f.state,
+      actor(3, "pm"),
+      {
+        delivery_id: completion.id,
+        target_sha: completion.subject.value,
+        kind: "product",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  f.commit(
+    setProjectPreferences(f.state, human, { system_merge_shadow: true }, f.io),
+  );
+  const state = f.state;
+  const q = required(
+    state.decisions.find((q) => q.trigger === "merge_confirmation"),
+  );
+  const input = { decision_id: q.id };
+  const blocker = "增量复核的隔离证据已失效，须完整复核";
+  expect(evaluateMergeShadow(state, q).pm_blockers).not.toContain(blocker);
+  const pending = required(prepareMergeShadow(state, system, input));
+  const checked: unknown[] = [];
+  const live = value(
+    pending(f.io, {
+      ...f.trust,
+      isCurrent: (binding) => {
+        checked.push(binding);
+        return f.trust.isCurrent(binding);
+      },
+    }),
+  );
+  expect(checked).toEqual([proof]);
+  expect(live.events[0]?.payload).toEqual(evaluateMergeShadow(state, q));
+  // Replacing the writer's port, or revoking a lease on the same port, needs no DB mutation.
+  expect(value(pending(f.io, undefined)).events).toEqual([]);
+  f.revoke();
+  const stale = value(pending(f.io, f.trust));
+  expect(stale.events).toEqual([]);
+  expect(stale.timeline).toEqual([]);
+  const next = required(prepareMergeShadow(state, system, input));
+  // A previously negative read must also be rechecked if the writer can attest it now.
+  expect(
+    value(next(f.io, { ...f.trust, isCurrent: () => true })).events,
+  ).toEqual([]);
+  expect(value(next(f.io, f.trust)).events[0]?.payload).toMatchObject({
+    would_confirm: false,
+    pm_blockers: expect.arrayContaining([blocker]),
+  });
 });
 
 test.each(Array.from({ length: 16 }, (_, i) => i + 1))(

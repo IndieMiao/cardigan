@@ -139,7 +139,12 @@ export class MergeShadowObserver {
               persistEffect(
                 tx,
                 project,
-                unwrap(emit({ clock: this.clock, ids: tx.ids })),
+                unwrap(
+                  emit(
+                    { clock: this.clock, ids: tx.ids },
+                    tx.test_review_trust,
+                  ),
+                ),
               ),
             );
         }

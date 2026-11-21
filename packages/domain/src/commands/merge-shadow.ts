@@ -46,6 +46,10 @@ import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
+import {
+  type TestReviewProofRead,
+  testReviewProofCurrent,
+} from "./test-review.js";
 
 /** Trusted host evidence only; evaluate the bindings against the snapshot fenced at commit. */
 export interface MergeShadowPaths {
@@ -131,6 +135,7 @@ export function evaluateMergeShadow(
   state: CommandState,
   q: Decision,
   evidence?: MergeShadowPaths,
+  proofReads?: TestReviewProofRead[],
 ) {
   const card = state.cards.find((c) => c.id === q.card_id);
   ensure(card, "not_found", "Card not found");
@@ -372,7 +377,7 @@ export function evaluateMergeShadow(
   );
   // Keep the existing PM gate as an additional safety net, never relax it. Noop is
   // the ADR's explicit host-verified exception to the check-result requirement.
-  const pmBlockers = pmMergeBlockers(state, q).filter(
+  const pmBlockers = pmMergeBlockers(state, q, proofReads).filter(
     (reason) =>
       !(
         current &&
@@ -398,7 +403,11 @@ export function evaluateMergeShadow(
 }
 
 type ShadowInput = { decision_id: DecisionId; paths?: MergeShadowPaths };
-function planShadow(d: CommandDraft, p: ShadowInput) {
+function planShadow(
+  d: CommandDraft,
+  p: ShadowInput,
+  proofReads?: TestReviewProofRead[],
+) {
   const state = d.state;
   if (projectPreferences(state).system_merge_shadow !== true)
     return { result: null };
@@ -408,7 +417,7 @@ function planShadow(d: CommandDraft, p: ShadowInput) {
     "validation_failed",
     "不是合并确认",
   );
-  const result = evaluateMergeShadow(state, q, p.paths);
+  const result = evaluateMergeShadow(state, q, p.paths, proofReads);
   const previous = eventsForDecision(state.events, q.id).findLast(
     (e) => e.type === "system_merge_shadow_recorded" && e.card_id === q.card_id,
   );
@@ -433,20 +442,32 @@ function planShadow(d: CommandDraft, p: ShadowInput) {
   };
 }
 
-/** For a host holding a versioned snapshot. Only allocate IDs after validating its revision. */
+/** Caller fences the DB revision; the append also checks live evidence before allocating IDs. */
 export function prepareMergeShadow(
   state: CommandState,
   actor: Actor,
   p: ShadowInput,
 ) {
+  const proofReads: TestReviewProofRead[] = [];
   const { emit } = planShadow(
     new CommandDraft(state, actor, "record_merge_shadow"),
     p,
+    proofReads,
   );
   return (
     emit &&
-    ((ports: CommandPorts) =>
-      command(state, actor, "record_merge_shadow", ports, emit))
+    ((ports: CommandPorts, trust: CommandState["test_review_trust"]) =>
+      command(state, actor, "record_merge_shadow", ports, (draft) => {
+        // The DB revision cannot see a revoked host lease. Replay only the
+        // external reads used by this prediction, against the writer's port.
+        if (
+          proofReads.every(
+            ({ proof, current }) =>
+              testReviewProofCurrent(trust, proof) === current,
+          )
+        )
+          emit(draft);
+      }))
   );
 }
 
