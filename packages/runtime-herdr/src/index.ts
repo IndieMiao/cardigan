@@ -10,6 +10,8 @@ export {
   isHcVersionCompatible,
 } from "./hc-version.js";
 
+import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { idleRetirementHelper } from "./idle-retirement.js";
@@ -174,6 +176,19 @@ export class HerdrRuntime implements Runtime {
     Promise<RuntimeResult<RuntimeObservation>>
   >;
   private readonly statusEpochs: Map<string, number>;
+  // Per-adapter, bounded and intentionally not persisted. A cold adapter must
+  // decline if the core is down, rather than trusting a PID from stored input.
+  private readonly localProcesses = new Map<
+    string,
+    {
+      id: string;
+      project: string;
+      assignment: string;
+      name: string;
+      launch: RuntimeRef["launch_generation"];
+      pid: number;
+    }
+  >();
   private constructor(
     readonly session: string,
     readonly socketPath: string,
@@ -377,7 +392,98 @@ export class HerdrRuntime implements Runtime {
     );
     if (typeof launched.address !== "string")
       fail("runtime_unavailable", "hc did not return a terminal address");
+    this.localProcesses.delete(launched.address);
     return launched.address as string;
+  }
+  /** Remember only the real local, non-kept terminal just created by this launch.
+   * The signal-zero probes only check existence. No PID crosses the runtime port. */
+  private async localProcessReceipt(
+    ref: RuntimeRef,
+    launch: RuntimeLaunch,
+    assignment: Assignment,
+  ) {
+    if (
+      this.execution.mode !== "local" ||
+      assignment.machine_id !== "local" ||
+      process.platform !== "linux"
+    )
+      return;
+    try {
+      const t: Terminal = await this.json(["get", ref.terminal_ref]);
+      const project = launch.labels.project;
+      if (!project) return;
+      this.checkRetirementTerminal(
+        ref,
+        { project_id: project, assignment_id: assignment.id },
+        t,
+      );
+      const pid = t.pid;
+      if (
+        !pid ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 1 ||
+        t.keep !== false ||
+        t.state !== "live" ||
+        t.labels?.run !== launch.labels.run
+      )
+        return;
+      process.kill(pid, 0);
+      process.kill(-pid, 0);
+      const id = randomUUID();
+      if (this.localProcesses.size >= 1024) {
+        const oldest = this.localProcesses.keys().next().value;
+        if (oldest) this.localProcesses.delete(oldest);
+      }
+      this.localProcesses.set(ref.terminal_ref, {
+        id,
+        project,
+        assignment: assignment.id,
+        name: ref.agent_name,
+        launch: ref.launch_generation,
+        pid,
+      });
+      return id;
+    } catch {
+      // This evidence is optional; do not roll back a successful launch.
+      return;
+    }
+  }
+  confirm_local_exit(ref: RuntimeRef, owner: RetirementIdentity) {
+    return result(async () => {
+      this.checkRef(ref);
+      const receipt = this.localProcesses.get(ref.terminal_ref);
+      if (
+        this.execution.mode !== "local" ||
+        ref.machine_id !== "local" ||
+        !receipt ||
+        receipt.id !== ref.local_process_receipt ||
+        receipt.project !== owner.project_id ||
+        receipt.assignment !== owner.assignment_id ||
+        receipt.name !== ref.agent_name ||
+        receipt.launch?.run_id !== ref.launch_generation?.run_id ||
+        receipt.launch?.generation !== ref.launch_generation?.generation
+      )
+        return false;
+      // PID reuse, permission errors, a surviving group and an inaccessible or
+      // replaced socket are all ambiguous. Never start hc or signal a process.
+      for (const pid of [receipt.pid, -receipt.pid]) {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ESRCH") return false;
+        }
+      }
+      try {
+        await lstat(this.socketPath);
+        return false;
+      } catch (err) {
+        return (
+          (err as NodeJS.ErrnoException).code === "ENOENT" &&
+          this.localProcesses.get(ref.terminal_ref) === receipt
+        );
+      }
+    });
   }
   provision(
     assignment: Assignment,
@@ -429,7 +535,8 @@ export class HerdrRuntime implements Runtime {
       };
       this.checkRef(ref);
       this.invalidateStatus(ref);
-      return ref;
+      const receipt = await this.localProcessReceipt(ref, launch, assignment);
+      return receipt ? { ...ref, local_process_receipt: receipt } : ref;
     });
   }
   find_launch(assignment: Assignment, launch: RuntimeLaunch) {
@@ -804,7 +911,11 @@ export class HerdrRuntime implements Runtime {
         )
       )
         fail(released.error.code, released.error.message);
-      const { agent_session_id: _previousSession, ...previous } = ref;
+      const {
+        agent_session_id: _previousSession,
+        local_process_receipt: _oldReceipt,
+        ...previous
+      } = ref;
       return {
         ...previous,
         terminal_ref: await this.launch(
@@ -973,9 +1084,7 @@ export class HerdrRuntime implements Runtime {
       )
         return failure("withdrawn", "probe_invalid");
       reason = "hc_failed";
-      const inspect = async () => {
-        stage = "confirm";
-        const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      const hasExited = (terminal: Terminal) => {
         check(terminal);
         if (terminal.state === "finished") return true;
         if (
@@ -985,6 +1094,10 @@ export class HerdrRuntime implements Runtime {
         )
           fail("runtime_conflict", "Idle terminal process changed");
         return false;
+      };
+      const inspect = async () => {
+        stage = "confirm";
+        return hasExited(await this.json(["get", ref.terminal_ref]));
       };
       const wait = async (ms: number) => {
         const until = Date.now() + ms;
@@ -1001,8 +1114,10 @@ export class HerdrRuntime implements Runtime {
           ["HUP", options.hangup_ms],
           ["TERM", options.terminate_ms],
         ] as const) {
+          if (options.system_finished_turn && mode === "HUP") continue;
           if (await inspect()) return exited;
           stage = mode;
+          let refused: RetirementEvidence["reason"] = "guard_changed";
           // The queue's guard runs after all waits and immediately before IO.
           if (
             !(await this.client.execIfCurrent(
@@ -1012,12 +1127,31 @@ export class HerdrRuntime implements Runtime {
                 attempted = true;
                 return true;
               },
+              options.system_finished_turn
+                ? async (raw) => {
+                    // Inside the acquired signal slot. Even if the address is reused
+                    // after this read, the helper can only signal the probed pidfd.
+                    const target: Terminal = JSON.parse(
+                      await raw.exec(["get", ref.terminal_ref, "--json"]),
+                    );
+                    if (hasExited(target)) {
+                      refused = "terminal_not_live";
+                      return false;
+                    }
+                    if (
+                      !["idle", "done", "unknown"].includes(
+                        target.status?.state ?? "unknown",
+                      )
+                    ) {
+                      refused = "terminal_busy";
+                      return false;
+                    }
+                    return true;
+                  }
+                : undefined,
             ))
           )
-            return failure(
-              attempted ? "uncertain" : "withdrawn",
-              "guard_changed",
-            );
+            return failure(attempted ? "uncertain" : "withdrawn", refused);
           if (await wait(budget)) return exited;
         }
         return failure("timeout", "still_live");

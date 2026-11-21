@@ -78,6 +78,7 @@ export interface HostOpsExecution {
   readonly context_usage?: ContextObservation;
   readonly automatic_context_restart?: boolean;
   readonly dispatch_stall_id?: string;
+  readonly system_finished_run_id?: string;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;

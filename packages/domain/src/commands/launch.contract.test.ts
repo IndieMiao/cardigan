@@ -48,7 +48,7 @@ async function deliverForReviewer() {
   );
   commit(submitDelivery(f.state, actor(), params, proof, f.io));
 }
-test("Role definitions preserve RoleReference compatibility; Runtime exposes seven typed ports", () => {
+test("Role definitions preserve RoleReference compatibility; Runtime exposes its typed operations", () => {
   const definition: Role = {
     role_id: "coder",
     version: 2,
@@ -90,6 +90,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     | "interrupt"
     | "resume_or_replace"
     | "human_entry"
+    | "confirm_local_exit"
     | "observe_retirement"
     | "retire_idle"
     | "release"
@@ -125,11 +126,12 @@ test.each(["human", "system"] as const)(
       actor: host,
     });
     f.state = apply(f.state, queued);
+    const bound = { ...ref, local_process_receipt: "fixture-receipt" };
     const sent = commit(
       dispatchRun(
         f.state,
         host,
-        { run_id: queued.data.id, runtime_ref: ref, base_sha: subject.value },
+        { run_id: queued.data.id, runtime_ref: bound, base_sha: subject.value },
         f.io,
       ),
     );
@@ -137,7 +139,7 @@ test.each(["human", "system"] as const)(
     expect(f.state.work_items.every((w) => w.status === "todo")).toBe(true);
     expect(f.state.assignments.find((a) => a.id === f.coder.id)).toMatchObject({
       runtime_state: "running",
-      runtime_ref: ref,
+      runtime_ref: bound,
       base_sha: subject.value,
     });
   },
@@ -326,6 +328,7 @@ test("invariant 12: blank model/CLI, changed Role snapshot and invalid dispatch 
     { branch: "" },
     { worktree_path: "" },
     { agent_session_id: "" },
+    { local_process_receipt: "" },
   ])
     reject(dispatch(r, { ...ref, ...patch }), "validation_failed");
   for (const base_sha of [undefined, "wrong"])
