@@ -82,7 +82,7 @@ const UNSEEN_MS = 500;
 /** The settings panel a setting is shown in (provided by SettingsPage). */
 export interface SettingPlace {
   project: string;
-  panel: "preferences" | "authorization" | "capacity" | "feishu";
+  panel: "preferences" | "authorization" | "machines" | "feishu";
   /** Shows the panel when it is hidden behind another one. */
   reveal: () => void;
 }

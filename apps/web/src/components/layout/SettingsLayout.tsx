@@ -190,6 +190,14 @@ export function SettingsRow({
   );
 }
 
+/**
+ * Rows in the bordered group frame without a group heading, for a settings
+ * drawer section that already has its title (e.g. a machine's Agent limit).
+ */
+export function SettingsRows({ children }: { children: ReactNode }) {
+  return <div className={styles.rows}>{children}</div>;
+}
+
 /** A read-only value in a row's control column (13px/20px, like descriptions). */
 export function SettingsValue({ children }: { children: ReactNode }) {
   return <span className={styles.value}>{children}</span>;
@@ -333,9 +341,81 @@ export function SettingsMarkdown({
 }
 
 /**
+ * A question asked above a drawer before an action (`--ui-layer-confirm`).
+ * Closing it (Esc, overlay) is the safe answer, `onCancel`. Focus goes back
+ * to what opened it, or to `fallbackFocus` when that is gone.
+ */
+export function SettingsConfirmDialog({
+  open,
+  title,
+  description,
+  describe = true,
+  cancelLabel,
+  confirmLabel,
+  destructive = false,
+  onCancel,
+  onConfirm,
+  fallbackFocus,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  /** False: the description is for assistive technology only. */
+  describe?: boolean;
+  cancelLabel: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  fallbackFocus?: () => HTMLElement | null;
+}) {
+  const opener = useRef<HTMLElement | null>(null);
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onCancel();
+      }}
+    >
+      <DialogContent
+        className={cn(styles.dialog, styles.confirm)}
+        overlayClassName={styles.confirm}
+        onOpenAutoFocus={() => {
+          // Still the control that opened it: focus moves in after this.
+          opener.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const target = opener.current?.isConnected
+            ? opener.current
+            : fallbackFocus?.();
+          target?.focus();
+        }}
+      >
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription className={describe ? undefined : "visually-hidden"}>
+          {description}
+        </DialogDescription>
+        <SettingsDialogActions>
+          <Button onClick={onCancel}>{cancelLabel}</Button>
+          <Button
+            variant={destructive ? "destructive" : "primary"}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </Button>
+        </SettingsDialogActions>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
  * C-494: closing a drawer form with unapplied edits asks first. Keeping the
- * edits is the default action; the dialog and its overlay sit above the
- * drawer (`--ui-layer-confirm`).
+ * edits is the default action.
  */
 export function SettingsDiscardDialog({
   open,
@@ -350,28 +430,17 @@ export function SettingsDiscardDialog({
   title?: string;
 }) {
   return (
-    <Dialog
+    <SettingsConfirmDialog
       open={open}
-      onOpenChange={(next) => {
-        if (!next) onKeep();
-      }}
-    >
-      <DialogContent
-        className={cn(styles.dialog, styles.confirm)}
-        overlayClassName={styles.confirm}
-      >
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription className="visually-hidden">
-          关闭后这次填写的内容不会保留。
-        </DialogDescription>
-        <SettingsDialogActions>
-          <Button onClick={onKeep}>继续编辑</Button>
-          <Button variant="destructive" onClick={onDiscard}>
-            放弃修改
-          </Button>
-        </SettingsDialogActions>
-      </DialogContent>
-    </Dialog>
+      title={title}
+      description="关闭后这次填写的内容不会保留。"
+      describe={false}
+      cancelLabel="继续编辑"
+      confirmLabel="放弃修改"
+      destructive
+      onCancel={onKeep}
+      onConfirm={onDiscard}
+    />
   );
 }
 

@@ -26,7 +26,6 @@ import { categoryLabels, defaultDelegation } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
-import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { FeishuSettings } from "./FeishuSettings.js";
 import { MachinesSettings } from "./MachinesSettings.js";
@@ -50,8 +49,7 @@ type SettingsTab =
   | "templates"
   | "employees"
   | "machines"
-  | "models"
-  | "capacity";
+  | "models";
 const settingsTabs: readonly SettingsTab[] = [
   "feishu",
   "preferences",
@@ -61,11 +59,11 @@ const settingsTabs: readonly SettingsTab[] = [
   "employees",
   "machines",
   "models",
-  "capacity",
 ];
 /** The open panel lives in the URL, so links and browser history restore it (C-518). */
 const routeTab = (tab: string | undefined): SettingsTab | undefined =>
-  settingsTabs.find((known) => known === tab);
+  // C-511: 并发与容量 moved into the machine detail; old links land there.
+  tab === "capacity" ? "machines" : settingsTabs.find((known) => known === tab);
 const routeVersion = (version: string | undefined): number | undefined =>
   version && /^[1-9][0-9]*$/u.test(version) ? Number(version) : undefined;
 
@@ -106,7 +104,7 @@ export function SettingsPage({
     shown.current.projectId !== projectId ? shown.current.tab : undefined;
   const tab = routeTab(filters.tab) ?? carried ?? "preferences";
   useEffect(() => {
-    if (tab !== "preferences" && routeTab(filters.tab) === undefined)
+    if (tab !== "preferences" && filters.tab !== tab)
       navigate.current({ tab }, { replace: true });
     shown.current = { projectId, tab };
   }, [projectId, tab, filters.tab]);
@@ -138,11 +136,11 @@ export function SettingsPage({
     }),
     [projectId, setTab],
   );
-  const capacityPlace = useMemo(
+  const machinesPlace = useMemo(
     () => ({
       project: projectId,
-      panel: "capacity" as const,
-      reveal: () => setTab("capacity"),
+      panel: "machines" as const,
+      reveal: () => setTab("machines"),
     }),
     [projectId, setTab],
   );
@@ -173,10 +171,8 @@ export function SettingsPage({
           >
             偏好
           </SettingsNavItem>
-          <SettingsNavItem
-            current={tab === "capacity"}
-            onClick={() => setTab("capacity")}
-          >
+          {/* C-511: the old entry, kept; limits are edited per machine now. */}
+          <SettingsNavItem current={false} onClick={() => setTab("machines")}>
             并发与容量
           </SettingsNavItem>
           <SettingsNavItem
@@ -237,15 +233,6 @@ export function SettingsPage({
           <FeishuSettings key={projectId} client={client} />
         </SettingPlaceContext.Provider>
       </RequestFeedbackScope>
-      <RequestFeedbackScope hidden={tab !== "capacity"}>
-        <SettingPlaceContext.Provider value={capacityPlace}>
-          <CapacitySettings
-            client={client}
-            projectId={projectId}
-            hidden={tab !== "capacity"}
-          />
-        </SettingPlaceContext.Provider>
-      </RequestFeedbackScope>
       {tab === "roles" && (
         <RolesSettings
           key={projectId}
@@ -274,12 +261,14 @@ export function SettingsPage({
         />
       )}
       {tab === "machines" && (
-        <MachinesSettings
-          key={projectId}
-          client={client}
-          projectId={projectId}
-          revision={machineRevision}
-        />
+        <SettingPlaceContext.Provider value={machinesPlace}>
+          <MachinesSettings
+            key={projectId}
+            client={client}
+            projectId={projectId}
+            revision={machineRevision}
+          />
+        </SettingPlaceContext.Provider>
       )}
       {tab === "models" && (
         <ModelsSettings key={projectId} client={client} projectId={projectId} />
