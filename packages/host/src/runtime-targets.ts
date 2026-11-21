@@ -837,6 +837,14 @@ export class RuntimeTargets implements Runtime {
   release(ref: RuntimeRef, options: { readonly force: boolean }) {
     return this.onRef(ref, (runtime) => runtime.release(ref, options));
   }
+  confirm_local_exit(ref: RuntimeRef, owner: RetirementIdentity) {
+    return this.invoke(
+      () => this.targetForRef(ref, owner.project_id),
+      (runtime) =>
+        runtime.confirm_local_exit?.(ref, owner) ??
+        Promise.resolve({ ok: true as const, value: false }),
+    );
+  }
   observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {
     return this.invoke(
       () => this.targetForRef(ref, identity.project_id),

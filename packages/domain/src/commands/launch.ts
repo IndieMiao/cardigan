@@ -599,6 +599,7 @@ export function dispatchRun(
       "worktree_path",
       "branch",
       "agent_session_id",
+      "local_process_receipt",
     ] as const)
       if (ref[field] !== undefined) text(ref[field], field);
     const path = ref.worktree_path ?? assignment.worktree_path;

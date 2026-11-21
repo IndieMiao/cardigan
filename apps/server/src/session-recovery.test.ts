@@ -236,6 +236,37 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
     }
   },
 );
+test.each([false, true])(
+  "queued system-ended Run with a stopped core requires independent local exit proof (%s)",
+  async (gone) => {
+    const s = scenario();
+    s.runtime.observe_retirement = vi.fn(async () => ({
+      ok: false,
+      error: { code: "runtime_unavailable", message: "core offline" },
+    }));
+    s.runtime.confirm_local_exit = vi.fn(async () => ({
+      ok: true,
+      value: gone,
+    }));
+    const d = new Dispatcher(s.options);
+    try {
+      await d.tick();
+      expect(s.runtime.confirm_local_exit).toHaveBeenCalledWith(
+        f.refFor(s.target.assignment),
+        { project_id: f.project, assignment_id: s.target.assignment.id },
+      );
+      expect(s.runtime.provision).toHaveBeenCalledTimes(gone ? 1 : 0);
+      expect(s.runtime.release).not.toHaveBeenCalled();
+      expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
+      expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
+        gone ? "dispatched" : "queued",
+      );
+    } finally {
+      await d.close();
+    }
+  },
+);
+
 test.each(["dispatched", "running", "unknown"])(
   "M5.6 an in-flight %s Run prevents automatic replacement",
   async (status) => {
