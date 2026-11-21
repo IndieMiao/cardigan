@@ -8,12 +8,32 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
+import type { MachineView } from "../api.js";
 import type { StreamCallbacks } from "../stream.js";
 import { fakeClient } from "../testing/fixtures.js";
+import { fixtureMachines } from "../testing/machines-fixture.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
+
+// C-511: the limit is edited in the machine detail; the old 并发与容量
+// link lands on the machine page.
+// The detail edits the limit its own machine read shows (Q-1013); here that
+// read always answers at once with the current limit.
+const local = fixtureMachines.find((m) => m.id === "local") as MachineView;
+const machineReads = (limit: () => number) => ({
+  machines: async () => ({ machines: [{ ...local, run_limit: limit() }] }),
+  machine: async () => ({ machine: { ...local, run_limit: limit() } }),
+});
+async function openLimit() {
+  const table = await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "本机" }));
+  return screen.findByRole<HTMLInputElement>("spinbutton", {
+    name: "本机 Agent 并发上限",
+  });
+}
 
 vi.stubGlobal(
   "ResizeObserver",
@@ -62,6 +82,7 @@ test("a superseded capacity read with an old value may not dismiss a true failur
   render(
     <App
       client={fakeClient({
+        ...machineReads(() => limit),
         executionCapacity: read,
         setRunLimit: () => write.promise,
         subscribe: (_, s) => {
@@ -72,9 +93,8 @@ test("a superseded capacity read with an old value may not dismiss a true failur
       })}
     />,
   );
-  const i = await screen.findByRole<HTMLInputElement>("spinbutton", {
-    name: "本机 Agent 并发上限",
-  });
+  const i = await openLimit();
+  expect(window.location.hash).toBe("#/p/p-1/settings?tab=machines");
   expect(i.value).toBe("6");
   // A reads the prior limit but is slow; a later SSE invalidation reads the current value first.
   holdNext = true;
@@ -86,7 +106,11 @@ test("a superseded capacity read with an old value may not dismiss a true failur
   fireEvent.change(i, { target: { value: "6" } });
   fireEvent.keyDown(i, { key: "Enter" });
   expect(i.readOnly).toBe(true);
-  fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+  // Leave while the detail is open (the modal hides the page from the
+  // accessibility tree; the link still navigates).
+  fireEvent.click(
+    screen.getByRole("link", { name: "帮助", exact: true, hidden: true }),
+  );
   await waitFor(() =>
     expect(
       screen.queryByRole("heading", { name: "设置", exact: true }),
@@ -133,6 +157,8 @@ test("a read that started before the write cannot confirm it while the actual re
   render(
     <App
       client={fakeClient({
+        // The detail keeps showing 4: only the shared capacity reads race.
+        ...machineReads(() => 4),
         executionCapacity: read,
         setRunLimit: () => write.promise,
         subscribe: (_, s) => {
@@ -143,9 +169,7 @@ test("a read that started before the write cannot confirm it while the actual re
       })}
     />,
   );
-  const input = await screen.findByRole<HTMLInputElement>("spinbutton", {
-    name: "本机 Agent 并发上限",
-  });
+  const input = await openLimit();
   expect(input.value).toBe("4");
   limit = 6;
   gate = old.promise;
@@ -154,7 +178,11 @@ test("a read that started before the write cannot confirm it while the actual re
   limit = 4;
   fireEvent.change(input, { target: { value: "6" } });
   fireEvent.keyDown(input, { key: "Enter" });
-  fireEvent.click(screen.getByRole("link", { name: "帮助", exact: true }));
+  // Leave while the detail is open (the modal hides the page from the
+  // accessibility tree; the link still navigates).
+  fireEvent.click(
+    screen.getByRole("link", { name: "帮助", exact: true, hidden: true }),
+  );
   await waitFor(() =>
     expect(
       screen.queryByRole("heading", { name: "设置", exact: true }),

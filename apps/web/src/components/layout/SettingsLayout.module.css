@@ -126,7 +126,10 @@
     gap: var(--ui-space-2);
     min-width: 0;
   }
-  .section ~ .section {
+  /* Drawer blocks (sections, and a caution group among them) are spaced alike. */
+  .section ~ .section,
+  .section ~ .group,
+  .group ~ .section {
     margin-block-start: var(--ui-space-6);
   }
   .section > h3 {

@@ -1306,6 +1306,107 @@ export interface MachineView {
   readonly bindings: readonly MachineBindingView[];
 }
 
+/** C-511: one explicit machine check (C-509), polled until it ends. */
+export interface MachineCheckJob {
+  readonly id: string;
+  readonly project_id: string;
+  readonly machine_id: string;
+  readonly kind: "machine" | "worker";
+  readonly status: "running" | "passed" | "failed";
+  /** The step in progress, `queued` before it starts, `finished` after. */
+  readonly step: string;
+  readonly started_at: string;
+  readonly checked_at: string;
+  readonly failed_steps: readonly string[];
+}
+
+/** C-511: what the add-worker wizard asks for (C-510); data only, no YAML. */
+export interface WorkerWizardInput {
+  readonly machine_id: string;
+  readonly label: string;
+  readonly os: "linux" | "macos";
+  readonly arch: "x64" | "arm64";
+  readonly host: string;
+  readonly port?: number;
+  readonly account: string;
+  readonly uid: number;
+  readonly gid: number;
+  readonly mcp_url: string;
+}
+export type WorkerWizardStepName =
+  | "configuration"
+  | "registration"
+  | "draft"
+  | "ssh"
+  | "account"
+  | "directories"
+  | "tools"
+  | "helpers"
+  | "resources"
+  | "mcp"
+  | "capabilities";
+export type WorkerWizardCommandKey =
+  | "account"
+  | "directories"
+  | "helpers"
+  | "tools";
+export interface WorkerWizardStep {
+  readonly step: WorkerWizardStepName;
+  readonly state: "pending" | "running" | "passed" | "blocked";
+  readonly elapsed_ms: number;
+  readonly reason?: string;
+  readonly next?: string;
+  readonly command_key?: WorkerWizardCommandKey;
+}
+/** A server-side wizard session; it lives 24 hours in the Web process. */
+export interface WorkerWizardView {
+  readonly id: string;
+  readonly machine_id: string;
+  readonly project_id: string;
+  readonly label: string;
+  readonly os: string;
+  readonly arch: string;
+  readonly phase:
+    | "preview"
+    | "ready"
+    | "running"
+    | "failed"
+    | "passed"
+    | "enabled";
+  readonly steps: readonly WorkerWizardStep[];
+  /** Admin commands for the target machine, as text; never run here. */
+  readonly commands: Readonly<Record<WorkerWizardCommandKey, string>>;
+  readonly command_guide: string;
+  readonly command_prerequisites: string;
+  readonly check_id?: string;
+  readonly error?: string;
+  /** The pending file change; private values are redacted by the server. */
+  readonly preview?: {
+    readonly preview_id: string;
+    readonly expires_at: string;
+    readonly file: string;
+    readonly diff: readonly {
+      readonly field: string;
+      readonly change: string;
+      readonly before?: string | number | boolean;
+      readonly after?: string | number | boolean;
+    }[];
+  };
+}
+
+/**
+ * One wizard step request. `confirm` writes the previewed worker file;
+ * `enable` turns on remote launch, which the reader confirms separately.
+ */
+export type WorkerWizardAction =
+  | { readonly kind: "run" | "cancel" | "launch-preview" }
+  | { readonly kind: "confirm"; readonly preview_id: string }
+  | {
+      readonly kind: "enable";
+      readonly preview_id: string;
+      readonly allow_remote_launch: true;
+    };
+
 /** C-75: one server page of an Assignment's Run history, newest first. */
 export interface ExecutionRunPage {
   readonly runs: readonly RunView[];
@@ -2098,12 +2199,52 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
-  /** C-512: read only; the machine actions belong to C-511. */
+  /** C-512: the machine read. */
   machines(projectId: string): Promise<{ machines: readonly MachineView[] }>;
   machine(
     projectId: string,
     machineId: string,
   ): Promise<{ machine: MachineView }>;
+  /**
+   * C-511: human-only machine actions (C-509) and the add-worker wizard
+   * (C-510). Optional so read-only fixtures need not provide them; the page
+   * hides an action its client lacks.
+   */
+  /**
+   * Each click carries its own operation key, but is never resent
+   * automatically: the server does not dedupe by key (a check that just
+   * ended is not joined), so a resend could act twice. After a failure the
+   * page reads the machine back before allowing another click.
+   */
+  checkMachine?(
+    projectId: string,
+    machineId: string,
+    idempotencyKey: string,
+  ): Promise<{ check: MachineCheckJob }>;
+  machineCheck?(
+    projectId: string,
+    machineId: string,
+    checkId: string,
+  ): Promise<{ check: MachineCheckJob }>;
+  setMachineDrain?(
+    projectId: string,
+    machineId: string,
+    drain: boolean,
+    idempotencyKey: string,
+  ): Promise<{ machine_id: string; status: string }>;
+  createWorkerWizard?(
+    projectId: string,
+    input: WorkerWizardInput,
+  ): Promise<{ wizard: WorkerWizardView }>;
+  workerWizard?(
+    projectId: string,
+    wizardId: string,
+  ): Promise<{ wizard: WorkerWizardView }>;
+  workerWizardAction?(
+    projectId: string,
+    wizardId: string,
+    action: WorkerWizardAction,
+  ): Promise<{ wizard: WorkerWizardView } | { cancelled: true }>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -2498,6 +2639,68 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<{ machine: MachineView }> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}`,
+    );
+  }
+  checkMachine(
+    projectId: string,
+    machineId: string,
+    idempotencyKey: string,
+  ): Promise<{ check: MachineCheckJob }> {
+    // The key identifies the click; it is never resent (see the interface).
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/check`,
+      { method: "POST", body: "{}", idempotencyKey, resend: false },
+    );
+  }
+  machineCheck(
+    projectId: string,
+    machineId: string,
+    checkId: string,
+  ): Promise<{ check: MachineCheckJob }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/checks/${encodeURIComponent(checkId)}`,
+    );
+  }
+  setMachineDrain(
+    projectId: string,
+    machineId: string,
+    drain: boolean,
+    idempotencyKey: string,
+  ): Promise<{ machine_id: string; status: string }> {
+    // Not resent: a late duplicate could undo a later opposite action.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/${drain ? "drain" : "resume"}`,
+      { method: "POST", body: "{}", idempotencyKey, resend: false },
+    );
+  }
+  createWorkerWizard(
+    projectId: string,
+    input: WorkerWizardInput,
+  ): Promise<{ wizard: WorkerWizardView }> {
+    // No automatic retry: wizard steps are not keyed on the server, so a
+    // failed reply is followed by a fresh read instead.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+  workerWizard(
+    projectId: string,
+    wizardId: string,
+  ): Promise<{ wizard: WorkerWizardView }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/${encodeURIComponent(wizardId)}`,
+    );
+  }
+  workerWizardAction(
+    projectId: string,
+    wizardId: string,
+    action: WorkerWizardAction,
+  ): Promise<{ wizard: WorkerWizardView } | { cancelled: true }> {
+    const { kind, ...body } = action;
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/${encodeURIComponent(wizardId)}/${kind}`,
+      { method: "POST", body: JSON.stringify(body) },
     );
   }
   execution(projectId: string): Promise<ExecutionData> {
@@ -3297,7 +3500,17 @@ export class HttpCardiganClient implements CardiganClient {
 
   private async request<T>(
     path: string,
-    init: { method?: string; body?: string; idempotencyKey?: string } = {},
+    init: {
+      method?: string;
+      body?: string;
+      idempotencyKey?: string;
+      /**
+       * C-511: whether a transport failure may be resent automatically. By
+       * default keyed writes are; an operation the server does not dedupe
+       * sends its key as an identifier only (`resend: false`).
+       */
+      resend?: boolean;
+    } = {},
     observe?: (response: Response) => void,
   ): Promise<T> {
     const method = init.method ?? "GET";
@@ -3318,7 +3531,7 @@ export class HttpCardiganClient implements CardiganClient {
       });
     const { response, lostReply } = await this.sendWithRetry(
       send,
-      isRetryableRequest(method, init.idempotencyKey),
+      init.resend ?? isRetryableRequest(method, init.idempotencyKey),
     );
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
