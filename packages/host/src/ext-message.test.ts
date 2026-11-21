@@ -913,6 +913,137 @@ test("a paused sender drops an expired unsent lease instead of sending outside i
   expect(fake.messages).toHaveLength(1);
 });
 
+const addTitledAction = (n: number) => {
+  addAction(n);
+  const id = `H-${n}` as const;
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, {
+      ...action,
+      id,
+      key: id,
+      handoff: {
+        title: `Fixture ${n}`,
+        summary: "",
+        instructions: "",
+        why_human: "",
+        expected_outcome: "",
+        expected_return: "",
+        rewritten_by: "human",
+        rewritten_at: now,
+      },
+    }),
+  );
+};
+
+test.each(
+  [10, 32].flatMap((limit) =>
+    ["after projection", "before projection", "mixed quiet items"].map(
+      (edge) => ({ limit, edge }),
+    ),
+  ),
+)(
+  "count-only ownership survives quiet hours: $edge, limit $limit",
+  async ({ limit, edge }) => {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: limit },
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+    };
+    now = "2026-01-01T00:00:59.999Z";
+    const first = sender();
+    first.recordStatus();
+    for (let n = 1; n <= 50; n++) addTitledAction(n);
+    await first.tick();
+    expect(fake.messages).toHaveLength(limit);
+    expect(rows()).toHaveLength(32);
+    store.close();
+    store = Store.open({ dataDir: dir });
+    advance(60_000);
+    if (edge === "after projection") {
+      store.observe({
+        transaction(kind) {
+          if (kind === "run" && rows().length === 50) {
+            store.observe(undefined);
+            advance(1);
+          }
+        },
+      });
+    } else advance(1);
+    if (edge === "mixed quiet items") addTitledAction(51);
+    await sender().tick();
+    expect(now).toBe("2026-01-01T00:02:00.000Z");
+    store.close();
+    store = Store.open({ dataDir: dir });
+    await sender().tick();
+    expect(fake.messages).toHaveLength(limit);
+    advance(60_000);
+    const awake = sender();
+    await awake.tick();
+    const summary = {
+      title: `${50 - limit} 条待处理`,
+      url: config.workbench_url,
+    };
+    const delivered = fake.messages.slice(limit);
+    if (edge === "mixed quiet items") {
+      expect(delivered).toHaveLength(2);
+      expect(delivered).toContainEqual(summary);
+      expect(delivered).toContainEqual(
+        expect.objectContaining({
+          total: 1,
+          items: [
+            expect.objectContaining({ item: "H-51", title: "Fixture 51" }),
+          ],
+        }),
+      );
+    } else expect(delivered).toEqual([summary]);
+    advance(60_000);
+    await awake.tick();
+    expect(fake.messages.slice(limit)).toEqual(delivered);
+  },
+);
+
+test("an older source first released during quiet hours is not a rate member", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+  };
+  const active = sender();
+  active.recordStatus();
+  addAction(90);
+  const held = { ...action, id: "H-90", key: "H-90" } as const;
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, {
+      ...held,
+      ready_when: { kind: "manual" },
+    }),
+  );
+  await active.tick();
+  expect(fake.messages).toHaveLength(0);
+  for (let n = 1; n <= 3; n++) addTitledAction(n);
+  await active.tick();
+  expect(fake.messages).toHaveLength(1);
+  advance(120_000);
+  store.uow.run((tx) => tx.human_actions.put(project_id, held));
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  advance(60_000);
+  await sender().tick();
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages.slice(1)).toHaveLength(2);
+  expect(fake.messages.slice(1)).toContainEqual({
+    title: "2 条待处理",
+    url: config.workbench_url,
+  });
+  expect(fake.messages.slice(1)).toContainEqual(
+    expect.objectContaining({
+      total: 1,
+      items: [expect.objectContaining({ item: "H-90" })],
+    }),
+  );
+});
+
 test.each(["claim", "dispatch"])(
   "entering quiet hours at %s preserves the overflow without spending a slot",
   async (edge) => {

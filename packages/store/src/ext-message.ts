@@ -44,7 +44,8 @@ export function hasExtMessage(
 }
 export interface ExtQuietOverflow {
   readonly stamp: string;
-  readonly members: string; // Pre-encoded item keys, never message content.
+  readonly members: string; // Quiet tail; both lists contain item keys, never message content.
+  readonly ordinary: string;
 }
 /** Only read the membership document in the read snapshot. */
 export function extQuietOverflow(
@@ -54,10 +55,14 @@ export function extQuietOverflow(
 ): ExtQuietOverflow | null {
   const row = prepare(
     db,
-    "SELECT stamp,members FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+    "SELECT stamp,members,ordinary FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
   ).get(project, channel);
   return row
-    ? { stamp: String(row.stamp), members: String(row.members) }
+    ? {
+        stamp: String(row.stamp),
+        members: String(row.members),
+        ordinary: String(row.ordinary),
+      }
     : null;
 }
 /** Constant-size fencing check inside the writer transaction. */
@@ -86,9 +91,15 @@ export function saveExtQuietOverflow(
   } else {
     prepare(
       db,
-      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members) VALUES (?,?,?,?)
-      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members`,
-    ).run(project, channel, checkpoint.stamp, checkpoint.members);
+      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary) VALUES (?,?,?,?,?)
+      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary`,
+    ).run(
+      project,
+      channel,
+      checkpoint.stamp,
+      checkpoint.members,
+      checkpoint.ordinary,
+    );
   }
 }
 export function projectExtMessage(
@@ -96,7 +107,7 @@ export function projectExtMessage(
   item: ExtMessageItem,
   channel: string,
   now: string,
-  deferred = false,
+  group: null | "queued" | "rate:queued" | boolean = null,
 ): void {
   prepare(
     db,
@@ -112,23 +123,34 @@ export function projectExtMessage(
     item.card_id ?? null,
     now,
     now,
-    deferred ? "queued" : null,
+    typeof group === "boolean" ? (group ? "queued" : null) : group,
   );
 }
 
-/** Freeze a quiet-hours batch in the same transaction as its first attempt. */
+/** Admit a single or freeze an open group. Neither a stale row nor the clock
+ * can move a member between the count-only and detailed payload classes. */
 export function groupExtMessage(
   db: DatabaseSync,
   row: ExtMessageRow,
   digest: string,
 ): void {
+  const from = row.digest_id;
+  const open = digest === "queued" || digest === "rate:queued";
+  if (
+    from === null
+      ? !open
+      : open ||
+        (from !== "queued" && from !== "rate:queued") ||
+        (from === "rate:queued") !== digest.startsWith("rate:")
+  )
+    return;
   prepare(
     db,
     `UPDATE ext_message_outbox SET digest_id = ?
     WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ?
     AND status = 'pending' AND attempts = 0 AND lease_id IS NULL
-    AND (digest_id IS NULL OR digest_id IN ('queued', 'rate:queued'))`,
-  ).run(digest, ...key(row));
+    AND digest_id IS ?`,
+  ).run(digest, ...key(row), from);
 }
 export function listExtMessages(
   db: DatabaseSync,

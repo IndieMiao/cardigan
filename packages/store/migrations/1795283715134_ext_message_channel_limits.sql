@@ -11,3 +11,6 @@ CREATE INDEX ext_message_pending_group ON ext_message_outbox(channel,digest_id) 
 CREATE INDEX ext_message_active_lease ON ext_message_outbox(lease_id) WHERE lease_id IS NOT NULL;
 -- NULL while the quota is exhausted; a finite source position once a slot returns.
 CREATE TABLE ext_message_rate_batches (channel TEXT PRIMARY KEY, through INTEGER);
+-- Exact ordinary-ready observations share the existing per-destination CAS stamp.
+-- Combined with an open rate batch, these retain ownership across bounded scans.
+ALTER TABLE ext_message_quiet_overflow ADD COLUMN ordinary TEXT NOT NULL DEFAULT '[]';

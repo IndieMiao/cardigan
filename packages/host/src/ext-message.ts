@@ -109,11 +109,13 @@ type Projection = {
   items: Map<string, ExtMessageItem>;
   incompleteDigests: ReadonlySet<string>;
   incompleteOrdinary: ReadonlySet<string>;
+  ordinary: ReadonlyMap<string, ReadonlySet<string>>;
   quietStamps: ReadonlyMap<string, string | null>;
 };
 const itemKey = (kind: string, id: string) => `${kind}:${id}`;
-// Called in the read snapshot: retain exact quiet-scan membership, not a time
-// watermark that could sweep in items only created or released after wake.
+// Save exact readiness observations (identities only). The channel's rate batch
+// plus an ordinary observation identifies overflow even before its outbox row
+// exists. The quiet tail stays separate; a timestamp alone proves neither.
 function planChannel(
   store: Store,
   project: ProjectId,
@@ -128,8 +130,25 @@ function planChannel(
   const remembered = new Set<string>(
     previous ? JSON.parse(previous.members) : [],
   );
+  const wasOrdinary = new Set<string>(
+    previous ? JSON.parse(previous.ordinary) : [],
+  );
+  const ordinary = new Set<string>();
+  const collecting = collectingExtRateBatch(store.database, channel);
+  const batchOpen = through !== null || collecting;
+  const unassigned = config.quiet_hours
+    ? new Set(
+        pendingExtMessages(store.database, project, channel)
+          .filter((row) => row.digest_id === null && row.attempts === 0)
+          .map((row) => itemKey(row.item_kind, row.item_id)),
+      )
+    : undefined;
   const remaining: string[] = [];
-  const writes = [];
+  const writes: {
+    item: ExtMessageItem;
+    channel: string;
+    group: "queued" | typeof rateQueue | null;
+  }[] = [];
   let complete = true;
   let incompleteDigest = false;
   let incompleteOrdinary = false;
@@ -141,52 +160,60 @@ function planChannel(
       continue;
     const key = itemKey(item.kind, item.item_id);
     const observed = remembered.has(key);
+    const pendingSingle = unassigned?.has(key);
+    if (!pendingSingle && hasExtMessage(store.database, item, channel))
+      continue;
+    // A fence bounds the batch, but is not evidence of ordinary readiness:
+    // quiet-born or newly released items in the same range retain their own format.
+    const earlier = wasOrdinary.has(key);
+    const sourceQuiet =
+      item.created_at !== undefined && extMessageQuiet(config, item.created_at);
+    const readyOutsideQuiet = item.ready && !quiet && !observed && !sourceQuiet;
+    const inRange =
+      through === null ||
+      !afterExtWatermark(store.database, project, item.event_id, through);
+    const rateMember = batchOpen && inRange && (earlier || readyOutsideQuiet);
     if (!item.ready && channel.startsWith("lark_app:")) {
       if (observed) remaining.push(key);
+      if (earlier && rateMember) ordinary.add(key);
       continue;
     }
-    if (hasExtMessage(store.database, item, channel)) continue;
-    const deferred =
-      quiet ||
-      observed ||
-      (item.created_at !== undefined &&
-        extMessageQuiet(config, item.created_at));
-    // Delay only newer ordinary rows until this cohort closes; the cursor
-    // includes the fence so their projection resumes even without new events.
-    if (
-      !deferred &&
-      through !== null &&
-      afterExtWatermark(store.database, project, item.event_id, through)
-    )
+    const deferred = !rateMember && (quiet || observed || sourceQuiet);
+    if (!deferred && !inRange) continue;
+    if (pendingSingle) {
+      if (readyOutsideQuiet || rateMember) ordinary.add(key);
       continue;
+    }
+    const group = rateMember ? rateQueue : deferred ? "queued" : null;
     if (writes.length < projectionBatch) {
-      writes.push({ item, channel, deferred });
+      writes.push({ item, channel, group });
+      if (config.quiet_hours && group === null && readyOutsideQuiet)
+        ordinary.add(key);
       continue;
     }
     complete = false;
-    if (quiet || observed) remaining.push(key);
+    if (deferred && (quiet || observed)) remaining.push(key);
+    if (config.quiet_hours && (readyOutsideQuiet || rateMember))
+      ordinary.add(key);
     if (item.ready) {
       if (deferred) incompleteDigest = true;
       else incompleteOrdinary = true;
     }
-    // Once both relevant groups are known incomplete, no need to scan further.
-    if (
-      !quiet &&
-      previous === null &&
-      incompleteOrdinary &&
-      (!config.quiet_hours || incompleteDigest)
-    )
-      break;
+    if (!config.quiet_hours && incompleteOrdinary) break;
   }
-  const members = remaining.length ? JSON.stringify(remaining) : null;
-  const next = !members
-    ? null
-    : previous?.members === members
-      ? previous
-      : { stamp: randomUUID(), members };
+  const members = JSON.stringify(remaining),
+    ordinaryKeys = JSON.stringify([...ordinary]);
+  const next =
+    !remaining.length && !ordinary.size
+      ? null
+      : previous?.members === members && previous.ordinary === ordinaryKeys
+        ? previous
+        : { stamp: randomUUID(), members, ordinary: ordinaryKeys };
   return {
     channel,
     writes,
+    collecting,
+    ordinary,
     complete: complete && next === null,
     incompleteDigest,
     incompleteOrdinary,
@@ -498,7 +525,11 @@ export class ExtMessageSender {
       if (version === undefined)
         throw new Error("External reminders require a versioned snapshot");
       const cursor = JSON.stringify([version, generation, [...rateBatches]]);
-      const projected = this.projectedVersions.get(projectId) === cursor;
+      const projected =
+        this.projectedVersions.get(projectId) === cursor &&
+        channels.every(
+          (c) => extQuietStamp(store.database, projectId, c) === null,
+        );
       if (
         projected &&
         channels.every(
@@ -538,6 +569,7 @@ export class ExtMessageSender {
           incompleteDigests: new Set(
             plans.filter((p) => p.incompleteDigest).map((p) => p.channel),
           ),
+          ordinary: new Map(plans.map((p) => [p.channel, p.ordinary])),
           quietStamps: new Map(
             plans.map((p) => [p.channel, p.next?.stamp ?? null]),
           ),
@@ -557,6 +589,8 @@ export class ExtMessageSender {
             (p) =>
               extRateBatch(store.database, p.channel) !==
                 rateBatches.get(p.channel) ||
+              collectingExtRateBatch(store.database, p.channel) !==
+                p.collecting ||
               !this.current(p.channel) ||
               extQuietStamp(store.database, projectId, p.channel) !==
                 (p.previous?.stamp ?? null),
@@ -568,12 +602,14 @@ export class ExtMessageSender {
           // ordinary overflow, even if every row in this write batch is deferred.
           if (
             (p.incompleteOrdinary ||
-              p.writes.some(({ item, deferred }) => item.ready && !deferred)) &&
+              p.writes.some(
+                ({ item, group }) => item.ready && group === null,
+              )) &&
             !this.slotAvailable(p.channel, config, this.clock.now())
           )
             deferExtRateBatch(store.database, p.channel);
-          for (const { item, channel, deferred } of p.writes)
-            projectExtMessage(store.database, item, channel, now, deferred);
+          for (const { item, channel, group } of p.writes)
+            projectExtMessage(store.database, item, channel, now, group);
           if (p.previous !== p.next)
             saveExtQuietOverflow(store.database, projectId, p.channel, p.next);
         }
@@ -611,7 +647,7 @@ export class ExtMessageSender {
     const eligible: { row: ExtMessageRow; item: ExtMessageItem }[] = [];
     const updates: {
       row: ExtMessageRow;
-      kind: "skip" | "fail" | "expire" | "queue";
+      kind: "skip" | "fail" | "expire";
     }[] = [];
     for (const row of candidates) {
       if (row.lease_until && row.lease_until > at) continue;
@@ -638,17 +674,13 @@ export class ExtMessageSender {
       }
       if (row.lease_id !== null) updates.push({ row, kind: "expire" });
       if (!item.ready) continue;
-      if (quiet) {
-        if (row.digest_id === null) updates.push({ row, kind: "queue" });
-        continue;
-      }
       eligible.push({ row, item });
     }
     if (!eligible.length && !updates.length)
       return quiet && candidate.digest_id === rateQueue
         ? "deferred"
         : undefined;
-    const first = eligible[0]?.item;
+    const first = quiet ? undefined : eligible[0]?.item;
     const appChannel = candidate.channel.startsWith("lark_app:");
     const firstProject = first?.project_id ?? project;
     const settings = appChannel ? this.options.gate?.(firstProject) : undefined;
@@ -695,7 +727,8 @@ export class ExtMessageSender {
         ).some(
           (p) => store.snapshotVersion(p) !== projections.get(p)!.version,
         ) ||
-        (candidate.digest_id === "queued" &&
+        ((candidate.digest_id === "queued" ||
+          (candidate.digest_id === null && !!config.quiet_hours)) &&
           extQuietStamp(store.database, project, candidate.channel) !==
             (projection.quietStamps.get(candidate.channel) ?? null)) ||
         (appChannel &&
@@ -717,8 +750,7 @@ export class ExtMessageSender {
           return "conflict" as const;
       }
       for (const { row, kind } of updates) {
-        if (kind === "queue") groupExtMessage(store.database, row, "queued");
-        else if (kind === "expire")
+        if (kind === "expire")
           this.settle(tx, row, "pending", "unknown", at, row.next_attempt_at);
         else if (kind === "skip") this.settle(tx, row, "skipped", null, at, at);
         else this.settle(tx, row, "failed", "unknown", at, at);
@@ -727,17 +759,29 @@ export class ExtMessageSender {
       const claimAt = this.clock.now();
       const sendBy = Date.parse(claimAt) + config.policy.timeout_ms;
       if (eligible.length) {
-        if (extMessageQuiet(config, claimAt)) {
-          for (const { row } of eligible)
-            if (row.digest_id === null)
-              groupExtMessage(store.database, row, "queued");
+        const single = digest === null && candidate.attempts === 0;
+        const enqueueRate = () => {
+          deferExtRateBatch(store.database, candidate.channel);
+          groupExtMessage(store.database, candidate, rateQueue);
+          return { queued: { ...candidate, digest_id: rateQueue } };
+        };
+        // Establish ownership independently of the send gate. A quiet-time
+        // observation alone cannot turn a newly ready item into prior overflow.
+        if (
+          single &&
+          (collectOverflow ||
+            collectingExtRateBatch(store.database, candidate.channel)) &&
+          (!quiet ||
+            projection.ordinary
+              .get(candidate.channel)
+              ?.has(itemKey(candidate.item_kind, candidate.item_id)))
+        )
+          return enqueueRate();
+        if (quiet || extMessageQuiet(config, claimAt)) {
+          if (single) groupExtMessage(store.database, candidate, "queued");
           return "deferred" as const;
         }
-        const single = digest === null && candidate.attempts === 0;
         if (
-          (single &&
-            (collectOverflow ||
-              collectingExtRateBatch(store.database, candidate.channel))) ||
           !reserveExtAttempt(
             store.database,
             candidate.channel.split(":")[0]!,
@@ -747,11 +791,7 @@ export class ExtMessageSender {
             sendBy,
           )
         ) {
-          if (single) {
-            deferExtRateBatch(store.database, candidate.channel);
-            groupExtMessage(store.database, candidate, rateQueue);
-            return { queued: { ...candidate, digest_id: rateQueue } };
-          }
+          if (single) return enqueueRate();
           return "deferred" as const;
         }
         // The last reservation may precede the first overflow outbox row. A
@@ -797,7 +837,7 @@ export class ExtMessageSender {
     if (typeof claimed === "string") return claimed;
     // Only our own ext_message_* audits changed since the checked snapshot;
     // they cannot affect outbound membership or Feishu action eligibility.
-    if (claimed.queued) return claimed.queued;
+    if ("queued" in claimed) return claimed.queued;
     for (const [p, version] of claimed.versions)
       projections.get(p)!.version = version;
     if (!message) return;
