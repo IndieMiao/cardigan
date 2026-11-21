@@ -53,8 +53,8 @@ function readRelease() {
       throw new Error("worker_release_changed");
     manifest[match[2] as string] = sha(data);
   }
-  const template = readFileSync(new URL("upgrade-worker-helpers.py", release));
-  if (sha(template) !== manifest["upgrade-worker-helpers.py"])
+  const template = readFileSync(new URL("manual-worker-upgrade.py", release));
+  if (sha(template) !== manifest["manual-worker-upgrade.py"])
     throw new Error("worker_release_changed");
   const bundle = gzipSync(git("archive", "--format=tar", rev, "deploy"));
   return { manifest, template, bundle, rev, bundleSha: sha(bundle) };

@@ -261,6 +261,49 @@ interface DeploymentActionInput {
   readonly reason?: "evidence_wait" | "worker_maintenance";
 }
 
+function supersedeHelperAction(
+  d: CommandDraft,
+  action: HumanAction,
+  reason: string,
+) {
+  const source = "worker_helper_superseded";
+  d.put("human_actions", {
+    ...action,
+    status: unwrap(transition("human_action", action.status, "cancel")),
+    cancellation: { reason, by: d.author, at: d.now, source },
+  });
+  d.emit("human_action_cancelled", undefined, {
+    human_action_id: action.id,
+    reason,
+    source,
+  });
+}
+
+/** Internal system handoff, not a claim that an administrator performed the install. */
+export function retireVerifiedHelperAction(
+  state: CommandState,
+  actor: Actor,
+  target: { machine_id: string; binding: string; key: string },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "record_deployment", ports, (d) => {
+    for (const action of d.list("human_actions")) {
+      if (
+        action.status !== "open" ||
+        action.helper_upgrade?.binding !== target.binding
+      )
+        continue;
+      const origin = workerHelperAction(state, action);
+      if (origin?.machine_id === target.machine_id && origin.key === target.key)
+        supersedeHelperAction(
+          d,
+          action,
+          "该绑定和版本已通过自动升级核验，不再需要人工安装",
+        );
+    }
+  });
+}
+
 export function requestDeploymentAction(
   state: CommandState,
   actor: Actor,
@@ -279,17 +322,7 @@ export function requestDeploymentAction(
         )
           continue;
         const reason = "已由当前发行版的 worker 升级待办取代";
-        const source = "worker_helper_superseded";
-        d.put("human_actions", {
-          ...previous,
-          status: unwrap(transition("human_action", previous.status, "cancel")),
-          cancellation: { reason, by: d.author, at: d.now, source },
-        });
-        d.emit("human_action_cancelled", undefined, {
-          human_action_id: previous.id,
-          reason,
-          source,
-        });
+        supersedeHelperAction(d, previous, reason);
       }
     }
     const prior = state.events.findLast(

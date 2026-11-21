@@ -1,0 +1,3 @@
+#!/bin/sh
+[ "$#" -eq 0 ] && [ "$(/bin/uname -s)" = Linux ] || exit 1
+exec /usr/bin/python3 -IB /opt/cardigan-helper-upgrade/upgrade-worker-helpers.py

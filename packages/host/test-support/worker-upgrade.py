@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 
-module = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'deploy/upgrade-worker-helpers.py'))
+module = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'deploy/manual-worker-upgrade.py'))
 upgrade = module['upgrade_files']
 names = module['HELPERS']
 digest = module['digest']

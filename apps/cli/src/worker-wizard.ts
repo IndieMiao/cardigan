@@ -196,6 +196,7 @@ export async function runWorkerCommand(
             passed,
             io.env,
             {
+              ...(mode === "check" ? { fullWorkerCheckId: job.id } : {}),
               browsersPath: () =>
                 loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
                   ?.browsers_path,

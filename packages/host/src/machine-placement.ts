@@ -15,6 +15,7 @@ import {
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
 import { workerCooldown } from "./worker-maintenance.js";
+import { upgradeHeld, upgradeHold } from "./worker-upgrade-gate.js";
 import { readWorktreePreparation } from "./worktree-preparation.js";
 
 /** Installed by server and standalone CLI; evaluated only during a new implicit assignment. */
@@ -116,6 +117,15 @@ export function configureMachinePlacement(
                 now,
                 observationFingerprint(binding, machine),
               ),
+              ...(id !== "local" && upgradeHeld(store, project, id)
+                ? {
+                    health: {
+                      status: "failed" as const,
+                      blockers: [upgradeHold],
+                      available: false,
+                    },
+                  }
+                : {}),
               ...(worker && id !== "local" && preparation
                 ? { worktree_preparation: preparation(worker) }
                 : {}),

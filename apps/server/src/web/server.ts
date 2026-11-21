@@ -1008,7 +1008,8 @@ async function serveProjectRoute(
         ]),
         now,
         context.runtimeUnknownGraceMs,
-        (project, machine) => context.checks.currentBinding(project, machine),
+        (project, machine) =>
+          context.checks.currentBinding(project, machine, "manual-upgrade"),
       ),
     });
     return;

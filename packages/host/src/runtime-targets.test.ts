@@ -25,6 +25,7 @@ import { HerdrRuntime } from "../../runtime-herdr/src/index.js";
 import { observeRegisteredMachine, RuntimeTargets } from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
 import { WorkerMcpError } from "./worker-mcp.js";
+import { upgradeHold } from "./worker-upgrade-gate.js";
 
 const value = <T>(result: RuntimeResult<T>): T => {
   if (!result.ok) throw new Error(result.error.message);
@@ -1353,3 +1354,36 @@ test.each([
     ).toBeUndefined();
   },
 );
+
+test("a manual confirmation may ignore drain but not a failed automatic upgrade", async () => {
+  const project = "fixture",
+    id = "worker-a";
+  store.uow.run((tx) => {
+    tx.machines.put(project, { ...machine(id, id), status: "draining" });
+    store.database
+      .prepare(
+        "INSERT INTO worker_helper_upgrades (project_id,machine_id,release_key,state) VALUES (?,?,?,'failed')",
+      )
+      .run(project, id, "fixture-release");
+  });
+  const observed = await observeRegisteredMachine(
+    {
+      store,
+      project,
+      machine: id,
+      observationId: "confirm-held",
+      helperConfirmation: {
+        binding:
+          router.resolve(project, id).execution.target?.fingerprint ??
+          "missing",
+      },
+      catalog: () => [],
+    },
+    () => router,
+  );
+  expect(observed.maintenance).toEqual({
+    status: "failed",
+    failed_steps: [upgradeHold],
+  });
+  expect(observed.health?.available).toBe(false);
+});
