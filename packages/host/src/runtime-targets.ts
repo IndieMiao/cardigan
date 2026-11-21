@@ -5,8 +5,11 @@ import type {
   IdleRetirementResult,
   Machine,
   ProjectId,
+  RetirementEvidence,
+  RetirementIdentity,
   Role,
   Runtime,
+  RuntimeErrorCode,
   RuntimeInteractionReader,
   RuntimeLaunch,
   RuntimeLaunchRecovery,
@@ -134,6 +137,30 @@ const failure = <T>(error?: unknown): RuntimeResult<T> => ({
         : "Runtime target rejected: target_invalid",
   },
 });
+
+// Only fixed routing refusals are fit for persistent retirement evidence.
+function retirementRefusal(
+  code: RuntimeErrorCode,
+  cause?: unknown,
+): RuntimeResult<IdleRetirementResult> {
+  let reason: RetirementEvidence["reason"] = "target_rejected";
+  if (cause instanceof RuntimeTargetError) {
+    switch (cause.reason) {
+      case "machine_unregistered":
+      case "worker_unconfigured":
+      case "target_mismatch":
+      case "target_changed":
+        reason = cause.reason;
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      outcome: "withdrawn",
+      evidence: { stage: "target", reason, runtime_code: code },
+    },
+  };
+}
 
 /** All production runtime entries share this resolver; refs contain no connection parameters. */
 export class RuntimeTargets implements Runtime {
@@ -552,7 +579,12 @@ export class RuntimeTargets implements Runtime {
   private async invoke<T>(
     target: () => Pick<Target, "execution" | "session">,
     call: (runtime: Adapter) => Promise<RuntimeResult<T>>,
+    onTargetRefusal?: (
+      code: RuntimeErrorCode,
+      cause?: unknown,
+    ) => RuntimeResult<T>,
   ): Promise<RuntimeResult<T>> {
+    let delegated = false;
     try {
       const resolved = target(),
         created = await this.adapter(resolved);
@@ -561,7 +593,15 @@ export class RuntimeTargets implements Runtime {
         JSON.stringify([resolved.execution, resolved.session]) !==
         JSON.stringify([current.execution, current.session])
       )
-        return failure();
+        return (
+          onTargetRefusal?.(
+            "invalid_launch",
+            new RuntimeTargetError("target_changed"),
+          ) ?? failure()
+        );
+      if (!created.ok && onTargetRefusal)
+        return onTargetRefusal(created.error.code);
+      delegated = created.ok;
       const result = created.ok ? await call(created.value) : created;
       return result.ok
         ? result
@@ -573,7 +613,9 @@ export class RuntimeTargets implements Runtime {
             },
           };
     } catch (error) {
-      return failure(error);
+      return !delegated && onTargetRefusal
+        ? onTargetRefusal("invalid_launch", error)
+        : failure(error);
     }
   }
   async provision(
@@ -703,12 +745,19 @@ export class RuntimeTargets implements Runtime {
   release(ref: RuntimeRef, options: { readonly force: boolean }) {
     return this.onRef(ref, (runtime) => runtime.release(ref, options));
   }
+  observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {
+    return this.invoke(
+      () => this.targetForRef(ref, identity.project_id),
+      (runtime) =>
+        runtime.observe_retirement?.(ref, identity) ??
+        Promise.resolve({ ok: true as const, value: "unknown" as const }),
+    );
+  }
   async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
   ) {
-    let delegated = false;
-    const retired = await this.invoke<IdleRetirementResult>(
+    return this.invoke<IdleRetirementResult>(
       () => this.targetForRef(ref, options.project_id),
       (runtime) => {
         if (!runtime.retire_idle)
@@ -719,23 +768,10 @@ export class RuntimeTargets implements Runtime {
               evidence: { stage: "target", reason: "unsupported" },
             },
           });
-        delegated = true;
         return runtime.retire_idle(ref, options);
       },
+      retirementRefusal,
     );
-    return !retired.ok && !delegated
-      ? ({
-          ok: true,
-          value: {
-            outcome: "withdrawn",
-            evidence: {
-              stage: "target",
-              reason: "target_rejected",
-              runtime_code: retired.error.code,
-            },
-          },
-        } as const)
-      : retired;
   }
   probeTerminal(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.probeTerminal(ref));

@@ -25,6 +25,15 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+/** A retirement of this exact session still owns its exit/credential decision. */
+export function retirementOwnsSession(a: Assignment): boolean {
+  return (
+    !!a.idle_retirement &&
+    JSON.stringify(canonical(a.idle_retirement.runtime_ref)) ===
+      JSON.stringify(canonical(a.runtime_ref))
+  );
+}
+
 function relatedOwners(state: CommandState, a: Assignment) {
   return state.assignments.filter(
     (other) =>
@@ -177,8 +186,7 @@ export function sessionMaintenanceCandidate(
     return excluded("recent_activity");
   if (
     a.idle_retirement?.phase === "waiting" &&
-    JSON.stringify(a.idle_retirement.runtime_ref) ===
-      JSON.stringify(a.runtime_ref) &&
+    retirementOwnsSession(a) &&
     Date.parse(a.idle_retirement.retry_at ?? "") > at
   )
     return excluded(

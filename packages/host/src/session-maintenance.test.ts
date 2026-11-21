@@ -70,6 +70,9 @@ function setup(dbPath = ":memory:", version = 1, manual = false) {
   let at = "2030-01-01T02:00:00Z";
   const runtime = {
     release: vi.fn(),
+    observe_retirement: vi
+      .fn<NonNullable<Runtime["observe_retirement"]>>()
+      .mockResolvedValue({ ok: true, value: "alive" }),
     status: vi.fn(async () => ({
       ok: true as const,
       value: {
@@ -478,19 +481,21 @@ test("lost acknowledgements preserve the fence; restart only observes exit and n
   try {
     await f.tick();
     expect(f.state().assignments[0]?.idle_retirement?.phase).toBe("stopping");
-    Object.assign(f.runtime, {
-      status: vi.fn(async () => ({
-        ok: false,
-        error: { code: "runtime_not_found", message: "snapshot missing" },
-      })),
+    f.runtime.status.mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "idle", observed_seq: 1 },
+    });
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: false,
+      error: { code: "runtime_not_found", message: "snapshot missing" },
     });
     f.setTime("2030-01-01T02:01:00Z");
     await f.tick();
     expect(retire).toHaveBeenCalledOnce();
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
-    f.runtime.status.mockResolvedValue({
+    f.runtime.observe_retirement.mockResolvedValue({
       ok: true,
-      value: { process: "exited", agent: "idle", observed_seq: 1 },
+      value: "exited",
     });
     f.setTime("2030-01-01T02:03:00Z");
     await f.tick();
@@ -521,7 +526,8 @@ test("no pidfd: recheck exit without signalling, keep the session usable and res
       await f.tick();
     }
     expect(retire).toHaveBeenCalledOnce();
-    expect(f.runtime.status).toHaveBeenCalledTimes(3);
+    expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
+    expect(f.runtime.status).not.toHaveBeenCalled();
     expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
       phase: "waiting",
       evidence,
@@ -537,15 +543,84 @@ test("no pidfd: recheck exit without signalling, keep the session usable and res
     expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
       { status: "pending" },
     ]);
-    f.runtime.status.mockResolvedValue({
+    f.runtime.observe_retirement.mockResolvedValue({
       ok: true,
-      value: { process: "exited", agent: "idle", observed_seq: 2 },
+      value: "exited",
     });
     f.setTime("2030-01-01T02:12:00Z");
     await f.tick();
     expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
       { status: "resolved" },
     ]);
+    expect(f.store.verifyToken(f.token.token)).toBeUndefined();
+    expect(retire).toHaveBeenCalledOnce();
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a published role waits for retirement of the same ref; neither missing status nor another session can revoke its token", async () => {
+  const f = setup(":memory:", 1);
+  const retire = vi.fn(async () => ({
+    ok: true,
+    value: {
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "pidfd_unavailable" },
+    },
+  }));
+  Object.assign(f.runtime, {
+    retire_idle: retire,
+    status: vi.fn(async () => ({
+      ok: false,
+      error: { code: "runtime_not_found", message: "missing" },
+    })),
+  });
+  try {
+    upgradeDeployedRoles(
+      f.store,
+      f.project,
+      [],
+      { coder: deploymentRolePolicyHash(f.source) },
+      new Set(["fixture"]),
+    );
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: false,
+      error: { code: "runtime_conflict", message: "wrong owner" },
+    });
+    await f.tick();
+    f.setTime("2030-01-01T02:01:00Z");
+    await f.tick();
+    expect(f.runtime.status).not.toHaveBeenCalled();
+    expect(f.state().assignments[0]).toMatchObject({
+      role_version: 1,
+      runtime_ref: f.a.runtime_ref,
+      idle_retirement: { phase: "waiting" },
+    });
+    expect(
+      f
+        .state()
+        .events.some((e) => e.type === "assignment_role_upgrade_started"),
+    ).toBe(false);
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
+    f.setTime("2030-01-01T02:03:00Z");
+    await f.tick();
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "session_replaced")
+        .map((e) => e.payload),
+    ).toMatchObject([
+      { reason: "idle_session_retired" },
+      { reason: "default_role_upgraded" },
+    ]);
+    expect(f.state().assignments[0]).toMatchObject({
+      role_version: 2,
+      runtime_ref: null,
+    });
     expect(f.store.verifyToken(f.token.token)).toBeUndefined();
     expect(retire).toHaveBeenCalledOnce();
   } finally {
@@ -568,13 +643,18 @@ test("a retirement claim appearing while locks are acquired is recovered, never 
           started_at: "2030-01-01T02:00:00Z",
           threshold_minutes: 60,
           failures: 0,
+          evidence: { stage: "HUP", reason: "pidfd_unavailable" },
           activity_at: f.a.last_mcp_activity_at,
         },
       }),
     );
     await tick;
     expect(retire).not.toHaveBeenCalled();
-    expect(f.runtime.status).toHaveBeenCalledOnce();
+    expect(f.runtime.observe_retirement).toHaveBeenCalledOnce();
+    expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
+      phase: "stopping",
+      last_failure: "uncertain",
+    });
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
   } finally {
     f.store.close();

@@ -18,6 +18,10 @@ export type RuntimeResult<T> =
 
 export const retirementReasons = {
   target_rejected: "回收目标未通过路由校验或连接失败",
+  machine_unregistered: "项目未登记这台机器，请先核对机器登记",
+  worker_unconfigured: "主机未配置这台机器的 worker，请先核对执行端配置",
+  target_mismatch: "会话引用与当前执行目标不匹配，请先核对目标绑定",
+  target_changed: "路由期间执行目标发生变化",
   unsupported: "运行时不支持空闲回收",
   hc_failed: "hc 请求未成功",
   identity_changed: "终端身份或启动代次不匹配",

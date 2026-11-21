@@ -27,6 +27,7 @@ import type {
   IdleRetirementResult,
   Machine,
   RetirementEvidence,
+  RetirementIdentity,
   Role,
   Runtime,
   RuntimeError,
@@ -807,6 +808,35 @@ export class HerdrRuntime implements Runtime {
     });
   }
 
+  private checkRetirementTerminal(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+    terminal: Terminal,
+  ) {
+    this.checkTerminal(ref, terminal);
+    if (
+      terminal.address !== ref.terminal_ref ||
+      terminal.labels?.project !== identity.project_id ||
+      terminal.labels?.assignment !== identity.assignment_id ||
+      (!ref.launch_generation && terminal.labels.generation !== undefined)
+    )
+      fail("runtime_conflict", "Idle terminal identity changed");
+  }
+  observe_retirement(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+  ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
+    return result(async () => {
+      this.checkRef(ref);
+      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      this.checkRetirementTerminal(ref, identity, terminal);
+      return terminal.state === "finished"
+        ? "exited"
+        : terminal.state === "live"
+          ? "alive"
+          : "unknown";
+    });
+  }
   async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
@@ -844,13 +874,8 @@ export class HerdrRuntime implements Runtime {
           terminal.state === "live" || terminal.state === "finished"
             ? terminal.state
             : "other";
-        this.checkTerminal(ref, terminal);
-        if (
-          terminal.labels?.project !== options.project_id ||
-          terminal.labels?.assignment !== options.assignment_id ||
-          terminal.address !== ref.terminal_ref ||
-          terminal.created_ms !== first.created_ms
-        )
+        this.checkRetirementTerminal(ref, options, terminal);
+        if (terminal.created_ms !== first.created_ms)
           fail("runtime_conflict", "Idle terminal identity changed");
       };
       check(first);

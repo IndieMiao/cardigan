@@ -1,5 +1,6 @@
 import {
   acknowledgeRun,
+  beginIdleSessionRetirement,
   cancelHumanAction,
   completeHumanAction,
   dispatchRun,
@@ -180,6 +181,77 @@ test("idle retirement defers bells and the next legal wake starts exactly one re
   await f.dispatcher.tick();
   expect(f.startRun).toHaveBeenCalledOnce();
   expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
+test("restart after a read-only claim lets a queued Run wake the same live session once", async () => {
+  const f = setup(false),
+    owner = f.owner(),
+    system = { kind: "system" as const, project_id: f.project };
+  const token = f.store.issueToken({
+    project_id: f.project,
+    assignment_id: owner.id,
+    role: { role_version: owner.role_version, allowed_tools: ["get_card"] },
+  });
+  f.store.touchAssignmentActivity(f.project, owner.id, f.clock.now());
+  f.advance(60 * 60_000 + 1);
+  const retire = vi
+    .fn<NonNullable<typeof f.runtime.retire_idle>>()
+    .mockResolvedValue({
+      ok: true,
+      value: {
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason: "pidfd_unavailable" },
+      },
+    });
+  f.runtime.retire_idle = retire;
+  f.runtime.observe_retirement = vi
+    .fn<NonNullable<typeof f.runtime.observe_retirement>>()
+    .mockResolvedValue({ ok: true, value: "alive" });
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  f.advance(60_000);
+  f.apply(
+    (s, a, p) => beginIdleSessionRetirement(s, a, owner.id, 60, p),
+    system,
+  );
+  expect(f.owner().idle_retirement).toMatchObject({
+    phase: "stopping",
+    observe_only: true,
+  });
+  // Crash after commit, before I/O. New business work arrives during the interruption.
+  f.comment();
+  const trigger = f
+    .state()
+    .events.filter((e) => e.type === "comment_posted")
+    .at(-1)!;
+  const queued = f.store.uow.run((tx) => {
+    const id = tx.ids.next(f.project, "run");
+    tx.runs.put(f.project, {
+      id,
+      assignment_id: owner.id,
+      role_version: owner.role_version,
+      trigger_event_id: trigger.id,
+      kind: "followup",
+      status: "queued",
+      model: "fixture",
+      agent_cli_version: "1",
+      queue_entered_at: f.clock.now(),
+      outcome: null,
+      summary: "",
+    });
+    return id;
+  });
+  await host.upgradeIdleAssignmentRoles(f.store, f.project, f.runtime, f.clock);
+  expect(f.owner().idle_retirement).toMatchObject({ phase: "waiting" });
+  await f.dispatcher.tick();
+  await f.dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === queued)?.status).toBe(
+    "dispatched",
+  );
+  expect(f.runtime.wake).toHaveBeenCalledOnce();
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(retire).toHaveBeenCalledOnce();
+  expect(f.owner().runtime_ref).toEqual(owner.runtime_ref);
+  expect(f.store.verifyToken(token.token)).toBeTruthy();
 });
 
 test.each(["triage", "legacy", "complete", "cancel"] as const)(

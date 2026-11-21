@@ -974,10 +974,25 @@ test.each([
           runtime_code: "runtime_conflict",
         },
       });
-    if (scenario === "no_pidfd")
+    if (scenario === "no_pidfd") {
       expect(result).toMatchObject({
         evidence: { stage: "probe", exit_code: 20 },
       });
+      const identity = { project_id: "fixture", assignment_id: "A-1" };
+      expect(value(await runtime.observe_retirement(owned, identity))).toBe(
+        "alive",
+      );
+      finished = true;
+      expect(value(await runtime.observe_retirement(owned, identity))).toBe(
+        "exited",
+      );
+      expect(
+        await runtime.observe_retirement(owned, {
+          ...identity,
+          assignment_id: "A-2",
+        }),
+      ).toMatchObject({ ok: false });
+    }
     expect(modes).toEqual(
       outcome === "withdrawn"
         ? ["probe"]

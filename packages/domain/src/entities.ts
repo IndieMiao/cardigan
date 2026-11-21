@@ -485,6 +485,8 @@ interface AssignmentFields {
   };
   readonly idle_retirement?: {
     readonly phase: "stopping" | "waiting";
+    /** This claim cannot send signals. Absent on legacy or signal-capable claims. */
+    readonly observe_only?: true;
     readonly runtime_ref: RuntimeRef;
     readonly started_at: Timestamp;
     readonly activity_at?: Timestamp;

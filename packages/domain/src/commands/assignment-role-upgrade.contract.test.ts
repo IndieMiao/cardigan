@@ -92,6 +92,55 @@ test("idle role upgrade preserves the owner and work, fences launches until exit
     ).events,
   ).toEqual([]);
 });
+test("retirement owns its session even in backoff; legacy overlapping upgrades need exact exit", () => {
+  const s = setup(),
+    owner = s.assignments[0]!,
+    io = ports();
+  const ref = {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t1",
+    agent_name: "fixture",
+  };
+  const state = {
+    ...s,
+    assignments: [
+      {
+        ...owner,
+        runtime_ref: ref,
+        idle_retirement: {
+          phase: "waiting" as const,
+          runtime_ref: ref,
+          started_at: io.clock.now(),
+          threshold_minutes: 60,
+          failures: 1,
+        },
+      },
+    ],
+  };
+  expect(
+    beginIdleAssignmentRoleUpgrade(state, system, owner.id, io),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  const overlap = {
+    ...state,
+    assignments: [
+      {
+        ...state.assignments[0]!,
+        role_upgrade: { role_version: 2, previous_runtime_ref: ref },
+      },
+    ],
+  };
+  for (const observed of [undefined, { ...ref, terminal_ref: "t2" }])
+    expect(
+      finishIdleAssignmentRoleUpgrade(overlap, system, owner.id, io, observed),
+    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  expect(
+    value(finishIdleAssignmentRoleUpgrade(overlap, system, owner.id, io, ref))
+      .events,
+  ).toMatchObject([
+    { type: "session_replaced", payload: { idle_retirement_confirmed: true } },
+  ]);
+});
 test.each(["queued", "dispatched", "acked", "running", "unknown"] as const)(
   "a %s Run keeps its pinned version",
   (status) => {

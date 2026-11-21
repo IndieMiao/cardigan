@@ -6,7 +6,6 @@ import {
   type RetirementEvidence,
   type RetirementSettlement,
   type Runtime,
-  retirementObserveOnly,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
   stoppedByHuman,
@@ -128,9 +127,8 @@ export async function retireIdleSessions(
       attempted++;
       const pendingEvidence: RetirementEvidence = pending.idle_retirement
         .evidence ?? { stage: "confirm", reason: "confirmation_pending" };
-      const observeOnly = retirementObserveOnly(pendingEvidence);
-      const unconfirmed =
-        claim?.recovering === false && observeOnly ? "observing" : "uncertain";
+      const observeOnly = pending.idle_retirement.observe_only === true;
+      const unconfirmed = observeOnly ? "observing" : "uncertain";
       let result: RetirementSettlement = {
         outcome: unconfirmed,
         evidence: pendingEvidence,
@@ -140,17 +138,20 @@ export async function retireIdleSessions(
         if (claim?.recovering || observeOnly) {
           // Unknown signals keep the fence; a known non-signal capability
           // failure permits legitimate work between read-only observations.
-          const observed = await runtime.status(ref);
+          const observed = await runtime.observe_retirement?.(ref, {
+            project_id: project,
+            assignment_id: a.id,
+          });
           result =
-            observed.ok && observed.value.process === "exited"
+            observed?.ok && observed.value === "exited"
               ? { outcome: "exited" }
               : {
                   outcome: unconfirmed,
                   evidence: {
                     ...pendingEvidence,
-                    observation: observed.ok
-                      ? observed.value.process
-                      : observed.error.code,
+                    observation: observed?.ok
+                      ? observed.value
+                      : (observed?.error.code ?? "unknown"),
                   },
                 };
         } else if (runtime.retire_idle) {

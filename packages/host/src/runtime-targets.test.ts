@@ -155,6 +155,7 @@ const factory = vi.fn(async (options: HerdrOptions) => {
       resume_or_replace: call("resume_or_replace", ref),
       human_entry: call("human_entry", `attach ${ref.terminal_ref}`),
       release: call("release", undefined),
+      observe_retirement: call("observe_retirement", "alive" as const),
       retire_idle: call("retire_idle", { outcome: "exited" }),
       probeTerminal: call("probeTerminal", "alive" as const),
       captureAgent: call("captureAgent", "fixture 1.0"),
@@ -284,6 +285,12 @@ test.each([
           before_signal: () => true,
         }),
       );
+      value(
+        await router.observe_retirement(ref, {
+          project_id: "fixture",
+          assignment_id: "A-1",
+        }),
+      );
       value(await router.probeTerminal(ref));
       for await (const event of router.events(ref)) value(event);
       expect(
@@ -299,6 +306,7 @@ test.each([
         "human_entry",
         "release",
         "retire_idle",
+        "observe_retirement",
         "probeTerminal",
         "events",
       ]);
@@ -430,6 +438,38 @@ test("cross-project/machine/alias/session/prefix/fingerprint/generation referenc
   ).toMatchObject({ ok: false });
   expect(calls).not.toHaveBeenCalled();
 });
+test("retirement reports distinct allowlisted routing refusals before delegation; unknown failures never persist text", async () => {
+  const ref: RuntimeRef = {
+    machine_id: "unlisted",
+    runtime_machine: "unlisted",
+    terminal_ref: "unlisted/t1",
+    agent_name: "fixture",
+  };
+  const options = {
+    project_id: "fixture",
+    assignment_id: "A-1",
+    hangup_ms: 1,
+    terminate_ms: 1,
+    before_signal: vi.fn(),
+  };
+  const check = async (reason: string) =>
+    expect(value(await router.retire_idle(ref, options))).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "target", reason, runtime_code: "invalid_launch" },
+    });
+  await check("machine_unregistered");
+  store.uow.run((tx) =>
+    tx.machines.put("fixture", machine("unlisted", "unlisted")),
+  );
+  await check("worker_unconfigured");
+  vi.spyOn(router, "resolve").mockImplementationOnce(() => {
+    throw new Error("private worker details");
+  });
+  await check("target_rejected");
+  expect(calls).not.toHaveBeenCalled();
+  expect(options.before_signal).not.toHaveBeenCalled();
+});
+
 test("alias rebinding and a generation change invalidate persisted refs across router restarts and open subscriptions", async () => {
   const ref = value(
     await router.provision(
@@ -471,7 +511,7 @@ test("alias rebinding and a generation change invalidate persisted refs across r
     ok: true,
     value: {
       outcome: "withdrawn",
-      evidence: { stage: "target", reason: "target_rejected" },
+      evidence: { stage: "target", reason: "target_mismatch" },
     },
   });
   workers = workers.map((w) =>

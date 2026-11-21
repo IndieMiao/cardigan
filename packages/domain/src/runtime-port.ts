@@ -50,13 +50,20 @@ export interface RuntimeInteractionReader {
     identity: { project_id: string; assignment_id: string; harness: string },
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
+export interface RetirementIdentity {
+  readonly project_id: string;
+  readonly assignment_id: string;
+}
 export interface Runtime {
+  /** Read-only. Only a finished terminal with this exact identity proves exit. */
+  observe_retirement?(
+    ref: RuntimeRef,
+    identity: RetirementIdentity,
+  ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
   /** Optional host-only idle retirement. Never escalates beyond HUP/TERM. */
   retire_idle?(
     ref: RuntimeRef,
-    options: {
-      readonly project_id: string;
-      readonly assignment_id: string;
+    options: RetirementIdentity & {
       readonly hangup_ms: number;
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;

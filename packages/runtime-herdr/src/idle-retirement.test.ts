@@ -112,6 +112,39 @@ test("new work at the final guard and uncertain identity prevent every signal", 
     value: { outcome: "withdrawn", evidence: { reason: "identity_changed" } },
   });
 });
+test("only a single exact get can prove retirement exit; snapshot, missing labels or a recycled address cannot", async () => {
+  const f = adapter(),
+    runtime = await f.create(),
+    get = vi.mocked(f.client.exec);
+  const generation = { run_id: "R-1" as const, generation: "g1" };
+  const generated = { ...ref, launch_generation: generation };
+  const labels = { ...f.terminal.labels, run: "R-1", generation: "g1" };
+  for (const [owned, address, tags, ok] of [
+    [ref, ref.terminal_ref, f.terminal.labels, true],
+    [ref, ref.terminal_ref, { project: "fixture", assignment: "A-2" }, false],
+    [ref, ref.terminal_ref, { project: "other", assignment: "A-1" }, false],
+    [ref, ref.terminal_ref, undefined, false],
+    [ref, "t2", f.terminal.labels, false],
+    [ref, ref.terminal_ref, labels, false],
+    [generated, ref.terminal_ref, { ...labels, run: "R-2" }, false],
+    [generated, ref.terminal_ref, { ...labels, generation: "g2" }, false],
+    [generated, ref.terminal_ref, labels, true],
+  ] as const) {
+    get
+      .mockClear()
+      .mockResolvedValueOnce(
+        JSON.stringify({ address, state: "finished", labels: tags }),
+      );
+    const observed = await runtime.observe_retirement(owned, options());
+    expect(observed).toMatchObject(
+      ok ? { ok: true, value: "exited" } : { ok: false },
+    );
+    expect(get.mock.calls.map(([args]) => args)).toEqual([
+      ["get", ref.terminal_ref, "--json"],
+    ]);
+  }
+});
+
 test("a changed process after HUP cannot receive TERM and is not reported exited", async () => {
   const f = adapter(),
     runtime = await f.create();

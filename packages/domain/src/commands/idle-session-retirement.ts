@@ -5,7 +5,10 @@ import {
   retirementObserveOnly,
   retirementReasons,
 } from "../runtime-types.js";
-import { sessionMaintenanceCandidate } from "../session-maintenance.js";
+import {
+  retirementOwnsSession,
+  sessionMaintenanceCandidate,
+} from "../session-maintenance.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -43,12 +46,7 @@ export function beginIdleSessionRetirement(
       "illegal_transition",
       "Session is not an idle candidate",
     );
-    const prior =
-      a.idle_retirement &&
-      JSON.stringify(a.idle_retirement.runtime_ref) ===
-        JSON.stringify(a.runtime_ref)
-        ? a.idle_retirement
-        : undefined;
+    const prior = retirementOwnsSession(a) ? a.idle_retirement : undefined;
     const next: Assignment = {
       ...a,
       idle_retirement: {
@@ -60,8 +58,11 @@ export function beginIdleSessionRetirement(
           ? { activity_at: a.last_mcp_activity_at }
           : {}),
         failures: prior?.failures ?? 0,
-        ...(retirementObserveOnly(prior?.evidence) && prior?.evidence
-          ? { evidence: prior.evidence }
+        ...(prior?.phase === "waiting" &&
+        prior.last_failure === "unavailable" &&
+        prior.evidence &&
+        retirementObserveOnly(prior.evidence)
+          ? { observe_only: true, evidence: prior.evidence }
           : {}),
         ...(prior?.notice_sent ? { notice_sent: true } : {}),
       },
@@ -93,7 +94,7 @@ export function settleIdleSessionRetirement(
       pending = a.idle_retirement;
     if (!pending || pending.phase !== "stopping") return a;
     ensure(
-      JSON.stringify(a.runtime_ref) === JSON.stringify(pending.runtime_ref) ||
+      retirementOwnsSession(a) ||
         (a.runtime_ref === null && stoppedByHuman(state.events, a.id)),
       "illegal_transition",
       "Retiring session changed",
@@ -102,6 +103,11 @@ export function settleIdleSessionRetirement(
       Number.isSafeInteger(retryMs) && retryMs > 0 && retryMs <= 2147483647,
       "validation_failed",
       "Invalid retirement retry delay",
+    );
+    ensure(
+      result.outcome !== "observing" || pending.observe_only === true,
+      "illegal_transition",
+      "Signal-capable retirement cannot release its fence by observation alone",
     );
     const card = d.work(a.work_item_id!).card_id;
     const { idle_retirement: _retirement, ...identity } = a;

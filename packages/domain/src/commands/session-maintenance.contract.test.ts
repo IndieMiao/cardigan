@@ -159,6 +159,21 @@ test("retirement fences launch without revoking identity; only trusted exit clea
   expect(refused.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.idle_retirement?.phase).toBe("stopping");
+  // Even if a signal attempt reported the same platform error as a read-only probe,
+  // neither new nor legacy signal-capable claims can release the dispatch fence.
+  expect(
+    settleIdleSessionRetirement(
+      apply(pending, unknown),
+      system,
+      a.id,
+      {
+        outcome: "observing",
+        evidence: { stage: "HUP", reason: "pidfd_unavailable" },
+      },
+      60000,
+      io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
   const changed = {
     ...pending,
     assignments: pending.assignments.map((owner) => ({

@@ -357,7 +357,8 @@ export function resolveRetirementNotifications(
       AND EXISTS (SELECT 1 FROM events done WHERE done.project_id=alert.project_id
         AND done.stream=alert.stream AND done.seq>alert.seq
         AND (done.type='assignment_stop_released' OR (done.type='session_replaced'
-          AND json_extract(done.doc,'$.payload.reason')='idle_session_retired'))
+          AND (json_extract(done.doc,'$.payload.reason')='idle_session_retired' OR
+               (json_extract(done.doc,'$.payload.reason')='default_role_upgraded' AND json_extract(done.doc,'$.payload.idle_retirement_confirmed')=1))))
         AND json_extract(done.doc,'$.payload.assignment_id')=json_extract(alert.doc,'$.payload.assignment_id'))`)
     .all(project);
   for (const row of rows)
