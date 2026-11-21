@@ -5,6 +5,8 @@
 // CHROMIUM_PATH=<chromium> node apps/web/test-support/c511-unknown-capture.mjs <new output dir>
 // C511_BASELINE_REF=<git ref> renders that ref's machine page (before).
 // C511_BEFORE=<before output dir> counts differing pixels against it.
+// Q-1076 scenes (stale-reply, verify-failed): a late start reply for an
+// older check after the reopened drawer follows a newer one.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -25,11 +27,21 @@ const historical = new Map(
   baseline
     ? [
         "views/MachinesSettings.tsx",
+        "views/machine-actions.ts",
         "components/layout/SettingsLayout.tsx",
-      ].map((path) => [
-        resolve(root, "src", path),
-        git("show", `${baseline}:apps/web/src/${path}`),
-      ])
+      ].flatMap((path) => {
+        // views/machine-actions.ts exists from Q-1074 on.
+        try {
+          return [
+            [
+              resolve(root, "src", path),
+              git("show", `${baseline}:apps/web/src/${path}`),
+            ],
+          ];
+        } catch {
+          return [];
+        }
+      })
     : [],
 );
 const server = await createServer({
@@ -261,6 +273,28 @@ try {
         baseline ? has("正在检查：SSH") : has("这台机器正在检查：SSH"),
       );
       await scene("lost-running");
+      // Q-1076: B followed in a reopened drawer, then A's late start reply.
+      for (const [name, fail] of [
+        ["stale-reply", false],
+        ["verify-failed", true],
+      ]) {
+        await drawer("stale", theme);
+        await click("[role=dialog]", "立即检查");
+        await run(() => {
+          window.__c511.b = true;
+        });
+        await click("[role=dialog]", "关闭抽屉");
+        await until("!document.querySelector('[role=dialog]')");
+        await click("table[aria-label='机器列表']", "本机");
+        await until(has("正在检查：SSH"));
+        await run((fail) => {
+          window.__c511.fail = fail;
+          window.__c511.releaseA();
+        }, fail);
+        if (fail && !baseline) await until(has("未能确认正在进行的检查"));
+        else await delay(400);
+        await scene(name);
+      }
       cases.push({ width, theme, results });
     }
   await send("Emulation.setDeviceMetricsOverride", {

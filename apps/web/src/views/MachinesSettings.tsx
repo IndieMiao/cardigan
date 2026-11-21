@@ -833,11 +833,8 @@ function useMachineActions({
   const lostText = "上次检查请求结果未知";
   const progress = (step: string) => checkStepLabel(step);
   const checkFeedback: RequestFeedbackProps = verifyFailed
-    ? {
-        error: "未能确认正在进行的检查",
-        retry: reread,
-        retryLabel: "重新读取",
-      }
+    ? // The read failed or was refused: its own feedback retries (read only).
+      { error: "未能确认正在进行的检查" }
     : verify && !following && !unknownCheck
       ? {
           // A result just shown (the followed check ended) stays readable.

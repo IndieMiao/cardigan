@@ -1624,7 +1624,7 @@ test("Q-1076 P5: a late snapshot cannot bring back A, which this page saw end", 
   expect(c.checkMachine).toHaveBeenCalledTimes(2);
 });
 
-test("Q-1076 R3: a failed check read keeps 立即检查 locked and offers only a reread", async () => {
+test("Q-1076 R3: a failed check read keeps 立即检查 locked and offers only the detail's reread", async () => {
   const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
   const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
   const details = heldDetails();
@@ -1649,10 +1649,11 @@ test("Q-1076 R3: a failed check read keeps 立即检查 locked and offers only a
   const posts = vi.mocked(
     c.checkMachine as NonNullable<CardiganClient["checkMachine"]>,
   ).mock.calls.length;
-  // The only way on is to read again; nothing is sent.
+  // The only way on is the detail's one reread; nothing is sent.
+  expect(d.getAllByRole("button", { name: "重试" })).toHaveLength(1);
+  expect(d.queryByRole("button", { name: "立即检查" })).toBeNull();
   details.state.hold = false;
-  const retry = d.getAllByRole("button", { name: "重新读取" });
-  for (const button of retry) fireEvent.click(button);
+  fireEvent.click(d.getByRole("button", { name: "重试" }));
   await waitFor(() =>
     expect(d.queryByText("未能确认正在进行的检查")).toBeNull(),
   );
