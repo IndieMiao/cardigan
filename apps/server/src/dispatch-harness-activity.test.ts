@@ -124,11 +124,11 @@ test.each([
       await vi.waitFor(() => expect(reconciled).toHaveBeenCalledTimes(1));
       const events = f.state().events;
       expect(events.filter((e) => e.type === "run_inactive")).toHaveLength(
-        mode === "progress" ? 0 : 3,
+        ["progress", "missing"].includes(mode) ? 0 : 3,
       );
       expect(
         events.filter((e) => e.type === "upstream_incident_started"),
-      ).toHaveLength(mode === "progress" ? 0 : 1);
+      ).toHaveLength(["progress", "missing"].includes(mode) ? 0 : 1);
       expect(runtime.release).not.toHaveBeenCalled();
       expect(JSON.stringify(events)).not.toContain("SECRET-ERROR");
     } finally {

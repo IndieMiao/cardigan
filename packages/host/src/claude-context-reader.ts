@@ -102,6 +102,40 @@ function summarize(lines, path, attributable, activityOnly, complete) {
   }
   return activity ? { path, activity } : undefined;
 }
+// Alert-only metadata. A large screenshot can consume the entire bounded tail;
+// establish file ownership independently from a bounded prefix in that case.
+function alertMetadata(head, tail, path, mtime) {
+  const id = basename(path, '.jsonl');
+  let cwd, pending, clockOnly = false;
+  const lines = head.concat(tail);
+  for (const [index, line] of lines.entries()) {
+    let e; try { e = object(JSON.parse(line)); } catch { continue; }
+    if (!e) continue;
+    if (e.isSidechain === true || e.message?.model === '<synthetic>') {
+      if (index >= head.length) clockOnly = true;
+      continue;
+    }
+    if (e.sessionId && e.sessionId !== id) return;
+    if (e.sessionId !== id || !text(e.cwd, 4096)) continue;
+    cwd = e.cwd;
+    if (index < head.length) continue; // Never infer a pending command across an unread gap.
+    clockOnly = e.type === 'progress' && e.data?.type === 'bash_progress';
+    if (!Array.isArray(e.message?.content)) continue;
+    for (const block of e.message.content) {
+      if (block?.type === 'tool_result' && pending?.id === block.tool_use_id) pending = undefined;
+      if (block?.type !== 'tool_use' || block.name !== 'Bash' || block.input?.run_in_background || typeof block.input?.command !== 'string') continue;
+      // Never export arguments, filenames, environment assignments or shell text.
+      const cmd = block.input.command;
+      const command = /(?:^|\s)node\s+[^\n;&|]*\bweb\.mjs\b/.test(cmd) ? 'node web.mjs' :
+        /(?:^|\s)python3?\s+-m\s+http\.server\b/.test(cmd) ? 'python -m http.server' :
+        /(?:^|\s)(?:pnpm|npm)\s+(?:run\s+)?dev\b/.test(cmd) ? 'dev server' :
+        /(?:^|\s)vite(?:\s|$)/.test(cmd) ? 'vite' : 'Bash';
+      if (text(block.id, 128) && Number.isFinite(Date.parse(e.timestamp))) pending = {id: block.id, command, since: e.timestamp};
+    }
+  }
+  return cwd ? {file_activity: {session_id: id, cwd, updated_at: new Date(mtime).toISOString()},
+    ...(pending ? {foreground: {command: pending.command, since: pending.since}} : {}), clock_only: clockOnly} : undefined;
+}
 function readTail(fd, path, attributable, activityOnly = false) {
   const { fstatSync, readSync } = require('node:fs');
   const stat = fstatSync(fd);
@@ -111,7 +145,13 @@ function readTail(fd, path, attributable, activityOnly = false) {
   const size = readSync(fd, buffer, 0, buffer.length, start);
   const lines = buffer.subarray(0, size).toString('utf8').split('\n');
   if (start) lines.shift();
-  return summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
+  const sample = summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
+  if (!attributable) return sample;
+  const prefix = Buffer.alloc(start ? Math.min(start, 65536) : 0);
+  const count = prefix.length ? readSync(fd, prefix, 0, prefix.length, 0) : 0;
+  const extra = alertMetadata(prefix.subarray(0, count).toString('utf8').split('\n').slice(0, 32), lines.slice(-256), path, stat.mtimeMs);
+  if (!extra) return sample;
+  return {path, ...sample, ...(!sample?.activity?.error && !extra.clock_only ? {file_activity: extra.file_activity} : {}), ...(extra.foreground ? {foreground: extra.foreground} : {})};
 }
 async function read() {
   // The worker opener passed a no-follow regular file as stdin. This is
@@ -149,7 +189,7 @@ async function read() {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     // With no trusted session ID, a late write to an older file cannot revive it.
     const byCreation = candidates.slice().sort((a, b) => b.born - a.born);
-    const latest = byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born ? byCreation[0] : undefined;
+    const latest = byCreation.length === 1 || (byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born) ? byCreation[0] : undefined;
     return readTail(file.fd, chosen.path, (!wanted && chosen.path === latest?.path) || chosen.name === wanted);
   } finally { await file?.close(); await dir.close(); }
 }

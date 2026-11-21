@@ -132,6 +132,18 @@ export function parseActivityMetadata(
     ...(v.error ? { error: v.error as HarnessActivity["error"] } : {}),
   };
 }
+export function transcriptWrite(
+  meta: Record<string, unknown> | undefined,
+  mtime?: number,
+) {
+  return mtime !== undefined && Number.isFinite(mtime)
+    ? parseActivityMetadata({
+        session_id: meta?.id,
+        cwd: meta?.cwd,
+        updated_at: new Date(mtime).toISOString(),
+      })
+    : undefined;
+}
 export function records(tail: string, start: number) {
   const lines = tail.split("\n");
   if (start) lines.shift();
@@ -152,7 +164,10 @@ export interface ContextReadInput {
   ): Promise<string[]>;
   readParts(
     path: string,
-  ): Promise<{ head: string; tail: string; tailStart: number } | undefined>;
+  ): Promise<
+    | { head: string; tail: string; tailStart: number; mtime?: number }
+    | undefined
+  >;
   caches(root: string): Promise<ContextSample[]>;
   readPrivateTranscript(): Promise<string | undefined>;
 }
@@ -160,6 +175,8 @@ export interface ContextReading {
   usage?: ContextSample | undefined;
   activity?: ActivityMetadata | undefined;
   progress?: ActivityMetadata | undefined;
+  fileActivity?: ActivityMetadata | undefined;
+  foreground?: { command: string; since: string } | undefined;
   /** Original fault record, separate from the latest activity used for idle detection. */
   startupFailure?: ActivityMetadata | undefined;
 }

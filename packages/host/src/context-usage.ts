@@ -133,13 +133,17 @@ export type HarnessActivityStatus =
   | "stale"
   | "unassociated"
   | "read_failed";
-export interface HarnessActivityInspection {
+export interface AlertEvidence {
+  fileActivity?: HarnessActivity;
+  foreground?: { command: string; since: string };
+}
+export interface HarnessActivityInspection extends AlertEvidence {
   activity?: HarnessActivity;
   startupFailure?: HarnessActivity;
   status: HarnessActivityStatus;
 }
 
-export interface SessionContextDiagnostic {
+export interface SessionContextDiagnostic extends AlertEvidence {
   agent: ContextUsage["agent"] | null;
   cwd: string | null;
   model: string | null;
@@ -249,6 +253,8 @@ export async function readSessionContexts(
     let progress: ActivityMetadata | undefined;
     let startupMetadata: ActivityMetadata | undefined;
     let activityMetadata: ActivityMetadata | undefined;
+    let fileMetadata: ActivityMetadata | undefined;
+    let foreground: AlertEvidence["foreground"];
     let activityReadFailed = false;
     const readFailed = () => {
       activityReadFailed = true;
@@ -278,6 +284,8 @@ export async function readSessionContexts(
       // A target may have been replaced while its SSH read was in flight.
       if (reading && (!worker || (await boundPaths())?.root === worker.root)) {
         usage = reading.usage;
+        fileMetadata = reading.fileActivity;
+        foreground = reading.foreground;
         activityMetadata = reading.activity;
         progress = reading.progress;
         startupMetadata = reading.startupFailure;
@@ -335,6 +343,11 @@ export async function readSessionContexts(
           }
         : undefined;
     const activity = bindActivity(activityMetadata, progress);
+    const file = bindActivity(fileMetadata);
+    const fileActivity =
+      file && !activity?.error && !activityReadFailed
+        ? { ...file, source: `${harness}:transcript_mtime` }
+        : undefined;
     const startupFailure = bindActivity(startupMetadata);
     const activityFresh = !!currentHarnessActivity(state, a, now, activity);
     const activityStatus: HarnessActivityStatus = activityReadFailed
@@ -389,6 +402,8 @@ export async function readSessionContexts(
           : null,
       ...(observation ? { observation } : {}),
       ...(activity ? { activity } : {}),
+      ...(fileActivity ? { fileActivity } : {}),
+      ...(foreground && (activity || fileActivity) ? { foreground } : {}),
       ...(startupFailure ? { startupFailure } : {}),
       activity_updated_at: activity?.updated_at ?? null,
       activity_source: activity?.source ?? null,

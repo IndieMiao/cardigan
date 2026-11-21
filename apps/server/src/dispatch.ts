@@ -88,6 +88,7 @@ import {
   payloadString,
   summarizeNotifications,
 } from "@cardigan/router";
+import type { HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
   type BellAttempt,
   beginBellAttempt,
@@ -190,7 +191,7 @@ export interface DispatcherOptions {
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
-  readonly runtime: Runtime;
+  readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "terminalActivity">>;
   readonly clock?: Clock;
   readonly standing?: StandingResolver;
   readonly deliveryLeaseMs?: number;
@@ -362,17 +363,6 @@ export class Dispatcher {
       clock: this.clock,
       afterMs: cancelAfterMs,
       onError: (error) => options.onError?.(error),
-      onUnknown: (project, assignment, run, row) =>
-        this.inactivityAlerts.publish(
-          project,
-          [{ assignment, run }],
-          new Map([[assignment.id, row]]),
-          !options.inspectHarnessActivity
-            ? "unavailable"
-            : row.status === "read_failed"
-              ? "read_failed"
-              : "completed",
-        ),
       ...(options.inspectHarnessActivity
         ? { inspectHarnessActivity: options.inspectHarnessActivity }
         : {}),

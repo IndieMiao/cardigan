@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -42,7 +49,13 @@ const read = () =>
 test("the worker emits only activity from the fd and original record time", async () => {
   const path = join(folder, "one.jsonl");
   await writeFile(path, record("one"));
+  await utimes(path, new Date(at), new Date(at));
   expect(JSON.parse(await read())).toEqual({
+    file_activity: {
+      cwd: "/worktree/src",
+      session_id: "one",
+      updated_at: new Date(at).toISOString(),
+    },
     path,
     activity: { cwd: "/worktree/src", session_id: "one", updated_at: at },
   });

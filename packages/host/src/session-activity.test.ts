@@ -588,3 +588,108 @@ test("C-499: an unfinished Claude line after a 503 invalidates silence on every 
   expect(row?.activity).toMatchObject({ updated_at: now });
   expect(row?.startupFailure).toBeUndefined();
 });
+
+test.each(["codex", "pi", "claude-code"])(
+  "C-541: %s alert-only file evidence survives missing protocol activity",
+  async (harness) => {
+    const stamp = new Date(now);
+    const path =
+      harness === "pi"
+        ? join(runDir(), "pi", "sessions", "current.jsonl")
+        : harness === "codex"
+          ? rollout()
+          : join(runDir(), "claude", "projects", "-fixture", "session-1.jsonl");
+    const browser = {
+      type: "progress",
+      sessionId: "session-1",
+      cwd,
+      timestamp: now,
+      data: { type: "mcp_progress", message: "PRIVATE-SCREENSHOT" },
+    };
+    // A single browser screenshot larger than the tail contains no complete record in that tail.
+    await write(
+      path,
+      harness === "codex"
+        ? codex("")
+        : harness === "pi"
+          ? line({ type: "session", ...metadata })
+          : line(browser) +
+            line({ ...browser, data: { image: "x".repeat(4 * 1024 * 1024) } }),
+    );
+    await utimes(path, stamp, stamp);
+    const diagnostic = await read(state(harness));
+    expect(diagnostic?.activity).toBeUndefined(); // Cannot feed stop / upstream evidence.
+    expect(diagnostic?.fileActivity).toMatchObject({
+      session_id: "session-1",
+      source: `${harness}:transcript_mtime`,
+      updated_at: now,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("PRIVATE-SCREENSHOT");
+  },
+);
+
+test("C-541: only a still-pending foreground tool yields a safe command and start time", async () => {
+  const path = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const e = { sessionId: "session-1", cwd, timestamp: now };
+  await write(
+    path,
+    line({
+      ...e,
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Bash",
+            id: "tool",
+            input: { command: "node /private/web.mjs --secret PRIVATE-ARG" },
+          },
+        ],
+      },
+    }) +
+      line({
+        ...e,
+        type: "progress",
+        data: { type: "bash_progress", elapsedTimeSeconds: 60 },
+      }),
+  );
+  const row = await read(state("claude-code"));
+  expect(row?.foreground).toEqual({ command: "node web.mjs", since: now });
+  expect(row?.fileActivity).toBeUndefined(); // Elapsed-time ticks are not output.
+  expect(JSON.stringify(row)).not.toContain("PRIVATE-ARG");
+  await appendFile(
+    path,
+    line({
+      ...e,
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "tool" }] },
+    }),
+  );
+  expect((await read(state("claude-code")))?.foreground).toBeUndefined();
+});
+
+test("C-541: sidechain-only writes cannot refresh a main-thread transcript", async () => {
+  const file = join(
+    runDir(),
+    "claude",
+    "projects",
+    "-fixture",
+    "session-1.jsonl",
+  );
+  const old = "2026-01-01T00:10:00.000Z";
+  const e = { sessionId: "session-1", cwd, type: "assistant" };
+  await write(
+    file,
+    line({ ...e, timestamp: old }) +
+      line({ ...e, timestamp: now, isSidechain: true }),
+  );
+  const row = await read(state("claude-code"));
+  expect(row?.fileActivity).toBeUndefined();
+  expect(row?.activity?.updated_at).toBe(old);
+});

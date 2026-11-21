@@ -2879,7 +2879,9 @@ test("Q-88 the 60-minute default tolerates 48-minute silence and restarts on fre
   f.advance(48 * 60_000);
   const dispatcher = new Dispatcher({ ...options, runLimit: () => 1 });
   await dispatcher.tick();
-  expect(f.state().events.some((e) => e.type === "run_inactive")).toBe(true);
+  expect(
+    f.state().events.some((e) => e.type === "run_local_activity_missing"),
+  ).toBe(true);
   expect(runtime.release).not.toHaveBeenCalled();
   expect(
     f.state().runs.find((r) => r.id === t.run.id)?.inactivity_stop,
@@ -3119,13 +3121,15 @@ test("C-297: current harness activity prevents both inactivity alerts and automa
   await dispatcher.tick();
   expect(f.state().events.filter((e) => e.type === "run_inactive")).toEqual([]);
   expect(runtime.release).not.toHaveBeenCalled();
-  f.advance(600_001);
-  // The same cached sample must expire even if the reader has stopped.
+  f.advance(15 * 60_000);
+  // An attributable sample is still silent at the inactivity threshold.
   await dispatcher.tick();
   expect(f.state().events).toContainEqual(
     expect.objectContaining({
       type: "run_inactive",
-      payload: expect.objectContaining({ activity_source: "活动来源缺失" }),
+      payload: expect.objectContaining({
+        activity_source: "codex:session_metadata",
+      }),
     }),
   );
 });

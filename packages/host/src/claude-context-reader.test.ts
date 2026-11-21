@@ -159,7 +159,7 @@ const line = (input = 100) =>
     },
   });
 
-test("the process boundary emits only usage fields and reads only a complete tail sample", async () => {
+test("only complete tail records supply usage; a verified prefix can identify the file write", async () => {
   root = await mkdtemp(join(tmpdir(), "claude-tail-"));
   const dir = join(root, "claude", "projects", "-fixture");
   await mkdir(dir, { recursive: true });
@@ -178,7 +178,14 @@ test("the process boundary emits only usage fields and reads only a complete tai
   expect(stdout.length).toBeLessThan(1024);
   // A sample before the bounded tail cannot be recovered from the file head.
   await writeFile(file, `${line(1)}\n${padding}\n`);
-  expect(await rawRead(root)).toBe("null");
+  expect(JSON.parse(await rawRead(root))).toEqual({
+    path: file,
+    file_activity: {
+      cwd: "/fixture",
+      session_id: "session",
+      updated_at: (await stat(file)).mtime.toISOString(),
+    },
+  });
 });
 
 test.each(["claude", "projects", "slug", "file"])(

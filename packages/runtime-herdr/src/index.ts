@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
+import { terminalSnapshot } from "./terminal-activity.js";
 
 export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
@@ -149,6 +150,7 @@ type Terminal = {
   labels?: Record<string, string>;
   status?: { state: string } | null;
   pid?: number | null;
+  foreground?: Parameters<typeof terminalSnapshot>[1];
   created_ms?: number;
   keep?: boolean;
 };
@@ -648,6 +650,52 @@ export class HerdrRuntime implements Runtime {
         this.statusRequests.delete(key);
     });
     return request;
+  }
+  async terminalActivity(
+    ref: RuntimeRef,
+    project: string,
+    assignment: string,
+  ): Promise<RuntimeResult<ReturnType<typeof terminalSnapshot>>> {
+    try {
+      this.checkRef(ref);
+      const get = async () => {
+        const t: Terminal = await this.json(["get", ref.terminal_ref]);
+        this.checkTerminal(ref, t);
+        if (
+          t.address !== ref.terminal_ref ||
+          t.state !== "live" ||
+          t.labels?.project !== project ||
+          t.labels.assignment !== assignment
+        )
+          throw new Error();
+        return t;
+      };
+      const before = await get();
+      const screen = await this.client.exec([
+        "read",
+        ref.terminal_ref,
+        "--lines",
+        "0",
+      ]);
+      const after = await get();
+      if (
+        JSON.stringify(before.labels) !== JSON.stringify(after.labels) ||
+        before.created_ms !== after.created_ms
+      )
+        throw new Error();
+      return {
+        ok: true as const,
+        value: terminalSnapshot(screen, after.foreground),
+      };
+    } catch {
+      return {
+        ok: false as const,
+        error: {
+          code: "runtime_unavailable" as const,
+          message: "终端活动不可用",
+        },
+      };
+    }
   }
   async interaction(
     ref: RuntimeRef,

@@ -20,6 +20,7 @@ import { listBellAttempts, PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { createCard } from "../../../packages/domain/src/commands/pm.js";
 import { pathEvidence } from "../../../packages/domain/src/commands/system-merge/test-fixtures.js";
+import { stalledTranscript } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { type M4Fixture, m4Fixture } from "./m4-fixtures.js";
 import { MergeExecutor } from "./merge-loop.js";
@@ -203,7 +204,9 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
       );
     },
   );
+  let frozen = f.state();
   const options: DispatcherOptions = {
+    harnessActivity: (_p, id) => stalledTranscript(frozen, id),
     store: f.store,
     runtime,
     clock: f.clock,
@@ -284,7 +287,10 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   };
   const owner = (id: string) =>
     required(f.state().assignments.find((a) => a.id === id));
-  const tick = () => dispatcher.tick();
+  const tick = () => {
+    frozen = f.state();
+    return dispatcher.tick();
+  };
   const replay = async () => {
     // A second SQLite connection plus a new dispatcher exercises durable
     // cursors and notifications, not the first instance's in-memory caches.
