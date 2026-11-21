@@ -1,13 +1,23 @@
 import { configDefaults, defineConfig } from "vitest/config";
-import { checkFlakeIds } from "./packages/host/src/check-flake-cases.js";
-import { ciReporters } from "./test-support/ci-reporters.js";
+import {
+  checkFlakeCases,
+  checkFlakeIds,
+} from "./packages/host/src/check-flake-cases.js";
+import { ciReporters, isolatedReceipts } from "./test-support/ci-reporters.js";
 
-const retryCases =
+const selected = (value: string | undefined) =>
   process.env.GITHUB_ACTIONS === "true"
-    ? checkFlakeIds.filter((id) =>
-        process.env.CARDIGAN_FLAKE_CASES?.split(" ").includes(id),
-      )
+    ? checkFlakeIds.filter((id) => value?.split(" ").includes(id))
     : [];
+const retryCases = selected(process.env.CARDIGAN_FLAKE_CASES);
+const isolated = retryCases.length > 0;
+const files = [...new Set(retryCases.map((id) => checkFlakeCases[id].file))];
+const exclude = [
+  ...configDefaults.exclude,
+  ...selected(process.env.CARDIGAN_CHECKED_CASES).map(
+    (id) => checkFlakeCases[id].file,
+  ),
+];
 const retryRunner = retryCases.length
   ? { runner: "./test-support/check-flake-runner.ts", provide: { retryCases } }
   : {};
@@ -21,7 +31,10 @@ const processContracts = [
 
 export default defineConfig({
   test: {
-    reporters: ciReporters,
+    reporters: isolated
+      ? [...ciReporters, isolatedReceipts(retryCases)]
+      : ciReporters,
+    exclude,
     environment: "node",
     setupFiles: ["./test-support/setup.ts"],
     projects: [
@@ -30,19 +43,17 @@ export default defineConfig({
         test: {
           name: "node",
           ...retryRunner,
-          include: ["{packages,apps}/*/src/**/*.test.{ts,tsx}"],
-          exclude: [
-            ...configDefaults.exclude,
-            "apps/web/**",
-            ...processContracts,
-          ],
+          include: isolated
+            ? files
+            : ["{packages,apps}/*/src/**/*.test.{ts,tsx}"],
+          exclude: [...exclude, "apps/web/**", ...processContracts],
         },
       },
       {
         extends: true,
         test: {
           name: "web",
-          include: ["apps/web/src/**/*.test.{ts,tsx}"],
+          include: isolated ? [] : ["apps/web/src/**/*.test.{ts,tsx}"],
           // DOM rendering and accessibility queries compete for CPU. Keep
           // web workers bounded and run them after the other packages.
           maxWorkers: 2,
@@ -54,7 +65,9 @@ export default defineConfig({
         test: {
           name: "process-contract",
           ...retryRunner,
-          include: processContracts,
+          include: isolated
+            ? files.filter((f) => processContracts.includes(f))
+            : processContracts,
           // A per-project maxWorkers would be overridden by the CI CLI flag.
           fileParallelism: false,
           sequence: { groupOrder: 2 },

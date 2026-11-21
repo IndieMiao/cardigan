@@ -1,6 +1,11 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, test, vi } from "vitest";
 import type { CheckRequest } from "./check-executor.js";
 import {
+  CASE_RUN_STEP,
+  CASE_WORKFLOW_STEPS,
   GITHUB_CHECK_NAMES,
   GITHUB_WORKFLOW_STEPS,
   GithubCheckPoller,
@@ -16,6 +21,7 @@ import {
   GithubRateLimit,
   GithubRetryLater,
 } from "./github-rate-limit.js";
+import { createMergeCheckLog } from "./merge-gate-log.js";
 
 const start = Date.parse("2026-11-15T00:00:00Z");
 const identity = (id: number): GithubRun => ({
@@ -67,7 +73,7 @@ const job = (id: number): GithubJob => ({
     conclusion: "success",
   })),
 });
-function setup(count = 10) {
+function setup(count = 10, checkRequest: CheckRequest = request) {
   let now = start;
   let runs = Array.from({ length: count }, (_, index) => identity(index + 1));
   const client = {
@@ -91,7 +97,7 @@ function setup(count = 10) {
   });
   const finished = vi.fn();
   for (const run of runs)
-    poller.register(external(run.id), request, run, finished);
+    poller.register(external(run.id), checkRequest, run, finished);
   return {
     poller,
     waitForLogRetry,
@@ -859,41 +865,81 @@ test.each([true, false])(
   },
 );
 
-test.each(["passed", "failed", "partial"] as const)(
-  "fixed flake receipts never override the required test result: %s",
+test.each([
+  "passed",
+  "failed",
+  "partial",
+  "missing all",
+  "unselected",
+  "isolated failed",
+  "batch timeout",
+  "card timeout",
+] as const)(
+  "case contract is strict, receipts are scoped, batch timeout handling is preserved: %s",
   async (mode) => {
-    const f = setup(1);
+    const timeout = mode.endsWith("timeout");
+    const f = setup(1, {
+      ...request,
+      ...(mode === "batch timeout" ? { mergeTier: "batch" } : {}),
+      checks: request.checks.map((check) =>
+        check.name === "test" && mode === "unselected"
+          ? { ...check, affectedPaths: ["apps/web"] }
+          : check,
+      ),
+    });
     f.complete();
     const j = job(1);
-    const receipts = ["ssh_local", "ssh_remote", "corepack", "loopback"].map(
-      (id) => ({
-        name: `Recovered ${id}`,
-        number: 0,
-        status: "completed",
-        conclusion: id === "corepack" ? "success" : "skipped",
-      }),
+    const names = CASE_WORKFLOW_STEPS.filter(
+      (name) =>
+        !(mode === "missing all" && name.startsWith("Recovered ")) &&
+        !(mode === "partial" && name === "Recovered loopback"),
     );
-    if (mode === "partial") receipts.pop();
-    const steps = j.steps
-      .flatMap((s) => [
-        mode === "failed" && s.name === "test"
-          ? { ...s, conclusion: "failure" }
-          : s,
-        ...(s.name === "e2e" ? receipts : []),
-      ])
-      .map((s, i) => ({ ...s, number: i + 1 }));
+    const conclusion = (name: string) => {
+      if (name.startsWith("Recovered "))
+        return name === "Recovered corepack" && !timeout
+          ? "success"
+          : "skipped";
+      if (name === "test" && (timeout || mode === "failed")) return "failure";
+      if (name === CASE_RUN_STEP && mode === "isolated failed")
+        return "failure";
+      return "success";
+    };
+    const steps = names.map((name, i) => ({
+      name,
+      number: i + 1,
+      status: "completed",
+      conclusion: conclusion(name),
+    }));
     f.client.jobs.mockResolvedValueOnce([{ ...j, steps }]);
     const result = f.poller.poll(external(1));
     await f.poller.tick();
-    expect(await result).toMatchObject(
-      mode === "partial"
-        ? { status: "failed", checks: [] }
-        : {
-            status: mode,
-            recovered: ["corepack"],
-            ...(mode === "failed" ? { caseTimeoutsManaged: true } : {}),
-          },
-    );
+    const settled = await result;
+    if (mode === "passed" || mode === "failed")
+      expect(settled).toMatchObject({ status: mode, recovered: ["corepack"] });
+    else if (timeout) {
+      expect(settled.status).toBe("failed");
+      const dataDir = await mkdtemp(join(tmpdir(), "case-contract-timeout-"));
+      try {
+        const log = await createMergeCheckLog({
+          dataDir,
+          project: "p",
+          attempt: "timeout",
+        });
+        log.append(
+          "test",
+          " FAIL src/check.test.ts > slow test\nError: Test timed out in 5000ms.\n",
+        );
+        expect((await log.finish(settled)).timeout_only).toBe(
+          mode === "batch timeout",
+        );
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+      expect(settled.recovered).toBeUndefined();
+    } else {
+      expect(settled).toMatchObject({ status: "failed", checks: [] });
+      expect(settled.recovered).toBeUndefined();
+    }
     expect(f.client.jobLog).not.toHaveBeenCalled();
   },
 );

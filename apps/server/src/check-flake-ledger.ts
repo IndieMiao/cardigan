@@ -29,21 +29,30 @@ export function recordCheckFlakes(
       json_extract(doc,'$.payload.count') AS count, json_extract(doc,'$.payload.notified') AS notified,
       json_extract(doc,'$.created_at') AS at FROM events WHERE project_id=? AND type=?
       AND json_extract(doc,'$.payload.key')=? AND (json_extract(doc,'$.payload.attempt')=? OR
-      (json_extract(doc,'$.created_at')>? AND json_extract(doc,'$.created_at')<=?))`)
-          .all(project, eventType, key, attempt, since, at);
+      json_extract(doc,'$.created_at')>?)`)
+          .all(project, eventType, key, attempt, since);
         const existing = rows.find((r) => r.attempt === attempt);
-        const count = existing ? Number(existing.count) : rows.length + 1;
+        // `at` was sampled before BEGIN IMMEDIATE. If a later completion
+        // committed first, advance this case's settlement clock under the lock.
+        const settled = rows.reduce(
+          (latest, row) => Math.max(latest, Date.parse(String(row.at))),
+          Date.parse(at),
+        );
+        const settledAt = new Date(settled).toISOString();
+        const cutoff = new Date(settled - week).toISOString();
+        const window = rows.filter((row) => String(row.at) > cutoff);
+        const count = existing ? Number(existing.count) : window.length + 1;
         const text = `偶发：${file} · ${name}（${signature}，近七天 ${count} 次）`;
         if (existing) return text;
         const notified =
-          count >= threshold && !rows.some((r) => r.notified === 1);
+          count >= threshold && !window.some((r) => r.notified === 1);
         const event = {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(project, card),
           type: eventType,
           card_id: card,
           actor: { kind: "system" as const, project_id: project },
-          created_at: at,
+          created_at: settledAt,
           payload: { key, attempt, file, name, signature, count, notified },
         };
         tx.events.append(project, event);
@@ -60,7 +69,7 @@ export function recordCheckFlakes(
             refs: [],
             mentions: [],
             retracted: false,
-            created_at: at,
+            created_at: settledAt,
           });
           recordNotification(store.database, {
             project_id: project,
@@ -69,7 +78,7 @@ export function recordCheckFlakes(
             seq: event.seq,
             recipient: { kind: "pm_ops" },
             kind: "escalation",
-            at,
+            at: settledAt,
           });
         }
         return text;

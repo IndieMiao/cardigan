@@ -1,10 +1,10 @@
 import { resolve } from "node:path";
 import { expect, type RunnerTestCase, test } from "vitest";
 import {
-  configureCaseRetry,
+  caseReceipts,
   matchesFailure,
-} from "../../../test-support/check-flake-runner.js";
-import { recoveredOnRetry } from "../../../test-support/ci-reporters.js";
+} from "../../../test-support/check-flake-evidence.js";
+import { configureCaseRetry } from "../../../test-support/check-flake-runner.js";
 import { type CheckFlakeId, checkFlakeCases } from "./check-flake-cases.js";
 
 const timeout = new Error(
@@ -82,14 +82,41 @@ test("only one retry, tied to exact case, scope and a single matching environmen
   ).toBe(false);
 });
 
-test("only fail then pass is recorded; a second failure, skip or missing attempt is not a pass", () => {
-  const attempts = (states: string[]) => states.map((state) => ({ state }));
-  expect(recoveredOnRetry("passed", attempts(["failed", "passed"]))).toBe(true);
-  expect(recoveredOnRetry("failed", attempts(["failed", "failed"]))).toBe(
-    false,
-  );
-  expect(() =>
-    recoveredOnRetry("skipped", attempts(["failed", "skipped"])),
-  ).toThrow();
-  expect(() => recoveredOnRetry("passed", attempts(["passed"]))).toThrow();
+test("the coordinator ties recovery to exact identity, first signature and indexed attempts, not worker metadata", () => {
+  const attempts = [
+    { state: "failed", retryIndex: 0, repeatIndex: 0, errors: [download] },
+    { state: "passed", retryIndex: 1, repeatIndex: 0 },
+  ] as const;
+  const row = { ...checkFlakeCases.corepack, state: "passed", attempts };
+  expect(caseReceipts(["corepack"], [row])).toEqual(["corepack"]);
+  expect(
+    caseReceipts(
+      ["corepack"],
+      [
+        {
+          ...row,
+          attempts: [{ state: "passed", retryIndex: 0, repeatIndex: 0 }],
+        },
+      ],
+    ),
+  ).toEqual([]);
+  for (const rows of [
+    [],
+    [row, row],
+    [{ ...row, name: "other" }],
+    [{ ...row, file: "other" }],
+    [{ ...row, state: "failed" }],
+    [
+      {
+        ...row,
+        attempts: [
+          { ...attempts[0], errors: [new Error("assertion")] },
+          attempts[1],
+        ],
+      },
+    ],
+    [{ ...row, attempts: [attempts[0], { ...attempts[1], state: "skipped" }] }],
+  ])
+    expect(() => caseReceipts(["corepack"], rows)).toThrow();
+  expect(caseReceipts([], [row])).toEqual([]);
 });

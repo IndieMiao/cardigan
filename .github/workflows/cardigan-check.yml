@@ -88,9 +88,12 @@ jobs:
           # Compatibility tests execute source from pinned historical commits.
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify candidate identity
+      - name: Verify candidate identity and case scope
         id: identity
         env:
+          CHECK_SCOPE: ${{ steps.scope.outputs.scope }}
+          AFFECTED_PATHS: ${{ steps.scope.outputs.affected_paths }}
+          SKIP_TEST: ${{ steps.scope.outputs.skip_test }}
           WORKFLOW_BASE: ${{ github.sha }}
           MERGE_TIER: ${{ inputs.merge_tier }}
           EXPECTED_SHA: ${{ inputs.sha }}
@@ -102,18 +105,23 @@ jobs:
           # candidate code. A differing first parent (including stacked deliveries)
           # or a batch cannot establish this card's complete diff.
           cases=()
+          selected() {
+            [[ "$SKIP_TEST" == false && ( "$CHECK_SCOPE" == full || "$CHECK_SCOPE" == docs_only ||
+               ( "$CHECK_SCOPE" == affected && " $AFFECTED_PATHS " == *" $1 "* ) ) ]]
+          }
           if [[ "$MERGE_TIER" =~ ^(single|card)$ && "$WORKFLOW_BASE" =~ ^[0-9a-f]{40}$ &&
                 "$(git show -s --format=%P HEAD)" =~ ^$WORKFLOW_BASE\ [0-9a-f]{40}$ ]] &&
+             git diff --quiet --no-renames "$WORKFLOW_BASE" HEAD -- 'packages/host/src/check-flake-cases*' &&
              ! git diff --quiet "$WORKFLOW_BASE" HEAD; then
             diff=(git diff --quiet --no-renames "$WORKFLOW_BASE" HEAD -- . ':(exclude,glob)docs/plans/C-*.md')
             # Server fixtures cover the backend stack; UI sources are independent.
-            if "${diff[@]}" ':(exclude,glob)apps/web/src/**'; then cases+=(ssh_local ssh_remote loopback); fi
+            if selected apps/server && "${diff[@]}" ':(exclude,glob)apps/web/src/**'; then cases+=(ssh_local ssh_remote loopback); fi
             # The standalone roles preload fixture doesn't run the backend or UI.
             elsewhere=()
             for pkg in apps/{web,cli,server} packages/{domain,host,mcp-server,router,store,git-service,git-transport,runtime-herdr}; do
               elsewhere+=(":(exclude,glob)$pkg/src/**")
             done
-            if "${diff[@]}" "${elsewhere[@]}"; then cases+=(corepack); fi
+            if selected packages/roles && "${diff[@]}" "${elsewhere[@]}"; then cases+=(corepack); fi
           fi
           echo "retry_cases=${cases[*]}" >> "$GITHUB_OUTPUT"
       - name: Setup Node
@@ -168,6 +176,43 @@ jobs:
               output.write('CARDIGAN_REQUIRE_HC=1\n')
               output.write('CARDIGAN_TEST_HC=' + str(binary) + '\n')
           PY
+      # Before any candidate build or unrelated suite executes, run only the
+      # selected, unchanged files. Vitest workers never get a GitHub output
+      # destination. The coordinator alone writes the verified result to fd 3.
+      - name: Run isolated case files
+        id: isolated
+        env:
+          CARDIGAN_CHECKED_CASES: ''
+          CARDIGAN_FLAKE_CASES: ${{ steps.identity.outputs.retry_cases }}
+          COREPACK_ENABLE_NETWORK: '0'
+        run: |
+          [[ -n "$CARDIGAN_FLAKE_CASES" ]] || exit 0
+          clean=(env -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STATE)
+          if [[ "$CARDIGAN_FLAKE_CASES" != corepack ]]; then "${clean[@]}" pnpm exec tsc -b; fi
+          report="$("${clean[@]}" node node_modules/vitest/vitest.mjs run 3>&1 1>&2)"
+          REPORT="$report" python3 - <<'PYCODE'
+          import json, os
+          ids = json.loads(os.environ['REPORT'])
+          allowed = os.environ['CARDIGAN_FLAKE_CASES'].split()
+          if not isinstance(ids, list) or not all(key in allowed for key in ids) or len(set(ids)) != len(ids):
+              raise ValueError('invalid case receipt')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key in ids:
+                  print(f'{key}=true', file=out)
+          PYCODE
+      # Fixed vocabulary only. These receipts never replace a required check.
+      - name: Recovered ssh_local
+        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'ssh_local') && steps.isolated.outputs.ssh_local == 'true' }}
+        run: 'true'
+      - name: Recovered ssh_remote
+        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'ssh_remote') && steps.isolated.outputs.ssh_remote == 'true' }}
+        run: 'true'
+      - name: Recovered corepack
+        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'corepack') && steps.isolated.outputs.corepack == 'true' }}
+        run: 'true'
+      - name: Recovered loopback
+        if: ${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.isolated.outputs.loopback == 'true' }}
+        run: 'true'
       - name: build
         id: build
         run: |
@@ -178,7 +223,8 @@ jobs:
         if: steps.scope.outputs.skip_test != 'true'
         env:
           COREPACK_ENABLE_NETWORK: '0'
-          CARDIGAN_FLAKE_CASES: ${{ steps.identity.outputs.retry_cases }}
+          CARDIGAN_FLAKE_CASES: ''
+          CARDIGAN_CHECKED_CASES: ${{ steps.identity.outputs.retry_cases }}
           CHECK_SCOPE: ${{ steps.scope.outputs.scope }}
           AFFECTED_PATHS: ${{ steps.scope.outputs.affected_paths }}
         run: |
@@ -200,16 +246,3 @@ jobs:
         id: e2e
         if: steps.scope.outputs.skip_e2e != 'true'
         run: pnpm test:e2e
-      # Fixed vocabulary only. These receipts never replace a required check.
-      - name: Recovered ssh_local
-        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'ssh_local') && steps.test.outputs.ssh_local == 'true' }}
-        run: 'true'
-      - name: Recovered ssh_remote
-        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'ssh_remote') && steps.test.outputs.ssh_remote == 'true' }}
-        run: 'true'
-      - name: Recovered corepack
-        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'corepack') && steps.test.outputs.corepack == 'true' }}
-        run: 'true'
-      - name: Recovered loopback
-        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.test.outputs.loopback == 'true' }}
-        run: 'true'

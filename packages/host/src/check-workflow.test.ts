@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
-import { checkFlakeIds } from "./check-flake-cases.js";
 import { githubCheckRunName } from "./github-check-executor.js";
 import {
+  CASE_SCOPE_STEP,
+  CASE_WORKFLOW_STEPS,
   GITHUB_CHECK_NAMES,
-  GITHUB_WORKFLOW_STEPS,
 } from "./github-check-poller.js";
 
 const root = new URL("../../../", import.meta.url);
@@ -51,10 +51,9 @@ describe("trusted GitHub check workflow", () => {
   );
 
   test("D4 explicitly names every trusted step in the polling contract", () => {
-    expect(steps.map((step: { name: string }) => step.name)).toEqual([
-      ...GITHUB_WORKFLOW_STEPS,
-      ...checkFlakeIds.map((id) => `Recovered ${id}`),
-    ]);
+    expect(steps.map((step: { name: string }) => step.name)).toEqual(
+      CASE_WORKFLOW_STEPS,
+    );
     expect(
       steps
         .filter((step: { id?: string }) =>
@@ -62,6 +61,23 @@ describe("trusted GitHub check workflow", () => {
         )
         .map((step: { name: string }) => step.name),
     ).toEqual([...GITHUB_CHECK_NAMES]);
+  });
+
+  test("receipts are finalized before ordinary candidate execution and never consume its outputs", () => {
+    const ids = steps.map((step: { id?: string }) => step.id);
+    const marker = steps.filter((step: { name: string }) =>
+      step.name.startsWith("Recovered "),
+    );
+    expect(marker).toHaveLength(4);
+    for (const step of marker) {
+      const key = step.name.slice("Recovered ".length);
+      expect(step.if).toBe(
+        `\${{ steps.isolated.outcome == 'success' && contains(steps.identity.outputs.retry_cases, '${key}') && steps.isolated.outputs.${key} == 'true' }}`,
+      );
+      expect(steps.indexOf(step)).toBeGreaterThan(ids.indexOf("isolated"));
+      expect(steps.indexOf(step)).toBeLessThan(ids.indexOf("build"));
+    }
+    expect(steps[ids.indexOf("test")].env.CARDIGAN_FLAKE_CASES).toBe("");
   });
 
   test("restricts triggers, credentials, concurrency and timeout", () => {
@@ -294,7 +310,7 @@ exec(json.loads(sys.argv[3]))
       const sha = git("rev-parse", "HEAD"),
         tree = git("rev-parse", "HEAD^{tree}");
       const verifyIndex = steps.findIndex(
-        (step: { name?: string }) => step.name === "Verify candidate identity",
+        (step: { name?: string }) => step.name === CASE_SCOPE_STEP,
       );
       expect(
         steps
@@ -326,7 +342,7 @@ exec(json.loads(sys.argv[3]))
         [sha, "0".repeat(40)],
         ["$(touch injected)", tree],
         [sha, "`touch injected`"],
-      ]) {
+      ] as const) {
         expect(run(head, expectedTree).status).not.toBe(0);
         expect(() => readFileSync(marker)).toThrow();
         expect(() => readFileSync(join(dir, "injected"))).toThrow();
@@ -472,11 +488,18 @@ test("only the trusted complete merge diff grants environment retries (including
     git("commit", "-qm", "base");
     const base = git("rev-parse", "HEAD");
     const script = steps.find(
-      (s: { name: string }) => s.name === "Verify candidate identity",
+      (s: { name: string }) => s.name === CASE_SCOPE_STEP,
     ).run;
     const check = (
       path: string,
-      { tier = "single", remove = false, wrongBase = false } = {},
+      {
+        tier = "single",
+        remove = false,
+        wrongBase = false,
+        scope = "full",
+        affected = "",
+        skip = false,
+      } = {},
     ) => {
       git("reset", "--hard", "-q", base);
       execFileSync("mkdir", ["-p", join(dir, path, "..")]);
@@ -506,6 +529,9 @@ test("only the trusted complete merge diff grants environment retries (including
           EXPECTED_SHA: candidate,
           EXPECTED_TREE: tree,
           MERGE_TIER: tier,
+          CHECK_SCOPE: scope,
+          AFFECTED_PATHS: affected,
+          SKIP_TEST: String(skip),
           WORKFLOW_BASE: wrongBase ? head : base,
           GITHUB_OUTPUT: out,
         },
@@ -515,6 +541,28 @@ test("only the trusted complete merge diff grants environment retries (including
     expect(check("apps/web/src/file.ts")).toBe(
       "retry_cases=ssh_local ssh_remote loopback corepack",
     );
+    for (const file of [
+      "packages/host/src/check-flake-cases.ts",
+      "packages/host/src/check-flake-cases.js",
+      "test-support/check-flake-evidence.ts",
+      "vitest.config.ts",
+    ])
+      expect(check(file)).toBe("retry_cases=");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/web",
+      }),
+    ).toBe("retry_cases=");
+    expect(
+      check("apps/web/src/file.ts", {
+        scope: "affected",
+        affected: "apps/web packages/roles",
+      }),
+    ).toBe("retry_cases=corepack");
+    expect(
+      check("docs/plans/C-77.md", { scope: "docs_only", skip: true }),
+    ).toBe("retry_cases=");
     expect(check("apps/server/src/dispatch.ts")).toBe("retry_cases=corepack");
     expect(check("packages/roles/src/file.ts")).toBe("retry_cases=");
     expect(check("apps/web/src/file.ts", { remove: true })).toBe(

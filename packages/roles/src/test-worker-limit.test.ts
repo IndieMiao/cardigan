@@ -13,7 +13,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { instructionsFor } from "./role-pack.js";
 import { testWorkerLimit } from "./test-worker-limit.js";
 
 const exec = promisify(execFile);
@@ -269,14 +268,3 @@ test("manual tests and other Node entrypoints keep their arguments", async () =>
       .stdout,
   ).toBe("unrelated\n");
 });
-
-test.each(["coder", "reviewer", "tester"] as const)(
-  "%s states the self-test limit",
-  (role) => {
-    expect(instructionsFor(role)).toContain(
-      "不超过主机限流配置的上限（启动时已强制）",
-    );
-    expect(instructionsFor(role)).not.toMatch(/\d+ 个 worker/);
-    expect(instructionsFor(role)).toContain("不要设法绕过");
-  },
-);

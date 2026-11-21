@@ -4,7 +4,7 @@ import {
   FailureLogError,
   type OpenFailureLog,
 } from "./check-executor.js";
-import { checkFlakeIds } from "./check-flake-cases.js";
+import { checkFlakeCases, checkFlakeIds } from "./check-flake-cases.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
 import { githubCheckScope } from "./github-check-scope.js";
 import {
@@ -52,6 +52,18 @@ export const GITHUB_WORKFLOW_STEPS = [
   "deps",
   "e2e",
 ] as const;
+// A renamed mandatory step identifies the new contract independently of
+// optional diagnostics. Losing even all receipt steps cannot look like v1.
+export const CASE_SCOPE_STEP = "Verify candidate identity and case scope";
+export const CASE_RUN_STEP = "Run isolated case files";
+export const CASE_WORKFLOW_STEPS = GITHUB_WORKFLOW_STEPS.flatMap(
+  (step): string[] =>
+    step === "Verify candidate identity"
+      ? [CASE_SCOPE_STEP]
+      : step === "build"
+        ? [CASE_RUN_STEP, ...checkFlakeIds.map((id) => `Recovered ${id}`), step]
+        : [step],
+);
 interface Pending {
   identity: GithubRun;
   external: ExternalGithubRun;
@@ -572,10 +584,10 @@ function mapGithubCheckSteps(
   // Accept exactly the complete old contract or the complete new one; never
   // treat arbitrary missing/extra business steps as optional.
   const receipts = checkFlakeIds.map((id) => `Recovered ${id}`);
-  const expected: readonly string[] =
-    steps.length === GITHUB_WORKFLOW_STEPS.length
-      ? GITHUB_WORKFLOW_STEPS
-      : [...GITHUB_WORKFLOW_STEPS, ...receipts];
+  const caseContract = steps.some((step) => step?.name === CASE_SCOPE_STEP);
+  const expected: readonly string[] = caseContract
+    ? CASE_WORKFLOW_STEPS
+    : GITHUB_WORKFLOW_STEPS;
   const mainStepCount =
     expected.length + (job.steps[0]?.name === "Set up job" ? 1 : 0);
   if (
@@ -649,13 +661,19 @@ function mapGithubCheckSteps(
         step.name === `Recovered ${id}` && step.conclusion === "success",
     ),
   );
+  const isolated = steps.find((s) => s.name === CASE_RUN_STEP);
   if (
     recovered.length &&
-    !steps.some(
-      (step) =>
-        step.name === "test" &&
-        ["success", "failure"].includes(step.conclusion ?? ""),
-    )
+    (isolated?.conclusion !== "success" ||
+      request.mergeTier === "batch" ||
+      scope.skip_checks.split(",").includes("test") ||
+      (scope.scope === "affected" &&
+        recovered.some(
+          (id) =>
+            !scope.affected_paths
+              .split(" ")
+              .some((pkg) => checkFlakeCases[id].file.startsWith(`${pkg}/`)),
+        )))
   )
     return rejected();
   const failedGithubStep = job.steps.find(
@@ -666,8 +684,10 @@ function mapGithubCheckSteps(
   return {
     // The new workflow already made the case-level retry decision. Do not
     // turn a remaining Vitest timeout into a second, whole-check retry.
-    ...(expected.length !== GITHUB_WORKFLOW_STEPS.length &&
-    checks.some((step) => step.name === "test" && step.status === "failed")
+    ...(caseContract &&
+    request.mergeTier !== "batch" &&
+    (isolated?.conclusion === "failure" ||
+      checks.some((step) => step.name === "test" && step.status === "failed"))
       ? { caseTimeoutsManaged: true }
       : {}),
     ...(recovered.length ? { recovered } : {}),

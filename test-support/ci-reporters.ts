@@ -1,48 +1,44 @@
-import { appendFileSync } from "node:fs";
+import { writeSync } from "node:fs";
 import { relative } from "node:path";
 import { configDefaults } from "vitest/config";
 import type { Reporter } from "vitest/node";
 import {
+  type CheckFlakeId,
   checkFlakeCases,
-  checkFlakeIds,
 } from "../packages/host/src/check-flake-cases.js";
+import { caseReceipts } from "./check-flake-evidence.js";
 
-/** Only a completed second execution can turn the first failure into a receipt. */
-export function recoveredOnRetry(
-  state: string,
-  attempts: readonly { state: string }[],
-) {
-  if (state === "failed") return false; // Let Vitest propagate the failure.
-  if (
-    state !== "passed" ||
-    attempts.length !== 2 ||
-    attempts[0]?.state !== "failed" ||
-    attempts[1]?.state !== "passed"
-  )
-    throw new Error("Incomplete environment retry; refusing to pass");
-  return true;
-}
-const flakeReceipts: Reporter = {
-  onTestRunEnd(modules) {
-    for (const module of modules)
-      for (const test of module.children.allTests()) {
-        const key = (test.meta() as { checkFlake?: unknown }).checkFlake;
-        if (!key) continue;
-        const id = checkFlakeIds.find((id) => id === key);
-        if (!id || !recoveredOnRetry(test.result().state, test.attempts()))
-          continue;
-        if (!process.env.GITHUB_OUTPUT)
-          throw new Error("Missing environment retry receipt destination");
-        const { file, name, signature } = checkFlakeCases[id];
-        appendFileSync(process.env.GITHUB_OUTPUT, `${id}=true\n`);
-        if (process.env.GITHUB_STEP_SUMMARY)
-          appendFileSync(
-            process.env.GITHUB_STEP_SUMMARY,
-            `偶发：${file} · ${name}（${signature}）；同一候选重跑 1 次通过。\n`,
-          );
-      }
+export const isolatedReceipts = (
+  eligible: readonly CheckFlakeId[],
+): Reporter => ({
+  onTestRunEnd(modules, errors, reason) {
+    if (errors.length || reason !== "passed") return; // Vitest owns the failing exit.
+    const expectedFiles = new Set<string>(
+      eligible.map((id) => checkFlakeCases[id].file),
+    );
+    if (
+      modules.some(
+        (module) =>
+          !expectedFiles.has(relative(process.cwd(), module.moduleId)),
+      )
+    )
+      throw new Error("Unexpected test module in isolated run");
+    const ids = caseReceipts(
+      eligible,
+      modules.flatMap((module) =>
+        Array.from(module.children.allTests(), (test) => ({
+          file: relative(process.cwd(), module.moduleId),
+          name: test.fullName,
+          state: test.result().state,
+          attempts: test.attempts(),
+        })),
+      ),
+    );
+    // Private coordinator pipe, not stdout or a GitHub command file. A missing
+    // report (even with exit 0) is never accepted as a successful partition.
+    writeSync(3, `${JSON.stringify(ids)}\n`);
   },
-};
+});
 // Add to (rather than replace) Vitest's normal output and GitHub annotations.
 const slowTests: Reporter = {
   onTestRunEnd(modules) {
@@ -72,5 +68,5 @@ const slowTests: Reporter = {
 };
 export const ciReporters =
   process.env.GITHUB_ACTIONS === "true"
-    ? [...configDefaults.reporters, slowTests, flakeReceipts]
+    ? [...configDefaults.reporters, slowTests]
     : configDefaults.reporters;

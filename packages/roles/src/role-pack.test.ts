@@ -861,3 +861,14 @@ test("PM planning splits UI framework from complex writes without splitting ordi
   ])
     expect(planning).toContain(requirement);
 });
+
+test.each(["coder", "reviewer", "tester"] as const)(
+  "%s states the self-test limit",
+  (role) => {
+    expect(instructionsFor(role)).toContain(
+      "不超过主机限流配置的上限（启动时已强制）",
+    );
+    expect(instructionsFor(role)).not.toMatch(/\d+ 个 worker/);
+    expect(instructionsFor(role)).toContain("不要设法绕过");
+  },
+);
