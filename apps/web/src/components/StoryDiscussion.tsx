@@ -5,8 +5,22 @@ import {
   type CardView,
   describeWriteError,
 } from "../api.js";
+import { referenceHref } from "../refs.js";
+import { IdTag } from "./IdTag.js";
+import {
+  ChecklistItem,
+  ChecklistPanel,
+  ChecklistSection,
+} from "./layout/ChecklistLayout.js";
+import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
 import { Input } from "./ui/input.js";
+
+const resolutionLabels = {
+  answer: "已回答",
+  accepted_default: "已接受默认",
+  proposal_default: "未答，方案按默认",
+} as const;
 
 export function StoryDiscussion({
   story,
@@ -24,12 +38,19 @@ export function StoryDiscussion({
   reload: () => void;
 }) {
   return (
-    <section aria-label="需求澄清">
-      <h3>需求澄清 · {story.discussion_rounds ?? 0} 轮</h3>
+    <ChecklistSection
+      label="需求澄清"
+      title={`需求澄清 · ${story.discussion_rounds ?? 0} 轮`}
+    >
       {story.question_groups?.map((group) => (
         <QuestionGroup
           key={group.id}
           group={group}
+          href={referenceHref(
+            { kind: "timeline_entry", id: group.id },
+            projectId,
+            cardId,
+          )}
           closed={closed}
           submit={async (reply, key) => {
             await client.addComment(
@@ -45,16 +66,18 @@ export function StoryDiscussion({
           }}
         />
       ))}
-    </section>
+    </ChecklistSection>
   );
 }
 
 function QuestionGroup({
   group,
+  href,
   closed,
   submit,
 }: {
   group: StoryQuestionGroup;
+  href: string | undefined;
   closed: boolean;
   submit: (reply: StoryReply, key: string) => Promise<void>;
 }) {
@@ -78,22 +101,44 @@ function QuestionGroup({
     }
   }
   return (
-    <fieldset disabled={busy}>
-      <legend>问题清单 {group.id}</legend>
-      <ol>
+    <>
+      <ChecklistPanel
+        disabled={busy}
+        title={
+          <>
+            问题清单 <IdTag id={group.id} label="" href={href} />
+          </>
+        }
+        actions={
+          !closed &&
+          group.questions.some((q) => !q.resolution) && (
+            <Button
+              variant="outline"
+              onClick={() =>
+                void send({ action: "accept_defaults", group_id: group.id })
+              }
+            >
+              整组按默认
+            </Button>
+          )
+        }
+      >
         {group.questions.map((q, i) => {
           const number = i + 1,
             answer = (drafts[number] ?? "").trim();
           return (
-            <li key={`${group.id}-${number}`}>
-              <strong>{q.question}</strong>
-              <p>
-                推荐：{q.recommended} · 影响：{q.impact}
-              </p>
+            <ChecklistItem
+              key={`${group.id}-${number}`}
+              title={q.question}
+              context={
+                <>
+                  推荐：{q.recommended} · 影响：{q.impact}
+                </>
+              }
+            >
               {q.resolution ? (
                 <p>
-                  {q.resolution.source === "answer" ? "已回答" : "按默认"}：
-                  {q.resolution.value}
+                  {resolutionLabels[q.resolution.source]}：{q.resolution.value}
                 </p>
               ) : (
                 !closed && (
@@ -122,21 +167,11 @@ function QuestionGroup({
                   </form>
                 )
               )}
-            </li>
+            </ChecklistItem>
           );
         })}
-      </ol>
-      {!closed && group.questions.some((q) => !q.resolution) && (
-        <Button
-          variant="outline"
-          onClick={() =>
-            void send({ action: "accept_defaults", group_id: group.id })
-          }
-        >
-          整组按默认
-        </Button>
-      )}
-      {error && <p role="alert">{error}</p>}
-    </fieldset>
+      </ChecklistPanel>
+      {error && <RequestFeedback error={error} />}
+    </>
   );
 }

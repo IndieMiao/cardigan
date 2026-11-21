@@ -1,0 +1,57 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .section {
+    display: grid;
+    gap: var(--ui-space-3);
+    min-width: 0;
+    margin-block: var(--ui-space-4);
+    overflow-wrap: anywhere;
+  }
+  .section > h2 {
+    margin: 0;
+    font-size: var(--ui-text-section);
+    line-height: var(--ui-leading-section);
+  }
+  .panel {
+    min-inline-size: 0;
+    margin: 0;
+    padding: var(--ui-space-3);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--ui-space-2);
+  }
+  .panel > ol {
+    display: grid;
+    gap: var(--ui-space-4);
+    margin: var(--ui-space-3) 0 0;
+    padding-inline-start: var(--ui-space-6);
+  }
+  .panel li > p {
+    margin: var(--ui-space-1) 0 0;
+  }
+  .context {
+    color: var(--text-muted);
+  }
+  .panel form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--ui-space-2);
+    margin: var(--ui-space-2) 0 0;
+  }
+  .panel > button {
+    margin-block-start: var(--ui-space-3);
+  }
+  @media (max-width: 760px) {
+    .panel form {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .panel form > button {
+      justify-self: end;
+    }
+  }
+}

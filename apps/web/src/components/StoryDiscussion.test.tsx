@@ -74,3 +74,37 @@ test("one-question replies and accept-all target the displayed group; retry keep
   view.rerender(<StoryDiscussion {...props} closed />);
   expect(screen.queryByRole("button")).toBeNull();
 });
+
+test("labels human answers, human-accepted defaults and unanswered proposal defaults separately", () => {
+  const sources = ["answer", "accepted_default", "proposal_default"] as const;
+  render(
+    <StoryDiscussion
+      client={fakeClient({})}
+      projectId="p"
+      cardId="C-1"
+      reload={vi.fn()}
+      closed
+      story={{
+        discussion_rounds: 1,
+        question_groups: [
+          {
+            id: group_id,
+            questions: sources.map((source, i) => ({
+              question: `问题 ${i + 1}`,
+              recommended: "一列",
+              impact: "容易阅读",
+              resolution: { source, value: "一列", entry_id: group_id },
+            })),
+          },
+        ],
+      }}
+    />,
+  );
+  for (const label of ["已回答", "已接受默认", "未答，方案按默认"]) {
+    expect(screen.getByText(`${label}：一列`)).toBeDefined();
+  }
+  expect(
+    screen.getByRole("heading", { name: "需求澄清 · 1 轮" }),
+  ).toBeDefined();
+  expect(screen.queryByRole("textbox")).toBeNull();
+});
