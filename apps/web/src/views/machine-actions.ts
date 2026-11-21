@@ -437,11 +437,15 @@ class MachineActions {
       this.stopPolling();
       this.fence = machineReadTick();
     }
+    // Q-1088: while the start request has not answered, which check it
+    // started is unknown, so no check's end answers it; the reply will, from
+    // the facts recorded above.
+    const unanswered = this.state.sending === "check";
     // Q-1085: when the request named another check, the feedback is that
     // check's known result, or nothing while it is unknown.
     const other = !!asked && !asked.shown && asked.id !== job.id;
     const known = other && asked ? this.ended.get(asked.id) : undefined;
-    const result = other ? known : job;
+    const result = unanswered ? undefined : other ? known : job;
     if (asked && !asked.shown && (answers || (other && known)))
       asked.shown = true;
     const verify = this.state.verify;

@@ -10,6 +10,8 @@
 // r4-late-reply (the running reply for a check already seen passed) and
 // p1-next-check (B taken up after A failed). Q-1085 scene: p1c-late-answer
 // (attachment-8243: A fails while B is followed, B passes, then A's reply).
+// Q-1088 scenes: q1088-before-reply (as p1c, but B fails, before A's start
+// reply) and q1088-answer (after it).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -352,6 +354,35 @@ try {
       await until(`${has("检查未通过：SSH")} || ${has("检查通过")}`);
       await delay(400);
       await scene("p1c-late-answer");
+      // Q-1088 (attachment-8273): as p1c, but B fails before A's reply.
+      await drawer("p1c", theme);
+      await click("[role=dialog]", "立即检查");
+      await run(() => {
+        window.__c511.read = "a";
+        window.__c511.bFail = true;
+      });
+      await reopenDrawer();
+      await until(has("正在检查：SSH"));
+      await delay(1500);
+      await run(() => {
+        window.__c511.read = "b";
+      });
+      await reopenDrawer();
+      await until(has("正在检查：MCP"));
+      await delay(1500);
+      await run(() => window.__c511.failA());
+      await delay(300);
+      await run(() => {
+        window.__c511.read = "bdone";
+        window.__c511.passB();
+      });
+      await until(`${has("正在开始检查")} || ${has("检查未通过：MCP")}`);
+      await delay(1500);
+      await scene("q1088-before-reply");
+      await run(() => window.__c511.releaseA());
+      await until(has("检查未通过：SSH"));
+      await delay(400);
+      await scene("q1088-answer");
       cases.push({ width, theme, results });
     }
   await send("Emulation.setDeviceMetricsOverride", {

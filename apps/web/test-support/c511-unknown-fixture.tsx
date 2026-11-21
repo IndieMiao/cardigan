@@ -31,7 +31,8 @@ import { settingsPanels } from "./settings-panels-data.js";
 //   p1c      Q-1085: 立即检查's reply (A) waits for `releaseA()`; reads
 //            follow `__c511.read` ("a": A running, "b": B running,
 //            "bdone": B passed); A's progress fails on `failA()`, B's
-//            passes on `passB()`.
+//            passes on `passB()`. Q-1088: with `__c511.bFail` B fails
+//            (MCP) instead, in its record and its progress.
 Date.now = () => new Date(NOW).getTime();
 // Each scene starts without an unknown write kept from the previous one.
 window.sessionStorage.clear();
@@ -61,6 +62,7 @@ const hooks = {
   b: false,
   fail: false,
   aDone: false,
+  bFail: false,
   read: "",
   releaseA: () => {},
   failA: () => {},
@@ -84,6 +86,7 @@ const onLocal = (
   id: string,
   status: "running" | "passed" | "failed",
   step: string,
+  failed_steps: string[] = [],
 ): MachineView => ({
   ...local,
   bindings: local.bindings.map((b) =>
@@ -96,7 +99,7 @@ const onLocal = (
             status,
             step,
             checked_at: NOW,
-            failed_steps: [],
+            failed_steps,
           },
         }
       : b,
@@ -140,7 +143,9 @@ const client = fakeClient({
             ? onLocal("chk-a", "running", "ssh")
             : hooks.read === "b"
               ? onLocal("chk-b", "running", "mcp")
-              : onLocal("chk-b", "passed", "finished"),
+              : hooks.bFail
+                ? onLocal("chk-b", "failed", "finished", ["mcp"])
+                : onLocal("chk-b", "passed", "finished"),
       };
     return {
       machine:
@@ -176,8 +181,9 @@ const client = fakeClient({
               resolve({
                 check: check({
                   id: "chk-b",
-                  status: "passed",
+                  status: hooks.bFail ? "failed" : "passed",
                   step: "finished",
+                  failed_steps: hooks.bFail ? ["mcp"] : [],
                 }),
               });
         })
