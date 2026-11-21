@@ -73,6 +73,7 @@ export function attachment(
     supersedes: null,
     inline: true,
     download_path: "/api/projects/p-1/attachments/F-1",
+    thumbnail_path: `${overrides.download_path ?? "/api/projects/p-1/attachments/F-1"}/thumbnail`,
     ...overrides,
   };
 }

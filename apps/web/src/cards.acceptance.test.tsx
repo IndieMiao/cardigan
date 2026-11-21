@@ -721,22 +721,24 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
   // The comment is readable before the timeline attachment lookup finishes.
   await waitFor(() =>
     expect(
-      commentRow.querySelector(`img[src$="/${current.id}"]`),
+      commentRow.querySelector(`img[src$="/${current.id}/thumbnail"]`),
     ).not.toBeNull(),
   );
   const images = [...commentRow.querySelectorAll("img")];
   expect(
-    images.some((i) => i.getAttribute("src")?.endsWith(`/${current.id}`)),
+    images.some((i) =>
+      i.getAttribute("src")?.endsWith(`/${current.id}/thumbnail`),
+    ),
   ).toBe(true);
   expect(
-    images.some((i) => i.getAttribute("src")?.endsWith(`/${svg.id}`)),
+    images.some((i) => i.getAttribute("src")?.endsWith(`/${svg.id}/thumbnail`)),
   ).toBe(false);
   const oldImage = images.find((i) =>
-    i.getAttribute("src")?.endsWith(`/${old.id}`),
+    i.getAttribute("src")?.endsWith(`/${old.id}/thumbnail`),
   );
   expect(oldImage?.closest("details")?.open).toBe(false);
   const currentImage = images.find((i) =>
-    i.getAttribute("src")?.endsWith(`/${current.id}`),
+    i.getAttribute("src")?.endsWith(`/${current.id}/thumbnail`),
   );
   const evidence = currentImage?.closest("li");
   expect(textOf(evidence ?? null)).toContain(decision.id);
