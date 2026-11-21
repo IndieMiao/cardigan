@@ -171,6 +171,8 @@ export async function serveEmployees(
                   : null,
             role_id: e.role_id,
             projects: e.projects ?? [],
+            // C-516: an explicit launch profile, or null to follow the role.
+            launch_profile_ref: e.launch_profile_ref ?? null,
             role_change_blocked: facts.has_unfinished_run
               ? "run"
               : facts.has_unreleased_assignment
@@ -197,6 +199,8 @@ export async function serveEmployees(
           .map((role) => ({
             role_id: role.role_id,
             display_name: role.display_name,
+            // C-516: what "跟随角色" resolves to in this project.
+            launch_profile_ref: role.launch_profile_ref,
           })),
       };
     });
