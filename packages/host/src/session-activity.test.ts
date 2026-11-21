@@ -837,3 +837,68 @@ test("C-541: an unread record boundary cannot refresh an old main thread or prov
   expect(row?.fileActivity).toBeUndefined();
   expect(row?.foreground).toBeUndefined();
 });
+
+// Unrelated or repeated progress must not push the time of the last output forward.
+test.each(["totalLines", "totalBytes"])(
+  "C-541: only advances of %s in the pending foreground invocation count",
+  async (counter) => {
+    const started = line({
+      ...mainRecord,
+      timestamp: oldAt,
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "cmd",
+            name: "Bash",
+            input: { command: "vite" },
+          },
+        ],
+      },
+    });
+    const output = (data: object, event: object = {}) =>
+      line({
+        ...mainRecord,
+        type: "progress",
+        parentToolUseID: "cmd",
+        data: { type: "bash_progress", fullOutput: "PRIVATE-OUTPUT", ...data },
+        ...event,
+      });
+    const at = "2026-01-01T00:21:00.000Z";
+    const other = counter === "totalBytes" ? "totalLines" : "totalBytes";
+    const file = claudeFile();
+    await write(
+      file,
+      started +
+        output({ [counter]: 2 }, { timestamp: at }) +
+        [
+          output({ elapsedTimeSeconds: 999 }),
+          output({ [counter]: 2, [other]: 1 }),
+          output({ [counter]: 1 }),
+          output({ [counter]: 2 }),
+          output({ [counter]: 3 }, { parentToolUseID: "background" }),
+          output({ [counter]: 3 }, { isSidechain: true }),
+          output({ [counter]: 3 }, { cwd: "/unrelated" }),
+          output({ [counter]: "3" }),
+        ].join(""),
+    );
+    await utimes(file, new Date(now), new Date(now));
+    const sample = await read(state("claude-code"));
+    expect(sample?.fileActivity?.updated_at).toBe(at);
+    expect(sample?.activity?.updated_at).toBe(oldAt);
+    expect(sample?.foreground).toEqual({ command: "vite", since: oldAt });
+    expect(JSON.stringify(sample)).not.toContain("PRIVATE-OUTPUT");
+    await appendFile(
+      file,
+      line({
+        ...mainRecord,
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "cmd" }] },
+      }) + output({ [counter]: 3 }),
+    );
+    const ended = await read(state("claude-code"));
+    expect(ended?.foreground).toBeUndefined();
+    expect(ended?.fileActivity).toBeUndefined();
+  },
+);

@@ -113,6 +113,18 @@ function foregroundName(cmd) {
   if (['npm', 'pnpm'].includes(exe) && (arg === 'dev' || (arg === 'run' && next === 'dev'))) return 'dev server';
   return exe === 'vite' ? 'vite' : 'Bash';
 }
+// Use only cumulative counters from the matched invocation, never the output
+// text. A newly available counter on an already productive call is a baseline,
+// not proof of growth. Repeated or regressing counters cannot renew activity.
+function bashOutputGrew(call, data) {
+  const keys = ['totalBytes', 'totalLines'].filter(key => data[key] !== undefined);
+  if (keys.some(key => !Number.isSafeInteger(data[key]) || data[key] < (call.counts[key] ?? 0))) return false;
+  const grew = keys.some(key => (call.counts[key] !== undefined || !call.produced) &&
+    data[key] > (call.counts[key] ?? 0));
+  for (const key of keys) call.counts[key] = data[key];
+  if (grew) call.produced = true;
+  return grew;
+}
 // Only the final attributable main-thread record may claim the file mtime.
 // A later timer, fault, sidechain or unread gap leaves only verified record times.
 function alertMetadata(lines, path, mtime, activity) {
@@ -128,17 +140,24 @@ function alertMetadata(lines, path, mtime, activity) {
     if (e.sessionId && e.sessionId !== id) return;
     if (e.sessionId !== id || !text(e.cwd, 4096)) continue;
     if (e.isApiErrorMessage === true || (e.type === 'system' && e.subtype === 'api_error') ||
-        (e.type === 'progress' && e.data?.type === 'bash_progress') ||
         !['user', 'assistant', 'progress'].includes(e.type)) continue;
-    finalWrite = {session_id: id, cwd: e.cwd, updated_at: writeTime};
     const ts = Date.parse(text(e.timestamp, 64));
     const timestamp = Number.isFinite(ts) ? new Date(ts).toISOString() : undefined;
+    if (e.type === 'progress' && e.data?.type === 'bash_progress') {
+      if (!pending || e.parentToolUseID !== pending.id || e.cwd !== pending.cwd) continue;
+      if (bashOutputGrew(pending, e.data) && timestamp && ts >= Date.parse(pending.since) &&
+          (!last || ts >= Date.parse(last.updated_at))) {
+        last = {session_id: id, cwd: e.cwd, updated_at: timestamp};
+      }
+      continue;
+    }
+    finalWrite = {session_id: id, cwd: e.cwd, updated_at: writeTime};
     if (timestamp && (!last || ts >= Date.parse(last.updated_at))) last = {...finalWrite, updated_at: timestamp};
     if (!Array.isArray(e.message?.content)) continue;
     for (const block of e.message.content) {
       if (block?.type === 'tool_result' && pending?.id === block.tool_use_id) pending = undefined;
       if (block?.type !== 'tool_use' || block.name !== 'Bash' || block.input?.run_in_background || typeof block.input?.command !== 'string') continue;
-      if (text(block.id, 128) && timestamp) pending = {id: block.id, command: foregroundName(block.input.command), since: timestamp};
+      if (text(block.id, 128) && timestamp) pending = {id: block.id, command: foregroundName(block.input.command), since: timestamp, cwd: e.cwd, counts: {}, produced: false};
     }
   }
   const progressAt = activity?.error ? activity.progress?.updated_at : activity?.updated_at;

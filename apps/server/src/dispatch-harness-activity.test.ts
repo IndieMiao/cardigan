@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Runtime } from "@cardigan/domain";
 import { HostOpsService, UpstreamHealthMonitor } from "@cardigan/host";
@@ -138,3 +138,98 @@ test.each([
     }
   },
 );
+
+// V-2610: drive the actual private transcript reader and the durable alert,
+// with a fixed terminal digest, no MCP calls and a synthetic clock.
+test("C-541: a foreground Bash call producing output is not silent; repeating its counters eventually alerts", async () => {
+  const f = dispatchFixture();
+  const { assignment } = f.create();
+  f.session(assignment, false);
+  f.store.uow.run((tx) => {
+    const [run] = tx.runs.list(f.project);
+    if (!run) throw new Error("Missing fixture Run");
+    tx.runs.put(f.project, { ...run, harness: "claude-code" });
+  });
+  const runtime = {
+    status: async () => ({
+      ok: true,
+      value: { process: "alive", agent: "idle" },
+    }),
+    terminalActivity: async () => ({
+      ok: true,
+      value: { digest: "unchanged" },
+    }),
+  } as unknown as Runtime;
+  const execution = { mode: "local" as const, dataDir: f.dataDir };
+  const options = { store: f.store, runtime, snapshot, clock: f.clock };
+  const service = new HostOpsService({
+    ...options,
+    contextUsage: { execution },
+  });
+  const inspect = vi.fn(service.inspectHarnessActivity.bind(service));
+  const dispatcher = new Dispatcher({
+    ...options,
+    inspectHarnessActivity: inspect,
+    inactiveCancelAfterMs: null,
+  });
+  try {
+    const cwd = executionPaths(execution, f.project, assignment.id).runDir;
+    const folder = join(cwd, "claude", "projects", "-fixture");
+    await mkdir(folder, { recursive: true });
+    const file = join(folder, "session.jsonl");
+    const append = async (event: object) => {
+      const timestamp = f.clock.now();
+      await appendFile(
+        file,
+        `${JSON.stringify({ cwd, sessionId: "session", timestamp, ...event })}\n`,
+      );
+      await utimes(file, new Date(timestamp), new Date(timestamp));
+    };
+    await append({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "cmd",
+            name: "Bash",
+            input: { command: "node web.mjs" },
+          },
+        ],
+      },
+    });
+    for (const [i, lines] of [1, 2, 2].entries()) {
+      f.advance(16 * 60_000);
+      const fullOutput = "PRIVATE\n".repeat(lines);
+      await append({
+        type: "progress",
+        parentToolUseID: "cmd",
+        data: {
+          type: "bash_progress",
+          elapsedTimeSeconds: (i + 1) * 960,
+          totalBytes: fullOutput.length,
+          totalLines: lines,
+          fullOutput,
+        },
+      });
+      await dispatcher.tick();
+      await vi.waitFor(
+        () => expect(inspect.mock.settledResults[i]?.type).toBe("fulfilled"),
+        { timeout: 5_000 },
+      );
+      const alerts = f.state().events.filter((e) => e.type === "run_inactive");
+      if (i < 2) expect(alerts).toHaveLength(0);
+      else
+        expect(alerts.map((e) => e.payload)).toMatchObject([
+          { reason: "前台命令 node web.mjs 已运行至少 48 分钟，无近期输出" },
+        ]);
+      const row = (await inspect.mock.results[i]?.value)?.get(assignment.id);
+      expect(JSON.stringify(row)).not.toContain("PRIVATE");
+      expect(JSON.stringify(alerts)).not.toContain("PRIVATE");
+    }
+  } finally {
+    dispatcher.close();
+    await service.close();
+    f.close();
+  }
+});
