@@ -76,4 +76,5 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+export type { SigningScope } from "./tools/mobile-signing.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

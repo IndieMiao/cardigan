@@ -30,6 +30,7 @@ export const ROLE_FIELD_LABELS: Readonly<Record<string, string>> = {
   abilities: "能力标签（abilities）",
   worktree: "worktree 模式",
   required_machine_tags: "机器标签",
+  required_capabilities: "机器能力要求（required_capabilities）",
 };
 
 /** Shown on every detail and edit view (plan p2v-9-10 §2.1 版本). */
@@ -90,10 +91,38 @@ const VALUE_FIELDS = [
   "worktree",
 ] as const;
 
-/** Line-level LCS diff; role instructions are short enough for O(n·m). */
+/** Above this many line pairs the LCS table is skipped (C-494 import previews). */
+const LCS_CELL_LIMIT = 250_000;
+
+/**
+ * Line-level LCS diff. Long texts keep their common head and tail and show
+ * the differing middle as removed then added, so memory stays bounded.
+ */
 export function diffLines(before: string, after: string): LineDiff[] {
   const a = before === "" ? [] : before.split("\n");
   const b = after === "" ? [] : after.split("\n");
+  if ((a.length + 1) * (b.length + 1) > LCS_CELL_LIMIT) {
+    let head = 0;
+    while (head < a.length && head < b.length && a[head] === b[head]) head++;
+    let tail = 0;
+    while (
+      tail < a.length - head &&
+      tail < b.length - head &&
+      a[a.length - 1 - tail] === b[b.length - 1 - tail]
+    )
+      tail++;
+    const same = (text: string): LineDiff => ({ op: "same", text });
+    return [
+      ...a.slice(0, head).map(same),
+      ...a
+        .slice(head, a.length - tail)
+        .map((text): LineDiff => ({ op: "remove", text })),
+      ...b
+        .slice(head, b.length - tail)
+        .map((text): LineDiff => ({ op: "add", text })),
+      ...a.slice(a.length - tail).map(same),
+    ];
+  }
   const table = Array.from({ length: a.length + 1 }, () =>
     new Array<number>(b.length + 1).fill(0),
   );

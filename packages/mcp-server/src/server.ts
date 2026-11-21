@@ -5,6 +5,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import { pipeline } from "node:stream/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
@@ -40,6 +41,11 @@ import {
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import {
+  type MobileSigningOptions,
+  mobileAccess,
+  mobileSigningTool,
+} from "./tools/mobile-signing.js";
+import {
   type ReservationOptions,
   reservationTool,
 } from "./tools/resource-reservation.js";
@@ -52,6 +58,7 @@ export interface McpServerOptions
     HostOpsToolOptions,
     CheckLogOptions,
     ReservationOptions,
+    MobileSigningOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
@@ -110,12 +117,14 @@ export function serverTools(
     HostOpsToolOptions &
     CheckLogOptions &
     ReservationOptions &
+    MobileSigningOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
     runProbeTool(options),
+    mobileSigningTool(options),
     reservationTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
@@ -296,6 +305,71 @@ export async function startMcpServer(
           signature: options.store.runResources.signState(payload),
         }),
       );
+      return;
+    }
+    if (url.searchParams.has("mobile_artifact")) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const id = url.searchParams.get("mobile_artifact") ?? "",
+        platform = url.searchParams.get("platform");
+      if (
+        req.method !== "GET" ||
+        !options.openMobileArtifact ||
+        !tools.some((t) => t.name === "request_mobile_signature") ||
+        !allowedHosts.includes(req.headers.host ?? "") ||
+        (req.headers.origin !== undefined &&
+          req.headers.origin !== url.origin) ||
+        url.searchParams.size !== 2 ||
+        !/^[a-f0-9]{32}$/u.test(id) ||
+        (platform !== "android" && platform !== "ios")
+      ) {
+        res.writeHead(404).end();
+        return;
+      }
+      try {
+        const { scope, current } = mobileAccess(
+          {
+            store: options.store,
+            identity: identity.value,
+            revalidateToken: () => {
+              const fresh = authenticate(
+                options.store,
+                bearerToken(req.headers.authorization),
+              );
+              if (
+                !fresh.ok ||
+                fresh.value.token.id !== identity.value.token.id ||
+                !fresh.value.actor.allowed_tools.includes(
+                  "request_mobile_signature",
+                )
+              )
+                throw new Error("denied");
+            },
+          },
+          platform,
+        );
+        const { stream, size, sha256 } = await options.openMobileArtifact(
+          scope,
+          id,
+          current,
+        );
+        try {
+          current();
+          if (res.destroyed) return;
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": size,
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": `attachment; filename="${id}.${platform === "android" ? "apk" : "xcarchive.zip"}"`,
+            ETag: `"${sha256}"`,
+          });
+          await pipeline(stream, res);
+        } finally {
+          stream.destroy();
+        }
+      } catch {
+        if (!res.headersSent && !res.destroyed) res.writeHead(404).end();
+        else res.destroy();
+      }
       return;
     }
     if (req.method === "POST" && url.searchParams.has("artifact_upload")) {

@@ -122,7 +122,27 @@ export interface MergeBatchView {
   readonly solo: boolean;
   readonly check?: MergeCheckView;
 }
+export interface StoryChildChoice {
+  action: "cancel" | "detach";
+  ids: readonly string[];
+}
+export interface CreateCardInput {
+  title: string;
+  goal: string;
+  template_id: string;
+  acceptance_criteria?: string[];
+  parent_card_id?: string;
+  state_and_save?: import("@cardigan/domain").UiStateAndSave;
+}
 export interface CardView {
+  readonly parent_card_id?: string;
+  readonly story?: { summary_entry_id?: string };
+  readonly story_progress?: {
+    children: { id: string; title: string; status: CardStatus }[];
+    counts: Record<CardStatus, number>;
+    finished: number;
+    total: number;
+  };
   readonly merge_solo?: boolean;
   readonly merge_stage?: MergeStageView;
   readonly depends_on_cards?: readonly string[];
@@ -719,6 +739,8 @@ export class ApiError extends Error {
      * so the write may already have taken effect whatever this status says.
      */
     readonly outcomeUncertain = false,
+    /** The server's `error.details`, when it sent any (e.g. the invalid field). */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -1345,6 +1367,8 @@ export interface TemplateDefinition {
     | { mode: "review"; reviewer: string };
 }
 export interface TemplateView extends TemplateDefinition {
+  story?: true;
+  requires_state_and_save?: boolean;
   version: number;
   builtin: boolean;
   status: "active" | "inactive";
@@ -1427,12 +1451,30 @@ export interface RoleSummary {
   readonly launch_profile_ref: string;
 }
 
+/** C-494: a launch profile the host has loaded; never endpoints or secrets. */
+export interface LaunchProfileOption {
+  readonly name: string;
+  readonly harness: string;
+  readonly model: string | null;
+}
+
 export interface RoleListView {
   readonly project_id: string;
   readonly roles: readonly RoleSummary[];
   readonly default_roles: readonly string[];
   readonly harnesses: readonly string[];
   readonly allowlists: RoleAllowlists;
+  /** Older servers omit it; role pickers then offer no profiles. */
+  readonly launch_profiles?: readonly LaunchProfileOption[];
+}
+
+/** One global employee as listed in the employee settings. */
+export interface EmployeeSummary extends CreatedEmployee {
+  readonly title?: string;
+  readonly status?: "active" | "inactive";
+  readonly avatar?: string | null;
+  /** Why a role change would be refused now: an unfinished run or a bound assignment. */
+  readonly role_change_blocked?: "run" | "assignment" | null;
 }
 
 /** C-515 `GET /api/launch-settings`: global, read-only; secret values never leave the host. */
@@ -1487,15 +1529,75 @@ export interface LaunchProviderView {
   readonly id: string;
   readonly name: string;
   readonly base_url: string | null;
+  /** C-515: environment variable → secrets.env key name (never the value). */
+  readonly secret_env?: Readonly<Record<string, string>>;
+}
+/** A model alias in launch.yaml: the concrete id it names, plus metadata. */
+export interface LaunchModelView extends LaunchModelMetadata {
+  readonly id: string;
+  readonly provider?: string;
 }
 export interface LaunchSettingsView {
   readonly version: string;
   readonly profiles: readonly LaunchProfileView[];
   readonly providers: readonly LaunchProviderView[];
+  readonly models?: Readonly<Record<string, LaunchModelView>>;
+  /** Key names present in secrets.env; values never leave the host. */
+  readonly secret_keys?: readonly string[];
+}
+
+/** C-515 profile fields a person may set; `null` clears an optional one. */
+export interface LaunchProfileFields {
+  readonly harness?: string;
+  readonly provider?: string | null;
+  readonly model?: string | null;
+  readonly effort?: string | null;
+  readonly permission_mode?: string | null;
+  readonly provider_flag?: string | null;
+  readonly auto_update?: boolean | null;
+}
+/** C-515 `POST /api/launch-settings/preview` change, one per preview. */
+export type LaunchChange =
+  | {
+      readonly op: "create_profile" | "edit_profile";
+      readonly name: string;
+      readonly fields: LaunchProfileFields;
+    }
+  | {
+      readonly op: "copy_profile";
+      readonly name: string;
+      readonly source: string;
+    }
+  | { readonly op: "delete_profile"; readonly name: string }
+  | { readonly op: "set_model"; readonly name: string; readonly id: string }
+  | {
+      readonly op: "edit_provider";
+      readonly name: string;
+      readonly fields: {
+        readonly name?: string;
+        readonly base_url?: string;
+        readonly secret_env?: Readonly<Record<string, string>>;
+      };
+    };
+export interface LaunchPreview {
+  readonly version: string;
+  readonly preview_id: string;
+  readonly diff: readonly {
+    readonly field: string;
+    readonly before: unknown;
+    readonly after: unknown;
+  }[];
+}
+export interface LaunchCheckStarted {
+  readonly id: string;
+  readonly profile: string;
+  readonly mode: LaunchProfileCheck["mode"];
+  readonly version: string;
+  readonly status: "running";
 }
 
 export interface EmployeeOptions {
-  readonly employees?: readonly CreatedEmployee[];
+  readonly employees?: readonly EmployeeSummary[];
   readonly library: readonly {
     readonly id: string;
     readonly name: string;
@@ -1510,7 +1612,27 @@ export interface EmployeeOptions {
   readonly roles: readonly {
     readonly role_id: string;
     readonly display_name: string;
+    /** C-516: the role's launch profile; older servers omit it. */
+    readonly launch_profile_ref?: string;
   }[];
+}
+/** C-493/C-516: change an employee's role, launch profile, or both. */
+export interface EmployeePatch {
+  readonly role_id?: string;
+  /** A pinned profile, or null to follow the role. */
+  readonly launch_profile_ref?: string | null;
+}
+/** `@` candidates for one card's comment box (active employees only). */
+export interface MentionCandidate {
+  readonly id: string;
+  readonly name: string;
+  readonly title: string;
+  readonly avatar: string | null;
+  /** Works on the card, wrote on its timeline, or is a standing PM. */
+  readonly related: boolean;
+}
+export interface MentionCandidates {
+  readonly employees: readonly MentionCandidate[];
 }
 export interface CreateEmployeeInput {
   readonly projects?: readonly string[];
@@ -1528,6 +1650,37 @@ export interface CreatedEmployee {
   readonly id: string;
   readonly name: string;
   readonly role_id: string;
+  /** C-516 (employee options): a pinned launch profile; null follows the role. */
+  readonly launch_profile_ref?: string | null;
+}
+
+/** C-492 role document preview; apply returns the same shape after writing. */
+export interface RoleDocumentPreview {
+  readonly snapshot: string;
+  readonly role: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly role: RoleDefinitionView;
+    readonly fields: readonly {
+      readonly field: string;
+      readonly before: unknown;
+      readonly after: unknown;
+    }[];
+    readonly relaxations: readonly string[];
+  };
+  readonly template: {
+    readonly action: "create" | "update" | "unchanged";
+    readonly before: (TemplateDefinition & { version: number }) | null;
+    readonly after: TemplateDefinition & { version: number };
+  } | null;
+  readonly employees: readonly {
+    readonly name: string;
+    readonly title: string;
+    readonly bio?: string;
+    readonly role_id: string;
+    readonly launch_profile_ref: string | null;
+    readonly action: "create" | "unchanged";
+    readonly id: string | null;
+  }[];
 }
 
 /** One saved role version (V9a `Role`). */
@@ -1631,11 +1784,48 @@ export interface CardiganClient {
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
   /** Global launch profiles (not project scoped). */
   launchSettings(): Promise<LaunchSettingsView>;
+  /** C-515: a diff of one change against `version`; nothing is written. */
+  previewLaunchChange(
+    version: string,
+    change: LaunchChange,
+  ): Promise<LaunchPreview>;
+  /** C-515: write a previewed change (validated, backed up, hot reloaded). */
+  confirmLaunchChange(
+    version: string,
+    previewId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  /** C-515: a person starts a local check or an online model listing. */
+  startLaunchCheck(
+    version: string,
+    profile: string,
+    mode: LaunchProfileCheck["mode"],
+  ): Promise<LaunchCheckStarted>;
   createEmployee(
     projectId: string,
     input: CreateEmployeeInput,
     idempotencyKey: string,
   ): Promise<CreatedEmployee>;
+  /** C-493: a role change is a transfer; the server refuses while work is bound. C-516: or pin/clear the launch profile. */
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: EmployeePatch,
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee>;
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview>;
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview>;
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }>;
+  /** C-515: the launch profile names roles and employees may use (global). */
+  launchProfileNames(): Promise<readonly string[]>;
   templates(projectId: string): Promise<{ templates: TemplateView[] }>;
   template(projectId: string, id: string): Promise<TemplateDetail>;
   templateHistory(
@@ -1787,11 +1977,17 @@ export interface CardiganClient {
       | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
+  createCard(
+    projectId: string,
+    input: CreateCardInput,
+    key: string,
+  ): Promise<{ id: string }>;
   cancelCard(
     projectId: string,
     cardId: string,
     reason: string,
     idempotencyKey?: string,
+    children?: StoryChildChoice,
   ): Promise<void>;
   supersedeCard(
     projectId: string,
@@ -1922,6 +2118,10 @@ export interface CardiganClient {
     cardId: string,
     panel: CardPanel,
   ): Promise<Partial<CardDetail>>;
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates>;
   addComment(
     projectId: string,
     cardId: string,
@@ -1937,7 +2137,11 @@ export interface CardiganClient {
 }
 
 interface ErrorBody {
-  readonly error?: { readonly code?: string; readonly message?: string };
+  readonly error?: {
+    readonly code?: string;
+    readonly message?: string;
+    readonly details?: unknown;
+  };
 }
 
 export class HttpCardiganClient implements CardiganClient {
@@ -2135,6 +2339,15 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<Partial<CardDetail>> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}?section=${panel}`,
+    );
+  }
+
+  mentionCandidates(
+    projectId: string,
+    cardId: string,
+  ): Promise<MentionCandidates> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}/mentions`,
     );
   }
 
@@ -2512,6 +2725,36 @@ export class HttpCardiganClient implements CardiganClient {
   launchSettings(): Promise<LaunchSettingsView> {
     return this.request("/api/launch-settings");
   }
+  previewLaunchChange(
+    version: string,
+    change: LaunchChange,
+  ): Promise<LaunchPreview> {
+    return this.request("/api/launch-settings/preview", {
+      method: "POST",
+      body: JSON.stringify({ version, change }),
+    });
+  }
+  async confirmLaunchChange(
+    version: string,
+    previewId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.request("/api/launch-settings/confirm", {
+      method: "POST",
+      body: JSON.stringify({ version, preview_id: previewId }),
+      idempotencyKey,
+    });
+  }
+  startLaunchCheck(
+    version: string,
+    profile: string,
+    mode: LaunchProfileCheck["mode"],
+  ): Promise<LaunchCheckStarted> {
+    return this.request("/api/launch-settings/checks", {
+      method: "POST",
+      body: JSON.stringify({ version, profile, mode }),
+    });
+  }
   employeeOptions(projectId: string): Promise<EmployeeOptions> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/employees/options`,
@@ -2528,6 +2771,52 @@ export class HttpCardiganClient implements CardiganClient {
       input,
       idempotencyKey,
     ) as Promise<CreatedEmployee>;
+  }
+  updateEmployee(
+    projectId: string,
+    employeeId: string,
+    patch: EmployeePatch,
+    idempotencyKey: string,
+  ): Promise<CreatedEmployee> {
+    return this.write(
+      projectId,
+      `employees/${encodeURIComponent(employeeId)}/update`,
+      patch,
+      idempotencyKey,
+    ) as Promise<CreatedEmployee>;
+  }
+  previewRoleDocument(
+    projectId: string,
+    markdown: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/role-document/preview`,
+      { method: "POST", body: JSON.stringify({ markdown }) },
+    );
+  }
+  applyRoleDocument(
+    projectId: string,
+    markdown: string,
+    snapshot: string,
+    idempotencyKey: string,
+  ): Promise<RoleDocumentPreview> {
+    return this.write(
+      projectId,
+      "role-document/apply",
+      { markdown, snapshot },
+      idempotencyKey,
+    ) as Promise<RoleDocumentPreview>;
+  }
+  async launchProfileNames(): Promise<readonly string[]> {
+    const { profiles } = await this.request<{ profiles: readonly string[] }>(
+      "/api/launch-settings/profiles",
+    );
+    return profiles;
+  }
+  exportRole(projectId: string, roleId: string): Promise<{ markdown: string }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(roleId)}/export`,
+    );
   }
   role(projectId: string, roleId: string): Promise<RoleDetailView> {
     return this.request(
@@ -2823,16 +3112,27 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  createCard(
+    projectId: string,
+    input: CreateCardInput,
+    idempotencyKey: string,
+  ): Promise<{ id: string }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/cards`,
+      { method: "POST", body: JSON.stringify(input), idempotencyKey },
+    );
+  }
   async cancelCard(
     projectId: string,
     cardId: string,
     reason: string,
     idempotencyKey = crypto.randomUUID(),
+    children?: StoryChildChoice,
   ): Promise<void> {
     await this.write(
       projectId,
       `cards/${encodeURIComponent(cardId)}/cancel`,
-      { reason },
+      { reason, ...(children ? { story_children: children } : {}) },
       idempotencyKey,
     );
   }
@@ -2922,7 +3222,13 @@ export class HttpCardiganClient implements CardiganClient {
       }
       const error = await toApiError(response, method, path);
       throw lostReply
-        ? new ApiError(error.status, error.code, error.message, true)
+        ? new ApiError(
+            error.status,
+            error.code,
+            error.message,
+            true,
+            error.details,
+          )
         : error;
     }
     observe?.(response);
@@ -2984,7 +3290,13 @@ async function toApiError(
   const code = body.error?.code ?? `http_${response.status}`;
   const message =
     body.error?.message ?? `${method} ${path} 失败（${response.status}）`;
-  return new ApiError(response.status, code, message);
+  return new ApiError(
+    response.status,
+    code,
+    message,
+    false,
+    body.error?.details,
+  );
 }
 
 /**

@@ -155,7 +155,11 @@ export function scopedCardState(
     JSON.stringify(sourceIds),
   ]);
   const related = cards
-    .flatMap((c) => c.related_cards)
+    .flatMap((c) =>
+      c.parent_card_id
+        ? [...c.related_cards, c.parent_card_id]
+        : c.related_cards,
+    )
     .concat(sourceDecisions.flatMap((q) => (q.card_id ? [q.card_id] : [])));
   cards = unique([
     ...cards,

@@ -714,3 +714,117 @@ test("C-72: the client reads whether the flag changed", async () => {
     ),
   ).toEqual({ changed: true, auto_merge_due_at: null });
 });
+
+test("story cancellation requires choosing what happens to the listed active children", async () => {
+  const cancelCard = vi.fn<CardiganClient["cancelCard"]>().mockResolvedValue();
+  const card = {
+    ...cardDetail().card,
+    story: {},
+    story_progress: {
+      total: 1,
+      finished: 0,
+      counts: {
+        backlog: 0,
+        todo: 1,
+        in_progress: 0,
+        review: 0,
+        awaiting_merge: 0,
+        done: 0,
+        cancelled: 0,
+      },
+      children: [{ id: "C-2", title: "Child", status: "todo" as const }],
+    },
+  };
+  render(
+    <CardActions
+      card={card}
+      client={fakeClient({ cancelCard })}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  await selectMenu(/^更多$/, "取消卡片");
+  const submit = screen.getByRole("button", {
+    name: "确认取消卡片",
+  }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  expect(
+    screen.getByRole("link", { name: /C-2.*Child/ }).getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-2");
+  fireEvent.click(screen.getByRole("radio", { name: "保留并脱离需求卡" }));
+  fireEvent.click(submit);
+  await waitFor(() =>
+    expect(cancelCard).toHaveBeenCalledWith(
+      "p-1",
+      card.id,
+      "",
+      expect.any(String),
+      { action: "detach", ids: ["C-2"] },
+    ),
+  );
+});
+
+test("a lost create response reuses its key after reopening the child form and releases it after success", async () => {
+  const createCard = vi
+    .fn<CardiganClient["createCard"]>()
+    .mockRejectedValueOnce(new TypeError("lost response"))
+    .mockResolvedValue({ id: "C-9" });
+  const client = fakeClient({
+    createCard,
+    templates: async () => ({
+      templates: [
+        {
+          id: "dev",
+          title: "开发卡",
+          description: "",
+          version: 2,
+          builtin: true,
+          status: "active",
+          requires_repo: true,
+          merge: "confirm",
+          require_acceptance_criteria: true,
+          primary_work_item_key: "development",
+          work_items: [],
+          completion: { mode: "review", reviewer: "system" },
+        },
+      ],
+    }),
+  });
+  render(
+    <CardActions
+      card={{ ...cardDetail().card, story: {} }}
+      client={client}
+      projectId="p-1"
+      onSaved={() => {}}
+    />,
+  );
+  async function submit() {
+    await selectMenu(/^更多$/, "新建子卡");
+    const dialog = within(
+      await screen.findByRole("dialog", { name: "新建子卡" }),
+    );
+    expect(
+      (dialog.getByLabelText("父需求卡（可选）") as HTMLInputElement).value,
+    ).toBe("C-1");
+    for (const [label, value] of [
+      ["标题", "Part"],
+      ["目标", "Outcome"],
+      ["验收标准", "Reviewed"],
+    ] as const)
+      fireEvent.change(dialog.getByLabelText(label), { target: { value } });
+    fireEvent.click(dialog.getByRole("button", { name: "创建" }));
+  }
+  await submit();
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await submit();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(createCard.mock.calls[1]).toEqual(createCard.mock.calls[0]);
+  await submit();
+  await waitFor(() => expect(createCard).toHaveBeenCalledTimes(3));
+  expect(createCard.mock.calls[2]?.[2]).not.toBe(createCard.mock.calls[1]?.[2]);
+  expect(createCard.mock.calls[2]?.[1]).toMatchObject({
+    parent_card_id: "C-1",
+    template_id: "dev",
+  });
+});

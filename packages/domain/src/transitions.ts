@@ -43,15 +43,22 @@ export const transitionTables: {
     inactive: { activate: "active" },
   },
   produce: {
-    todo: { dependencies_met: "ready", cancel: "cancelled" },
+    todo: {
+      story_child_added: "in_progress",
+      story_summary_submitted: "delivered",
+      dependencies_met: "ready",
+      cancel: "cancelled",
+    },
     ready: { run_started: "in_progress", cancel: "cancelled" },
     in_progress: {
+      story_summary_submitted: "delivered",
       delivery_submitted: "delivered",
       block: "blocked",
       request_decision: "waiting_decision",
       cancel: "cancelled",
     },
     delivered: {
+      story_child_added: "in_progress",
       delivery_submitted: "delivered",
       verifiers_passed: "accepted",
       review_rejected: "changes_requested",

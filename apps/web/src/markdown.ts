@@ -108,6 +108,60 @@ markdown.renderer.rules.id_reference = (tokens, index) => {
   return `<span data-ui="id-badge" class="${idBadgeClass(canonical)}">${escapeHtml(id)}</span> <span class="id-description">${escapeHtml(description)}</span>`;
 };
 
+/** A column whose longest cell is longer than this many characters wraps. */
+const WIDE_CELL = 8;
+
+/**
+ * Table cells for both Markdown renderers (this one and HelpMarkdown).
+ *
+ * markdown-it writes the column alignment (`:---`, `:---:`, `---:`) as an
+ * inline `style`; cells keep only `data-align` instead, so theme.css owns the
+ * look and no author-controlled style reaches the page. A column with a cell
+ * longer than {@link WIDE_CELL} characters is marked `data-wide`: it wraps at a
+ * minimum reading width, and every other column stays on one line, so a narrow
+ * table never squeezes a column to one character per line.
+ */
+export function markdownTables(md: typeof markdown): void {
+  md.core.ruler.push("table_cells", (state) => {
+    let columns: ReturnType<typeof md.parse>[number][][] = [];
+    let wide: boolean[] = [];
+    let column = 0;
+    state.tokens.forEach((token, index) => {
+      if (token.type === "table_open") {
+        columns = [];
+        wide = [];
+      } else if (token.type === "tr_open") {
+        column = 0;
+      } else if (token.type === "th_open" || token.type === "td_open") {
+        const align = /^text-align:(left|center|right)$/u.exec(
+          String(token.attrGet("style") ?? ""),
+        )?.[1];
+        token.attrs = null;
+        if (align) token.attrSet("data-align", align);
+        const cells = columns[column] ?? [];
+        cells.push(token);
+        columns[column] = cells;
+        const text = (state.tokens[index + 1]?.children ?? [])
+          .map((child) => child.content)
+          .join("");
+        if (Array.from(text).length > WIDE_CELL) wide[column] = true;
+        column += 1;
+      } else if (token.type === "table_close") {
+        columns.forEach((cells, i) => {
+          if (wide[i]) for (const cell of cells) cell.attrSet("data-wide", "");
+        });
+      }
+    });
+  });
+}
+markdown.use(markdownTables);
+
+// Wide tables scroll inside their own box instead of widening the body.
+markdown.renderer.rules.table_open = (tokens, index, options, _env, self) =>
+  `<div class="ui-markdown-table">${self.renderToken(tokens, index, options)}`;
+markdown.renderer.rules.table_close = (tokens, index, options, _env, self) =>
+  `${self.renderToken(tokens, index, options)}</div>\n`;
+
 /** Render one body to HTML; the caller owns the container element. */
 export function renderMarkdown(source: string): string {
   return markdown.render(source);

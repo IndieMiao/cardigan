@@ -62,6 +62,7 @@ export const toolNames = [
   "request_recheck",
   "request_check",
   "run_probe",
+  "request_mobile_signature",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -158,6 +159,9 @@ export interface Card {
     | { readonly kind: "decision"; readonly decision_id: DecisionId };
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
+  readonly parent_card_id?: CardId;
+  /** Stamped only for the built-in story workflow, not existing custom templates. */
+  readonly story?: { readonly summary_entry_id?: TimelineEntryId };
   readonly related_cards: readonly CardId[];
   readonly is_ui_framework?: boolean;
   readonly depends_on_cards?: readonly CardId[];

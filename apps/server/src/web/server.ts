@@ -91,6 +91,7 @@ import { LoginLimiter } from "./login-limiter.js";
 import { MachineChecks } from "./machine-checks.js";
 import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
+import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -875,6 +876,17 @@ async function serveProjectRoute(
     return;
   }
 
+  const mentions = /^\/cards\/([^/]+)\/mentions$/.exec(rest);
+  if (mentions !== null) {
+    const card_id = decodeURIComponent(mentions[1] ?? "") as CardId;
+    const candidates = readMentionCandidates(store, project_id, card_id);
+    if (candidates === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, candidates);
+    return;
+  }
+
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
@@ -1131,7 +1143,11 @@ function serveRoleRead(
     listRoleVersions(tx, project_id),
   );
   if (rest === "/roles") {
-    sendJson(context.res, 200, roleList(project_id, versions));
+    sendJson(
+      context.res,
+      200,
+      roleList(project_id, versions, context.roleLaunchConfig?.()),
+    );
     return;
   }
   const match = /^\/roles\/([^/]+)(\/history)?$/u.exec(rest);

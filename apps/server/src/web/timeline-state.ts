@@ -1,5 +1,6 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
+import { storyProgress } from "@cardigan/domain";
 import { timeRead } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
@@ -199,6 +200,20 @@ export function readPagedCard(
     );
     return timed("assemble", () =>
       cardDetail(state, cardId, {
+        ...(card.story
+          ? {
+              storyProgress: storyProgress(
+                readDocs(
+                  store,
+                  project,
+                  "cards",
+                  "json_extract(doc, '$.parent_card_id') = ?",
+                  [card.id],
+                ),
+                card,
+              ),
+            }
+          : {}),
         dependencyState,
         mergeState,
         ...options,
