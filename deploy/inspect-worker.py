@@ -228,17 +228,44 @@ def optional(fn):
         return None
 
 
+def managed_loopback_account(c, user):
+    # install-agent.py predates per-project remote accounts: gid is the shared
+    # supplementary group. Its root-owned installation marker is not readable
+    # by the agent. Check metadata only, never the controller's identity/data.
+    if (not c['local'] or c['platform'] != 'linux' or user.pw_name != 'agent'
+            or user.pw_dir != '/var/lib/cardigan-agent' or os.getgid() != user.pw_gid
+            or os.getegid() != user.pw_gid or grp.getgrgid(user.pw_gid).gr_name != 'agent'
+            or grp.getgrgid(c['gid']).gr_name != 'cardigan-share'
+            or c['gid'] not in os.getgroups() or set(os.getgroups()) - {user.pw_gid, c['gid']}):
+        raise ValueError()
+    with directory(user.pw_dir) as fd:
+        home = os.fstat(fd)
+        marker = os.stat('.cardigan-managed', dir_fd=fd, follow_symlinks=False)
+        if (home.st_uid != 0 or stat.S_IMODE(home.st_mode) != 0o750 or marker.st_uid != 0
+                or not stat.S_ISREG(marker.st_mode) or marker.st_nlink != 1 or stat.S_IMODE(marker.st_mode) != 0o600):
+            raise ValueError()
+    with directory(c['root']) as fd:
+        root = os.fstat(fd)
+        if root.st_uid == os.getuid() or root.st_gid != c['gid'] or stat.S_IMODE(root.st_mode) != 0o2750:
+            raise ValueError()
+
+
 def main(c):
     user = pwd.getpwuid(os.getuid())
-    if user.pw_name != c['user'] or os.getuid() == 0 or os.geteuid() != os.getuid() or os.getegid() != c['gid']:
+    if user.pw_name != c['user'] or os.getuid() == 0 or os.geteuid() != os.getuid():
         raise ValueError()
     if user.pw_name in ('root', 'ciadmin') or grp.getgrgid(user.pw_gid).gr_name in ('root', 'sudo', 'admin', 'wheel', 'docker'):
         raise ValueError()
     project, assignment, generation = c['project'], c['assignment'], c['generation']
-    if platform.system().lower() != c['platform'] or user.pw_gid != c['gid']:
+    if platform.system().lower() != c['platform']:
         raise ValueError()
-    native['project_account'](dict(account=c['user'], uid=os.getuid(), home=user.pw_dir,
-                                   root=c['root'], project=project))
+    if c.get('managed_loopback'):
+        managed_loopback_account(c, user)
+    else:
+        if os.getegid() != c['gid'] or user.pw_gid != c['gid']:
+            raise ValueError()
+        native['project_account'](dict(account=c['user'], uid=os.getuid(), home=user.pw_dir,
+                                       root=c['root'], project=project))
     base = Path(c['root'], 'runs', project, assignment)
     published = generation and not c['local']
     labels = dict(cardigan='1', project=project, assignment=assignment)

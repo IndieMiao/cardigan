@@ -72,9 +72,19 @@ export function beginIdleSessionRetirement(
       },
     };
     d.put("assignments", next);
-    d.emit("idle_session_retirement_started", d.work(a.work_item_id!).card_id, {
-      assignment_id: id,
-    });
+    if (
+      !(
+        next.idle_retirement?.observe_only &&
+        prior?.evidence?.reason === "kept_terminal"
+      )
+    )
+      d.emit(
+        "idle_session_retirement_started",
+        d.work(a.work_item_id!).card_id,
+        {
+          assignment_id: id,
+        },
+      );
     return next;
   });
 }
@@ -313,7 +323,10 @@ export function settleIdleSessionRetirement(
         : result.outcome;
     const failures = pending.failures + 1;
     const notify =
-      failures >= 3 && !pending.notice_sent && !pending.dispatch_wait;
+      failures >= 3 &&
+      evidence.reason !== "kept_terminal" &&
+      !pending.notice_sent &&
+      !pending.dispatch_wait;
     const next: Assignment = {
       ...a,
       idle_retirement: {

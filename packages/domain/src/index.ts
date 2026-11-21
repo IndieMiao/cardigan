@@ -263,6 +263,7 @@ export { sharedMustFixes } from "./shared-findings.js";
 export {
   repairWakeTarget,
   resumableReviewWithdrawal,
+  reviewDiscussionInstruction,
   reviewReceiptTargetCurrent,
   reviewRunWakeDisposition,
   reviewWakeBlocked,

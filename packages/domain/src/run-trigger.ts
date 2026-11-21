@@ -34,7 +34,8 @@ export function originalRunTrigger(
     if (host && typeof p?.stall_review_trigger === "string") {
       const trigger = eventById(state.events, p.stall_review_trigger);
       return trigger?.type === "review_submitted" ||
-        trigger?.type === "decision_resolved"
+        trigger?.type === "decision_resolved" ||
+        trigger?.type === "instruction_issued"
         ? trigger
         : undefined;
     }

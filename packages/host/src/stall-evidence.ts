@@ -3,7 +3,9 @@ import {
   type Assignment,
   type CommandState,
   idleWakeGuard,
+  type RetirementIdentity,
   type Runtime,
+  type RuntimeRef,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
@@ -120,6 +122,30 @@ export async function stallWorkspace(
     return "unknown";
   }
 }
+/** Missing hc is not an exit. The native Linux adapter can independently
+ * prove that this exact non-kept launch, its process group and socket are gone. */
+export async function observeTurnOwner(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  identity: RetirementIdentity,
+) {
+  const exact = await runtime
+    .observe_retirement?.(ref, identity)
+    .catch(() => undefined);
+  if (
+    exact &&
+    !exact.ok &&
+    exact.error.code === "runtime_unavailable" &&
+    ref.machine_id === "local" &&
+    ref.local_process_receipt
+  ) {
+    const proof = await runtime
+      .confirm_local_exit?.(ref, identity)
+      .catch(() => undefined);
+    if (proof?.ok && proof.value) return { ok: true, value: "exited" } as const;
+  }
+  return exact;
+}
 export async function stallEvidence(
   state: CommandState,
   a: Assignment,
@@ -136,12 +162,10 @@ export async function stallEvidence(
     systemTurn &&
     a.runtime_ref?.machine_id === a.machine_id &&
     a.machine_id === "local"
-      ? runtime
-          .observe_retirement?.(a.runtime_ref, {
-            project_id: state.project_id,
-            assignment_id: a.id,
-          })
-          .catch(() => undefined)
+      ? observeTurnOwner(runtime, a.runtime_ref, {
+          project_id: state.project_id,
+          assignment_id: a.id,
+        })
       : undefined,
   ]);
   const terminal_state = observed?.ok ? observed.value.agent : null;
@@ -164,7 +188,11 @@ export async function stallEvidence(
       : {}),
     workspace,
     terminal_state,
-    process_state: observed?.ok ? observed.value.process : null,
+    process_state: observed?.ok
+      ? observed.value.process
+      : owner?.ok
+        ? owner.value
+        : null,
     can_restart:
       (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
       a.machine_id === "local" &&

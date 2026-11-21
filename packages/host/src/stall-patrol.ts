@@ -43,7 +43,7 @@ export class StallPatrol {
     private store: Store,
     private clock: Clock,
     private runtime: Runtime,
-    private execution: () => ExecutionConfig | undefined,
+    private execution: (project: ProjectId) => ExecutionConfig | undefined,
     private signal: AbortSignal,
   ) {}
   private causes(state: CommandState) {
@@ -111,7 +111,7 @@ export class StallPatrol {
       state,
       a,
       this.runtime,
-      this.execution(),
+      this.execution(state.project_id),
       this.signal,
       !!stall?.system_finished_run_id,
     );
@@ -227,7 +227,10 @@ export class StallPatrol {
       const fresh = loadCommandState(tx, project);
       if (handled(fresh) || hostOpsPending(fresh.events, a.id)) return;
       const row = this.causes(fresh).find(
-        (s) => s.cause_id === stall.cause_id && s.assignment_id === a.id,
+        (s) =>
+          s.cause_id === stall.cause_id &&
+          s.assignment_id === a.id &&
+          s.review_trigger_id === stall.review_trigger_id,
       );
       if (!row) return; // Original notification already delivered or acknowledged.
       reason = row.restart_blocked ?? reason;

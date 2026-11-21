@@ -1,13 +1,15 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { Assignment, ProjectId, Run } from "@cardigan/domain";
+import type { Assignment, ProjectId, Run, Runtime } from "@cardigan/domain";
 import { ToolError, workerEvidence } from "@cardigan/mcp-server";
 import {
   agentProcessCommand,
   type ExecutionConfig,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
+
+import { observeTurnOwner } from "./stall-evidence.js";
 
 const names = [
   "worker-files.py",
@@ -24,8 +26,8 @@ const unavailable = (reason: string) =>
     { reason },
   );
 
-/** The same isolated worker account path is used for loopback and remote machines.
- * Never run a probe in the controller account, including for a local-mode server. */
+/** Collect files/processes only via the selected isolated account; native
+ * local diagnostics may project the exact hc observation, not controller data. */
 export async function inspectWorker(
   execution: ExecutionConfig,
   project: ProjectId,
@@ -34,14 +36,17 @@ export async function inspectWorker(
   current: boolean,
   platform: string,
   harness = run?.harness,
+  runtime?: Runtime,
 ) {
   const target = execution.target;
-  if (execution.mode !== "agent-ssh")
-    throw unavailable("isolated_worker_transport_required");
   if (!target) throw unavailable("worker_binding_missing");
   if (target.project_id !== project || target.machine_id !== a.machine_id)
     throw unavailable("worker_binding_mismatch");
-  if (a.external || ["root", "ciadmin"].includes(execution.user ?? "agent"))
+  if (
+    a.external ||
+    (execution.mode === "agent-ssh" &&
+      ["root", "ciadmin"].includes(execution.user ?? "agent"))
+  )
     throw unavailable("worker_identity_not_allowed");
   const pub = run?.launch_publication;
   // Dispatch writes the Assignment ref, but a preparation failure can be
@@ -60,6 +65,47 @@ export async function inspectWorker(
             (!dispatched ||
               JSON.stringify(dispatched) === JSON.stringify(resident))))));
   const ref = pub ? pub.runtime_ref : residentProven ? resident : null;
+  // Native local mode has no isolated worker account. Read only the bound
+  // native terminal; never run a file/process collector as the controller.
+  if (
+    runtime &&
+    a.machine_id === "local" &&
+    !pub &&
+    execution.mode === "local"
+  ) {
+    if (
+      ref?.machine_id !== "local" ||
+      ref.runtime_machine !== "local" ||
+      !/^t[0-9a-z]{1,12}$/u.test(ref.terminal_ref) ||
+      (ref.target && !runtimeOwnsRef(execution, ref))
+    )
+      throw unavailable("local_session_not_bound");
+    const owner = await observeTurnOwner(runtime, ref, {
+      project_id: project,
+      assignment_id: a.id,
+    });
+    if (!owner?.ok || owner.value === "unknown")
+      throw unavailable("local_terminal_unconfirmed");
+    return {
+      source: "local_runtime",
+      session_launch_run_id: ref.launch_generation?.run_id ?? null,
+      terminals: [
+        {
+          address: ref.terminal_ref,
+          state: owner.value === "alive" ? "live" : "finished",
+          activity: null,
+          screen: [],
+        },
+      ],
+      processes: null,
+      events: null,
+      markers: null,
+      helpers: [],
+      free_bytes: null,
+    };
+  }
+  if (execution.mode !== "agent-ssh")
+    throw unavailable("isolated_worker_transport_required");
   if (
     (pub &&
       (pub.target.machine_id !== a.machine_id ||
@@ -103,6 +149,12 @@ export async function inspectWorker(
     platform,
     live,
     local,
+    managed_loopback:
+      local &&
+      target.generation === "legacy" &&
+      platform === "linux" &&
+      (execution.user ?? "agent") === "agent" &&
+      ["localhost", "127.0.0.1", "::1"].includes(execution.host ?? "localhost"),
     assignment: a.id,
     session: target.session,
     root: execution.agentRoot,

@@ -412,17 +412,21 @@ export function finishHostOpsAction(
       ensure(action.snapshot, "invariant_violation", "Missing launch snapshot");
       // C-154: an active standing PM keeps its Assignment and everything it
       // owns; only a PM the human already paused is resumed (no new handoff).
-      run = queueRunInDraft(d, {
-        ...action.snapshot,
-        assignment_id: a.id,
-        reuse_queued: true,
-        ...(action.tool === "host_ops_restart_standing_pm"
-          ? a.status === "suspended"
-            ? { resume: true }
-            : { restart_session: true }
-          : {}),
-        kind: previous?.kind ?? "followup",
-      });
+      run = queueRunInDraft(
+        d,
+        {
+          ...action.snapshot,
+          assignment_id: a.id,
+          reuse_queued: true,
+          ...(action.tool === "host_ops_restart_standing_pm"
+            ? a.status === "suspended"
+              ? { resume: true }
+              : { restart_session: true }
+            : {}),
+          kind: previous?.kind ?? "followup",
+        },
+        eventById(state.events, currentStall?.review_trigger_id),
+      );
     }
     const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(

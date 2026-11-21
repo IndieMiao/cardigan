@@ -159,9 +159,20 @@ export class HostOpsService {
       options.store,
       this.clock,
       options.runtime,
-      () => options.contextUsage?.execution,
+      (project) => this.stallExecution(project),
       this.contextAbort.signal,
     );
+  }
+  /** A project-local worker may have a different account and workspace root
+   * than the host default. Never fall back across a rejected registry binding. */
+  private stallExecution(project: ProjectId) {
+    try {
+      return this.options.workerExecution
+        ? this.options.workerExecution(project, "local")
+        : this.options.contextUsage?.execution;
+    } catch {
+      return undefined;
+    }
   }
   /** Each monitor (including its in-flight probes) belongs to one immutable launch generation. */
   private get upstream(): UpstreamHealthMonitor | undefined {
@@ -286,6 +297,7 @@ export class HostOpsService {
       current,
       platform,
       harness,
+      this.options.runtime,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {
@@ -1338,7 +1350,7 @@ export class HostOpsService {
           ? await stallWorkspace(
               state,
               a,
-              this.options.contextUsage?.execution,
+              this.stallExecution(project),
               this.contextAbort.signal,
             )
           : "unknown";

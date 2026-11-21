@@ -262,7 +262,7 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
 });
 
-function endedReviewer() {
+function endedReviewer(discussWhileWaiting = false) {
   const { f, a, card, item, tree } = reviewerFixture();
   const run = f.session(a, false);
   const q = f.apply((state, actor, ports) =>
@@ -291,6 +291,16 @@ function endedReviewer() {
     ),
   );
   f.advance(1);
+  if (discussWhileWaiting) {
+    const notice = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      a,
+      card.id,
+    );
+    f.skipEvents();
+    return { f, a, card, item, notice, tree, run };
+  }
   f.apply((state, actor, ports) =>
     recordDecision(
       state,
@@ -334,6 +344,74 @@ function endedReviewer() {
   f.skipEvents();
   return { f, a, card, item, notice, tree, run };
 }
+
+test("a paused reviewer's directed instruction recovers on independently proven local exit, not on an offline core alone", async () => {
+  const { f, a, item, run, notice } = endedReviewer(true);
+  const ref = f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id),
+      w = tx.work_items.get(f.project, item.id);
+    if (!owner?.runtime_ref || !w) throw new Error("missing reviewer");
+    const ref = {
+      ...owner.runtime_ref,
+      local_process_receipt: "fixture-receipt",
+    };
+    tx.assignments.put(f.project, { ...owner, runtime_ref: ref });
+    tx.runs.put(f.project, {
+      ...tx.runs.get(f.project, run.id)!,
+      recovery_runtime: ref,
+    });
+    expect(w.status).toBe("waiting_decision");
+    return ref;
+  });
+  const missing = {
+    ok: false,
+    error: { code: "runtime_unavailable", message: "offline" },
+  } as const;
+  vi.mocked(f.runtime.status).mockResolvedValue(missing);
+  f.runtime.observe_retirement = vi.fn(async () => missing);
+  const proof = vi.fn(async () => ({ ok: true as const, value: false }));
+  f.runtime.confirm_local_exit = proof;
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    const row = async () =>
+      (await f.view()).dispatch_stalls.find((s) => s.assignment_id === a.id);
+    expect(await row()).toMatchObject({
+      can_restart: false,
+      terminal_owner: "unconfirmed",
+    });
+    proof.mockResolvedValue({ ok: true, value: true });
+    expect(await row()).toMatchObject({
+      can_restart: true,
+      terminal_owner: "confirmed",
+      process_state: "exited",
+    });
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().events.some((e) => e.type === "host_ops_action_finished"),
+      ).toBe(true);
+    });
+    expect(proof).toHaveBeenCalledWith(ref, {
+      project_id: f.project,
+      assignment_id: a.id,
+    });
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    await dispatcher.tick();
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id)?.status,
+    ).toBe("belled");
+    expect(f.state().work_items.find((w) => w.id === item.id)?.status).toBe(
+      "waiting_decision",
+    );
+  } finally {
+    await dispatcher.close();
+  }
+});
 
 test.each(["dirty", "unknown"])(
   "an exact missing terminal cannot start a notice-only Run on a %s workspace",

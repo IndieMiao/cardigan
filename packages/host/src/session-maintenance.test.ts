@@ -802,3 +802,50 @@ test("a commit between maintenance slices invalidates the remaining owners' obse
     f.store.close();
   }
 });
+
+test("kept shells are observed without operator requests or repeated signals", async () => {
+  const f = setup(":memory:", 2);
+  const retire = vi.fn(async () => ({
+    ok: true,
+    value: {
+      outcome: "withdrawn",
+      evidence: {
+        stage: "get",
+        reason: "kept_terminal",
+        terminal_state: "live",
+      },
+    },
+  }));
+  Object.assign(f.runtime, { retire_idle: retire });
+  try {
+    for (const minute of [0, 1, 3, 7]) {
+      f.setTime(`2030-01-01T02:0${minute}:00Z`);
+      await f.tick();
+    }
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "idle_session_retirement_started"),
+    ).toHaveLength(1);
+    expect(retire).toHaveBeenCalledOnce();
+    expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
+    expect(f.store.listNotifications({ project_id: f.project })).toHaveLength(
+      0,
+    );
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "session_maintenance_attention"),
+    ).toHaveLength(0);
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    f.runtime.observe_retirement.mockResolvedValue({
+      ok: true,
+      value: "exited",
+    });
+    f.setTime("2030-01-01T02:12:00Z");
+    await f.tick();
+    expect(f.state().assignments[0]?.runtime_ref).toBeNull();
+  } finally {
+    f.store.close();
+  }
+});

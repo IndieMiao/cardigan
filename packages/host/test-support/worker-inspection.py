@@ -18,6 +18,24 @@ native = runpy.run_path(str(deploy / 'worker-primitives.py'))
 
 
 class CollectorTest(unittest.TestCase):
+    def test_legacy_loopback_layout_is_distinct_from_project_worker(self):
+        user = SimpleNamespace(pw_name='agent', pw_gid=2001, pw_dir='/var/lib/cardigan-agent')
+        def info(uid, gid, mode):
+            return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=mode, st_nlink=1)
+        c = dict(local=True, platform='linux', gid=2002, root='/worker')
+        with contextlib.ExitStack() as stack:
+            for name, number in [('getgid', 2001), ('getegid', 2001), ('getuid', 3000), ('getgroups', [2001, 2002])]:
+                stack.enter_context(patch('os.' + name, return_value=number))
+            stack.enter_context(patch('grp.getgrgid', side_effect=lambda g: SimpleNamespace(gr_name={2001:'agent', 2002:'cardigan-share'}[g])))
+            stack.enter_context(patch.dict(probe['managed_loopback_account'].__globals__, directory=contextlib.nullcontext))
+            stack.enter_context(patch('os.fstat', side_effect=lambda fd: info(0,2001,0o750) if fd == user.pw_dir else info(4000,2002,0o2750)))
+            marker = stack.enter_context(patch('os.stat', return_value=info(0,2001,0o100600)))
+            probe['managed_loopback_account'](c,user)
+            for invalid in [dict(c, local=False), dict(c, platform='darwin')]:
+                with self.assertRaises(ValueError): probe['managed_loopback_account'](invalid,user)
+            marker.return_value = info(3000,2001,0o100600)
+            with self.assertRaises(ValueError): probe['managed_loopback_account'](c,user)
+
     def hc_fixture(self, system, change=None):
         labels = dict(cardigan='1', project='test', assignment='A-1', run='R-8')
         t = dict(labels=labels, address='t2', state='live', pid=None, created_ms=15, foreground={'pid':42})
