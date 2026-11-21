@@ -589,9 +589,18 @@ function EmployeeRoleDrawer({
   onClose: () => void;
   onSaved: (note: string) => void;
 }) {
-  const [role, setRole] = useState(employee.role_id);
+  // Only what the person picked (V-2567): untouched fields follow the latest
+  // read, so a retry after a re-read never writes back a value someone else
+  // just changed. Picking the read's value again is no longer an edit.
   const savedProfile = employee.launch_profile_ref ?? null;
-  const [profile, setProfile] = useState<string | null>(savedProfile);
+  const [roleEdit, setRoleEdit] = useState<string>();
+  const [profileEdit, setProfileEdit] = useState<{ value: string | null }>();
+  const role = roleEdit ?? employee.role_id;
+  const profile = profileEdit ? profileEdit.value : savedProfile;
+  const setRole = (next: string) =>
+    setRoleEdit(next === employee.role_id ? undefined : next);
+  const setProfile = (next: string | null) =>
+    setProfileEdit(next === savedProfile ? undefined : { value: next });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);

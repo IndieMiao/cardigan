@@ -1306,3 +1306,47 @@ test("Q-1052: an older read failing after a newer one was shown shows no error; 
     vi.useRealTimers();
   }
 });
+
+test("V-2567 (孙权): an older GET does not restore passed after a newer failed result", async () => {
+  const { act } = await import("@testing-library/react");
+  const name = "pi-deepseek";
+  let releaseOld: ((value: LaunchSettingsView) => void) | undefined;
+  const old = new Promise<LaunchSettingsView>((resolve) => {
+    releaseOld = resolve;
+  });
+  const reads = vi
+    .fn()
+    .mockResolvedValueOnce(withCheck(name, null))
+    .mockImplementationOnce(() => old)
+    .mockResolvedValue(
+      withCheck(name, {
+        ...check("online", "failed"),
+        id: "later",
+        started_at: "2026-01-01T00:00:10.000Z",
+        finished_at: "2026-01-01T00:00:12.000Z",
+      }),
+    );
+  const api = harness({ launchSettings: reads });
+  await openModels(api.client);
+  const d = within(await openProfile(name));
+  vi.useFakeTimers();
+  try {
+    await act(async () => {
+      fireEvent.click(d.getByRole("button", { name: "在线探测" }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
+    expect(d.queryByText("在线探测未通过")).not.toBeNull();
+    await act(async () => {
+      releaseOld?.(withCheck(name, check("online", "passed")));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(api.startLaunchCheck).toHaveBeenCalledTimes(1);
+    expect(d.queryByText("已列出模型")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});

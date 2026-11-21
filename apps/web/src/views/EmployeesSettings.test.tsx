@@ -675,3 +675,90 @@ test("C-516: a role that became blocked after a failed save keeps the save unava
   expect(save.disabled).toBe(true);
   expect(updateEmployee).toHaveBeenCalledTimes(1);
 });
+
+// D-2017 independent review (孙权, V-2567): a retry after a re-read sends only
+// what the person picked, with the same body and idempotency key.
+for (const editProfile of [true, false]) {
+  test(`V-2567: a retry keeps the ${editProfile ? "role" : "launch profile"} someone else just changed`, async () => {
+    const { act } = await import("@testing-library/react");
+    let resolveReread: ((value: EmployeeOptions) => void) | undefined;
+    const reread = new Promise<EmployeeOptions>((resolve) => {
+      resolveReread = resolve;
+    });
+    const employeeOptions = vi
+      .fn()
+      .mockResolvedValueOnce(staffed)
+      .mockReturnValue(reread);
+    const updateEmployee = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValue({ id: "E-1", name: "云长", role_id: "reviewer" });
+    await open({
+      employeeOptions,
+      updateEmployee,
+      launchProfileNames: profileNames,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "云长" }));
+    const d = within(await screen.findByRole("dialog", { name: "云长" }));
+    await waitFor(() =>
+      expect(d.getByLabelText("启动配置").hasAttribute("disabled")).toBe(false),
+    );
+    const patch = editProfile
+      ? { launch_profile_ref: "pi-agent" }
+      : { role_id: "reviewer" };
+    changeControl(d.getByLabelText(editProfile ? "启动配置" : "角色"), {
+      target: { value: editProfile ? "pi-agent" : "reviewer" },
+    });
+    fireEvent.click(d.getByRole("button", { name: "保存" }));
+    await d.findByRole("alert");
+    await waitFor(() => expect(employeeOptions).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      resolveReread?.({
+        ...staffed,
+        employees: staffed.employees?.map((e) =>
+          e.id === "E-1"
+            ? {
+                ...e,
+                ...(editProfile
+                  ? { role_id: "reviewer" }
+                  : { launch_profile_ref: "codex-agent" }),
+              }
+            : e,
+        ),
+      });
+    });
+    // The other session's value is shown for the field this person left alone.
+    if (editProfile)
+      expect(d.getByLabelText("角色").textContent).toContain("审核");
+    else expect(d.getByLabelText("启动配置").textContent).toBe("codex-agent");
+    fireEvent.click(d.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(updateEmployee).toHaveBeenCalledTimes(2));
+    expect(updateEmployee.mock.calls.map((args) => args[2])).toEqual([
+      patch,
+      patch,
+    ]);
+    expect(updateEmployee.mock.calls[1]?.[3]).toBe(
+      updateEmployee.mock.calls[0]?.[3],
+    );
+  });
+}
+
+test("V-2567: picking the current value again is not an edit", async () => {
+  await open({
+    employeeOptions: async () => staffed,
+    launchProfileNames: profileNames,
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "云长" }));
+  const d = within(await screen.findByRole("dialog", { name: "云长" }));
+  await waitFor(() =>
+    expect(d.getByLabelText("启动配置").hasAttribute("disabled")).toBe(false),
+  );
+  const save = () =>
+    d.getByRole("button", { name: "保存" }) as HTMLButtonElement;
+  changeControl(d.getByLabelText("启动配置"), {
+    target: { value: "pi-agent" },
+  });
+  expect(save().disabled).toBe(false);
+  changeControl(d.getByLabelText("启动配置"), { target: { value: "" } });
+  expect(save().disabled).toBe(true);
+});
