@@ -102,6 +102,102 @@ function summarize(lines, path, attributable, activityOnly, complete) {
   }
   return activity ? { path, activity } : undefined;
 }
+// Alert-only classification, never a shell parser. Only simple unquoted argv
+// with a recognized executable and operand are specific enough to name.
+function foregroundName(cmd) {
+  const simple = cmd.trim();
+  if (!/^[\w./:@=+%,-]+(?:[ \t]+[\w./:@=+%,-]+)*$/.test(simple)) return 'Bash';
+  const [exe, arg, next] = simple.split(/[ \t]+/);
+  if (exe === 'node' && arg && !arg.startsWith('-') && basename(arg) === 'web.mjs') return 'node web.mjs';
+  if (['python', 'python3'].includes(exe) && arg === '-m' && next === 'http.server') return 'python -m http.server';
+  if (['npm', 'pnpm'].includes(exe) && (arg === 'dev' || (arg === 'run' && next === 'dev'))) return 'dev server';
+  return exe === 'vite' ? 'vite' : 'Bash';
+}
+// Use only cumulative counters from the matched invocation, never the output
+// text. A newly available counter on an already productive call is a baseline,
+// not proof of growth. Repeated or regressing counters cannot renew activity.
+function bashOutputGrew(call, data) {
+  const keys = ['totalBytes', 'totalLines'].filter(key => data[key] !== undefined);
+  if (keys.some(key => !Number.isSafeInteger(data[key]) || data[key] < (call.counts[key] ?? 0))) return false;
+  const grew = keys.some(key => (call.counts[key] !== undefined || !call.produced) &&
+    data[key] > (call.counts[key] ?? 0));
+  for (const key of keys) call.counts[key] = data[key];
+  if (grew) call.produced = true;
+  return grew;
+}
+// Only the final attributable main-thread record may claim the file mtime.
+// A later timer, fault, sidechain or unread gap leaves only verified record times.
+function alertMetadata(lines, path, mtime, activity) {
+  const id = basename(path, '.jsonl');
+  let last, finalWrite;
+  // Per bounded read of this session only. A tool ID is local to its cwd;
+  // completing one sibling cannot consume another's start or high-water marks.
+  const pending = new Map();
+  const [floor, exactCwd, childPrefix] = process.argv.slice(4);
+  const earliestCall = Number(floor);
+  function matchesCwd(dir) {
+    if (!exactCwd || !text(dir, 4096) || !dir.startsWith('/')) return false;
+    const normalized = resolve(dir);
+    return normalized === exactCwd || (childPrefix && normalized.startsWith(childPrefix));
+  }
+  const writeTime = new Date(mtime).toISOString();
+  for (const line of lines) {
+    if (line === '') continue;
+    finalWrite = undefined;
+    let e;
+    try { e = object(JSON.parse(line)); } catch { pending.clear(); continue; }
+    if (!e || e.isSidechain === true || e.message?.model === '<synthetic>') continue;
+    if (e.sessionId && e.sessionId !== id) return;
+    if (e.sessionId !== id || !matchesCwd(e.cwd)) continue;
+    if (e.isApiErrorMessage === true || (e.type === 'system' && e.subtype === 'api_error') ||
+        !['user', 'assistant', 'progress'].includes(e.type)) continue;
+    const ts = Date.parse(text(e.timestamp, 64));
+    const timestamp = Number.isFinite(ts) ? new Date(ts).toISOString() : undefined;
+    if (e.type === 'progress' && e.data?.type === 'bash_progress') {
+      const call = pending.get(e.cwd)?.get(e.parentToolUseID);
+      if (!call || ts < Date.parse(call.start.updated_at)) continue;
+      if (bashOutputGrew(call, e.data) && timestamp &&
+          (!last || ts >= Date.parse(last.updated_at))) {
+        last = {session_id: id, cwd: e.cwd, updated_at: timestamp};
+      }
+      continue;
+    }
+    finalWrite = {session_id: id, cwd: e.cwd, updated_at: writeTime};
+    if (timestamp && (!last || ts >= Date.parse(last.updated_at))) last = {...finalWrite, updated_at: timestamp};
+    if (!Array.isArray(e.message?.content)) continue;
+    for (const block of e.message.content) {
+      let calls = pending.get(e.cwd);
+      if (e.type === 'user' && block?.type === 'tool_result') {
+        const call = calls?.get(block.tool_use_id);
+        if (call && (!timestamp || ts >= Date.parse(call.start.updated_at))) calls.delete(block.tool_use_id);
+        if (calls?.size === 0) pending.delete(e.cwd);
+        continue;
+      }
+      if (e.type !== 'assistant' || block?.type !== 'tool_use' || block.name !== 'Bash' ||
+          block.input?.run_in_background || typeof block.input?.command !== 'string' ||
+          !text(block.id, 128) || !timestamp || !(ts >= earliestCall)) continue;
+      if (!calls) { calls = new Map(); pending.set(e.cwd, calls); }
+      if (!calls.has(block.id)) calls.set(block.id, {
+        command: foregroundName(block.input.command),
+        start: {session_id: id, cwd: e.cwd, updated_at: timestamp},
+        counts: {}, produced: false,
+      });
+    }
+  }
+  // A later protocol sample outside this scope will be discarded by the
+  // host. It must not suppress the last attributable alert-only record.
+  const progress = activity?.error ? activity.progress : activity;
+  const progressAt = matchesCwd(activity?.cwd) && matchesCwd(progress?.cwd) && progress?.updated_at;
+  const file = finalWrite ?? (last && (!progressAt || Date.parse(last.updated_at) > Date.parse(progressAt)) ? last : undefined);
+  // Several calls can all contribute progress, but none is uniquely the stalled command.
+  const calls = pending.size === 1 ? pending.values().next().value : undefined;
+  const only = calls?.size === 1 ? calls.values().next().value : undefined;
+  if (!file && !only) return;
+  return {
+    ...(file ? {file_activity: file} : {}),
+    ...(only ? {foreground: {command: only.command, start: only.start}} : {}),
+  };
+}
 function readTail(fd, path, attributable, activityOnly = false) {
   const { fstatSync, readSync } = require('node:fs');
   const stat = fstatSync(fd);
@@ -111,7 +207,21 @@ function readTail(fd, path, attributable, activityOnly = false) {
   const size = readSync(fd, buffer, 0, buffer.length, start);
   const lines = buffer.subarray(0, size).toString('utf8').split('\n');
   if (start) lines.shift();
-  return summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
+  const sample = summarize(lines, path, attributable, activityOnly, !start && size === stat.size && lines.length <= 256);
+  if (!attributable) return sample;
+  // For alert metadata only, spend the extra 64 KiB immediately before the
+  // tail, so a crossing screenshot can be attributed even in a long-lived file.
+  // If its opening is still outside the window, never guess its thread or mtime.
+  if (size !== stat.size - start) return sample;
+  let diagnosticLines = lines;
+  if (start) {
+    const prefix = Buffer.alloc(Math.min(start, 65536));
+    if (readSync(fd, prefix, 0, prefix.length, start - prefix.length) !== prefix.length) return sample;
+    diagnosticLines = Buffer.concat([prefix, buffer]).toString('utf8').split('\n');
+    if (start > prefix.length) diagnosticLines.shift();
+  }
+  const extra = alertMetadata(diagnosticLines, path, stat.mtimeMs, sample?.activity);
+  return extra ? {path, ...sample, ...extra} : sample;
 }
 async function read() {
   // The worker opener passed a no-follow regular file as stdin. This is
@@ -149,7 +259,7 @@ async function read() {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     // With no trusted session ID, a late write to an older file cannot revive it.
     const byCreation = candidates.slice().sort((a, b) => b.born - a.born);
-    const latest = byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born ? byCreation[0] : undefined;
+    const latest = byCreation.length === 1 || (byCreation[0]?.born > 0 && byCreation[0].born !== byCreation[1]?.born) ? byCreation[0] : undefined;
     return readTail(file.fd, chosen.path, (!wanted && chosen.path === latest?.path) || chosen.name === wanted);
   } finally { await file?.close(); await dir.close(); }
 }

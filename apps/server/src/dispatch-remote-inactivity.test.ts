@@ -5,6 +5,7 @@ import {
 } from "@cardigan/domain";
 import type { HarnessActivityInspection } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { stalledTranscript } from "../test-support/dispatch.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
 import { Dispatcher } from "./dispatch.js";
@@ -22,6 +23,13 @@ function session(harness: "claude-code" | "codex" | "pi") {
   const run = f.latest();
   f.store.uow.run((tx) => tx.runs.put(f.project, { ...run, harness }));
   return { a, ref: f.refFor(a), run };
+}
+function stalledRow(
+  id: Parameters<typeof stalledTranscript>[1],
+): HarnessActivityInspection {
+  const activity = stalledTranscript(f.state(), id);
+  if (!activity) throw new Error("Missing local fixture activity");
+  return { status: "stale", activity };
 }
 test.each(["claude-code", "codex", "pi"] as const)(
   "remote %s missing evidence is a notice, not a stall or host handoff",
@@ -148,7 +156,7 @@ test("a pending worker inspection does not delay the local inactivity alert", as
     inspectHarnessActivity: async (_project, target, localOnly) => {
       if (target === remote.a.id) return pending.promise;
       expect(localOnly).toBe(true);
-      return new Map();
+      return new Map([[run.assignment_id, stalledRow(run.assignment_id)]]);
     },
   });
   try {
@@ -214,7 +222,16 @@ test.each(["progress", "missing", "silent", "closing"] as const)(
       harnessActivity: (_project, id) =>
         id === remote.a.id ? latest : undefined,
       inspectHarnessActivity: async (_project, id) => {
-        if (id !== remote.a.id) return new Map();
+        if (id !== remote.a.id)
+          return new Map(
+            f
+              .state()
+              .runs.filter(
+                (r) =>
+                  r.assignment_id !== remote.a.id && r.status === "running",
+              )
+              .map((r) => [r.assignment_id, stalledRow(r.assignment_id)]),
+          );
         // Initial inactivity check, stop claim read, then final pre-release read.
         return ++reads <= 2 ? stale : pending.promise;
       },

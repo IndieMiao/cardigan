@@ -1,6 +1,8 @@
 import type { Actor, Assignment } from "../entities.js";
 import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
 import type { AssignmentId } from "../ids.js";
+import { retirementWaitReceipt } from "../retirement-session.js";
+import { retirementOwnsSession } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -26,6 +28,12 @@ export function beginIdleAssignmentRoleUpgrade(
     );
     const previous = d.get("assignments", assignmentId);
     if (previous.role_upgrade) return previous;
+    ensure(
+      previous.idle_retirement?.phase !== "stopping" &&
+        !retirementOwnsSession(previous),
+      "illegal_transition",
+      "Session has an unconfirmed retirement",
+    );
     ensure(
       previous.scope === "work_item" &&
         !previous.external &&
@@ -139,6 +147,7 @@ export function finishIdleAssignmentRoleUpgrade(
   actor: Actor,
   assignmentId: AssignmentId,
   ports: CommandPorts,
+  observedRetirementExit?: NonNullable<Assignment["runtime_ref"]>,
 ) {
   return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
     ensure(
@@ -148,6 +157,15 @@ export function finishIdleAssignmentRoleUpgrade(
     );
     const previous = d.get("assignments", assignmentId);
     if (!previous.role_upgrade) return previous;
+    const retired = retirementOwnsSession(previous);
+    ensure(
+      previous.idle_retirement?.phase !== "stopping" &&
+        (!retired ||
+          JSON.stringify(previous.runtime_ref) ===
+            JSON.stringify(observedRetirementExit)),
+      "illegal_transition",
+      "Unconfirmed retirement still owns this session",
+    );
     ensure(
       !state.runs.some(
         (r) =>
@@ -196,6 +214,12 @@ export function finishIdleAssignmentRoleUpgrade(
       {
         assignment_id: previous.id,
         reason: "default_role_upgraded",
+        ...(retired
+          ? {
+              idle_retirement_confirmed: true,
+              ...retirementWaitReceipt(previous),
+            }
+          : {}),
         from_version: previous.role_version,
         to_version: next.role_version,
         old_runtime_ref: upgrade.previous_runtime_ref

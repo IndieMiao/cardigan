@@ -640,3 +640,31 @@ test("current errors outside the target line cannot delay recovery", () => {
     ).action,
   ).toBe("restart_once");
 });
+
+test.each(["terminal_output", "claude-code:transcript_mtime"])(
+  "C-541: %s alerts do not create an upstream incident or grant recovery authority",
+  (source) => {
+    const f = scenario();
+    for (const n of [1, 2, 3])
+      f.fact("run_inactive", {
+        assignment_id: id("assignment", n),
+        run_id: id("run", n),
+        activity_source: source,
+      });
+    expect(
+      upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, {}),
+    ).toEqual([]);
+    expect(f.record().events).toEqual([]);
+    expect(f.diagnosis().action).not.toBe("restart_once");
+    // Independent structured upstream evidence is still honored for the same Runs.
+    const failures = Object.fromEntries(
+      f.targets.map((t) => [
+        t.assignment_id,
+        { error: "rate_limit" as const, at: f.at(0) },
+      ]),
+    );
+    expect(
+      upstreamCluster(f.state(), f.targets, DEFAULT_UPSTREAM_POLICY, failures),
+    ).toHaveLength(3);
+  },
+);
