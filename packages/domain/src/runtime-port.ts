@@ -1,23 +1,9 @@
 import type { Assignment, Machine, RuntimeRef } from "./entities.js";
 import type { Role } from "./role.js";
+import type { IdleRetirementResult, RuntimeResult } from "./runtime-types.js";
 
-export const runtimeErrorCodes = [
-  "runtime_not_found",
-  "runtime_unavailable",
-  "version_mismatch",
-  "runtime_timeout",
-  "runtime_queue_timeout",
-  "runtime_conflict",
-  "invalid_launch",
-] as const;
-export type RuntimeErrorCode = (typeof runtimeErrorCodes)[number];
-export interface RuntimeError {
-  readonly code: RuntimeErrorCode;
-  readonly message: string;
-}
-export type RuntimeResult<T> =
-  | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly error: RuntimeError };
+export * from "./runtime-types.js";
+
 /** Host-compiled launch instructions, with no Token or provider secret values. */
 export interface RuntimeLaunch {
   readonly command: string;
@@ -75,9 +61,7 @@ export interface Runtime {
       readonly terminate_ms: number;
       readonly before_signal: () => boolean;
     },
-  ): Promise<
-    RuntimeResult<{ readonly exited: boolean; readonly withdrawn?: boolean }>
-  >;
+  ): Promise<RuntimeResult<IdleRetirementResult>>;
   provision(
     assignment: Assignment,
     role: Role,

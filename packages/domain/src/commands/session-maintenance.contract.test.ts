@@ -107,6 +107,11 @@ test("retirement fences launch without revoking identity; only trusted exit clea
   const state = setup(),
     a = state.assignments[0]!,
     io = { ...ports(), clock: { now: () => now } };
+  const evidence = {
+    stage: "HUP",
+    reason: "hc_failed",
+    runtime_code: "runtime_timeout",
+  } as const;
   const begun = value(beginIdleSessionRetirement(state, system, a.id, 60, io));
   const pending = apply(state, begun);
   expect(begun.token_requests).toEqual([]);
@@ -124,8 +129,34 @@ test("retirement fences launch without revoking identity; only trusted exit clea
     ),
   ).toMatchObject({ ok: false });
   const unknown = value(
-    settleIdleSessionRetirement(pending, system, a.id, "uncertain", 60000, io),
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "uncertain", evidence },
+      60000,
+      io,
+    ),
   );
+  const refused = value(
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "withdrawn", evidence },
+      60000,
+      io,
+    ),
+  );
+  expect(refused.events[0]).toMatchObject({
+    type: "idle_session_retirement_withdrawn",
+    payload: { assignment_id: a.id, retry: true, evidence },
+  });
+  expect(refused.data.idle_retirement).toMatchObject({
+    phase: "waiting",
+    evidence,
+  });
+  expect(refused.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.runtime_ref).toEqual(a.runtime_ref);
   expect(unknown.data.idle_retirement?.phase).toBe("stopping");
   const changed = {
@@ -136,10 +167,24 @@ test("retirement fences launch without revoking identity; only trusted exit clea
     })),
   };
   expect(
-    settleIdleSessionRetirement(changed, system, a.id, "exited", 60000, io),
+    settleIdleSessionRetirement(
+      changed,
+      system,
+      a.id,
+      { outcome: "exited" },
+      60000,
+      io,
+    ),
   ).toMatchObject({ ok: false });
   const exited = value(
-    settleIdleSessionRetirement(pending, system, a.id, "exited", 60000, io),
+    settleIdleSessionRetirement(
+      pending,
+      system,
+      a.id,
+      { outcome: "exited" },
+      60000,
+      io,
+    ),
   );
   expect(exited.data.runtime_ref).toBeNull();
   expect(exited.data.role_version).toBe(a.role_version);
@@ -150,7 +195,7 @@ test("retirement fences launch without revoking identity; only trusted exit clea
         apply(pending, exited),
         system,
         a.id,
-        "exited",
+        { outcome: "exited" },
         60000,
         io,
       ),

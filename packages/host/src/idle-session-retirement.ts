@@ -3,9 +3,13 @@ import {
   beginIdleSessionRetirement,
   type Clock,
   type ProjectId,
+  type RetirementEvidence,
+  type RetirementSettlement,
   type Runtime,
+  retirementObserveOnly,
   sessionMaintenanceCandidate,
   settleIdleSessionRetirement,
+  stoppedByHuman,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
@@ -122,23 +126,33 @@ export async function retireIdleSessions(
       const pending = claim?.pending;
       if (!pending?.idle_retirement) continue;
       attempted++;
-      let outcome:
-        | "exited"
-        | "timeout"
-        | "uncertain"
-        | "withdrawn"
-        | "unavailable" = "uncertain";
+      const pendingEvidence: RetirementEvidence = pending.idle_retirement
+        .evidence ?? { stage: "confirm", reason: "confirmation_pending" };
+      const observeOnly = retirementObserveOnly(pendingEvidence);
+      const unconfirmed =
+        claim?.recovering === false && observeOnly ? "observing" : "uncertain";
+      let result: RetirementSettlement = {
+        outcome: unconfirmed,
+        evidence: pendingEvidence,
+      };
       const ref = pending.idle_retirement.runtime_ref;
       try {
-        if (claim?.recovering) {
-          // Recovery never repeats a possibly still-in-flight remote signal.
+        if (claim?.recovering || observeOnly) {
+          // Unknown signals keep the fence; a known non-signal capability
+          // failure permits legitimate work between read-only observations.
           const observed = await runtime.status(ref);
-          if (
-            observed.ok
-              ? observed.value.process === "exited"
-              : observed.error.code === "runtime_not_found"
-          )
-            outcome = "exited";
+          result =
+            observed.ok && observed.value.process === "exited"
+              ? { outcome: "exited" }
+              : {
+                  outcome: unconfirmed,
+                  evidence: {
+                    ...pendingEvidence,
+                    observation: observed.ok
+                      ? observed.value.process
+                      : observed.error.code,
+                  },
+                };
         } else if (runtime.retire_idle) {
           const retired = await runtime.retire_idle(ref, {
             ...policy,
@@ -165,39 +179,25 @@ export async function retireIdleSessions(
                 ).candidate;
               }),
           });
-          outcome = retired.ok
-            ? retired.value.exited
-              ? "exited"
-              : retired.value.withdrawn
-                ? "withdrawn"
-                : "timeout"
-            : "uncertain";
-          if (outcome === "withdrawn") {
-            const stillIdle = store.uow.read((tx) => {
-              const state = loadCommandState(tx, project),
-                current = state.assignments.find((v) => v.id === a.id);
-              if (
-                !current ||
-                JSON.stringify(current.runtime_ref) !== JSON.stringify(ref)
-              )
-                return false;
-              const { idle_retirement: _pending, ...identity } = current;
-              return sessionMaintenanceCandidate(
-                state,
-                identity as Assignment,
-                clock.now(),
-                threshold,
-              ).candidate;
-            });
-            if (stillIdle) outcome = "unavailable";
-            note(a.id, "retirement_unavailable");
-          }
+          result = retired.ok
+            ? retired.value
+            : {
+                outcome: "uncertain",
+                evidence: {
+                  ...pendingEvidence,
+                  runtime_code: retired.error.code,
+                },
+              };
         }
       } catch {
-        outcome = "uncertain";
+        // No receipt: retain the initial observation-only or uncertain state.
       }
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
+        // A missing remote snapshot alone is not proof of exit. The human stop
+        // path clears its exact ref only after successful release.
+        if (pending.runtime_ref === null && stoppedByHuman(state.events, a.id))
+          result = { outcome: "exited" };
         const retry = Math.min(
           policy.retry_max_ms,
           policy.retry_ms *
@@ -208,7 +208,7 @@ export async function retireIdleSessions(
             state,
             { kind: "system", project_id: project },
             a.id,
-            outcome,
+            result,
             retry,
             { ids: tx.ids, clock },
           ),

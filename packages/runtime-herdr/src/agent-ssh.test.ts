@@ -20,7 +20,9 @@ import {
   shellQuote,
 } from "./execution.js";
 import { HC_RELEASE } from "./hc-version.js";
+import { idleRetirementHelper } from "./idle-retirement.js";
 import { HerdrRuntime } from "./index.js";
+import { hcError } from "./runtime-failure.js";
 import { assignment, launch, machine, role, value } from "./test-support.js";
 
 let root: string,
@@ -867,3 +869,122 @@ test("macOS registers only its fixed entry and refuses the old autostart alias w
     expect(client.exec).toHaveBeenCalledTimes(1);
   }
 });
+
+// Real agent-ssh routing/registration with a synthetic hc endpoint only.
+// Neither the fixture credentials nor a live worker are used for transport.
+test.each([
+  ["linux-worker", "refused", "withdrawn", "hc_failed"],
+  ["darwin-worker", "no_pidfd", "withdrawn", "pidfd_unavailable"],
+  ["linux-worker", "timeout", "timeout", "still_live"],
+  ["linux-worker", "lost_receipt", "uncertain", "hc_failed"],
+  ["linux-worker", "success", "exited", null],
+] as const)(
+  "idle retirement on %s: %s",
+  async (machine, scenario, outcome, reason) => {
+    const target = {
+      project_id: "fixture",
+      machine_id: machine,
+      session: "fixture",
+      generation: "g1",
+      fingerprint: "fixture",
+    };
+    const owned = {
+      ...ref,
+      target,
+      machine_id: machine,
+      runtime_machine: machine,
+      terminal_ref: `${machine}/t1`,
+    };
+    const base = vi.mocked(client.exec).getMockImplementation()!;
+    let finished = false;
+    const modes: string[] = [];
+    vi.mocked(client.exec).mockImplementation(async (args) => {
+      if (args[0] === "get") {
+        expect(args[1]).toBe(owned.terminal_ref);
+        return JSON.stringify({
+          address: owned.terminal_ref,
+          state: finished ? "finished" : "live",
+          pid: 12345,
+          created_ms: 1000,
+          keep: false,
+          labels: { project: "fixture", assignment: "A-1" },
+        });
+      }
+      if (args[0] !== "exec") return base(args);
+      expect(args.slice(0, 4)).toEqual(["exec", "--on", machine, "--"]);
+      const mode = args[args.indexOf(idleRetirementHelper) + 1]!;
+      modes.push(mode);
+      if (mode === "probe") {
+        if (scenario === "refused")
+          throw hcError(
+            JSON.stringify({
+              error: { kind: "blocked", message: "private fixture" },
+            }),
+          );
+        if (scenario === "no_pidfd") throw hcError("private fixture", 20);
+        return JSON.stringify({
+          pid: 12345,
+          start: "10",
+          uid: 1000,
+          boot: "fixture",
+        });
+      }
+      if (scenario === "lost_receipt") throw new Error("private fixture");
+      finished = scenario === "success";
+      return "";
+    });
+    const runtime = value(
+      await HerdrRuntime.create({
+        client,
+        session: target.session,
+        execution: {
+          ...execution,
+          machine,
+          user: "worker_fixture",
+          target,
+          ...(scenario === "no_pidfd"
+            ? {
+                macosCore: {
+                  python: "/usr/bin/python3",
+                  retiredLaunchdLabel: "dev.cardigan.example",
+                },
+              }
+            : {}),
+        },
+      }),
+    );
+    const result = value(
+      await runtime.retire_idle(owned, {
+        project_id: "fixture",
+        assignment_id: "A-1",
+        hangup_ms: 1,
+        terminate_ms: 1,
+        before_signal: () => true,
+      }),
+    );
+    expect(result).toMatchObject({
+      outcome,
+      ...(reason ? { evidence: { reason, terminal_state: "live" } } : {}),
+    });
+    if (scenario === "refused")
+      expect(result).toMatchObject({
+        evidence: {
+          stage: "probe",
+          hc_kind: "blocked",
+          runtime_code: "runtime_conflict",
+        },
+      });
+    if (scenario === "no_pidfd")
+      expect(result).toMatchObject({
+        evidence: { stage: "probe", exit_code: 20 },
+      });
+    expect(modes).toEqual(
+      outcome === "withdrawn"
+        ? ["probe"]
+        : outcome === "timeout"
+          ? ["probe", "HUP", "TERM"]
+          : ["probe", "HUP"],
+    );
+    expect(JSON.stringify(result)).not.toContain("private fixture");
+  },
+);

@@ -63,7 +63,7 @@ test.each(["HUP", "TERM", undefined])(
     const result = await runtime.retire_idle(ref, options());
     expect(result).toMatchObject({
       ok: true,
-      value: { exited: !!finishAfter },
+      value: { outcome: finishAfter ? "exited" : "timeout" },
     });
     const calls = vi.mocked(f.client.exec).mock.calls.map(([args]) => args);
     expect(
@@ -91,7 +91,10 @@ test("new work at the final guard and uncertain identity prevent every signal", 
       ...options(),
       before_signal: () => false,
     }),
-  ).toMatchObject({ ok: true, value: { exited: false, withdrawn: true } });
+  ).toMatchObject({
+    ok: true,
+    value: { outcome: "withdrawn", evidence: { reason: "guard_changed" } },
+  });
   expect(
     vi
       .mocked(f.client.exec)
@@ -100,13 +103,13 @@ test("new work at the final guard and uncertain identity prevent every signal", 
   f.terminal.keep = true;
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
     ok: true,
-    value: { withdrawn: true },
+    value: { outcome: "withdrawn", evidence: { reason: "kept_terminal" } },
   });
   f.terminal.keep = false;
   f.terminal.labels.assignment = "A-99";
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
     ok: true,
-    value: { withdrawn: true },
+    value: { outcome: "withdrawn", evidence: { reason: "identity_changed" } },
   });
 });
 test("a changed process after HUP cannot receive TERM and is not reported exited", async () => {
@@ -119,8 +122,11 @@ test("a changed process after HUP cannot receive TERM and is not reported exited
     return result;
   });
   expect(await runtime.retire_idle(ref, options())).toMatchObject({
-    ok: false,
-    error: { code: "runtime_conflict" },
+    ok: true,
+    value: {
+      outcome: "uncertain",
+      evidence: { reason: "identity_changed", terminal_state: "live" },
+    },
   });
   expect(
     vi.mocked(f.client.exec).mock.calls.some(([args]) => args.includes("TERM")),
@@ -162,6 +168,9 @@ test.skipIf(process.platform !== "linux")(
     try {
       await vi.waitFor(() => expect(output).toContain("ready"));
       const identity = JSON.parse((await helper("probe")).stdout);
+      await expect(
+        helper("probe", undefined, "other-terminal"),
+      ).rejects.toMatchObject({ code: 22 });
       await expect(
         helper("HUP", JSON.stringify({ ...identity, start: "wrong" })),
       ).rejects.toThrow();

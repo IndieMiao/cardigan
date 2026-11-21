@@ -2,6 +2,7 @@ import { arch, platform } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
   Assignment,
+  IdleRetirementResult,
   Machine,
   ProjectId,
   Role,
@@ -707,20 +708,33 @@ export class RuntimeTargets implements Runtime {
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
   ) {
     let delegated = false;
-    const retired = await this.invoke<{ exited: boolean; withdrawn?: boolean }>(
+    const retired = await this.invoke<IdleRetirementResult>(
       () => this.targetForRef(ref, options.project_id),
       (runtime) => {
         if (!runtime.retire_idle)
           return Promise.resolve({
             ok: true,
-            value: { exited: false, withdrawn: true },
+            value: {
+              outcome: "withdrawn",
+              evidence: { stage: "target", reason: "unsupported" },
+            },
           });
         delegated = true;
         return runtime.retire_idle(ref, options);
       },
     );
     return !retired.ok && !delegated
-      ? { ok: true as const, value: { exited: false, withdrawn: true } }
+      ? ({
+          ok: true,
+          value: {
+            outcome: "withdrawn",
+            evidence: {
+              stage: "target",
+              reason: "target_rejected",
+              runtime_code: retired.error.code,
+            },
+          },
+        } as const)
       : retired;
   }
   probeTerminal(ref: RuntimeRef) {

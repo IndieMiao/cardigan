@@ -155,7 +155,7 @@ const factory = vi.fn(async (options: HerdrOptions) => {
       resume_or_replace: call("resume_or_replace", ref),
       human_entry: call("human_entry", `attach ${ref.terminal_ref}`),
       release: call("release", undefined),
-      retire_idle: call("retire_idle", { exited: true }),
+      retire_idle: call("retire_idle", { outcome: "exited" }),
       probeTerminal: call("probeTerminal", "alive" as const),
       captureAgent: call("captureAgent", "fixture 1.0"),
       checkLocalHealth: call("checkLocalHealth", undefined),
@@ -467,7 +467,13 @@ test("alias rebinding and a generation change invalidate persisted refs across r
       terminate_ms: 1,
       before_signal: () => true,
     }),
-  ).toMatchObject({ ok: true, value: { exited: false, withdrawn: true } });
+  ).toMatchObject({
+    ok: true,
+    value: {
+      outcome: "withdrawn",
+      evidence: { stage: "target", reason: "target_rejected" },
+    },
+  });
   workers = workers.map((w) =>
     w.machine_id === "worker-a"
       ? {

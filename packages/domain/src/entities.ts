@@ -491,6 +491,7 @@ interface AssignmentFields {
     readonly threshold_minutes: number;
     readonly retry_at?: Timestamp;
     readonly failures: number;
+    readonly evidence?: import("./runtime-types.js").RetirementEvidence;
     readonly last_failure?: "timeout" | "uncertain" | "unavailable";
     readonly notice_sent?: boolean;
   };
