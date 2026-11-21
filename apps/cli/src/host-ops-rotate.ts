@@ -30,6 +30,7 @@ export async function rotateHostOps(input: {
   project_id: ProjectId;
   dataDir: string;
   session?: string;
+  employee?: string;
 }): Promise<Assignment> {
   const { store, io, project_id, dataDir } = input;
   const actor = resolveActor(io, project_id, store);
@@ -76,6 +77,7 @@ export async function rotateHostOps(input: {
       const result = prepareHostOpsRotation(
         loadCommandState(tx, project_id),
         actor,
+        input.employee,
       );
       if (!result.ok)
         throw new CliError(
@@ -128,7 +130,11 @@ export async function rotateHostOps(input: {
       const result = finishHostOpsRotation(
         loadCommandState(tx, project_id),
         actor,
-        { previous_assignment_id: previous.id, to_version: begun.to_version },
+        {
+          previous_assignment_id: previous.id,
+          to_version: begun.to_version,
+          ...(begun.employee_id ? { employee_id: begun.employee_id } : {}),
+        },
         { clock: systemClock, ids: tx.ids },
       );
       if (!result.ok)
@@ -177,7 +183,7 @@ export async function rotateHostOps(input: {
       );
     }
     io.stdout(
-      `已将主机运维 ${previous.id}（v${previous.role_version}）轮换为 ${next.id}（v${next.role_version}），保留员工并转交待处理通知；旧身份已释放。`,
+      `已将主机运维 ${previous.id}（v${previous.role_version}）轮换为 ${next.id}（v${next.role_version}），已转交待处理通知；旧身份已释放。`,
     );
     return next;
   } finally {

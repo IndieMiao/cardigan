@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -8,7 +8,9 @@ import type {
   RuntimeLaunch,
   RuntimeRef,
   RuntimeResult,
+  RuntimeWakeOptions,
 } from "@cardigan/domain";
+import * as herdr from "@cardigan/runtime-herdr";
 import {
   HC_RELEASE,
   type HcClient,
@@ -990,6 +992,92 @@ test.each(["disabled", "offline", "draining"] as const)(
   },
 );
 
+async function singleSlotWorker() {
+  const socketPath = join(root, "wake.sock");
+  const env = { CARDIGAN_HC_CONCURRENCY: "1" };
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let hold = false;
+  let queued: Promise<void> | undefined;
+  const client: HcClient = {
+    available: async () => true,
+    exec: vi.fn(async (args) => {
+      if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
+      if (args[0] === "machine") {
+        if (args[1] === "ls") return JSON.stringify({ machines: [] });
+        if (hold) {
+          hold = false;
+          queued = governed.queue.run(async () => {
+            entered.resolve();
+            await release.promise;
+          });
+        }
+        return JSON.stringify({ version: HC_RELEASE.version });
+      }
+      return "";
+    }),
+    async *lines() {},
+  };
+  const governed = governHcClient(client, {
+    socket: socketPath,
+    session: "worker-a",
+    policy: hcCallPolicy({ ...process.env, ...env }),
+  });
+  const key = join(root, "key"),
+    known = join(root, "known");
+  await writeFile(key, "fixture", { mode: 0o600 });
+  await writeFile(known, "fixture", { mode: 0o600 });
+  workers = workers.map((w) => ({
+    ...w,
+    execution: { ...w.execution, identityFile: key, knownHostsFile: known },
+  }));
+  const live = value(
+    await RuntimeTargets.create({
+      execution: { mode: "local", dataDir: root },
+      store,
+      project: "fixture",
+      socketPath,
+      env,
+      client,
+      factory: (options) => HerdrRuntime.create(options),
+      workers: () => workers,
+      workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
+    }),
+  );
+  const target = (await live.forLaunch("fixture", assignment("worker-a")))
+    .execution.target;
+  if (!target) throw new Error("Missing fixture target");
+  const ref: RuntimeRef = {
+    machine_id: "worker-a",
+    runtime_machine: "worker-a",
+    terminal_ref: "worker-a/t1",
+    agent_name: "fixture",
+    target,
+  };
+  async function wakeAfterQueue(
+    options: RuntimeWakeOptions,
+    whileQueued: () => void | Promise<void>,
+  ) {
+    hold = true;
+    const waking = live.wake(ref, "next run", options);
+    try {
+      await Promise.race([
+        entered.promise,
+        waking.then(() => {
+          throw new Error("Wake never queued");
+        }),
+      ]);
+      await whileQueued();
+    } finally {
+      release.resolve();
+      await Promise.all([queued, waking]);
+    }
+    return value(await waking);
+  }
+  return { live, target, client, wakeAfterQueue, queue: governed.queue };
+}
+
 test.each([
   "disabled",
   "offline",
@@ -1000,102 +1088,93 @@ test.each([
 ] as const)(
   "real hc queue rechecks remote wake authority at send time: %s",
   async (change) => {
-    const socketPath = join(root, "wake.sock");
-    const env = { CARDIGAN_HC_CONCURRENCY: "1" };
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    let hold = false;
-    let queued: Promise<void> | undefined;
-    const client: HcClient = {
-      available: async () => true,
-      exec: vi.fn(async (args) => {
-        if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
-        if (args[0] === "machine") {
-          if (args[1] === "ls") return JSON.stringify({ machines: [] });
-          if (hold) {
-            hold = false;
-            queued = governed.queue.run(async () => {
-              entered.resolve();
-              await release.promise;
-            });
-          }
-          return JSON.stringify({ version: HC_RELEASE.version });
-        }
-        return "";
-      }),
-      async *lines() {},
-    };
-    const governed = governHcClient(client, {
-      socket: socketPath,
-      session: "worker-a",
-      policy: hcCallPolicy({ ...process.env, ...env }),
-    });
-    const key = join(root, "key"),
-      known = join(root, "known");
-    await writeFile(key, "fixture", { mode: 0o600 });
-    await writeFile(known, "fixture", { mode: 0o600 });
-    workers = workers.map((w) => ({
-      ...w,
-      execution: { ...w.execution, identityFile: key, knownHostsFile: known },
-    }));
-    const live = value(
-      await RuntimeTargets.create({
-        execution: { mode: "local", dataDir: root },
-        store,
-        project: "fixture",
-        socketPath,
-        env,
-        client,
-        factory: (options) => HerdrRuntime.create(options),
-        workers: () => workers,
-        workerReadiness: readiness,
-        workerMcpReachability: mcpReachability,
-      }),
-    );
-    const target = (await live.forLaunch("fixture", assignment("worker-a")))
-      .execution.target;
-    if (!target) throw new Error("Missing fixture target");
-    const ref: RuntimeRef = {
-      machine_id: "worker-a",
-      runtime_machine: "worker-a",
-      terminal_ref: "worker-a/t1",
-      agent_name: "fixture",
-      target,
-    };
+    const { client, wakeAfterQueue } = await singleSlotWorker();
     const caller = vi.fn(() => {
       if (change === "caller_changes_policy")
         workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
       return change !== "caller";
     });
-    hold = true;
-    const waking = live.wake(ref, "next run", {
-      before_send: caller,
-      if_idle: true,
-    });
-    try {
-      await entered.promise;
-      if (change === "disabled")
-        workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
-      if (change === "offline")
-        store.uow.run((tx) =>
-          tx.machines.put("fixture", {
-            ...machine("worker-a", "worker-a"),
-            status: "offline",
-          }),
-        );
-      if (change === "fingerprint")
-        workers = workers.map((w) => ({ ...w, generation: "new" }));
-    } finally {
-      release.resolve();
-    }
-    expect(value(await waking)).toEqual(
+    const result = await wakeAfterQueue(
+      { before_send: caller, if_idle: true },
+      () => {
+        if (change === "disabled")
+          workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+        if (change === "offline")
+          store.uow.run((tx) =>
+            tx.machines.put("fixture", {
+              ...machine("worker-a", "worker-a"),
+              status: "offline",
+            }),
+          );
+        if (change === "fingerprint")
+          workers = workers.map((w) => ({ ...w, generation: "new" }));
+      },
+    );
+    expect(result).toEqual(
       change === "ready" ? { sent: true } : { sent: false, withdrawn: true },
     );
-    await queued;
     expect(
       vi.mocked(client.exec).mock.calls.filter(([args]) => args[0] === "send"),
     ).toHaveLength(change === "ready" ? 1 : 0);
     expect(caller).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each(["mounted", "unmounted"] as const)(
+  "a single remote send slot checks the pinned resource after queuing: %s",
+  async (condition) => {
+    const { live, target, client, wakeAfterQueue, queue } =
+      await singleSlotWorker();
+    // Only replace the SSH transport. Run the real protected probe wrapper
+    // against a synthetic mount marker on the same pinned fixture worker.
+    using transport = vi
+      .spyOn(herdr, "agentProcessCommand")
+      .mockImplementation(async (execution, argv) => {
+        if (
+          execution.target?.fingerprint !== target.fingerprint ||
+          argv[0] !== "/usr/bin/python3"
+        )
+          throw new Error("Wrong probe target");
+        return { file: argv[0], args: argv.slice(1) };
+      });
+    const marker = join(root, "volume");
+    await writeFile(marker, "mounted");
+    const command = [
+      await realpath("/usr/bin/python3"),
+      "-I",
+      "-c",
+      "import os,sys; sys.exit(not os.path.isfile(sys.argv[1]))",
+      marker,
+    ] as const;
+    const check = async () =>
+      (await live.publicationResourceProbe(
+        command,
+        {
+          project: "fixture",
+          machine: "worker-a",
+          key: "render",
+          action: "check",
+        },
+        target.fingerprint,
+      )) === target.fingerprint;
+    expect(await check()).toBe(true);
+    const result = await wakeAfterQueue(
+      { resource_preflight: check },
+      async () => {
+        expect(transport).toHaveBeenCalledTimes(1);
+        if (condition === "unmounted") await rm(marker);
+      },
+    );
+    expect(result).toEqual(
+      condition === "mounted"
+        ? { sent: true }
+        : { sent: false, withdrawn: true },
+    );
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(client.exec).mock.calls.filter(([args]) => args[0] === "send"),
+    ).toHaveLength(condition === "mounted" ? 1 : 0);
+    expect(queue.diagnostics().queue_timeouts).toBe(0);
   },
 );
 

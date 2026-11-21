@@ -1,12 +1,12 @@
 import { dirname, join } from "node:path";
 import type { Machine } from "@cardigan/domain";
 import {
+  MachineCheckJournal,
   matchesWorkerPlatform,
   onboardWorker,
   parseWorkerOnboarding,
   readOnboardingYaml,
-  refreshMachineObservations,
-  runtimeTargetBinding,
+  refreshWorkerObservations,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
@@ -15,9 +15,11 @@ import {
   workerOnboardingStatus,
 } from "@cardigan/host";
 import { openStore } from "@cardigan/store";
+import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { hasToken, resolveDataDir } from "./host.js";
 import type { CliIo } from "./io.js";
+import { cliLaunchPaths } from "./paths.js";
 import { runWorkflowCommand } from "./workflow.js";
 
 const USAGE = `用法：cardigan worker add|resume|check|status --project <项目> --machine <机器>
@@ -103,128 +105,117 @@ export async function runWorkerCommand(
     if (io.platform !== "linux")
       throw new WorkerOnboardingError("worker_controller_linux_required");
     const dataDir = resolveDataDir(io, flags["data-dir"]);
-    const config = parseWorkerOnboarding(
-      readOnboardingYaml(
-        flags.config ?? join(configRoot, `worker-${machine}-${project}.yaml`),
-      ),
-      dataDir,
-    );
-    digest = config.digest;
-    if (
-      config.worker.project_id !== project ||
-      config.worker.machine_id !== machine ||
-      (flags.host !== undefined && flags.host !== config.worker.execution.host)
-    )
-      throw new WorkerOnboardingError("worker_identity_conflict");
-    const matchesCheckedWorker = (registered: Machine) =>
-      registered.herdr_machine === machine &&
-      matchesWorkerPlatform(registered, config.worker);
-    const registration = async (create: boolean) => {
-      const store = openStore({ dataDir });
-      let exists = false;
-      let label = machine;
-      try {
-        if (!store.getProject(project)) return false;
-        const machines = store.uow.read((tx) =>
-          store.listProjects().flatMap((p) =>
-            tx.machines
-              .list(p.id)
-              .filter((m) => m.id === machine)
-              .map((m) => ({ project: p.id, machine: m })),
-          ),
-        );
-        if (machines.some((m) => !matchesCheckedWorker(m.machine)))
-          return false;
-        exists = machines.some((m) => m.project === project);
-        label = machines[0]?.machine.label ?? machine;
-      } finally {
-        store.close();
-      }
-      if (exists) return true; // Preserve online/draining and all existing capacity/tags.
-      if (!create) return false;
-      const silent = { ...io, stdout: () => {}, stderr: () => {} };
-      return (
-        (await runWorkflowCommand(
-          [
-            "machine",
-            "register",
-            machine,
-            "--project",
-            project,
-            "--data-dir",
-            dataDir,
-            "--label",
-            label,
-            "--os",
-            config.worker.os,
-            "--arch",
-            config.worker.arch,
-            "--status",
-            "offline",
-          ],
-          silent,
-        )) === EXIT.ok
-      );
-    };
-    const passed = await onboardWorker({
-      config,
-      configRoot,
-      dataDir,
-      mode,
-      ...(flags["confirm-config"]
-        ? { confirmConfig: flags["confirm-config"] }
-        : {}),
-      registration,
-      ...(probe ? { probe } : {}),
-      report: (step, state, reason, next) =>
-        io.stdout(`${step}: ${state} (${reason})${next ? `\n${next}` : ""}`),
-    });
     const store = openStore({ dataDir });
     try {
-      const checkedRegistration = () => {
-        const registered = store.uow.read((tx) =>
-          tx.machines.get(project, machine),
+      const journal = new MachineCheckJournal(store);
+      const { job, joined } = journal.claim(project, machine, "worker", "cli");
+      if (joined) throw new WorkerOnboardingError("worker_busy");
+      let failed = "configuration";
+      const passed = await journal.execute(
+        job,
+        async (progress) => {
+          progress("configuration");
+          const config = parseWorkerOnboarding(
+            readOnboardingYaml(
+              flags.config ??
+                join(configRoot, `worker-${machine}-${project}.yaml`),
+            ),
+            dataDir,
+          );
+          digest = config.digest;
+          if (
+            config.worker.project_id !== project ||
+            config.worker.machine_id !== machine ||
+            (flags.host !== undefined &&
+              flags.host !== config.worker.execution.host)
+          )
+            throw new WorkerOnboardingError("worker_identity_conflict");
+          const matchesCheckedWorker = (registered: Machine) =>
+            registered.herdr_machine === machine &&
+            matchesWorkerPlatform(registered, config.worker);
+          const registration = async (create: boolean) => {
+            if (!store.getProject(project)) return false;
+            const machines = store.uow.read((tx) =>
+              store.listProjects().flatMap((p) => {
+                const m = tx.machines.get(p.id, machine);
+                return m ? [{ project: p.id, machine: m }] : [];
+              }),
+            );
+            if (machines.some((m) => !matchesCheckedWorker(m.machine)))
+              return false;
+            // Preserve online/draining and all existing capacity/tags.
+            if (machines.some((m) => m.project === project)) return true;
+            if (!create) return false;
+            const silent = { ...io, stdout: () => {}, stderr: () => {} };
+            return (
+              (await runWorkflowCommand(
+                [
+                  "machine",
+                  "register",
+                  machine,
+                  "--project",
+                  project,
+                  "--data-dir",
+                  dataDir,
+                  "--label",
+                  machines[0]?.machine.label ?? machine,
+                  "--os",
+                  config.worker.os,
+                  "--arch",
+                  config.worker.arch,
+                  "--status",
+                  "offline",
+                ],
+                silent,
+              )) === EXIT.ok
+            );
+          };
+
+          const passed = await onboardWorker({
+            config,
+            configRoot,
+            dataDir,
+            mode,
+            ...(flags["confirm-config"]
+              ? { confirmConfig: flags["confirm-config"] }
+              : {}),
+            registration,
+            ...(probe ? { probe } : {}),
+            beforeStep: progress,
+            report: (step, state, reason, next) => {
+              if (state === "blocked") failed = step;
+              io.stdout(
+                `${step}: ${state} (${reason})${next ? `\n${next}` : ""}`,
+              );
+            },
+          });
+          if (passed) progress("capabilities");
+          await refreshWorkerObservations(
+            store,
+            config.worker,
+            passed,
+            io.env,
+            {
+              browsersPath: () =>
+                loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+                  ?.browsers_path,
+            },
+          );
+          return passed;
+        },
+        (ok) => ({
+          status: ok ? "passed" : "failed",
+          failed_steps: ok ? [] : [failed],
+        }),
+      );
+      if (passed)
+        io.stdout(
+          "接入检查通过；未启用远程派发。MCP 已验证 HTTPS 可达和未鉴权拒绝，启动鉴权由运行目标检查负责。",
         );
-        return registered && matchesCheckedWorker(registered)
-          ? registered
-          : undefined;
-      };
-      if (checkedRegistration()) {
-        const execution = {
-          ...config.worker.execution,
-          target: runtimeTargetBinding(config.worker),
-        };
-        const observations = await refreshMachineObservations({
-          store,
-          project,
-          machine,
-          env: io.env,
-          // The wizard probes its input configuration, not an arbitrary later registration.
-          // Resolve both sides of the observation fence against that same worker.
-          target: () => {
-            const registered = checkedRegistration();
-            if (!registered)
-              throw new WorkerOnboardingError("worker_identity_conflict");
-            return { execution, machine: registered };
-          },
-          check: async () => ({
-            blockers: passed ? [] : ["worker_check_failed"],
-            launch_enabled: false,
-          }),
-        });
-        if (passed && !observations.health?.available)
-          throw new WorkerOnboardingError("worker_capability_check_failed");
-      } else if (passed) {
-        throw new WorkerOnboardingError("worker_identity_conflict");
-      }
+      return passed ? EXIT.ok : EXIT.failure;
     } finally {
       store.close();
     }
-    if (passed)
-      io.stdout(
-        "接入检查通过；未启用远程派发。MCP 已验证 HTTPS 可达和未鉴权拒绝，启动鉴权由运行目标检查负责。",
-      );
-    return passed ? EXIT.ok : EXIT.failure;
   } catch (error) {
     throw new CliError(
       error instanceof WorkerOnboardingError

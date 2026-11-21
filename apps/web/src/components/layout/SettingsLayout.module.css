@@ -340,6 +340,25 @@
       var(--ui-space-4)
     );
   }
+  /* C-512: a drawer's own read status stays in its body, under the header,
+     so the page stack (also below the drawer header) never covers it. */
+  .drawerFeedback :global(.request-feedback-region) {
+    position: static;
+    align-items: stretch;
+    max-width: none;
+    max-height: none;
+  }
+  /* Separate a visible notice from the drawer content that follows it. */
+  .drawerFeedback:has(:global(.request-feedback):not(:empty)) {
+    margin-bottom: var(--ui-space-3);
+  }
+  /* While such a drawer is open the page stack waits in the bottom corner,
+     so the two stacks never share a place (the page stack paints above the
+     drawer) and the drawer's retry stays reachable on every width. */
+  :global(body):has(.drawerFeedback) > :global(.request-feedback-region) {
+    top: auto;
+    bottom: var(--ui-space-4);
+  }
   /* Fitted to the settings column; the cards list keeps its own minimum. */
   .table {
     min-width: 0;

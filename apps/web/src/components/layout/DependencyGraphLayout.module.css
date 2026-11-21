@@ -33,12 +33,21 @@
   .clipEnd::after {
     visibility: visible;
   }
-  /* Long or wide chains scroll here; the drawer and page never widen. */
+  /* Long, wide or tall graphs scroll here; the drawer and page never widen. */
   .scroll {
     /* Contribute no min-content width, so flex/grid ancestors stay put. */
     contain: inline-size;
-    overflow-x: auto;
+    overflow: auto;
+    max-block-size: 50vh;
     padding-block: var(--ui-space-1);
+    /* Dragging pans the view; it must not select node text. */
+    user-select: none;
+  }
+  .pannable {
+    cursor: grab;
+  }
+  .panning {
+    cursor: grabbing;
   }
   .canvas {
     position: relative;
@@ -103,12 +112,22 @@
     background: var(--surface);
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
+    text-align: start;
     text-decoration: none;
   }
-  a.node:hover {
+  button.node {
+    margin: 0;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .pannable button.node {
+    cursor: inherit;
+  }
+  button.node:hover,
+  button.node[aria-expanded="true"] {
     border-color: var(--ui-border-hover);
   }
-  a.node:focus-visible {
+  button.node:focus-visible {
     outline: var(--ui-focus-width) solid var(--ui-focus);
     outline-offset: var(--ui-focus-width);
   }

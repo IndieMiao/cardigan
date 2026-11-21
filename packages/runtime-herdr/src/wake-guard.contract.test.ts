@@ -235,3 +235,27 @@ test("withdraws if the terminal reports work while the transcript response is in
     await sending;
   }
 });
+
+test("target preflight runs before the final synchronous authority check and never sends on failure", async () => {
+  const raw = client();
+  const runtime: Runtime = value(await HerdrRuntime.create({ client: raw }));
+  const guard = vi.fn(() => true);
+  expect(
+    await runtime.wake(ref, "bell", {
+      resource_preflight: async () => false,
+      before_send: guard,
+    }),
+  ).toMatchObject({ ok: true, value: { withdrawn: true } });
+  expect(guard).not.toHaveBeenCalled();
+  expect(
+    await runtime.wake(ref, "bell", {
+      resource_preflight: async () => {
+        guard.mockReturnValue(false);
+        return true;
+      },
+      before_send: guard,
+    }),
+  ).toMatchObject({ ok: true, value: { withdrawn: true } });
+  expect(guard).toHaveBeenCalledOnce();
+  expect(raw.exec).toHaveBeenCalledTimes(1);
+});

@@ -47,6 +47,7 @@ export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
+export { selectStandingEmployee } from "./commands/employee-assignment.js";
 export * from "./commands/flow.js";
 export { DEFAULT_FRAMEWORK_WAIT_REMINDER_MS } from "./commands/framework-dependencies.js";
 export * from "./commands/host-ops.js";
@@ -76,6 +77,7 @@ export {
 } from "./commands/merge.js";
 export * from "./commands/merge-batch.js";
 export {
+  canRecheckMerge,
   FAILURE_EXCERPT_MAX_BYTES,
   hasAutoRerun,
   hasPassedMergeCheck,
@@ -198,6 +200,7 @@ export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export { eventById, eventsOfType } from "./event-index.js";
+export * from "./ext-interaction.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";
@@ -231,8 +234,10 @@ export * from "./pm-notification.js";
 export * from "./ports.js";
 export * from "./precheck.js";
 export * from "./preferences.js";
+export { cancelledQueueRelease } from "./prelaunch-release.js";
 export * from "./priority.js";
 export * from "./probes.js";
+export * from "./provider-start.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export * from "./remote-worker-loss.js";

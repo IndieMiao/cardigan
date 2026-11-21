@@ -16,6 +16,7 @@ import {
   loadMergeGateConfig,
   loadRunCapacityConfig,
   loadRuntimeWorkers,
+  MachineLeases,
   machineRunCapacity,
   RuntimeTargets,
   redactFailureLine,
@@ -23,6 +24,7 @@ import {
   runtimeWorkersPath,
   scrubRunCredentials,
   sessionFingerprint,
+  targetProbe,
 } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
@@ -76,12 +78,19 @@ import {
   tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
+import { machineHost } from "./web/machine-host.js";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
-import { type RunningWebServer, startWebServer } from "./web/server.js";
+import {
+  type RunningWebServer,
+  startWebServer,
+  type WebServerOptions,
+} from "./web/server.js";
 
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
   readonly role?: "web" | "background";
+  /** Activate the launch publisher only while this process owns the dispatch lock. */
+  readonly onBackgroundOwner?: () => () => void;
   readonly env?: ServerEnv;
   readonly config?: ServerConfig;
   /** Inject a store (tests); otherwise one is opened from the config. */
@@ -121,6 +130,7 @@ export interface StartServerOptions {
    * endpoint (§3.1); absent in tests that only exercise the MCP surface.
    */
   readonly web?: {
+    readonly launchSettings?: WebServerOptions["launchSettings"];
     readonly config: WebConfig;
     readonly log?: (event: Readonly<Record<string, unknown>>) => void;
     /** SSE cadence; tests shorten it. */
@@ -170,16 +180,20 @@ export async function startCardiganServer(
     join(config.dataDir, "locks", "background.lock"),
     1,
   );
+  let stopPublishing: (() => void) | undefined;
   try {
+    stopPublishing = options.onBackgroundOwner?.();
     const server = await assembleServer(options);
     return {
       ...server,
       close: async () => {
         await server.close();
+        stopPublishing?.();
         await unlock();
       },
     };
   } catch (error) {
+    stopPublishing?.();
     await unlock();
     throw error;
   }
@@ -294,6 +308,24 @@ async function assembleServer(
   const runCapacity = await loadRunCapacityConfig({
     env: { ...(options.env ?? process.env) },
   });
+  const targets = options.dispatcher?.runtime;
+  const leases = new MachineLeases(
+    store,
+    runCapacity,
+    targetProbe(async (project, machine_id) =>
+      targets instanceof RuntimeTargets
+        ? (
+            await targets.forLaunch(project, {
+              machine_id,
+              runtime_ref: null,
+            })
+          ).execution
+        : execution,
+    ),
+    targets instanceof RuntimeTargets
+      ? targets.publicationResourceProbe
+      : undefined,
+  );
   configureMachinePlacement(
     store,
     config.dataDir,
@@ -453,6 +485,16 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              reserveResource: (actor, input, revalidate) =>
+                leases.reserve(
+                  actor,
+                  input.machine,
+                  input.resource,
+                  input.starts_at,
+                  input.ends_at,
+                  () => new Date().toISOString(),
+                  { key: input.idempotency_key, revalidate },
+                ),
               auditProbeCall: (actor, code) =>
                 store.uow.run((tx) => {
                   tx.global_events.append({
@@ -563,6 +605,13 @@ async function assembleServer(
                     : hostOps.executionDiagnostics(project),
               }
             : {}),
+          machineHost: machineHost(
+            store,
+            execution,
+            session,
+            { ...runtimeEnv },
+            () => options.dispatcher?.upstream?.browser?.browsers_path,
+          ),
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,
           capabilityCatalog: () =>
@@ -571,6 +620,9 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          ...(webOptions.launchSettings
+            ? { launchSettings: webOptions.launchSettings }
+            : {}),
           roleLaunchConfig: () => options.dispatcher?.upstream,
           launchProfiles: () =>
             Object.keys(options.dispatcher?.upstream?.profiles ?? {}),
@@ -675,6 +727,12 @@ async function assembleServer(
                 assignment,
               );
         },
+        ...(config.providerFailureThreshold !== undefined
+          ? { providerFailureThreshold: config.providerFailureThreshold }
+          : {}),
+        ...(config.providerCooldownMs !== undefined
+          ? { providerCooldownMs: config.providerCooldownMs }
+          : {}),
         ...options.dispatcher,
         ...((options.dispatcher.runtimeFailureLimit ??
           config.runtimeFailureLimit) === undefined
@@ -740,7 +798,10 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        leases,
+        projectQuota: runCapacity.projectQuota,
         resourceLimits: runCapacity.resourcesForMachine,
+        queuedRecheckAfterMs: runCapacity.queuedRecheckAfterMs,
         inboxStallAfterMs: runCapacity.inboxStallAfterMs,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
@@ -762,6 +823,11 @@ async function assembleServer(
       extSender = new ExtMessageSender({
         store,
         configuration: loadExtMessageConfig(),
+        gate: (project) => ({
+          ...mergeProjectSettings(mergeGate, project),
+          merge_gate_enabled:
+            mergeGate.forProject(project).status !== "disabled",
+        }),
       });
       extSender.recordStatus();
       const notificationSender = extSender;

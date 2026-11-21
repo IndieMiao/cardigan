@@ -2,8 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Machine } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
+  acceptedBrowserDigest,
   beginMachineObservation,
+  browserPathDigest,
   completeMachineObservation,
+  isAcceptedBrowserPath,
   type MachineCapability,
   type MachineHealth,
   readMachineObservations,
@@ -40,9 +43,16 @@ export interface MachineObservationOptions {
   readonly machine: string;
   /** Resolve runtime configuration inside the observation fence, before any probe. */
   readonly target: () => ObservationTarget | Promise<ObservationTarget>;
+  readonly observationId?: string;
+  readonly progress?: (step: "runtime" | "capabilities") => void;
   readonly check: () => Promise<
     Pick<MachineHealth, "blockers" | "launch_enabled">
   >;
+  /** Same launch configuration that supplies the browser MCP on this host. */
+  readonly browsersPath?: () =>
+    | string
+    | undefined
+    | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
   readonly env?: NodeJS.ProcessEnv;
@@ -57,7 +67,7 @@ export async function refreshMachineObservations(
   options.signal?.throwIfAborted();
   const now = options.now ?? (() => new Date().toISOString());
   const actor = { kind: "system" as const, project_id: project };
-  const observation = randomUUID();
+  const observation = options.observationId ?? randomUUID();
   beginMachineObservation(store, actor, project, machine, observation, now());
   let health: MachineHealth = {
     status: "failed",
@@ -66,6 +76,7 @@ export async function refreshMachineObservations(
     launch_enabled: false,
   };
   let capabilities: MachineCapability[] = [];
+  let observedBrowserDigest: string | null | undefined;
   let targetFingerprint: string | undefined;
   try {
     const target = await options.target();
@@ -80,21 +91,53 @@ export async function refreshMachineObservations(
       checked_at: now(),
       status: checked.blockers.length ? "failed" : "passed",
     };
+    let root: string | undefined;
+    if (!checked.blockers.length && !options.catalog) {
+      try {
+        // A CLI file or web-process snapshot can be newer than the dispatch owner's config.
+        const candidate = await options.browsersPath?.();
+        if (candidate && isAcceptedBrowserPath(store, candidate))
+          root = candidate;
+      } catch {
+        // This optional scope cannot invalidate the machine's other observations.
+      }
+    }
     const catalog = checked.blockers.length
       ? []
-      : (
-          options.catalog ?? (() => loadMachineCapabilityCatalog(options.env))
-        )();
+      : (options.catalog?.() ??
+        loadMachineCapabilityCatalog(options.env, root, target.machine.os));
+    const failures: NonNullable<
+      MachineHealth["capability_failures"]
+    >[number][] = [];
+    if (catalog.length) options.progress?.("capabilities");
     const probe = options.probe ?? probeMachineCapability;
     for (const entry of catalog) {
       options.signal?.throwIfAborted();
       if (!entry.os.some((os) => os === target.machine.os)) continue;
+      const search = "scopes" in entry.check ? entry.check : undefined;
+      if (search) {
+        const registry = search.scopes.find((s) => s.kind === "registry");
+        observedBrowserDigest = registry
+          ? browserPathDigest(registry.value)
+          : acceptedBrowserDigest(store);
+      }
       const result = await probe(
         target.execution,
         target.machine.os,
         entry.check,
         options.signal,
       );
+      if (search && !result.ok)
+        failures.push({
+          key: entry.key,
+          search_locations: search.scopes
+            .slice(0, result.attempted ?? 0)
+            .map((scope) => scope.label),
+          ...(result.attempted !== search.scopes.length ||
+          result.incomplete !== false
+            ? { search_incomplete: true }
+            : {}),
+        });
       if (
         !result.ok ||
         (entry.acceptsOutput && !entry.acceptsOutput(result.output))
@@ -123,6 +166,7 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
+    if (failures.length) health = { ...health, capability_failures: failures };
     const current = await options.target();
     options.signal?.throwIfAborted();
     if (
@@ -158,6 +202,7 @@ export async function refreshMachineObservations(
     health,
     capabilities,
     targetFingerprint,
+    observedBrowserDigest,
   );
   return readMachineObservations(store, project, machine, now());
 }

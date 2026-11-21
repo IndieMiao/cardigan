@@ -20,6 +20,7 @@ import {
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
+  providerAdmission,
   recoverPreparation,
   recoveryTargetCurrent,
   remainingResourceRatio,
@@ -60,6 +61,7 @@ import {
   beginLaunchAttempt,
   confirmReviewNotSent,
   finishBellAttempt,
+  getRoleVersion,
   type Store,
   settleWakeWithdrawal,
   unfinishedBellAttempts,
@@ -82,6 +84,8 @@ import {
   preparationPolicy,
   withPreparationQueue,
 } from "./preparation-queue.js";
+import type { ReadProjectQuota } from "./project-quotas.js";
+import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
@@ -89,6 +93,7 @@ import {
   type ReadResourceLimits,
   runCapacitySnapshot,
 } from "./run-capacity.js";
+import { resourceEntry, verifiedLocalLaunch } from "./run-resource-worker.js";
 import { assignmentResourceKeys } from "./run-resources.js";
 import {
   deferTargetAttempt,
@@ -145,6 +150,11 @@ export class RunCapacityDeferred extends Error {
     super(`排队中（前面还有 ${ahead} 个）`);
   }
 }
+export class RunProviderDeferred extends Error {
+  constructor() {
+    super("模型服务不可用，保留执行排队等待");
+  }
+}
 export class RunPreparationDeferred extends Error {
   constructor() {
     super("工作目录准备或启动尚未结束，保留执行排队等待");
@@ -154,6 +164,8 @@ export class RunPreparationDeferred extends Error {
 export interface LaunchHost {
   readonly configDir?: string;
   readonly runLimit?: (machine: string) => number;
+  readonly leases?: MachineLeases;
+  readonly projectQuota?: ReadProjectQuota;
   readonly resourceLimits?: ReadResourceLimits;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly store: Store;
@@ -177,6 +189,9 @@ export interface LaunchHost {
 export class RunPreflightDeferred extends Error {}
 
 export interface LaunchRunInput {
+  readonly resourceAccess?: ResourceAccess;
+  readonly resourcePreflight?: () => Promise<boolean>;
+  readonly resourceGate?: () => boolean;
   readonly project: ProjectId;
   readonly assignment_id: Assignment["id"];
   /** The Run to start; it must already exist in `queued` state. */
@@ -342,6 +357,12 @@ async function launchWithClaim(
   // CLI starts share the Dispatcher's durable exclusion while the Run is
   // still queued. Otherwise two starts could rotate tokens/provision at once.
   const clock = host.clock ?? wallClock;
+  const owner = host.store.uow.read((tx) =>
+    tx.assignments.get(input.project, input.assignment_id),
+  );
+  const inspection =
+    owner && (await host.leases?.inspect(input.project, owner));
+  let access: ResourceAccess | undefined;
   const attempt = host.store.uow.run((tx) => {
     const run = tx.runs.get(input.project, input.run.id);
     if (
@@ -358,12 +379,75 @@ async function launchWithClaim(
     const assignment = tx.assignments.get(input.project, input.assignment_id);
     if (!assignment)
       throw new HostLaunchError("dispatch", "Assignment is missing");
+    const profile =
+      run.launch_profile_ref ??
+      (assignment.employee_id &&
+        tx.employees.get(assignment.employee_id)?.launch_profile_ref) ??
+      getRoleVersion(
+        tx,
+        input.project,
+        assignment.role_id,
+        assignment.role_version,
+      )?.launch_profile_ref;
+    const probe = providerAdmission(
+      loadCommandState(tx, input.project),
+      profile,
+      clock.now(),
+      (r) =>
+        unfinishedBellAttempts(
+          host.store.database,
+          input.project,
+          r.assignment_id,
+        ).some((b) => b.run_id === r.id),
+    );
+    if (probe === "wait") {
+      tx.runs.put(input.project, {
+        ...run,
+        queue_reason: "provider_unavailable",
+      });
+      return "provider_unavailable" as const;
+    }
     tx.runs.put(input.project, { ...run, queue_reason: "concurrency_limit" });
-    const capacity = runCapacitySnapshot(host.store, tx, host.resourceLimits);
+    const capacity = runCapacitySnapshot(
+      host.store,
+      tx,
+      host.resourceLimits,
+      host.projectQuota,
+    );
     const slots = capacity.resourcesForMachine(assignment.machine_id);
     const keys = assignmentResourceKeys(tx, input.project, assignment);
+    const denied = host.leases?.blocked(
+      input.project,
+      assignment.machine_id,
+      keys,
+      clock.now(),
+      inspection,
+    );
+    if (
+      denied ||
+      (host.leases &&
+        !capacity.withinProjectQuota(input.project, assignment, keys)) ||
+      (assignment.runtime_ref &&
+        host.leases?.freshSession(input.project, assignment))
+    ) {
+      host.leases?.wait(
+        tx,
+        input.project,
+        assignment,
+        run,
+        denied ??
+          (!capacity.withinProjectQuota(input.project, assignment, keys)
+            ? "项目额度已满"
+            : "等待重新创建资源会话"),
+        clock.now(),
+      );
+      return undefined;
+    }
+    const preferred = host.leases?.config.preferred(assignment.machine_id);
     const manual =
-      input.actor.kind === "human" && input.actor.project_id === input.project;
+      input.actor.kind === "human" &&
+      input.actor.project_id === input.project &&
+      (!preferred || preferred === input.project);
     const limit = effectiveRunLimit(
       host.store,
       assignment.machine_id,
@@ -379,6 +463,7 @@ async function launchWithClaim(
     // Resource limits are hard even for a manual launch. A zero total denotes
     // invalid private configuration, so resource-bearing Runs cannot infer that they're unlimited.
     if (
+      !capacity.withinProjectQuota(input.project, assignment, keys) ||
       remainingResourceRatio(keys, slots) <= 0 ||
       (limit === 0 && keys.length > 0) ||
       (!manual &&
@@ -392,11 +477,19 @@ async function launchWithClaim(
               assignment.machine_id,
               slots,
               clock.now(),
+              (p, o) =>
+                capacity.withinProjectQuota(p, o) &&
+                !host.leases?.waitingElsewhere(p, o, clock.now(), tx),
+              host.leases?.config.preferred(assignment.machine_id),
             ))))
     ) {
       return undefined;
     }
-    const cleared = { ...run, resource_keys: keys };
+    const cleared = {
+      ...run,
+      resource_keys: keys,
+      ...(probe ? { provider_probe: probe } : {}),
+    };
     delete cleared.queue_reason;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
@@ -413,6 +506,16 @@ async function launchWithClaim(
       finished_at: null,
       outcome: null,
     };
+    if (inspection)
+      access = host.leases?.acquire(
+        tx,
+        input.project,
+        assignment,
+        run,
+        keys,
+        inspection,
+        at,
+      );
     beginLaunchAttempt(host.store.database, attempt);
     return {
       ...attempt,
@@ -425,6 +528,7 @@ async function launchWithClaim(
           : undefined,
     };
   });
+  if (attempt === "provider_unavailable") throw new RunProviderDeferred();
   if (!attempt) {
     const waiting = host.store.uow.read((tx) =>
       runCapacitySnapshot(host.store, tx).queue.find(
@@ -436,10 +540,47 @@ async function launchWithClaim(
   let sent = false;
   let deferred = false;
   let withdrawn = false;
+  const leases = host.leases;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
-    const result = await launch(host, input, attempt);
+    const result = await launch(
+      host,
+      {
+        ...input,
+        ...(access ? { resourceAccess: access } : {}),
+        ...(leases && owner && access?.target
+          ? {
+              resourcePreflight: () =>
+                leases.canPublish(
+                  input.project,
+                  owner,
+                  input.run,
+                  () => clock.now(),
+                  access,
+                ),
+            }
+          : {}),
+        ...(host.leases && owner
+          ? {
+              resourceGate: () =>
+                !host.leases?.blocked(
+                  input.project,
+                  owner.machine_id,
+                  host.store.uow.read(
+                    (tx) =>
+                      tx.runs.get(input.project, input.run.id)?.resource_keys ??
+                      [],
+                  ),
+                  clock.now(),
+                  undefined,
+                  access,
+                ),
+            }
+          : {}),
+      },
+      attempt,
+    );
     sent = true;
     return result;
   } catch (error) {
@@ -516,6 +657,13 @@ async function launch(
       throw error;
     }
   }
+  if (
+    input.resourceAccess?.target &&
+    input.resourceAccess.target !==
+      (execution.target?.fingerprint ??
+        (execution.mode === "local" ? "local" : undefined))
+  )
+    throw new RunPreflightDeferred("资源检查目标已变化");
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );
@@ -679,7 +827,10 @@ async function launch(
           return effect.data;
         });
       let run: Run | undefined =
-        workItem?.kind === "verify" ? undefined : dispatch();
+        workItem?.kind === "verify" ||
+        host.leases?.configured(project, assignment.machine_id)
+          ? undefined
+          : dispatch();
       let waking = false;
       const wakeCurrent = () =>
         host.store.uow.read((tx) => {
@@ -698,6 +849,11 @@ async function launch(
         worktree ??= await prepare();
         requireTarget();
         requireWakeCurrent();
+        if (
+          (input.resourcePreflight && !(await input.resourcePreflight())) ||
+          (input.resourceGate && !input.resourceGate())
+        )
+          throw new RunTargetDeferred();
         run ??= dispatch();
         preparedReviewPrompt = reviewPrompt();
         waking = true;
@@ -708,7 +864,11 @@ async function launch(
             .filter(Boolean)
             .join("\n"),
           {
+            ...(input.resourcePreflight
+              ? { resource_preflight: input.resourcePreflight }
+              : {}),
             before_send: () => {
+              if (input.resourceGate && !input.resourceGate()) return false;
               if (attempt?.review_wake) {
                 const gate = crossRepairSendBoundary(
                   host.store,
@@ -904,8 +1064,19 @@ async function launch(
         capabilities: role.capabilities,
       },
       launch: host.launch.config,
+      ...(input.resourceAccess
+        ? { resource_bindings: input.resourceAccess.bindings }
+        : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
+      run_resources: resourceEntry(
+        project,
+        assignment.machine_id,
+        execution,
+        mcpUrl,
+        issued.record.id,
+        host.store.runResources.publicKey(),
+      ),
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
@@ -981,8 +1152,7 @@ async function launch(
     if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
-      command: compiled.launch_script,
-      args: [],
+      ...verifiedLocalLaunch(compiled),
       cwd: workDir,
       agent_name: agentName,
       labels: {
@@ -1059,6 +1229,11 @@ async function launch(
           };
     const baseSha = worktree?.base_sha ?? assignment.base_sha;
     step = "dispatch";
+    if (
+      (input.resourcePreflight && !(await input.resourcePreflight())) ||
+      (input.resourceGate && !input.resourceGate())
+    )
+      throw new RunTargetDeferred();
     applyCommand(host.store, {
       project,
       actor: input.actor,
@@ -1105,7 +1280,16 @@ async function launch(
     )
       requireTarget();
 
-    // Only now may the wrapper start the Agent (M2 §4 step 5–8).
+    // Local dispatch and sentinel publication are consecutive synchronous
+    // decisions after the last probe. Do not park a local dispatched Run to
+    // repeat asynchronous IO. Remote publication has its own withdrawal journal.
+    if (
+      (publication &&
+        input.resourcePreflight &&
+        !(await input.resourcePreflight())) ||
+      (input.resourceGate && !input.resourceGate())
+    )
+      throw new RunTargetDeferred();
     step = "sentinel write";
     if (publication) await publication.commit();
     else await writeAgentSentinel(execution, project, assignment.id);

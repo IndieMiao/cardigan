@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+  abortDispatch,
   assign,
   assignOrDefer,
   autoAssignVerifier,
@@ -8,6 +9,7 @@ import {
   type Machine,
   type MachinePlacement,
   queueRun,
+  recoverPreparation,
   releaseAssignment,
   saveMachine,
 } from "../index.js";
@@ -820,3 +822,145 @@ test("only a released pre-Run snapshot failure can reselect a different machine 
   ).toBe(params.work_item_id);
   expect(value(reassign(next)).events).toEqual([]);
 });
+
+test.each([false, true])(
+  "C-527: explicit prelaunch cancellation allows checked reassignment (cleaned preparation retry: %s)",
+  (retry) => {
+    const io = ports(),
+      base = preferRemote();
+    const s: CommandState = {
+      ...base,
+      work_items: base.work_items.map((w) =>
+        w.kind === "produce" ? { ...w, status: "todo" } : w,
+      ),
+    };
+    const work = { role_id: "coder", work_item_id: id("work_item", 1) };
+    const first = value(assign(s, human, work, io));
+    const placed = apply(s, first);
+    const pending = value(
+      queueRun(
+        placed,
+        human,
+        { assignment_id: first.data.id, model: "m", agent_cli_version: "v" },
+        io,
+      ),
+    );
+    let before = apply(placed, pending);
+    let target = pending.data;
+    if (retry) {
+      const system = { kind: "system" as const, project_id: s.project_id };
+      before = apply(
+        before,
+        value(
+          abortDispatch(
+            before,
+            system,
+            { run_id: target.id, reason: "directory preparation failed" },
+            io,
+          ),
+        ),
+      );
+      const recovered = value(
+        recoverPreparation(
+          before,
+          system,
+          {
+            run_id: target.id,
+            category: "preparation_queue_timeout",
+            expected_runtime_ref: null,
+            cleanup_complete: true,
+            execution_exited: true,
+            backoff_ms: 60_000,
+          },
+          io,
+        ),
+      );
+      if (!recovered.data) throw new Error("Missing preparation retry");
+      before = apply(before, recovered);
+      target = recovered.data;
+    }
+    const params = {
+      assignment_id: first.data.id,
+      cancel_queued_run_id: target.id,
+    };
+    const permit = { ...io, unreservedAssignment: () => true };
+    if (retry) {
+      const proof = before.events.find((e) => e.id === target.trigger_event_id);
+      if (!proof) throw new Error("Missing recovery proof");
+      for (const events of [
+        before.events.filter((e) => e.id !== proof.id),
+        before.events.map((e) =>
+          e.id === proof.id ? { ...e, actor: human } : e,
+        ),
+        [
+          ...before.events,
+          {
+            ...proof,
+            type: "run_dispatched",
+            payload: { run_id: pending.data.id },
+          },
+        ],
+      ]) {
+        expect(
+          releaseAssignment({ ...before, events }, human, params, permit).ok,
+        ).toBe(false);
+      }
+    }
+    expect(first.data.machine_id).toBe(remote.id);
+    expect(releaseAssignment(before, human, params, io).ok).toBe(false);
+    expect(
+      releaseAssignment(
+        {
+          ...before,
+          runs: before.runs.map((r) =>
+            r.id === target.id ? { ...r, status: "dispatched" } : r,
+          ),
+        },
+        human,
+        params,
+        permit,
+      ).ok,
+    ).toBe(false);
+    expect(
+      releaseAssignment(
+        {
+          ...before,
+          assignments: before.assignments.map((a) =>
+            a.id === first.data.id ? { ...a, session_ref: "existing" } : a,
+          ),
+        },
+        human,
+        params,
+        permit,
+      ).ok,
+    ).toBe(false);
+    const release = value(releaseAssignment(before, human, params, permit));
+    const after = apply(before, release);
+    expect(release.events.map((e) => e.type)).toEqual([
+      "run_dispatch_aborted",
+      "assignment_released",
+    ]);
+    expect(after.runs.map((r) => r.status)).toEqual(
+      retry ? ["cancelled", "cancelled"] : ["cancelled"],
+    );
+    if (retry)
+      expect(
+        assign(
+          {
+            ...after,
+            events: after.events.filter(
+              (e) => e.id !== target.trigger_event_id,
+            ),
+          },
+          human,
+          work,
+          io,
+        ).ok,
+      ).toBe(false);
+    expect(value(assign(after, human, work, io)).data).toMatchObject({
+      machine_id: "local",
+      work_item_id: work.work_item_id,
+      role_version: first.data.role_version,
+    });
+  },
+);

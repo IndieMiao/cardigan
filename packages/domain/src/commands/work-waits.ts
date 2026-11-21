@@ -1,4 +1,4 @@
-import type { Actor, Event, WorkItem } from "../entities.js";
+import type { Actor, Assignment, Event, WorkItem } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import {
   latestPrecheckConflict,
@@ -13,6 +13,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { authorPrecheckWait } from "./precheck-wait.js";
 import { canResume, resumeWork } from "./resumption.js";
 import { stoppedByHuman } from "./stop.js";
 
@@ -222,6 +223,78 @@ function satisfied(
   }
 }
 
+function eligibleWaitOwner(d: CommandDraft, item: WorkItem, owner: Assignment) {
+  const card = d.card(item.card_id);
+  return !(
+    card.hold ||
+    ["backlog", "done", "cancelled", "awaiting_merge"].includes(card.status) ||
+    item.manual_assign ||
+    item.replaced_by_work_item_id ||
+    owner.status !== "active" ||
+    owner.scope !== "work_item" ||
+    owner.work_item_id !== item.id ||
+    owner.external ||
+    owner.role_upgrade ||
+    stoppedByHuman(d.state.events, owner.id) ||
+    hostOpsPending(d.state.events, owner.id) ||
+    !["in_progress", "blocked", "waiting_decision"].includes(item.status) ||
+    !hasRunTarget(owner, d.state)
+  );
+}
+
+/** Settle only this author's passed wait inside the verified delivery transaction. */
+export function resumePassedDeliveryWait(
+  d: CommandDraft,
+  item: WorkItem,
+  head: string,
+) {
+  const blocker = item.reported_blocker;
+  if (
+    item.status !== "blocked" ||
+    !blocker ||
+    blocker.reported_by !== d.author ||
+    !d.assignment ||
+    !eligibleWaitOwner(d, item, d.assignment)
+  )
+    return;
+  const wait = authorPrecheckWait(d, item, blocker.resume_when, blocker.needs);
+  if (
+    wait?.event.type !== "precheck_finished" ||
+    wait.consumed ||
+    wait.check.status !== "passed" ||
+    wait.check.head_sha !== head
+  )
+    return;
+  if (
+    d
+      .list("runs")
+      .some(
+        (r) =>
+          r.assignment_id === item.assignment_id &&
+          (r.dispatch_stop || r.inactivity_stop),
+      )
+  )
+    return;
+  const { reported_blocker: _blocker, ...cleared } = item;
+  const resumed = resumeWork(d, cleared);
+  if (!resumed) return;
+  d.emit(
+    "precheck_wait_delivered",
+    item.card_id,
+    {
+      work_item_id: item.id,
+      attempt_id: wait.check.attempt_id,
+      evidence: wait.event.id,
+    },
+    {
+      type: "status_change",
+      work_item_id: item.id,
+      body: `${item.id} 等待的预检 ${wait.check.attempt_id} 已通过，提交交付时自动解除阻塞。`,
+    },
+  );
+  return resumed;
+}
+
 /** Internal maintenance only. Evidence, one-shot consumption and wake request commit atomically. */
 export function resumeWorkWaits(
   state: CommandState,
@@ -229,10 +302,17 @@ export function resumeWorkWaits(
   p: {
     baseline?: { branch: string; sha: string };
     conflict_max_resumes?: number;
+    precheck_failure_limit?: number;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "resume_work_waits", ports, (d) => {
+    const failureLimit = p.precheck_failure_limit ?? 2;
+    ensure(
+      Number.isSafeInteger(failureLimit) && failureLimit > 0,
+      "validation_failed",
+      "预检连续失败上限须为正整数",
+    );
     const maxResumes = p.conflict_max_resumes ?? DEFAULT_CONFLICT_MAX_RESUMES;
     ensure(
       Number.isSafeInteger(maxResumes) && maxResumes > 0,
@@ -258,29 +338,10 @@ export function resumeWorkWaits(
         (!item.assignment_id || !waitingOwners.has(item.assignment_id))
       )
         continue;
-      const card = d.card(item.card_id);
       const owner = d
         .list("assignments")
         .find((a) => a.id === item.assignment_id);
-      if (
-        card.hold ||
-        ["backlog", "done", "cancelled", "awaiting_merge"].includes(
-          card.status,
-        ) ||
-        item.manual_assign ||
-        item.replaced_by_work_item_id ||
-        !owner ||
-        owner.status !== "active" ||
-        owner.scope !== "work_item" ||
-        owner.work_item_id !== item.id ||
-        owner.external ||
-        owner.role_upgrade ||
-        stoppedByHuman(state.events, owner.id) ||
-        hostOpsPending(state.events, owner.id) ||
-        !["in_progress", "blocked", "waiting_decision"].includes(item.status) ||
-        !hasRunTarget(owner, state)
-      )
-        continue;
+      if (!owner || !eligibleWaitOwner(d, item, owner)) continue;
       const runs = d.list("runs").filter((r) => r.assignment_id === owner.id);
       if (
         runs.some(
@@ -313,10 +374,38 @@ export function resumeWorkWaits(
           : wait?.resumed_by
             ? undefined
             : wait?.condition;
+      if (!condition) continue;
+      const authorWait =
+        !conflictWait && blocker?.reported_by === `assignment:${owner.id}`
+          ? authorPrecheckWait(d, item, condition, blocker.needs)
+          : undefined;
+      if (authorWait?.consumed) continue;
+      if (blocker && authorWait?.reachedFailureLimit(failureLimit)) {
+        const body = `${item.id} 同一提交连续 ${failureLimit} 次预检失败（${condition.target_id}），已停止自动恢复，请 PM 核查。`;
+        d.put("work_items", {
+          ...item,
+          reported_blocker: { ...blocker, auto_resume_disabled: true },
+        });
+        d.emit(
+          "precheck_wait_escalated",
+          item.card_id,
+          {
+            work_item_id: item.id,
+            attempt_id: condition.target_id,
+            head_sha: authorWait.check.head_sha,
+            assignment_id: owner.id,
+            evidence: authorWait.event.id,
+            limit: failureLimit,
+            body,
+          },
+          { type: "system", work_item_id: item.id, body },
+        );
+        continue;
+      }
       if (
-        !condition ||
-        (!conflictWait &&
-          (blocker?.auto_resume_disabled || autoResumeUsed(d, item, condition)))
+        !authorWait &&
+        !conflictWait &&
+        (blocker?.auto_resume_disabled || autoResumeUsed(d, item, condition))
       )
         continue;
       let recovery:
@@ -371,7 +460,11 @@ export function resumeWorkWaits(
           retry: attempts.length + 1,
         };
       }
-      const evidence = satisfied(d, condition, p.baseline, item);
+      const evidence = authorWait
+        ? authorWait.event.type === "precheck_finished"
+          ? authorWait.event.id
+          : undefined
+        : satisfied(d, condition, p.baseline, item);
       if (!evidence) continue;
       const { reported_blocker: _blocker, ...cleared } = item;
       if (!canResume(d, cleared)) continue;

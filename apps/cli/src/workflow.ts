@@ -34,6 +34,7 @@ import {
   projectSnapshot,
   runtimeUnknownDeferred,
   saveMachine,
+  selectStandingEmployee,
   setCardSensitive,
   standingTools,
   supersedeCard,
@@ -42,12 +43,14 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import {
+  checkRegisteredMachine,
   configureMachinePlacement,
   effectiveRunLimit,
   loadMergeGateConfig,
   loadRunCapacityConfig,
+  MachineLeases,
   RuntimeTargets,
-  refreshMachineObservations,
+  targetProbe,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
@@ -102,12 +105,13 @@ const USAGE = [
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--recovery-source main|backup] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
+  "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
-  "  cardigan pm create --office|--ops [--project <p>]",
+  "  cardigan pm create --office|--ops [--employee <E-n 或名字>] [--project <p>]",
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
   "  cardigan host-ops start [--project <p>]  启动常驻主机运维（已在运行就跳过）",
-  "  cardigan host-ops rotate [--project <p>]  保留员工和待处理事项，切换到最新角色版本并启动",
+  "  cardigan host-ops rotate [--project <p>] [--employee <编号或名字>]  切换到最新角色版本并启动，默认保留原员工",
   "  cardigan pm start [--office] [--ops] [--project <p>]  一键启动常驻 PM（已在运行就跳过）",
   "  cardigan pm rotate --office|--ops [--external] [--employee <E-n 或名字>] [--project <p>]     把常驻 PM 换到 pm 角色的最新版本",
   "  cardigan pm restart --office|--ops [--project <p>]     重开常驻 PM 会话（不暂停、不转交事项、不换版本）",
@@ -838,9 +842,15 @@ async function machineCommand(
     throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
   const [sub, ...rest] = args;
   if (
-    !["register", "update", "list", "show", "drain", "check"].includes(
-      sub ?? "",
-    )
+    ![
+      "register",
+      "update",
+      "list",
+      "show",
+      "drain",
+      "check",
+      "reserve",
+    ].includes(sub ?? "")
   )
     throw new CliError(
       "用法：cardigan machine register|update|list|show|drain|check",
@@ -852,7 +862,9 @@ async function machineCommand(
       !(
         sub === "register" || sub === "update"
           ? ["project", "data-dir", "label", "os", "arch", "tags", "status"]
-          : ["project", "data-dir"]
+          : sub === "reserve"
+            ? ["project", "data-dir", "resource", "start", "end"]
+            : ["project", "data-dir"]
       ).includes(key)
     )
       throw new CliError(`机器登记不接受 --${key}`, EXIT.usage);
@@ -880,6 +892,47 @@ async function machineCommand(
         config.forMachine,
         config.maxForMachine,
       );
+    if (sub === "reserve") {
+      const leases = new MachineLeases(
+        store,
+        config,
+        targetProbe(async (project, machine_id) => {
+          const dataDir = resolveDataDir(
+            io,
+            optional(parsed.flags, "data-dir"),
+          );
+          const connection = await terminalExecution(
+            io,
+            dataDir,
+            null,
+            machine_id,
+          );
+          const result = await RuntimeTargets.create({
+            ...connection,
+            env: io.env,
+            store,
+            project,
+          });
+          if (!result.ok) throw new Error("目标不可用");
+          return (
+            await result.value.forLaunch(project, {
+              machine_id,
+              runtime_ref: null,
+            })
+          ).execution;
+        }),
+      );
+      const generation = await leases.reserve(
+        actor,
+        id ?? "",
+        optional(parsed.flags, "resource") ?? "",
+        optional(parsed.flags, "start") ?? "",
+        optional(parsed.flags, "end") ?? "",
+        () => new Date().toISOString(),
+      );
+      io.stdout(JSON.stringify({ generation }));
+      return EXIT.ok;
+    }
     if (sub === "list" || sub === "show" || sub === "check") {
       const machines = store.uow.read((tx) => tx.machines.list(project_id));
       const selected =
@@ -902,39 +955,34 @@ async function machineCommand(
       if (sub === "check") {
         const machine = selected[0] as Machine;
         const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
-        let runtime: RuntimeTargets | undefined;
-        const ready = async () => {
-          if (runtime) return runtime;
-          const connection = await terminalExecution(
-            io,
-            dataDir,
-            null,
-            machine.id,
-          );
-          const created = await RuntimeTargets.create({
-            ...connection,
-            env: io.env,
+        const observations = await checkRegisteredMachine(
+          {
             store,
             project: project_id,
-          });
-          if (!created.ok)
-            throw new CliError(created.error.message, EXIT.failure);
-          runtime = created.value;
-          return runtime;
-        };
-        const observations = await refreshMachineObservations({
-          store,
-          project: project_id,
-          machine: machine.id,
-          env: io.env,
-          target: async () => (await ready()).resolve(project_id, machine.id),
-          check: async () => {
-            const checked = await (await ready()).check(project_id, machine.id);
-            return checked.ok
-              ? checked.value
-              : { blockers: [checked.error.code], launch_enabled: false };
+            machine: machine.id,
+            env: io.env,
+            browsersPath: () =>
+              loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+                ?.browsers_path,
           },
-        });
+          async () => {
+            const connection = await terminalExecution(
+              io,
+              dataDir,
+              null,
+              machine.id,
+            );
+            const created = await RuntimeTargets.create({
+              ...connection,
+              env: io.env,
+              store,
+              project: project_id,
+            });
+            if (!created.ok)
+              throw new CliError(created.error.message, EXIT.failure);
+            return created.value;
+          },
+        );
         io.stdout(JSON.stringify(observations, null, 2));
         if (!observations.health?.available)
           throw new CliError("机器检查未通过", EXIT.failure);
@@ -1225,7 +1273,13 @@ async function hostOpsCommand(
   const allowed =
     sub === "create"
       ? ["project", "data-dir", "employee"]
-      : ["project", "data-dir", "mcp-url", "hc-session"];
+      : [
+          "project",
+          "data-dir",
+          "mcp-url",
+          "hc-session",
+          ...(sub === "rotate" ? ["employee"] : []),
+        ];
   if (
     !["create", "start", "rotate"].includes(sub ?? "") ||
     parsed.positionals.length ||
@@ -1269,8 +1323,10 @@ async function hostOpsCommand(
       );
       return EXIT.ok;
     }
-    if (sub === "rotate")
+    if (sub === "rotate") {
+      const employee = optional(parsed.flags, "employee");
       await rotateHostOps({
+        ...(employee === undefined ? {} : { employee }),
         store,
         io,
         project_id,
@@ -1279,6 +1335,7 @@ async function hostOpsCommand(
           ? { session: optional(parsed.flags, "hc-session") as string }
           : {}),
       });
+    }
     const candidates = store.uow.read((tx) =>
       tx.assignments
         .list(project_id)
@@ -2017,12 +2074,32 @@ function pmCreate(args: readonly string[], io: CliIo): number {
         );
       }
 
+      const reference = optional(parsed.flags, "employee");
+      let employeeId = existing?.employee_id;
+      if (!existing || reference !== undefined) {
+        const selected = selectStandingEmployee(
+          {
+            project_id,
+            assignments,
+            employees: tx.employees.list(),
+            employee_activity: tx.employees.assignmentActivity?.() ?? [],
+          },
+          "pm",
+          reference,
+        );
+        if (!selected.ok)
+          throw new CliError(selected.error.message, EXIT.usage);
+        if (existing && selected.value?.id !== employeeId)
+          throw new CliError("Assignment 的员工创建后不能修改", EXIT.usage);
+        employeeId = selected.value?.id;
+      }
       const stamped =
         existing === undefined
           ? applyStandingMode(
               {
                 id: tx.ids.next(project_id, "assignment"),
                 scope: "standing",
+                ...(employeeId ? { employee_id: employeeId } : {}),
                 role_id: "pm",
                 role_version: latest.role_version,
                 status: "active",

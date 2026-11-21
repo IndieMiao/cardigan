@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -9,17 +11,26 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { toolNames } from "@cardigan/domain";
 import {
   type CapabilityProbe,
   configureMachinePlacement,
   loadRunCapacityConfig,
+  onboardWorker,
   parseWorkerOnboarding,
+  RuntimeTargets,
   WORKER_PROBES,
 } from "@cardigan/host";
-import { readMachineObservations, Store } from "@cardigan/store";
+import {
+  readMachineObservations,
+  recordAcceptedBrowserPath,
+  Store,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
+import { MachineChecks } from "../../server/src/web/machine-checks.js";
+import { machineHost } from "../../server/src/web/machine-host.js";
 import { CLI_TOOLS, requireCliTool } from "./command-access.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -31,11 +42,19 @@ vi.mock("@cardigan/host", async (importOriginal) => {
   const host = await importOriginal<typeof import("@cardigan/host")>();
   return {
     ...host,
-    refreshMachineObservations: (
-      options: Parameters<typeof host.refreshMachineObservations>[0],
+    onboardWorker: vi.fn(host.onboardWorker),
+    observeRegisteredMachine: (
+      ...[options, create]: Parameters<typeof host.observeRegisteredMachine>
     ) =>
-      host.refreshMachineObservations({
-        ...options,
+      host.observeRegisteredMachine(
+        { ...options, probe: capabilityProbe },
+        create,
+      ),
+    refreshWorkerObservations: (
+      ...args: Parameters<typeof host.refreshWorkerObservations>
+    ) =>
+      host.refreshWorkerObservations(args[0], args[1], args[2], args[3], {
+        ...args[4],
         probe: capabilityProbe,
       }),
   };
@@ -158,6 +177,65 @@ test("macOS add/resume/check/status preserve offline identity and recheck capaci
   expect(lines.join("\n")).not.toContain("systemctl");
 });
 
+test("CLI and Workbench checks use only the dispatch owner's accepted browser directory", async () => {
+  await bootstrap();
+  const dataDir = join(root, "data"),
+    store = Store.open({ dataDir });
+  const directory = "/fixture/registry";
+  let webPath = directory;
+  const execution = { mode: "local" as const, dataDir };
+  const host = machineHost(store, execution, "example", io.env, () => webPath);
+  const runtimeCheck = vi
+    .spyOn(RuntimeTargets.prototype, "check")
+    .mockResolvedValue({
+      ok: true,
+      value: { machine_id: "local", blockers: [], launch_enabled: false },
+    });
+  const browserScopes = () =>
+    capabilityProbe.mock.calls.flatMap(([, , cmd]) =>
+      "scopes" in cmd
+        ? [cmd.scopes.filter((s) => s.kind === "registry").map((s) => s.value)]
+        : [],
+    );
+  try {
+    writeFileSync(
+      join(configRoot, "launch.yaml"),
+      stringify({
+        browser: { command: "/fixture/mcp", browsers_path: directory },
+      }),
+    );
+    recordAcceptedBrowserPath(store, directory);
+    expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+      0,
+    );
+    expect(browserScopes()).toEqual([[directory]]);
+    for (const kind of ["machine", "worker"] as const) {
+      for (webPath of [directory, "/fixture/unaccepted"]) {
+        capabilityProbe.mockClear();
+        if (kind === "worker")
+          vi.mocked(onboardWorker).mockResolvedValueOnce(true);
+        const machine = kind === "worker" ? "worker-a" : "local";
+        expect(
+          await host.check(
+            "example",
+            machine,
+            kind,
+            () => {},
+            new AbortController().signal,
+            "fixture-job",
+          ),
+        ).toMatchObject({ status: "passed" });
+        expect(browserScopes()).toEqual([
+          webPath === directory ? [directory] : [],
+        ]);
+      }
+    }
+  } finally {
+    runtimeCheck.mockRestore();
+    store.close();
+  }
+});
+
 test("a changed session offers exact-digest confirmation and preserves CLI config selection", async () => {
   await bootstrap();
   const probe = vi.fn(async () => true);
@@ -253,6 +331,106 @@ test("worker check reports a failed capability refresh instead of claiming succe
     store.close();
   }
 });
+
+test.skipIf(process.platform !== "linux")(
+  "Web joins a live CLI worker by id and reports its final capability failure; the second CLI fails busy",
+  async () => {
+    await bootstrap();
+    expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+      0,
+    );
+    writeFileSync(
+      join(configRoot, "machine-capabilities.yaml"),
+      "version: 1\ncapabilities:\n  node:\n    check: [echo, forged]\n",
+      { mode: 0o600 },
+    );
+    const dataDir = join(root, "data");
+    const store = Store.open({ dataDir });
+    const host = machineHost(store, { mode: "local", dataDir }, "test", io.env);
+    const check = vi.fn(host.check);
+    const checks = new MachineChecks(
+      store,
+      { now: () => new Date().toISOString() },
+      new AbortController().signal,
+      { ...host, check },
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("../test-support/held-worker-check.mjs", import.meta.url),
+        ),
+        ...args,
+      ],
+      {
+        env: { ...io.env, PATH: process.env.PATH },
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 20_000,
+      },
+    );
+    const closed = once(child, "close");
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (s) => {
+      stderr += s;
+    });
+    child.stdout.resume();
+    const latest = () => checks.latest("worker-a", "example", "worker");
+    try {
+      await vi.waitFor(
+        () =>
+          expect(latest()).toMatchObject({ status: "running", step: "ssh" }),
+        { timeout: 10_000 },
+      );
+      const actual = latest();
+      const joined = checks.start(
+        "example",
+        "worker-a",
+        "machine",
+        () => "fixture-human",
+      );
+      expect(joined).toEqual(actual);
+      expect(host.workerRecord("example", "worker-a")).toMatchObject({
+        status: "checking",
+      });
+      const secondProbe = vi.fn(async () => true);
+      await expect(
+        runWorkerCommand(["check", ...args], io, secondProbe),
+      ).rejects.toThrow("worker_busy");
+      expect(secondProbe).not.toHaveBeenCalled();
+      child.stdin.end("release\n");
+      expect(await closed).toEqual([1, null]);
+      expect(stderr).toContain("worker_capability_check_failed");
+      await checks.settled();
+      expect(check).not.toHaveBeenCalled();
+      const final = checks.read("worker-a", joined.id);
+      expect(final).toMatchObject({
+        kind: "worker",
+        status: "failed",
+        failed_steps: ["capabilities"],
+      });
+      expect(latest()).toEqual(final);
+      expect(host.workerRecord("example", "worker-a")).toEqual({
+        status: "failed",
+        checked_at: final?.checked_at,
+        failed_steps: ["capabilities"],
+      });
+      expect(
+        store.uow.read((tx) => tx.global_events.listAfter(0)),
+      ).toContainEqual(
+        expect.objectContaining({
+          type: "machine_check_joined",
+          payload: expect.objectContaining({ check_id: joined.id }),
+        }),
+      );
+    } finally {
+      child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+      store.close();
+    }
+  },
+  30_000,
+);
 
 test("dry-run has no filesystem, database or process side effects even with nonexistent configuration", async () => {
   const probe = vi.fn(async () => true);
@@ -393,7 +571,9 @@ test.each(["wizard", "capability"] as const)(
       dataDir = join(root, "data");
     const version = { ok: true, output: "codex-cli 1.2.3" };
     capabilityProbe.mockImplementation(async (_e, _os, command) =>
-      command[0] === "codex" ? version : { ok: false, output: "" },
+      !("scopes" in command) && command[0] === "codex"
+        ? version
+        : { ok: false, output: "" },
     );
     expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
       0,
@@ -446,7 +626,8 @@ test.each(["wizard", "capability"] as const)(
       capabilityProbe
         .mockClear()
         .mockImplementation(async (_e, _os, command) => {
-          if (command[0] !== "codex") return { ok: false, output: "" };
+          if ("scopes" in command || command[0] !== "codex")
+            return { ok: false, output: "" };
           if (phase === "capability") await changeRegistry();
           return version; // Result from the x64 worker, even when the registry now says arm64.
         });

@@ -182,3 +182,5 @@ C-414：`report_blocker.resume_when={kind,target_id}` 可选；支持 `precheck_
 `finish_run.wait_for={kind:"baseline_updated"}` 记录作者的主机登记基线，或传 `{kind:"deployment_ready",target_id:<完整 SHA>}` 等部署成功；仅进行中的产出项可声明。不改变工作项业务状态；旧调用无等待含义。unknown 的延迟结束保留条件，仍须原有身份和重连证明后结算。系统维护消费受信事实，重核人工暂停、停止栅栏、当前负责人、其它阻塞和在途 Run，在同事务恢复、记录证据并请求 followup；重复扫描和重启不重复唤醒，同轮结果汇总通知 PM。
 
 C-420：`report_blocker.resume_when` 增加 `baseline_updated`，`target_id` 须为当前作者主机登记的基线 SHA。当前作者最新预检候选冲突会自动纳入同一恢复扫描，无需作者报告或声明等待；新 Run 仍由原主机准备链同步基线，不自动合入或解冲突。每个工作项同一 HEAD 默认最多自动同步 3 次（内部 Dispatcher 可配置），每个 attempt 仅消费一次；达到上限只向 PM 发一次 `baseline_conflict_limit_reached`。受信历史候选冲突与明确基线原因匹配时兼容解除旧阻塞，不解除其它原因的报告。
+
+C-521：当前作者等待本产出项自己的预检时，每个新 attempt 可独立恢复，不受此前普通等待次数影响；同一 HEAD 连续检查失败交 PM（默认两次，可由 Dispatcher 配置）。等待的 attempt 已通过时，提交匹配 HEAD 的交付可在同一事务解除该等待，不清除其它阻塞。其它项目内等待与候选冲突仍按原规则处理。

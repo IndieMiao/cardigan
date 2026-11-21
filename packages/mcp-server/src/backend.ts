@@ -161,6 +161,13 @@ export interface McpBackend {
     operation: (tx: TransactionContext) => T,
   ): Result<{ readonly value: T; readonly replayed: boolean }>;
   /** Resolve a token by its stored hash; revoked tokens resolve to `undefined`. */
+  verifyResourceRead?(
+    id: string,
+    key: string,
+    challenge: string,
+    proof: string,
+  ): McpToken | undefined;
+  readonly runResources?: { signState(data: string): string };
   verifyToken(token: string): McpToken | undefined;
   /**
    * M3.2: record the last authenticated MCP call for the watchdog (§3.3).

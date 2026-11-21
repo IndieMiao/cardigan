@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 
@@ -283,6 +283,36 @@ profiles:
   });
 });
 
+test("a standalone employee CLI can resolve an uncached alias without publishing a host generation", async () => {
+  writeFileSync(
+    join(dataDir, "launch.yaml"),
+    `providers:
+  gateway: {api: anthropic-messages}
+models:
+  primary: {provider: gateway, id: first}
+profiles:
+  fixture: {harness: claude-code, model: primary}
+`,
+  );
+  const upstream = vi.spyOn(globalThis, "fetch");
+  upstream.mockImplementation(async () =>
+    Response.json({
+      gateway: { models: { first: { limit: { context: 64000 } } } },
+    }),
+  );
+  try {
+    expect(await run([...add, "--launch-profile", "fixture"])).toBe(0);
+    expect(upstream).toHaveBeenCalledOnce();
+    expect(snapshot().employees[0]?.launch_profile_ref).toBe("fixture");
+    expect(
+      store.database.prepare("SELECT revision FROM launch_host_profiles").all(),
+    ).toEqual([]);
+    expect(readdirSync(dataDir)).not.toContain("models-dev.json");
+  } finally {
+    upstream.mockRestore();
+  }
+});
+
 test("duplicate rename and reactivation fail atomically with Chinese errors", async () => {
   expect(await run(add)).toBe(0);
   expect(await run(["deactivate", "E-1"])).toBe(0);
@@ -320,6 +350,17 @@ test.each([
     expect(snapshot()).toEqual(before);
   },
 );
+
+test("--projects round trips multiple memberships; omitted preserves and empty clears", async () => {
+  expect(await run([...add, "--projects", "one, two"])).toBe(0);
+  expect(await run(["update", "E-1", "--title", "架构师"])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual(["one", "two"]);
+  expect(await run(["update", "E-1", "--projects=two,one,one"])).toBe(2);
+  expect(await run(["update", "E-1", "--projects=two"])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual(["two"]);
+  expect(await run(["update", "E-1", "--projects="])).toBe(0);
+  expect(snapshot().employees[0]?.projects).toEqual([]);
+});
 
 test("transfer checks the latest role in every project, not the CLI project or an obsolete version", async () => {
   expect(await run(add)).toBe(0);

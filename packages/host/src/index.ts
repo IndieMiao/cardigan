@@ -23,6 +23,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export {
+  CandidateRepositoryBusy,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckExecutorUnavailable,
@@ -129,6 +130,7 @@ export {
   RunCapacityDeferred,
   RunPreflightDeferred,
   RunPreparationDeferred,
+  RunProviderDeferred,
   scrubRunCredentials,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
@@ -136,11 +138,25 @@ export {
 } from "./launch.js";
 export { launchFilesStamp } from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
+export {
+  acceptedHostProfiles,
+  adoptInstalledCatalog,
+  assertLaunchFence,
+  isAcceptedLaunchRevision,
+  type LaunchFence,
+  launchRevision,
+  publishLaunchRefresh,
+  publishModelFile,
+  withLaunchSnapshot,
+} from "./launch-model-intent.js";
+export { probeModel } from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
+export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
+export * from "./machine-check-journal.js";
 export { configureMachinePlacement } from "./machine-placement.js";
 export {
   DEFAULT_MCP_HOST,
@@ -155,6 +171,7 @@ export {
   type ExecutionOwner,
   executionOwner,
   mergeCheckAttemptRunning,
+  mergeCheckAttemptRunningInTransaction,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
@@ -185,8 +202,8 @@ export {
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {
-  loadModelLaunchConfig,
   parseCachedLaunchConfig,
+  stageModelLaunchConfig,
 } from "./model-catalog.js";
 export {
   agentNameFor,
@@ -207,12 +224,19 @@ export {
 export { previewPorts } from "./preview-ports.js";
 export * from "./probe-config.js";
 export * from "./probe-service.js";
+export type { ReadProjectQuota } from "./project-quotas.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,
   hostRepositoryLock,
   repositoryLockPath,
 } from "./repository-lock.js";
+export {
+  MachineLeases,
+  type ResourceAccess,
+  type ResourceAdmission,
+} from "./resource-leases.js";
+export { targetProbe } from "./resource-probe.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   applyRoleDocument,
@@ -233,6 +257,7 @@ export {
   loadRunCapacityConfig,
   type RunCapacityConfiguration,
 } from "./run-capacity-config.js";
+export { previewRunResources, resourceTarget } from "./run-resource-worker.js";
 export { assignmentResourceKeys } from "./run-resources.js";
 export {
   deferIfTargetWait,
@@ -289,7 +314,10 @@ export {
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
 export { WorkerGitTransport } from "./worker-git.js";
+export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";
+export * from "./worker-wizard-files.js";
+export * from "./worker-wizard-form.js";
 export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,

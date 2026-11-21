@@ -33,7 +33,13 @@ import type {
   ReadResourceLimits,
 } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
-import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
+import {
+  feishuStatus,
+  listRoleVersions,
+  manageFeishuBinding,
+  type Store,
+  type WebSession,
+} from "@cardigan/store";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
@@ -54,6 +60,7 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
+import { drainTasks } from "./drain-tasks.js";
 import {
   executionCapacity,
   executionCapacityRevision,
@@ -79,7 +86,11 @@ import {
   sessionCookie,
   unauthorized,
 } from "./http.js";
+import { LaunchSettings } from "./launch-settings.js";
 import { LoginLimiter } from "./login-limiter.js";
+import { MachineChecks } from "./machine-checks.js";
+import type { MachineHost } from "./machine-host.js";
+import { serveMachines } from "./machines.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -103,6 +114,7 @@ import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
 import { readPagedCard } from "./timeline-state.js";
+import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
 
 /**
@@ -115,6 +127,12 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly launchSettings?: {
+    dir: string;
+    effective: () => import("@cardigan/roles").LaunchConfig;
+    adopt: (generation: import("../live-launch.js").LaunchGeneration) => void;
+  };
+  readonly machineHost?: MachineHost;
   readonly roleLaunchConfig?: () =>
     | import("@cardigan/roles").LaunchConfig
     | undefined;
@@ -181,6 +199,10 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly launchSettings: LaunchSettings | undefined;
+  readonly wizards: WorkerWizards;
+  readonly checks: MachineChecks;
+  readonly host: MachineHost | undefined;
   readonly recordTiming: (stage: string, ms: number) => void;
   readonly roleLaunchConfig: WebServerOptions["roleLaunchConfig"];
   readonly launchProfiles: WebServerOptions["launchProfiles"];
@@ -244,11 +266,36 @@ export async function startWebServer(
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
   });
+  const launchSettings = options.launchSettings
+    ? new LaunchSettings(
+        store,
+        options.launchSettings.dir,
+        dataDir,
+        options.launchSettings.effective,
+        options.launchSettings.adopt,
+      )
+    : undefined;
   const host = config.host;
   // Filled in once the socket is bound: the Host allow-list needs the port.
   let boundPort = 0;
   // Aborted by close(): SSE streams end, and responses stop keeping sockets.
   const shutdown = new AbortController();
+  const checks = new MachineChecks(
+    store,
+    clock,
+    shutdown.signal,
+    options.machineHost,
+  );
+
+  const wizards = new WorkerWizards(
+    store,
+    clock,
+    checks,
+    shutdown.signal,
+    options.machineHost?.wizard,
+    options.runLimit,
+    options.runLimitMaximum,
+  );
 
   const http = createServer((req, res) => {
     if (shutdown.signal.aborted) res.setHeader("Connection", "close");
@@ -343,6 +390,9 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        checks,
+        wizards,
+        host: options.machineHost,
         recordTiming,
         buildInfo,
         cardsCache: options.cardsCache,
@@ -359,8 +409,13 @@ export async function startWebServer(
         hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs,
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
-        roleLaunchConfig: options.roleLaunchConfig,
-        launchProfiles: options.launchProfiles,
+        launchSettings,
+        roleLaunchConfig: launchSettings
+          ? () => launchSettings.effective()
+          : options.roleLaunchConfig,
+        launchProfiles: launchSettings
+          ? () => Object.keys(launchSettings.effective().profiles)
+          : options.launchProfiles,
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
@@ -402,13 +457,20 @@ export async function startWebServer(
     url: `http://${bracket(host)}:${address.port}`,
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
+        launchSettings?.checks.beginShutdown();
         let cancel = (): void => {};
         // Stop listening first, then end the streams; `close` also drops the
         // connections that are already idle.
         http.close((error) => {
           cancel();
-          if (error) reject(error);
-          else resolve();
+          void drainTasks([
+            checks.settled(),
+            wizards.settled(),
+            launchSettings?.checks.drain(),
+          ]).then(
+            () => (error ? reject(error) : resolve()),
+            (reason) => reject(error ?? reason),
+          );
         });
         shutdown.abort();
         http.closeIdleConnections();
@@ -433,6 +495,59 @@ async function handleApi(context: RequestContext): Promise<void> {
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
 
+  if (
+    path === "/api/launch-settings" ||
+    path.startsWith("/api/launch-settings/")
+  ) {
+    if (!context.launchSettings)
+      throw new HttpRejection(503, "unavailable", "未配置启动设置");
+    const owner = createHash("sha256")
+      .update(`launch-settings:${sessionToken(req)}`)
+      .digest("hex");
+    return context.launchSettings.serve(
+      path.slice("/api/launch-settings".length),
+      req,
+      res,
+      () => requireSession(context),
+      owner,
+    );
+  }
+
+  if (path === "/api/me/feishu") {
+    if (req.method !== "GET" && req.method !== "POST")
+      methodNotAllowed(["GET", "POST"]);
+    if (req.method === "GET") {
+      sendJson(res, 200, feishuStatus(context.store.database));
+      return;
+    }
+    const input = await readJsonBody(req);
+    const action = input.action;
+    if (
+      Object.keys(input).length !== 1 ||
+      (action !== "code" && action !== "unbind")
+    )
+      throw new HttpRejection(400, "invalid_action", "绑定操作无效");
+    const output = context.store.uow.run(() => {
+      const live = requireSession(context);
+      if (!live.member_id)
+        throw new HttpRejection(403, "owner_required", "请重新登录");
+      try {
+        return manageFeishuBinding(
+          context.store.database,
+          live.member_id,
+          action,
+        );
+      } catch {
+        throw new HttpRejection(
+          409,
+          "binding_unavailable",
+          "当前不能执行绑定操作，请刷新",
+        );
+      }
+    });
+    sendJson(res, 200, { ...feishuStatus(context.store.database), ...output });
+    return;
+  }
   if (path.startsWith("/api/avatars/")) {
     return serveAvatar(
       req,
@@ -522,6 +637,19 @@ async function serveProjectRoute(
   const { req, res, url, clock, store } = context;
   const now = clock.now();
 
+  if (rest === "/worker-wizards" || rest.startsWith("/worker-wizards/"))
+    return context.wizards.serve(req, res, project_id, rest, () =>
+      requireSession(context),
+    );
+
+  if (rest === "/machines" || rest.startsWith("/machines/")) {
+    return serveMachines(
+      { ...context, authorize: () => requireSession(context) },
+      project_id,
+      rest,
+    );
+  }
+
   if (rest === "/stream") {
     if (req.method !== "GET") methodNotAllowed(["GET"]);
     let after: StreamCursor[];
@@ -548,6 +676,8 @@ async function serveProjectRoute(
           context.runLimitMaximum,
           context.machineDisplayName,
           context.resourceLimits,
+          project_id,
+          clock.now(),
         ),
       ...(context.stream?.pollMs === undefined
         ? {}
@@ -601,6 +731,8 @@ async function serveProjectRoute(
         context.runLimitMaximum,
         context.machineDisplayName,
         context.resourceLimits,
+        project_id,
+        clock.now(),
       ),
     );
     return;

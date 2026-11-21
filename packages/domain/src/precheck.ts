@@ -33,6 +33,34 @@ export function latestPrecheckConflict(
     : undefined;
 }
 
+/** Both the idle scanner and inline delivery bind settlement to this terminal event. */
+export function authorPrecheckWaitHandled(
+  events: readonly Event[],
+  result: Event,
+): boolean {
+  const check = result.payload as unknown as Precheck;
+  return events.some((e) => {
+    if (
+      e.card_id !== result.card_id ||
+      e.actor.project_id !== result.actor.project_id
+    )
+      return false;
+    const p = e.payload as Record<string, unknown>;
+    return (
+      ((e.type === "precheck_wait_delivered" &&
+        e.actor.kind === "assignment" &&
+        e.actor.assignment_id === check.assignment_id) ||
+        (["work_item_resume_requested", "precheck_wait_escalated"].includes(
+          e.type,
+        ) &&
+          e.actor.kind === "system" &&
+          p.assignment_id === check.assignment_id)) &&
+      p.work_item_id === check.work_item_id &&
+      p.evidence === result.id
+    );
+  });
+}
+
 /** Persisted automatic handling; previousRunId scopes notification suppression. */
 export function precheckConflictHandling(
   events: readonly Event[],
@@ -75,10 +103,26 @@ export function pendingPrecheckConflict(
 }
 
 /** The host uses this exact predicate before persisting a projected diagnostic. */
-export function validPrecheckSummary(summary: string): boolean {
+export function validPrecheckSummary(
+  summary: string,
+  external?: Precheck["external_run"],
+): boolean {
+  // The one URL a failure diagnostic can carry is the bound github.com run,
+  // optionally followed by a numeric job. Never exempt other paths in the line.
+  const locator =
+    /(https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/([1-9]\d*))(?:\/job\/[1-9]\d*)?$/u.exec(
+      summary,
+    );
+  const diagnostic =
+    locator &&
+    external &&
+    Number(locator[2]) === external.run_id &&
+    locator[1] === external.html_url
+      ? summary.slice(0, locator.index)
+      : summary;
   return (
     summary.length <= 12000 &&
-    !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(summary)
+    !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(diagnostic)
   );
 }
 

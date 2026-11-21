@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   type Employee,
@@ -16,6 +17,7 @@ import {
   type CompiledAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  RUN_RESOURCE_RULE,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
@@ -54,10 +56,14 @@ export function compileAssignmentLaunch(
   if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
     throw new Error("Agent niceness must be an integer from 0 to 19");
   const identity = employeeIdentityPrompt(input.employee?.identity);
+  const policyRule = input.resource_bindings
+    ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
+    : "";
   const rolePrompt =
-    input.role.instructions === undefined
+    (input.role.instructions === undefined
       ? (input.role.core_prompt ?? "")
-      : composeRolePrompt(input.role.instructions);
+      : composeRolePrompt(input.role.instructions)) + policyRule;
+  const resourceRule = input.run_resources ? `\n\n${RUN_RESOURCE_RULE}` : "";
   const corePrompt =
     identity === undefined
       ? rolePrompt
@@ -217,6 +223,37 @@ export function compileAssignmentLaunch(
     }
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
+  if (input.resource_bindings) {
+    env.CARDIGAN_RESOURCE_BINDINGS = JSON.stringify(input.resource_bindings);
+    const ports = input.resource_bindings.flatMap((b) =>
+      b.port ? [b.port] : [],
+    );
+    env.ADB_SERVER_SOCKET =
+      ports.length === 1
+        ? `tcp:localhost:${ports[0]}`
+        : "localfilesystem:/dev/null";
+    const devices = input.resource_bindings.flatMap((b) =>
+      b.device ? [b.device] : [],
+    );
+    env.ANDROID_SERIAL =
+      (devices.length === 1 ? devices[0] : undefined) ?? "cardigan-unassigned";
+  }
+  const resourceFiles: CompiledFile[] = [];
+  if (input.run_resources) {
+    env.CARDIGAN_RESOURCE_SESSION = `${input.assignment.assignment_id}.${input.assignment.run_id}`;
+    env.CARDIGAN_RESOURCE_TARGET = input.run_resources.target;
+    const path = join(input.run_dir, "run-command.py");
+    const digest = createHash("sha256")
+      .update(input.run_resources.source)
+      .digest("hex");
+    // Execute the exact bytes just authenticated, never reopen by name.
+    env.CARDIGAN_RUN_COMMAND = `import hashlib,os,sys; b=os.fdopen(os.open(${JSON.stringify(path)},os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb').read(${Buffer.byteLength(input.run_resources.source) + 1}); hashlib.sha256(b).hexdigest()==${JSON.stringify(digest)} or sys.exit(125); exec(compile(b,'<run-command>','exec'))`;
+    resourceFiles.push({
+      path,
+      mode: 0o600,
+      content: input.run_resources.source,
+    });
+  }
   if (input.agent_local_tests) env.CARDIGAN_AGENT_LOCAL_TESTS = "1";
   const testLimit =
     input.test_max_workers === undefined
@@ -237,9 +274,10 @@ export function compileAssignmentLaunch(
       : [
           {
             path: secretsFile,
-            content: input.worker_launch
-              ? JSON.stringify(secretEnv)
-              : secretsFileContent(secretEnv),
+            content:
+              input.worker_launch || input.run_resources
+                ? JSON.stringify(secretEnv)
+                : secretsFileContent(secretEnv),
             mode: 0o600,
           },
         ];
@@ -255,7 +293,7 @@ export function compileAssignmentLaunch(
     files: [
       {
         path: coreFile,
-        content: withTrailingNewline(corePrompt),
+        content: withTrailingNewline(corePrompt + resourceRule),
         mode: 0o600,
       },
       {
@@ -266,6 +304,7 @@ export function compileAssignmentLaunch(
       ...strippedBaseFiles,
       ...harnessFiles,
       ...(testLimit ? [testLimit.file] : []),
+      ...resourceFiles,
       ...secretsFiles,
       ...(input.worker_launch
         ? [
@@ -279,6 +318,7 @@ export function compileAssignmentLaunch(
                 nice: agentNice,
                 cwd: input.work_dir,
                 trust_worktree: input.role.worktree !== "none",
+                secret_keys: Object.keys(secretEnv),
               }),
               mode: 0o600,
             },
@@ -293,7 +333,10 @@ export function compileAssignmentLaunch(
               tokenFile,
               firstPromptFile: firstFile,
               startFile,
-              secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
+              secretsFile:
+                secretsFiles.length === 0 || input.run_resources
+                  ? undefined
+                  : secretsFile,
               command,
               args,
               env,
@@ -409,7 +452,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-# Git's legacy command-line environment must not override the scoped list.
+${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

@@ -5,7 +5,7 @@ import {
   resolveServerConfig,
   type ServerEnv,
 } from "./config.js";
-import { createHostWiring } from "./host.js";
+import { configDir, createHostWiring } from "./host.js";
 import {
   installShutdownHandlers,
   SHUTDOWN_EXIT_MARGIN_MS,
@@ -130,6 +130,7 @@ export async function runServer(
     refresh = host.refreshLaunch;
     server = await startCardiganServer({
       role: options.role ?? "web",
+      onBackgroundOwner: host.publishWhileBackgroundOwner,
       config,
       env,
       store,
@@ -139,7 +140,14 @@ export async function runServer(
       // resolved execution it uses for the rest of startup.
       captureAgent: (command, args, timeout) =>
         host.runtime.captureAgent(command, args, timeout),
-      web: { config: webConfig },
+      web: {
+        config: webConfig,
+        launchSettings: {
+          dir: configDir(env),
+          effective: host.selectableLaunchConfig,
+          adopt: host.adoptLaunch,
+        },
+      },
       dispatcher: {
         runtime: host.runtime,
         get upstream() {

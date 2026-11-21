@@ -237,6 +237,22 @@ test("released owners can only settle interrupted, and GitHub success requires a
       f.io,
     ).ok,
   ).toBe(false);
+  for (const [summary, allowed] of [
+    [`日志获取失败（not_found）：${external.html_url}/job/34`, true],
+    [`日志获取失败（api）：${external.html_url}`, true],
+    [`${external.html_url}/job/34?token=private`, false],
+    [`private /unsafe ${external.html_url}/job/34`, false],
+    ["https://github.com/example/repo/actions/runs/99/job/34", false],
+  ] as const) {
+    expect(
+      recordPrecheck(
+        s,
+        system,
+        { ...gh, external_run: external, status: "failed", summary },
+        f.io,
+      ).ok,
+    ).toBe(allowed);
+  }
   const released = {
     ...s,
     assignments: s.assignments.map((a) => ({

@@ -1,5 +1,6 @@
 import type { Assignment, Run } from "./entities.js";
 
+export const DEFAULT_QUEUED_RECHECK_AFTER_MS = 5 * 60_000;
 export const DEFAULT_RUN_LIMIT = 4;
 export const DEFAULT_MAX_RUN_LIMIT = 16;
 
@@ -46,6 +47,13 @@ export const isStandingPm = (assignment: Assignment): boolean =>
 export const isRunCapacityExempt = (assignment: Assignment): boolean =>
   assignment.scope === "standing" &&
   (assignment.role_id === "pm" || assignment.role_id === "host_ops");
+
+/** Publication is for a new start, never a continuation or a fenced stop. */
+export const awaitsStartPublication = (run: Run): boolean =>
+  (run.status === "queued" || run.status === "dispatched") &&
+  !run.started_at &&
+  !run.inactivity_stop &&
+  !run.dispatch_stop;
 
 /** Physical occupancy, including stop reservations until exit is confirmed. */
 export const runOccupiesSlot = (run: Run): boolean =>

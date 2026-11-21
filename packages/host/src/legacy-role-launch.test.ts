@@ -12,7 +12,11 @@ import {
   toolNames,
   updateRole,
 } from "@cardigan/domain";
-import { corePromptFor, parseLaunchConfig } from "@cardigan/roles";
+import {
+  corePromptFor,
+  parseLaunchConfig,
+  RUN_RESOURCE_RULE,
+} from "@cardigan/roles";
 import {
   defaultMigrationsDir,
   getRoleVersion,
@@ -249,7 +253,7 @@ test.each(["codex", "claude-code", "pi"] as const)(
           status: "dispatched",
         });
         expect(await readFile(join(launched.run_dir, "core.md"), "utf8")).toBe(
-          role.core_prompt,
+          `${role.core_prompt}\n\n${RUN_RESOURCE_RULE}\n`,
         );
         expect(
           store.database
