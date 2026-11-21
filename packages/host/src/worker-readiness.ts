@@ -6,18 +6,29 @@ import {
   isHcVersionCompatible,
 } from "@cardigan/runtime-herdr";
 
+import {
+  digestMismatch,
+  protocolMismatch,
+  workerHelperDigests,
+  workerPublicationProtocol,
+} from "./worker-helper-release.js";
+
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export type WorkerReadinessFailure =
   | "worker_unreachable"
   | "hc_version"
   | "worker_directories"
-  | "worker_helpers";
+  | "worker_helpers"
+  | typeof digestMismatch
+  | ReturnType<typeof protocolMismatch>;
 
 /** Fixed, read-only probe. No project code, credentials or raw diagnostics are returned. */
 export const workerReadinessScript = `
-import importlib.util,json,os,pathlib,platform,pwd,stat,subprocess,sys
+import hashlib,importlib.util,json,os,pathlib,platform,pwd,stat,subprocess,sys
 r=json.loads(sys.argv[1])
 failures=[]
+protocol=None
+matching=None
 def require(value):
     if not value: raise ValueError()
 def protected(path):
@@ -35,8 +46,15 @@ def module(path,name):
     spec.loader.exec_module(m)
     return m
 try:
-    git=module(r['git_helper'],'worker_git')
+    paths=(('worker-files.py',r['file_helper']),('worker-git.py',r['git_helper']),
+        ('worker-primitives.py',pathlib.Path(r['git_helper']).with_name('worker-primitives.py')),
+        ('worker-primitives.py',pathlib.Path(r['file_helper']).with_name('worker-primitives.py')))
+    # Unknown (unsafe/unreadable) is not evidence of an installed release mismatch.
+    for _,path in paths: protected(path)
+    matching=all(hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()==r['digests'][name] for name,path in paths)
     files=module(r['file_helper'],'worker_files')
+    protocol=getattr(files, 'PUBLICATION_PROTOCOL', 1)
+    git=module(r['git_helper'],'worker_git')
     require(callable(git.Workspace) and callable(git.check_layout) and callable(files.namespace))
     native=git.native
     require(subprocess.run(['git','--version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0)
@@ -69,7 +87,7 @@ version=None
 try:
     version=subprocess.check_output(['hc','--version'],stderr=subprocess.DEVNULL,timeout=5).decode().strip()
 except Exception: pass
-print(json.dumps(dict(failures=failures,version=version)))
+print(json.dumps(dict(failures=failures,version=version,protocol=protocol,matching=matching)))
 `;
 
 export async function workerReadiness(
@@ -85,6 +103,7 @@ export async function workerReadiness(
       "-c",
       workerReadinessScript,
       JSON.stringify({
+        digests: workerHelperDigests(),
         root: execution.agentRoot,
         gid: execution.gid,
         project: execution.target.project_id,
@@ -98,6 +117,8 @@ export async function workerReadiness(
       maxBuffer: 65536,
     });
     const result = JSON.parse(stdout) as {
+      protocol: unknown;
+      matching: unknown;
       failures: unknown;
       version: unknown;
     };
@@ -112,8 +133,22 @@ export async function workerReadiness(
       typeof result.version === "string"
         ? /^hc (\S+)$/u.exec(result.version)?.[1]
         : undefined;
+    const blockers = result.failures as WorkerReadinessFailure[];
+    const { protocol } = result;
+    const protocolKnown =
+      typeof protocol === "number" &&
+      Number.isSafeInteger(protocol) &&
+      protocol >= 1;
+    if (
+      (!protocolKnown || typeof result.matching !== "boolean") &&
+      !blockers.includes("worker_helpers")
+    )
+      blockers.push("worker_helpers");
+    if (protocolKnown && protocol < workerPublicationProtocol)
+      blockers.unshift(protocolMismatch(protocol));
+    else if (result.matching === false) blockers.unshift(digestMismatch);
     return [
-      ...(result.failures as WorkerReadinessFailure[]),
+      ...blockers,
       ...(isHcVersionCompatible(version) ? [] : ["hc_version" as const]),
     ];
   } catch {

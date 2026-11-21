@@ -46,6 +46,34 @@
   .panel > button {
     margin-block-start: var(--ui-space-3);
   }
+  .details {
+    margin-block-start: var(--ui-space-1);
+  }
+  .details > summary {
+    width: fit-content;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .details > :not(summary) {
+    margin-block: var(--ui-space-2) 0;
+  }
+  .details ul {
+    padding-inline-start: var(--ui-space-6);
+  }
+  .alert {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+    margin-block-start: var(--ui-space-2);
+    color: var(--danger);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-space-2);
+    margin-block-start: var(--ui-space-3);
+  }
   @media (max-width: 760px) {
     .panel form {
       grid-template-columns: minmax(0, 1fr);

@@ -10,6 +10,7 @@ import {
   lastRunActivity,
   type ProjectId,
   type Run,
+  unreceivedBell,
 } from "@cardigan/domain";
 import type { HarnessActivityInspection } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -101,6 +102,7 @@ export class InactivityAlerts {
       a.status === "active" &&
       !a.external &&
       run.status === "running" &&
+      !unreceivedBell(run)?.retry_at &&
       Date.parse(at) -
         (lastInactiveStopActivity(state, run, a, at, sample) ??
           lastRunActivity(run, a)) >=

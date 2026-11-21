@@ -33,6 +33,7 @@ import {
 } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { redactSecrets } from "./wake-preparation.js";
+import { workerPreparationOutcome } from "./worker-maintenance.js";
 
 /** One bounded host diagnostic for the journal and the dispatcher's failure log. */
 export function launchFailureReason(
@@ -150,7 +151,7 @@ export class LaunchPublication {
         wait: false,
         provision_attempted: false,
       },
-      true,
+      { fresh: true },
     );
     return publication;
   }
@@ -162,7 +163,10 @@ export class LaunchPublication {
       throw new Error("Launch generation changed");
     return value;
   }
-  private save(value: Publication, fresh = false) {
+  private save(
+    value: Publication,
+    { fresh, workerFailure }: { fresh?: boolean; workerFailure?: boolean } = {},
+  ) {
     return this.host.store.uow.run((tx) => {
       const old = tx.runs.get(this.project, this.run.id)?.launch_publication;
       if (
@@ -194,6 +198,25 @@ export class LaunchPublication {
           )
             throw new Error("Launch identity revocation failed");
       persistEffect(tx, this.project, effect);
+      if (
+        (value.phase === "started" && old?.phase !== "started") ||
+        (value.phase === "stopping" &&
+          old?.phase !== "stopping" &&
+          old?.phase !== "started" &&
+          workerFailure &&
+          !value.wait &&
+          value.failure_reason)
+      )
+        workerPreparationOutcome(
+          this.host.store,
+          tx,
+          this.project,
+          this.assignment.machine_id,
+          value.target.fingerprint,
+          this.clock,
+          value.failure_reason ?? null,
+          this.execution.preparationCooldown,
+        );
       return value;
     });
   }
@@ -303,17 +326,22 @@ export class LaunchPublication {
   /** Revocation and durable reservation precede every worker call or terminal stop. */
   async stop(
     wait = false,
-    failureReason?: string,
+    failure?: { reason: string; worker: boolean },
     refusal?: ProvisionTargetRefusal,
   ): Promise<boolean> {
     this.recoveryOperation = "revoke_identity";
-    let current = this.update("stopping", {
-      // An opaque runtime may delegate to the checked router after its intent
-      // was journaled. Only its exact pre-adapter receipt can disprove that intent.
-      ...(refusal ? { provision_attempted: false } : {}),
-      wait,
-      ...(failureReason ? { failure_reason: failureReason } : {}),
-    });
+    let current = this.save(
+      {
+        ...this.current(),
+        phase: "stopping",
+        // An opaque runtime may delegate to the checked router after its intent
+        // was journaled. Only its exact pre-adapter receipt can disprove that intent.
+        ...(refusal ? { provision_attempted: false } : {}),
+        wait,
+        ...(failure ? { failure_reason: failure.reason } : {}),
+      },
+      { workerFailure: failure?.worker === true },
+    );
     this.recoveryOperation = "worker_clear";
     const cleared = await workerFiles(this.execution, this.identity, "clear");
     this.recoveryOperation = "journal";

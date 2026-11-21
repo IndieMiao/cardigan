@@ -43,7 +43,13 @@ const role: Role = {
   core_prompt: "Fictional core prompt.",
   harness: "pi",
   launch_profile_ref: "pi-agent",
-  allowed_tools: ["whoami", "get_card", "submit_delivery"],
+  allowed_tools: [
+    "whoami",
+    "get_card",
+    "submit_delivery",
+    "get_updates",
+    "ack_events",
+  ],
   capabilities: [],
   abilities: [],
   worktree: "none",
@@ -281,7 +287,13 @@ describe("the HTTP layer", () => {
       assignment_id: seeded.assignment.id,
       role: {
         role_version: seeded.assignment.role_version,
-        allowed_tools: ["whoami", "get_card", "submit_delivery"],
+        allowed_tools: [
+          "whoami",
+          "get_card",
+          "submit_delivery",
+          "get_updates",
+          "ack_events",
+        ],
       },
     }).token;
     running = await startMcpServer({
@@ -307,6 +319,42 @@ describe("the HTTP layer", () => {
       )
       .then(() => client);
   }
+
+  test("only a successful call on the addressed stream receipts the current Run", async () => {
+    const run = store.uow.run((tx) => {
+      const r = tx.runs.list(project_id)[0];
+      const ref = tx.assignments.get(project_id, assignment.id)?.runtime_ref;
+      const card = tx.cards.list(project_id)[0];
+      if (!r || !ref || !card) throw new Error("missing fixture");
+      const bell_delivery = {
+        run_id: r.id,
+        card_id: card.id,
+        runtime_ref: ref,
+        sent_at: NOW,
+      };
+      tx.runs.put(project_id, { ...r, bell_delivery });
+      return bell_delivery;
+    });
+    const client = await connect();
+    try {
+      await client.callTool({ name: "whoami", arguments: {} });
+      await client.callTool({ name: "get_updates", arguments: {} });
+      const bad = await client.callTool({
+        name: "ack_events",
+        arguments: { card_id: run.card_id, up_to_seq: 99999 },
+      });
+      expect(bad.isError).toBe(true);
+      expect(read(run.run_id)?.status).toBe("running");
+      expect(read(run.run_id)?.bell_delivery?.received_at).toBeUndefined();
+      await client.callTool({
+        name: "get_updates",
+        arguments: { card_id: run.card_id },
+      });
+      expect(read(run.run_id)?.bell_delivery?.received_at).toBeDefined();
+    } finally {
+      await client.close();
+    }
+  });
 
   test("only a tool call records the Assignment's last MCP activity", async () => {
     const activity = () =>

@@ -86,6 +86,7 @@ export const toolNames = [
   "triage_human_action",
   "complete_host_action",
   "host_ops_read_diagnostics",
+  "host_ops_inspect_worker",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
   "host_ops_recheck_merge",
@@ -161,6 +162,13 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly parent_card_id?: CardId;
+  /** C-503: the story proposal version and child number this card was opened from. */
+  readonly story_source?: {
+    readonly card_id: CardId;
+    readonly version: number;
+    readonly entry_id: TimelineEntryId;
+    readonly number: number;
+  };
   /** Stamped only for the built-in story workflow, not existing custom templates. */
   readonly story?: StoryState;
   readonly related_cards: readonly CardId[];
@@ -554,6 +562,24 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** This Run's first bell, not a business ACK or an inbox cursor. Never inherit on recovery. */
+  readonly bell_delivery?: {
+    readonly run_id: RunId;
+    readonly card_id?: CardId;
+    readonly session_ref?: string;
+    readonly review_target?: {
+      readonly delivery_id: DeliveryId;
+      readonly target_sha: string;
+    };
+    readonly received_at?: Timestamp;
+    readonly sent_at?: Timestamp;
+    readonly runtime_ref?: RuntimeRef;
+    readonly retry_at?: Timestamp;
+    /** Positive non-delivery, valid only for this exact first-write attempt. */
+    readonly refused_attempt_id?: string;
+    readonly idle_check_at?: Timestamp;
+    readonly escalated_at?: Timestamp;
+  };
   readonly failure_reason?: "provider_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;

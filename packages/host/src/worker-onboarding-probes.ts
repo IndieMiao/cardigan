@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { agentProcessCommand } from "@cardigan/runtime-herdr";
+import {
+  helpers as helperNames,
+  workerHelperDigests,
+} from "./worker-helper-release.js";
 import {
   type WorkerOnboardingConfig,
   workerOnboardingHelperPaths,
@@ -166,25 +169,14 @@ export function workerProbeInput(
 ) {
   const e = config.worker.execution;
   const paths = step === "helpers" ? workerOnboardingHelperPaths(e) : undefined;
-  const helpers =
-    step === "helpers"
-      ? Object.fromEntries(
-          [
-            [paths?.[0], "worker-files.py"],
-            [paths?.[1], "worker-git.py"],
-            [paths?.[2], "worker-primitives.py"],
-          ].map(([path, source]) => [
-            path,
-            createHash("sha256")
-              .update(
-                readFileSync(
-                  new URL(`../../../deploy/${source}`, import.meta.url),
-                ),
-              )
-              .digest("hex"),
-          ]),
-        )
-      : {};
+  const helpers = paths
+    ? Object.fromEntries(
+        helperNames.map((name, index) => [
+          paths[index],
+          workerHelperDigests()[name],
+        ]),
+      )
+    : {};
   return {
     step,
     root: e.agentRoot,

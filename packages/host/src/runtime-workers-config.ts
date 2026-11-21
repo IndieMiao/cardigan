@@ -81,6 +81,20 @@ function object(value: unknown, keys: string): Record<string, unknown> {
     return invalid();
   return value as Record<string, unknown>;
 }
+function cooldown(value: unknown) {
+  const { failures, duration_ms } = object(value, "failures duration_ms");
+  if (
+    typeof failures !== "number" ||
+    !Number.isSafeInteger(failures) ||
+    failures <= 0 ||
+    typeof duration_ms !== "number" ||
+    !Number.isSafeInteger(duration_ms) ||
+    duration_ms <= 0 ||
+    duration_ms > 2147483647
+  )
+    return invalid();
+  return { failures, duration_ms };
+}
 const list = (value: unknown): unknown[] =>
   Array.isArray(value) ? value : invalid();
 const str = (value: unknown): string =>
@@ -141,7 +155,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
+          "project_id user gid alias session root path generation publication preparation_cooldown python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -211,6 +225,9 @@ export function parseRuntimeWorkers(
           ...(machine_id === "local"
             ? {}
             : { mcp: workerMcpConfig(p.mcp_url, p.mcp_timeout_ms) }),
+          ...(p.preparation_cooldown === undefined
+            ? {}
+            : { preparationCooldown: cooldown(p.preparation_cooldown) }),
           ...(p.publication === undefined
             ? {}
             : { publication: workerPublishLimits(p.publication) }),

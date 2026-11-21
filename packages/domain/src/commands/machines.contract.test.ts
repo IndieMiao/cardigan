@@ -964,3 +964,40 @@ test.each([false, true])(
     });
   },
 );
+
+test.each([
+  [
+    { preparation_cooldown_until: "2030-01-01T00:00:00.000Z" },
+    "连续启动准备失败",
+  ],
+  [
+    {
+      health: {
+        status: "failed",
+        available: false,
+        blockers: ["worker helper 落后（已装 1，需要 2）"],
+      },
+    },
+    "已装 1，需要 2",
+  ],
+] as const)(
+  "an unavailable worker is skipped without changing registry status",
+  (fact, reason) => {
+    const result = value(
+      select({
+        ...preferRemote(),
+        read_machine_placement: () =>
+          placement([
+            ["local", { ...healthy, occupied: 3 }],
+            [remote.id, { ...healthy, ...fact }],
+          ]),
+      }),
+    );
+    expect(result.data.machine_id).toBe("local");
+    expect(result.events.at(-1)?.payload).toMatchObject({
+      excluded: [
+        { machine_id: remote.id, reasons: [expect.stringContaining(reason)] },
+      ],
+    });
+  },
+);

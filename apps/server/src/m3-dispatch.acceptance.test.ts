@@ -700,24 +700,91 @@ test("§3.3 a bell without an ACK is resent with 1/2/4/8 minute backoff, then es
   expect(alertsFor("pm_ops").length).toBeGreaterThan(0);
 }, 30_000);
 
+test("an unread reminder on a completed Run waits for idle both at the probe and in the send slot", async () => {
+  const runtime = fakeRuntime();
+  withRun(f, f.coder, "running");
+  f.endRun();
+  comment(f);
+  f.route();
+  const d = dispatcher(f, runtime);
+  await d.tick();
+  f.acknowledge();
+  f.endRun();
+  const note = () =>
+    f
+      .notes()
+      .find(
+        (n) => n.recipient.assignment_id === f.coder.id && n.kind === "comment",
+      );
+  const run = note()?.run_id;
+  expect(run).toBeTruthy();
+  runtime.status.mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "working", observed_seq: 2 },
+  });
+  f.advance(60_000);
+  await d.tick();
+  expect(runtime.wake).toHaveBeenCalledTimes(1);
+  expect(note()).toMatchObject({ run_id: run, attempts: 1, status: "pending" });
+  runtime.status.mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "done", observed_seq: 3 },
+  });
+  runtime.wake.mockResolvedValueOnce({
+    ok: true,
+    value: { sent: false, withdrawn: true },
+  });
+  await d.tick();
+  expect(runtime.wake.mock.lastCall?.[2]?.observed_guard).toEqual({
+    state: "done",
+  });
+  expect(note()).toMatchObject({ run_id: run, attempts: 1, status: "pending" });
+  runtime.wake.mockImplementationOnce(async (_, _bell, opts) => ({
+    ok: true,
+    value: { sent: opts?.before_send?.() === true },
+  }));
+  await d.tick();
+  expect(note()).toMatchObject({ run_id: run, attempts: 2, status: "belled" });
+  expect(f.runs(f.coder)).toHaveLength(2);
+});
+
 test("§3.3 no resend while the harness is working on its unfinished Run", async () => {
   const runtime = fakeRuntime();
   runtime.status.mockResolvedValue({
     ok: true,
     value: { process: "alive", agent: "working", observed_seq: 2 },
   });
-  withRun(f, f.coder, "running");
+  const run = withRun(f, f.coder, "running");
   comment(f);
   f.route();
   const d = dispatcher(f, runtime);
   await d.tick();
-  const commentNote = () => f.notes().find((note) => note.kind === "comment");
-  const attempts = commentNote()?.attempts;
-  f.advance(30 * 60_000);
+  const commentNote = () =>
+    f
+      .notes()
+      .find(
+        (note) =>
+          note.kind === "comment" &&
+          note.recipient.assignment_id === f.coder.id,
+      );
+  const note = commentNote();
+  if (!note) throw new Error("missing coder comment");
+  f.advance(10 * 60_000 - 1);
   await d.tick();
-  // The comment notification was never (re)sent while the harness was working.
-  expect(commentNote()?.attempts).toBe(attempts);
-  expect(commentNote()?.status).toBe("pending");
+  expect(commentNote()).toMatchObject({
+    id: note.id,
+    attempts: 0,
+    status: "pending",
+  });
+  // C-546: the deadline transfers the unread comment, not the running turn.
+  f.advance(1);
+  await d.tick();
+  expect(commentNote()).toMatchObject({
+    id: note.id,
+    attempts: 0,
+    status: "needs_attention",
+  });
+  expect(f.runs(f.coder)).toMatchObject([{ id: run.id, status: "running" }]);
   expect(runtime.wake).not.toHaveBeenCalled();
 });
 
