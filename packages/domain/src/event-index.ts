@@ -28,28 +28,49 @@ export function eventsOfType(events: readonly Event[], type: string) {
   }
   return index.get(type) ?? noEvents;
 }
-const byDecision = new WeakMap<
-  readonly Event[],
-  ReadonlyMap<unknown, readonly Event[]>
->();
-
-/** Preserve event order; an immutable snapshot gets one decision lookup index. */
-export function eventsForDecision(events: readonly Event[], id: string) {
-  let index = byDecision.get(events);
-  if (!index) {
-    const map = new Map<unknown, Event[]>();
-    for (const event of events) {
-      const p = event.payload;
-      if (!p || typeof p !== "object" || !("decision_id" in p)) continue;
-      const list = map.get(p.decision_id);
-      if (list) list.push(event);
-      else map.set(p.decision_id, [event]);
+// Immutable snapshots retain the original order within every bucket. Build
+// each requested lookup once, including when many candidates share one card.
+function keyedEvents(keys: (e: Event) => readonly unknown[]) {
+  const cache = new WeakMap<readonly Event[], Map<unknown, Event[]>>();
+  return (events: readonly Event[], key: string): readonly Event[] => {
+    let index = cache.get(events);
+    if (!index) {
+      index = new Map();
+      for (const event of events) {
+        for (const value of keys(event)) {
+          const list = index.get(value);
+          if (list) list.push(event);
+          else index.set(value, [event]);
+        }
+      }
+      cache.set(events, index);
     }
-    index = map;
-    byDecision.set(events, index);
-  }
-  return index.get(id) ?? [];
+    return index.get(key) ?? noEvents;
+  };
 }
+const byField = (field: string) =>
+  keyedEvents((e) => {
+    const value = (e.payload as Record<string, unknown> | null)?.[field];
+    return typeof value === "string" ? [value] : [];
+  });
+export const eventsForDecision = byField("decision_id");
+export const eventsForCompletion = byField("completion_id");
+export const eventsForWorkItem = byField("work_item_id");
+export const resumeEventsForItem = keyedEvents((e) => {
+  const p = e.payload;
+  return p &&
+    typeof p === "object" &&
+    "resume_work_items" in p &&
+    Array.isArray(p.resume_work_items)
+    ? p.resume_work_items
+    : [];
+});
+const forCard = keyedEvents((e) => (e.card_id ? [e.card_id] : []));
+export const cardEventsOfType = (
+  events: readonly Event[],
+  card: string,
+  type: string,
+) => forCard(eventsOfType(events, type), card);
 
 /** Same result as `events.find((e) => e.id === id)`: the first match wins. */
 export function eventById(

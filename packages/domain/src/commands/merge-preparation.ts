@@ -1,4 +1,5 @@
 import type { Actor, Event } from "../entities.js";
+import { eventsForCompletion } from "../event-index.js";
 import type { CardId, DeliveryId } from "../ids.js";
 import {
   type CommandPorts,
@@ -23,7 +24,7 @@ export function hasVerifiedMergeNoop(
   card: CardId,
   completion: DeliveryId,
 ): boolean {
-  const latest = events
+  const latest = eventsForCompletion(events, completion)
     .filter(
       (e) =>
         e.card_id === card &&

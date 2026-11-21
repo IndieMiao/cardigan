@@ -1,17 +1,26 @@
 import {
   type Clock,
+  type CommandEffect,
+  type CommandPorts,
   currentPreMergeVersions,
+  type DecisionId,
+  eventsForDecision,
   type MergeShadowPaths,
   type ProjectId,
+  prepareMergeShadow,
   projectPreferences,
-  recordMergeShadow,
+  type Result,
   validMergeShadowPolicy,
 } from "@cardigan/domain";
-import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import type { Store, StoreTransactionContext } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
+import {
+  applyMaintenancePlan,
+  type MaintenanceWrite,
+} from "./maintenance-writes.js";
 
-/** Read-only Git evidence outside the transaction, then re-evaluate fresh state inside it. */
+/** Collect Git evidence without locks, then evaluate once on a fresh versioned snapshot. */
 export class MergeShadowObserver {
   private readonly cache = new Map<string, MergeShadowPaths>();
   constructor(
@@ -28,10 +37,8 @@ export class MergeShadowObserver {
         q.trigger === "merge_confirmation" &&
         q.card_id &&
         (["open", "provisional", "snoozed"].includes(q.status) ||
-          !state.events.some(
-            (e) =>
-              e.type === "system_merge_shadow_recorded" &&
-              (e.payload as { decision_id?: string }).decision_id === q.id,
+          !eventsForDecision(state.events, q.id).some(
+            (e) => e.type === "system_merge_shadow_recorded",
           )),
     );
     const policy = pref.system_merge_shadow_policy;
@@ -40,11 +47,15 @@ export class MergeShadowObserver {
       policy &&
       policy.role_rule_paths.length > 0 &&
       policy.release_paths.length > 0;
+    const evidence = new Map<DecisionId, MergeShadowPaths | undefined>();
+    const binding = candidates.length
+      ? this.git?.projectOf(project)
+      : undefined;
+    let sampledBase: string | undefined;
     for (const q of candidates) {
       const card = state.cards.find((c) => c.id === q.card_id);
       if (!card) continue;
       let paths: MergeShadowPaths | undefined;
-      const binding = this.git?.projectOf(project);
       if (
         pathsConfigured &&
         q.status === "open" &&
@@ -56,7 +67,8 @@ export class MergeShadowObserver {
         this.git.changedPaths
       ) {
         try {
-          const base = await this.git.baseline(binding);
+          sampledBase ??= await this.git.baseline(binding);
+          const base = sampledBase;
           const versions = currentPreMergeVersions(
             card,
             state.work_items,
@@ -91,28 +103,60 @@ export class MergeShadowObserver {
               versions: changed,
             };
           }
-          // If the baseline moved during IO, do not treat the sampled paths as current.
-          if ((await this.git.baseline(binding)) !== base) paths = undefined;
-          if (paths) this.cache.set(`${project}:${q.id}`, paths);
+          this.cache.set(`${project}:${q.id}`, paths);
         } catch {
           // No raw Git diagnostics in project events. Unknown paths are conservative.
           paths = undefined;
         }
       }
-      this.store.uow.run((tx) => {
-        const fresh = loadCommandState(tx, project);
-        // A concurrent deletion must not turn an observation into a dispatch failure.
-        if (!fresh.decisions.some((d) => d.id === q.id)) return;
-        const result = recordMergeShadow(
-          fresh,
-          { kind: "system", project_id: project },
-          { decision_id: q.id, ...(paths ? { paths } : {}) },
-          { clock: this.clock, ids: tx.ids },
-        );
-        if (!result.ok) throw new Error(result.error.message);
-        persistEffect(tx, project, result.value);
-      });
+      evidence.set(q.id, paths);
     }
+    // Recheck the sampled baseline after **all** Git IO. A move while reading a
+    // later candidate also invalidates the earlier candidates' path evidence.
+    if (sampledBase && binding) {
+      let current: string | undefined;
+      try {
+        current = await this.git?.baseline?.(binding);
+      } catch {
+        /* unavailable evidence is uncertain */
+      }
+      if (current !== sampledBase)
+        for (const id of evidence.keys()) evidence.set(id, undefined);
+    }
+    if (evidence.size)
+      applyMaintenancePlan(this.store, project, (tx) => {
+        const fresh = loadCommandState(tx, project);
+        const writes: MaintenanceWrite[] = [];
+        if (projectPreferences(fresh).system_merge_shadow !== true)
+          return writes;
+        for (const q of fresh.decisions) {
+          if (!evidence.has(q.id)) continue;
+          const paths = evidence.get(q.id);
+          const plan = prepareMergeShadow(
+            fresh,
+            { kind: "system", project_id: project },
+            { decision_id: q.id, ...(paths ? { paths } : {}) },
+          );
+          if (!plan) continue;
+          const persist =
+            (append: (ports: CommandPorts) => Result<CommandEffect<unknown>>) =>
+            (tx: StoreTransactionContext) =>
+              persistEffect(
+                tx,
+                project,
+                unwrap(append({ clock: this.clock, ids: tx.ids })),
+              );
+          if (plan.append) writes.push(persist(plan.append));
+          else
+            writes.push({
+              whenCurrent: (trust) => {
+                const append = plan.whenCurrent(trust);
+                return append && persist(append);
+              },
+            });
+        }
+        return writes;
+      });
     const active = new Set(candidates.map((q) => `${project}:${q.id}`));
     for (const key of this.cache.keys())
       if (key.startsWith(`${project}:`) && !active.has(key))

@@ -2646,8 +2646,8 @@ export class Dispatcher {
     // C-244: sub-spans of `route.maintenance`; timing only, no added await.
     const step = <T>(name: string, run: () => T) =>
       profileSpanSync(`route.maintenance.${name}`, run);
+    const at = this.clock.now();
     store.uow.run((tx) => {
-      const at = this.clock.now();
       const prior = this.loadState(tx, project);
       const expired = unwrap(
         expireMergeSnoozes(
@@ -2686,10 +2686,15 @@ export class Dispatcher {
             });
         }
       });
-      step("review_limit", () =>
-        escalateReviewLimitWaits(tx, store, state, at),
-      );
-      step("merge_stalls", () => escalatePmMergeStalls(tx, store, state, at));
+    });
+    step("review_limit", () =>
+      escalateReviewLimitWaits(store, project, at, this.loadState),
+    );
+    step("merge_stalls", () =>
+      escalatePmMergeStalls(store, project, at, {}, this.loadState),
+    );
+    store.uow.run((tx) => {
+      const state = this.loadState(tx, project);
       const attempts = unfinishedBellAttempts(store.database, project);
       // C-244: this loop writes notifications and alert events only; tokens
       // and Assignments stay as read, so one standing resolution per kind.

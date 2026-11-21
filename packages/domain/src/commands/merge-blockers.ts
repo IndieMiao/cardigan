@@ -14,7 +14,10 @@ import {
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
 import { systemMergeEnabled } from "./system-merge-policy.js";
-import { invalidTestReviewPasses } from "./test-review.js";
+import {
+  invalidTestReviewPasses,
+  type TestReviewProofRead,
+} from "./test-review.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -31,6 +34,7 @@ const newest = (values: readonly Delivery[]) =>
 export function pmMergeBlockers(
   state: CommandState,
   q: Decision,
+  proofReads?: TestReviewProofRead[],
 ): readonly string[] {
   if (
     q.trigger !== "merge_confirmation" ||
@@ -60,6 +64,7 @@ export function pmMergeBlockers(
             (w) => w.id === v.work_item_id && w.card_id === q.card_id,
           ),
       ),
+      proofReads,
     ).length
   )
     blockers.push("增量复核的隔离证据已失效，须完整复核");
