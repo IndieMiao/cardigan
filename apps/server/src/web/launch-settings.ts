@@ -11,6 +11,7 @@ import {
 } from "@cardigan/host";
 import {
   type LaunchConfig,
+  LaunchConfigError,
   requiredSecretKeys,
   validateLaunchSecrets,
 } from "@cardigan/roles";
@@ -27,12 +28,14 @@ import {
   type Change,
   candidate,
   changeSchema,
+  providerUsers,
 } from "./launch-settings-change.js";
-import { ProfileChecks } from "./launch-settings-check.js";
+import { ProfileChecks, providerCheck } from "./launch-settings-check.js";
 import {
   digest,
   invalid,
-  legacyEndpoints,
+  privateEnv,
+  providerEndpoint,
   publicFields,
   readLaunchSettings,
   references,
@@ -40,6 +43,20 @@ import {
   snapshot,
   stale,
 } from "./launch-settings-file.js";
+import {
+  addSecrets,
+  auditStatus,
+  clearSecrets,
+  pendingKeys,
+  planKeys,
+  plannedSecrets,
+  readSecretsText,
+  SecretsUnsettled,
+  secretTimes,
+  secretValues,
+  settleSecretIntents,
+  settleSecrets,
+} from "./launch-settings-secrets.js";
 
 const versionSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 const previewBody = z.strictObject({
@@ -49,12 +66,40 @@ const previewBody = z.strictObject({
 const confirmBody = z.strictObject({
   version: versionSchema,
   preview_id: z.uuid(),
+  /** C-549: values for exactly the keys the preview set; never stored or echoed. */
+  secrets: secretValues.optional(),
 });
-const checkBody = z.strictObject({
-  version: versionSchema,
-  profile: z.string(),
-  mode: z.enum(["metadata", "online"]),
-});
+const checkBody = z.union([
+  z.strictObject({
+    version: versionSchema,
+    profile: z.string(),
+    mode: z.enum(["metadata", "online"]),
+  }),
+  z.strictObject({
+    version: versionSchema,
+    provider: z.string(),
+    mode: z.literal("online"),
+  }),
+]);
+/** Nothing changed: our own partial write was undone (C-549). */
+const writeFailed = () =>
+  new HttpRejection(500, "write_failed", "写入失败，已恢复原文件，没有改动");
+/** V-2708: the outcome is not known yet; the next read settles it from the files. */
+const writeUnknown = () =>
+  new HttpRejection(
+    500,
+    "write_unsettled",
+    "写入结果暂未确认，请刷新后查看密钥状态",
+  );
+function envView(
+  env: Readonly<Record<string, string>>,
+  secrets: Record<string, string>,
+) {
+  return Object.entries(env).map(([name, value]) => ({
+    name: publicFields(name, secrets) as string,
+    value: privateEnv(name, value, secrets) ? null : value,
+  }));
+}
 
 function redactedFields(
   values: Record<string, unknown>,
@@ -82,11 +127,24 @@ export class LaunchSettings {
     private readonly adopt: (generation: LaunchGeneration) => void,
   ) {
     this.checks = new ProfileChecks(store, () => this.snapshot());
+    // V-2713: settle what an interrupted confirmation left behind before
+    // anything reads it. Bookkeeping only (the files are not touched); a
+    // failure here is retried by the next settings read.
+    try {
+      withLaunchSnapshot(store, dir, dataDir, () => undefined);
+      settleSecretIntents(store, dir);
+    } catch {
+      /* retried before the next read */
+    }
   }
   private snapshot() {
     return snapshot(this.dir, launchRevision(this.store));
   }
   private file() {
+    // Q-1094: the host settles its YAML receipts first; then each pending
+    // secrets.env write is judged from those receipts and the files.
+    withLaunchSnapshot(this.store, this.dir, this.dataDir, () => undefined);
+    settleSecretIntents(this.store, this.dir);
     return withLaunchSnapshot(this.store, this.dir, this.dataDir, (fence) => ({
       ...readLaunchSettings(this.dir, this.dataDir, fence.revision),
       fence,
@@ -136,23 +194,47 @@ export class LaunchSettings {
         };
       }),
     );
-    const providers = Object.entries(config.providers).map(([id, p]) => ({
-      ...redactedFields(
-        {
-          id,
-          name: p.name ?? p.codex?.name ?? id,
-          base_url: p.base_url ?? legacyEndpoints(config, id)[0]?.value ?? null,
+    const times = secretTimes(this.store);
+    const providers = Object.entries(config.providers).map(([id, p]) => {
+      const users = providerUsers(f, id);
+      const last = this.checks.latest(providerCheck(id));
+      return {
+        ...redactedFields(
+          {
+            id,
+            name: p.name ?? p.codex?.name ?? id,
+            base_url: providerEndpoint(config, id),
+            harness: p.harness ?? null,
+            api: p.api ?? null,
+            profiles: users.profiles,
+            models: users.models,
+            secrets: Object.entries(p.secret_env).map(([env, key]) => ({
+              env,
+              key,
+              set: Object.hasOwn(secrets, key) && !!secrets[key],
+              updated_at: times.get(key) ?? null,
+            })),
+          },
+          secrets,
+        ),
+        secret_env: publicFields(p.secret_env, secrets, true),
+        env: envView(p.env, secrets),
+        last_check: last && {
+          ...last,
+          cli_version: publicFields(last.cli_version, secrets),
         },
-        secrets,
-      ),
-      secret_env: publicFields(p.secret_env, secrets, true),
-    }));
+      };
+    });
     return {
       version: f.version,
       profiles,
       providers,
       models: publicFields(config.models ?? {}, secrets, true),
-      secret_keys: publicFields(Object.keys(secrets), secrets),
+      // Keys a pending write is adding cannot be chosen yet (V-2719).
+      secret_keys: publicFields(
+        Object.keys(secrets).filter((k) => !pendingKeys(this.store).has(k)),
+        secrets,
+      ),
     };
   }
   private guardDelete(
@@ -170,6 +252,19 @@ export class LaunchSettings {
         publicFields({ references: refs }, f.secrets),
       );
   }
+  /** The candidate must hold both before and after the secrets.env write. */
+  private checkSecrets(
+    f: SettingsFile,
+    next: LaunchConfig,
+    secrets: Record<string, string>,
+  ) {
+    try {
+      validateLaunchSecrets(next, secrets);
+      validateLaunchSecrets(f.config, secrets);
+    } catch {
+      throw invalid();
+    }
+  }
   private preview(body: unknown, owner: string) {
     const parsed = previewBody.safeParse(body);
     if (!parsed.success) throw invalid();
@@ -177,16 +272,25 @@ export class LaunchSettings {
       f = this.file();
     if (version !== f.version) throw stale();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { diff, text, raw } = candidate(f, change);
+    const id = randomUUID();
+    const { diff, text, raw, plan, keyMap } = candidate(f, change, {
+      operation: id,
+      pending: pendingKeys(this.store),
+    });
+    let next: LaunchConfig;
     try {
-      validateLaunchSecrets(
-        parseCachedLaunchConfig(raw, this.dataDir),
-        f.secrets,
-      );
+      next = parseCachedLaunchConfig(raw, this.dataDir);
     } catch {
       throw invalid();
     }
-    const id = randomUUID();
+    this.checkSecrets(
+      f,
+      next,
+      plannedSecrets(f.secrets, {
+        set: Object.values(keyMap),
+        clear: plan.clear ?? [],
+      }),
+    );
     if (this.previews.size >= 256)
       this.previews.delete(this.previews.keys().next().value ?? "");
     this.previews.set(id, { change, version, owner, after: digest(text) });
@@ -222,14 +326,26 @@ export class LaunchSettings {
             "此幂等键已用于其它预览",
           );
         if (receipt.installed) return true;
-        if (!allowUnsettled) throw stale();
+        // Q-1094: a reserved but uninstalled receipt is not proof either way.
+        if (!allowUnsettled) throw writeUnknown();
       }
       return false;
     };
     const success = { ok: true, preview_id: id };
     // A settled receipt is scoped to this session and request; later disk edits cannot undo it.
     if (replay(true)) return success;
-    const f = this.file();
+    let f: ReturnType<LaunchSettings["file"]>;
+    try {
+      f = this.file();
+    } catch (error) {
+      // This request's own publication is reserved but unsettled and the host
+      // cannot settle it now (e.g. launch.yaml was edited meanwhile).
+      const own = this.store.database
+        .prepare("SELECT installed FROM launch_web_changes WHERE request_key=?")
+        .get(requestKey);
+      if (own && !own.installed) throw writeUnknown();
+      throw error;
+    }
     const path = realpathSync(f.path);
     if (replay(false)) return success;
     const pending = this.previews.get(id);
@@ -241,17 +357,40 @@ export class LaunchSettings {
     )
       throw stale();
     const { change } = pending;
+    // Q-1094: a confirmation of this preview whose outcome is not proved yet
+    // is reported as such, whatever is sent now.
+    const recorded = auditStatus(this.store, id);
+    if (recorded === "pending" || recorded === "unconfirmed")
+      throw writeUnknown();
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const { text, raw } = candidate(f, change);
-    // The host reloads via the refresh-aware catalog loader, not the offline preview cache.
-    const staged = await stageModelLaunchConfig(raw, this.dataDir).catch(() => {
-      throw invalid();
+    const { text, raw, yaml, plan, keyMap, superseded } = candidate(f, change, {
+      operation: id,
+      pending: pendingKeys(this.store),
     });
-    try {
-      validateLaunchSecrets(staged.config, f.secrets);
-    } catch {
-      throw invalid();
-    }
+    // Values for exactly the keys the confirmed preview names, nothing else.
+    const values = parsed.data.secrets ?? {};
+    const { set, clear } = planKeys(plan);
+    if (
+      Object.keys(values).length !== set.length ||
+      set.some((k) => !Object.hasOwn(values, k))
+    )
+      throw invalid("secrets");
+    // The host reloads via the refresh-aware catalog loader, not the offline preview cache.
+    const staged = yaml
+      ? await stageModelLaunchConfig(raw, this.dataDir).catch(() => {
+          throw invalid();
+        })
+      : { config: f.config, catalog: undefined };
+    // Values arrive under the keys the form named; they go to the fresh keys.
+    const finalValues = Object.fromEntries(
+      Object.entries(values).map(([k, v]) => [keyMap[k] ?? k, v]),
+    );
+    const secrets = plannedSecrets(
+      f.secrets,
+      { set: Object.keys(finalValues), clear },
+      finalValues,
+    );
+    this.checkSecrets(f, staged.config, secrets);
     const actor = authorize().member_id ?? "human";
     if (replay(false)) return success; // a concurrent identical request finished during preflight
     if (digest(text) !== pending.after || this.snapshot() !== version)
@@ -259,54 +398,139 @@ export class LaunchSettings {
     // A reference can be added while awaiting the catalog. Reject before even backing up,
     // then check once more under the SQLite publication lock.
     this.store.uow.read((tx) => this.guardDelete(f, change, tx));
-    const suffix = randomUUID(),
-      temp = `${path}.${suffix}.tmp`,
-      opts = { flag: "wx", mode: 0o600 };
-    writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
-    try {
-      writeFileSync(temp, text, opts);
-      const revision = publishModelFile(
-        this.store,
-        path,
-        temp,
-        id,
-        f.original,
-        text,
-        this.dataDir,
-        f.fence,
-        staged.catalog,
-        "人员已确认修改启动配置，新运行将使用更新后的配置。",
-        {
-          hostProfiles: Object.keys(
-            selectableLaunchConfig({
-              config: staged.config,
-              secrets: f.secrets,
-            }).profiles,
-          ),
-          reserve: () =>
-            this.store.database
-              .prepare(
-                "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at) VALUES(?,?,?,?,?,?,?)",
-              )
-              .run(
-                id,
-                requestKey,
-                version,
-                change.op,
-                change.name,
-                actor,
-                new Date().toISOString(),
-              ),
-          checkReferences: (tx) => this.guardDelete(f, change, tx),
-        },
+    const receipt = (installed: boolean) =>
+      this.store.database
+        .prepare(
+          "INSERT INTO launch_web_changes(operation,request_key,snapshot,action,target,actor,created_at,installed) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          id,
+          requestKey,
+          version,
+          change.op,
+          change.name,
+          actor,
+          new Date().toISOString(),
+          installed ? 1 : 0,
+        );
+    // Q-1094 / Q-1095: one commit point per confirmation. A value goes to a
+    // brand-new key first (nothing already in secrets.env changes), then the
+    // YAML rename commits; only the host's receipt proves it. Clearing keys
+    // (never with a YAML change) commits by the secrets.env rename.
+    const now = new Date().toISOString();
+    const audit = (keys: readonly string[], action: "set" | "clear") => {
+      const row = this.store.database.prepare(
+        "INSERT INTO launch_secret_changes(operation,key,action,actor,created_at,status) VALUES(?,?,?,?,?,'pending')",
       );
-      this.adopt({ config: staged.config, secrets: f.secrets, revision });
-    } catch (error) {
-      if (error instanceof HttpRejection) throw error;
-      if (this.snapshot() !== version) throw stale();
-      throw error;
-    } finally {
-      rmSync(temp, { force: true });
+      for (const k of keys) row.run(id, k, action, actor, now);
+    };
+    const unsettled = (error: unknown) => {
+      if (error instanceof HttpRejection) return error;
+      if (error instanceof SecretsUnsettled) return writeUnknown();
+      return writeFailed();
+    };
+    let files: string | undefined;
+    if (set.length) {
+      try {
+        files = addSecrets(this.store, this.dir, this.dataDir, f.fence, {
+          operation: id,
+          original: readSecretsText(this.dir),
+          values: finalValues,
+          superseded,
+          yamlBefore: f.original,
+          reserve: () => audit(Object.keys(finalValues), "set"),
+        });
+      } catch (error) {
+        throw unsettled(error);
+      }
+    } else if (clear.length) {
+      try {
+        clearSecrets(this.store, this.dir, this.dataDir, f.fence, {
+          operation: id,
+          original: readSecretsText(this.dir),
+          keys: clear,
+          reserve: () => {
+            audit(clear, "clear");
+            receipt(false);
+          },
+        });
+      } catch (error) {
+        throw unsettled(error);
+      }
+    }
+    if (yaml) {
+      const suffix = randomUUID(),
+        temp = `${path}.${suffix}.tmp`,
+        opts = { flag: "wx", mode: 0o600 };
+      let revision: number | undefined;
+      try {
+        // V-2708: only our own secrets.env rename may differ from the
+        // previewed snapshot. The catalog, the revision and every other file
+        // must still be exactly those the preview was validated against.
+        const fence = files === undefined ? f.fence : { ...f.fence, files };
+        writeFileSync(`${path}.${suffix}.bak`, f.original, opts);
+        writeFileSync(temp, text, opts);
+        revision = publishModelFile(
+          this.store,
+          path,
+          temp,
+          id,
+          f.original,
+          text,
+          this.dataDir,
+          fence,
+          staged.catalog,
+          "人员已确认修改启动配置，新运行将使用更新后的配置。",
+          {
+            hostProfiles: Object.keys(
+              selectableLaunchConfig({ config: staged.config, secrets })
+                .profiles,
+            ),
+            reserve: () => receipt(false),
+            checkReferences: (tx) => this.guardDelete(f, change, tx),
+          },
+        );
+      } catch (error) {
+        if (files !== undefined) {
+          // Decided by the receipt and the files, never by guessing.
+          let outcome: string;
+          try {
+            outcome = settleSecrets(this.store, this.dir, id);
+          } catch {
+            throw writeUnknown();
+          }
+          if (outcome === "failed") {
+            if (error instanceof HttpRejection) throw error;
+            // Another writer changed the launch files between the two steps.
+            if (error instanceof LaunchConfigError) throw stale();
+            throw writeFailed();
+          }
+          if (outcome !== "applied") throw writeUnknown();
+        } else {
+          const own = this.store.database
+            .prepare(
+              "SELECT installed FROM launch_web_changes WHERE operation=?",
+            )
+            .get(id);
+          if (own && !own.installed) throw writeUnknown();
+          if (!own?.installed) {
+            if (error instanceof HttpRejection) throw error;
+            if (this.snapshot() !== version) throw stale();
+            throw error;
+          }
+        }
+      } finally {
+        rmSync(temp, { force: true });
+      }
+      // Committed: close the write (the superseded keys go once unused).
+      if (files !== undefined)
+        try {
+          settleSecrets(this.store, this.dir, id);
+        } catch {
+          /* the next settle closes it the same way */
+        }
+      if (revision !== undefined)
+        this.adopt({ config: staged.config, secrets, revision });
     }
     this.previews.delete(id);
     return success;
@@ -357,7 +581,9 @@ export class LaunchSettings {
       sendJson(
         res,
         202,
-        this.checks.start(f, input.data.profile, input.data.mode, actor),
+        "provider" in input.data
+          ? this.checks.startProvider(f, input.data.provider, actor)
+          : this.checks.start(f, input.data.profile, input.data.mode, actor),
       );
     }
   }

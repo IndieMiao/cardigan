@@ -7,6 +7,7 @@ import { probeModel } from "@cardigan/host";
 import {
   getHarnessAdapter,
   type Harness,
+  type ResolvedProfile,
   requiredSecretKeys,
   resolveProfile,
 } from "@cardigan/roles";
@@ -14,6 +15,7 @@ import type { Store } from "@cardigan/store";
 import { HttpRejection } from "./http.js";
 import {
   invalid,
+  providerEndpoint,
   publicFields,
   type SettingsFile,
 } from "./launch-settings-file.js";
@@ -118,8 +120,6 @@ export class ProfileChecks {
       !Object.hasOwn(file.config.profiles, profile)
     )
       throw invalid("profile");
-    if (this.active.has(profile))
-      throw new HttpRejection(409, "check_running", "该配置已有检查在进行");
     const resolved = resolveProfile(file.config, profile);
     if (mode === "online") {
       const provider = resolved.provider;
@@ -134,47 +134,137 @@ export class ProfileChecks {
       )
         throw invalid("base_url");
     }
+    return this.run(file, profile, mode, actor, async (problems, report) => {
+      const cli = await this.cli(resolved.profile.harness);
+      report(cli.version);
+      if (!cli.path) problems.push("cli_missing");
+      const missing = requiredSecretKeys(file.config, profile).some(
+        (key) => !Object.hasOwn(file.secrets, key) || !file.secrets[key],
+      );
+      if (missing) problems.push("missing_secret");
+      if (mode === "metadata") {
+        const alias = file.raw.profiles[profile].model;
+        const model = Object.hasOwn(file.config.models ?? {}, alias)
+          ? file.config.models?.[alias]
+          : undefined;
+        if (model)
+          for (const key of [
+            "context_window",
+            "max_output_tokens",
+            "reasoning_efforts",
+          ] as const)
+            if (model[key] === undefined) problems.push(`missing_${key}`);
+      } else if (this.currentVersion() !== file.version) {
+        problems.push("stale_snapshot");
+      } else if (
+        !missing &&
+        (await probeModel(
+          resolved,
+          file.secrets,
+          false,
+          file.config.launch_check,
+        ))
+      )
+        problems.push("online_failed");
+    });
+  }
+  /**
+   * C-549: list the Provider's models once, with its own credential, without a
+   * profile or model (and never calling inference). Stored with the profile
+   * checks under `provider:<id>`, a key no profile name can take.
+   */
+  startProvider(file: SettingsFile, id: string, actor: string) {
+    const definition = Object.hasOwn(file.config.providers, id)
+      ? file.config.providers[id]
+      : undefined;
+    if (!definition || publicFields(id, file.secrets) !== id)
+      throw invalid("provider");
+    const harness: Harness | undefined =
+      definition.harness ??
+      (definition.codex
+        ? "codex"
+        : definition.pi
+          ? "pi"
+          : definition.api === "anthropic-messages"
+            ? "claude-code"
+            : definition.api === "openai-responses"
+              ? "codex"
+              : definition.api
+                ? "pi"
+                : undefined);
+    const api =
+      definition.api ??
+      (harness === "claude-code"
+        ? "anthropic-messages"
+        : harness === "codex"
+          ? "openai-responses"
+          : undefined);
+    // V-2708: the same endpoint the detail shows (a safe legacy env URL counts).
+    const url = providerEndpoint(file.config, id);
+    if (
+      !harness ||
+      !api ||
+      !url ||
+      publicFields(url, file.secrets) !== url ||
+      publicFields(definition.name ?? id, file.secrets) !==
+        (definition.name ?? id)
+    )
+      throw invalid("base_url");
+    const resolved: ResolvedProfile = {
+      name: providerCheck(id),
+      profile: { harness },
+      provider: { name: id, definition: { ...definition, api, base_url: url } },
+    };
+    return this.run(
+      file,
+      providerCheck(id),
+      "online",
+      actor,
+      async (problems) => {
+        const missing = Object.values(definition.secret_env).some(
+          (key) => !Object.hasOwn(file.secrets, key) || !file.secrets[key],
+        );
+        if (missing) problems.push("missing_secret");
+        else if (this.currentVersion() !== file.version)
+          problems.push("stale_snapshot");
+        else if (
+          await probeModel(
+            resolved,
+            file.secrets,
+            false,
+            file.config.launch_check,
+            true,
+          )
+        )
+          problems.push("online_failed");
+      },
+    );
+  }
+  private run(
+    file: SettingsFile,
+    target: string,
+    mode: CheckMode,
+    actor: string,
+    check: (
+      problems: string[],
+      report: (cliVersion: string | null) => void,
+    ) => Promise<void>,
+  ) {
+    if (this.active.has(target))
+      throw new HttpRejection(409, "check_running", "该配置已有检查在进行");
     const id = randomUUID();
     this.store.database
       .prepare(
         "INSERT INTO launch_profile_checks(id,profile,snapshot,kind,actor,started_at) VALUES(?,?,?,?,?,?)",
       )
-      .run(id, profile, file.version, mode, actor, new Date().toISOString());
+      .run(id, target, file.version, mode, actor, new Date().toISOString());
     const work = Promise.resolve().then(async () => {
       const problems: string[] = [];
       let version: string | null = null;
       try {
-        const cli = await this.cli(resolved.profile.harness);
-        version = cli.version;
-        if (!cli.path) problems.push("cli_missing");
-        const missing = requiredSecretKeys(file.config, profile).some(
-          (key) => !Object.hasOwn(file.secrets, key) || !file.secrets[key],
-        );
-        if (missing) problems.push("missing_secret");
-        if (mode === "metadata") {
-          const alias = file.raw.profiles[profile].model;
-          const model = Object.hasOwn(file.config.models ?? {}, alias)
-            ? file.config.models?.[alias]
-            : undefined;
-          if (model)
-            for (const key of [
-              "context_window",
-              "max_output_tokens",
-              "reasoning_efforts",
-            ] as const)
-              if (model[key] === undefined) problems.push(`missing_${key}`);
-        } else if (this.currentVersion() !== file.version) {
-          problems.push("stale_snapshot");
-        } else if (
-          !missing &&
-          (await probeModel(
-            resolved,
-            file.secrets,
-            false,
-            file.config.launch_check,
-          ))
-        )
-          problems.push("online_failed");
+        await check(problems, (v) => {
+          version = v;
+        });
       } catch {
         problems.push(mode === "online" ? "online_failed" : "check_failed");
       }
@@ -192,15 +282,24 @@ export class ProfileChecks {
           id,
         );
     });
-    this.active.set(profile, work);
+    this.active.set(target, work);
     void work.then(
-      () => this.active.delete(profile),
+      () => this.active.delete(target),
       (reason: unknown) => {
         // The HTTP listener may still be draining requests when this check leaves active.
         if (this.shutdown) this.shutdown.firstFailure ??= { reason };
-        this.active.delete(profile);
+        this.active.delete(target);
       },
     );
-    return { id, profile, mode, version: file.version, status: "running" };
+    return {
+      id,
+      profile: target,
+      mode,
+      version: file.version,
+      status: "running",
+    };
   }
 }
+
+/** The check key of a Provider; profile names cannot contain a colon. */
+export const providerCheck = (id: string) => `provider:${id}`;
