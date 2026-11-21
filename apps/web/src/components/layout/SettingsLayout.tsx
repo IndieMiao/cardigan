@@ -341,9 +341,63 @@ export function SettingsMarkdown({
 }
 
 /**
+ * A question asked above a drawer before an action (`--ui-layer-confirm`).
+ * Closing it (Esc, overlay) is the safe answer, `onCancel`.
+ */
+export function SettingsConfirmDialog({
+  open,
+  title,
+  description,
+  describe = true,
+  cancelLabel,
+  confirmLabel,
+  destructive = false,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  /** False: the description is for assistive technology only. */
+  describe?: boolean;
+  cancelLabel: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onCancel();
+      }}
+    >
+      <DialogContent
+        className={cn(styles.dialog, styles.confirm)}
+        overlayClassName={styles.confirm}
+      >
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription className={describe ? undefined : "visually-hidden"}>
+          {description}
+        </DialogDescription>
+        <SettingsDialogActions>
+          <Button onClick={onCancel}>{cancelLabel}</Button>
+          <Button
+            variant={destructive ? "destructive" : "primary"}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </Button>
+        </SettingsDialogActions>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
  * C-494: closing a drawer form with unapplied edits asks first. Keeping the
- * edits is the default action; the dialog and its overlay sit above the
- * drawer (`--ui-layer-confirm`).
+ * edits is the default action.
  */
 export function SettingsDiscardDialog({
   open,
@@ -355,28 +409,17 @@ export function SettingsDiscardDialog({
   onDiscard: () => void;
 }) {
   return (
-    <Dialog
+    <SettingsConfirmDialog
       open={open}
-      onOpenChange={(next) => {
-        if (!next) onKeep();
-      }}
-    >
-      <DialogContent
-        className={cn(styles.dialog, styles.confirm)}
-        overlayClassName={styles.confirm}
-      >
-        <DialogTitle>放弃未应用的修改？</DialogTitle>
-        <DialogDescription className="visually-hidden">
-          关闭后这次填写的内容不会保留。
-        </DialogDescription>
-        <SettingsDialogActions>
-          <Button onClick={onKeep}>继续编辑</Button>
-          <Button variant="destructive" onClick={onDiscard}>
-            放弃修改
-          </Button>
-        </SettingsDialogActions>
-      </DialogContent>
-    </Dialog>
+      title="放弃未应用的修改？"
+      description="关闭后这次填写的内容不会保留。"
+      describe={false}
+      cancelLabel="继续编辑"
+      confirmLabel="放弃修改"
+      destructive
+      onCancel={onKeep}
+      onConfirm={onDiscard}
+    />
   );
 }
 

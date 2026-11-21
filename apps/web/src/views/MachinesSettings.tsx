@@ -22,6 +22,7 @@ import { IdTag } from "../components/IdTag.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
 import {
+  SettingsConfirmDialog,
   SettingsDrawerFeedback,
   SettingsFact,
   SettingsFacts,
@@ -33,7 +34,10 @@ import {
 } from "../components/layout/SettingsLayout.js";
 import { CAPABILITY_TAGS } from "../components/MachineDetail.js";
 import { CardLink } from "../components/Operations.js";
-import { RequestFeedback } from "../components/RequestFeedback.js";
+import {
+  RequestFeedback,
+  type RequestFeedbackProps,
+} from "../components/RequestFeedback.js";
 import { Badge } from "../components/ui/badge.js";
 import { Button } from "../components/ui/button.js";
 import {
@@ -51,6 +55,7 @@ import {
   machineActiveRuns,
 } from "../machine-labels.js";
 import { settingKey, trackSettingsRead } from "../settings-clock.js";
+import { statusLabel } from "../status.js";
 import { useResource } from "../useResource.js";
 import { MachineAgentLimit, MergeCheckCapacity } from "./AgentLimit.js";
 import { useNotice } from "./useSettingWrite.js";
@@ -368,18 +373,10 @@ function MachineDrawer({
     [client, projectId, summary.id],
   );
   const detail = useResource(load, revision);
-  /**
-   * V-2549: a read-back refused (401/403/404) after a write takes the facts
-   * and controls down at once, like a refused detail read; they stay down
-   * until a later detail read answers (the refusal is tied to the data it
-   * replaced).
-   */
-  const [refused, setRefused] = useState<{ message: string; data: unknown }>();
-  const shownData = useRef(detail.data);
-  shownData.current = detail.data;
-  const withdrawn =
-    withdrawnOf(detail.data) ??
-    (refused && refused.data === detail.data ? refused.message : undefined);
+  // V-2549: the detail read is also the read-back after a write whose reply
+  // was lost, so a refusal (401/403/404) takes the facts and controls down
+  // here, exactly like any refused detail read, until a read succeeds.
+  const withdrawn = withdrawnOf(detail.data);
   const machine =
     detail.data && !withdrawn && "machine" in detail.data
       ? detail.data.machine
@@ -389,17 +386,19 @@ function MachineDrawer({
     reloadDetail();
     onChanged();
   }, [reloadDetail, onChanged]);
-  const onRefused = useCallback(
-    (message: string) => setRefused({ message, data: shownData.current }),
-    [],
-  );
   const actions = useMachineActions({
     client,
     projectId,
+    machineId: summary.id,
     machine,
+    read: {
+      data: detail.data,
+      ok: !!machine && !detail.error && !detail.pending,
+      pending: detail.pending,
+      reload: reloadDetail,
+    },
     pollMs,
     onChanged: changed,
-    onRefused,
   });
   return (
     <Drawer
@@ -413,6 +412,15 @@ function MachineDrawer({
       initialFocus="close"
       actions={canEdit && machine ? <MachineButtons {...actions} /> : undefined}
     >
+      <SettingsConfirmDialog
+        open={actions.asking}
+        title="仍要重新检查？"
+        description="上次请求结果未知，再次检查可能让这台机器多检查一次。"
+        cancelLabel="取消"
+        confirmLabel="重新检查"
+        onCancel={actions.cancelAgain}
+        onConfirm={actions.confirmAgain}
+      />
       <CardDetailLayout
         className="card-page-drawer"
         aria-label={withdrawn ? "机器详情" : `机器 ${summary.id}`}
@@ -712,46 +720,136 @@ function BindingRow({ binding }: { binding: MachineBindingView }) {
 }
 
 /**
+ * Q-1048: a machine write whose reply never came (no reply, timeout, 5xx).
+ * The server does not dedupe by operation key, so nothing the page reads
+ * later can prove whether that request was accepted: the write stays
+ * unknown. It is kept per project and machine in this tab (closing and
+ * reopening the drawer, rereading or reloading the page keep it), so none of
+ * those is a way to send the same check again.
+ */
+type UnknownWrites = {
+  /** `seen`: checks of this machine seen running after the request. */
+  readonly check?: { readonly seen: readonly string[] };
+  readonly drain?: "drain" | "resume";
+};
+const unknownKey = (projectId: string, machineId: string) =>
+  `cardigan:machine-unknown-write:${projectId}:${machineId}`;
+/** Used only where the tab's session storage is unavailable. */
+const unknownMemory = new Map<string, UnknownWrites>();
+function parseUnknown(raw: string | null): UnknownWrites {
+  if (!raw) return {};
+  const value: unknown = JSON.parse(raw);
+  if (!value || typeof value !== "object") return {};
+  const { check, drain } = value as { check?: unknown; drain?: unknown };
+  const seen =
+    check && typeof check === "object"
+      ? (check as { seen?: unknown }).seen
+      : undefined;
+  return {
+    ...(check && typeof check === "object"
+      ? {
+          check: {
+            seen: Array.isArray(seen)
+              ? seen.filter((id): id is string => typeof id === "string")
+              : [],
+          },
+        }
+      : {}),
+    ...(drain === "drain" || drain === "resume" ? { drain } : {}),
+  };
+}
+function readUnknown(key: string): UnknownWrites {
+  try {
+    return parseUnknown(window.sessionStorage.getItem(key));
+  } catch {
+    return unknownMemory.get(key) ?? {};
+  }
+}
+function writeUnknown(key: string, value: UnknownWrites) {
+  const empty = !value.check && !value.drain;
+  try {
+    if (empty) window.sessionStorage.removeItem(key);
+    else window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    if (empty) unknownMemory.delete(key);
+    else unknownMemory.set(key, value);
+  }
+}
+function useUnknownWrites(projectId: string, machineId: string) {
+  const key = unknownKey(projectId, machineId);
+  const [unknown, setUnknown] = useState(() => readUnknown(key));
+  const current = useRef(unknown);
+  // Also called after the drawer closed: a reply lost meanwhile is kept.
+  const update = useCallback(
+    (next: (old: UnknownWrites) => UnknownWrites) => {
+      const value = next(current.current);
+      current.current = value;
+      writeUnknown(key, value);
+      setUnknown(value);
+    },
+    [key],
+  );
+  return { unknown, current, update };
+}
+const withoutCheck = ({ check: _, ...rest }: UnknownWrites) => rest;
+const withoutDrain = ({ drain: _, ...rest }: UnknownWrites) => rest;
+
+/**
  * C-511: 立即检查 and 排空/恢复 for one machine. A check runs on the host;
  * it is read again until it ends, and one already running (also started
  * elsewhere or before the page was opened) is followed instead of started
- * again. The check and the drain keep separate feedback, so one never
- * removes the other's retry. Requests are not resent: after a failure the
- * machine is read again and shows what actually happened. Every action ends
- * with the list, detail and capacity read again.
+ * again. The check and the drain keep separate feedback. Requests are never
+ * resent. Only a reply speaks for a request: after a lost reply the detail
+ * is read back to show what the machine is doing, never to decide what
+ * became of the request (Q-1048).
  */
 function useMachineActions({
   client,
   projectId,
+  machineId,
   machine,
+  read,
   pollMs,
   onChanged,
-  onRefused,
 }: {
   client: CardiganClient;
   projectId: string;
+  machineId: string;
+  /** Undefined while the detail is unread or withdrawn. */
   machine: MachineView | undefined;
+  /** The drawer's detail read, which is also the read-back. */
+  read: {
+    readonly data: unknown;
+    /** The last read answered and was allowed. */
+    readonly ok: boolean;
+    readonly pending: boolean;
+    readonly reload: () => void;
+  };
   pollMs: number;
   onChanged: () => void;
-  /** The machine read was refused (401/403/404): withdraw what is shown. */
-  onRefused: (message: string) => void;
 }) {
-  const machineId = machine?.id;
   const current = machine?.bindings.find((b) => b.is_current);
   // Checks run per physical machine and the host joins a running one, so a
   // check started from any project is followed (V-2549).
   const recorded =
     runningCheck(machine) ?? current?.last_requested_check ?? undefined;
+  const {
+    unknown,
+    current: unknownNow,
+    update,
+  } = useUnknownWrites(projectId, machineId);
   const [check, setCheck] = useState<{ id: string; step: string }>();
   const [starting, setStarting] = useState(false);
   const [draining, setDraining] = useState<"drain" | "resume">();
+  const [asking, setAsking] = useState(false);
   const sending = useRef(false);
   const [checkError, setCheckError] = useState("");
   const [checkRetry, setCheckRetry] = useState<(() => void) | undefined>();
   const [checkMessage, setCheckMessage] = useNotice();
   const [drainError, setDrainError] = useState("");
-  const [drainRetry, setDrainRetry] = useState<(() => void) | undefined>();
   const [drainMessage, setDrainMessage] = useNotice();
+  /** What the lost reply failed with, when it happened in this view. */
+  const [checkCause, setCheckCause] = useState("");
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -768,30 +866,45 @@ function useMachineActions({
   }, [recorded?.status, recorded?.id, recorded?.step]);
   const changed = useRef(onChanged);
   changed.current = onChanged;
+  const reread = useCallback(() => changed.current(), []);
+  /**
+   * The detail read shown when a write became unknown: only a read answered
+   * after it says what the machine did since. A new drawer starts unread.
+   */
+  const data = useRef(read.data);
+  data.current = read.data;
+  const before = useRef<unknown>(undefined);
+  const fresh = read.ok && read.data !== before.current;
   const finished = useCallback(
     (job: MachineCheckJob) => {
       ended.current.add(job.id);
       setCheck(undefined);
-      if (job.status === "passed") setCheckMessage("检查通过");
-      else
-        setCheckError(
-          `检查未通过：${
-            job.failed_steps.map(checkStepLabel).join("、") || "原因未记录"
-          }`,
-        );
+      const steps =
+        job.failed_steps.map(checkStepLabel).join("、") || "原因未记录";
+      if (unknownNow.current.check?.seen.includes(job.id)) {
+        // The machine was checked after the unknown request, by it or not:
+        // the result is the machine's, and a new check may be started.
+        update(withoutCheck);
+        setCheckCause("");
+        if (job.status === "passed") {
+          setCheckError("");
+          setCheckMessage("这台机器最近一次检查：通过");
+        } else setCheckError(`这台机器最近一次检查：未通过（${steps}）`);
+      } else if (job.status === "passed") setCheckMessage("检查通过");
+      else setCheckError(`检查未通过：${steps}`);
       changed.current();
     },
-    [setCheckMessage],
+    [setCheckMessage, update, unknownNow],
   );
   const [tick, setTick] = useState(0);
   const checkId = check?.id;
   // biome-ignore lint/correctness/useExhaustiveDependencies: tick schedules the next read.
   useEffect(() => {
-    const read = client.machineCheck;
-    if (!checkId || !machineId || !read) return;
+    const poll = client.machineCheck;
+    if (!checkId || !poll) return;
     const timer = window.setTimeout(async () => {
       try {
-        const { check: job } = await read.call(
+        const { check: job } = await poll.call(
           client,
           projectId,
           machineId,
@@ -817,66 +930,97 @@ function useMachineActions({
     return () => window.clearTimeout(timer);
   }, [client, projectId, machineId, checkId, pollMs, tick, finished]);
 
+  // An unknown check request, against a read answered since.
+  const lost = unknown.check;
+  const seen = fresh && machine && lost ? machine : undefined;
+  const runningNow = runningCheck(seen);
+  const endedSeen = seen && lost ? seenCheckEnded(seen, lost.seen) : undefined;
+  const quietlyChecking = !!seen && !runningNow && checkingWithoutId(seen);
+  useEffect(() => {
+    if (!runningNow || ended.current.has(runningNow.id)) return;
+    update((old) =>
+      old.check && !old.check.seen.includes(runningNow.id)
+        ? { ...old, check: { seen: [...old.check.seen, runningNow.id] } }
+        : old,
+    );
+  }, [runningNow, update]);
+  useEffect(() => {
+    if (endedSeen && !runningNow)
+      finished({
+        id: endedSeen.id,
+        project_id: projectId,
+        machine_id: machineId,
+        kind: endedSeen.kind,
+        status: endedSeen.status === "failed" ? "failed" : "passed",
+        step: endedSeen.step,
+        started_at: endedSeen.checked_at,
+        checked_at: endedSeen.checked_at,
+        failed_steps: endedSeen.failed_steps,
+      });
+  }, [endedSeen, runningNow, finished, projectId, machineId]);
+  // A check without an id to follow: read the machine again until it ends.
+  const reloadRead = read.reload;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: each answered read schedules the next.
+  useEffect(() => {
+    if (!quietlyChecking) return;
+    const timer = window.setTimeout(reloadRead, pollMs);
+    return () => window.clearTimeout(timer);
+  }, [quietlyChecking, read.data, reloadRead, pollMs]);
+  // An unknown drain or resume: a read showing the target state settles it.
+  const lostDrain = unknown.drain;
+  const target = lostDrain === "drain" ? "draining" : "online";
+  const drainSettled =
+    !!lostDrain && fresh && !!machine && machine.status === target;
+  useEffect(() => {
+    if (!drainSettled) return;
+    update(withoutDrain);
+    setDrainError("");
+    setDrainMessage(
+      target === "draining"
+        ? "当前已排空，不再接收新任务"
+        : "当前已恢复接收新任务",
+    );
+  }, [drainSettled, target, update, setDrainMessage]);
+
+  const sendingAny = starting || draining !== undefined;
+  // After a lost reply, until a read answers: nothing may be sent.
+  const reading = (!!lost || !!lostDrain) && !fresh;
   /**
-   * After a failed write the outcome is unknown until the machine is read
-   * back (a lost reply may hide a write that took effect). Until then both
-   * actions stay disabled; a failed read-back offers to read again, never
-   * to resend the write.
+   * Q-1048 5b: a new check the user asks for once more, never a resend. Only
+   * after a read answered, was allowed, and shows no check running.
    */
-  const [confirming, setConfirming] = useState(false);
-  const confirm = async (
-    /** False: the outcome is still unknown; read again shortly. */
-    settle: (read: MachineView) => boolean,
-    report: (message: string, retry: () => void) => void,
-  ): Promise<void> => {
-    const read = client.machine;
-    if (!machineId) return;
-    sending.current = true;
-    setConfirming(true);
-    let known = false;
-    try {
-      const { machine: fresh } = await read.call(client, projectId, machineId);
-      if (!alive.current) return;
-      known = settle(fresh);
-    } catch (cause) {
-      if (!alive.current) return;
-      if (cause instanceof ApiError && WITHDRAWN_STATUSES.has(cause.status)) {
-        // Refused or gone: what is shown is no longer allowed or current.
-        onRefused(describeError(cause));
-        changed.current();
-      }
-      report(
-        `未能读回机器状态：${describeError(cause)}`,
-        () => void confirm(settle, report),
-      );
-      return; // still unconfirmed: actions stay disabled
-    } finally {
-      if (alive.current) setConfirming(false);
-    }
-    if (!known) {
-      window.setTimeout(() => {
-        if (alive.current) void confirm(settle, report);
-      }, pollMs);
-      return;
-    }
-    sending.current = false;
-    changed.current();
-  };
-  const unconfirmed = useRef(false);
-  /** Mirrors `unconfirmed` for rendering: the actions show as unavailable. */
-  const [unsettled, setUnsettled] = useState(false);
+  const againable =
+    !!lost &&
+    !!seen &&
+    !runningNow &&
+    !endedSeen &&
+    !quietlyChecking &&
+    !check &&
+    !sendingAny;
+  const checkLocked =
+    sendingAny ||
+    reading ||
+    !!check ||
+    !!lost ||
+    (checkRetry !== undefined && !check);
+  const drainLocked = sendingAny || reading;
+  // Buttons are aria-disabled, so a press still arrives: checked on send.
+  const gate = useRef({ againable, checkLocked, drainLocked });
+  gate.current = { againable, checkLocked, drainLocked };
+
   /** No reply, or a gateway/server error: the write may have taken effect. */
   const uncertain = (cause: unknown) =>
     !(cause instanceof ApiError) || cause.status >= 500;
-  const start = async () => {
+  const start = async (again = false) => {
     const post = client.checkMachine;
-    if (!post || !machineId || sending.current || unconfirmed.current || check)
-      return;
-    const before = checkRecords(machine);
+    if (!post || sending.current) return;
+    if (again ? !gate.current.againable : gate.current.checkLocked) return;
+    if (again) update(withoutCheck);
     sending.current = true;
     setStarting(true);
     setCheckError("");
     setCheckRetry(undefined);
+    setCheckCause("");
     let failure: unknown;
     try {
       const { check: job } = await post.call(
@@ -891,171 +1035,131 @@ function useMachineActions({
     } catch (cause) {
       failure = cause;
     } finally {
+      sending.current = false;
       if (alive.current) setStarting(false);
-      if (failure === undefined) sending.current = false;
     }
-    if (failure === undefined || !alive.current) return;
+    if (failure === undefined) return;
     if (!uncertain(failure)) {
       // Refused outright: nothing started.
-      sending.current = false;
+      if (!alive.current) return;
       setCheckError(`未能开始检查：${describeError(failure)}`);
       changed.current();
       return;
     }
-    // The check may have started anyway: read the machine before anything
-    // else may be sent.
-    unconfirmed.current = true;
-    setUnsettled(true);
-    setCheckError(`未能确认检查是否已开始：${describeError(failure)}`);
-    await confirm(
-      (fresh) => {
-        const running = runningCheck(fresh);
-        if (running) {
-          // Started, or joined a check already running on this machine.
-          unconfirmed.current = false;
-          setUnsettled(false);
-          setCheckError("");
-          setCheckRetry(undefined);
-          setCheck({ id: running.id, step: running.step });
-          return true;
-        }
-        const after = checkRecords(fresh);
-        if ([...after.values()].some((r) => r.state === "checking")) {
-          // A check without an id to follow is running: wait for it.
-          setCheckError("检查进行中，正在等待结果…");
-          return false;
-        }
-        unconfirmed.current = false;
-        setUnsettled(false);
-        setCheckRetry(undefined);
-        const moved = [...after].filter(
-          ([key, r]) =>
-            before.get(key)?.state !== r.state || before.get(key)?.at !== r.at,
-        );
-        if (moved.length === 0) {
-          // No record of this machine moved: the check was not accepted.
-          setCheckError(
-            `检查没有开始：${describeError(failure)}，可以再试一次。`,
-          );
-          return true;
-        }
-        // It ran (possibly joined from another project) and has ended.
-        setCheckError("");
-        const ended = moved
-          .map(([, r]) => r.requested)
-          .find((r) => r !== undefined);
-        if (ended)
-          finished({
-            id: ended.id,
-            project_id: projectId,
-            machine_id: fresh.id,
-            kind: ended.kind,
-            status: ended.status === "failed" ? "failed" : "passed",
-            step: ended.step,
-            started_at: ended.checked_at,
-            checked_at: ended.checked_at,
-            failed_steps: ended.failed_steps,
-          });
-        else setCheckMessage("检查已完成，结果见“最近检查”");
-        return true;
-      },
-      (message, again) => {
-        setCheckError(message);
-        setCheckRetry(() => () => {
-          setCheckRetry(undefined);
-          again();
-        });
-      },
-    );
+    // Unknown, and stays unknown: kept even if the drawer is gone by now.
+    before.current = data.current;
+    update((old) => ({ ...old, check: { seen: [] } }));
+    if (!alive.current) return;
+    setCheckCause(describeError(failure));
+    changed.current();
   };
   const drain = async (on: boolean) => {
     const post = client.setMachineDrain;
-    if (!post || !machineId || sending.current || unconfirmed.current) return;
-    const target = on ? "draining" : "online";
+    const op = on ? "drain" : "resume";
+    if (!post || sending.current || gate.current.drainLocked) return;
+    // Until a read shows the target, only the same direction may be sent
+    // again: it cannot undo an unknown request, and repeating it changes
+    // nothing if that one took effect.
+    const pending = unknownNow.current.drain;
+    if (pending && pending !== op) return;
     const done = on ? "已排空，不再接收新任务" : "已恢复接收新任务";
     const what = on ? "排空" : "恢复";
     sending.current = true;
-    setDraining(on ? "drain" : "resume");
+    setDraining(op);
     setDrainError("");
-    setDrainRetry(undefined);
     let failure: unknown;
     try {
       await post.call(client, projectId, machineId, on, crypto.randomUUID());
+      update(withoutDrain);
       if (alive.current) setDrainMessage(done);
     } catch (cause) {
       failure = cause;
     } finally {
+      sending.current = false;
       if (alive.current) setDraining(undefined);
     }
-    if (!alive.current) return;
-    if (failure === undefined || !uncertain(failure)) {
-      sending.current = false;
-      if (failure !== undefined)
-        setDrainError(`未能${what}：${describeError(failure)}`);
-      changed.current();
-      return;
-    }
-    // Read back whether it took effect before another click may be sent.
-    unconfirmed.current = true;
-    setUnsettled(true);
-    setDrainError(`未能确认是否已${what}：${describeError(failure)}`);
-    await confirm(
-      (fresh) => {
-        unconfirmed.current = false;
-        setUnsettled(false);
-        setDrainRetry(undefined);
-        if (fresh.status === target) {
-          setDrainError("");
-          setDrainMessage(done);
-        } else
-          setDrainError(
-            `未能${what}：${describeError(failure)}，可以再试一次。`,
-          );
-        return true;
-      },
-      (message, again) => {
-        setDrainError(message);
-        setDrainRetry(() => () => {
-          setDrainRetry(undefined);
-          again();
-        });
-      },
-    );
+    if (failure !== undefined && uncertain(failure)) {
+      before.current = data.current;
+      update((old) => ({ ...old, drain: op }));
+    } else if (failure !== undefined && alive.current)
+      setDrainError(`未能${what}：${describeError(failure)}`);
+    if (alive.current) changed.current();
   };
+
+  const unknownCheck = `上次检查请求结果未知${checkCause ? `：${checkCause}` : ""}`;
+  const checkFeedback: RequestFeedbackProps = !lost
+    ? {
+        pending: check !== undefined || starting,
+        pendingMessage: check
+          ? `正在检查：${checkStepLabel(check.step)}…`
+          : "正在开始检查…",
+        error: checkError,
+        retry: checkRetry,
+        message: checkMessage,
+      }
+    : check
+      ? {
+          pending: true,
+          pendingMessage: `这台机器正在检查：${checkStepLabel(check.step)}…`,
+          error: checkError,
+          retry: checkRetry,
+        }
+      : !fresh
+        ? read.pending
+          ? { pending: true, pendingMessage: "正在读回机器状态…" }
+          : // The read failed or was refused: its own feedback retries.
+            { error: unknownCheck }
+        : quietlyChecking
+          ? { pending: true, pendingMessage: "这台机器正在检查，正在等待结果…" }
+          : {
+              error: unknownCheck,
+              retry: reread,
+              retryLabel: "重新读取",
+            };
+  const what = lostDrain === "drain" ? "排空" : "恢复";
+  const origin = lostDrain === "drain" ? "online" : "draining";
+  const drainFeedback: RequestFeedbackProps =
+    !lostDrain || draining || drainSettled
+      ? {
+          pending: draining !== undefined,
+          pendingMessage: draining === "resume" ? "正在恢复…" : "正在排空…",
+          error: drainError,
+          message: drainMessage,
+        }
+      : !fresh || !machine
+        ? read.pending
+          ? { pending: true, pendingMessage: "正在读回机器状态…" }
+          : { error: `${what}结果未知` }
+        : {
+            error:
+              machine.status === origin
+                ? `当前仍为“${statusLabel(origin)}”，${what}结果未知`
+                : `${what}结果未知，当前为“${machine.status ? statusLabel(machine.status) : "未知"}”`,
+            retry: reread,
+            retryLabel: "重新读取",
+          };
   return {
     status: machine?.status,
     // Checks run per project binding; without one there is nothing to check.
     checkable: !!current && !!client.checkMachine,
     drainable: !!client.setMachineDrain,
     check,
-    // Also while a failed write's outcome is being (or could not be) read back.
-    busy:
-      starting ||
-      draining !== undefined ||
-      confirming ||
-      unsettled ||
-      (checkRetry !== undefined && !check) ||
-      drainRetry !== undefined,
+    checkLocked,
+    drainLocked,
+    againable,
+    asking,
+    ask: () => {
+      if (gate.current.againable) setAsking(true);
+    },
+    cancelAgain: () => setAsking(false),
+    confirmAgain: () => {
+      setAsking(false);
+      void start(true);
+    },
     start,
     drain,
-    checkFeedback: {
-      pending: check !== undefined || starting || confirming,
-      pendingMessage: check
-        ? `正在检查：${checkStepLabel(check.step)}…`
-        : confirming
-          ? "正在读回机器状态…"
-          : "正在开始检查…",
-      error: checkError,
-      retry: checkRetry,
-      message: checkMessage,
-    },
-    drainFeedback: {
-      pending: draining !== undefined,
-      pendingMessage: draining === "resume" ? "正在恢复…" : "正在排空…",
-      error: drainError,
-      retry: drainRetry,
-      message: drainMessage,
-    },
+    checkFeedback,
+    drainFeedback,
   };
 }
 
@@ -1064,32 +1168,40 @@ function MachineButtons({
   checkable,
   drainable,
   check,
-  busy,
+  checkLocked,
+  drainLocked,
+  againable,
+  ask,
   start,
   drain,
 }: ReturnType<typeof useMachineActions>) {
-  const waiting = busy || undefined;
+  const drainWaiting = drainLocked || undefined;
   return (
     <>
       {drainable && status === "online" && (
-        <Button aria-disabled={waiting} onClick={() => void drain(true)}>
+        <Button aria-disabled={drainWaiting} onClick={() => void drain(true)}>
           排空
         </Button>
       )}
       {drainable && status === "draining" && (
-        <Button aria-disabled={waiting} onClick={() => void drain(false)}>
+        <Button aria-disabled={drainWaiting} onClick={() => void drain(false)}>
           恢复
         </Button>
       )}
-      {checkable && (
-        <Button
-          variant="primary"
-          aria-disabled={waiting ?? (check ? true : undefined)}
-          onClick={() => void start()}
-        >
-          {check ? "检查中…" : "立即检查"}
-        </Button>
-      )}
+      {checkable &&
+        (againable ? (
+          <Button aria-haspopup="dialog" onClick={ask}>
+            仍要重新检查
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            aria-disabled={checkLocked || undefined}
+            onClick={() => void start()}
+          >
+            {check ? "检查中…" : "立即检查"}
+          </Button>
+        ))}
     </>
   );
 }
@@ -1101,34 +1213,20 @@ function runningCheck(machine: MachineView | undefined) {
     .map((b) => b.last_requested_check)
     .find((r): r is RequestedCheck => r?.status === "running");
 }
-/**
- * Every check record of a machine across its bindings (explicit, health and
- * worker), keyed by project and kind: a write whose reply was lost took
- * effect if any of them moved, wherever the host recorded it.
- */
-function checkRecords(machine: MachineView | undefined) {
-  const records = new Map<
-    string,
-    { state: string; at: string; requested?: RequestedCheck }
-  >();
-  for (const b of machine?.bindings ?? []) {
-    const r = b.last_requested_check;
-    if (r)
-      records.set(`${b.project_id}:requested`, {
-        state: `${r.id}:${r.status}`,
-        at: r.checked_at,
-        requested: r,
-      });
-    if (b.machine_check)
-      records.set(`${b.project_id}:machine`, {
-        state: b.machine_check.status,
-        at: b.machine_check.checked_at,
-      });
-    if (b.worker_check)
-      records.set(`${b.project_id}:worker`, {
-        state: b.worker_check.status,
-        at: b.worker_check.checked_at,
-      });
-  }
-  return records;
+/** An explicit check seen running after an unknown request, now ended. */
+function seenCheckEnded(machine: MachineView, seen: readonly string[]) {
+  return machine.bindings
+    .map((b) => b.last_requested_check)
+    .find(
+      (r): r is RequestedCheck =>
+        !!r && r.status !== "running" && seen.includes(r.id),
+    );
+}
+/** A health or worker check in progress, which has no id to follow. */
+function checkingWithoutId(machine: MachineView) {
+  return machine.bindings.some(
+    (b) =>
+      b.machine_check?.status === "checking" ||
+      b.worker_check?.status === "checking",
+  );
 }
