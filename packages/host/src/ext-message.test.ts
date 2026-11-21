@@ -980,6 +980,146 @@ function holdMatrixAction(n: number) {
   });
 }
 
+// C-555#183: the same readiness history must produce identical deliveries,
+// whether a bounded projection materialized the tail or the sender restarted.
+const wakeCases = (["A", "B", "C"] as const).flatMap((scenario) =>
+  [false, true].flatMap((extraScan) =>
+    [false, true].map((restart) => ({ scenario, extraScan, restart })),
+  ),
+);
+test.each(wakeCases)(
+  "wake evidence $scenario extraScan=$extraScan restart=$restart",
+  async ({ scenario, extraScan, restart }) => {
+    config = {
+      ...config,
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+      policy: { ...config.policy, max_per_minute: 1 },
+    };
+    const calls: {
+      at: string;
+      target: string | undefined;
+      message: ExtMessage;
+    }[] = [];
+    const start = () =>
+      sender({
+        adapters: {
+          fake: (target) => ({
+            async send(message) {
+              calls.push({ at: now, target, message });
+              return "sent";
+            },
+          }),
+        },
+      });
+    let active = start();
+    active.recordStatus();
+    now = matrixTime(scenario === "B" ? 121_000 : 130_000);
+    const release: (() => void)[] = [];
+    if (scenario === "C") {
+      addTitledAction(101);
+      addTitledAction(102);
+      if (extraScan) await active.tick();
+      expect(rows()).toHaveLength(extraScan ? 2 : 0);
+    } else {
+      for (let n = 101; n <= 134; n++) release.push(holdMatrixAction(n));
+      await active.tick();
+      if (extraScan) await active.tick();
+      expect(rows()).toHaveLength(extraScan ? 34 : 32);
+    }
+    expect(calls).toEqual([]);
+    if (restart) {
+      await active.stop();
+      store.close();
+      store = Store.open({ dataDir: dir });
+      active = start();
+    }
+    const wake = scenario === "B" ? 181_000 : 180_000;
+    now = matrixTime(wake);
+    for (const unlock of release.slice(scenario === "B" ? 32 : 0)) unlock();
+    const target = config.channels.fake!.credential;
+    const first = {
+      at: now,
+      target,
+      message:
+        scenario === "C"
+          ? {
+              project: project_id,
+              title: "免打扰期间 2 条待处理",
+              total: 2,
+              items: [matrixEntry(101), matrixEntry(102)],
+              url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
+            }
+          : matrixEntry(scenario === "A" ? 101 : 133),
+    };
+    await active.tick();
+    expect(calls).toEqual([first]);
+    now = matrixTime(wake + 59_999);
+    await active.tick();
+    expect(calls).toEqual([first]);
+    advance(1);
+    const expected =
+      scenario === "C"
+        ? [first]
+        : [
+            first,
+            {
+              at: now,
+              target,
+              message: {
+                title: `${scenario === "A" ? 33 : 1} 条待处理`,
+                url: config.workbench_url,
+              },
+            },
+          ];
+    await active.tick();
+    expect(calls).toEqual(expected);
+    for (let i = 0; i < 4; i++) {
+      advance(60_000);
+      await active.tick();
+    }
+    expect(calls).toEqual(expected);
+  },
+);
+
+test.each([false, true])(
+  "a missed manual release is dated by its fact even after an unready scan: duringQuiet=%s",
+  async (duringQuiet) => {
+    config = {
+      ...config,
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+    };
+    const active = sender();
+    active.recordStatus();
+    now = matrixTime(119_000);
+    holdMatrixAction(101);
+    await active.tick();
+    expect(fake.messages).toEqual([]);
+    await active.stop();
+    store.close();
+    store = Store.open({ dataDir: dir });
+    now = matrixTime(duringQuiet ? 179_999 : 180_000);
+    store.uow.run((tx) =>
+      tx.human_actions.put(project_id, {
+        ...tx.human_actions.get(project_id, "H-101")!,
+        ready_released: { at: now, by: "human", reason: "fixture" },
+      }),
+    );
+    now = matrixTime(180_000);
+    await sender().tick();
+    expect(fake.messages).toEqual([
+      duringQuiet
+        ? {
+            project: project_id,
+            title: "免打扰期间 1 条待处理",
+            total: 1,
+            items: [matrixEntry(101)],
+            url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
+          }
+        : matrixEntry(101),
+    ]);
+  },
+);
+
 test.each(matrixCells)(
   "admission matrix full=$full open=$open quietSource=$quietSource claim=$claim enqueued=$enqueued restart=$restart",
   async ({ full, open, quietSource, claim, enqueued, restart }) => {

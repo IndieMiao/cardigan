@@ -1,9 +1,9 @@
 import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
 import { selectNeedsYouDecisions } from "./commands/queries.js";
-import type { Event } from "./entities.js";
+import type { Event, ReadyCondition } from "./entities.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
-import { needsYouItemReady } from "./readiness.js";
+import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
 export const EXT_MESSAGE_DEFAULTS = {
   timeout_ms: 10_000,
@@ -23,6 +23,11 @@ export interface ExtMessageItem {
   readonly card_id?: CardId;
   readonly event_id: EventId;
   readonly created_at?: string;
+  /** Replay evidence, not dispatch authorization. No date is inferred for an unmet gate. */
+  readonly ready_evidence?: {
+    readonly basis: "source" | "release";
+    readonly at: string;
+  };
   readonly item_id: string;
   readonly kind: ExtMessageKind;
   readonly title?: string;
@@ -141,6 +146,28 @@ export function buildExtMessageDigest(
   };
 }
 
+// Compare condition facts by their fields, not JSON property insertion order.
+function releaseKey(
+  id: string,
+  condition: Event["payload"],
+): string | undefined {
+  if (!condition || typeof condition !== "object" || !("kind" in condition))
+    return;
+  const { kind } = condition;
+  if (kind === "manual") return JSON.stringify([id, kind]);
+  if (
+    (kind !== "card_delivery" && kind !== "card_merged") ||
+    !("card_id" in condition)
+  )
+    return;
+  return JSON.stringify([
+    id,
+    kind,
+    condition.card_id,
+    kind === "card_delivery" && "after" in condition ? condition.after : null,
+  ]);
+}
+
 /** Replayable projection of canonical Needs You facts, including handled items for skip auditing. */
 export function extMessageItems(
   state: CommandState,
@@ -169,21 +196,57 @@ export function extMessageItems(
   // Preserve first-match stream order, including legacy events with both references.
   const decisionSources = new Map<string, Event>();
   const actionSources = new Map<string, Event>();
+  const released = new Map<string, string>();
+  const reissued = new Set<string>();
   for (const e of state.events) {
     const p = e.payload;
     if (!p || typeof p !== "object") continue;
-    if (
-      "decision_id" in p &&
-      typeof p.decision_id === "string" &&
-      !decisionSources.has(p.decision_id)
-    )
-      decisionSources.set(p.decision_id, e);
-    if (
-      "human_action_id" in p &&
-      typeof p.human_action_id === "string" &&
-      !actionSources.has(p.human_action_id)
-    )
-      actionSources.set(p.human_action_id, e);
+    if (e.type === NEEDS_YOU_ITEM_READY && "condition" in p) {
+      const id =
+        "human_action_id" in p
+          ? p.human_action_id
+          : "decision_id" in p
+            ? p.decision_id
+            : undefined;
+      const key = typeof id === "string" && releaseKey(id, p.condition);
+      if (key && !released.has(key)) released.set(key, e.created_at);
+    }
+    // A decision may fan out to several cards in the creation transaction;
+    // those are not reissues. A later request or an explicit handoff may
+    // change visibility, so its first request no longer proves readiness.
+    if ("decision_id" in p && typeof p.decision_id === "string") {
+      const first = decisionSources.get(p.decision_id);
+      if (!first) decisionSources.set(p.decision_id, e);
+      else if (
+        e.type === "decision_requested" &&
+        (first.created_at !== e.created_at || "previous_decider" in p)
+      )
+        reissued.add(p.decision_id);
+    }
+    if ("human_action_id" in p && typeof p.human_action_id === "string") {
+      if (!actionSources.has(p.human_action_id))
+        actionSources.set(p.human_action_id, e);
+      else if (e.type === "human_action_requested")
+        reissued.add(p.human_action_id);
+    }
+  }
+  // For gated items the original request is not evidence of readiness. If a
+  // matching release fact is unavailable, leave dating to the checked scan.
+  function evidence(
+    id: string,
+    source: Event,
+    gate?: ReadyCondition,
+    manual?: string,
+  ): Pick<ExtMessageItem, "ready_evidence"> {
+    const key = gate && releaseKey(id, gate);
+    const at = manual ?? (key ? released.get(key) : undefined);
+    if (at) return { ready_evidence: { basis: "release", at } };
+    return gate ||
+      reissued.has(id) ||
+      (source.type !== "decision_requested" &&
+        source.type !== "human_action_requested")
+      ? {}
+      : { ready_evidence: { basis: "source", at: source.created_at } };
   }
   const out: ExtMessageItem[] = [];
   for (const q of state.decisions) {
@@ -201,6 +264,7 @@ export function extMessageItems(
       ...(q.card_id ? { card_id: q.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      ...evidence(q.id, event, q.ready_when),
       item_id: q.id,
       kind:
         q.trigger === "merge_confirmation" ? "merge_confirmation" : "decision",
@@ -221,6 +285,7 @@ export function extMessageItems(
       ...(h.card_id ? { card_id: h.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      ...evidence(h.id, event, h.ready_when, h.ready_released?.at),
       item_id: h.id,
       kind: "human_action",
       ...(h.handoff?.title ? { title: h.handoff.title } : {}),
@@ -241,6 +306,7 @@ export function extMessageItems(
       ...(n.card_id ? { card_id: n.card_id } : {}),
       event_id: n.id,
       created_at: n.at,
+      ready_evidence: { basis: "source", at: n.at },
       item_id: n.id,
       kind: "notice",
       title: n.question,

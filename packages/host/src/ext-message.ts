@@ -136,6 +136,10 @@ function planChannel(
   const knownOverflow = new Set<string>(
     previous ? JSON.parse(previous.ordinary) : [],
   );
+  const wasWaiting = new Set<string>(
+    previous ? JSON.parse(previous.waiting) : [],
+  );
+  const waiting: string[] = [];
   const heldOverflow: string[] = [];
   const heldQuiet: string[] = [];
   const collecting = collectingExtRateBatch(store.database, channel);
@@ -174,12 +178,20 @@ function planChannel(
     const inRange =
       through === null ||
       !afterExtWatermark(store.database, project, item.event_id, through);
+    const earlier = previousSingles.has(key);
+    const evidence = item.ready_evidence;
+    // An observation of a closed gate invalidates birth-time inference, not a
+    // later release fact. Once admitted, use the saved class, not replay time.
     const quietItem =
       remembered.has(key) ||
-      (!row &&
-        item.created_at !== undefined &&
-        extMessageQuiet(config, item.created_at));
-    const earlier = previousSingles.has(key);
+      (item.ready &&
+        !earlier &&
+        !knownOverflow.has(key) &&
+        evidence !== undefined &&
+        (evidence.basis === "release" || !wasWaiting.has(key)) &&
+        extMessageQuiet(config, evidence.at));
+    if (config.quiet_hours && (!item.ready || wasWaiting.has(key)))
+      waiting.push(key);
     const ordinaryReady = item.ready && !quietItem && (!quiet || earlier);
     const assignedRate =
       knownOverflow.has(key) ||
@@ -265,21 +277,27 @@ function planChannel(
         }
       }
     }
+    const waitingKeys = JSON.stringify(waiting);
     const members = JSON.stringify(remaining),
       overflowKeys = JSON.stringify([...overflowTail]),
       singleKeys = JSON.stringify([...singles]);
     const next =
-      !remaining.length && !overflowTail.size && !singles.size
+      !remaining.length &&
+      !overflowTail.size &&
+      !singles.size &&
+      !waiting.length
         ? null
         : previous?.members === members &&
             previous.ordinary === overflowKeys &&
-            previous.singles === singleKeys
+            previous.singles === singleKeys &&
+            previous.waiting === waitingKeys
           ? previous
           : {
               stamp: randomUUID(),
               members,
               ordinary: overflowKeys,
               singles: singleKeys,
+              waiting: waitingKeys,
             };
     return {
       channel,

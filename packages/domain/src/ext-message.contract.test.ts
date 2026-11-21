@@ -200,6 +200,70 @@ test("projection follows current handled/readiness state, preferred title and al
     extMessageItems({ ...state, cards: [] }, project).every((i) => i.sensitive),
   ).toBe(true);
 });
+test("readiness replay uses the matching gate fact, never an older request or another gate; evidence is not exported", () => {
+  const state = fixture();
+  const card_id = state.cards[0]!.id;
+  const gate = { kind: "card_merged" as const, card_id };
+  const at = "2026-01-01T00:02:10.000Z";
+  const origin = event(
+    "human_action_requested",
+    { human_action_id: action.id },
+    1,
+  );
+  const fact = {
+    ...event(
+      "needs_you_item_ready",
+      {
+        human_action_id: action.id,
+        condition: { card_id, kind: "card_merged" },
+      },
+      2,
+    ),
+    created_at: at,
+  };
+  const project = (h: HumanAction, events: Event[]) =>
+    extMessageItems(
+      {
+        ...state,
+        cards: state.cards.map((c) => ({ ...c, status: "done" as const })),
+        human_actions: [h],
+        events,
+      },
+      state.project_id,
+    )[0]!;
+  expect(project(action, [origin]).ready_evidence).toEqual({
+    basis: "source",
+    at: origin.created_at,
+  });
+  const gated = { ...action, ready_when: gate };
+  expect(project(gated, [origin])).toMatchObject({ ready: true });
+  expect(project(gated, [origin]).ready_evidence).toBeUndefined();
+  expect(
+    project({ ...action, ready_when: { kind: "card_delivery", card_id } }, [
+      origin,
+      fact,
+    ]).ready_evidence,
+  ).toBeUndefined();
+  const ready = project(gated, [origin, fact]);
+  expect(ready.ready_evidence).toEqual({ basis: "release", at });
+  expect(
+    project(
+      {
+        ...action,
+        ready_when: { kind: "manual" },
+        ready_released: { by: "human", reason: "fixture", at },
+      },
+      [origin],
+    ).ready_evidence,
+  ).toEqual({ basis: "release", at });
+  expect(
+    project(action, [origin, { ...origin, id: fact.id, seq: 2 }])
+      .ready_evidence,
+  ).toBeUndefined();
+  expect(
+    buildExtMessage(ready, "https://workbench.invalid"),
+  ).not.toHaveProperty("ready_evidence");
+});
 test("projection preserves the first source in stream order and canonical handoff groups", () => {
   const second = { ...decision, id: id("decision", 2), key: id("decision", 2) };
   const state = {

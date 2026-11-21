@@ -44,8 +44,9 @@ export function hasExtMessage(
 }
 export interface ExtQuietOverflow {
   readonly stamp: string;
-  readonly members: string; // Quiet tail. All three sets contain item keys, never message content.
+  readonly members: string; // Quiet tail. All sets contain item keys, never message content.
   readonly ordinary: string; // Known overflow not yet materialized in the outbox.
+  readonly waiting: string; // Observed unready, even outside the bounded write batch.
   readonly singles: string; // Ordinary prefix, not a reservation of channel budget.
 }
 /** Only read the membership document in the read snapshot. */
@@ -56,7 +57,7 @@ export function extQuietOverflow(
 ): ExtQuietOverflow | null {
   const row = prepare(
     db,
-    "SELECT stamp,members,ordinary,singles FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+    "SELECT stamp,members,ordinary,singles,waiting FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
   ).get(project, channel);
   return row
     ? {
@@ -64,6 +65,7 @@ export function extQuietOverflow(
         members: String(row.members),
         ordinary: String(row.ordinary),
         singles: String(row.singles),
+        waiting: String(row.waiting),
       }
     : null;
 }
@@ -93,8 +95,8 @@ export function saveExtQuietOverflow(
   } else {
     prepare(
       db,
-      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary,singles) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary,singles=excluded.singles`,
+      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary,singles,waiting) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary,singles=excluded.singles,waiting=excluded.waiting`,
     ).run(
       project,
       channel,
@@ -102,6 +104,7 @@ export function saveExtQuietOverflow(
       checkpoint.members,
       checkpoint.ordinary,
       checkpoint.singles,
+      checkpoint.waiting,
     );
   }
 }
