@@ -22,6 +22,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { stalledCache } from "../test-support/dispatch.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { standingResolver } from "./assembly.js";
 import { resolveServerConfig } from "./config.js";
@@ -609,7 +610,12 @@ test("500-minute-old watchdog attention resolves after the Run finishes or the A
   f.session(f.target.assignment, false);
   f.skipEvents();
   // Preserve the legacy alert scenario independently of C-54's optional reaper.
-  const d = dispatcher({ inactivityGraceMs: 1, inactiveCancelAfterMs: null });
+  let harnessActivity = stalledCache(f.state());
+  const d = dispatcher({
+    inactivityGraceMs: 1,
+    inactiveCancelAfterMs: null,
+    harnessActivity: (project, id) => harnessActivity(project, id),
+  });
   f.advance(500 * 60000);
   await d.tick();
   expect(f.notes()[0]?.status).toBe("needs_attention");
@@ -619,6 +625,7 @@ test("500-minute-old watchdog attention resolves after the Run finishes or the A
   expect(f.notes()[0]?.status).toBe("resolved");
   const another = f.create();
   f.session(another.assignment, false);
+  harnessActivity = stalledCache(f.state());
   f.skipEvents();
   f.advance(500 * 60000);
   await d.tick();
