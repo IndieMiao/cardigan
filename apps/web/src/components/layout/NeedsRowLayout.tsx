@@ -63,6 +63,8 @@ export interface NeedsRowProps {
   readonly title: ReactNode;
   /** One-line plain summary under the title. */
   readonly summary?: ReactNode;
+  /** C-503: why the row's direct action was refused; stays visible when folded. */
+  readonly alert?: ReactNode;
   readonly time?: ReactNode;
   readonly status?: ReactNode;
   /** The single primary action; always the right-most control. */
@@ -85,6 +87,7 @@ export function NeedsRow({
   ids,
   title,
   summary,
+  alert,
   time,
   status,
   action,
@@ -130,6 +133,11 @@ export function NeedsRow({
             {title}
           </h3>
           {summary && <p className={styles.summary}>{summary}</p>}
+          {alert && (
+            <div className={styles.alert} role="alert">
+              {alert}
+            </div>
+          )}
         </div>
         <div className={styles.trail}>
           {time && <span className={styles.time}>{time}</span>}

@@ -62,6 +62,7 @@ import {
   TableRow,
 } from "../components/ui/table.js";
 import { CardDetailPage } from "../lazy-pages.js";
+import { guardLeave } from "../leave-guard.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
 import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
@@ -757,7 +758,8 @@ export function CardListPage({
         }
         open={openCardId !== undefined}
         onOpenChange={(open) => {
-          if (!open) closeCard();
+          // C-503: an unsent draft in the drawer asks before it closes.
+          if (!open) guardLeave(closeCard);
         }}
         title={
           openCardId ? (

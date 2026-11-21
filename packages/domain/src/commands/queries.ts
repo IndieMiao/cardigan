@@ -1,5 +1,6 @@
 import {
   cardCriticalPathLengths,
+  cardDependenciesAllowStart,
   cardDependencyView,
 } from "../card-dependencies.js";
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
@@ -40,11 +41,16 @@ import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
+  currentStoryProposal,
+  storyProposalConfirmable,
+} from "../story-discussion.js";
+import {
   builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
+import { dependencyState } from "./card-dependencies.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -702,10 +708,12 @@ export function listNeedsYouCounts(
       (q) => decisionSection(state, q),
       false,
     );
-    const decisionCount = data.decisions.filter(
+    const decisionsOnly = data.decisions.filter(
       (s) => s === "decisions",
     ).length;
-    const mergeCount = data.decisions.length - decisionCount;
+    // Story proposals count with decisions and never against merges.
+    const decisionCount = decisionsOnly + data.story_proposals.length;
+    const mergeCount = data.decisions.length - decisionsOnly;
     const humanActions = data.human_actions.filter(
       (h) => h.triage !== "host",
     ).length;
@@ -713,7 +721,11 @@ export function listNeedsYouCounts(
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
     return {
-      total_pending: data.decisions.length + humanActions + attention,
+      total_pending:
+        data.decisions.length +
+        data.story_proposals.length +
+        humanActions +
+        attention,
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
         merges: {
@@ -978,6 +990,9 @@ function selectNeedsYou<T>(
         ),
       { details: includeDetails },
     ).map(view),
+    // C-503: the current, unconfirmed proposal of each open story waits on the
+    // human's one-click confirmation; no decision or default stands in for it.
+    story_proposals: includes("decisions") ? pendingStoryProposals(d) : [],
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(
@@ -1074,6 +1089,42 @@ function selectNeedsYou<T>(
             })),
         ],
   };
+}
+
+/**
+ * Stories whose latest proposal the human can confirm right now: the same
+ * open, scheduled, unpaused and startable conditions `confirm_story_proposal`
+ * checks, so the list never offers an action known to fail.
+ */
+export function pendingStoryProposals(d: CommandDraft) {
+  let dependencies: ReturnType<typeof dependencyState> | undefined;
+  const startable = (card: Card) => {
+    if (!card.depends_on_cards?.length || card.early_start) return true;
+    dependencies ??= dependencyState(d);
+    return cardDependenciesAllowStart(dependencies, card);
+  };
+  return d.list("cards").flatMap((card) => {
+    const proposal = currentStoryProposal(card.story);
+    return card.story &&
+      proposal &&
+      storyProposalConfirmable(card) &&
+      startable(card)
+      ? [
+          {
+            card_id: card.id,
+            card_title: card.title,
+            version: proposal.version,
+            entry_id: proposal.entry_id,
+            submitted_at: proposal.submitted_at,
+            children: proposal.children.map((c) => ({
+              title: c.title,
+              template_id: c.template_id,
+              owner_role: c.owner_role,
+            })),
+          },
+        ]
+      : [];
+  });
 }
 
 /** Persist the audit and return the item from the same fresh transaction. */
