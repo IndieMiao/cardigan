@@ -839,10 +839,30 @@ test("kept shells are observed without operator requests or repeated signals", a
     ).toHaveLength(0);
     expect(f.store.verifyToken(f.token.token)).toBeTruthy();
     f.runtime.observe_retirement.mockResolvedValue({
+      ok: false,
+      error: { code: "runtime_conflict", message: "owner changed" },
+    });
+    for (const [minute, count] of [
+      [12, 0],
+      [18, 0],
+      [25, 1],
+      [34, 1],
+    ]) {
+      f.setTime(`2030-01-01T02:${minute}:00Z`);
+      await f.tick();
+      expect(
+        f
+          .state()
+          .events.filter((e) => e.type === "session_maintenance_attention"),
+      ).toHaveLength(count);
+    }
+    expect(retire).toHaveBeenCalledOnce();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    f.runtime.observe_retirement.mockResolvedValue({
       ok: true,
       value: "exited",
     });
-    f.setTime("2030-01-01T02:12:00Z");
+    f.setTime("2030-01-01T03:00:00Z");
     await f.tick();
     expect(f.state().assignments[0]?.runtime_ref).toBeNull();
   } finally {

@@ -6,6 +6,7 @@ import { ToolError, workerEvidence } from "@cardigan/mcp-server";
 import {
   agentProcessCommand,
   type ExecutionConfig,
+  managedLoopback,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 
@@ -80,10 +81,15 @@ export async function inspectWorker(
       (ref.target && !runtimeOwnsRef(execution, ref))
     )
       throw unavailable("local_session_not_bound");
-    const owner = await observeTurnOwner(runtime, ref, {
-      project_id: project,
-      assignment_id: a.id,
-    });
+    const owner = await observeTurnOwner(
+      runtime,
+      ref,
+      {
+        project_id: project,
+        assignment_id: a.id,
+      },
+      false,
+    );
     if (!owner?.ok || owner.value === "unknown")
       throw unavailable("local_terminal_unconfirmed");
     return {
@@ -150,11 +156,7 @@ export async function inspectWorker(
     live,
     local,
     managed_loopback:
-      local &&
-      target.generation === "legacy" &&
-      platform === "linux" &&
-      (execution.user ?? "agent") === "agent" &&
-      ["localhost", "127.0.0.1", "::1"].includes(execution.host ?? "localhost"),
+      local && platform === "linux" && managedLoopback(execution),
     assignment: a.id,
     session: target.session,
     root: execution.agentRoot,

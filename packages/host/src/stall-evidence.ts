@@ -128,9 +128,13 @@ export async function observeTurnOwner(
   runtime: Runtime,
   ref: RuntimeRef,
   identity: RetirementIdentity,
+  systemTurn = true,
 ) {
   const exact = await runtime
-    .observe_retirement?.(ref, identity)
+    .observe_retirement?.(
+      ref,
+      systemTurn ? { ...identity, system_finished_turn: true } : identity,
+    )
     .catch(() => undefined);
   if (
     exact &&
@@ -179,9 +183,12 @@ export async function stallEvidence(
   const ownerConfirmed =
     owner?.ok && (owner.value === "alive" || owner.value === "exited");
   const unknownOrIdle =
-    !observed?.ok ||
-    ["unknown", "idle", "done"].includes(observed.value.agent) ||
-    observed.value.process === "exited";
+    (!observed?.ok &&
+      observed?.error.code !== "runtime_conflict" &&
+      observed?.error.code !== "invalid_launch") ||
+    (observed?.ok &&
+      (["unknown", "idle", "done"].includes(observed.value.agent) ||
+        observed.value.process === "exited"));
   return {
     ...(systemTurn
       ? { terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed" }

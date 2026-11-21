@@ -12,6 +12,7 @@ import {
   hostOpsPending,
   pendingHostOpsActions,
 } from "../host-ops.js";
+import type { EventId } from "../ids.js";
 import { runsOf } from "../run-index.js";
 import {
   type CommandDraft,
@@ -162,6 +163,7 @@ export function beginSystemTurnRestart(
   p: {
     assignment_id: Assignment["id"];
     cause_id: string;
+    review_trigger_id?: EventId;
     snapshot: NonNullable<HostOpsExecution["snapshot"]>;
   },
   ports: CommandPorts,
@@ -199,6 +201,9 @@ export function beginSystemTurnRestart(
       target_id: a.id,
       reason: "系统代结束的轮次门铃超期，核对归属后换会话。",
       dispatch_stall_id: p.cause_id,
+      ...(p.review_trigger_id
+        ? { review_trigger_id: p.review_trigger_id }
+        : {}),
       snapshot: p.snapshot,
     });
   });

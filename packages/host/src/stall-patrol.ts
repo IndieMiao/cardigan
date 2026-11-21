@@ -202,14 +202,15 @@ export class StallPatrol {
   ) {
     const project = state.project_id;
     const a = state.assignments.find((a) => a.id === stall.assignment_id);
-    const handled = (s: CommandState) =>
-      ["host_ops_action_taken", "bell_turn_recovery_failed"].some((type) =>
-        eventsOfType(s.events, type).some(
-          (e) =>
-            (e.payload as { system_finished_run_id?: string })
-              .system_finished_run_id === stall.system_finished_run_id,
-        ),
+    // A failed observation did not acquire the stop fence. Remember the
+    // alert separately so fresh evidence can still recover the original bell.
+    const recorded = (s: CommandState, type: string) =>
+      eventsOfType(s.events, type).some(
+        (e) =>
+          (e.payload as { system_finished_run_id?: string })
+            .system_finished_run_id === stall.system_finished_run_id,
       );
+    const handled = (s: CommandState) => recorded(s, "host_ops_action_taken");
     if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
     const view = await this.evidence(state, a, stall);
     let reason =
@@ -245,7 +246,14 @@ export class StallPatrol {
         const effect = beginSystemTurnRestart(
           fresh,
           { kind: "system", project_id: project },
-          { assignment_id: a.id, cause_id: stall.cause_id, snapshot: launch },
+          {
+            assignment_id: a.id,
+            cause_id: stall.cause_id,
+            snapshot: launch,
+            ...(row.review_trigger_id
+              ? { review_trigger_id: row.review_trigger_id }
+              : {}),
+          },
           { clock: this.clock, ids: tx.ids },
         );
         if (effect.ok) {
@@ -254,6 +262,7 @@ export class StallPatrol {
         }
         reason = effect.error.message;
       }
+      if (recorded(fresh, "bell_turn_recovery_failed")) return;
       const event = {
         id: tx.ids.nextEventId(),
         seq: tx.ids.nextEventSequence(project, stall.card_id ?? undefined),

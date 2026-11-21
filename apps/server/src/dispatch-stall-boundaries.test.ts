@@ -16,6 +16,7 @@ import { moveNotification, recordNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
 import { setup } from "../test-support/dispatch-stalls.js";
+import { loopbackFixture } from "../test-support/loopback-retirement.js";
 import { Dispatcher } from "./dispatch.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 
@@ -345,6 +346,149 @@ function endedReviewer(discussWhileWaiting = false) {
   return { f, a, card, item, notice, tree, run };
 }
 
+test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once from worker-side evidence", async () => {
+  const { f, a, run, notice } = endedReviewer();
+  const ref = f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id),
+      old = tx.runs.get(f.project, run.id);
+    if (!owner?.runtime_ref || !old) throw new Error("missing reviewer");
+    const ref = {
+      ...owner.runtime_ref,
+      runtime_machine: "cardigan-agent",
+      terminal_ref: "cardigan-agent/t2",
+      target: {
+        machine_id: "local",
+        project_id: f.project,
+        generation: "legacy",
+        session: "fixture",
+        fingerprint: "a".repeat(64),
+      },
+      launch_generation: {
+        run_id: run.id,
+        generation: "cad0f00d-aaaa-4bbb-8000-aaaaaaaaaaaa",
+      },
+    };
+    tx.assignments.put(f.project, { ...owner, runtime_ref: ref });
+    tx.runs.put(f.project, { ...old, recovery_runtime: ref });
+    return ref;
+  });
+  const worker = await loopbackFixture(f.dataDir, ref, a.id);
+  f.runtime.observe_retirement = worker.runtime.observe_retirement.bind(
+    worker.runtime,
+  );
+  f.runtime.retire_idle = worker.runtime.retire_idle.bind(worker.runtime);
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "unknown", observed_seq: 1 },
+  });
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    const row = async () =>
+      (await f.view()).dispatch_stalls.find((s) => s.assignment_id === a.id);
+    for (const evidence of ["conflict", "busy", "incomplete"]) {
+      worker.sample(evidence);
+      expect(await row()).toMatchObject({
+        workspace: "clean",
+        can_restart: false,
+      });
+      await f.service.tick();
+      f.advance(30_000);
+    }
+    expect(worker.signals).toEqual([]);
+    worker.sample("matched");
+    expect(await row()).toMatchObject({
+      workspace: "clean",
+      process_state: "alive",
+      terminal_owner: "confirmed",
+      can_restart: true,
+    });
+    await vi.waitFor(
+      async () => {
+        await f.service.tick();
+        expect(
+          f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+        ).toHaveLength(1);
+      },
+      { timeout: 10000 },
+    );
+    expect(worker.signals).toEqual(["TERM"]);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    await dispatcher.tick();
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id)?.status,
+    ).toBe("belled");
+  } finally {
+    await dispatcher.close();
+  }
+}, 20000);
+
+test.each(["before request", "before signal", "after signal"])(
+  "ordinary restart respects a reviewer pause %s",
+  async (when) => {
+    const { f, a, item } = endedReviewer(when === "before request");
+    const request = () =>
+      f.service.tools.execute(f.context, "host_ops_restart_assignment", {
+        target_id: a.id,
+        reason: "fixture",
+        idempotency_key: "plain-restart",
+      });
+    const pause = () =>
+      f.store.uow.run((tx) => {
+        const w = tx.work_items.get(f.project, item.id);
+        if (!w) throw new Error("missing verifier");
+        tx.work_items.put(f.project, { ...w, status: "waiting_decision" });
+      });
+    if (when === "before request") {
+      await expect(request()).rejects.toThrow(/等待拍板/);
+      expect(
+        f.state().events.some((e) => e.type === "host_ops_action_taken"),
+      ).toBe(false);
+    } else {
+      await request();
+      if (when === "before signal") pause();
+      else {
+        const release = vi.mocked(f.runtime.release).getMockImplementation();
+        if (!release) throw new Error("missing release");
+        vi.mocked(f.runtime.release).mockImplementationOnce(async (...args) => {
+          pause();
+          return release(...args);
+        });
+      }
+      await f.service.tick();
+      expect(
+        f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+      ).toMatchObject([
+        {
+          payload: {
+            result:
+              when === "before signal"
+                ? "withdrawn_review_wait"
+                : "stopped_without_restart",
+          },
+        },
+      ]);
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          ),
+      ).toHaveLength(0);
+      expect(f.state().work_items.find((w) => w.id === item.id)?.status).toBe(
+        "waiting_decision",
+      );
+    }
+    expect(f.runtime.release).toHaveBeenCalledTimes(
+      when === "after signal" ? 1 : 0,
+    );
+  },
+);
+
 test("a paused reviewer's directed instruction recovers on independently proven local exit, not on an offline core alone", async () => {
   const { f, a, item, run, notice } = endedReviewer(true);
   const ref = f.store.uow.run((tx) => {
@@ -382,6 +526,17 @@ test("a paused reviewer's directed instruction recovers on independently proven 
       can_restart: false,
       terminal_owner: "unconfirmed",
     });
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
+      ).toHaveLength(1);
+    });
+    await f.service.tick();
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(0);
+    f.advance(30_000); // Next scheduled patrol, same outstanding notice.
     proof.mockResolvedValue({ ok: true, value: true });
     expect(await row()).toMatchObject({
       can_restart: true,
@@ -394,6 +549,12 @@ test("a paused reviewer's directed instruction recovers on independently proven 
         f.state().events.some((e) => e.type === "host_ops_action_finished"),
       ).toBe(true);
     });
+    expect(
+      f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
+    ).toHaveLength(1);
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(1);
     expect(proof).toHaveBeenCalledWith(ref, {
       project_id: f.project,
       assignment_id: a.id,

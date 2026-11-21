@@ -135,7 +135,8 @@ def socket_path(home, session, system):
     return Path(home, '.local/state/herdr-core', session, session + '.sock')
 
 
-def terminals(home, session, labels, pinned, system):
+@contextlib.contextmanager
+def core_rpc(home, session, system):
     path = socket_path(home, session, system)
     st = path.lstat()
     if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid() or path.resolve() != path:
@@ -160,49 +161,81 @@ def terminals(home, session, labels, pinned, system):
             hello = rpc('hello', dict(generation=1, framed=False))
             if hello.get('generation') != 1 or hello.get('framed') is not False:
                 raise ValueError()
-            result, processes = [], []
-            incomplete = False
-            for t in rpc('terminal.list', dict(all=True, labels=labels))['terminals']:
-                address = t['address']
-                if (not re.fullmatch(r't[0-9a-z]{1,12}', address) or (pinned and address != pinned)
-                        or not all(t['labels'].get(k) == v for k, v in labels.items())):
-                    continue
-                def same_terminal(other):
-                    return all(other.get(k) == t.get(k) for k in ('address', 'labels', 'created_ms', 'pid', 'state'))
-                def pids(term):
-                    return {p for p in (term.get('pid'), (term.get('foreground') or {}).get('pid'))
-                            if type(p) is int and p > 0 and term['state'] == 'live'}
-                def observe(pid):
-                    return native['identity'](session, pid, address, os.getpgid(pid))
-                before = {p: optional(lambda: observe(p)) for p in pids(t)}
-                # Bracket attribution with a native birth identity on both sides.
-                # The first confirmation occurs *after* recording process births.
-                confirmed = rpc('terminal.get', dict(terminal=address)) if before else t
-                if not same_terminal(confirmed):
+            yield rpc
+
+
+def retirement_terminal(c):
+    # Narrow private read for the controller's existing pidfd retirement path.
+    # Read the bound worker socket, never infer exit from an absent address.
+    user = pwd.getpwuid(os.getuid())
+    if (os.getuid() == 0 or os.geteuid() != os.getuid() or platform.system() != 'Linux'
+            or not re.fullmatch(r'[a-zA-Z0-9_-]{1,48}', c['session'])
+            or not re.fullmatch(r't[0-9a-z]{1,12}', c['terminal'])):
+        raise ValueError()
+    managed_loopback_account(c, user)
+    with core_rpc(user.pw_dir, c['session'], 'linux') as rpc:
+        t = rpc('terminal.get', dict(terminal=c['terminal']))
+    labels = dict(cardigan='1', project=c['project'], assignment=c['assignment'],
+                  run=c['launch_run'], generation=c['generation'])
+    if (t['address'] != c['terminal'] or not all(t['labels'].get(k) == v for k, v in labels.items())
+            or t['state'] not in ('live', 'finished') or type(t.get('created_ms')) != int):
+        raise ValueError()
+    # A live terminal needs positive process evidence; a shell or foreign uid
+    # is never a signal target. The pidfd helper checks birth and marker again.
+    if t['state'] == 'live' and (type(t.get('pid')) != int or t['pid'] <= 1
+                                or os.stat('/proc/' + str(t['pid'])).st_uid != os.getuid()):
+        raise ValueError()
+    activity = (t.get('status') or {}).get('state', 'unknown')
+    return dict(address=t['address'], labels=labels, state=t['state'], created_ms=t['created_ms'],
+                keep=t.get('keep', False), pid=t.get('pid'),
+                status=dict(state=activity if activity in ('unknown', 'idle', 'done') else 'blocked'))
+
+
+def terminals(home, session, labels, pinned, system):
+    with core_rpc(home, session, system) as rpc:
+        result, processes = [], []
+        incomplete = False
+        for t in rpc('terminal.list', dict(all=True, labels=labels))['terminals']:
+            address = t['address']
+            if (not re.fullmatch(r't[0-9a-z]{1,12}', address) or (pinned and address != pinned)
+                    or not all(t['labels'].get(k) == v for k, v in labels.items())):
+                continue
+            def same_terminal(other):
+                return all(other.get(k) == t.get(k) for k in ('address', 'labels', 'created_ms', 'pid', 'state'))
+            def pids(term):
+                return {p for p in (term.get('pid'), (term.get('foreground') or {}).get('pid'))
+                        if type(p) is int and p > 0 and term['state'] == 'live'}
+            def observe(pid):
+                return native['identity'](session, pid, address, os.getpgid(pid))
+            before = {p: optional(lambda: observe(p)) for p in pids(t)}
+            # Bracket attribution with a native birth identity on both sides.
+            # The first confirmation occurs *after* recording process births.
+            confirmed = rpc('terminal.get', dict(terminal=address)) if before else t
+            if not same_terminal(confirmed):
+                incomplete = True
+                continue
+            tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
+            rows = {p: optional(lambda: process(p)) for p in pids(confirmed) & before.keys()
+                    if before[p] and before[p]['uid'] == os.getuid()}
+            after = rpc('terminal.get', dict(terminal=address))
+            if not same_terminal(after):
+                incomplete = True
+                continue
+            for p in pids(after):
+                birth = before.get(p)
+                if not birth or optional(lambda: observe(p)) != birth:
                     incomplete = True
-                    continue
-                tail = screen(rpc('terminal.read', dict(terminal=address, lines=0))['text'])
-                rows = {p: optional(lambda: process(p)) for p in pids(confirmed) & before.keys()
-                        if before[p] and before[p]['uid'] == os.getuid()}
-                after = rpc('terminal.get', dict(terminal=address))
-                if not same_terminal(after):
-                    incomplete = True
-                    continue
-                for p in pids(after):
-                    birth = before.get(p)
-                    if not birth or optional(lambda: observe(p)) != birth:
+                elif birth['uid'] == os.getuid():
+                    if rows.get(p):
+                        processes.extend(rows[p])
+                    else:
                         incomplete = True
-                    elif birth['uid'] == os.getuid():
-                        if rows.get(p):
-                            processes.extend(rows[p])
-                        else:
-                            incomplete = True
-                activity = (after.get('status') or {}).get('state')
-                result.append(dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail))
-                if len(result) == 4:
-                    break
-            # Keep verified rows; never turn an unreadable candidate into proof of absence.
-            return result, (None if incomplete and not processes else processes)
+            activity = (after.get('status') or {}).get('state')
+            result.append(dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail))
+            if len(result) == 4:
+                break
+        # Keep verified rows; never turn an unreadable candidate into proof of absence.
+        return result, (None if incomplete and not processes else processes)
 
 
 def process(pid):
@@ -316,6 +349,7 @@ def main(c):
 if __name__ == '__main__':
     try:
         signal.alarm(10)
-        print(json.dumps(main(json.loads(sys.stdin.buffer.read(8192)))))
+        print(json.dumps(retirement_terminal(json.loads(sys.argv[1])) if len(sys.argv) == 2
+                         else main(json.loads(sys.stdin.buffer.read(8192)))))
     except Exception:
         sys.exit(1)  # no tracebacks, hostnames, paths or raw output on failure

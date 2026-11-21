@@ -26,6 +26,7 @@ import type {
   RunId,
 } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewDiscussionInstruction } from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { lastUpstreamInactivity } from "../upstream-health.js";
 import {
@@ -48,12 +49,21 @@ export interface HostOpsActionParams {
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
   readonly dispatch_stall_id?: string;
+  /** Host-resolved original notification; never an operator-supplied event. */
+  readonly review_trigger_id?: EventId;
   readonly tool: HostOpsExecutionTool;
   readonly context_usage?: ContextObservation;
   readonly context_stale_after_ms?: number;
   readonly target_id: AssignmentId | RunId;
   readonly reason: string;
   readonly snapshot?: HostOpsExecution["snapshot"];
+}
+
+function pausedReviewer(state: CommandState, id: AssignmentId) {
+  const item = state.work_items.find((w) => w.assignment_id === id);
+  return item?.kind === "verify" && item.status === "waiting_decision"
+    ? item
+    : undefined;
 }
 
 function target(d: CommandDraft, p: HostOpsActionParams) {
@@ -98,6 +108,20 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
       (a.scope === "standing" && a.role_id === "pm"),
     "unauthorized",
     "Target must be a standing PM",
+  );
+  // A stall is independently revalidated against its exact notification by
+  // the host before intent and signal. A generic restart has no such trigger.
+  const wait = pausedReviewer(d.state, a.id);
+  ensure(
+    p.tool === "host_ops_cancel_run" ||
+      !wait ||
+      (p.dispatch_stall_id &&
+        reviewDiscussionInstruction(
+          wait,
+          eventById(d.state.events, p.review_trigger_id),
+        )),
+    "illegal_transition",
+    "审核正在等待拍板，不能重启",
   );
   if (a.scope === "work_item") {
     const w = d.work(a.work_item_id);
@@ -401,9 +425,12 @@ export function finishHostOpsAction(
     const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
+    const wait = pausedReviewer(d.state, a.id);
+    const trigger = eventById(state.events, currentStall?.review_trigger_id);
     if (
       action.tool !== "host_ops_cancel_run" &&
       (!action.dispatch_stall_id || currentStall) &&
+      (!wait || reviewDiscussionInstruction(wait, trigger)) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
@@ -425,7 +452,7 @@ export function finishHostOpsAction(
             : {}),
           kind: previous?.kind ?? "followup",
         },
-        eventById(state.events, currentStall?.review_trigger_id),
+        trigger,
       );
     }
     const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
@@ -436,6 +463,7 @@ export function finishHostOpsAction(
         : card?.id,
       {
         action_id,
+        ...(!run && wait ? { result: "stopped_without_restart" } : {}),
         ...(run && currentStall?.review_trigger_id
           ? { stall_review_trigger: currentStall.review_trigger_id }
           : {}),
@@ -758,5 +786,53 @@ export function withdrawUnstartedStallRestart(
       ...(reason ? { reason } : {}),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
+  });
+}
+
+/** A pause after acceptance wins until the first release. After that point
+ * keep the fence and settle confirmed exit (without queuing a formal review). */
+export function guardReviewRestartStop(
+  state: CommandState,
+  actor: Actor,
+  actionId: HostOpsExecution["action_id"],
+  ports: CommandPorts,
+  beforeRelease: boolean,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === actionId,
+    );
+    if (
+      action?.tool !== "host_ops_restart_assignment" ||
+      action.dispatch_stall_id
+    )
+      return false;
+    if (reviewRestartStopStarted(state, actionId)) return !beforeRelease;
+    if (pausedReviewer(state, action.assignment_id)) {
+      d.emit("host_ops_action_finished", undefined, {
+        action_id: actionId,
+        assignment_id: action.assignment_id,
+        result: "withdrawn_review_wait",
+      });
+      return false;
+    }
+    if (beforeRelease)
+      d.emit("host_ops_action_deferred", undefined, {
+        action_id: actionId,
+        assignment_id: action.assignment_id,
+        reason: "review_restart_stop_started",
+      });
+    return true;
+  });
+}
+export function reviewRestartStopStarted(
+  state: CommandState,
+  actionId: string,
+) {
+  return eventsOfType(state.events, "host_ops_action_deferred").some((e) => {
+    const p = e.payload as { action_id: string; reason: string };
+    return (
+      p.action_id === actionId && p.reason === "review_restart_stop_started"
+    );
   });
 }

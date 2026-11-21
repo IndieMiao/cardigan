@@ -70,7 +70,7 @@ export interface Runtime {
   /** Read-only. Only a finished terminal with this exact identity proves exit. */
   observe_retirement?(
     ref: RuntimeRef,
-    identity: RetirementIdentity,
+    identity: RetirementIdentity & { readonly system_finished_turn?: true },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
   /** Read-only local kernel check for an already queued Run whose core is gone.
    * A missing socket alone never proves the original terminal process exited. */
