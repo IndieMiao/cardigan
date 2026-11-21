@@ -1506,10 +1506,10 @@ function ProviderFields({
                     })
                   }
                 >
-                  {/* A key secrets.env no longer has stays visible, not choosable. */}
+                  {/* A key secrets.env does not have yet stays visible, not choosable; “填写” sets it. */}
                   {!keys.includes(key) && (
                     <option value={key} disabled>
-                      {key}（已失效）
+                      {key}（未设置）
                     </option>
                   )}
                   {keys.map((k) => (
