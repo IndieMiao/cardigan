@@ -1,5 +1,10 @@
 import { join } from "node:path";
-import type { Assignment, CommandState, Runtime } from "@cardigan/domain";
+import {
+  type Assignment,
+  type CommandState,
+  idleWakeGuard,
+  type Runtime,
+} from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
   agentProcessCommand,
@@ -129,14 +134,13 @@ export async function stallEvidence(
       : undefined,
   ]);
   const terminal_state = observed?.ok ? observed.value.agent : null;
+  // A blocked/error/unknown CLI may still be in its old turn, regardless of MCP silence.
   const safeTerminal =
-    !a.runtime_ref ||
+    (!a.runtime_ref &&
+      !a.session_ref &&
+      a.runtime_state === "not_provisioned") ||
     (observed?.ok &&
-      (observed.value.process === "exited" ||
-        (observed.value.process === "alive" &&
-          ["idle", "done", "blocked", "error"].includes(
-            observed.value.agent,
-          ))));
+      (observed.value.process === "exited" || idleWakeGuard(observed.value)));
   return {
     workspace,
     terminal_state,

@@ -11,7 +11,12 @@ import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
 
-test("guard refusal logs its state once; resume without queue and pending notification become actionable at the threshold", async () => {
+test.each(["unknown", "blocked", "error"] as const)(
+  "C-548: a system-ended turn on alive/%s hands off once, but silence does not authorize replacement",
+  checkStalledTurn,
+);
+
+async function checkStalledTurn(agent: "unknown" | "blocked" | "error") {
   vi.stubEnv("CARDIGAN_DISPATCH_STALL_MS", "600000");
   const f = setup();
   const a = f.target.assignment;
@@ -60,11 +65,23 @@ test("guard refusal logs its state once; resume without queue and pending notifi
     abortDispatch(s, actor, { run_id: followup.id, reason: "fixture" }, p),
   );
   f.skipEvents();
-  f.advance(1);
+  const path = join(f.dataDir, "agent", "worktrees", f.project, a.id);
+  mkdirSync(path, { recursive: true });
+  execFileSync("git", ["init", "-q", path]);
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id);
+    if (!owner) throw new Error("missing target");
+    tx.assignments.put(f.project, {
+      ...owner,
+      worktree_path: path,
+      last_mcp_activity_at: f.clock.now(),
+    });
+  });
+  f.advance(60 * 60_000);
   const info = vi.spyOn(console, "info").mockImplementation(() => {});
   vi.mocked(f.runtime.status).mockResolvedValue({
     ok: true,
-    value: { process: "alive", agent: "blocked", observed_seq: 1 },
+    value: { process: "alive", agent, observed_seq: 1 },
   });
   const resumed = f.event(
     "work_item_resume_requested",
@@ -77,7 +94,7 @@ test("guard refusal logs its state once; resume without queue and pending notifi
   await dispatcher.tick();
   expect(
     info.mock.calls.filter(([s]) =>
-      String(s).includes("wake_guard:alive/blocked"),
+      String(s).includes(`wake_guard:alive/${agent}`),
     ),
   ).toHaveLength(1);
   f.advance(599999);
@@ -85,6 +102,24 @@ test("guard refusal logs its state once; resume without queue and pending notifi
   f.advance(1);
   await dispatcher.tick(); // C-546 hands the refused notification to operations at the same deadline.
   expect(f.notes().some((n) => n.status === "needs_attention")).toBe(true);
+  const handoffs = f
+    .state()
+    .events.filter((e) => e.type === "bell_wake_escalated");
+  expect(handoffs).toMatchObject([
+    {
+      payload: {
+        assignment_id: a.id,
+        reason: "system_finished_turn",
+        activity_source: `alive/${agent}`,
+        activity_forwarded_to: f.ops.id,
+      },
+    },
+  ]);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.project, assignment_id: f.ops.id })
+      .filter((n) => n.event_id === handoffs[0]?.id),
+  ).toHaveLength(1);
   const rows = (await f.view()).dispatch_stalls;
   expect(rows).toEqual(
     expect.arrayContaining(
@@ -94,14 +129,34 @@ test("guard refusal logs its state once; resume without queue and pending notifi
           assignment_id: a.id,
           card_id: f.target.card.id,
           age_ms: 600000,
-          terminal_state: "blocked",
-          can_restart: true,
+          terminal_state: agent,
+          workspace: "clean",
+          can_restart: false,
         }),
       ),
     ),
   );
   const cause = rows.find((r) => r.kind === "notification_backlog")
     ?.cause_id as string;
+  await expect(f.restart(a, cause)).rejects.toMatchObject({
+    code: "stale_target",
+  });
+  expect(f.state().events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
+  );
+  expect(f.runtime.release).not.toHaveBeenCalledWith(
+    f.refFor(a),
+    expect.anything(),
+  );
+  // Separate positive control: only a fresh terminal observation changes the decision, not the clock.
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "done", observed_seq: 2 },
+  });
+  expect(
+    (await f.view()).dispatch_stalls.find((r) => r.cause_id === cause)
+      ?.can_restart,
+  ).toBe(true);
   await f.restart(a, cause);
   await f.restart(a, cause);
   expect(
@@ -123,8 +178,40 @@ test("guard refusal logs its state once; resume without queue and pending notifi
         ?.payload,
     ).toMatchObject({ result: "withdrawn_stall_changed" }),
   );
-  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.runtime.release).not.toHaveBeenCalledWith(
+    f.refFor(a),
+    expect.anything(),
+  );
   await dispatcher.close();
+}
+
+test("a lost terminal reference is not evidence of a never-provisioned session", async () => {
+  const f = setup();
+  const a = f.target.assignment;
+  f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id);
+    if (!owner) throw new Error("missing target");
+    tx.assignments.put(f.project, {
+      ...owner,
+      runtime_state: "lost",
+      runtime_ref: null,
+      session_ref: "previous",
+    });
+  });
+  f.advance(1);
+  const cause = f.event("instruction_issued", {
+    work_item_id: f.target.item.id,
+  });
+  f.advance(600_000);
+  expect((await f.view()).dispatch_stalls).toMatchObject([
+    { cause_id: cause.id, can_restart: false },
+  ]);
+  await expect(f.restart(a, cause.id)).rejects.toMatchObject({
+    code: "stale_target",
+  });
+  expect(f.state().events.some((e) => e.type === "host_ops_action_taken")).toBe(
+    false,
+  );
 });
 
 test("a lost instruction bell remains visible with no notification; dirty files and missing evidence cannot authorize a restart", async () => {
