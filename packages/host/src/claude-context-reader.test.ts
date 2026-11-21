@@ -8,6 +8,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -178,12 +179,15 @@ test("only complete tail records supply usage; a verified prefix can identify th
   expect(stdout.length).toBeLessThan(1024);
   // A sample before the bounded tail cannot be recovered from the file head.
   await writeFile(file, `${line(1)}\n${padding}\n`);
+  // Use a known whole-second write time distinct from the record timestamp.
+  const writtenAt = new Date("2026-01-01T00:05:00.000Z");
+  await utimes(file, writtenAt, writtenAt);
   expect(JSON.parse(await rawRead(root))).toEqual({
     path: file,
     file_activity: {
       cwd: "/fixture",
       session_id: "session",
-      updated_at: (await stat(file)).mtime.toISOString(),
+      updated_at: writtenAt.toISOString(),
     },
   });
 });
