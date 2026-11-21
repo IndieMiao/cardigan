@@ -5,6 +5,7 @@ import type {
   Event,
   PreMergeCheckedVersion,
 } from "../entities.js";
+import { cardEventsOfType, eventsForDecision } from "../event-index.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
   displayChangedPath,
@@ -16,6 +17,7 @@ import {
 } from "../preferences.js";
 import {
   attempt,
+  CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -45,7 +47,7 @@ import {
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
 
-/** Trusted host evidence only; commit and delivery bindings are rechecked in the write transaction. */
+/** Trusted host evidence only; evaluate the bindings against the snapshot fenced at commit. */
 export interface MergeShadowPaths {
   readonly completion_id: DeliveryId;
   readonly base_branch: string;
@@ -62,6 +64,38 @@ export interface MergeShadowCondition {
 const payload = (e: Event) => e.payload as Record<string, unknown>;
 const fullSha = (value: string) =>
   /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+// A non-system comment newer than either classification cutoff invalidates it.
+const commentSeq = new WeakMap<CommandState["timeline"], Map<CardId, number>>();
+function latestComment(timeline: CommandState["timeline"], card: CardId) {
+  let index = commentSeq.get(timeline);
+  if (!index) {
+    index = new Map();
+    for (const e of timeline) {
+      if (e.type === "comment" && e.author !== "system")
+        index.set(
+          e.card_id,
+          Math.max(index.get(e.card_id) ?? -Infinity, e.event_seq),
+        );
+    }
+    commentSeq.set(timeline, index);
+  }
+  return index.get(card) ?? -Infinity;
+}
+function heldMerge(event: Event) {
+  if (event.type === "merge_confirmation_snoozed") return true;
+  if (
+    ![
+      "decision_resolved",
+      "decision_provisionally_resolved",
+      "merge_changes_requested",
+    ].includes(event.type)
+  )
+    return false;
+  const option =
+    payload(event).option ??
+    (event.type === "merge_changes_requested" ? "request_changes" : "");
+  return ["hold", "request_changes"].includes(String(option));
+}
 function pathCondition(
   number: number,
   declared: boolean | undefined,
@@ -281,49 +315,32 @@ export function evaluateMergeShadow(
       ),
     "仍有工作项阻塞、挡合并的人工操作或其它未决拍板",
   );
-  const comments = state.timeline.filter(
-    (e) =>
-      e.card_id === card.id && e.type === "comment" && e.author !== "system",
-  );
+  const lastComment = latestComment(state.timeline, card.id);
   check(
     14,
     !!classification &&
-      comments.every(
-        (e) =>
-          e.event_seq <= classification.read_through_seq &&
-          e.event_seq < classification.event_seq,
-      ),
+      lastComment <= classification.read_through_seq &&
+      lastComment < classification.event_seq,
     "分类确认未覆盖全部评论，或确认后又出现人或 Agent 评论",
   );
   // Expiry clears snooze and reopens the decision, but never erases a hold
   // for this completion. Include holds on superseded confirmation IDs too.
-  const held = state.events.some(
-    (e) =>
-      e.card_id === card.id &&
-      [
-        "decision_resolved",
-        "decision_provisionally_resolved",
-        "merge_changes_requested",
-        "merge_confirmation_snoozed",
-      ].includes(e.type) &&
-      (e.type === "merge_confirmation_snoozed" ||
-        ["hold", "request_changes"].includes(
-          String(
-            payload(e).option ??
-              (e.type === "merge_changes_requested" ? "request_changes" : ""),
-          ),
-        )) &&
-      state.decisions.some(
-        (other) =>
-          other.id === payload(e).decision_id &&
-          other.trigger === "merge_confirmation" &&
-          other.kind === "approve" &&
-          "delivery_id" in other.target &&
-          q.kind === "approve" &&
-          "delivery_id" in q.target &&
-          other.target.delivery_id === q.target.delivery_id,
-      ),
-  );
+  const completionId =
+    q.kind === "approve" && "delivery_id" in q.target
+      ? q.target.delivery_id
+      : undefined;
+  const held =
+    completionId !== undefined &&
+    state.decisions.some(
+      (other) =>
+        other.trigger === "merge_confirmation" &&
+        other.kind === "approve" &&
+        "delivery_id" in other.target &&
+        other.target.delivery_id === completionId &&
+        eventsForDecision(state.events, other.id).some(
+          (e) => e.card_id === card.id && heldMerge(e),
+        ),
+    );
   check(
     15,
     (card.merge_policy ?? "confirm") === "confirm" &&
@@ -332,12 +349,11 @@ export function evaluateMergeShadow(
       !q.resolution,
     "合并策略不是确认，或本完成申请曾被暂缓、hold、退回或处理",
   );
-  const audit = state.events.find(
-    (e) =>
-      e.card_id === card.id &&
-      e.type === "merge_classification_recorded" &&
-      e.seq === classification?.event_seq,
-  );
+  const audit = cardEventsOfType(
+    state.events,
+    card.id,
+    "merge_classification_recorded",
+  ).find((e) => e.seq === classification?.event_seq);
   const producers = items.filter((w) => w.kind === "produce");
   check(
     16,
@@ -367,10 +383,7 @@ export function evaluateMergeShadow(
   return {
     rule: "C-225/merge-shadow",
     decision_id: q.id,
-    completion_id:
-      q.kind === "approve" && "delivery_id" in q.target
-        ? q.target.delivery_id
-        : null,
+    completion_id: completionId ?? null,
     classification_seq: classification?.event_seq ?? null,
     checked_versions: versions,
     base_sha: paths ? (evidence?.base_sha ?? null) : null,
@@ -384,48 +397,69 @@ export function evaluateMergeShadow(
   };
 }
 
-/** Only append audit records. No schedule, confirmation, merge or status mutation. */
+type ShadowInput = { decision_id: DecisionId; paths?: MergeShadowPaths };
+function planShadow(d: CommandDraft, p: ShadowInput) {
+  const state = d.state;
+  if (projectPreferences(state).system_merge_shadow !== true)
+    return { result: null };
+  const q = d.get("decisions", p.decision_id);
+  ensure(
+    q.trigger === "merge_confirmation" && q.card_id,
+    "validation_failed",
+    "不是合并确认",
+  );
+  const result = evaluateMergeShadow(state, q, p.paths);
+  const previous = eventsForDecision(state.events, q.id).findLast(
+    (e) => e.type === "system_merge_shadow_recorded" && e.card_id === q.card_id,
+  );
+  const json = JSON.stringify(result);
+  if (previous && JSON.stringify(previous.payload) === json) return { result };
+  const data = JSON.parse(json);
+  const body = `合并影子记录：如果开启，${result.would_confirm ? "会代确认" : "不会代确认"}。${result.conditions
+    .filter((c) => c.status !== "passed")
+    .map(
+      (c) =>
+        `条件 ${c.number}${c.status === "uncertain" ? " 不确定" : " 不满足"}：${c.reason}`,
+    )
+    .join("；")} 仅记录，不执行合并。`;
+  return {
+    result,
+    emit: (draft: CommandDraft) =>
+      draft.emit("system_merge_shadow_recorded", q.card_id, data, {
+        type: "system",
+        decision_id: q.id,
+        body,
+      }),
+  };
+}
+
+/** For a host holding a versioned snapshot. Only allocate IDs after validating its revision. */
+export function prepareMergeShadow(
+  state: CommandState,
+  actor: Actor,
+  p: ShadowInput,
+) {
+  const { emit } = planShadow(
+    new CommandDraft(state, actor, "record_merge_shadow"),
+    p,
+  );
+  return (
+    emit &&
+    ((ports: CommandPorts) =>
+      command(state, actor, "record_merge_shadow", ports, emit))
+  );
+}
+
+/** Atomic command for callers already holding a fresh state. */
 export function recordMergeShadow(
   state: CommandState,
   actor: Actor,
-  p: { decision_id: DecisionId; paths?: MergeShadowPaths },
+  p: ShadowInput,
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_merge_shadow", ports, (d) => {
-    if (projectPreferences(state).system_merge_shadow !== true) return null;
-    const q = d.get("decisions", p.decision_id);
-    ensure(
-      q.trigger === "merge_confirmation" && q.card_id,
-      "validation_failed",
-      "不是合并确认",
-    );
-    const result = evaluateMergeShadow(state, q, p.paths);
-    const previous = state.events
-      .filter(
-        (e) =>
-          e.type === "system_merge_shadow_recorded" &&
-          e.card_id === q.card_id &&
-          payload(e).decision_id === q.id,
-      )
-      .at(-1);
-    if (previous && JSON.stringify(previous.payload) === JSON.stringify(result))
-      return result;
-    d.emit(
-      "system_merge_shadow_recorded",
-      q.card_id,
-      JSON.parse(JSON.stringify(result)),
-      {
-        type: "system",
-        decision_id: q.id,
-        body: `合并影子记录：如果开启，${result.would_confirm ? "会代确认" : "不会代确认"}。${result.conditions
-          .filter((c) => c.status !== "passed")
-          .map(
-            (c) =>
-              `条件 ${c.number}${c.status === "uncertain" ? " 不确定" : " 不满足"}：${c.reason}`,
-          )
-          .join("；")} 仅记录，不执行合并。`,
-      },
-    );
+    const { result, emit } = planShadow(d, p);
+    emit?.(d);
     return result;
   });
 }

@@ -1,4 +1,5 @@
 import type { Event, MergeCheckView } from "../entities.js";
+import { eventsForCompletion } from "../event-index.js";
 import type { CardId, DeliveryId } from "../ids.js";
 export const MERGE_CHECK_EVENTS = [
   "merge_check_queued",
@@ -12,7 +13,8 @@ export function latestMergeCheck(
   completion: DeliveryId,
   tree?: string,
 ): MergeCheckView | undefined {
-  const event = events
+  const history = eventsForCompletion(events, completion);
+  const event = history
     .filter((e) => {
       const p = e.payload as Partial<MergeCheckView> | null;
       return (
@@ -27,7 +29,7 @@ export function latestMergeCheck(
   const check = event.payload as unknown as MergeCheckView;
   const waiting =
     check.status === "queued"
-      ? events
+      ? history
           .filter(
             (e) =>
               e.actor.kind === "system" &&

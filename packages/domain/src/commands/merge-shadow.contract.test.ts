@@ -13,6 +13,7 @@ import {
   mergeClassificationView,
   mergeShadowComparisons,
   postComment,
+  prepareMergeShadow,
   recordDecision,
   recordMergeCheck,
   recordMergeShadow,
@@ -238,6 +239,25 @@ test("C-238: all 16 conditions can pass, but the only effect is a system audit; 
     prediction: { would_confirm: true },
     actual: { status: "open", decider: "role:pm", resolution: null },
   });
+});
+
+test("C-553: a prepared audit is system-only, appends no business changes and deduplicates on replay", async () => {
+  const f = await fixture();
+  const input = { decision_id: f.q.id, paths: f.paths };
+  expect(() => prepareMergeShadow(f.state, human, input)).toThrow();
+  const append = required(prepareMergeShadow(f.state, system, input));
+  const effect = value(append(f.io));
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "system_merge_shadow_recorded",
+  ]);
+  expect(effect.events[0]?.payload).toEqual(
+    evaluateMergeShadow(f.state, f.q, f.paths),
+  );
+  expect(effect.changes).toEqual([]);
+  expect(effect.timeline).toHaveLength(1);
+  expect(
+    prepareMergeShadow(apply(f.state, effect), system, input),
+  ).toBeUndefined();
 });
 
 test.each(Array.from({ length: 16 }, (_, i) => i + 1))(
