@@ -136,7 +136,9 @@ export interface CreateCardInput {
 }
 export interface CardView {
   readonly parent_card_id?: string;
-  readonly story?: { summary_entry_id?: string };
+  readonly story?: import("@cardigan/domain").StoryState & {
+    discussion_rounds?: number;
+  };
   readonly story_progress?: {
     children: { id: string; title: string; status: CardStatus }[];
     counts: Record<CardStatus, number>;
@@ -584,6 +586,8 @@ export interface AttachmentView extends AuthorView {
   readonly supersedes: string | null;
   readonly inline: boolean;
   readonly download_path: string;
+  /** Small server-rendered preview for inline bitmaps; null otherwise. */
+  readonly thumbnail_path: string | null;
 }
 
 export interface CardRelations {
@@ -666,6 +670,7 @@ export interface CardDetail {
 }
 
 export interface CommentInput {
+  readonly story_discussion?: import("@cardigan/domain").StoryReply;
   readonly body: string;
   readonly work_item_id?: string;
   readonly mentions?: readonly string[];

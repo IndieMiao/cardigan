@@ -410,7 +410,9 @@ test("timeline entries are typed and carry their attachments", async () => {
 
   const comment = document.querySelector('[data-timeline-type="comment"]');
   const image = comment?.querySelector("img");
-  expect(image?.getAttribute("src")).toBe("/api/projects/p-1/attachments/F-1");
+  expect(image?.getAttribute("src")).toBe(
+    "/api/projects/p-1/attachments/F-1/thumbnail",
+  );
   expect(comment?.textContent).toContain("依据 D-1（待拍板）");
 });
 

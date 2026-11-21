@@ -75,6 +75,8 @@ export function requestRoute(path: string): string {
       return prefix + rest;
     if (/^\/cards\/[^/]+\/mentions$/.test(rest))
       return `${prefix}/cards/:id/mentions`;
+    if (/^\/attachments\/[^/]+\/thumbnail$/.test(rest))
+      return `${prefix}/attachments/:id/thumbnail`;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =

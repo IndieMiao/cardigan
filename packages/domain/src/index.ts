@@ -188,6 +188,10 @@ export * from "./commands/upstream-health.js";
 export { resumeWorkWaits } from "./commands/work-waits.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export {
+  categoryAuthorization,
+  categoryDelegated,
+} from "./decision-authorization.js";
 export * from "./decision-groups.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
@@ -260,6 +264,7 @@ export {
 export * from "./standing.js";
 export * from "./states.js";
 export * from "./story.js";
+export * from "./story-discussion.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./test-review.js";

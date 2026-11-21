@@ -70,6 +70,7 @@ const noticeOnlyEvents = new Map([
 const systemNoticeEvents = new Map([
   [PM_MERGE_STALL_KIND, "stalled"],
   ["launch_model_changed", "主机启动模型已更改"],
+  ["host_disk_space_low", "主机磁盘可用空间不足"],
   ["launch_reload_failed", "主机启动配置重载失败"],
   ["host_role_upgraded", "默认角色已自动升级"],
   ["host_role_upgrade_deferred", "角色升级等待系统排查"],

@@ -48,6 +48,11 @@ import { MergeBlockers } from "../components/MergeBlockers.js";
 import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { StoryDiscussion } from "../components/StoryDiscussion.js";
+import {
+  StoryOverview,
+  useStoryAttachments,
+} from "../components/StoryOverview.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import {
@@ -300,6 +305,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...(data.card.dependency?.graph?.nodes ?? []).map(
               (card) => card.id,
             ),
+            // A story's progress and graph follow its children's own events.
+            ...(data.card.story_progress?.children ?? []).map(
+              (card) => card.id,
+            ),
           ]),
       ),
     ].sort();
@@ -464,6 +473,13 @@ function CardContent({
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;
+  const storyAttachments = useStoryAttachments({
+    detail: head,
+    client,
+    projectId,
+    cardId,
+    revision,
+  });
   useLayoutEffect(() => {
     if (!anchor || !anchorReady) return;
     const target = document.getElementById(anchor);
@@ -762,40 +778,53 @@ function CardContent({
               ))}
             </section>
           )}
-          <section className="card-purpose" aria-label="目标和验收标准">
-            <h2>目标和验收标准</h2>
-            <Markdown body={card.goal} />
-            <section className="acceptance-criteria">
-              <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
-              <LongContent>
-                <ul>
-                  {card.acceptance_criteria.map((criterion) => (
-                    <li key={criterion}>
-                      <MarkdownBody body={criterion} />
-                    </li>
-                  ))}
-                </ul>
-              </LongContent>
-            </section>
-            {completionId && (
-              <section aria-label="完成申请">
-                <h3>完成申请</h3>
-                <p>
-                  整体完成申请已通过：
-                  <IdTag
-                    id={completionId}
-                    label="完成申请"
-                    href={routeHash({
-                      kind: "card",
-                      projectId,
-                      cardId,
-                      anchor: `delivery-${completionId}`,
-                    })}
-                  />
-                </p>
+          {card.story ? (
+            <StoryOverview
+              detail={detail}
+              attachments={storyAttachments}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              revision={revision}
+              onLocate={onLocate}
+              onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
+            />
+          ) : (
+            <section className="card-purpose" aria-label="目标和验收标准">
+              <h2>目标和验收标准</h2>
+              <Markdown body={card.goal} />
+              <section className="acceptance-criteria">
+                <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
+                <LongContent>
+                  <ul>
+                    {card.acceptance_criteria.map((criterion) => (
+                      <li key={criterion}>
+                        <MarkdownBody body={criterion} />
+                      </li>
+                    ))}
+                  </ul>
+                </LongContent>
               </section>
-            )}
-          </section>
+              {completionId && (
+                <section aria-label="完成申请">
+                  <h3>完成申请</h3>
+                  <p>
+                    整体完成申请已通过：
+                    <IdTag
+                      id={completionId}
+                      label="完成申请"
+                      href={routeHash({
+                        kind: "card",
+                        projectId,
+                        cardId,
+                        anchor: `delivery-${completionId}`,
+                      })}
+                    />
+                  </p>
+                </section>
+              )}
+            </section>
+          )}
           <RecentConclusions
             detail={detail}
             projectId={projectId}
@@ -856,12 +885,22 @@ function CardContent({
             loaded={detail.timeline.length}
             total={detail.counts.timeline}
           />
+          {detail.card.story && (
+            <StoryDiscussion
+              story={detail.card.story}
+              closed={["done", "cancelled"].includes(detail.card.status)}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              reload={reload}
+            />
+          )}
           <CommentBox
             ref={commentBox}
             client={client}
             projectId={projectId}
             cardId={cardId}
-            hasPmOps={detail.has_pm_ops}
+            hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />
