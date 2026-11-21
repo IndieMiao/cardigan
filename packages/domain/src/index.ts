@@ -282,3 +282,4 @@ export {
 } from "./upstream-health.js";
 export * from "./verification-activity.js";
 export * from "./work-wait.js";
+export * from "./worker-helper-action.js";

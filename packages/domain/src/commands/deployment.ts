@@ -2,6 +2,7 @@ import type { Actor, Event, HumanAction } from "../entities.js";
 import { eventsOfType } from "../event-index.js";
 import type { AssignmentId, CardId, HumanActionId, RunId } from "../ids.js";
 import { transition } from "../transitions.js";
+import { workerHelperAction } from "../worker-helper-action.js";
 import type { CommandDraft, CommandPorts, CommandState } from "./core.js";
 import { command, ensure, unwrap } from "./core.js";
 import {
@@ -199,7 +200,62 @@ export function recordDeploymentStop(
   );
 }
 
+export function recordHelperUpgradeChecks(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    human_action_id: HumanActionId;
+    text: string;
+    attachments?: readonly string[];
+    machine_id: string | null;
+    binding: string | null;
+    checks: Omit<NonNullable<HumanAction["helper_checks"]>, "at">;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "request_human_action", ports, (d) => {
+    const action = d.get("human_actions", p.human_action_id);
+    const upgrade = workerHelperAction(state, action);
+    ensure(
+      actor.kind === "human" &&
+        action.requested_by === "system" &&
+        !!upgrade &&
+        upgrade.machine_id === p.machine_id &&
+        (!action.helper_upgrade ||
+          action.helper_upgrade.binding === p.binding) &&
+        action.status === "open",
+      "illegal_transition",
+      "待办或检查目标已变化",
+    );
+    ensure(
+      (!!p.binding &&
+        !!p.machine_id &&
+        d
+          .list("machines")
+          .some((m) => m.id === p.machine_id && m.herdr_machine === m.id)) ||
+        (p.checks.worker.status === "failed" &&
+          p.checks.machine.status === "failed"),
+      "validation_failed",
+      "机器未绑定，不能记录核验通过",
+    );
+    const helper_checks = { ...p.checks, at: d.now };
+    const updated = { ...action, helper_checks };
+    d.put("human_actions", updated);
+    d.emit("worker_helper_upgrade_checked", undefined, {
+      human_action_id: action.id,
+      worker: helper_checks.worker.status,
+      machine: helper_checks.machine.status,
+    });
+    return [p.checks.worker, p.checks.machine].every(
+      (r) => r.status === "passed" && !r.failed_steps.length,
+    )
+      ? completeActionDraft(d, p, true)
+      : updated;
+  });
+}
 interface DeploymentActionInput {
+  readonly terminal?: HumanAction["terminal"];
+  readonly helper_upgrade?: HumanAction["helper_upgrade"];
   readonly key: string;
   readonly instructions: string;
   readonly reason?: "evidence_wait" | "worker_maintenance";
@@ -212,9 +268,36 @@ export function requestDeploymentAction(
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_deployment", ports, (d) => {
+    if (input.helper_upgrade) {
+      for (const previous of d.list("human_actions")) {
+        if (previous.status !== "open") continue;
+        const old = workerHelperAction(state, previous);
+        if (
+          !old ||
+          old.machine_id !== input.helper_upgrade.machine_id ||
+          old.key === input.key
+        )
+          continue;
+        const reason = "已由当前发行版的 worker 升级待办取代";
+        const source = "worker_helper_superseded";
+        d.put("human_actions", {
+          ...previous,
+          status: unwrap(transition("human_action", previous.status, "cancel")),
+          cancellation: { reason, by: d.author, at: d.now, source },
+        });
+        d.emit("human_action_cancelled", undefined, {
+          human_action_id: previous.id,
+          reason,
+          source,
+        });
+      }
+    }
     const prior = state.events.findLast(
       (e) =>
         e.type === "host_deployment_action_requested" &&
+        !e.card_id &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === state.project_id &&
         (e.payload as { key?: string }).key === input.key,
     );
     const existing =
@@ -229,8 +312,28 @@ export function requestDeploymentAction(
     if (
       existing &&
       (input.reason !== "worker_maintenance" || existing.status === "open")
-    )
+    ) {
+      if (
+        input.helper_upgrade &&
+        (existing.terminal?.command !== input.terminal?.command ||
+          existing.instructions !== input.instructions ||
+          existing.helper_upgrade?.binding !== input.helper_upgrade.binding)
+      ) {
+        const { terminal: _old, helper_checks: _checks, ...rest } = existing;
+        const updated = {
+          ...rest,
+          instructions: input.instructions,
+          helper_upgrade: input.helper_upgrade,
+          ...(input.terminal ? { terminal: input.terminal } : {}),
+        };
+        d.put("human_actions", updated);
+        d.emit("worker_helper_upgrade_updated", undefined, {
+          human_action_id: updated.id,
+        });
+        return updated;
+      }
       return existing;
+    }
     return createDeploymentAction(d, input);
   });
 }
@@ -241,6 +344,8 @@ function createDeploymentAction(d: CommandDraft, input: DeploymentActionInput) {
     id,
     key: id,
     requested_by: "system",
+    ...(input.terminal ? { terminal: input.terminal } : {}),
+    ...(input.helper_upgrade ? { helper_upgrade: input.helper_upgrade } : {}),
     status: "open",
     ...(input.reason ? { category: "general" as const } : {}),
     triage:

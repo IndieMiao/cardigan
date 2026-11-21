@@ -877,6 +877,8 @@ export interface NeedsDecision extends DecisionView, AuthorView {
 export interface NeedsAction
   extends Pick<HumanActionView, "id" | "instructions" | "expected_return">,
     AuthorView {
+  readonly terminal?: import("@cardigan/domain").ActionCommand;
+  readonly helper_checks?: import("@cardigan/domain").HumanAction["helper_checks"];
   readonly card_id: string | null;
   readonly why: string;
   readonly triage?: "pm_ops" | "human" | "host";

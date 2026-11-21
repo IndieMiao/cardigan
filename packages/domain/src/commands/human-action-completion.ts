@@ -5,6 +5,7 @@ import { highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
 import { transition } from "../transitions.js";
+import { workerHelperAction } from "../worker-helper-action.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
 import { mergeContentDecisions } from "./human-decided-merge.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
@@ -66,8 +67,14 @@ export function completeActionDraft(
     text: string;
     attachments?: readonly string[];
   },
+  helperVerified = false,
 ) {
   const action = d.get("human_actions", p.human_action_id);
+  ensure(
+    !workerHelperAction(d.state, action) || helperVerified,
+    "illegal_transition",
+    "请在 Needs You 确认并通过两项机器核验",
+  );
   ensure(
     !remoteExitAction(d.state, action.id) || d.actor.kind === "human",
     "unauthorized",

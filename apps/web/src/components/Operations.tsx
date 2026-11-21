@@ -73,20 +73,32 @@ export const cliCommand = (project: string, action: string, id?: string) =>
 export function CopyCommand({
   label,
   command,
+  block = false,
 }: {
   label: string;
   command: string;
+  block?: boolean;
 }) {
   const [message, setMessage] = useState("");
   return (
     <div className="copy-command">
       <span>{label}：</span>
-      <code>{command}</code>{" "}
+      {block ? (
+        <pre>
+          <code>{command}</code>
+        </pre>
+      ) : (
+        <code>{command}</code>
+      )}{" "}
       <Tooltip
         content={
-          <>
-            需要先用 <code>deploy/install-cli.sh</code> 安装 cardigan 命令。
-          </>
+          block ? (
+            "复制命令"
+          ) : (
+            <>
+              需要先用 <code>deploy/install-cli.sh</code> 安装 cardigan 命令。
+            </>
+          )
         }
       >
         <button

@@ -3017,6 +3017,47 @@ test("grouped questions show each source and attachment while answering only the
   ]);
 });
 
+test("structured terminal steps display and copy the exact multiline command without completing the action", async () => {
+  const data = page([]);
+  const terminal = {
+    target: "测试机",
+    login: "使用管理账号",
+    command: `printf '%s\\n' 'two words' '${"a".repeat(1102)}'\nprintf 'done'`,
+    expected_output: "打印 done",
+    on_failure: "保留输出",
+  };
+  const writeText = vi.fn(async () => {}),
+    completeAction = vi.fn();
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...data,
+          human_actions: data.human_actions.map((h) => ({ ...h, terminal })),
+        }),
+        completeAction,
+      })}
+    />,
+  );
+  const row = await screen.findByRole("article", { name: "执行 H-1" });
+  for (const v of [
+    terminal.target,
+    terminal.login,
+    terminal.expected_output,
+    terminal.on_failure,
+  ])
+    expect(row.textContent).toContain(v);
+  expect(row.querySelector("pre code")?.textContent).toBe(terminal.command);
+  fireEvent.click(within(row).getByRole("button", { name: "复制执行命令" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(terminal.command));
+  expect(completeAction).not.toHaveBeenCalled();
+});
+
 test("a story proposal waits for one-click confirmation; a stale version says to refresh in the row", async () => {
   const proposalPage = (version: number): NeedsPage => ({
     ...page([]),
