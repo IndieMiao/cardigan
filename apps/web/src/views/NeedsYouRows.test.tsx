@@ -143,6 +143,20 @@ test("a single click when counts first enable the merge tab survives default sel
   );
 });
 
+test("with the same counts and no click the first nonempty tab is selected", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({ needsYou: async () => data })}
+    />,
+  );
+  const panel = await screen.findByRole("tabpanel", { name: /^待拍板/ });
+  await within(panel).findByRole("article", { name: "拍板 Q-1" });
+  expect(screen.getByRole("tab", { selected: true }).textContent).toMatch(
+    /^待拍板/,
+  );
+});
+
 test.each(tabs)(
   "C-459: the %s tab uses the shared row: ids and title left, primary action last on the right",
   async (label, row) => {
