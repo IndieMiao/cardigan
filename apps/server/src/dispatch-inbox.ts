@@ -15,6 +15,7 @@ import {
   newPmNotification,
   type ProjectId,
   pmNotificationState,
+  type RunId,
   readyNotices,
   runById,
   states,
@@ -22,8 +23,11 @@ import {
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   assignmentCanReadCard,
+  mergeNotifications,
+  type NotificationKind,
   type RoutedNotification,
   routeEvent,
+  summarizeNotifications,
 } from "@cardigan/router";
 import {
   advanceRouterCursor,
@@ -39,6 +43,35 @@ import {
 import type { StateLoader } from "./dispatch-state.js";
 
 export const dispatcherClock: Clock = { now: () => new Date().toISOString() };
+
+/** Both first delivery and recovery render the inbox stream, never the recipient's scope. */
+export function notificationBell(
+  project: ProjectId,
+  assignment: AssignmentId,
+  run: RunId,
+  notes: readonly Notification[],
+) {
+  const first = notes[0];
+  if (!first || notes.some((n) => n.card_id !== first.card_id))
+    throw Error("A notification bell requires one non-empty stream");
+  const notifications = notes.map((n) => ({
+    seq: n.seq,
+    kind: n.kind as NotificationKind,
+    summary: "",
+  }));
+  if (first.card_id) {
+    const bell = mergeNotifications({
+      card_id: first.card_id,
+      assignment_id: assignment,
+      run_id: run,
+      notifications,
+    });
+    if (!bell) throw Error("Missing bell");
+    return bell.text;
+  }
+  const seqs = notifications.map((n) => n.seq);
+  return `[bell] project=${project} asg=${assignment} run=${run} seq=${Math.min(...seqs)}..${Math.max(...seqs)} summary=${JSON.stringify(summarizeNotifications(notifications))}\n→ 请调用 get_updates 读取项目更新`;
+}
 
 /** The caller's transaction keeps the audit and its visible explanation together. */
 function recordInboxNotice(

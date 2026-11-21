@@ -86,12 +86,7 @@ import {
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import {
-  mergeNotifications,
-  type NotificationKind,
-  payloadString,
-  summarizeNotifications,
-} from "@cardigan/router";
+import { payloadString } from "@cardigan/router";
 import {
   type BellAttempt,
   beginBellAttempt,
@@ -135,6 +130,7 @@ import {
   acknowledgeInbox,
   dispatcherClock,
   memoStanding,
+  notificationBell,
   notificationOwner,
   resolveObsoletePmNotifications,
   resolveUnreadableNotifications,
@@ -1630,11 +1626,6 @@ export class Dispatcher {
       }
       if (!live && run.status !== "queued")
         throw { code: "finished_run_needs_attention" };
-      const kinds = ready.map((n) => ({
-        seq: n.seq,
-        kind: n.kind as NotificationKind,
-        summary: "",
-      }));
       // §6.2: the bell names the Run, because the Agent needs it for
       // finish_run and heartbeat even when the host started the session.
       const runCard = state.work_items.find(
@@ -1642,15 +1633,7 @@ export class Dispatcher {
       )?.card_id;
       const bell = !ready.length
         ? `[bell] ${runCard ? `card=${runCard} wi=${a.work_item_id}` : `project=${project}`} asg=${a.id} run=${run.id} kind=${run.kind}\n→ 请调用 whoami、get_card、get_updates 继续已排队工作`
-        : cause?.card_id
-          ? mergeNotifications({
-              card_id: cause.card_id,
-              assignment_id: a.id,
-              run_id: run.id,
-              notifications: kinds,
-            })?.text
-          : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
-      if (!bell) throw new Error("Missing bell");
+        : notificationBell(project, a.id, run.id, ready);
       // Set the budget on the durable intent *before* publication copies it.
       // Live wakes (including retries), local starts and no-checkout roles keep the bell lease.
       const worktree =

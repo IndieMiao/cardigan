@@ -70,6 +70,7 @@ import {
   recordHostOpsAlert,
   wakeFailure,
 } from "./dispatch-alert.js";
+import { notificationBell } from "./dispatch-inbox.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 import {
@@ -839,7 +840,7 @@ export async function retryDispatchedRuns(
       // A refused first claim never settled its inbox rows. Reclaim exactly
       // those IDs alongside Run-owned rows, not unrelated newer comments.
       const refusedNotes = new Set(current.refusedNotes);
-      const notes = store
+      const candidates = store
         .listNotifications({
           project_id: project,
           statuses: ["pending", "belled", "delivery_failed"],
@@ -859,9 +860,26 @@ export async function retryDispatchedRuns(
       const cause = current.state.events.find(
         (e) => e.id === current.run.trigger_event_id,
       );
+      // An absent card on an existing receipt means project stream. It is
+      // not a missing value to fill with the recipient's work-item card.
+      const receipt = current.run.bell_delivery;
+      const source = (
+        receipt?.run_id === current.run.id
+          ? receipt
+          : (candidates[0] ?? cause ?? item)
+      )?.card_id;
+      const notes = candidates.filter((n) => n.card_id === source);
+      // Retain any stored decision instructions on ordinary retries. For a
+      // refused claim, render the original pending rows, not a prior address.
+      const storedBell = refusedNotes.size
+        ? undefined
+        : notes.find((n) => n.bell)?.bell;
+      const address = source ? `card=${source}` : `project=${project}`;
       const bell =
-        notes.find((n) => n.bell)?.bell ??
-        `[bell] ${item ? `card=${item.card_id} wi=${item.id}` : `project=${project}`} asg=${current.a.id} run=${current.run.id} seq=${cause?.seq ?? 0} kind=${current.run.kind}\n→ 请调用 get_updates 读取详情`;
+        storedBell ??
+        (notes.length
+          ? notificationBell(project, current.a.id, current.run.id, notes)
+          : `[bell] ${address} asg=${current.a.id} run=${current.run.id} seq=${cause?.seq ?? 0} kind=${current.run.kind}\n→ 请调用 get_updates 读取详情`);
       const attempt: BellAttempt = {
         id: randomUUID(),
         project_id: project,
