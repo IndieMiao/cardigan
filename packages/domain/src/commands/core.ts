@@ -168,6 +168,7 @@ type CommandName =
   | "manage_machines"
   | "manage_templates"
   | "mark_card_done"
+  | "confirm_story_proposal"
   | "clear_released_runtime_refs"
   | "request_worktree_cleanup";
 export function ensure(

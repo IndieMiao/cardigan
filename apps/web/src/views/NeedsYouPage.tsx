@@ -2,6 +2,7 @@ import { reviewImpactLabel } from "@cardigan/domain";
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ApiError,
   type CardiganClient,
   type DecisionView,
   describeError,
@@ -11,6 +12,7 @@ import {
   type NeedsAction,
   type NeedsDecision,
   type NeedsPage,
+  type NeedsStoryProposal,
   type NoticeView,
   type PreMergeCheckView,
 } from "../api.js";
@@ -1537,6 +1539,124 @@ function CloseLaterAction({
   );
 }
 
+/**
+ * C-503: a story's current proposal. "确认开卡" opens every child in one step;
+ * a change request is written on the story card itself.
+ */
+function StoryProposalRow({
+  item,
+  client,
+  projectId,
+  done,
+  elapsed,
+}: Props & {
+  item: NeedsStoryProposal;
+  done: () => void;
+  elapsed: number;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [refusal, setRefusal] = useState<{ message: string; stale: boolean }>();
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  // Same version, same key: a retry after a lost reply opens nothing twice.
+  const key = useRef(crypto.randomUUID());
+  const cardHref = (anchor?: string) =>
+    routeHash({
+      kind: "card",
+      projectId,
+      cardId: item.card_id,
+      ...(anchor ? { anchor } : {}),
+    });
+  return (
+    <NeedsRow
+      label={`确认拆解 ${item.card_id}`}
+      ids={
+        <>
+          <RowCard
+            projectId={projectId}
+            id={item.card_id}
+            label={item.card_title}
+          />
+          <IdTag
+            id={item.entry_id}
+            label="拆解方案"
+            href={cardHref(`entry-${item.entry_id}`)}
+          />
+        </>
+      }
+      title={`确认拆解：第 ${item.version} 版，${item.children.length} 张子卡`}
+      summary={noticeLine(item.children.map((c) => c.title).join("、"))}
+      alert={
+        refusal && (
+          <>
+            <span>{refusal.message}</span>
+            {refusal.stale && (
+              <Button variant="outline" onClick={done}>
+                刷新
+              </Button>
+            )}
+          </>
+        )
+      }
+      time={waitLabel(item.waited_ms, elapsed)}
+      status={<StatusTag status="open" label="待确认" />}
+      action={
+        <Button
+          variant="primary"
+          disabled={busy}
+          aria-label={`确认开卡 ${item.card_id} 第 ${item.version} 版`}
+          onClick={async () => {
+            if (sending.current) return;
+            sending.current = true;
+            setBusy(true);
+            setRefusal(undefined);
+            try {
+              const result = await client.confirmStoryProposal(
+                projectId,
+                item.card_id,
+                item.version,
+                key.current,
+              );
+              setMessage(
+                `${item.card_id} 已开出 ${result.card_ids.length} 张子卡`,
+              );
+              done();
+            } catch (cause) {
+              const stale =
+                cause instanceof ApiError && cause.code === "stale_target";
+              setRefusal({
+                stale,
+                message: stale
+                  ? "拆解方案已更新，请刷新后再确认"
+                  : `开卡失败：${describeWriteError(cause)}`,
+              });
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        >
+          确认开卡
+        </Button>
+      }
+    >
+      <ol aria-label={`${item.card_id} 第 ${item.version} 版子卡`}>
+        {item.children
+          .map((child, i) => ({ ...child, number: i + 1 }))
+          .map((child) => (
+            <li key={child.number}>
+              {child.title}（模板 {child.template_id} · 负责 {child.owner_role}
+              ）
+            </li>
+          ))}
+      </ol>
+      <p>
+        <a href={cardHref()}>回到需求卡提修改意见</a>
+      </p>
+      <RequestFeedback message={message} />
+    </NeedsRow>
+  );
+}
 function HumanAction({
   item,
   client,
@@ -1941,8 +2061,10 @@ function NeedsContent({
   // folded group and never count as waiting on the human.
   const mine = (data?.human_actions ?? []).filter((a) => a.triage !== "host");
   const host = (data?.human_actions ?? []).filter((a) => a.triage === "host");
+  const proposals = data?.story_proposals ?? [];
   const total = data
     ? data.decisions.length +
+      proposals.length +
       mine.length +
       data.incidents.length +
       (data.attention?.length ?? 0)
@@ -2105,6 +2227,20 @@ function NeedsContent({
             >
               {blocking.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
+              ))}
+            </NeedsList>
+          )}
+          {!!proposals.length && (
+            <NeedsList
+              label="确认拆解"
+              title={`确认拆解（${proposals.length}）`}
+            >
+              {proposals.map((item) => (
+                <StoryProposalRow
+                  key={`${item.card_id}@${item.version}`}
+                  item={item}
+                  {...props}
+                />
               ))}
             </NeedsList>
           )}

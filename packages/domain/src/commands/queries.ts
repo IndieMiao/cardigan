@@ -39,6 +39,8 @@ import { providerIncidents } from "../provider-start.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
+import { storyTerminal } from "../story.js";
+import { currentStoryProposal } from "../story-discussion.js";
 import {
   builtinCardTemplatesForFlow,
   type CardTemplate,
@@ -702,9 +704,9 @@ export function listNeedsYouCounts(
       (q) => decisionSection(state, q),
       false,
     );
-    const decisionCount = data.decisions.filter(
-      (s) => s === "decisions",
-    ).length;
+    const decisionCount =
+      data.decisions.filter((s) => s === "decisions").length +
+      data.story_proposals.length;
     const mergeCount = data.decisions.length - decisionCount;
     const humanActions = data.human_actions.filter(
       (h) => h.triage !== "host",
@@ -713,7 +715,11 @@ export function listNeedsYouCounts(
     const noticeList = notices(state);
     const unread = noticeList.filter((n) => !n.read).length;
     return {
-      total_pending: data.decisions.length + humanActions + attention,
+      total_pending:
+        data.decisions.length +
+        data.story_proposals.length +
+        humanActions +
+        attention,
       tabs: {
         decisions: { count: decisionCount, attention: decisionCount },
         merges: {
@@ -978,6 +984,9 @@ function selectNeedsYou<T>(
         ),
       { details: includeDetails },
     ).map(view),
+    // C-503: the current, unconfirmed proposal of each open story waits on the
+    // human's one-click confirmation; no decision or default stands in for it.
+    story_proposals: includes("decisions") ? pendingStoryProposals(d) : [],
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(
@@ -1074,6 +1083,33 @@ function selectNeedsYou<T>(
             })),
         ],
   };
+}
+
+/** Open, unpaused stories whose latest proposal is not yet confirmed. */
+export function pendingStoryProposals(d: CommandDraft) {
+  return d.list("cards").flatMap((card) => {
+    const proposal = currentStoryProposal(card.story);
+    return card.story &&
+      proposal &&
+      !proposal.confirmed &&
+      !card.hold &&
+      !storyTerminal(card)
+      ? [
+          {
+            card_id: card.id,
+            card_title: card.title,
+            version: proposal.version,
+            entry_id: proposal.entry_id,
+            submitted_at: proposal.submitted_at,
+            children: proposal.children.map((c) => ({
+              title: c.title,
+              template_id: c.template_id,
+              owner_role: c.owner_role,
+            })),
+          },
+        ]
+      : [];
+  });
 }
 
 /** Persist the audit and return the item from the same fresh transaction. */

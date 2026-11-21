@@ -161,6 +161,13 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly parent_card_id?: CardId;
+  /** C-503: the story proposal version and child number this card was opened from. */
+  readonly story_source?: {
+    readonly card_id: CardId;
+    readonly version: number;
+    readonly entry_id: TimelineEntryId;
+    readonly number: number;
+  };
   /** Stamped only for the built-in story workflow, not existing custom templates. */
   readonly story?: StoryState;
   readonly related_cards: readonly CardId[];

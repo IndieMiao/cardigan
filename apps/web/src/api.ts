@@ -908,7 +908,29 @@ export interface NeedsLaterItem {
   readonly triage?: "human" | "host";
   readonly waiting_for: string;
 }
+/** C-503: a story's current proposal waiting for the human's confirmation. */
+export interface NeedsStoryProposal {
+  readonly card_id: string;
+  readonly card_title: string;
+  readonly version: number;
+  readonly entry_id: string;
+  readonly submitted_at: string;
+  readonly waited_ms: number | null;
+  readonly children: readonly {
+    readonly title: string;
+    readonly template_id: string;
+    readonly owner_role: string;
+  }[];
+}
+export interface StoryConfirmation {
+  readonly card_id: string;
+  readonly version: number;
+  readonly card_ids: readonly string[];
+  readonly replayed: boolean;
+}
 export interface NeedsPage {
+  /** C-503: older servers omit it. */
+  readonly story_proposals?: readonly NeedsStoryProposal[];
   readonly waiting_merge_checks_count?: number;
   /** C-171: the confirmations the waiting summary counts (queued or running). */
   readonly waiting_merge_check_items?: readonly {
@@ -1853,6 +1875,13 @@ export interface CardiganClient {
     attachments: string[],
     idempotencyKey: string,
   ): Promise<void>;
+  /** C-503: confirm the story proposal version the person saw. */
+  confirmStoryProposal(
+    projectId: string,
+    cardId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<StoryConfirmation>;
   roles(projectId: string): Promise<RoleListView>;
   role(projectId: string, roleId: string): Promise<RoleDetailView>;
   roleHistory(projectId: string, roleId: string): Promise<RoleHistoryView>;
@@ -2522,6 +2551,19 @@ export class HttpCardiganClient implements CardiganClient {
       { result, attachments },
       idempotencyKey,
     );
+  }
+  async confirmStoryProposal(
+    projectId: string,
+    cardId: string,
+    version: number,
+    idempotencyKey: string,
+  ): Promise<StoryConfirmation> {
+    return (await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/story-confirm`,
+      { version },
+      idempotencyKey,
+    )) as StoryConfirmation;
   }
   async setMergeConfirmSnoozeDefault(
     projectId: string,
