@@ -29,6 +29,21 @@ export const THUMBNAIL_MAX_RATIO = 4 / 3;
 const VERSION = "v1";
 /** Decoders allowed to run; never SVG or other formats behind a bitmap MIME. */
 const DECODABLE = new Set(["png", "jpeg", "gif", "webp", "heif"]);
+/**
+ * Signatures of the inline bitmap types (PNG, JPEG, GIF, WebP, AVIF). Anything
+ * else never reaches libvips, whose loaders would also parse SVG, PDF or TIFF.
+ */
+function bitmapSignature(input: Uint8Array): boolean {
+  const ascii = (start: number, end: number) =>
+    Buffer.from(input.subarray(start, end)).toString("latin1");
+  return (
+    ascii(0, 8) === "\x89PNG\r\n\x1a\n" ||
+    ascii(0, 3) === "\xff\xd8\xff" ||
+    ["GIF87a", "GIF89a"].includes(ascii(0, 6)) ||
+    (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") ||
+    (ascii(4, 8) === "ftyp" && ["avif", "avis"].includes(ascii(8, 12)))
+  );
+}
 /** About 1440×69000; bounds decoder memory for a hostile 10 MiB upload. */
 const MAX_INPUT_PIXELS = 100_000_000;
 /** Renders running at once; a page of thumbnails queues behind these. */
@@ -40,6 +55,7 @@ export type ThumbnailResult = Buffer | "missing" | "unavailable";
 
 /** Render the thumbnail bytes, or throw when the image cannot be decoded. */
 export async function renderThumbnail(input: Uint8Array): Promise<Buffer> {
+  if (!bitmapSignature(input)) throw new Error("unsupported format");
   const image = sharp(input, {
     limitInputPixels: MAX_INPUT_PIXELS,
     failOn: "error",

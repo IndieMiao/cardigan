@@ -65,6 +65,9 @@ test("thumbnails cap the width, keep small images and never enlarge", async () =
   expect(
     await size(await renderThumbnail(await solid(40, 30).gif().toBuffer())),
   ).toEqual({ width: 40, height: 30, format: "webp" });
+  expect(
+    await size(await renderThumbnail(await solid(64, 48).avif().toBuffer())),
+  ).toEqual({ width: 64, height: 48, format: "webp" });
 });
 
 test("long screenshots keep their top at 3:4 instead of shrinking to a sliver", async () => {
@@ -87,6 +90,7 @@ test("long screenshots keep their top at 3:4 instead of shrinking to a sliver", 
 test("undecodable, truncated or non-bitmap content is rejected", async () => {
   const png = await solid(400, 400).png().toBuffer();
   for (const input of [
+    await solid(16, 16).tiff().toBuffer(),
     Buffer.from(
       '<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"/>',
     ),
