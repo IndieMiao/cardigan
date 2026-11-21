@@ -1,6 +1,16 @@
 /** C-540: attachment thumbnails are rendered once, cached and access-checked. */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Attachment, CardId, TimelineEntry } from "@cardigan/domain";
@@ -100,6 +110,33 @@ test("undecodable, truncated or non-bitmap content is rejected", async () => {
     await expect(renderThumbnail(input)).rejects.toThrow();
 });
 
+test("AVIF is recognised by a compatible brand inside the file type box", async () => {
+  const avif = await solid(32, 24).avif().toBuffer();
+  const box = avif.readUInt32BE(0);
+  expect(avif.toString("latin1", 4, box)).toBe("ftypavif\0\0\0\0mif1avifmiaf");
+  // Major brand mif1, avif only among the compatible brands.
+  const mif1 = Buffer.from(avif);
+  mif1.write("mif1", 8, "latin1");
+  expect(await size(await renderThumbnail(mif1))).toEqual({
+    width: 32,
+    height: 24,
+    format: "webp",
+  });
+  // No AVIF brand anywhere in the box (an HEIC-style file) is still refused.
+  const heic = Buffer.from(avif);
+  heic.write("heic", 8, "latin1");
+  heic.write("mif1heicmiaf", 16, "latin1");
+  await expect(renderThumbnail(heic)).rejects.toThrow("unsupported format");
+  // A brand outside the declared box does not count.
+  const short = Buffer.from(mif1);
+  short.writeUInt32BE(20, 0);
+  await expect(renderThumbnail(short)).rejects.toThrow("unsupported format");
+  // Nor does a box claiming more bytes than the file has.
+  const long = Buffer.from(mif1.subarray(0, box));
+  long.writeUInt32BE(box + 4, 0);
+  await expect(renderThumbnail(long)).rejects.toThrow("unsupported format");
+});
+
 test("the cache renders each blob once, across concurrent requests and restarts", async () => {
   const dataDir = await temporary(),
     png = await solid(900, 600).png().toBuffer();
@@ -145,6 +182,90 @@ test("failures are remembered and a missing blob is reported separately", async 
   expect(renders).toBe(1);
   expect(await cache.get(digest(3), async () => undefined)).toBe("missing");
   expect(() => cache.get("../../etc/passwd", source)).toThrow();
+});
+
+test("cold renders read the original only once a render slot is free", async () => {
+  const dataDir = await temporary();
+  const releases: (() => void)[] = [];
+  const read: number[] = [];
+  const cache = new ThumbnailCache(
+    dataDir,
+    () =>
+      new Promise<Buffer>((done) =>
+        releases.push(() => done(Buffer.from("RIFF\x04\0\0\0WEBP", "latin1"))),
+      ),
+  );
+  const settle = () => new Promise((ready) => setTimeout(ready, 20));
+  const results = [4, 5, 6, 7].map((n) =>
+    cache.get(digest(n), async () => {
+      read.push(n);
+      return Buffer.from("original");
+    }),
+  );
+  await settle();
+  // Two renders hold their originals; the others have not read theirs yet.
+  expect(read).toEqual([4, 5]);
+  releases.shift()?.();
+  await settle();
+  expect(read).toEqual([4, 5, 6]);
+  for (; releases.length > 0 || read.length < 4; await settle())
+    releases.shift()?.();
+  expect(read).toEqual([4, 5, 6, 7]);
+  expect((await Promise.all(results)).every(Buffer.isBuffer)).toBe(true);
+});
+
+test("cache entries that are not plain bounded WebP files are never served", async () => {
+  const dataDir = await temporary(),
+    png = await solid(300, 200).png().toBuffer();
+  const directory = join(dataDir, "attachment-thumbnails", "v1");
+  await mkdir(directory, { recursive: true });
+  const secret = join(dataDir, "secret.webp");
+  // A valid WebP outside the cache: following a link would leak it.
+  const outside = await solid(10, 10, BLUE).webp().toBuffer();
+  await writeFile(secret, outside);
+  let renders = 0;
+  const cache = () =>
+    new ThumbnailCache(dataDir, (input) => {
+      renders++;
+      return renderThumbnail(input);
+    });
+  const fresh = await renderThumbnail(png);
+  const entry = (n: number) => join(directory, `${digest(n)}.webp`);
+
+  await symlink(secret, entry(10));
+  execFileSync("mkfifo", [entry(11)]);
+  const huge = Buffer.alloc(2 * 1024 * 1024);
+  huge.write("RIFF", 0, "latin1");
+  huge.writeUInt32LE(huge.byteLength - 8, 4);
+  huge.write("WEBP", 8, "latin1");
+  await writeFile(entry(12), huge);
+  await writeFile(entry(13), Buffer.from("<script>alert(1)</script>"));
+  await writeFile(entry(14), outside.subarray(0, outside.byteLength - 4));
+  for (const n of [10, 11, 12, 13, 14]) {
+    const before = renders;
+    const output = await cache().get(digest(n), async () => png);
+    expect(Buffer.isBuffer(output) && output.equals(fresh)).toBe(true);
+    expect(renders).toBe(before + 1);
+    // The bad entry was replaced by the rendered thumbnail, not written through.
+    expect((await lstat(entry(n))).isFile()).toBe(true);
+    expect(await cache().get(digest(n), async () => png)).toEqual(fresh);
+    expect(renders).toBe(before + 1);
+  }
+  expect((await readFile(secret)).equals(outside)).toBe(true);
+
+  // A symlinked cache directory is neither read nor written.
+  const elsewhere = join(dataDir, "elsewhere");
+  await mkdir(elsewhere);
+  await writeFile(join(elsewhere, `${digest(15)}.webp`), outside);
+  await rm(directory, { recursive: true });
+  await symlink(elsewhere, directory);
+  const linked = cache();
+  for (let i = 0; i < 2; i++)
+    expect(await linked.get(digest(15), async () => png)).toEqual(fresh);
+  expect(await readdir(elsewhere)).toEqual([`${digest(15)}.webp`]);
+  expect(
+    (await readFile(join(elsewhere, `${digest(15)}.webp`))).equals(outside),
+  ).toBe(true);
 });
 
 test("the thumbnail route has the original's session and project checks", async () => {

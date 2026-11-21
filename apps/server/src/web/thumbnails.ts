@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { AttachmentId, ProjectId } from "@cardigan/domain";
 import { fileAttachmentStore } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
@@ -41,13 +42,43 @@ function bitmapSignature(input: Uint8Array): boolean {
     ascii(0, 3) === "\xff\xd8\xff" ||
     ["GIF87a", "GIF89a"].includes(ascii(0, 6)) ||
     (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") ||
-    (ascii(4, 8) === "ftyp" && ["avif", "avis"].includes(ascii(8, 12)))
+    avifBrand(input, ascii)
   );
+}
+/**
+ * An ISO-BMFF file type box naming AVIF as its major or one of its compatible
+ * brands (e.g. major `mif1` with `avif` listed), read within the box bounds.
+ */
+function avifBrand(
+  input: Uint8Array,
+  ascii: (start: number, end: number) => string,
+): boolean {
+  if (input.byteLength < 16 || ascii(4, 8) !== "ftyp") return false;
+  const size = Buffer.from(input.subarray(0, 4)).readUInt32BE(0);
+  // Sizes 0 (to end of file) and 1 (64-bit) are not used for this box, and
+  // real ones list a handful of brands.
+  if (size < 16 || size > Math.min(input.byteLength, 1024) || size % 4 !== 0)
+    return false;
+  const brands = [ascii(8, 12)];
+  for (let offset = 16; offset < size; offset += 4)
+    brands.push(ascii(offset, offset + 4));
+  return brands.some((brand) => brand === "avif" || brand === "avis");
 }
 /** About 1440×69000; bounds decoder memory for a hostile 10 MiB upload. */
 const MAX_INPUT_PIXELS = 100_000_000;
 /** Renders running at once; a page of thumbnails queues behind these. */
 const MAX_RENDERS = 2;
+/** Largest cache entry served; a 480×640 thumbnail is a few dozen KiB. */
+const MAX_THUMBNAIL_BYTES = 1024 * 1024;
+/** A complete WebP file: RIFF header whose length covers exactly `content`. */
+function webpFile(content: Buffer): boolean {
+  return (
+    content.byteLength >= 12 &&
+    content.toString("latin1", 0, 4) === "RIFF" &&
+    content.toString("latin1", 8, 12) === "WEBP" &&
+    content.readUInt32LE(4) + 8 === content.byteLength
+  );
+}
 
 export const THUMBNAIL_MIME = "image/webp";
 
@@ -122,27 +153,86 @@ export class ThumbnailCache {
     source: () => Promise<Uint8Array | undefined>,
   ): Promise<ThumbnailResult> {
     const path = join(this.directory, `${digest}.webp`);
-    try {
-      return await readFile(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    const input = await source();
-    if (input === undefined) return "missing";
-    let output: Buffer;
-    try {
-      output = await this.limited(() => this.render(input));
-    } catch {
-      this.failed.add(digest);
-      return "unavailable";
-    }
+    const cached = await this.cached(path);
+    if (cached !== undefined) return cached;
+    // The original is read only once a render slot is free, so a page of cold
+    // thumbnails holds at most MAX_RENDERS originals in memory.
+    const output = await this.limited<ThumbnailResult>(async () => {
+      const input = await source();
+      if (input === undefined) return "missing";
+      try {
+        return await this.render(input);
+      } catch {
+        this.failed.add(digest);
+        return "unavailable";
+      }
+    });
+    if (typeof output === "string") return output;
     // A full disk costs only the cache; the thumbnail is still served.
     await this.store(path, output).catch(() => undefined);
     return output;
   }
 
+  /**
+   * A cache entry fit to serve: a regular WebP file of bounded size inside
+   * real cache directories. Anything else is a miss and gets rendered again.
+   */
+  private async cached(path: string): Promise<Buffer | undefined> {
+    if ((await this.directoryState()) !== "ready") return undefined;
+    try {
+      // Never follow a symlink or block while opening a special file.
+      const file = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.size > MAX_THUMBNAIL_BYTES) return undefined;
+        // One extra byte detects growth after stat without an unbounded read.
+        const buffer = Buffer.alloc(info.size + 1);
+        let size = 0;
+        while (size < buffer.length) {
+          const { bytesRead } = await file.read(
+            buffer,
+            size,
+            buffer.length - size,
+            size,
+          );
+          if (bytesRead === 0) break;
+          size += bytesRead;
+        }
+        const content = buffer.subarray(0, size);
+        return size === info.size && webpFile(content) ? content : undefined;
+      } finally {
+        await file.close();
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * `ready` when both cache directories are real directories, `absent` before
+   * the first write, `untrusted` when either is a symlink or another file;
+   * an untrusted cache is neither read nor written.
+   */
+  private async directoryState(): Promise<"ready" | "absent" | "untrusted"> {
+    for (const directory of [dirname(this.directory), this.directory]) {
+      try {
+        if (!(await lstat(directory)).isDirectory()) return "untrusted";
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? "absent"
+          : "untrusted";
+      }
+    }
+    return "ready";
+  }
+
   private async store(path: string, output: Buffer) {
+    if ((await this.directoryState()) === "untrusted") return;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    if ((await this.directoryState()) !== "ready") return;
     const temporary = join(this.directory, `.${randomUUID()}.tmp`);
     try {
       await writeFile(temporary, output, { flag: "wx", mode: 0o600 });
