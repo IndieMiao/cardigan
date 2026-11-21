@@ -3,12 +3,16 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type Assignment,
+  abortDispatch,
   type CardId,
   finishRun,
+  queueRun,
+  recordDecision,
+  requestDecision,
   reviewRunWakeDisposition,
 } from "@cardigan/domain";
 import { unwrap } from "@cardigan/mcp-server";
-import { moveNotification } from "@cardigan/store";
+import { moveNotification, recordNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
 import { setup } from "../test-support/dispatch-stalls.js";
@@ -258,43 +262,230 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
 });
 
-test("synthetic review handoff: reading the bell is not a restart; safe fresh evidence recovers its original assignment once", async () => {
-  const { f, a, card, item } = reviewerFixture();
-  // Replay the persisted end of a review-limit turn. The review is allowed to proceed now.
+function endedReviewer() {
+  const { f, a, card, item, tree } = reviewerFixture();
   const run = f.session(a, false);
-  f.store.uow.run((tx) => {
-    const owner = tx.assignments.get(f.project, a.id);
-    const active = tx.runs.get(f.project, run.id);
-    if (!owner || !active) throw new Error("missing review session");
-    tx.runs.put(f.project, {
-      ...active,
-      status: "completed",
-      outcome: "blocked",
-      finished_at: f.clock.now(),
-    });
-    tx.assignments.put(f.project, { ...owner, runtime_state: "idle" });
-  });
-  f.event(
-    "run_finished",
-    {
-      run_id: run.id,
-      assignment_id: a.id,
-      outcome: "blocked",
-      finished_by: "system",
-      reason: "review_limit",
-    },
-    undefined,
-    card.id,
+  const q = f.apply((state, actor, ports) =>
+    requestDecision(
+      state,
+      actor,
+      {
+        kind: "choose",
+        category: "general",
+        decider: "human",
+        plain_summary: {
+          changed: "等待继续审核",
+          impact: "恢复审核",
+          risk: "无",
+        },
+        question: "恢复审核？",
+        context: "fixture",
+        blocking: true,
+        card_id: card.id,
+        affected_cards: [card.id],
+        affected_work_items: [item.id],
+        options: [{ key: "go", description: "继续", impact: "恢复审核" }],
+        recommended: "go",
+      },
+      ports,
+    ),
   );
-  f.skipEvents();
   f.advance(1);
-  const notice = f.event(
-    "comment_posted",
-    { work_item_id: item.id },
-    a,
-    card.id,
+  f.apply((state, actor, ports) =>
+    recordDecision(
+      state,
+      actor,
+      {
+        decision_id: q.id,
+        option: "go",
+        rationale: "fixture",
+        raw_quote: "go",
+      },
+      ports,
+    ),
+  );
+  // This incident has no in-flight Run; retire any prequeued follow-up.
+  const queued = f
+    .state()
+    .runs.find((r) => r.assignment_id === a.id && r.status === "queued");
+  if (queued)
+    f.apply((s, actor, p) =>
+      abortDispatch(s, actor, { run_id: queued.id, reason: "fixture" }, p),
+    );
+  const notice = f
+    .state()
+    .events.find(
+      (e) =>
+        e.type === "decision_resolved" &&
+        (e.payload as { decision_id: string }).decision_id === q.id,
+    );
+  if (!notice) throw new Error("missing resolved decision");
+  f.store.uow.run(() =>
+    recordNotification(f.store.database, {
+      project_id: f.project,
+      event_id: notice.id,
+      seq: notice.seq,
+      card_id: card.id,
+      at: f.clock.now(),
+      kind: "assignment",
+      recipient: { kind: "assignment", assignment_id: a.id },
+    }),
   );
   f.skipEvents();
+  return { f, a, card, item, notice, tree, run };
+}
+
+test.each([
+  "automatic",
+  "tool",
+  "dirty",
+  "owner_mismatch",
+  "lost_observation",
+  "in_flight",
+  "exit_unconfirmed",
+] as const)("C-554: overdue reviewer bell (%s)", async (mode) => {
+  const { f, a, notice, tree, run } = endedReviewer();
+  let exited = false;
+  vi.mocked(f.runtime.status).mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "unknown", observed_seq: 1 },
+  });
+  f.runtime.observe_retirement = vi.fn(async (ref, owner) => {
+    if (
+      mode === "owner_mismatch" ||
+      owner.project_id !== f.project ||
+      owner.assignment_id !== a.id ||
+      ref.terminal_ref !== a.runtime_ref?.terminal_ref
+    )
+      return {
+        ok: false as const,
+        error: {
+          code: "runtime_conflict" as const,
+          message: "identity changed",
+        },
+      };
+    return {
+      ok: true as const,
+      value: exited ? ("exited" as const) : ("alive" as const),
+    };
+  });
+  vi.mocked(f.runtime.release).mockImplementation(async () => {
+    exited = mode !== "exit_unconfirmed";
+    return { ok: true, value: undefined };
+  });
+  const dispatcher = new Dispatcher(f.options);
+  const events = (type: string) =>
+    f.state().events.filter((e) => e.type === type);
+  try {
+    await dispatcher.tick();
+    if (mode === "lost_observation") {
+      vi.mocked(f.runtime.status).mockResolvedValue({
+        ok: false,
+        error: { code: "runtime_unavailable", message: "Lost" },
+      });
+      delete f.runtime.observe_retirement;
+    }
+    f.advance(599999);
+    await dispatcher.tick();
+    expect(events("bell_turn_recovery_due")).toHaveLength(0);
+    f.advance(1);
+    await dispatcher.tick();
+    await dispatcher.tick();
+    expect(events("bell_turn_recovery_due")).toMatchObject([
+      {
+        payload: {
+          run_id: run.id,
+          activity_source:
+            mode === "lost_observation"
+              ? "runtime_unavailable"
+              : "alive/unknown",
+        },
+      },
+    ]);
+    const cause = events("bell_turn_recovery_due")[0]?.id as string;
+    if (mode === "dirty") writeFileSync(join(tree, "keep"), "original");
+    if (mode === "in_flight")
+      f.apply((state, actor, p) =>
+        queueRun(
+          state,
+          actor,
+          {
+            assignment_id: a.id,
+            model: "fixture",
+            agent_cli_version: "fixture",
+          },
+          p,
+        ),
+      );
+    const safe = ["automatic", "tool", "exit_unconfirmed"].includes(mode);
+    const row = (await f.view()).dispatch_stalls.find(
+      (s) => s.cause_id === cause,
+    );
+    expect(row).toMatchObject({ can_restart: safe });
+    if (mode === "tool") await f.restart(a, cause);
+    await f.service.tick();
+    if (safe) {
+      await vi.waitFor(async () => {
+        await f.service.tick();
+        expect(f.runtime.release).toHaveBeenCalledTimes(1);
+      });
+      if (mode === "exit_unconfirmed") {
+        await vi.waitFor(() =>
+          expect(events("host_ops_action_deferred")).toContainEqual(
+            expect.objectContaining({
+              payload: expect.objectContaining({
+                notify_pm: true,
+                reason: "terminal_exit_unconfirmed",
+              }),
+            }),
+          ),
+        );
+        expect(events("host_ops_action_finished")).toHaveLength(0);
+      } else {
+        await vi.waitFor(() =>
+          expect(events("host_ops_action_finished")).toHaveLength(1),
+        );
+        expect(events("host_ops_action_taken")).toMatchObject([
+          {
+            actor: { kind: mode === "automatic" ? "system" : "assignment" },
+            payload: { assignment_id: a.id, system_finished_run_id: run.id },
+          },
+        ]);
+        await dispatcher.tick();
+        const original = f.store
+          .listNotifications({ project_id: f.project, assignment_id: a.id })
+          .find((n) => n.event_id === notice.id);
+        expect(original).toMatchObject({ status: "belled", seq: notice.seq });
+        expect(original?.run_id).not.toBe(run.id);
+      }
+    } else {
+      await vi.waitFor(() =>
+        expect(events("bell_turn_recovery_failed")).toHaveLength(1),
+      );
+      const failure = events("bell_turn_recovery_failed")[0];
+      expect(failure?.payload).toMatchObject(
+        mode === "dirty"
+          ? { workspace: "dirty" }
+          : mode === "in_flight"
+            ? { restart_blocked: "unfinished_run" }
+            : { terminal_owner: "unconfirmed" },
+      );
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === failure?.id)
+          .map((n) => n.recipient),
+      ).toEqual([{ kind: "pm_ops" }]);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+    }
+    expect(f.state().human_actions).toHaveLength(0);
+  } finally {
+    await dispatcher.close();
+  }
+});
+
+test("synthetic review handoff: reading the bell is not a restart; safe fresh evidence recovers its original assignment once", async () => {
+  const { f, a, card, notice } = endedReviewer();
   const ref = f.refFor(a);
   f.working.add(ref.terminal_ref);
   const execute = vi.spyOn(f.service.tools, "execute");
@@ -307,13 +498,13 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
       .state()
       .events.find(
         (e) =>
-          e.type === "bell_wake_escalated" &&
+          e.type === "bell_turn_recovery_due" &&
           (e.payload as { assignment_id?: string }).assignment_id === a.id,
       );
     expect(handoff).toMatchObject({
       payload: {
         reason: "system_finished_turn",
-        activity_forwarded_to: f.ops.id,
+        activity_source: "alive/working",
       },
     });
     if (!handoff || handoff.card_id !== card.id)
@@ -322,7 +513,7 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
       .listNotifications({ project_id: f.project, assignment_id: a.id })
       .filter((n) => n.event_id === notice.id);
     if (!note) throw new Error("missing original notification");
-    expect(note.status).toBe("needs_attention");
+    expect(note.status).toBe("pending");
     unwrap(
       f.store.ackEvents({
         project_id: f.project,
@@ -336,7 +527,7 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
         (s) => s.assignment_id === a.id && s.handoff_event_id === handoff.id,
       );
     expect(await row()).toMatchObject({
-      cause_id: note.id,
+      cause_id: handoff.id,
       workspace: "clean",
       can_restart: false,
     });
@@ -347,6 +538,12 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
     expect(execute).not.toHaveBeenCalled();
     // No prior attempt. Do not bypass the guard: only a new terminal observation enables this call.
     f.working.delete(ref.terminal_ref);
+    f.runtime.observe_retirement = async () => ({
+      ok: true,
+      value: vi.mocked(f.runtime.release).mock.calls.length
+        ? "exited"
+        : "alive",
+    });
     const ready = await row();
     if (!ready?.can_restart)
       throw new Error("expected actionable review handoff");
@@ -365,13 +562,13 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
     expect(
       f.state().events.filter((e) => e.type === "host_ops_action_taken"),
     ).toMatchObject([
-      { payload: { dispatch_stall_id: note.id, target_id: a.id } },
+      { payload: { dispatch_stall_id: handoff.id, target_id: a.id } },
     ]);
     expect(f.runtime.release).toHaveBeenCalledOnce();
     expect(
       f.state().assignments.find((owner) => owner.id === a.id)?.runtime_ref,
     ).toBeNull();
-    expect(await row()).toBeUndefined();
+    expect((await row())?.can_restart).not.toBe(true);
     const queued = f
       .state()
       .runs.find((r) => r.assignment_id === a.id && r.status === "queued");

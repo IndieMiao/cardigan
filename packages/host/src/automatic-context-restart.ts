@@ -20,9 +20,18 @@ export function notifyAutomaticContextResult(
   effect: Pick<CommandEffect<unknown>, "events">,
 ) {
   for (const event of effect.events) {
-    if (event.type !== "context_session_restart_result") continue;
-    const recipients =
-      (event.payload as { result?: string }).result === "failed"
+    const pmOnly =
+      (event.type === "host_ops_action_deferred" &&
+        (event.payload as { notify_pm?: boolean }).notify_pm) ||
+      (event.type === "context_session_restart_result" &&
+        (event.payload as { system_finished_run_id?: string })
+          .system_finished_run_id);
+    if (pmOnly && (event.payload as { result?: string }).result === "succeeded")
+      continue;
+    if (!pmOnly && event.type !== "context_session_restart_result") continue;
+    const recipients = pmOnly
+      ? (["pm_ops"] as const)
+      : (event.payload as { result?: string }).result === "failed"
         ? (["pm_ops", "pm_office", "needs_you"] as const)
         : (event.payload as { dispatch_stall_id?: string }).dispatch_stall_id
           ? (["pm_ops", "pm_office"] as const)

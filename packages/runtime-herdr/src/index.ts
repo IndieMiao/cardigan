@@ -843,16 +843,22 @@ export class HerdrRuntime implements Runtime {
       return `HC_SESSION=${quote(this.session)} HC_SOCKET=${quote(this.socketPath)} ${quote(this.binary)} attach ${quote(ref.terminal_ref)}`;
     });
   }
-  release(ref: RuntimeRef, options: { readonly force: boolean }) {
+  release(ref: RuntimeRef, options: Parameters<Runtime["release"]>[1]) {
     return result(async () => {
       this.checkRef(ref);
       this.invalidateStatus(ref);
       try {
         const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
-        this.checkTerminal(ref, terminal);
+        if (options.owner)
+          this.checkRetirementTerminal(ref, options.owner, terminal);
+        else this.checkTerminal(ref, terminal);
         if (
-          !options.force &&
-          ["working", "blocked"].includes(terminal.status?.state ?? "")
+          (!options.force &&
+            ["working", "blocked"].includes(terminal.status?.state ?? "")) ||
+          (options.owner &&
+            ["working", "blocked", "error"].includes(
+              terminal.status?.state ?? "",
+            ))
         )
           fail("runtime_conflict", "Terminal is busy; force is required");
         if (terminal.state === "live")
