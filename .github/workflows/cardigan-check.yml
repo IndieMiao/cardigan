@@ -89,12 +89,33 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify candidate identity
+        id: identity
         env:
+          WORKFLOW_BASE: ${{ github.sha }}
+          MERGE_TIER: ${{ inputs.merge_tier }}
           EXPECTED_SHA: ${{ inputs.sha }}
           EXPECTED_TREE: ${{ inputs.tree }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          # Only grant retries for test inputs proven independent *before* running
+          # candidate code. A differing first parent (including stacked deliveries)
+          # or a batch cannot establish this card's complete diff.
+          cases=()
+          if [[ "$MERGE_TIER" =~ ^(single|card)$ && "$WORKFLOW_BASE" =~ ^[0-9a-f]{40}$ &&
+                "$(git show -s --format=%P HEAD)" =~ ^$WORKFLOW_BASE\ [0-9a-f]{40}$ ]] &&
+             ! git diff --quiet "$WORKFLOW_BASE" HEAD; then
+            diff=(git diff --quiet --no-renames "$WORKFLOW_BASE" HEAD -- . ':(exclude,glob)docs/plans/C-*.md')
+            # Server fixtures cover the backend stack; UI sources are independent.
+            if "${diff[@]}" ':(exclude,glob)apps/web/src/**'; then cases+=(ssh_local ssh_remote loopback); fi
+            # The standalone roles preload fixture doesn't run the backend or UI.
+            elsewhere=()
+            for pkg in apps/{web,cli,server} packages/{domain,host,mcp-server,router,store,git-service,git-transport,runtime-herdr}; do
+              elsewhere+=(":(exclude,glob)$pkg/src/**")
+            done
+            if "${diff[@]}" "${elsewhere[@]}"; then cases+=(corepack); fi
+          fi
+          echo "retry_cases=${cases[*]}" >> "$GITHUB_OUTPUT"
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -156,6 +177,8 @@ jobs:
         id: test
         if: steps.scope.outputs.skip_test != 'true'
         env:
+          COREPACK_ENABLE_NETWORK: '0'
+          CARDIGAN_FLAKE_CASES: ${{ steps.identity.outputs.retry_cases }}
           CHECK_SCOPE: ${{ steps.scope.outputs.scope }}
           AFFECTED_PATHS: ${{ steps.scope.outputs.affected_paths }}
         run: |
@@ -177,3 +200,16 @@ jobs:
         id: e2e
         if: steps.scope.outputs.skip_e2e != 'true'
         run: pnpm test:e2e
+      # Fixed vocabulary only. These receipts never replace a required check.
+      - name: Recovered ssh_local
+        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'ssh_local') && steps.test.outputs.ssh_local == 'true' }}
+        run: 'true'
+      - name: Recovered ssh_remote
+        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'ssh_remote') && steps.test.outputs.ssh_remote == 'true' }}
+        run: 'true'
+      - name: Recovered corepack
+        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'corepack') && steps.test.outputs.corepack == 'true' }}
+        run: 'true'
+      - name: Recovered loopback
+        if: ${{ !cancelled() && contains(steps.identity.outputs.retry_cases, 'loopback') && steps.test.outputs.loopback == 'true' }}
+        run: 'true'

@@ -4,6 +4,7 @@ import {
   FailureLogError,
   type OpenFailureLog,
 } from "./check-executor.js";
+import { checkFlakeIds } from "./check-flake-cases.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
 import { githubCheckScope } from "./github-check-scope.js";
 import {
@@ -561,20 +562,25 @@ function mapGithubCheckSteps(
   job: GithubJob,
 ): CheckoutResult {
   if (!Array.isArray(job.steps)) return rejected();
-  const mainStepCount =
-    GITHUB_WORKFLOW_STEPS.length +
-    (job.steps[0]?.name === "Set up job" ? 1 : 0);
+
   const steps = [...job.steps];
   if (steps[0]?.name === "Set up job") steps.shift();
   if (steps.at(-1)?.name === "Complete job") steps.pop();
   // GitHub registers post steps for these trusted actions, even when skipped.
   for (const name of ["Post Checkout candidate", "Post Setup Node"])
     if (steps.at(-1)?.name === name) steps.pop();
+  // Accept exactly the complete old contract or the complete new one; never
+  // treat arbitrary missing/extra business steps as optional.
+  const receipts = checkFlakeIds.map((id) => `Recovered ${id}`);
+  const expected: readonly string[] =
+    steps.length === GITHUB_WORKFLOW_STEPS.length
+      ? GITHUB_WORKFLOW_STEPS
+      : [...GITHUB_WORKFLOW_STEPS, ...receipts];
+  const mainStepCount =
+    expected.length + (job.steps[0]?.name === "Set up job" ? 1 : 0);
   if (
-    steps.length !== GITHUB_WORKFLOW_STEPS.length ||
-    steps.some(
-      (step, index) => !step || step.name !== GITHUB_WORKFLOW_STEPS[index],
-    ) ||
+    steps.length !== expected.length ||
+    steps.some((step, index) => !step || step.name !== expected[index]) ||
     job.steps.some(
       (step, index) =>
         !step ||
@@ -597,6 +603,7 @@ function mapGithubCheckSteps(
     return rejected();
   const scope = githubCheckScope(request);
   const intentionalSkip = (name: string) =>
+    receipts.includes(name) ||
     (scope.scope === "docs_only" &&
       scope.skip_checks.split(",").includes(name)) ||
     (request.mergeTier === "card" && name === "e2e");
@@ -636,12 +643,34 @@ function mapGithubCheckSteps(
     checks.every(
       (step) => step.status === "passed" || step.status === "skipped",
     );
+  const recovered = checkFlakeIds.filter((id) =>
+    steps.some(
+      (step) =>
+        step.name === `Recovered ${id}` && step.conclusion === "success",
+    ),
+  );
+  if (
+    recovered.length &&
+    !steps.some(
+      (step) =>
+        step.name === "test" &&
+        ["success", "failure"].includes(step.conclusion ?? ""),
+    )
+  )
+    return rejected();
   const failedGithubStep = job.steps.find(
     (s) =>
       !checks.some((c) => c.name === s.name) &&
       (s.conclusion === "failure" || s.conclusion === "timed_out"),
   )?.name;
   return {
+    // The new workflow already made the case-level retry decision. Do not
+    // turn a remaining Vitest timeout into a second, whole-check retry.
+    ...(expected.length !== GITHUB_WORKFLOW_STEPS.length &&
+    checks.some((step) => step.name === "test" && step.status === "failed")
+      ? { caseTimeoutsManaged: true }
+      : {}),
+    ...(recovered.length ? { recovered } : {}),
     ...(failedGithubStep ? { failedGithubStep } : {}),
     status: passed
       ? "passed"

@@ -349,6 +349,7 @@ export async function createMergeCheckLog(input: {
     async finish(
       result: CheckoutResult,
       bound?: { readonly run_id: number; readonly html_url: string },
+      recoveredSummary?: string,
     ) {
       if (finished) throw new Error("Merge check log is already closed");
       finished = true;
@@ -371,7 +372,7 @@ export async function createMergeCheckLog(input: {
         failed?.name ?? result.failedGithubStep ?? "executor",
       );
       const failures = failureBuffer?.failure.lines() ?? [];
-      const baseSummary =
+      const checkSummary =
         result.status === "passed"
           ? result.checks.some((c) => c.status === "skipped")
             ? "本次范围内的检查已通过"
@@ -393,6 +394,9 @@ export async function createMergeCheckLog(input: {
               ),
               CHECK_SUMMARY_LIMIT,
             );
+      const baseSummary = recoveredSummary
+        ? boundedCheckSummary(checkSummary, recoveredSummary)
+        : checkSummary;
       // This link is constructed solely from the verified run and numeric job id,
       // never from log text, a Location header or an exception message.
       const locator =
@@ -425,6 +429,7 @@ export async function createMergeCheckLog(input: {
         !result.manual_attention &&
         !result.failedGithubStep;
       const timeout_only =
+        !result.caseTimeoutsManaged &&
         canClassify &&
         [...output].every(
           ([name, buffer]) =>

@@ -858,3 +858,42 @@ test.each([true, false])(
     expect(f.finished).toHaveBeenCalledOnce();
   },
 );
+
+test.each(["passed", "failed", "partial"] as const)(
+  "fixed flake receipts never override the required test result: %s",
+  async (mode) => {
+    const f = setup(1);
+    f.complete();
+    const j = job(1);
+    const receipts = ["ssh_local", "ssh_remote", "corepack", "loopback"].map(
+      (id) => ({
+        name: `Recovered ${id}`,
+        number: 0,
+        status: "completed",
+        conclusion: id === "corepack" ? "success" : "skipped",
+      }),
+    );
+    if (mode === "partial") receipts.pop();
+    const steps = j.steps
+      .flatMap((s) => [
+        mode === "failed" && s.name === "test"
+          ? { ...s, conclusion: "failure" }
+          : s,
+        ...(s.name === "e2e" ? receipts : []),
+      ])
+      .map((s, i) => ({ ...s, number: i + 1 }));
+    f.client.jobs.mockResolvedValueOnce([{ ...j, steps }]);
+    const result = f.poller.poll(external(1));
+    await f.poller.tick();
+    expect(await result).toMatchObject(
+      mode === "partial"
+        ? { status: "failed", checks: [] }
+        : {
+            status: mode,
+            recovered: ["corepack"],
+            ...(mode === "failed" ? { caseTimeoutsManaged: true } : {}),
+          },
+    );
+    expect(f.client.jobLog).not.toHaveBeenCalled();
+  },
+);

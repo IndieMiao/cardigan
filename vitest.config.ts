@@ -1,8 +1,18 @@
 import { configDefaults, defineConfig } from "vitest/config";
-
+import { checkFlakeIds } from "./packages/host/src/check-flake-cases.js";
 import { ciReporters } from "./test-support/ci-reporters.js";
 
+const retryCases =
+  process.env.GITHUB_ACTIONS === "true"
+    ? checkFlakeIds.filter((id) =>
+        process.env.CARDIGAN_FLAKE_CASES?.split(" ").includes(id),
+      )
+    : [];
+const retryRunner = retryCases.length
+  ? { runner: "./test-support/check-flake-runner.ts", provide: { retryCases } }
+  : {};
 const processContracts = [
+  "packages/roles/src/test-worker-limit.test.ts",
   "packages/host/src/worker-claude-opener.integration.test.ts",
   "apps/server/src/diagnostics-reader.test.ts",
   "apps/cli/src/assignment-attach.test.ts",
@@ -19,6 +29,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: "node",
+          ...retryRunner,
           include: ["{packages,apps}/*/src/**/*.test.{ts,tsx}"],
           exclude: [
             ...configDefaults.exclude,
@@ -42,6 +53,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: "process-contract",
+          ...retryRunner,
           include: processContracts,
           // A per-project maxWorkers would be overridden by the CI CLI flag.
           fileParallelism: false,
