@@ -96,3 +96,39 @@ test.each(["linux", "darwin"])(
     expect(transport.mock.calls[0]?.[1].join(" ")).not.toContain("sudo");
   },
 );
+
+test("does not prepare an installer for a nonstandard helper destination", () => {
+  expect(() =>
+    upgradeMaterials(
+      {
+        ...worker,
+        fileHelper: {
+          python: "/usr/bin/python3",
+          path: "/other/worker-files.py",
+        },
+      },
+      "linux",
+    ),
+  ).toThrow("worker_binding_unavailable");
+});
+
+test("does not advertise a command if the worker cannot confirm both staged digests", async () => {
+  transport.mockResolvedValue({
+    file: "/usr/bin/python3",
+    args: [
+      "-IB",
+      "-c",
+      "import sys; sys.stdin.buffer.read(); print('wrong digest')",
+    ],
+  });
+  await expect(stageWorkerUpgrade(worker, "linux")).rejects.toThrow(
+    "worker_release_staging_failed",
+  );
+});
+
+test("replays both operator sequences in temporary directories without root", () => {
+  execFileSync("/usr/bin/python3", [
+    "-IB",
+    new URL("../test-support/worker-upgrade.py", import.meta.url).pathname,
+  ]);
+});
