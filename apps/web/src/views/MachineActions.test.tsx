@@ -1930,12 +1930,17 @@ test("D2091 P1-c into R4: a terminal poll for A received after switching to B st
   const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
   const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
   const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollC = Promise.withResolvers<{ check: MachineCheckJob }>();
   const details = heldDetails();
   const c = client({
     machine: details.machine,
     checkMachine: vi.fn(() => postA.promise),
     machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
-      id === "job-A" ? pollA.promise : pollB.promise,
+      id === "job-A"
+        ? pollA.promise
+        : id === "job-B"
+          ? pollB.promise
+          : pollC.promise,
     ),
   });
   const { rerender } = render(<Page c={c} />);
@@ -1991,12 +1996,17 @@ async function followAThenB() {
   const postA = Promise.withResolvers<{ check: MachineCheckJob }>();
   const pollA = Promise.withResolvers<{ check: MachineCheckJob }>();
   const pollB = Promise.withResolvers<{ check: MachineCheckJob }>();
+  const pollC = Promise.withResolvers<{ check: MachineCheckJob }>();
   const details = heldDetails();
   const c = client({
     machine: details.machine,
     checkMachine: vi.fn(() => postA.promise),
     machineCheck: vi.fn(async (_p: string, _m: string, id: string) =>
-      id === "job-A" ? pollA.promise : pollB.promise,
+      id === "job-A"
+        ? pollA.promise
+        : id === "job-B"
+          ? pollB.promise
+          : pollC.promise,
     ),
   });
   const { rerender } = render(<Page c={c} />);
@@ -2038,7 +2048,7 @@ async function followAThenB() {
     act(async () =>
       postA.resolve({ check: job({ id: "job-A", status: "running" }) }),
     );
-  return { c, d, failA, passB, replyA };
+  return { c, d, failA, passB, replyA, details, postA, pollA, pollB, pollC };
 }
 const results = (d: ReturnType<typeof within>) => ({
   a: !!d.queryByText("检查未通过：SSH"),
@@ -2096,4 +2106,288 @@ test("Q-1085 V4: a progress reply naming another id records nothing", async () =
   expect(results(d)).toEqual({ a: false, b: false });
   expect(progressIds(c)).toEqual(["job-A", "job-B"]);
   expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+
+// attachment-8273 (V-2695:1), as the reviewer wrote it.
+test("Reviewer: confirmed V2 order, A failure known before start reply while B runs", async () => {
+  const { c, d, failA, passB, replyA } = await followAThenB();
+  await failA();
+  await replyA();
+  expect(d.getByText("正在检查：MCP…")).toBeTruthy();
+  expect(disabled(d, "检查中…")).toBe(true);
+  await passB();
+  await d.findByText("检查未通过：SSH");
+  expect(disabled(d, "立即检查")).toBe(false);
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+});
+test("Reviewer: step 5 with B failed before the POST names A", async () => {
+  const { c, d, failA, replyA, details, pollB } = await followAThenB();
+  await failA();
+  details.state.machine = onBinding(
+    requested("job-B", "failed", { failed_steps: ["mcp"] }),
+  );
+  await act(async () =>
+    pollB.resolve({
+      check: job({
+        id: "job-B",
+        status: "failed",
+        step: "finished",
+        failed_steps: ["mcp"],
+      }),
+    }),
+  );
+  const before = {
+    pending: !!d.queryByText("正在开始检查…"),
+    bFailure: !!d.queryByText("检查未通过：MCP"),
+    locked: disabled(d, "立即检查"),
+  };
+  await replyA();
+  await d.findByText("检查未通过：SSH");
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+  expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  expect(before).toEqual({ pending: true, bFailure: false, locked: true });
+});
+
+/**
+ * Q-1088 matrix (docs/plans/C-511.md): after steps 1–3 (the start request
+ * waits, the page followed A, then B), three events arrive in every order:
+ * P, the start reply naming A or B; EA, A's late progress reply; EB, B's
+ * progress reply (and its detail record). A may never answer. After every
+ * event the page shows what the set of arrived events says, whatever the
+ * order.
+ */
+type Outcome = "passed" | "failed";
+type Event = "P" | "EA" | "EB";
+interface Cell {
+  readonly named: "A" | "B";
+  readonly a: Outcome | undefined;
+  readonly b: Outcome;
+}
+const resultText = (who: "A" | "B", outcome: Outcome) =>
+  outcome === "passed"
+    ? "检查通过"
+    : `检查未通过：${who === "A" ? "SSH" : "MCP"}`;
+const matrixTexts = [
+  "正在检查：MCP…",
+  "正在开始检查…",
+  "正在读回机器状态…",
+  "检查未通过：SSH",
+  "检查未通过：MCP",
+  "检查通过",
+];
+function expectedView(cell: Cell, arrived: ReadonlySet<Event>) {
+  if (!arrived.has("EB")) return { shown: ["正在检查：MCP…"], locked: true };
+  if (!arrived.has("P")) return { shown: ["正在开始检查…"], locked: true };
+  const answer: ["A" | "B", Outcome] | undefined =
+    cell.named === "B"
+      ? ["B", cell.b]
+      : arrived.has("EA") && cell.a
+        ? ["A", cell.a]
+        : undefined;
+  return { shown: answer ? [resultText(...answer)] : [], locked: false };
+}
+function orders(events: readonly Event[]): Event[][] {
+  if (events.length <= 1) return [[...events]];
+  return events.flatMap((first, i) =>
+    orders(events.filter((_, j) => j !== i)).map((rest) => [first, ...rest]),
+  );
+}
+const matrix = (["A", "B"] as const).flatMap((named) =>
+  ([undefined, "passed", "failed"] as const).flatMap((a) =>
+    (["passed", "failed"] as const).flatMap((b) =>
+      orders(a ? ["P", "EA", "EB"] : ["P", "EB"]).map(
+        (order) =>
+          [
+            `P→${named}, A ${a ?? "never answers"}, B ${b}: ${order.join(" ")}`,
+            { named, a, b } as Cell,
+            order,
+          ] as const,
+      ),
+    ),
+  ),
+);
+
+test.each(matrix)("Q-1088 matrix %s", async (_name, cell, order) => {
+  const { c, d, details, postA, pollA, pollB } = await followAThenB();
+  const view = () => matrixView(d, matrixTexts);
+  const fire: Record<Event, () => Promise<void>> = {
+    P: () =>
+      act(async () =>
+        postA.resolve({
+          // The reply speaks of the check as it was then: B at its step.
+          check:
+            cell.named === "A"
+              ? job({ id: "job-A", status: "running" })
+              : job({ id: "job-B", status: "running", step: "mcp" }),
+        }),
+      ),
+    EA: () =>
+      act(async () =>
+        pollA.resolve({
+          check: job({
+            id: "job-A",
+            status: cell.a,
+            step: "finished",
+            failed_steps: cell.a === "failed" ? ["ssh"] : [],
+          }),
+        }),
+      ),
+    EB: async () => {
+      const failed_steps = cell.b === "failed" ? ["mcp"] : [];
+      details.state.machine = onBinding(
+        requested("job-B", cell.b, { failed_steps }),
+      );
+      await act(async () =>
+        pollB.resolve({
+          check: job({
+            id: "job-B",
+            status: cell.b,
+            step: "finished",
+            failed_steps,
+          }),
+        }),
+      );
+    },
+  };
+  const arrived = new Set<Event>();
+  expect(view()).toEqual(expectedView(cell, arrived));
+  for (const event of order) {
+    await fire[event]();
+    arrived.add(event);
+    const expected = expectedView(cell, arrived);
+    await waitFor(() => expect(view()).toEqual(expected));
+    // Settled: further timers and reads change nothing.
+    await settle();
+    expect({ after: event, ...view() }).toEqual({ after: event, ...expected });
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  }
+  expect(progressIds(c)).toEqual(["job-A", "job-B"]);
+});
+
+/** Lets further timers (pollMs 5) and reads run. */
+const settle = () =>
+  act(() => new Promise((resolve) => setTimeout(resolve, 30)));
+const matrixView = (d: ReturnType<typeof within>, texts: readonly string[]) => ({
+  shown: texts.filter((text) => d.queryByText(text) !== null),
+  locked:
+    (
+      d.queryByRole("button", { name: "立即检查" }) ??
+      d.getByRole("button", { name: "检查中…" })
+    ).getAttribute("aria-disabled") === "true",
+});
+
+/**
+ * Q-1088 matrix, start reply naming C: the request was handled after B had
+ * ended on the host, so C is a check this page has not seen. C's progress
+ * is read only once the page follows C, so EC (C's end) comes after P.
+ */
+type EventC = Event | "EC";
+interface CellC {
+  readonly a: "failed" | undefined;
+  readonly b: Outcome;
+  readonly cc: Outcome;
+}
+const textsC = [...matrixTexts, "正在检查：工具…", "检查未通过：工具"];
+function expectedViewC(cell: CellC, arrived: ReadonlySet<EventC>) {
+  if (!arrived.has("P"))
+    return expectedView({ named: "A", a: cell.a, b: cell.b }, arrived as never);
+  if (!arrived.has("EC")) return { shown: ["正在检查：工具…"], locked: true };
+  return {
+    shown: [cell.cc === "passed" ? "检查通过" : "检查未通过：工具"],
+    locked: false,
+  };
+}
+const ordersC = (events: readonly EventC[]) =>
+  (orders(events as Event[]) as EventC[][]).filter(
+    (order) => order.indexOf("EC") > order.indexOf("P"),
+  );
+const matrixC = (["failed", undefined] as const).flatMap((a) =>
+  (["passed", "failed"] as const).flatMap((b) =>
+    (["passed", "failed"] as const).flatMap((cc) =>
+      ordersC(a ? ["P", "EA", "EB", "EC"] : ["P", "EB", "EC"]).map(
+        (order) =>
+          [
+            `P→C, A ${a ?? "never answers"}, B ${b}, C ${cc}: ${order.join(" ")}`,
+            { a, b, cc } as CellC,
+            order,
+          ] as const,
+      ),
+    ),
+  ),
+);
+
+test.each(matrixC)("Q-1088 matrix %s", async (_name, cell, order) => {
+  const { c, d, details, postA, pollA, pollB, pollC } = await followAThenB();
+  const view = () => matrixView(d, textsC);
+  const arrived = new Set<EventC>();
+  const failedB = cell.b === "failed" ? ["mcp"] : [];
+  const fire: Record<EventC, () => Promise<void>> = {
+    P: async () => {
+      // B ended on the host and C runs in its place on this binding.
+      details.state.machine = onBinding(
+        requested("job-C", "running", { step: "tools" }),
+      );
+      await act(async () =>
+        postA.resolve({
+          check: job({ id: "job-C", status: "running", step: "tools" }),
+        }),
+      );
+    },
+    EA: () =>
+      act(async () =>
+        pollA.resolve({
+          check: job({
+            id: "job-A",
+            status: "failed",
+            step: "finished",
+            failed_steps: ["ssh"],
+          }),
+        }),
+      ),
+    EB: async () => {
+      if (!arrived.has("P"))
+        details.state.machine = onBinding(
+          requested("job-B", cell.b, { failed_steps: failedB }),
+        );
+      await act(async () =>
+        pollB.resolve({
+          check: job({
+            id: "job-B",
+            status: cell.b,
+            step: "finished",
+            failed_steps: failedB,
+          }),
+        }),
+      );
+    },
+    EC: async () => {
+      const failed_steps = cell.cc === "failed" ? ["tools"] : [];
+      details.state.machine = onBinding(
+        requested("job-C", cell.cc, { failed_steps }),
+      );
+      await waitFor(() => expect(progressIds(c)).toContain("job-C"));
+      await act(async () =>
+        pollC.resolve({
+          check: job({
+            id: "job-C",
+            status: cell.cc,
+            step: "finished",
+            failed_steps,
+          }),
+        }),
+      );
+    },
+  };
+  expect(view()).toEqual(expectedViewC(cell, arrived));
+  for (const event of order) {
+    await fire[event]();
+    arrived.add(event);
+    const expected = expectedViewC(cell, arrived);
+    await waitFor(() => expect(view()).toEqual(expected));
+    await settle();
+    expect({ after: event, ...view() }).toEqual({ after: event, ...expected });
+    expect(c.checkMachine).toHaveBeenCalledTimes(1);
+  }
+  expect(progressIds(c)).toEqual(["job-A", "job-B", "job-C"]);
 });
