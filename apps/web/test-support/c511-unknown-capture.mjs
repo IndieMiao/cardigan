@@ -334,12 +334,13 @@ try {
       });
       await reopenDrawer();
       await until(has("正在检查：SSH"));
+      await delay(1500); // A's progress read is out (poll interval 1 s)
       await run(() => {
         window.__c511.read = "b";
       });
       await reopenDrawer();
       await until(has("正在检查：MCP"));
-      await delay(1500); // both progress reads are out
+      await delay(1500); // B's progress read is out too
       await run(() => window.__c511.failA());
       await delay(300);
       await run(() => {
