@@ -6,8 +6,9 @@ import {
   type Notification,
   type Run,
   runsOf,
+  systemEndedTurn,
 } from "@cardigan/domain";
-import { recordWakeRefusal } from "@cardigan/host";
+import { recordWakeRefusal, turnSessionKey } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { payloadString, payloadStrings } from "@cardigan/router";
 import {
@@ -22,34 +23,6 @@ import {
   hostOpsAlertRecipient,
 } from "./dispatch-alert.js";
 import type { StandingResolver } from "./dispatch-inbox.js";
-
-/** Queuing another Run doesn't end the CLI turn. Only consider the last one that actually started. */
-function systemEndedTurn(state: CommandState, owner: Assignment) {
-  let last: Run | undefined;
-  for (const r of runsOf(state.runs, owner.id)) {
-    if (!r.started_at) continue;
-    if (
-      !last?.started_at ||
-      r.started_at > last.started_at ||
-      (r.started_at === last.started_at &&
-        Number(r.id.slice(2)) > Number(last.id.slice(2)))
-    )
-      last = r;
-  }
-  if (!last?.finished_at || last.outcome !== "blocked") return;
-  const ref =
-    last.bell_delivery?.runtime_ref ??
-    last.recovery_runtime ??
-    last.launch_publication?.runtime_ref;
-  if (ref && JSON.stringify(ref) !== JSON.stringify(owner.runtime_ref)) return;
-  return eventsOfType(state.events, "run_finished").some(
-    (e) =>
-      payloadString(e.payload, "run_id") === last.id &&
-      payloadString(e.payload, "finished_by") === "system",
-  )
-    ? last
-    : undefined;
-}
 
 /** CandidateIndex groups unread retries by their original Run, separately from new work. */
 export function previousInboxTurn(
@@ -67,6 +40,23 @@ export function previousInboxTurn(
   if (reminder) return { turn: reminder, reason: "unread_reminder" } as const;
   const turn = owner.runtime_ref && systemEndedTurn(state, owner);
   if (turn) return { turn, reason: "system_finished_turn" } as const;
+}
+
+/** Exclude only notices already claimed by this system-ended turn's own deadline. */
+export function systemTurnWaitingNotes(state: CommandState, owner: Assignment) {
+  const turn = owner.runtime_ref && systemEndedTurn(state, owner);
+  return new Set(
+    turn
+      ? eventsOfType(state.events, "bell_wake_deferred")
+          .filter(
+            (e) =>
+              payloadString(e.payload, "assignment_id") === owner.id &&
+              payloadString(e.payload, "run_id") === turn.id &&
+              payloadString(e.payload, "reason") === "system_finished_turn",
+          )
+          .flatMap((e) => payloadStrings(e.payload, "notification_ids"))
+      : [],
+  );
 }
 
 /** Commit the deadline with the positive non-write receipt, not when its next retry is due. */
@@ -169,6 +159,24 @@ export function recordTurnWait(
       ))
   )
     return;
+  // Keep the unread rows dispatchable: a replacement must ring the original seqs.
+  if (reason === "system_finished_turn") {
+    const previous = matching("bell_turn_recovery_due");
+    const recorded = new Set(
+      previous.flatMap((e) => payloadStrings(e.payload, "notification_ids")),
+    );
+    const newIds = overdue.filter((id) => !recorded.has(id));
+    if (newIds.length || (!ids.length && !previous.length))
+      dispatchAlert(tx, store, state, at, {
+        ...common,
+        type: "bell_turn_recovery_due",
+        notification_ids: newIds,
+        session_key: turnSessionKey(owner),
+        // An empty bell belongs to an already queued Run. Never stop it.
+        audience: newIds.length ? "activity_log" : "ops",
+      });
+    return;
+  }
   handoffUnread(
     tx,
     store,

@@ -263,3 +263,20 @@ test("C-238 an advancing baseline during evidence sampling remains uncertain", a
     base_sha: null,
   });
 });
+
+test("C-553: a project edit after evaluation discards the prepared shadow audit", async () => {
+  const { git } = await ready();
+  let reads = 0;
+  f.store.observe({
+    transaction(kind) {
+      if (kind !== "read" || ++reads !== 2) return;
+      f.store.observe(undefined);
+      f.comment();
+    },
+  });
+  const observer = new MergeShadowObserver(f.store, git, f.clock);
+  await observer.tick(f.id);
+  expect(shadows()).toEqual([]);
+  await observer.tick(f.id);
+  expect(shadows()[0]?.payload).toMatchObject({ would_confirm: false });
+});

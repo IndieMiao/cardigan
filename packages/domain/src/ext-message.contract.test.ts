@@ -200,6 +200,138 @@ test("projection follows current handled/readiness state, preferred title and al
     extMessageItems({ ...state, cards: [] }, project).every((i) => i.sensitive),
   ).toBe(true);
 });
+test("projection preserves the first source in stream order and canonical handoff groups", () => {
+  const second = { ...decision, id: id("decision", 2), key: id("decision", 2) };
+  const state = {
+    ...fixture(),
+    decisions: [decision, second].map((q) => ({
+      ...q,
+      handoff_group: "shared",
+    })),
+    human_actions: [action],
+    events: [
+      event(
+        "decision_requested",
+        { decision_id: decision.id, human_action_id: action.id },
+        2,
+      ),
+      event("decision_requested", { decision_id: second.id }, 3),
+      event(
+        "legacy",
+        { decision_id: decision.id, human_action_id: action.id },
+        1,
+      ),
+    ],
+  };
+  expect(
+    extMessageItems(state, state.project_id).map((i) => [
+      i.item_id,
+      i.event_id,
+      i.handled,
+    ]),
+  ).toEqual([
+    [decision.id, "event-2", false],
+    [second.id, "event-3", true],
+    [action.id, "event-2", false],
+  ]);
+});
+test("failed checks on confirmed merges stay visible without a full event scan per decision", async () => {
+  const f = mergeFixture();
+  const { completion } = await f.accept();
+  const confirmation = f.state.decisions.find(
+    (q) => q.trigger === "merge_confirmation",
+  )!;
+  const base = {
+    ...f.state,
+    decisions: [{ ...confirmation, decider: "human" as const }],
+  };
+  const confirmed = value(
+    recordDecision(
+      base,
+      human,
+      {
+        decision_id: confirmation.id,
+        option: "merge",
+        raw_quote: "同意",
+        rationale: "已查看",
+      },
+      f.io,
+    ),
+  ).data;
+  const work = base.work_items.find((w) => w.id === completion.work_item_id)!;
+  const cases = Array.from({ length: 8 }, (_, i) => {
+    const n = i + 1;
+    const card_id = id("card", n),
+      work_item_id = id("work_item", n),
+      completion_id = id("delivery", n),
+      decision_id = id("decision", n);
+    return {
+      card: { ...f.card, id: card_id, status: "awaiting_merge" as const },
+      work: { ...work, id: work_item_id, card_id },
+      completion: {
+        ...completion,
+        id: completion_id,
+        work_item_id,
+        status: "accepted" as const,
+      },
+      decision: {
+        ...confirmed,
+        id: decision_id,
+        key: decision_id,
+        card_id,
+        kind: "approve" as const,
+        target: { delivery_id: completion_id },
+      },
+      events: [
+        { ...event("decision_requested", { decision_id }, n * 2), card_id },
+        {
+          ...event(
+            "merge_check_finished",
+            {
+              completion_id,
+              attempt_id: `check-${n}`,
+              status: "failed",
+              checks: [],
+            },
+            n * 2 + 1,
+          ),
+          card_id,
+        },
+      ],
+    };
+  });
+  function historyVisits(count: number) {
+    // Count actual visits to an unrelated history slot, not elapsed time or a
+    // specific Array method. Both projections start with a fresh, equal-sized snapshot.
+    const unrelated = event("comment_posted", {}, 0);
+    const events = [unrelated, ...cases.flatMap((entry) => entry.events)];
+    let visits = 0;
+    Object.defineProperty(events, 0, {
+      get: () => {
+        visits++;
+        return unrelated;
+      },
+    });
+    const state = {
+      ...base,
+      events,
+      cards: cases.map((c) => c.card),
+      work_items: cases.map((c) => c.work),
+      deliveries: cases.map((c) => c.completion),
+      decisions: cases.slice(0, count).map((c) => c.decision),
+    };
+    expect(
+      extMessageItems(state, state.project_id)
+        .filter((i) => i.kind === "merge_confirmation" && !i.handled && i.ready)
+        .map((i) => i.item_id),
+    ).toEqual(state.decisions.map((q) => q.id));
+    return visits;
+  }
+  const single = historyVisits(1);
+  expect(single).toBeGreaterThan(0);
+  expect(historyVisits(cases.length)).toBe(single);
+});
+
 test("final failure becomes one readable Workbench notice and never enters external projection", () => {
   const failed = {
     ...event(

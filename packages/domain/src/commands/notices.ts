@@ -40,9 +40,18 @@ const field = (e: Event, key: string) => {
 };
 const officeWaitKey = (e: Event) =>
   field(e, "wait_key") ?? field(e, "source_entry_id");
-function readIds(events: readonly Event[]) {
+function noticeIndex(events: readonly Event[]) {
+  const recovered = new Set<string | undefined>();
+  const overdue = new Set<string | undefined>();
+  const closed = new Set<string | undefined>();
   const ids = new Set<string>();
-  for (const e of events)
+  for (const e of events) {
+    if (e.actor.kind === "system") {
+      if (e.type === "standing_pm_recovery_started")
+        recovered.add(field(e, "source_recovery_event_id"));
+      if (e.type === "office_wait_overdue") overdue.add(officeWaitKey(e));
+      if (e.type === "office_wait_closed") closed.add(officeWaitKey(e));
+    }
     if (
       e.type === "notices_read" &&
       typeof e.payload === "object" &&
@@ -52,7 +61,8 @@ function readIds(events: readonly Event[]) {
     )
       for (const id of e.payload.notice_ids)
         if (typeof id === "string") ids.add(id);
-  return ids;
+  }
+  return { read: ids, recovered, overdue, closed };
 }
 function noticeBody(e: Event) {
   const notice = field(e, "notice");
@@ -83,7 +93,8 @@ const systemNoticeEvents = new Map([
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
-  const read = readIds(state.events);
+  const { read, recovered, overdue, closed } = noticeIndex(state.events);
+  const decisions = new Map(state.decisions.map((q) => [q.id, q]));
   const seen = new Set<string>();
   const out: Notice[] = [];
   // seq is per card stream (§6.1); order across cards by time, then by the
@@ -149,34 +160,12 @@ export function notices(state: CommandState): readonly Notice[] {
       });
       continue;
     }
-    if (
-      e.type === "standing_pm_recovered" &&
-      state.events.some(
-        (started) =>
-          started.type === "standing_pm_recovery_started" &&
-          started.actor.kind === "system" &&
-          field(started, "source_recovery_event_id") === e.id,
-      )
-    )
-      continue;
-    if (
-      e.type === "office_wait_started" &&
-      state.events.some(
-        (later) =>
-          later.type === "office_wait_overdue" &&
-          later.actor.kind === "system" &&
-          officeWaitKey(later) === officeWaitKey(e),
-      )
-    )
+    if (e.type === "standing_pm_recovered" && recovered.has(e.id)) continue;
+    if (e.type === "office_wait_started" && overdue.has(officeWaitKey(e)))
       continue;
     if (
       ["office_wait_started", "office_wait_overdue"].includes(e.type) &&
-      state.events.some(
-        (closed) =>
-          closed.type === "office_wait_closed" &&
-          closed.actor.kind === "system" &&
-          officeWaitKey(closed) === officeWaitKey(e),
-      )
+      closed.has(officeWaitKey(e))
     )
       continue;
     if (
@@ -222,7 +211,7 @@ export function notices(state: CommandState): readonly Notice[] {
       continue;
     const decision_id = field(e, "decision_id") as DecisionId | undefined;
     if (!decision_id && !systemNotice) continue;
-    const q = state.decisions.find((q) => q.id === decision_id);
+    const q = decision_id ? decisions.get(decision_id) : undefined;
     const key = `${decision_id ?? e.id}/${e.type}/${e.created_at}`;
     if (seen.has(key)) continue;
     seen.add(key);

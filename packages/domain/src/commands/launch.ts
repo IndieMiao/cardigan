@@ -421,6 +421,8 @@ export interface DispatchRunParams {
   /** Host-only D5 replacement, committed together with dispatch and its handoff. */
   readonly replacement?: {
     readonly previous: RuntimeRef;
+    /** Provision fresh without releasing a previously confirmed absent/exited terminal address. */
+    readonly previous_exit_confirmed?: true;
     readonly reason:
       | "runtime_not_found"
       | "runtime_unavailable"
@@ -597,6 +599,7 @@ export function dispatchRun(
       "worktree_path",
       "branch",
       "agent_session_id",
+      "local_process_receipt",
     ] as const)
       if (ref[field] !== undefined) text(ref[field], field);
     const path = ref.worktree_path ?? assignment.worktree_path;

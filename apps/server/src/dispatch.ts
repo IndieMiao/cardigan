@@ -156,6 +156,7 @@ import {
   previousInboxTurn,
   recordTurnWait,
   settleRefusedWake,
+  systemTurnWaitingNotes,
 } from "./dispatch-turn-guard.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
@@ -933,6 +934,40 @@ export class Dispatcher {
       observation = observed?.ok
         ? `${observed.value.process}/${observed.value.agent}`
         : (observed?.error.code ?? "unavailable");
+      const systemTurn = guardedTurn?.reason === "system_finished_turn";
+      const sessionLoss = observed?.ok
+        ? observed.value.process === "exited"
+        : observed?.error.code === "runtime_not_found" ||
+          observed?.error.code === "runtime_unavailable";
+      let previousExitConfirmed = false;
+      // Only an existing queued Run can take the between-Runs recovery path.
+      // A new notice needs the stall patrol's independent workspace check.
+      if (queued && systemTurn && sessionLoss) {
+        // A missing event-snapshot row is not exit proof: check the bound
+        // terminal itself, or its local launch receipt when the core is gone.
+        const exact = await this.options.runtime
+          .observe_retirement?.(runtimeRef, {
+            project_id: project,
+            assignment_id: a.id,
+          })
+          .catch(() => undefined);
+        previousExitConfirmed = exact?.ok
+          ? exact.value === "exited"
+          : exact?.error.code === "runtime_not_found";
+        if (
+          !exact?.ok &&
+          exact?.error.code === "runtime_unavailable" &&
+          a.machine_id === "local"
+        ) {
+          const gone = await this.options.runtime
+            .confirm_local_exit?.(runtimeRef, {
+              project_id: project,
+              assignment_id: a.id,
+            })
+            .catch(() => undefined);
+          previousExitConfirmed = gone?.ok === true && gone.value === true;
+        }
+      }
       if (retirementHeld || guardedTurn) {
         guard = observed?.ok ? idleWakeGuard(observed.value) : undefined;
         // An explicit finish does not waive the idle check for a retirement-held session.
@@ -941,10 +976,8 @@ export class Dispatcher {
           (retirementHeld ||
             continuing ||
             reminder ||
-            (observed?.ok
-              ? observed.value.process !== "exited"
-              : observed?.error.code !== "runtime_not_found" &&
-                observed?.error.code !== "runtime_unavailable"))
+            !sessionLoss ||
+            (systemTurn && !previousExitConfirmed))
         ) {
           if (guardedTurn)
             this.waitForTurn(
@@ -975,6 +1008,9 @@ export class Dispatcher {
         replacement = {
           previous: a.runtime_ref,
           reason: observed.error.code,
+          ...(previousExitConfirmed
+            ? { previous_exit_confirmed: true as const }
+            : {}),
         };
       } else {
         this.waitForRuntime(project, a);
@@ -1427,9 +1463,12 @@ export class Dispatcher {
         unfinishedBellAttempts(store.database, project, owner.id).length
       )
         return;
+      const turnWaits = systemTurnWaitingNotes(state, owner);
       const pending = this.pendingForOwner(state, owner, overdue).filter(
         (n) =>
           Date.parse(n.updated_at) <= deadline &&
+          // This notification has its own deadline and PM recovery path.
+          !turnWaits.has(n.id) &&
           !(
             owner.standing_mode === "ops" &&
             newPmNotification(state, n) &&
@@ -2622,8 +2661,8 @@ export class Dispatcher {
     // C-244: sub-spans of `route.maintenance`; timing only, no added await.
     const step = <T>(name: string, run: () => T) =>
       profileSpanSync(`route.maintenance.${name}`, run);
+    const at = this.clock.now();
     store.uow.run((tx) => {
-      const at = this.clock.now();
       const prior = this.loadState(tx, project);
       const expired = unwrap(
         expireMergeSnoozes(
@@ -2662,10 +2701,15 @@ export class Dispatcher {
             });
         }
       });
-      step("review_limit", () =>
-        escalateReviewLimitWaits(tx, store, state, at),
-      );
-      step("merge_stalls", () => escalatePmMergeStalls(tx, store, state, at));
+    });
+    step("review_limit", () =>
+      escalateReviewLimitWaits(store, project, at, this.loadState),
+    );
+    step("merge_stalls", () =>
+      escalatePmMergeStalls(store, project, at, {}, this.loadState),
+    );
+    store.uow.run((tx) => {
+      const state = this.loadState(tx, project);
       const attempts = unfinishedBellAttempts(store.database, project);
       // C-244: this loop writes notifications and alert events only; tokens
       // and Assignments stay as read, so one standing resolution per kind.

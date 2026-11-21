@@ -104,21 +104,30 @@ test.each(["local", "remote-worker"])(
     expect(result).not.toHaveProperty("secrets");
   },
 );
-test("unreachable SSH, malformed, secret-bearing and oversized responses have only the fixed error", async () => {
-  const { execution, a } = worker("remote");
-  for (const code of [
-    "console.error('private credential');process.exit(9)",
+test.each([
+  [
+    "console.error('private credential');process.exit(255)",
+    "ssh_connection_failed",
+  ],
+  ["console.error('private credential');process.exit(9)", "collector_exit_9"],
+  [
     `console.log(JSON.stringify(${JSON.stringify({ ...reply, events: [{ time: "private credential", type: "private" }] })}))`,
-    `console.log('x'.repeat(40000))`,
-  ]) {
+    "invalid_collector_response",
+  ],
+  ["console.log('x'.repeat(40000))", "response_too_large"],
+])(
+  "local worker inspection reports a bounded failure (%s)",
+  async (code, reason) => {
+    const { execution, a } = worker("local");
     vi.mocked(agentProcessCommand).mockResolvedValueOnce(transport(code));
     await expect(
       inspectWorker(execution, project, a, undefined, true, "linux"),
-    ).rejects.toThrow(
-      /^Worker unreachable or read-only diagnostics unavailable$/u,
-    );
-  }
-});
+    ).rejects.toMatchObject({
+      message: `Worker inspection unavailable: ${reason}`,
+      details: { reason },
+    });
+  },
+);
 test("unisolated local mode, external assignment, historical target drift and admin identity never reach SSH", async () => {
   const { execution, a } = worker("local");
   vi.mocked(agentProcessCommand).mockClear();
