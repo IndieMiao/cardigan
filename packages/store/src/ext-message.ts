@@ -44,8 +44,9 @@ export function hasExtMessage(
 }
 export interface ExtQuietOverflow {
   readonly stamp: string;
-  readonly members: string; // Quiet tail; both lists contain item keys, never message content.
-  readonly ordinary: string;
+  readonly members: string; // Quiet tail. All three sets contain item keys, never message content.
+  readonly ordinary: string; // Known overflow not yet materialized in the outbox.
+  readonly singles: string; // Ordinary prefix, not a reservation of channel budget.
 }
 /** Only read the membership document in the read snapshot. */
 export function extQuietOverflow(
@@ -55,13 +56,14 @@ export function extQuietOverflow(
 ): ExtQuietOverflow | null {
   const row = prepare(
     db,
-    "SELECT stamp,members,ordinary FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+    "SELECT stamp,members,ordinary,singles FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
   ).get(project, channel);
   return row
     ? {
         stamp: String(row.stamp),
         members: String(row.members),
         ordinary: String(row.ordinary),
+        singles: String(row.singles),
       }
     : null;
 }
@@ -91,14 +93,15 @@ export function saveExtQuietOverflow(
   } else {
     prepare(
       db,
-      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary) VALUES (?,?,?,?,?)
-      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary`,
+      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary,singles) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary,singles=excluded.singles`,
     ).run(
       project,
       channel,
       checkpoint.stamp,
       checkpoint.members,
       checkpoint.ordinary,
+      checkpoint.singles,
     );
   }
 }

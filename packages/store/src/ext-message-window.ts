@@ -96,20 +96,28 @@ export function afterExtWatermark(
 }
 
 /** Advisory outside a claim; authoritative only under the writer lock. */
+export function extAttemptSlots(
+  db: DatabaseSync,
+  channel: string,
+  at: number,
+  limit: number,
+) {
+  const used = Number(
+    prepare(
+      db,
+      "SELECT COUNT(*) AS n FROM ext_message_attempts WHERE channel=? AND at>?",
+    ).get(channel, at - 60_000)?.n,
+  );
+  return Math.max(0, limit - used);
+}
+
 export function extAttemptAvailable(
   db: DatabaseSync,
   channel: string,
   at: number,
   limit: number,
 ) {
-  return (
-    Number(
-      prepare(
-        db,
-        "SELECT COUNT(*) AS n FROM ext_message_attempts WHERE channel=? AND at>?",
-      ).get(channel, at - 60_000)?.n,
-    ) < limit
-  );
+  return extAttemptSlots(db, channel, at, limit) > 0;
 }
 
 /** Called in the same IMMEDIATE transaction as the outbox lease. */

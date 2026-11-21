@@ -23,6 +23,7 @@ import {
   type ExtChannelActivation,
   type ExtMessageRow,
   extAttemptAvailable,
+  extAttemptSlots,
   extChannelActivation,
   extQuietOverflow,
   extQuietStamp,
@@ -109,13 +110,13 @@ type Projection = {
   items: Map<string, ExtMessageItem>;
   incompleteDigests: ReadonlySet<string>;
   incompleteOrdinary: ReadonlySet<string>;
-  ordinary: ReadonlyMap<string, ReadonlySet<string>>;
+  singles: ReadonlyMap<string, ReadonlySet<string>>;
   quietStamps: ReadonlyMap<string, string | null>;
 };
+const compareKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const itemKey = (kind: string, id: string) => `${kind}:${id}`;
-// Save exact readiness observations (identities only). The channel's rate batch
-// plus an ordinary observation identifies overflow even before its outbox row
-// exists. The quiet tail stays separate; a timestamp alone proves neither.
+// Build the complete membership decision from one read snapshot. Only item
+// identities survive projection; message contents are rebuilt just before claim.
 function planChannel(
   store: Store,
   project: ProjectId,
@@ -125,15 +126,18 @@ function planChannel(
   quiet: boolean,
   watermark: number,
   through: number | null,
+  slots: number,
+  now: string,
 ) {
   const previous = extQuietOverflow(store.database, project, channel);
   const remembered = new Set<string>(
     previous ? JSON.parse(previous.members) : [],
   );
-  const wasOrdinary = new Set<string>(
+  const knownOverflow = new Set<string>(
     previous ? JSON.parse(previous.ordinary) : [],
   );
-  const ordinary = new Set<string>();
+  const heldOverflow: string[] = [];
+  const heldQuiet: string[] = [];
   const collecting = collectingExtRateBatch(store.database, channel);
   const batchOpen = through !== null || collecting;
   const unassigned = config.quiet_hours
@@ -143,19 +147,21 @@ function planChannel(
           .map((row) => [itemKey(row.item_kind, row.item_id), row] as const),
       )
     : undefined;
-  const admissions: {
-    row: ExtMessageRow;
-    group: "queued" | typeof rateQueue;
-  }[] = [];
-  const remaining: string[] = [];
-  const writes: {
+  const previousSingles = new Set<string>(
+    previous ? JSON.parse(previous.singles) : [],
+  );
+  const candidates: {
+    key: string;
     item: ExtMessageItem;
-    channel: string;
-    group: "queued" | typeof rateQueue | null;
+    row?: ExtMessageRow;
+    rank: number;
+    at: string;
+    inRange: boolean;
+    quietItem: boolean;
+    ordinaryReady: boolean;
+    assignedRate: boolean;
   }[] = [];
-  let complete = true;
-  let incompleteDigest = false;
-  let incompleteOrdinary = false;
+  let newRows = 0;
   for (const item of items) {
     if (
       item.handled ||
@@ -163,72 +169,135 @@ function planChannel(
     )
       continue;
     const key = itemKey(item.kind, item.item_id);
-    const observed = remembered.has(key);
-    const pendingSingle = unassigned?.get(key);
-    if (!pendingSingle && hasExtMessage(store.database, item, channel))
-      continue;
-    // A fence bounds the batch, but is not evidence of ordinary readiness:
-    // quiet-born or newly released items in the same range retain their own format.
-    const earlier = wasOrdinary.has(key);
-    const sourceQuiet =
-      item.created_at !== undefined && extMessageQuiet(config, item.created_at);
-    const readyOutsideQuiet = item.ready && !quiet && !observed && !sourceQuiet;
+    const row = unassigned?.get(key);
+    if (!row && hasExtMessage(store.database, item, channel)) continue;
     const inRange =
       through === null ||
       !afterExtWatermark(store.database, project, item.event_id, through);
-    const rateMember = batchOpen && inRange && (earlier || readyOutsideQuiet);
+    const quietItem =
+      remembered.has(key) ||
+      (!row &&
+        item.created_at !== undefined &&
+        extMessageQuiet(config, item.created_at));
+    const earlier = previousSingles.has(key);
+    const ordinaryReady = item.ready && !quietItem && (!quiet || earlier);
+    const assignedRate =
+      knownOverflow.has(key) ||
+      (batchOpen && !earlier && ordinaryReady && inRange);
+    if (!inRange && !quiet && !quietItem && !assignedRate) continue;
     if (!item.ready && channel.startsWith("lark_app:")) {
-      if (observed) remaining.push(key);
-      if (earlier && rateMember) ordinary.add(key);
+      if (remembered.has(key)) heldQuiet.push(key);
+      if (knownOverflow.has(key)) heldOverflow.push(key);
       continue;
     }
-    const deferred = !rateMember && (quiet || observed || sourceQuiet);
-    if (!deferred && !inRange) continue;
-    const group = rateMember ? rateQueue : deferred ? "queued" : null;
-    if (pendingSingle) {
-      // A held webhook item can already have an ungrouped outbox row. Commit
-      // its observed class with the projection, not when a later clock permits sending.
-      if (item.ready && group) admissions.push({ row: pendingSingle, group });
-      else if (readyOutsideQuiet || rateMember) ordinary.add(key);
-      continue;
-    }
-    if (writes.length < projectionBatch) {
-      writes.push({ item, channel, group });
-      if (config.quiet_hours && group === null && readyOutsideQuiet)
-        ordinary.add(key);
-      continue;
-    }
-    complete = false;
-    if (deferred && (quiet || observed)) remaining.push(key);
-    if (config.quiet_hours && (readyOutsideQuiet || rateMember))
-      ordinary.add(key);
-    if (item.ready) {
-      if (deferred) incompleteDigest = true;
-      else incompleteOrdinary = true;
-    }
-    if (!config.quiet_hours && incompleteOrdinary) break;
+    const rank = !row && newRows++ >= projectionBatch ? 1 : 0;
+    candidates.push({
+      key,
+      item,
+      ...(row ? { row } : {}),
+      rank,
+      at: row?.next_attempt_at ?? now,
+      inRange,
+      quietItem,
+      ordinaryReady,
+      assignedRate,
+    });
+    if (!config.quiet_hours && rank && item.ready) break;
   }
-  const members = JSON.stringify(remaining),
-    ordinaryKeys = JSON.stringify([...ordinary]);
-  const next =
-    !remaining.length && !ordinary.size
-      ? null
-      : previous?.members === members && previous.ordinary === ordinaryKeys
-        ? previous
-        : { stamp: randomUUID(), members, ordinary: ordinaryKeys };
-  return {
-    channel,
-    writes,
-    admissions,
-    collecting,
-    ordinary,
-    complete: complete && next === null,
-    incompleteDigest,
-    incompleteOrdinary,
-    previous,
-    next,
-  };
+  // Match drain priority: enqueued (or inserted this round) before the bounded
+  // tail, then next_attempt_at and item ID. A projected slot is not a lease.
+  const eligiblePrefix = config.quiet_hours
+    ? candidates
+        .filter((c) => c.ordinaryReady && c.inRange && !c.assignedRate)
+        .sort(
+          (a, b) =>
+            a.rank - b.rank ||
+            compareKey(a.at, b.at) ||
+            compareKey(a.item.item_id, b.item.item_id),
+        )
+    : [];
+  // A competing reservation between read and commit can only shorten this
+  // prefix. Reclassify the observed IDs, never rescan readiness at a later clock.
+  function classify(available: number) {
+    const singles = new Set(
+      eligiblePrefix.slice(0, available).map((c) => c.key),
+    );
+    const overflowTail = new Set(heldOverflow);
+    const admissions: {
+      row: ExtMessageRow;
+      group: "queued" | typeof rateQueue;
+    }[] = [];
+    const remaining = [...heldQuiet];
+    const writes: {
+      item: ExtMessageItem;
+      channel: string;
+      group: "queued" | typeof rateQueue | null;
+    }[] = [];
+    let hasRate = false,
+      complete = true,
+      incompleteDigest = false,
+      incompleteOrdinary = false;
+    for (const c of candidates) {
+      const { row, key, item } = c;
+      const rate =
+        c.assignedRate ||
+        (config.quiet_hours &&
+          c.inRange &&
+          c.ordinaryReady &&
+          !singles.has(key));
+      const deferred = !rate && (quiet || c.quietItem);
+      if (!c.inRange && !deferred && !rate) continue;
+      const group = rate ? rateQueue : item.ready && deferred ? "queued" : null;
+      if (rate) hasRate = true;
+      if (deferred) singles.delete(key);
+      if (row) {
+        if (group && item.ready) admissions.push({ row, group });
+        else if (rate) overflowTail.add(key);
+      } else if (!c.rank) {
+        writes.push({ item, channel, group });
+      } else {
+        complete = false;
+        if (group === "queued") remaining.push(key);
+        if (rate && config.quiet_hours) overflowTail.add(key);
+        if (item.ready) {
+          if (deferred) incompleteDigest = true;
+          else incompleteOrdinary = true;
+        }
+      }
+    }
+    const members = JSON.stringify(remaining),
+      overflowKeys = JSON.stringify([...overflowTail]),
+      singleKeys = JSON.stringify([...singles]);
+    const next =
+      !remaining.length && !overflowTail.size && !singles.size
+        ? null
+        : previous?.members === members &&
+            previous.ordinary === overflowKeys &&
+            previous.singles === singleKeys
+          ? previous
+          : {
+              stamp: randomUUID(),
+              members,
+              ordinary: overflowKeys,
+              singles: singleKeys,
+            };
+    return {
+      channel,
+      writes,
+      admissions,
+      collecting,
+      singles,
+      hasRate,
+      complete: complete && next === null,
+      incompleteDigest,
+      incompleteOrdinary,
+      previous,
+      next,
+    };
+  }
+  return { ...classify(slots), classify };
 }
+
 export class ExtMessageSender {
   private running: Promise<void> | undefined;
   private receipts: Promise<void> | undefined;
@@ -389,6 +458,7 @@ export class ExtMessageSender {
     );
     const projections = new Map<string, Projection>();
     let snapshotConflict = false;
+    const prefixSlots = new Map<string, number>();
     for (const project of store.listProjects()) {
       const projection = this.project(
         project.id,
@@ -396,10 +466,15 @@ export class ExtMessageSender {
         generation,
         watermarks,
         rateBatches,
+        prefixSlots,
         config,
       );
       if (projection === false) snapshotConflict = true;
-      else if (projection) projections.set(project.id, projection);
+      else if (projection) {
+        projections.set(project.id, projection);
+        for (const [channel, keys] of projection.singles)
+          prefixSlots.set(channel, (prefixSlots.get(channel) ?? 0) + keys.size);
+      }
     }
     // Drain sibling channels before reporting an error, including their result commits.
     const results = await Promise.allSettled(
@@ -524,10 +599,23 @@ export class ExtMessageSender {
     generation: string | undefined,
     watermarks: ReadonlyMap<string, number>,
     rateBatches: ReadonlyMap<string, number | null>,
+    prefixSlots: ReadonlyMap<string, number>,
     config: ExtMessageConfig,
   ): Projection | false | undefined {
     const { store } = this.options;
     const now = this.clock.now();
+    const available = (channel: string, at: string) =>
+      config.quiet_hours
+        ? Math.max(
+            0,
+            extAttemptSlots(
+              store.database,
+              channel.split(":")[0]!,
+              Date.parse(at),
+              config.policy.max_per_minute ?? defaultMaxPerMinute,
+            ) - (prefixSlots.get(channel) ?? 0),
+          )
+        : 0;
     const plan = store.uow.read((tx) => {
       const version = store.snapshotVersion(projectId);
       if (version === undefined)
@@ -549,51 +637,44 @@ export class ExtMessageSender {
       const state = loadCommandState(tx, projectId);
       const items = extMessageItems(state, projectId);
       const quiet = extMessageQuiet(config, now);
-      const plans = projected
-        ? []
-        : channels.map((channel) =>
-            planChannel(
-              store,
-              projectId,
-              channel,
-              items,
-              config,
-              quiet,
-              watermarks.get(channel)!,
-              rateBatches.get(channel)!,
-            ),
-          );
+      const plans =
+        projected && !config.quiet_hours
+          ? []
+          : channels.map((channel) =>
+              planChannel(
+                store,
+                projectId,
+                channel,
+                items,
+                config,
+                quiet,
+                watermarks.get(channel)!,
+                rateBatches.get(channel)!,
+                available(channel, now),
+                now,
+              ),
+            );
       return {
         cursor,
         plans,
-        projection: {
-          version,
-          state,
-          watermarks,
-          rateBatches,
-          incompleteOrdinary: new Set(
-            plans.filter((p) => p.incompleteOrdinary).map((p) => p.channel),
-          ),
-          incompleteDigests: new Set(
-            plans.filter((p) => p.incompleteDigest).map((p) => p.channel),
-          ),
-          ordinary: new Map(plans.map((p) => [p.channel, p.ordinary])),
-          quietStamps: new Map(
-            plans.map((p) => [p.channel, p.next?.stamp ?? null]),
-          ),
-          items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
-        },
+        version,
+        state,
+        items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
       };
     });
     if (!plan) return;
-    const { projection } = plan;
     if (
       plan.plans.some(
-        (p) => p.writes.length || p.admissions.length || p.previous !== p.next,
+        (p) =>
+          p.writes.length ||
+          p.admissions.length ||
+          p.previous !== p.next ||
+          (p.singles.size &&
+            p.singles.size > available(p.channel, this.clock.now())),
       ) &&
       !store.uow.run(() => {
         if (
-          store.snapshotVersion(projectId) !== projection.version ||
+          store.snapshotVersion(projectId) !== plan.version ||
           this.app?.binding?.generation !== generation ||
           plan.plans.some(
             (p) =>
@@ -607,15 +688,24 @@ export class ExtMessageSender {
           )
         )
           return false;
-        for (const p of plan.plans) {
+        for (const [i, initial] of plan.plans.entries()) {
+          let p = initial;
+          if (p.singles.size) {
+            const left = available(p.channel, this.clock.now());
+            if (left < p.singles.size) {
+              p = { ...p, ...p.classify(left) };
+              plan.plans[i] = p;
+            }
+          }
           // The quota can already be full when the read plan first discovers
           // ordinary overflow, even if every row in this write batch is deferred.
           if (
-            (p.incompleteOrdinary ||
+            p.hasRate ||
+            ((p.incompleteOrdinary ||
               p.writes.some(
                 ({ item, group }) => item.ready && group === null,
               )) &&
-            !this.slotAvailable(p.channel, config, this.clock.now())
+              !this.slotAvailable(p.channel, config, this.clock.now()))
           )
             deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, group } of p.writes)
@@ -631,7 +721,24 @@ export class ExtMessageSender {
       return false;
     if (plan.plans.every((p) => p.complete))
       this.projectedVersions.set(projectId, plan.cursor);
-    return projection;
+    const { plans } = plan;
+    return {
+      version: plan.version,
+      state: plan.state,
+      items: plan.items,
+      watermarks,
+      rateBatches,
+      incompleteOrdinary: new Set(
+        plans.filter((p) => p.incompleteOrdinary).map((p) => p.channel),
+      ),
+      incompleteDigests: new Set(
+        plans.filter((p) => p.incompleteDigest).map((p) => p.channel),
+      ),
+      singles: new Map(plans.map((p) => [p.channel, p.singles])),
+      quietStamps: new Map(
+        plans.map((p) => [p.channel, p.next?.stamp ?? null]),
+      ),
+    };
   }
   private async deliver(
     candidates: readonly ExtMessageRow[],
@@ -779,14 +886,15 @@ export class ExtMessageSender {
         };
         // Establish ownership independently of the send gate. A quiet-time
         // observation alone cannot turn a newly ready item into prior overflow.
+        const prefix = projection.singles
+          .get(candidate.channel)
+          ?.has(itemKey(candidate.item_kind, candidate.item_id));
         if (
           single &&
-          (collectOverflow ||
-            collectingExtRateBatch(store.database, candidate.channel)) &&
-          (!quiet ||
-            projection.ordinary
-              .get(candidate.channel)
-              ?.has(itemKey(candidate.item_kind, candidate.item_id)))
+          (prefix
+            ? !this.slotAvailable(candidate.channel, config, claimAt)
+            : collectOverflow ||
+              collectingExtRateBatch(store.database, candidate.channel))
         )
           return enqueueRate();
         if (quiet || extMessageQuiet(config, claimAt)) {

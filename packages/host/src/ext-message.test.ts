@@ -13,6 +13,7 @@ import {
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   claimExtMessage,
+  deferExtRateBatch,
   listExtMessages,
   projectExtMessage,
   Store,
@@ -934,6 +935,380 @@ const addTitledAction = (n: number) => {
     }),
   );
 };
+
+// C-555#135: cell expectations are independent of enqueue and restart timing.
+const matrixCells = [false, true].flatMap((full) =>
+  [false, true].flatMap((open) =>
+    [false, true].flatMap((quietSource) =>
+      (["before", "enter", "during", "wake"] as const).flatMap((claim) =>
+        [false, true].flatMap((enqueued) =>
+          [false, true].map((restart) => ({
+            full,
+            open,
+            quietSource,
+            claim,
+            enqueued,
+            restart,
+          })),
+        ),
+      ),
+    ),
+  ),
+);
+const matrixTime = (ms: number) =>
+  new Date(Date.UTC(2026, 0, 1) + ms).toISOString();
+const matrixEntry = (n: number) => ({
+  project: project_id,
+  card: "C-1",
+  item: `H-${n}`,
+  kind: "human_action",
+  title: `Fixture ${n}`,
+  url: `${config.workbench_url}/#/p/${project_id}/cards/C-1?at=human-action-H-${n}`,
+});
+// Return a release function so the source time stays distinct from its readiness.
+function holdMatrixAction(n: number) {
+  addTitledAction(n);
+  const id = `H-${n}` as const;
+  return store.uow.run((tx) => {
+    const held = tx.human_actions.get(project_id, id)!;
+    tx.human_actions.put(project_id, {
+      ...held,
+      ready_when: { kind: "manual" },
+    });
+    return () =>
+      store.uow.run((writer) => writer.human_actions.put(project_id, held));
+  });
+}
+
+test.each(matrixCells)(
+  "admission matrix full=$full open=$open quietSource=$quietSource claim=$claim enqueued=$enqueued restart=$restart",
+  async ({ full, open, quietSource, claim, enqueued, restart }) => {
+    config = {
+      ...config,
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+      policy: { ...config.policy, max_per_minute: full ? 1 : 2 },
+    };
+    const calls: {
+      at: number;
+      target: string | undefined;
+      message: ExtMessage;
+    }[] = [];
+    const start = () =>
+      sender({
+        adapters: {
+          fake: (target) => ({
+            async send(message) {
+              calls.push({ at: Date.parse(now), target, message });
+              return "sent";
+            },
+          }),
+        },
+      });
+    let active = start();
+    active.recordStatus();
+    now = matrixTime(119_998);
+    if (full) {
+      addTitledAction(1);
+      await active.tick();
+    }
+    const baseline = calls.length;
+    expect(baseline).toBe(full ? 1 : 0);
+    const release = [holdMatrixAction(90), holdMatrixAction(91)];
+    if (enqueued) await active.tick();
+    expect(
+      rows()
+        .filter((r) => r.item_id === "H-90" || r.item_id === "H-91")
+        .map((r) => r.digest_id),
+    ).toEqual(enqueued ? [null, null] : []);
+    if (open) store.uow.run(() => deferExtRateBatch(store.database, "fake"));
+    const unreachable =
+      quietSource && (claim === "before" || claim === "enter");
+    now = matrixTime(
+      quietSource && !unreachable
+        ? claim === "wake"
+          ? 179_999
+          : 120_000
+        : 119_999,
+    );
+    if (!unreachable) for (const unlock of release) unlock();
+    const claimTime =
+      claim === "before"
+        ? 119_999
+        : claim === "enter"
+          ? 120_000
+          : claim === "during"
+            ? 150_000
+            : 180_000;
+    // Stop immediately after the checked projection commit, before any claim.
+    // For an unreachable cell no readiness write is required; the read suffices.
+    let read = false,
+      boundary = false;
+    store.observe({
+      transaction(kind) {
+        if (kind === "read") read = true;
+        if (!read || (!unreachable && kind !== "run")) return;
+        store.observe(undefined);
+        boundary = true;
+        now = matrixTime(claimTime);
+        if (restart) void active.stop();
+      },
+    });
+    await active.tick();
+    expect(boundary).toBe(true);
+    store.observe(undefined);
+    if (restart) {
+      await active.stop();
+      store.close();
+      store = Store.open({ dataDir: dir });
+      active = start();
+    }
+    await active.tick();
+    if (unreachable) {
+      expect(calls.slice(baseline)).toEqual([]);
+      return;
+    }
+    if (claim === "enter" || claim === "during")
+      expect(calls.slice(baseline)).toEqual([]);
+    if (claim === "before" && !full)
+      expect(calls.length).toBeGreaterThan(baseline);
+    if (now < matrixTime(180_000)) {
+      now = matrixTime(180_000);
+      await active.tick();
+    }
+    for (let n = 0; n < 3; n++) {
+      await active.tick();
+      advance(60_000);
+    }
+    const expected = quietSource
+      ? "details"
+      : full || open
+        ? "count"
+        : claim === "enter" || claim === "during"
+          ? "details"
+          : "single";
+    const earliest = Date.parse(
+      matrixTime(claim === "before" && !full ? 119_999 : 180_000),
+    );
+    expect([...new Set(calls.slice(baseline).map((c) => c.at))]).toEqual([
+      earliest,
+    ]);
+    const entries = [matrixEntry(90), matrixEntry(91)];
+    expect(calls.slice(baseline).map((c) => c.message)).toEqual(
+      expected === "count"
+        ? [{ title: "2 条待处理", url: config.workbench_url }]
+        : expected === "details"
+          ? [
+              {
+                project: project_id,
+                title: "免打扰期间 2 条待处理",
+                total: 2,
+                items: entries,
+                url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
+              },
+            ]
+          : entries,
+    );
+    for (const c of calls) {
+      expect(c.target).toBe("SYNTHETIC_SECRET");
+      expect(
+        c.at < Date.parse(matrixTime(120_000)) ||
+          c.at >= Date.parse(matrixTime(180_000)),
+      ).toBe(true);
+      expect(
+        calls.filter((v) => v.at > c.at - 60_000 && v.at <= c.at).length,
+      ).toBeLessThanOrEqual(full ? 1 : 2);
+    }
+  },
+);
+
+test.each([false, true])(
+  "one remaining slot admits only the prefix across quiet, restart=%s",
+  async (restart) => {
+    config = {
+      ...config,
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+      policy: { ...config.policy, max_per_minute: 2 },
+    };
+    const active = sender();
+    active.recordStatus();
+    now = matrixTime(119_998);
+    addTitledAction(1);
+    await active.tick();
+    const release = [holdMatrixAction(90), holdMatrixAction(91)];
+    await active.tick();
+    advance(1);
+    for (const unlock of release) unlock();
+    let read = false;
+    store.observe({
+      transaction(kind) {
+        if (kind === "read") read = true;
+        else if (read) {
+          store.observe(undefined);
+          advance(1);
+          if (restart) void active.stop();
+        }
+      },
+    });
+    await active.tick();
+    expect(now).toBe(matrixTime(120_000));
+    if (restart) {
+      await active.stop();
+      store.close();
+      store = Store.open({ dataDir: dir });
+    }
+    await sender().tick();
+    expect(fake.messages).toHaveLength(1);
+    now = matrixTime(180_000);
+    await sender().tick();
+    advance(60_000);
+    await sender().tick();
+    expect(fake.messages.slice(1)).toHaveLength(2);
+    expect(fake.messages.slice(1)).toContainEqual({
+      title: "1 条待处理",
+      url: config.workbench_url,
+    });
+    expect(fake.messages.slice(1)).toContainEqual({
+      project: project_id,
+      total: 1,
+      items: [matrixEntry(90)],
+      title: "免打扰期间 1 条待处理",
+      url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
+    });
+  },
+);
+
+test.each([1, 2])(
+  "an ordinary arrival at wake stays outside the sealed two-item batch (limit %i)",
+  async (limit) => {
+    config = {
+      ...config,
+      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
+      policy: { ...config.policy, max_per_minute: limit },
+    };
+    const active = sender();
+    active.recordStatus();
+    now = matrixTime(60_000);
+    for (let i = 1; i <= limit + 2; i++) addTitledAction(i);
+    await active.tick();
+    now = matrixTime(120_000);
+    await active.tick();
+    expect(fake.messages).toHaveLength(limit);
+    now = matrixTime(180_000);
+    addTitledAction(90);
+    await active.tick();
+    await active.tick();
+    const count = (n: number) => ({
+      title: `${n} 条待处理`,
+      url: config.workbench_url,
+    });
+    expect(fake.messages.slice(limit)).toEqual(
+      limit === 1 ? [count(2)] : [count(2), matrixEntry(90)],
+    );
+    for (let n = 0; n < 2; n++) {
+      advance(60_000);
+      await active.tick();
+    }
+    expect(fake.messages.slice(limit)).toEqual([
+      count(2),
+      limit === 1 ? count(1) : matrixEntry(90),
+    ]);
+  },
+);
+
+test("two connections contend for the last slot with a retry, frozen summary and ordinary item", async () => {
+  config = {
+    ...config,
+    quiet_hours: { timezone: "UTC", start: "23:00", end: "23:01" },
+    policy: { ...config.policy, max_per_minute: 2 },
+  };
+  const otherProject = "project-b";
+  store.createProject({ id: otherProject, name: "Other" });
+  store.uow.run((tx) => tx.cards.put(otherProject, card()));
+  const active = sender();
+  active.recordStatus();
+  addTitledAction(1);
+  await active.tick();
+  now = matrixTime(1000);
+  for (let i = 2; i <= 4; i++) addTitledAction(i);
+  fake.result = "retryable";
+  await active.tick();
+  // Hold the failed single until the already-open summary has itself tried once.
+  const h2 = store.uow.read((tx) => tx.human_actions.get(project_id, "H-2")!);
+  store.uow.run((tx) =>
+    tx.human_actions.put(project_id, { ...h2, ready_when: { kind: "manual" } }),
+  );
+  now = matrixTime(60_000);
+  await active.tick();
+  expect(fake.messages).toHaveLength(3);
+  const count = (n: number) => ({
+    title: `${n} 条待处理`,
+    url: config.workbench_url,
+  });
+  expect(fake.messages[2]).toEqual(count(2));
+  now = matrixTime(90_000);
+  store.uow.run((tx) => tx.human_actions.put(project_id, h2));
+  addAction(5, otherProject);
+  const other = Store.open({ dataDir: dir });
+  const gate = Promise.withResolvers<"sent">();
+  const calls: { at: number; message: ExtMessage }[] = [];
+  const run = (db: Store) =>
+    sender({
+      store: db,
+      adapters: {
+        fake: (target) => ({
+          async send(message) {
+            expect(target).toBe("SYNTHETIC_SECRET");
+            calls.push({ at: Date.parse(now), message });
+            return calls.length === 1 ? gate.promise : "sent";
+          },
+        }),
+      },
+    }).tick();
+  try {
+    const first = run(store);
+    try {
+      await run(other);
+      expect(calls).toHaveLength(1);
+    } finally {
+      gate.resolve("sent");
+      await first;
+    }
+    expect(calls).toHaveLength(1);
+    for (let i = 0; i < 4; i++) {
+      advance(60_000);
+      await run(other);
+      await run(store);
+    }
+    expect(calls.map((c) => c.message)).toHaveLength(3);
+    expect(calls.map((c) => c.message)).toContainEqual(matrixEntry(2));
+    expect(calls.map((c) => c.message)).toContainEqual(count(2));
+    const fifth = rows().find((r) => r.item_id === "H-5");
+    expect(calls.map((c) => c.message)).toContainEqual(
+      fifth?.digest_id?.startsWith("rate:")
+        ? count(1)
+        : {
+            ...matrixEntry(5),
+            project: otherProject,
+            title: "有新的待你执行事项",
+            url: `${config.workbench_url}/#/p/${otherProject}/cards/C-1?at=human-action-H-5`,
+          },
+    );
+    expect(fifth).toMatchObject({
+      project_id: otherProject,
+      status: "sent",
+      attempts: 1,
+    });
+    const times = [0, 1000, 60_000]
+      .map((t) => Date.parse(matrixTime(t)))
+      .concat(calls.map((c) => c.at));
+    for (const t of times)
+      expect(
+        times.filter((at) => at > t - 60_000 && at <= t).length,
+      ).toBeLessThanOrEqual(2);
+  } finally {
+    other.close();
+  }
+});
 
 test.each(
   [10, 32].flatMap((limit) =>
