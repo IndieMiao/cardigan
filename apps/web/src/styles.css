@@ -1469,20 +1469,6 @@ fieldset.filters {
   background: var(--surface);
 }
 
-.mention-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.mention-list button {
-  padding: 2px 8px;
-  font-size: var(--text-xs);
-}
-
 .comment-actions {
   display: flex;
   align-items: center;

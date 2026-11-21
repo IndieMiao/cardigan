@@ -34,6 +34,7 @@ import type {
   RuntimeState,
   VerifyStatus,
 } from "./states.js";
+import type { StoryState } from "./story-discussion.js";
 
 export type Timestamp = string;
 export type JsonValue =
@@ -62,6 +63,7 @@ export const toolNames = [
   "request_recheck",
   "request_check",
   "run_probe",
+  "request_mobile_signature",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -158,6 +160,9 @@ export interface Card {
     | { readonly kind: "decision"; readonly decision_id: DecisionId };
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
+  readonly parent_card_id?: CardId;
+  /** Stamped only for the built-in story workflow, not existing custom templates. */
+  readonly story?: StoryState;
   readonly related_cards: readonly CardId[];
   readonly is_ui_framework?: boolean;
   readonly depends_on_cards?: readonly CardId[];
@@ -549,6 +554,24 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** This Run's first bell, not a business ACK or an inbox cursor. Never inherit on recovery. */
+  readonly bell_delivery?: {
+    readonly run_id: RunId;
+    readonly card_id?: CardId;
+    readonly session_ref?: string;
+    readonly review_target?: {
+      readonly delivery_id: DeliveryId;
+      readonly target_sha: string;
+    };
+    readonly received_at?: Timestamp;
+    readonly sent_at?: Timestamp;
+    readonly runtime_ref?: RuntimeRef;
+    readonly retry_at?: Timestamp;
+    /** Positive non-delivery, valid only for this exact first-write attempt. */
+    readonly refused_attempt_id?: string;
+    readonly idle_check_at?: Timestamp;
+    readonly escalated_at?: Timestamp;
+  };
   readonly failure_reason?: "provider_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;

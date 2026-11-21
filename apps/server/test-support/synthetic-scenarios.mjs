@@ -155,16 +155,16 @@ export function seedScenarios(
   const cards = [];
   for (let i = 1; i <= size.cards; i++) {
     const template =
-      i === 1 || i === 2
-        ? "general"
+      i === 2
+        ? "story"
         : i >= 20 && i <= 26
           ? "dev"
           : ["dev", "general", "artifact", "design"][i % 4];
     const status =
       i === 1
         ? "backlog"
-        : i === 2
-          ? "todo"
+        : template === "story"
+          ? "in_progress"
           : i >= 20 && i <= 26
             ? "awaiting_merge"
             : i >= 27 && i <= 30
@@ -216,6 +216,8 @@ export function seedScenarios(
       ...(i === 28 ? { superseded_by: "C-4", related_cards: ["C-4"] } : {}),
       template,
       template_version: 1,
+      ...(template === "story" ? { story: {} } : {}),
+      ...(i === 16 ? { parent_card_id: "C-2" } : {}),
       merge_policy: template === "dev" ? "confirm" : "none",
       ...(template === "dev"
         ? { repo: "synthetic-repository", base_branch: "main" }
@@ -253,7 +255,8 @@ export function seedScenarios(
   const work = [];
   const groups = new Map();
   const assignments = [];
-  for (let i = 0; i < size.work_items; i++) {
+  // Reserve one item for the standing Office; it has no work-item assignment or run.
+  for (let i = 0; i < size.work_items - 1; i++) {
     const card = cards[2 + (Math.floor(i / 3) % (cards.length - 2))];
     const position = i % 3;
     const kind = position === 0 ? "produce" : "verify";
@@ -340,6 +343,18 @@ export function seedScenarios(
     tx.work_items.put(project, item);
     tx.assignments.put(project, assignment);
   }
+  tx.work_items.put(project, {
+    id: next("work_item"),
+    card_id: "C-2",
+    template_key: "decomposition",
+    title: "拆解",
+    kind: "produce",
+    role_id: "pm",
+    required: true,
+    depends_on: [],
+    completion_criteria: cards[1].acceptance_criteria,
+    status: "in_progress",
+  });
   // Map the complete vocabulary onto open cards, independent of scale/distribution.
   for (const kind of ["produce", "verify"]) {
     const available = work.filter(

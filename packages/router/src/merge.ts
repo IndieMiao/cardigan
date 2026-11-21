@@ -31,6 +31,7 @@ const SUMMARY_LABELS: readonly {
   { kind: "assignment", label: ["assignment", "assignments"] },
   { kind: "delivery", label: ["delivery", "deliveries"] },
   { kind: "review", label: ["review", "reviews"] },
+  { kind: "story_fyi", label: ["story FYI", "story FYIs"] },
   { kind: "comment", label: ["comment", "comments"] },
   { kind: "instruction", label: ["instruction", "instructions"] },
   { kind: "decision", label: ["decision", "decisions"] },

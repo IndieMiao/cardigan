@@ -48,6 +48,11 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
+  ensure(
+    !d.card(item.card_id).story,
+    "illegal_transition",
+    "需求卡由常驻 Office 处理，不另派工作会话",
+  );
   requireCardDependencyStart(d, d.card(item.card_id));
   ensure(
     !d.card(item.card_id).hold,

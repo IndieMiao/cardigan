@@ -14,6 +14,7 @@ import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   type Attachment,
   type Delivery,
+  type Employee,
   recordDecision,
   requestDecision,
 } from "../../../packages/domain/dist/index.js";
@@ -477,18 +478,33 @@ test("U07 §3.4: only existing server-resolved numbers in an Agent comment becom
 });
 
 test("U08 §3.7: comment preview, mention completion and pasted image post through the public HTTP commands", async () => {
+  // C-514: `@` suggests the project's active employees (Assignment
+  // employee_id is immutable, so this one is not on the card).
+  f.store().uow.run((tx) => {
+    const employee: Employee = {
+      id: "E-1" as Employee["id"],
+      name: "关羽",
+      title: "开发工程师",
+      bio: "",
+      avatar: null,
+      role_id: f.primary.owner.role_id,
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.primary.owner.created_at,
+      updated_at: f.primary.owner.created_at,
+    };
+    tx.employees.put(employee);
+  });
   await f.loginBrowser();
   detail();
   await selectCardTab(/^时间线/);
   const input = await screen.findByRole("textbox", { name: /评论|内容/ });
   fireEvent.change(input, { target: { value: "**Review this** @" } });
-  const suggestion = await screen.findByRole("button", {
-    name: new RegExp(f.primary.owner.id),
-  });
+  const suggestion = await screen.findByRole("option", { name: /关羽/ });
+  expect(suggestion.textContent).toContain("开发工程师");
+  expect(screen.queryByRole("option", { name: /Assignment|角色/ })).toBeNull();
   fireEvent.click(suggestion);
-  expect((input as HTMLTextAreaElement).value).toContain(
-    `@${f.primary.owner.id}`,
-  );
+  expect((input as HTMLTextAreaElement).value).toBe("**Review this** @关羽 ");
   const file = new File(["image evidence"], "evidence.png", {
     type: "image/png",
   });
@@ -516,7 +532,7 @@ test("U08 §3.7: comment preview, mention completion and pasted image post throu
   const posted = f
     .state()
     .timeline.find((e) => e.id === attachment?.attach_to.id);
-  expect(posted?.mentions).toContain(f.primary.owner.id);
+  expect(posted?.mentions).toContain("@关羽");
 });
 
 test("U09 §3.7: a failed comment keeps its draft and queued image, then retry writes once", async () => {
@@ -705,22 +721,24 @@ test("U11 §8.4: attachments show decision status, fold superseded versions and 
   // The comment is readable before the timeline attachment lookup finishes.
   await waitFor(() =>
     expect(
-      commentRow.querySelector(`img[src$="/${current.id}"]`),
+      commentRow.querySelector(`img[src$="/${current.id}/thumbnail"]`),
     ).not.toBeNull(),
   );
   const images = [...commentRow.querySelectorAll("img")];
   expect(
-    images.some((i) => i.getAttribute("src")?.endsWith(`/${current.id}`)),
+    images.some((i) =>
+      i.getAttribute("src")?.endsWith(`/${current.id}/thumbnail`),
+    ),
   ).toBe(true);
   expect(
-    images.some((i) => i.getAttribute("src")?.endsWith(`/${svg.id}`)),
+    images.some((i) => i.getAttribute("src")?.endsWith(`/${svg.id}/thumbnail`)),
   ).toBe(false);
   const oldImage = images.find((i) =>
-    i.getAttribute("src")?.endsWith(`/${old.id}`),
+    i.getAttribute("src")?.endsWith(`/${old.id}/thumbnail`),
   );
   expect(oldImage?.closest("details")?.open).toBe(false);
   const currentImage = images.find((i) =>
-    i.getAttribute("src")?.endsWith(`/${current.id}`),
+    i.getAttribute("src")?.endsWith(`/${current.id}/thumbnail`),
   );
   const evidence = currentImage?.closest("li");
   expect(textOf(evidence ?? null)).toContain(decision.id);

@@ -292,6 +292,8 @@ export async function generateFixture({
       scenarios: {
         empty: "C-1",
         single: "C-2",
+        story: "C-2",
+        story_child: "C-16",
         long_and_many: "C-3",
         parent: "C-4",
         child: "C-5",

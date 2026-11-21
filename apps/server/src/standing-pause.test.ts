@@ -59,6 +59,7 @@ beforeEach(() => {
           "ack_events",
           "finish_run",
           "record_decision",
+          "post_comment",
         ],
         capabilities: [],
         abilities: [],
@@ -514,6 +515,22 @@ test.each([false, true])(
         p,
       ),
     );
+    const story = f.apply((s, a, p) =>
+      createCard(
+        s,
+        a,
+        {
+          template_id: "story",
+          title: "Need",
+          goal: "Clarify",
+          source: { kind: "quote", text: "Need" },
+        },
+        p,
+      ),
+    );
+    const humanComment = f.apply((s, a, p) =>
+      postComment(s, a, { card_id: story.id, body: "未提及的需求评论" }, p),
+    );
     const before = current(external);
     expect(
       executionView(f.state(), f.clock.now()).assignments.find(
@@ -542,6 +559,32 @@ test.each([false, true])(
     expect(runtime.provision).not.toHaveBeenCalled();
     expect(runtime.resume_or_replace).not.toHaveBeenCalled();
     expect(runtime.wake).not.toHaveBeenCalled();
+    const storyNotes = f.store
+      .listNotifications({ project_id: f.project })
+      .filter(
+        (n) => n.card_id === story.id && n.seq === humanComment.event_seq,
+      );
+    expect(storyNotes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recipient: { kind: "pm_office" },
+          kind: "comment",
+          status: "pending",
+        }),
+        expect.objectContaining({
+          recipient: { kind: "pm_ops" },
+          kind: "story_fyi",
+        }),
+      ]),
+    );
+    expect(
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: external.id,
+        card_id: story.id,
+        up_to_seq: humanComment.event_seq,
+      }).ok,
+    ).toBe(true);
     const notes = f.store
       .listNotifications({ project_id: f.project })
       .filter(
@@ -566,6 +609,15 @@ test.each([false, true])(
         .filter((n) => notes.some((pending) => pending.id === n.id))
         .every((n) => n.status === "acked"),
     ).toBe(true);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .find(
+          (n) =>
+            n.id ===
+            storyNotes.find((note) => note.recipient.kind === "pm_office")?.id,
+        )?.status,
+    ).toBe("acked");
     await expect(start(external)).rejects.toThrow("这是外接 Assignment");
     expect(runtime.provision).not.toHaveBeenCalled();
   },

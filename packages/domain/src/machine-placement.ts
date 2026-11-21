@@ -31,9 +31,11 @@ export interface MachinePlacement {
   readonly observation_target_matches?: boolean;
   /** Current project opt-in and platform match; a past health check is not a binding. */
   readonly remote_binding: "disabled" | "platform_mismatch" | "allowed";
+  readonly preparation_cooldown_until?: string;
   /** Host-attested server dispatch on this exact binding, independent of ordinary health. */
   readonly worktree_preparation?: WorktreePreparation;
   readonly health: {
+    readonly blockers?: readonly string[];
     readonly status: string;
     readonly available: boolean;
   } | null;

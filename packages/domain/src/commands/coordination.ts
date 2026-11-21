@@ -35,7 +35,10 @@ import { extractReferences } from "../references.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
+import { storyProgress, storyTerminal } from "../story.js";
+import type { StoryDiscussion } from "../story-discussion.js";
 import type { ResumeCondition } from "../work-wait.js";
+import { requireCardDependencyStart } from "./card-dependencies.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -83,6 +86,7 @@ import {
 } from "./review-strategy.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { suggestSourceMergeUnrelated } from "./source-merge.js";
+import { storyDiscussionChange } from "./story-discussion.js";
 import {
   suggestionProgressEvents,
   suggestionProgressToken,
@@ -179,6 +183,8 @@ export function postComment(
   state: CommandState,
   actor: Actor,
   p: Pick<TimelineEntry, "card_id" | "body"> & {
+    story_discussion?: StoryDiscussion;
+    story_summary?: boolean;
     host_result_for?: HumanActionId;
     host_report_for?: HumanActionId;
     review_plan?: ReviewPlanComment;
@@ -191,8 +197,26 @@ export function postComment(
   ports: CommandPorts,
 ) {
   return command(state, actor, "post_comment", ports, (d) => {
-    d.card(p.card_id);
+    const card = d.card(p.card_id);
     text(p.body, "body");
+    ensure(
+      !p.story_discussion ||
+        !(
+          p.story_summary ||
+          p.host_report_for ||
+          p.host_result_for ||
+          p.review_plan ||
+          p.work_item_id ||
+          p.supersedes
+        ),
+      "validation_failed",
+      "需求讨论必须是单独的卡片评论",
+    );
+    const discussion =
+      p.story_discussion && storyDiscussionChange(d, card, p.story_discussion);
+    const body = discussion
+      ? [p.body, ...discussion.lines].join("\n\n")
+      : p.body;
     if (p.work_item_id)
       ensure(
         d.work(p.work_item_id).card_id === p.card_id,
@@ -214,6 +238,15 @@ export function postComment(
           entry.author === d.author,
           "unauthorized",
           "Only the same author can supersede a comment",
+        );
+        ensure(
+          !card.story?.question_groups?.some(
+            (group) =>
+              group.id === entry.id ||
+              group.questions.some((q) => q.resolution?.entry_id === entry.id),
+          ),
+          "illegal_transition",
+          "不能替换需求问题清单或已绑定的答复、默认记录；可回复原评论继续讨论",
         );
         checkPlanSupersession(d, entry, p.review_plan);
       }
@@ -247,7 +280,7 @@ export function postComment(
           ...(resultFor
             ? [{ kind: "human_action" as const, id: resultFor }]
             : []),
-          ...extractReferences(p.body),
+          ...extractReferences(body),
         ].map((ref) => [JSON.stringify(ref), ref]),
       ).values(),
     ];
@@ -255,16 +288,18 @@ export function postComment(
       "comment_posted",
       p.card_id,
       {
-        body: p.body,
+        body,
         host_report_for: p.host_report_for ?? null,
       },
       {
         type: "comment",
         ...(p.host_report_for ? { human_action_id: p.host_report_for } : {}),
-        body: p.body,
+        body,
         refs,
         mentions: commentMentions(
-          p.body,
+          p.story_discussion?.action === "answer"
+            ? `${p.body}\n${p.story_discussion.answer}`
+            : p.body,
           p.mentions ?? [],
           state.employees ?? [],
           state.roles.map((role) => role.role_id),
@@ -274,6 +309,50 @@ export function postComment(
         ...(p.supersedes ? { supersedes: p.supersedes } : {}),
       },
     );
+    if (discussion && d.timeline[0]) discussion.apply(d.timeline[0].id);
+    if (p.story_summary) {
+      ensure(
+        d.assignment?.scope === "standing" &&
+          d.assignment.role_id === "pm" &&
+          d.assignment.standing_mode === "office",
+        "unauthorized",
+        "只有常驻 Office 可提交需求总结",
+      );
+      ensure(
+        !card.hold && card.status !== "backlog",
+        "illegal_transition",
+        "需求卡尚未排期或已暂停",
+      );
+      requireCardDependencyStart(d, card);
+      const progress = storyProgress(d.list("cards"), card);
+      ensure(
+        card.story &&
+          !storyTerminal(card) &&
+          progress.total > 0 &&
+          progress.finished === progress.total,
+        "illegal_transition",
+        "需求卡的子卡尚未全部结束或需求卡已关闭",
+      );
+      const item = d
+        .list("work_items")
+        .find(
+          (w) => w.card_id === card.id && w.template_key === "decomposition",
+        );
+      ensure(
+        item && d.timeline[0],
+        "invariant_violation",
+        "缺少拆解项或总结记录",
+      );
+      if (item.status !== "delivered")
+        d.put("work_items", d.move(item, "story_summary_submitted"));
+      d.put("cards", {
+        ...card,
+        story: { ...card.story, summary_entry_id: d.timeline[0].id },
+      });
+      d.emit("story_summary_submitted", card.id, {
+        entry_id: d.timeline[0].id,
+      });
+    }
     if (p.review_plan && d.timeline[0])
       recordReviewPlan(d, d.timeline[0], p.review_plan);
     if (p.host_result_for) {
@@ -560,7 +639,22 @@ export function requestDecision(
         ...items.map((w) => w.card_id),
       ]),
     ];
-    for (const id of cards) d.card(id);
+    const targets = cards.map((id) => d.card(id));
+    const storyQuestion = p.card_id
+      ? targets[0]?.story
+      : targets.length > 0 && targets.every((c) => c.story);
+    if (
+      storyQuestion &&
+      d.assignment?.scope === "standing" &&
+      d.assignment.role_id === "pm" &&
+      d.assignment.standing_mode === "office"
+    ) {
+      ensure(
+        ["scope_change", "spending", "credential"].includes(p.category),
+        "validation_failed",
+        "需求卡仅为方向、范围、花钱或凭据分歧发起拍板；其它正式授权在对应工作卡或项目上办理，不得用问题清单代批",
+      );
+    }
     const readyWhen = p.ready_when
       ? readyCondition(
           d,

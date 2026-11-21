@@ -25,4 +25,6 @@ Tailwind 扫描所有 views/components/App。页面组合布局组件；页面�
 
 设置页用 `layout/SettingsLayout`（导航、面板、分组、设置行、数值框、悬停说明）组合，布尔设置用 `Switch`，多字段设置用 `DialogContent`；保存方式和危险区规则见 `docs/design/ui-guidelines.md` 的“设置页模式”。列表类设置用 `SettingsTable`，详情/编辑放 `Drawer` + `CardDetailLayout`，抽屉内用 `SettingsSection`、`SettingsFacts`、`SettingsText`、`SettingsDiff`、`SettingsWarning`、`SettingsAvatar`，见同文档“列表类设置与抽屉”。
 
+抽屉里放不下全部列的确认表（如角色导入预览的模板工作项）给 `SettingsTable` 加 `recordsAlways`，在所有宽度用纵向记录；表内编号用 `DataTableId`，只在 `_`、`-`、`.` 后换行、不改文字。
+
 工具栏日期筛选用 `FilterDate`（`layout/FilterDateLayout` 提供控件框）；非卡片数据表用 `DataTableLayout stacked` 获得窄屏纵向记录，短值列用 `DataTableCell nowrap`。不要在页面为这两种场景另写 CSS。

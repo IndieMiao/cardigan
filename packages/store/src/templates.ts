@@ -3,6 +3,7 @@ import {
   builtinCardTemplates,
   type CardTemplate,
   designCardTemplate,
+  storyCardTemplate,
   uiCardTemplate,
 } from "@cardigan/domain";
 
@@ -16,7 +17,12 @@ export function seedCardTemplates(db: DatabaseSync, project: string): void {
       .get()
   )
     return;
-  insertTemplates(db, project, builtinCardTemplates);
+  insertTemplates(
+    db,
+    project,
+    builtinCardTemplates.filter((t) => t.id !== "story"),
+  );
+  seedStoryTemplate(db, project);
   seedUiTemplate(db, project);
 }
 
@@ -53,6 +59,34 @@ export function seedDesignTemplate(db: DatabaseSync): void {
     .prepare("SELECT id FROM projects UNION SELECT project_id AS id FROM cards")
     .all())
     insertTemplates(db, String(row.id), [designCardTemplate]);
+}
+
+export function seedStoryTemplates(db: DatabaseSync): void {
+  for (const row of db
+    .prepare("SELECT id FROM projects UNION SELECT project_id AS id FROM cards")
+    .all())
+    seedStoryTemplate(db, String(row.id));
+}
+
+/** Keep every pinned custom version, including an occupied fallback name. */
+function seedStoryTemplate(db: DatabaseSync, project: string): void {
+  const rows = db
+    .prepare(
+      "SELECT DISTINCT template_id FROM card_templates WHERE project_id = ?",
+    )
+    .all(project);
+  const ids = new Set(rows.map((row) => String(row.template_id)));
+  const existing = db
+    .prepare(
+      `SELECT 1 FROM card_templates WHERE project_id = ? AND json_extract(doc, '$.builtin') = 1
+     AND (template_id = 'story' OR json_extract(doc, '$.story') = 1) LIMIT 1`,
+    )
+    .get(project);
+  if (existing) return;
+  let id: string = storyCardTemplate.id;
+  for (let i = 1; ids.has(id); i++)
+    id = i === 1 ? "builtin-story" : `builtin-story-${i}`;
+  insertTemplates(db, project, [{ ...storyCardTemplate, id }]);
 }
 
 function insertTemplates(

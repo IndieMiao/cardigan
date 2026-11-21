@@ -1,3 +1,5 @@
+import { ImageOff } from "lucide-react";
+
 export {
   ChevronDown as ChevronDownIcon,
   ChevronRight as ChevronRightIcon,
@@ -27,4 +29,9 @@ export function BoardIcon() {
       />
     </svg>
   );
+}
+
+/** Stands in for an image thumbnail that could not be loaded or decoded. */
+export function ImageUnavailableIcon() {
+  return <ImageOff size={16} aria-hidden="true" />;
 }

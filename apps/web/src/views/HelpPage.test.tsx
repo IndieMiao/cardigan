@@ -181,3 +181,28 @@ test("safe links keep labels, isolate external windows and avoid nested interact
   expect(container.querySelector("a .id-type-card")?.textContent).toBe("C-1");
   expect(container.querySelector("a a, a [tabindex]")).toBeNull();
 });
+
+test("help tables share the Markdown table box and keep their records layout", () => {
+  const { container } = render(
+    <HelpMarkdown
+      source={
+        "| 名称 | 说明 | 数 |\n|:---|---|---:|\n| <b>粗</b> | 一段超过八个字的说明文字 | 3 |"
+      }
+    />,
+  );
+  const box = container.querySelector(".ui-markdown-table");
+  expect(box?.getAttribute("data-layout")).toBe("stacked");
+  expect(box?.firstElementChild?.tagName).toBe("TABLE");
+  expect(container.querySelector("[style]")).toBeNull();
+  expect(container.querySelector("b")).toBeNull();
+  const [name, description, count] = container.querySelectorAll("td");
+  expect(name?.textContent).toBe("<b>粗</b>");
+  expect(name?.getAttribute("data-align")).toBe("left");
+  expect(name?.hasAttribute("data-wide")).toBe(false);
+  expect(description?.getAttribute("data-label")).toBe("说明");
+  expect(description?.getAttribute("data-wide")).toBe("");
+  expect(count?.getAttribute("data-align")).toBe("right");
+  expect(container.querySelector("th")?.getAttribute("data-align")).toBe(
+    "left",
+  );
+});

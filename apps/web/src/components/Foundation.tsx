@@ -26,8 +26,19 @@ export function PageTitle({
   );
 }
 
-export function EmptyState({ children }: { children: ReactNode }) {
-  return <p className="empty">{children}</p>;
+export function EmptyState({
+  children,
+  action,
+}: {
+  children: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <>
+      {action && <div>{action}</div>}
+      <p className="empty">{children}</p>
+    </>
+  );
 }
 export function StatusTag({
   status,

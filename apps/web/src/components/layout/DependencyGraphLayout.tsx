@@ -1,3 +1,4 @@
+import { CircleHelp } from "lucide-react";
 import {
   type ReactNode,
   type RefObject,
@@ -10,6 +11,7 @@ import {
 } from "react";
 import { cn } from "../../lib/utils.js";
 import { Tooltip } from "../Tooltip.js";
+import { IconButton } from "../ui/button.js";
 import { Popover, PopoverTrigger } from "../ui/popover.js";
 import styles from "./DependencyGraphLayout.module.css";
 
@@ -18,10 +20,32 @@ export function DependencyGraphFacts({ children }: { children: ReactNode }) {
   return <p className={styles.facts}>{children}</p>;
 }
 
+/** How to read the graph's lines, on hover or focus; never as page text. */
+export function DependencyGraphHelp({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip content={children}>
+      <IconButton aria-label={label} variant="ghost" className={styles.help}>
+        <CircleHelp aria-hidden="true" />
+      </IconButton>
+    </Tooltip>
+  );
+}
+
 export interface DependencyGraphEdge {
   readonly from: string;
   readonly to: string;
   readonly muted?: boolean;
+  /**
+   * `parent` joins a story to a child card: dashed and without an arrow, so it
+   * never reads as an order. The default is a dependency arrow.
+   */
+  readonly kind?: "dependency" | "parent";
   /** Empty cells a long edge runs through, one per column it crosses. */
   readonly via?: readonly { readonly column: number; readonly row: number }[];
 }
@@ -30,6 +54,7 @@ interface Path {
   readonly key: string;
   readonly d: string;
   readonly muted: boolean;
+  readonly parent: boolean;
 }
 
 interface Box {
@@ -111,7 +136,9 @@ export function DependencyGraph({
   const edgeKey = edges
     .map(
       (e) =>
-        `${edgeKeyOf(e)}${e.muted ? "~" : ""}${(e.via ?? [])
+        `${edgeKeyOf(e)}${e.muted ? "~" : ""}${e.kind === "parent" ? "^" : ""}${(
+          e.via ?? []
+        )
           .map((w) => `@${w.column}:${w.row}`)
           .join("")}`,
     )
@@ -158,8 +185,15 @@ export function DependencyGraph({
         x = box.right;
         y = middle(box);
       }
-      d += curve(x, y, to.left - ARROW, ends.get(key) ?? middle(to));
-      return { key, d, muted: !!edge.muted };
+      const parent = edge.kind === "parent";
+      // A parent line has no arrowhead, so it runs all the way to the child.
+      d += curve(
+        x,
+        y,
+        to.left - (parent ? 0 : ARROW),
+        ends.get(key) ?? middle(to),
+      );
+      return { key, d, muted: !!edge.muted, parent };
     });
     setFrame({ width: root.scrollWidth, height: root.scrollHeight, paths });
   }, [edgeKey]);
@@ -248,9 +282,16 @@ export function DependencyGraph({
               <path
                 key={path.key}
                 data-edge={path.key}
-                className={cn(styles.edge, path.muted && styles.edgeMuted)}
+                data-edge-kind={path.parent ? "parent" : "dependency"}
+                className={cn(
+                  styles.edge,
+                  path.muted && styles.edgeMuted,
+                  path.parent && styles.edgeParent,
+                )}
                 d={path.d}
-                markerEnd={`url(#${arrow(path.muted)})`}
+                markerEnd={
+                  path.parent ? undefined : `url(#${arrow(path.muted)})`
+                }
               />
             ))}
           </svg>
@@ -501,6 +542,8 @@ export function DependencyGraphNode({
   tooltip,
   before = [],
   after = [],
+  childOf,
+  parentOf = [],
   children,
 }: {
   id: string;
@@ -516,10 +559,16 @@ export function DependencyGraphNode({
   /** Direct prerequisites and dependents, read out instead of the lines. */
   before?: readonly string[] | undefined;
   after?: readonly string[] | undefined;
+  /** The story this node is a child of, read out like the dependency links. */
+  childOf?: string | undefined;
+  /** Child cards of this story node. */
+  parentOf?: readonly string[] | undefined;
   children: ReactNode;
 }) {
   const descriptionId = useId();
   const relations = [
+    childOf ? `父卡 ${childOf}` : "",
+    parentOf.length ? `子卡 ${parentOf.join("、")}` : "",
     before.length ? `前置 ${before.join("、")}` : "",
     after.length ? `后续 ${after.join("、")}` : "",
   ]

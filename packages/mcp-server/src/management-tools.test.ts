@@ -2798,3 +2798,85 @@ test("PM can create and clear the explicit UI framework marker through MCP", asy
     }),
   ).toMatchObject({ is_ui_framework: false });
 });
+
+test("MCP creates a repo-free story and links a child without creating a dependency", async () => {
+  const parent = await ok<Card>(office, "create_card", {
+    title: "Need",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Need" },
+    template_id: "story",
+  });
+  expect(parent).toMatchObject({ template: "story", merge_policy: "none" });
+  const child = await ok<Card>(office, "create_card", {
+    title: "Part",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Part" },
+    template_id: "general",
+    parent_card_id: parent.id,
+  });
+  expect(child.parent_card_id).toBe(parent.id);
+  expect(child.depends_on_cards).toBeUndefined();
+});
+
+test("Office posts a checklist and proposal through MCP; reads show defaults, their source and zero rounds after silence", async () => {
+  store.uow.run((tx) => {
+    const owner = tx.assignments
+      .list(project)
+      .find((a) => a.scope === "standing");
+    if (owner?.scope !== "standing") throw new Error("Missing Office");
+    tx.assignments.put(project, { ...owner, standing_mode: "office" });
+  });
+  const { id: card_id } = await ok<Card>(office, "create_card", {
+    title: "Need",
+    goal: "Outcome",
+    source: { kind: "quote", text: "Need" },
+    template_id: "story",
+  });
+  const params = {
+    card_id,
+    body: "需要澄清",
+    story_discussion: {
+      action: "ask",
+      questions: [
+        { question: "布局？", recommended: "一栏", impact: "容易阅读" },
+      ],
+    },
+  };
+  const ask = await ok<TimelineEntry>(
+    office,
+    "post_comment",
+    params,
+    "ask-once",
+  );
+  expect(await ok(office, "post_comment", params, "ask-once")).toEqual(ask);
+  const plan = await ok<TimelineEntry>(office, "post_comment", {
+    card_id,
+    body: "先调整布局",
+    story_discussion: { action: "propose" },
+  });
+  expect(await ok(office, "get_card", { card_id })).toMatchObject({
+    card: {
+      story: {
+        discussion_rounds: 0,
+        question_groups: [
+          {
+            id: ask.id,
+            questions: [
+              {
+                resolution: {
+                  source: "proposal_default",
+                  value: "一栏",
+                  entry_id: plan.id,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+    decisions: [],
+  });
+  expect(
+    await ok(office, "get_updates", { card_id, since_seq: ask.event_seq }),
+  ).toMatchObject({ timeline: [{ body: expect.stringContaining("按默认") }] });
+});

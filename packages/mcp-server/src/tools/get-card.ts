@@ -7,6 +7,7 @@ import type {
 } from "@cardigan/domain";
 import {
   authorView,
+  CROSS_CARD_REFERENCE_NOTICE,
   cardDependencyView,
   cardReadAccess,
   cardTemplate,
@@ -27,6 +28,8 @@ import {
   roleRuleInventory,
   runAuthorView,
   sharedMustFixes,
+  storyDiscussionRounds,
+  storyProgress,
   verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -73,7 +76,7 @@ export const getCardTool = defineTool({
         card: { id: card.id, title: card.title, status: card.status },
       };
     }
-    const { state, dependency, merge_stage } = store.uow.read((tx) => {
+    const projection = store.uow.read((tx) => {
       try {
         const project = identity.actor.project_id;
         const projectEvents = timed(
@@ -92,9 +95,21 @@ export const getCardTool = defineTool({
         const localEvents = queueConfig
           ? [...projectEvents, ...cardEvents]
           : cardEvents;
-        const sources = timed("sql_card_sources", () =>
-          tx.cardSources?.(project, cardId),
-        );
+        // The visibility projection needs attachment owners (timeline or delivery)
+        // for a child and its immediate parent, never unrelated project streams.
+        const sourceIds = new Set([cardId]);
+        if (card.parent_card_id) sourceIds.add(card.parent_card_id);
+        const sources = timed("sql_card_sources", () => {
+          if (!tx.cardSources) return undefined;
+          const own = tx.cardSources(project, cardId);
+          if (!card.parent_card_id || card.parent_card_id === cardId)
+            return own;
+          const parent = tx.cardSources(project, card.parent_card_id);
+          return {
+            timeline: [...own.timeline, ...parent.timeline],
+            attachments: [...own.attachments, ...parent.attachments],
+          };
+        });
         const snapshot = timed(
           "sql_state",
           (): CommandState => ({
@@ -123,10 +138,12 @@ export const getCardTool = defineTool({
             human_actions: tx.human_actions.list(project),
             attachments:
               sources?.attachments ??
-              tx.attachments.list(project).filter((a) => a.card_id === cardId),
+              tx.attachments
+                .list(project)
+                .filter((a) => sourceIds.has(a.card_id)),
             timeline:
               sources?.timeline ??
-              tx.timeline.list(project).filter((e) => e.card_id === cardId),
+              tx.timeline.list(project).filter((e) => sourceIds.has(e.card_id)),
             events: localEvents,
             employees: tx.employees?.list() ?? [],
             members: tx.members?.list() ?? [],
@@ -207,12 +224,16 @@ export const getCardTool = defineTool({
             referenceReadState(snapshot, read.assignment),
           ),
           dependency,
+          story_progress: card.story
+            ? storyProgress(visibleCards, card)
+            : undefined,
           merge_stage: safeStage,
         };
       } catch {
         throw ToolError.validation("检查日志列表读取失败。");
       }
     });
+    const { state, dependency, merge_stage, story_progress } = projection;
     const work_items = state.work_items.filter((w) => w.card_id === cardId);
     const works = new Set(work_items.map((w) => w.id));
     const assignments = state.assignments.filter(
@@ -306,9 +327,29 @@ export const getCardTool = defineTool({
         cardId,
       ),
     );
-    auditReferenceRead(context, [cardId], "get_card");
+    // Metadata is inherited as a reference, never as a child-owned upload. The
+    // filtered source state and the final audit both enforce current access.
+    const parentAttachments = card.parent_card_id
+      ? state.attachments
+          .filter((a) => a.card_id === card.parent_card_id)
+          .map((a) => a.id)
+      : [];
+    const parentReference =
+      card.parent_card_id && parentAttachments.length
+        ? {
+            source_card_id: card.parent_card_id,
+            reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+            attachment_ids: parentAttachments,
+          }
+        : undefined;
+    auditReferenceRead(
+      context,
+      parentReference ? [cardId, parentReference.source_card_id] : [cardId],
+      "get_card",
+    );
     return publicSourceMergeData({
       ...read.provenance,
+      ...(parentReference ? { parent_reference: parentReference } : {}),
       timeline: timed("timeline_view", () =>
         state.timeline
           .filter((entry) => entry.card_id === cardId)
@@ -325,6 +366,15 @@ export const getCardTool = defineTool({
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
+        ...(card.story
+          ? {
+              story: {
+                ...card.story,
+                discussion_rounds: storyDiscussionRounds(card.story),
+              },
+              story_progress,
+            }
+          : {}),
         ...(dependency ? { dependency } : {}),
         ...(card.merge_classification
           ? {

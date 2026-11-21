@@ -25,4 +25,16 @@ const SearchInput = forwardRef<HTMLInputElement, ComponentProps<"input">>(
 );
 SearchInput.displayName = "SearchInput";
 
+export function RadioChoice({
+  children,
+  ...props
+}: Omit<ComponentProps<"input">, "type">) {
+  return (
+    <label className="grid min-h-control grid-cols-[auto_1fr] items-center gap-2">
+      <input {...props} type="radio" className="m-0 size-4 accent-(--accent)" />
+      <span>{children}</span>
+    </label>
+  );
+}
+
 export { Input, SearchInput };

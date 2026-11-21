@@ -1,0 +1,146 @@
+{
+  "snapshot": "50eea6e7811588d6b47de6dfecafda50a032769a7e9ab163039a2b341dcbb0a9",
+  "role": {
+    "action": "unchanged",
+    "role": {
+      "role_id": "qa-two",
+      "version": 1,
+      "display_name": "reviewer",
+      "kind": "verify",
+      "core_prompt": "",
+      "instructions": "复核职责：合成示例。",
+      "harness": "codex",
+      "launch_profile_ref": "fixture",
+      "allowed_tools": [
+        "whoami",
+        "get_card",
+        "get_updates",
+        "ack_events",
+        "post_comment",
+        "heartbeat",
+        "finish_run",
+        "report_blocker",
+        "request_human_action",
+        "request_decision",
+        "upload_attachment",
+        "read_attachment",
+        "project_snapshot",
+        "get_check_log",
+        "submit_review",
+        "withdraw_review"
+      ],
+      "capabilities": ["verify"],
+      "status": "active",
+      "abilities": [],
+      "worktree": "readonly",
+      "required_machine_tags": [],
+      "required_capabilities": []
+    },
+    "fields": [],
+    "relaxations": []
+  },
+  "template": {
+    "action": "update",
+    "before": {
+      "id": "copy",
+      "title": "合成模板",
+      "description": "",
+      "requires_repo": false,
+      "merge": "none",
+      "require_acceptance_criteria": false,
+      "work_items": [
+        {
+          "key": "integration_verification_long_key",
+          "title": "集成环境里的长时间验证",
+          "kind": "produce",
+          "role_id": "frontend-engineer",
+          "required": true,
+          "requirements": {
+            "os": "linux",
+            "arch": "arm64",
+            "tags": ["isolated-machine"],
+            "capabilities": ["verified-environment"]
+          }
+        },
+        {
+          "key": "build_and_verify_output",
+          "title": "第二份",
+          "kind": "produce",
+          "role_id": "frontend-engineer",
+          "required": true
+        },
+        {
+          "key": "check-one",
+          "title": "复核一",
+          "kind": "verify",
+          "role_id": "qa-two",
+          "required": true,
+          "target_work_item_key": "integration_verification_long_key"
+        },
+        {
+          "key": "check-two",
+          "title": "复核二",
+          "kind": "verify",
+          "role_id": "qa-two",
+          "required": true
+        }
+      ],
+      "primary_work_item_key": "integration_verification_long_key",
+      "completion": {
+        "mode": "review",
+        "reviewer": "role:qa-two"
+      },
+      "version": 2,
+      "builtin": false,
+      "status": "active"
+    },
+    "after": {
+      "id": "copy",
+      "title": "合成模板",
+      "description": "",
+      "requires_repo": false,
+      "merge": "none",
+      "require_acceptance_criteria": false,
+      "work_items": [
+        {
+          "key": "integration_verification_long_key",
+          "title": "集成环境里的长时间验证",
+          "kind": "produce",
+          "role_id": "frontend-engineer",
+          "required": true
+        },
+        {
+          "key": "build_and_verify_output",
+          "title": "第二份",
+          "kind": "produce",
+          "role_id": "frontend-engineer",
+          "required": true
+        },
+        {
+          "key": "check-one",
+          "title": "复核一",
+          "kind": "verify",
+          "role_id": "qa-two",
+          "required": true,
+          "target_work_item_key": "integration_verification_long_key"
+        },
+        {
+          "key": "check-two",
+          "title": "复核二",
+          "kind": "verify",
+          "role_id": "qa-two",
+          "required": true
+        }
+      ],
+      "primary_work_item_key": "integration_verification_long_key",
+      "completion": {
+        "mode": "review",
+        "reviewer": "role:qa-two"
+      },
+      "version": 3,
+      "builtin": false,
+      "status": "active"
+    }
+  },
+  "employees": []
+}

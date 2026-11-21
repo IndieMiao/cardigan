@@ -21,8 +21,10 @@ import {
   reviewMaxRounds,
 } from "../preferences.js";
 import { parseCardPriority } from "../priority.js";
+import { storyProgress, storyTerminal } from "../story.js";
 import {
   builtinCardTemplatesForFlow,
+  isStoryTemplate,
   latestCardTemplate,
   requiresUiStateAndSave,
 } from "../templates.js";
@@ -40,6 +42,7 @@ import {
 } from "./card-dependencies.js";
 import { applyCardHold, type CardHoldInput } from "./card-hold.js";
 import {
+  type CommandDraft,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
@@ -81,6 +84,7 @@ export type CreateCardParams = Pick<
       Card,
       | "out_of_scope"
       | "related_cards"
+      | "parent_card_id"
       | "deadline"
       | "template"
       | "acceptance_criteria"
@@ -170,7 +174,8 @@ export function createCard(
       "validation_failed",
       "停用模板不能建卡",
     );
-    validateCardTemplate(template, state.roles);
+    const story = isStoryTemplate(template);
+    validateCardTemplate(template, state.roles, { story });
     ensure(
       p.work_item_requirements === undefined ||
         (p.work_item_requirements !== null &&
@@ -227,6 +232,34 @@ export function createCard(
       p.state_and_save,
       requiresUiStateAndSave(template),
     );
+    if (p.parent_card_id !== undefined) {
+      const parent = d.card(p.parent_card_id);
+      ensure(
+        !story &&
+          parent.story &&
+          !parent.parent_card_id &&
+          !storyTerminal(parent),
+        "validation_failed",
+        "父卡必须是同项目未结束的需求卡，需求卡不能作为子卡",
+      );
+      if (parent.story.summary_entry_id) {
+        const { summary_entry_id: _old, ...story } = parent.story;
+        d.put("cards", { ...parent, story });
+      }
+      const item = d
+        .list("work_items")
+        .find(
+          (w) => w.card_id === parent.id && w.template_key === "decomposition",
+        );
+      if (
+        item &&
+        (item.status === "delivered" ||
+          (item.status === "todo" &&
+            !parent.hold &&
+            parent.status !== "backlog"))
+      )
+        d.put("work_items", d.move(item, "story_child_added"));
+    }
     const id = d.ids.next(state.project_id, "card");
     let card: Card = {
       id,
@@ -240,6 +273,8 @@ export function createCard(
       source: p.source,
       ...(p.repo === undefined ? {} : { repo: p.repo }),
       ...(p.base_branch === undefined ? {} : { base_branch: p.base_branch }),
+      ...(story ? { story: {} } : {}),
+      ...(p.parent_card_id ? { parent_card_id: p.parent_card_id } : {}),
       priority,
       status: "todo",
       template: template.id,
@@ -325,6 +360,7 @@ export function createCard(
       {
         card_id: id,
         template: template.id,
+        ...(card.parent_card_id ? { parent_card_id: card.parent_card_id } : {}),
         template_version: template.version,
         ...(p.is_ui_framework !== undefined
           ? { is_ui_framework: p.is_ui_framework }
@@ -341,9 +377,105 @@ export function createCard(
       },
       { type: "system", body: dependencyChangeNotice(card, p) },
     );
+    if (card.parent_card_id)
+      d.emit(
+        "story_child_added",
+        card.parent_card_id,
+        { child_card_id: card.id },
+        {
+          type: "system",
+          body: `已关联子卡 ${card.id}`,
+          refs: [{ kind: "card", id: card.id }],
+        },
+      );
     recordFrameworkLinks(d, card);
     return card;
   });
+}
+export interface StoryChildChoice {
+  readonly action: "cancel" | "detach";
+  readonly ids: readonly Card["id"][];
+}
+function cancelCardWork(d: CommandDraft, card: Card) {
+  const cancelledRunIds: RunId[] = [];
+  const items = d.list("work_items").filter((w) => w.card_id === card.id);
+  const itemIds = new Set(items.map((w) => w.id));
+  const owners = new Set(
+    d
+      .list("assignments")
+      .filter((a) => a.scope === "work_item" && itemIds.has(a.work_item_id))
+      .map((a) => a.id),
+  );
+  // Queued Runs have not been dispatched. Preserve runtime references;
+  // in-flight launches recheck the card and Run before starting the Agent.
+  for (const run of d.list("runs")) {
+    if (run.status !== "queued" || !owners.has(run.assignment_id)) continue;
+    d.put("runs", {
+      ...run,
+      status: unwrap(transition("run", run.status, "cancel")),
+      outcome: "failed",
+      summary: "卡片已取消，排队执行已取消",
+      finished_at: d.now,
+    });
+    cancelledRunIds.push(run.id);
+  }
+  for (const item of items)
+    if (
+      item.status !== "cancelled" &&
+      !(item.kind === "verify" && item.status === "passed")
+    )
+      d.put("work_items", d.move(item, "cancel"));
+  return cancelledRunIds;
+}
+function settleStoryChildren(
+  d: CommandDraft,
+  parent: Card,
+  choice?: StoryChildChoice,
+) {
+  const active = storyProgress(d.list("cards"), parent).children.filter(
+    (c) => !storyTerminal(c),
+  );
+  if (!choice && !active.length) return;
+  ensure(
+    choice &&
+      ["detach", "cancel"].includes(choice.action) &&
+      Array.isArray(choice.ids) &&
+      choice.ids.length === active.length &&
+      active.every((c) => choice.ids.includes(c.id)),
+    "validation_failed",
+    `请确认未结束子卡并选择一并取消或保留脱离：${active.map((c) => c.id).join("、") || "无"}`,
+  );
+  for (const { id } of active) {
+    const child = d.card(id);
+    if (choice.action === "detach") {
+      const { parent_card_id: _, ...detached } = child;
+      d.put("cards", detached);
+      d.emit(
+        "story_child_detached",
+        id,
+        { parent_card_id: parent.id },
+        { type: "status_change", body: `已脱离取消的需求卡 ${parent.id}` },
+      );
+    } else {
+      const cancelled_run_ids = cancelCardWork(d, child);
+      d.put("cards", {
+        ...child,
+        status: unwrap(transition("card", child.status, "cancel")),
+      });
+      cancelCardHumanActions(d, id);
+      d.emit(
+        "card_updated",
+        id,
+        {
+          card_id: id,
+          status: "cancelled",
+          cancelled_run_ids,
+          parent_card_id: parent.id,
+        },
+        { type: "status_change", body: `随需求卡 ${parent.id} 一并取消` },
+      );
+    }
+  }
 }
 export function updateCard(
   state: CommandState,
@@ -355,6 +487,7 @@ export function updateCard(
     acceptance_criteria?: readonly string[];
     priority?: number | string;
     status?: Card["status"];
+    story_children?: StoryChildChoice;
     risk_tags?: Card["risk_tags"];
     high_risk?: boolean;
     hold?: CardHoldInput;
@@ -367,6 +500,14 @@ export function updateCard(
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.story_children !== undefined)
+      ensure(
+        card.story && p.status === "cancelled",
+        "validation_failed",
+        "子卡选择只用于取消需求卡",
+      );
+    if (card.story && p.status === "cancelled")
+      ensure(actor.kind === "human", "unauthorized", "只有人能取消需求卡");
     if (p.hold !== undefined) {
       ensure(
         Object.keys(p).every((key) => ["card_id", "hold"].includes(key)),
@@ -453,36 +594,10 @@ export function updateCard(
         requireCardDependencyStart(d, dependencyCard);
       }
     }
-    const cancelledRunIds: RunId[] = [];
-    if (status === "cancelled" && card.status !== "cancelled") {
-      const items = d.list("work_items").filter((w) => w.card_id === card.id);
-      const itemIds = new Set(items.map((w) => w.id));
-      const owners = new Set(
-        d
-          .list("assignments")
-          .filter((a) => a.scope === "work_item" && itemIds.has(a.work_item_id))
-          .map((a) => a.id),
-      );
-      // Queued Runs have not been dispatched. Preserve runtime references;
-      // in-flight launches recheck the card and Run before starting the Agent.
-      for (const run of d.list("runs")) {
-        if (run.status !== "queued" || !owners.has(run.assignment_id)) continue;
-        d.put("runs", {
-          ...run,
-          status: unwrap(transition("run", run.status, "cancel")),
-          outcome: "failed",
-          summary: "卡片已取消，排队执行已取消",
-          finished_at: d.now,
-        });
-        cancelledRunIds.push(run.id);
-      }
-      for (const item of items)
-        if (
-          item.status !== "cancelled" &&
-          !(item.kind === "verify" && item.status === "passed")
-        )
-          d.put("work_items", d.move(item, "cancel"));
-    }
+    const cancelling = status === "cancelled" && card.status !== "cancelled";
+    if (cancelling && card.story)
+      settleStoryChildren(d, card, p.story_children);
+    const cancelledRunIds = cancelling ? cancelCardWork(d, card) : [];
     const result: Card = {
       ...dependencyCard,
       status,
@@ -617,6 +732,7 @@ export function createWorkItem(
   return command(state, actor, "create_work_item", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    ensure(!card.story, "illegal_transition", "需求卡只有常驻 Office 的拆解项");
     text(p.title, "title");
     ensure(
       card.status !== "done" && card.status !== "cancelled",

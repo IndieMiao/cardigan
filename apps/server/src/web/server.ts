@@ -91,6 +91,7 @@ import { LoginLimiter } from "./login-limiter.js";
 import { MachineChecks } from "./machine-checks.js";
 import type { MachineHost } from "./machine-host.js";
 import { serveMachines } from "./machines.js";
+import { readMentionCandidates } from "./mention-candidates.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
 import { readNeedsVersion } from "./needs-version.js";
@@ -113,6 +114,7 @@ import {
 import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
+import { serveAttachmentThumbnail } from "./thumbnails.js";
 import { readPagedCard } from "./timeline-state.js";
 import { WorkerWizards } from "./worker-wizards.js";
 import { serveWrite } from "./write.js";
@@ -834,6 +836,22 @@ async function serveProjectRoute(
     });
   }
 
+  const thumbnail = /^\/attachments\/([^/]+)\/thumbnail$/.exec(rest);
+  if (thumbnail !== null) {
+    const served = await serveAttachmentThumbnail({
+      store,
+      project_id,
+      attachment_id: decodeURIComponent(thumbnail[1] ?? ""),
+      req,
+      res,
+      dataDir: context.dataDir,
+    });
+    if (!served) {
+      throw new HttpRejection(404, "not_found", "attachment not found");
+    }
+    return;
+  }
+
   const attachment = /^\/attachments\/([^/]+)$/.exec(rest);
   if (attachment !== null) {
     const served = await serveAttachment({
@@ -872,6 +890,17 @@ async function serveProjectRoute(
         throw new HttpRejection(400, "validation_failed", error.message);
       throw error;
     }
+    return;
+  }
+
+  const mentions = /^\/cards\/([^/]+)\/mentions$/.exec(rest);
+  if (mentions !== null) {
+    const card_id = decodeURIComponent(mentions[1] ?? "") as CardId;
+    const candidates = readMentionCandidates(store, project_id, card_id);
+    if (candidates === undefined) {
+      throw new HttpRejection(404, "not_found", `card ${card_id} not found`);
+    }
+    sendJson(res, 200, candidates);
     return;
   }
 
@@ -1131,7 +1160,11 @@ function serveRoleRead(
     listRoleVersions(tx, project_id),
   );
   if (rest === "/roles") {
-    sendJson(context.res, 200, roleList(project_id, versions));
+    sendJson(
+      context.res,
+      200,
+      roleList(project_id, versions, context.roleLaunchConfig?.()),
+    );
     return;
   }
   const match = /^\/roles\/([^/]+)(\/history)?$/u.exec(rest);

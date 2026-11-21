@@ -5,6 +5,7 @@ import type { RuntimeTargetBinding } from "@cardigan/domain";
 import type { LaunchFile } from "./agent-files.js";
 import { agentProcessCommand } from "./agent-ssh.js";
 import type { ExecutionConfig, WorkerPublishLimits } from "./execution.js";
+import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
 import type { WorkerProcessIdentity } from "./worker-primitives.js";
 
 export type { WorkerPublishLimits } from "./execution.js";
@@ -73,8 +74,9 @@ type WorkerExecution = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 const trailer = Buffer.from("\nCARDIGAN-PUBLISH-1\n");
 const allowedFile =
   /^(?:core\.md|first\.md|run-command\.py|launch\.sh|launch\.json|token|secrets\.env|codex\/config\.toml|pi\/(?:models\.json|mcp\.json|trust\.json|extensions\/cardigan-context-usage\.js)|mcp\.json|cardigan-assignment\.[A-Za-z0-9_.-]+\.claude-settings\.json)$/u;
-const rejected = (): never => {
-  throw new Error("Worker publication rejected");
+class PublicationError extends Error {}
+const rejected = (summary = "invalid publication"): never => {
+  throw new PublicationError(`Worker publication rejected: ${summary}`);
 };
 
 export function workerSessionPath(
@@ -136,8 +138,8 @@ export function workerFileRequest(
         secret = ["token", "secrets.env"].includes(name);
       const data = Buffer.from(file.content);
       total += data.byteLength;
+      if (!allowedFile.test(name)) return rejected("filename_rejected");
       if (
-        !allowedFile.test(name) ||
         names.has(name) ||
         file.path !== posix.join(root, name) ||
         file.mode !== (name === "launch.sh" ? 0o700 : 0o600) ||
@@ -208,6 +210,7 @@ export async function workerFiles(
     )
   )
     return rejected();
+  let output: Buffer;
   try {
     const command = await agentProcessCommand(config, [
       config.fileHelper.python,
@@ -218,11 +221,20 @@ export async function workerFiles(
     ]);
     const remaining = policy.timeout_ms - (Date.now() - started);
     if (remaining <= 0) return rejected();
-    const output = await new Promise<Buffer>((resolve, reject) => {
+    output = await new Promise<Buffer>((resolve, reject) => {
       const child = spawn(command.file, command.args, {
-        stdio: ["pipe", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", "pipe"],
       });
       const chunks: Buffer[] = [];
+      // Drain stderr; only a complete fixed diagnostic can cross the SSH boundary.
+      let stderr = Buffer.alloc(0);
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (stderr.length < 256)
+          stderr = Buffer.concat([
+            stderr,
+            chunk.subarray(0, 256 - stderr.length),
+          ]);
+      });
       let size = 0;
       const timer = setTimeout(() => child.kill("SIGKILL"), remaining);
       child.stdout.on("data", (chunk: Buffer) => {
@@ -231,19 +243,48 @@ export async function workerFiles(
         else chunks.push(chunk);
       });
       child.on("error", reject);
-      child.stdin.on("error", () => child.kill("SIGKILL"));
+      child.stdin.on("error", () => {
+        /* EPIPE: wait for the remote exit and its diagnostic. */
+      });
       child.on("close", (code) => {
         clearTimeout(timer);
         if (
           code !== 0 ||
           size > policy.header_max_bytes ||
           Date.now() - started >= policy.timeout_ms
-        )
-          reject(new Error());
-        else resolve(Buffer.concat(chunks));
+        ) {
+          const text = stderr.toString().trim();
+          const summary =
+            stderr.length < 256 &&
+            /^worker_(?:filename_rejected|permission_denied|disk_error|timeout|publication_rejected)$/u.test(
+              text,
+            )
+              ? text
+              : Date.now() - started >= policy.timeout_ms
+                ? "timeout"
+                : size > policy.header_max_bytes
+                  ? "reply_too_large"
+                  : "unknown (stderr omitted)";
+          reject(
+            new WorkerPreparationFailure(
+              `Worker publication rejected: ${operation}; exit=${code ?? "signal"}; ${summary}`,
+            ),
+          );
+        } else resolve(Buffer.concat(chunks));
       });
       child.stdin.end(payload);
     });
+  } catch (error) {
+    if (
+      error instanceof WorkerPreparationFailure ||
+      error instanceof PublicationError
+    )
+      throw error;
+    // Credential inspection or spawning the local SSH executable failed. Never
+    // propagate the local path or count this against the intended machine.
+    return rejected(`${operation}; SSH entry unavailable`);
+  }
+  try {
     const reply = JSON.parse(output.toString()) as WorkerFileReply;
     if (
       reply.version !== 1 ||
@@ -302,6 +343,9 @@ export async function workerFiles(
       ...(operation === "inspect" ? { worktree } : {}),
     } as WorkerFileReply;
   } catch {
-    return rejected();
+    // An SSH process completed but its reply failed parsing or validation.
+    throw new WorkerPreparationFailure(
+      `Worker publication rejected: ${operation}; invalid reply`,
+    );
   }
 }

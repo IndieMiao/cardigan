@@ -30,11 +30,7 @@ import { CardSidebar, CardWorkItems } from "../components/CardSidebar.js";
 import { CardStatusLine } from "../components/CardStatusLine.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { CardTemplate } from "../components/CardTemplate.js";
-import {
-  CommentBox,
-  type CommentBoxHandle,
-  type MentionOption,
-} from "../components/CommentBox.js";
+import { CommentBox, type CommentBoxHandle } from "../components/CommentBox.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
@@ -49,8 +45,14 @@ import {
 } from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
+import { Markdown, MarkdownBody } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { StoryDiscussion } from "../components/StoryDiscussion.js";
+import {
+  StoryOverview,
+  useStoryAttachments,
+} from "../components/StoryOverview.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import {
@@ -58,7 +60,6 @@ import {
   TimelinePager,
 } from "../components/TimelineControls.js";
 import { Button } from "../components/ui/button.js";
-import { Prose } from "../components/ui/prose.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
@@ -304,6 +305,10 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...(data.card.dependency?.graph?.nodes ?? []).map(
               (card) => card.id,
             ),
+            // A story's progress and graph follow its children's own events.
+            ...(data.card.story_progress?.children ?? []).map(
+              (card) => card.id,
+            ),
           ]),
       ),
     ].sort();
@@ -468,6 +473,13 @@ function CardContent({
   );
   const detail = head.overview ? { ...head, ...panelData.data } : head;
   const panelReady = !head.overview || !!panelData.data;
+  const storyAttachments = useStoryAttachments({
+    detail: head,
+    client,
+    projectId,
+    cardId,
+    revision,
+  });
   useLayoutEffect(() => {
     if (!anchor || !anchorReady) return;
     const target = document.getElementById(anchor);
@@ -766,42 +778,53 @@ function CardContent({
               ))}
             </section>
           )}
-          <section className="card-purpose" aria-label="目标和验收标准">
-            <h2>目标和验收标准</h2>
-            <LongContent>
-              <Prose text={card.goal}>
-                <p>{card.goal}</p>
-              </Prose>
-            </LongContent>
-            <section className="acceptance-criteria">
-              <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
-              <LongContent>
-                <ul>
-                  {card.acceptance_criteria.map((criterion) => (
-                    <li key={criterion}>{criterion}</li>
-                  ))}
-                </ul>
-              </LongContent>
-            </section>
-            {completionId && (
-              <section aria-label="完成申请">
-                <h3>完成申请</h3>
-                <p>
-                  整体完成申请已通过：
-                  <IdTag
-                    id={completionId}
-                    label="完成申请"
-                    href={routeHash({
-                      kind: "card",
-                      projectId,
-                      cardId,
-                      anchor: `delivery-${completionId}`,
-                    })}
-                  />
-                </p>
+          {card.story ? (
+            <StoryOverview
+              detail={detail}
+              attachments={storyAttachments}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              revision={revision}
+              onLocate={onLocate}
+              onShowTimeline={() => setSelectedSection(sectionId("timeline"))}
+            />
+          ) : (
+            <section className="card-purpose" aria-label="目标和验收标准">
+              <h2>目标和验收标准</h2>
+              <Markdown body={card.goal} />
+              <section className="acceptance-criteria">
+                <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
+                <LongContent>
+                  <ul>
+                    {card.acceptance_criteria.map((criterion) => (
+                      <li key={criterion}>
+                        <MarkdownBody body={criterion} />
+                      </li>
+                    ))}
+                  </ul>
+                </LongContent>
               </section>
-            )}
-          </section>
+              {completionId && (
+                <section aria-label="完成申请">
+                  <h3>完成申请</h3>
+                  <p>
+                    整体完成申请已通过：
+                    <IdTag
+                      id={completionId}
+                      label="完成申请"
+                      href={routeHash({
+                        kind: "card",
+                        projectId,
+                        cardId,
+                        anchor: `delivery-${completionId}`,
+                      })}
+                    />
+                  </p>
+                </section>
+              )}
+            </section>
+          )}
           <RecentConclusions
             detail={detail}
             projectId={projectId}
@@ -862,13 +885,22 @@ function CardContent({
             loaded={detail.timeline.length}
             total={detail.counts.timeline}
           />
+          {detail.card.story && (
+            <StoryDiscussion
+              story={detail.card.story}
+              closed={["done", "cancelled"].includes(detail.card.status)}
+              client={client}
+              projectId={projectId}
+              cardId={cardId}
+              reload={reload}
+            />
+          )}
           <CommentBox
             ref={commentBox}
             client={client}
             projectId={projectId}
             cardId={cardId}
-            mentions={mentionOptions(detail)}
-            hasPmOps={detail.has_pm_ops}
+            hasPmOps={detail.card.story ? undefined : detail.has_pm_ops}
             onPosted={onPosted}
             onConflict={onCommentConflict}
           />
@@ -922,33 +954,4 @@ function CardContent({
       </div>
     </CardDetailLayout>
   );
-}
-
-/** `@` suggestions: the roles and Assignments this card already knows. */
-export function mentionOptions(detail: CardDetail): MentionOption[] {
-  const options = new Map<string, MentionOption>();
-  for (const item of detail.work_items) {
-    options.set(item.role_id, {
-      value: item.role_id,
-      label: `角色 ${item.role_id}`,
-    });
-    if (item.assignment_id !== undefined) {
-      options.set(item.assignment_id, {
-        value: item.assignment_id,
-        label: `Assignment ${item.assignment_id}`,
-      });
-    }
-  }
-  for (const owner of detail.card.next_owners) {
-    if (owner.kind === "role") {
-      options.set(owner.ref, { value: owner.ref, label: `角色 ${owner.ref}` });
-    }
-    if (owner.kind === "assignment") {
-      options.set(owner.ref, {
-        value: owner.ref,
-        label: `Assignment ${owner.ref}`,
-      });
-    }
-  }
-  return [...options.values()];
 }
