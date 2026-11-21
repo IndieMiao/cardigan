@@ -5,7 +5,7 @@ import type { Decision, Delivery } from "../entities.js";
 import { passedCardCheck } from "../merge-batch.js";
 import { autoMergeOn } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
-import { riskTagAutoMergeAllowed } from "./delegation.js";
+import { mergeRiskBlockers } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext } from "./merge-context.js";
 import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
@@ -63,8 +63,7 @@ export function pmMergeBlockers(
     ).length
   )
     blockers.push("增量复核的隔离证据已失效，须完整复核");
-  if (!riskTagAutoMergeAllowed(state, q))
-    blockers.push("高危交付须有当前有效的必需独立复核");
+  blockers.push(...mergeRiskBlockers(state, context.value.card));
   const screenshot = screenshotCheckBlocker(state, context.value.card);
   if (screenshot) blockers.push(screenshot);
   const check = state.project_settings?.merge_queue

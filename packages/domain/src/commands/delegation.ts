@@ -136,35 +136,40 @@ type DelegationSubject = Pick<
       | { readonly delivery_id: import("../ids.js").DeliveryId }
       | { readonly subject: import("../entities.js").DeliverySubject };
   };
-/** Compatibility name: independent coverage follows paths/manual risk, not classification tags. */
+type MergeRiskState = Pick<
+  CommandState,
+  "cards" | "decisions" | "work_items" | "deliveries" | "reviews"
+> &
+  Partial<Pick<CommandState, "project_id" | "project_preferences" | "events">>;
+
+/** Compatibility predicate for authorization callers; both gates must pass. */
 export function riskTagAutoMergeAllowed(
-  state: Pick<
-    CommandState,
-    "cards" | "decisions" | "work_items" | "deliveries" | "reviews"
-  > &
-    Partial<
-      Pick<CommandState, "project_id" | "project_preferences" | "events">
-    >,
+  state: MergeRiskState,
   q: DelegationSubject,
 ): boolean {
   const card = state.cards.find((c) => c.id === q.card_id);
-  if (
-    q.trigger !== "merge_confirmation" ||
-    !card ||
-    mergeNeedsHuman(
-      state.decisions,
-      state.cards,
-      card.id,
-      state.project_preferences?.find((p) => p.id === state.project_id),
-      state.events,
-    )
-  )
-    return false;
+  return (
+    q.trigger === "merge_confirmation" &&
+    !!card &&
+    mergeRiskBlockers(state, card).length === 0
+  );
+}
+
+/** Personal consent cannot stand in for a review, nor a review for consent. */
+export function mergeRiskBlockers(state: MergeRiskState, card: Card): string[] {
+  const human = mergeNeedsHuman(
+    state.decisions,
+    state.cards,
+    card.id,
+    state.project_preferences?.find((p) => p.id === state.project_id),
+    state.events,
+  );
+  const blockers = human ? [human] : [];
   const items = state.work_items.filter((w) => w.card_id === card.id);
   if (!items.some((w) => w.kind === "produce" && w.status !== "cancelled"))
-    return false;
+    return [...blockers, "卡片没有未取消的产出项"];
   const producers = highRiskProducts(state, card);
-  if (!producers.length) return true;
+  if (!producers.length) return blockers;
   const current = producers.flatMap((w) => {
     const latest = state.deliveries
       .filter(
@@ -176,7 +181,6 @@ export function riskTagAutoMergeAllowed(
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     return latest ? [latest] : [];
   });
-  if (!producers.length || current.length !== producers.length) return false;
   const verifiers = items.filter(
     (w) =>
       w.kind === "verify" &&
@@ -188,9 +192,14 @@ export function riskTagAutoMergeAllowed(
   // Review identity/version is authoritative; similarly named advisory checks
   // and a passed work item alone cannot grant merge authority.
   const matrix = deriveReviewMatrix(current, verifiers, state.reviews);
-  return current.every((v) =>
-    matrix.some((r) => r.delivery_id === v.id && reviewPassed(r)),
-  );
+  if (
+    current.length !== producers.length ||
+    !current.every((v) =>
+      matrix.some((r) => r.delivery_id === v.id && reviewPassed(r)),
+    )
+  )
+    blockers.push("高危交付须有当前有效的必需独立复核");
+  return blockers;
 }
 function projectPreference(d: CommandDraft) {
   return d.list("project_preferences").find((p) => p.id === d.state.project_id);
