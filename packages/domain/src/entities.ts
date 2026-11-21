@@ -62,6 +62,7 @@ export const toolNames = [
   "request_recheck",
   "request_check",
   "run_probe",
+  "request_mobile_signature",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
