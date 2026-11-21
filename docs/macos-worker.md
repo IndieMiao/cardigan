@@ -295,3 +295,28 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 本卡自动测试均为合成夹具，**未现场验证 Mac**。合并后由 human_action 跟进：专用账号安装/许可、无桌面登录及锁屏/重启后的核心、add/check/resume、空 Run、真实开发 commit/回传/同 SHA 预检、失联后准确退出证明。现场结果分别记录；未知退出保留占用，不建第二个 Run，不把本向导当作接管授权。
 
 Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新可写工作区的第一次** `godot --headless --import`。不在机器登记或普通 worktree 检出时自动运行。预热、只读包发布、损坏回退和计时口径见 [C-498](plans/C-498.md)。
+
+### 可选：为已登记的 Mac 接入受限 helper 升级
+
+默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对管理员安装的 `/opt/cardigan/deploy` 来自已部署发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
+
+```sh
+sh deploy/enroll-helper-controller.sh prepare example worker-a
+```
+
+Mac 管理员运行下面第一条，粘贴 prepare 输出的 SSH 公钥和 PEM 公钥两段，以 Ctrl-D 结束；对照控制主机终端核实两个指纹。脚本创建无密码凭据的隐藏系统账号及独占组，不开启图形登录、不加入 admin、wheel 或 worker 组；HOME、公钥和入口由 root 持有。确认本机 SSH 策略只允许此受限公钥，没有其它登录入口。sudo 授权只应有一个固定的无参数命令；脚本拒绝已有账号、文件或已有 sudo 授权。异常时不要强行覆盖或激活。
+
+```sh
+sudo /bin/sh /opt/cardigan/deploy/enroll-helper-worker.sh
+sudo -n -l -U cardigan_updater
+```
+
+两端校验一致后，回到控制主机发行版根目录：
+
+```sh
+sh deploy/enroll-helper-controller.sh activate example worker-a
+cardigan worker check --project example --machine worker-a
+cardigan machine check worker-a --project example
+```
+
+若先前 helper 落后，激活后等待下一轮后台巡检再做双检查。密钥仅存控制主机私有配置；启动布局、launchd 和调度开关不变。Mac 入口单独固定 Darwin 和系统 Python（需要可用的 `/usr/bin/python3` 及 `/usr/bin/openssl`），使用 root 安装的检查器，不从 Homebrew、worker HOME 或上传的包加载检查代码。逐文件原子替换及备份、失败后的人工恢复和撤销方式与 [Linux 受限接入](linux-worker.md#可选一次接入之后由后台升级-helper) 相同。不要用一次接入替代 macOS 现场隔离验证。

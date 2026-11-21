@@ -3,7 +3,7 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import { workerHelperDigests } from "./worker-helper-release.js";
 
-function notify(
+export function notifyWorkerMaintenance(
   tx: StoreTransactionContext,
   project: string,
   clock: Clock,
@@ -31,7 +31,7 @@ export function notifyHelperMismatch(
   reason: string,
 ) {
   const digests = workerHelperDigests();
-  notify(
+  notifyWorkerMaintenance(
     tx,
     project,
     clock,
@@ -81,7 +81,7 @@ export function workerPreparationOutcome(
     ON CONFLICT(project_id,machine_id,target) DO UPDATE SET failures=excluded.failures, cooldown_until=excluded.cooldown_until`)
     .run(project, machine, target, count, until);
   if (count === policy.failures)
-    notify(
+    notifyWorkerMaintenance(
       tx,
       project,
       clock,

@@ -10,6 +10,7 @@ import type {
 import { STATUS_LABELS } from "./status.js";
 
 const BLOCKERS: Readonly<Record<string, string>> = {
+  worker_helper_upgrade_unverified: "升级后尚未通过双检查",
   machine_check_failed: "机器检查失败",
   machine_observation_failed: "能力检查失败",
   machine_not_ready: "机器未就绪",

@@ -47,6 +47,12 @@ import {
   workerMcpConfig,
 } from "./worker-mcp.js";
 import { workerReadiness } from "./worker-readiness.js";
+import { patrolHelperUpgrade } from "./worker-upgrade.js";
+import {
+  manualMachineChecked,
+  upgradeHeld,
+  upgradeHold,
+} from "./worker-upgrade-gate.js";
 
 type TargetState = Pick<ReadRepositories, "machines" | "assignments">;
 type Adapter = Runtime &
@@ -241,6 +247,11 @@ export class RuntimeTargets implements Runtime {
 
     if (
       machine_id !== "local" &&
+      upgradeHeld(this.options.store, project, machine_id)
+    )
+      return rejected(upgradeHold);
+    if (
+      machine_id !== "local" &&
       (target.execution.mode !== "agent-ssh" || !target.execution.gitHelper)
     )
       return rejected();
@@ -271,6 +282,8 @@ export class RuntimeTargets implements Runtime {
     if (!["online", "degraded"].includes(target.machine.status))
       return rejected("machine_not_ready");
     if (assignment.machine_id !== "local") {
+      if (upgradeHeld(this.options.store, project, assignment.machine_id))
+        return rejected(upgradeHold);
       if (!this.launchAllowed(project, assignment.machine_id))
         return rejected("remote_launch_disabled");
       this.requireWorkerConfiguration(target);
@@ -459,6 +472,27 @@ export class RuntimeTargets implements Runtime {
     project: ProjectId,
     machine_id: string,
   ): Promise<RuntimeResult<MachineCheck>> {
+    return this.rawMachineCheck(project, machine_id).then((result) => {
+      if (
+        result.ok &&
+        machine_id !== "local" &&
+        upgradeHeld(this.options.store, project, machine_id)
+      )
+        return {
+          ...result,
+          value: {
+            ...result.value,
+            blockers: [...result.value.blockers, upgradeHold],
+            launch_enabled: false,
+          },
+        };
+      return result;
+    });
+  }
+  private rawMachineCheck(
+    project: ProjectId,
+    machine_id: string,
+  ): Promise<RuntimeResult<MachineCheck>> {
     return this.invoke<MachineCheck>(
       () => {
         const target = this.resolve(project, machine_id);
@@ -489,6 +523,17 @@ export class RuntimeTargets implements Runtime {
           return rejected("target_changed");
         if (!["online", "degraded"].includes(current.machine.status))
           blockers = [...blockers, "machine_not_ready"];
+        if (
+          machine_id !== "local" &&
+          !blockers.length &&
+          upgradeHeld(this.options.store, project, machine_id)
+        )
+          manualMachineChecked(
+            this.options.store,
+            project,
+            machine_id,
+            target.execution.target?.fingerprint,
+          );
         return {
           ok: true,
           value: {
@@ -522,6 +567,30 @@ export class RuntimeTargets implements Runtime {
       },
       () => this,
       "patrol",
+      async () => {
+        const execution = this.resolve(project, machine).execution;
+        const check = async () => {
+          const result = await this.rawMachineCheck(project, machine);
+          return result.ok
+            ? result.value
+            : { blockers: [result.error.code], launch_enabled: false };
+        };
+        return patrolHelperUpgrade(
+          {
+            store: this.options.store,
+            project,
+            machine,
+            execution,
+            env: this.options.env,
+            signal: overrides.signal,
+            bindingCurrent: () =>
+              this.resolve(project, machine).execution.target?.fingerprint ===
+              execution.target?.fingerprint,
+            check,
+          },
+          await check(),
+        );
+      },
     );
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
@@ -822,6 +891,7 @@ export class RuntimeTargets implements Runtime {
 export function observeRegisteredMachine(
   options: Omit<MachineObservationOptions, "target" | "check">,
   create: () => Promise<RuntimeTargets> | RuntimeTargets,
+  patrolCheck?: MachineObservationOptions["check"],
 ) {
   const { project, machine } = options;
   let runtime: RuntimeTargets | undefined;
@@ -829,18 +899,21 @@ export function observeRegisteredMachine(
   return refreshMachineObservations({
     ...options,
     target: async () => (await ready()).resolve(project, machine),
-    check: async () => {
-      const checked = await (await ready()).check(project, machine);
-      return checked.ok
-        ? checked.value
-        : { blockers: [checked.error.code], launch_enabled: false };
-    },
+    check:
+      patrolCheck ??
+      (async () => {
+        const checked = await (await ready()).check(project, machine);
+        return checked.ok
+          ? checked.value
+          : { blockers: [checked.error.code], launch_enabled: false };
+      }),
   });
 }
 export async function checkRegisteredMachine(
   options: Parameters<typeof observeRegisteredMachine>[0],
   create: Parameters<typeof observeRegisteredMachine>[1],
   source: "cli" | "patrol" = "cli",
+  patrolCheck?: MachineObservationOptions["check"],
 ) {
   const journal = new MachineCheckJournal(options.store);
   for (;;) {
@@ -866,6 +939,7 @@ export async function checkRegisteredMachine(
               },
             },
             create,
+            patrolCheck,
           );
         },
         (r) => ({

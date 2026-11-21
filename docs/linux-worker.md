@@ -342,3 +342,32 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 | `worker_<步骤>_blocked` | 按该步骤的下一操作修复，再 resume；不会自动执行特权安装或降低检查要求 |
 
 现场账号、SSH、TLS、hc/Run 与 CI 共存尚未验证时，应明确保留“未现场验证”；合成测试通过不能替代这些事实。
+
+### 可选：一次接入，之后由后台升级 helper
+
+默认关闭，未接入时仍走上面的人工流程。前置：标准的三个 `libexec` 路径、已登记且一致的向导配置、已有独立 worker 账号、开启主机自部署。以下在维护窗口运行；先确认没有活跃任务、备份私有配置，不停旧会话、不改调度开关。控制主机用 **server 服务账号**，worker 用自己的管理员终端；两端都从管理员已核验的发行版运行，不能从项目工作树或上传的临时目录运行脚本。
+
+1. 在控制主机已部署发行版根目录准备本绑定专用的 SSH 身份和**独立的发行签名密钥**；下例将机器、项目替换为实际登记值。私钥留在 0700 的 `CARDIGAN_CONFIG_DIR` 中（文件 0600），不进入 Run、Agent、MCP 或仓库。
+
+   ```sh
+   sh deploy/enroll-helper-controller.sh prepare example worker-a
+   ```
+
+2. 在 worker 确认 `/opt/cardigan/deploy` 是这次经独立核对的、整条路径受 root 保护的发行目录，`/etc/cardigan/worker.json` 是正确项目配置。执行下列命令，从控制主机终端粘贴上一步标准输出的**公钥两段**（SSH 一行及完整 PEM），按 Ctrl-D；核对两端显示的指纹。不要发送私钥。脚本创建无密码凭据的专用系统账号，root 持有 HOME、公钥和强制 SSH 命令；sudoers 仅允许固定入口、零参数，不授予 shell 和额外 sudo。
+
+   ```sh
+   sudo /bin/sh /opt/cardigan/deploy/enroll-helper-worker.sh
+   sudo -n -l -U cardigan_updater
+   ```
+
+3. 确认输出中只有 `/opt/cardigan-helper-upgrade/upgrade ""`，系统 SSH 只允许该账号用已安装受限公钥认证（无其它可信 CA、键或认证入口）。核对 worker 账号与升级账号不共组，不额外授予图形登录。若不符，保持未激活，不通过修改权限绕过检查。在控制主机原目录激活：
+
+   ```sh
+   sh deploy/enroll-helper-controller.sh activate example worker-a
+   cardigan worker check --project example --machine worker-a
+   cardigan machine check worker-a --project example
+   ```
+
+   激活本身不重启机器、不使检查变绿。已有摘要不符时，等下一次后台巡检，再执行这两条只读复查。首次和后续巡检均不从工作树取文件：只签发当前进程与部署记录一致的已部署提交中的三个 blob；root 只接收限长的标准输入，独立验签、核对文件名与 SHA-256，并拒绝旧请求。旧文件保存在 root 私有的 `/opt/cardigan-helper-upgrade/state/backup-<毫秒时间戳>`。安装器检查代码与基础实现固定在首次安装的 root 目录中，绝不执行上传的代码。bootstrap 本身的升级仍须管理员审核安装。
+
+升级失败会保持停派：同一绑定、同一组摘要不会再自动安装。按运维待办查出失败阶段；部分替换时按备份整体还原或人工安装当前可信版本，然后顺序执行上面两条检查。仅 worker check 成功不能解锁；同一绑定的 machine check 也须通过，且不覆盖人工 drain 或关闭派发。未完成的初始化不原地重跑：保留已有账号、文件和备份，让管理员检查冲突。撤销接入时先停用该专用身份，再由管理员移除对应受限授权，勿改 worker 的既有连接。

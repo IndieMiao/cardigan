@@ -9,6 +9,7 @@ import {
   type RuntimeWorker,
 } from "./runtime-workers-config.js";
 import { WorkerOnboardingError } from "./worker-onboarding-config.js";
+import { manualWorkerChecked } from "./worker-upgrade-gate.js";
 
 /** Both callers must publish evidence for the exact binding that was probed. */
 export async function refreshWorkerObservations(
@@ -19,7 +20,7 @@ export async function refreshWorkerObservations(
   options: Pick<
     MachineObservationOptions,
     "signal" | "probe" | "browsersPath"
-  > = {},
+  > & { readonly fullWorkerCheck?: boolean } = {},
 ) {
   const { project_id: project, machine_id: machine } = worker;
   const checkedRegistration = () => {
@@ -58,6 +59,13 @@ export async function refreshWorkerObservations(
     });
     if (passed && !observations.health?.available)
       throw new WorkerOnboardingError("worker_capability_check_failed");
+    if (passed && options.fullWorkerCheck)
+      manualWorkerChecked(
+        store,
+        project,
+        machine,
+        execution.target.fingerprint,
+      );
   } else if (passed) {
     throw new WorkerOnboardingError("worker_identity_conflict");
   }
