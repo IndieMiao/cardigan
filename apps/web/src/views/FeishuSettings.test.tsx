@@ -19,6 +19,31 @@ afterEach(() => {
   window.location.hash = "";
   vi.useRealTimers();
 });
+test.each([
+  ["disabled", "未启用"],
+  ["connecting", "连接中"],
+  ["reconnecting", "重连中"],
+  ["offline", "离线"],
+  ["failed", "离线"],
+  ["stopped", "离线"],
+  ["idle", "离线"],
+])(
+  "%s disables binding and explains why without issuing a request",
+  async (state, label) => {
+    const api = vi.fn(async () => ({ state, bound: false }));
+    render(<FeishuSettings client={fakeClient({ feishuBinding: api })} />);
+    await screen.findByText(label);
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: "绑定飞书",
+    });
+    expect(button.disabled).toBe(true);
+    expect(button.title).toBe(label);
+    api.mockClear();
+    fireEvent.click(button);
+    expect(api).not.toHaveBeenCalled();
+  },
+);
+
 test("shows pending code, notices expiry, refreshes the binding then confirms unlink", async () => {
   vi.useFakeTimers();
   let bound = false;
@@ -38,9 +63,15 @@ test("shows pending code, notices expiry, refreshes the binding then confirms un
     render(<FeishuSettings client={fakeClient({ feishuBinding: api })} />);
   });
   expect(screen.getByText("未绑定")).toBeTruthy();
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "绑定飞书" }));
+  const bind = screen.getByRole<HTMLButtonElement>("button", {
+    name: "绑定飞书",
   });
+  expect(bind.disabled).toBe(false);
+  expect(bind.hasAttribute("title")).toBe(false);
+  await act(async () => {
+    fireEvent.click(bind);
+  });
+  expect(api).toHaveBeenCalledWith("code");
   expect(screen.getByText("FIXTURE123")).toBeTruthy();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(4001);

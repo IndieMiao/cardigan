@@ -33,6 +33,10 @@ const update = (patch: Partial<PreferencesView>) => {
 // Evidence scene: a change made elsewhere, seen by the next read.
 Object.assign(window, { settingsFixtureUpdate: update });
 // Synthetic private-chat binding scenes for design acceptance (no service or SDK).
+const feishuState =
+  new URLSearchParams(location.search).get("feishu") === "disabled"
+    ? "disabled"
+    : "connected";
 let feishuBound = false;
 Object.assign(window, {
   setFixtureFeishuBound: (bound: boolean) => {
@@ -43,7 +47,7 @@ const client = fakeClient({
   feishuBinding: async (action) => {
     if (action === "unbind") feishuBound = false;
     return {
-      state: "connected",
+      state: feishuState,
       bound: feishuBound,
       ...(action === "code"
         ? {
