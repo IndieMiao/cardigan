@@ -425,12 +425,17 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           "release_assignment",
           "replace_verification_work_item",
           "complete_host_action",
+          "send_owner_message",
         ].includes(name),
     ).sort(),
   );
   expect(officeTools).toContain("get_check_log");
   // A legacy PM without an explicit external Office identity has no completion tool.
   expect(officeTools).not.toContain("complete_host_action");
+  // An untyped legacy standing PM is not a managed Office either.
+  expect(
+    code(await call(office, "send_owner_message", { card_id, text: "test" })),
+  ).toBe("forbidden_tool");
   expect(officeTools).not.toContain("request_delivery_rework");
   expect(
     code(
