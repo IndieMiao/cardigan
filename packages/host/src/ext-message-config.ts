@@ -10,6 +10,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { EXT_MESSAGE_DEFAULTS, type ExtMessagePolicy } from "@cardigan/domain";
 import { parse } from "yaml";
 import { parseFeishuCredential } from "./ext-message-feishu.js";
+import { parseAppCredential } from "./feishu-inbox.js";
 
 interface ExtChannel {
   enabled: boolean;
@@ -19,10 +20,11 @@ interface ExtChannel {
   binding_attempts_per_minute?: number;
   pending_limit?: number;
 }
+export const defaultMaxPerMinute = 10;
 export interface ExtMessageConfig {
   readonly enabled: boolean;
   readonly workbench_url: string;
-  readonly policy: ExtMessagePolicy;
+  readonly policy: ExtMessagePolicy & { readonly max_per_minute?: number };
   readonly channels: Readonly<Record<string, ExtChannel>>;
   readonly quiet_hours?: {
     readonly timezone: string;
@@ -125,7 +127,8 @@ export function loadExtMessageConfig(
       policyRaw.retry_delays_ms ?? EXT_MESSAGE_DEFAULTS.retry_delays_ms;
     if (!Array.isArray(delays) || delays.length !== max_attempts - 1)
       return invalid();
-    const policy: ExtMessagePolicy = {
+    const policy: ExtMessageConfig["policy"] = {
+      max_per_minute: integer(policyRaw.max_per_minute, defaultMaxPerMinute),
       timeout_ms: integer(
         policyRaw.timeout_ms,
         EXT_MESSAGE_DEFAULTS.timeout_ms,
@@ -181,8 +184,12 @@ export function loadExtMessageConfig(
             if (!credential) return invalid();
           }
         }
+        // Fingerprint and send the same effective fields. JSON whitespace, key
+        // order and fields ignored by the adapter do not constitute rotation.
         if (enabled && active && name === "lark")
-          parseFeishuCredential(credential);
+          credential = JSON.stringify(parseFeishuCredential(credential));
+        if (enabled && active && name === "lark_app")
+          credential = JSON.stringify(parseAppCredential(credential));
         channels[name] = {
           enabled: active,
           ...(name === "lark_app"
@@ -238,18 +245,27 @@ export function loadExtMessageConfig(
     return { status: "invalid" };
   }
 }
+// One host timezone at a time. A backlog scan must not reconstruct Intl for every source date.
+let quietClock: { zone: string; formatter: Intl.DateTimeFormat } | undefined;
+
 export function extMessageQuiet(
   config: ExtMessageConfig,
   now: string,
 ): boolean {
   const q = config.quiet_hours;
   if (!q) return false;
-  const time = new Intl.DateTimeFormat("en-GB", {
-    timeZone: q.timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).format(new Date(now));
+  if (quietClock?.zone !== q.timezone) {
+    quietClock = {
+      zone: q.timezone,
+      formatter: new Intl.DateTimeFormat("en-GB", {
+        timeZone: q.timezone,
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }),
+    };
+  }
+  const time = quietClock.formatter.format(new Date(now));
   return q.start < q.end
     ? time >= q.start && time < q.end
     : time >= q.start || time < q.end;

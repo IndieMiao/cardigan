@@ -259,3 +259,164 @@ test("target preflight runs before the final synchronous authority check and nev
   expect(guard).toHaveBeenCalledOnce();
   expect(raw.exec).toHaveBeenCalledTimes(1);
 });
+
+test.each(["claude-code", "codex"] as const)(
+  "bound %s prompt is re-proven inside send slot and never types into a kept shell",
+  async (harness) => {
+    const raw = client(),
+      runtime = value(await HerdrRuntime.create({ client: raw }));
+    const binding = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness,
+      require_disconnect: true as const,
+    };
+    const idle =
+      harness === "codex"
+        ? "■ stream disconnected before completion\n›\n? for shortcuts"
+        : "⎿  API Error: Connection lost mid-response\n──────────\n❯\n──────────\n? for shortcuts";
+    let screen = idle,
+      fg = harness === "codex" ? "codex" : "claude",
+      address = ref.terminal_ref,
+      state = "unknown";
+    const send = vi.fn();
+    raw.exec = async (args) => {
+      if (args[0] === "get")
+        return JSON.stringify({
+          address: args[1] === ref.agent_name ? address : ref.terminal_ref,
+          state: "live",
+          status: { state },
+          labels: { project: "fixture", assignment: "A-1" },
+          foreground: { pid: 10, name: fg },
+          created_ms: 1000,
+        });
+      if (args[0] === "read") return screen;
+      if (args[0] === "send") send();
+      return "{}";
+    };
+    expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    const cleared = () =>
+      runtime
+        .observe_prompt(ref, { ...binding, require_disconnect: false })
+        .then(value);
+    expect(await cleared()).toBe(false);
+    const poke = () =>
+      runtime.wake(ref, "fixture", { prompt_binding: binding });
+    fg = "bash";
+    expect(value(await poke()).withdrawn).toBe(true);
+    fg = harness === "codex" ? "codex" : "claude";
+    address = "t2";
+    expect(value(await poke()).withdrawn).toBe(true);
+    address = ref.terminal_ref;
+    state = "working";
+    expect(value(await poke()).withdrawn).toBe(true);
+    state = "unknown";
+    screen = idle.replace(/\n([›❯])/u, "\n$1 pending input");
+    expect(value(await poke()).withdrawn).toBe(true);
+    expect(await cleared()).toBe(false);
+    screen = idle.split("\n").slice(1).join("\n");
+    expect(await cleared()).toBe(true);
+    address = "other";
+    expect(await cleared()).toBe(false);
+    address = ref.terminal_ref;
+    expect(value(await poke()).withdrawn).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    screen = idle;
+    expect(value(await poke())).toEqual({ sent: true });
+    expect(send).toHaveBeenCalledOnce();
+  },
+);
+
+test.each(["idle", "done"])(
+  "kept %s still requires an empty editor before the original bell",
+  async (state) => {
+    const raw = client();
+    const runtime = value(await HerdrRuntime.create({ client: raw }));
+    const binding = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness: "codex" as const,
+    };
+    let screen = "›\n? for shortcuts";
+    const writes: string[][] = [];
+    raw.exec = async (args) => {
+      if (args[0] === "get")
+        return JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: { state },
+          labels: { project: "fixture", assignment: "A-1" },
+          foreground: { name: "codex", pid: 42 },
+        });
+      if (args[0] === "read") return screen;
+      if (args[0] === "send") writes.push([...args]);
+      return "{}";
+    };
+    const send = () =>
+      runtime.wake(ref, "original", { prompt_binding: binding });
+    // The editor can change after the outer preflight without changing OSC state.
+    expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    for (const editor of [
+      "› draft",
+      "› Explain this codebase",
+      "Press Enter to confirm\n›",
+    ]) {
+      screen = `${editor}\n? for shortcuts`;
+      expect(value(await runtime.observe_prompt(ref, binding))).toBe(false);
+      expect(value(await send())).toEqual({ sent: false, withdrawn: true });
+    }
+    expect(writes).toEqual([]);
+    screen = "›\n? for shortcuts";
+    expect(value(await send())).toEqual({ sent: true });
+    expect(writes).toEqual([
+      [
+        "send",
+        "--json",
+        ...(state === "idle" ? ["--if", "idle"] : []),
+        "--",
+        ref.terminal_ref,
+        "original",
+      ],
+    ]);
+  },
+);
+
+test("kept idle uses hc's write-time condition when work starts after the final prompt check", async () => {
+  const raw = client();
+  const runtime = value(await HerdrRuntime.create({ client: raw }));
+  let state = "idle";
+  const typed: string[] = [];
+  raw.exec = async (args) => {
+    if (args[0] === "get")
+      return JSON.stringify({
+        address: ref.terminal_ref,
+        state: "live",
+        status: { state },
+        labels: { project: "fixture", assignment: "A-1" },
+        foreground: { name: "claude", pid: 10 },
+      });
+    if (args[0] === "read") return "──────────\n❯\n──────────\n? for shortcuts";
+    if (args[0] === "send") {
+      if (args[2] === "--if" && args[3] === "idle" && state !== "idle")
+        throw new RuntimeFailure(
+          "runtime_conflict",
+          "fixture condition declined",
+        );
+      typed.push(args.join(" "));
+    }
+    return "{}";
+  };
+  const result = await runtime.wake(ref, "bell", {
+    prompt_binding: {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness: "claude-code",
+    },
+    before_send: () => {
+      state = "working";
+      return true;
+    },
+  });
+  expect(result.ok).toBe(false);
+  expect(typed).toEqual([]);
+});

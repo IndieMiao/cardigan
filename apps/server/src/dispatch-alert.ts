@@ -175,6 +175,8 @@ export function dispatchAlert(
     mark?: boolean;
     notifyHostOps?: boolean;
     activity_source?: string;
+    progress_at?: string;
+    session_key?: string;
     activity_status?: HarnessActivityStatus;
     activity_check?: "completed" | "read_failed" | "timeout" | "unavailable";
     error?: DeliveryFailure;
@@ -212,7 +214,9 @@ export function dispatchAlert(
     payload: {
       assignment_id: input.assignment.id,
       reason: input.reason,
+      ...(input.progress_at ? { progress_at: input.progress_at } : {}),
       ...input.review,
+      ...(input.session_key ? { session_key: input.session_key } : {}),
       ...(inactiveProducer ? { work_item_id: item.id } : {}),
       ...(product ? { delivery_id: product.id } : {}),
       ...(input.activity_source

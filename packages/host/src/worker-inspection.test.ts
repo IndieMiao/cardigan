@@ -104,21 +104,30 @@ test.each(["local", "remote-worker"])(
     expect(result).not.toHaveProperty("secrets");
   },
 );
-test("unreachable SSH, malformed, secret-bearing and oversized responses have only the fixed error", async () => {
-  const { execution, a } = worker("remote");
-  for (const code of [
-    "console.error('private credential');process.exit(9)",
+test.each([
+  [
+    "console.error('private credential');process.exit(255)",
+    "ssh_connection_failed",
+  ],
+  ["console.error('private credential');process.exit(9)", "collector_exit_9"],
+  [
     `console.log(JSON.stringify(${JSON.stringify({ ...reply, events: [{ time: "private credential", type: "private" }] })}))`,
-    `console.log('x'.repeat(40000))`,
-  ]) {
+    "invalid_collector_response",
+  ],
+  ["console.log('x'.repeat(40000))", "response_too_large"],
+])(
+  "local worker inspection reports a bounded failure (%s)",
+  async (code, reason) => {
+    const { execution, a } = worker("local");
     vi.mocked(agentProcessCommand).mockResolvedValueOnce(transport(code));
     await expect(
       inspectWorker(execution, project, a, undefined, true, "linux"),
-    ).rejects.toThrow(
-      /^Worker unreachable or read-only diagnostics unavailable$/u,
-    );
-  }
-});
+    ).rejects.toMatchObject({
+      message: `Worker inspection unavailable: ${reason}`,
+      details: { reason },
+    });
+  },
+);
 test("unisolated local mode, external assignment, historical target drift and admin identity never reach SSH", async () => {
   const { execution, a } = worker("local");
   vi.mocked(agentProcessCommand).mockClear();
@@ -219,6 +228,53 @@ test.each([
     expect(result.processes).toEqual(live ? [] : null);
   },
 );
+test.each(["alive", "exited", "unknown"] as const)(
+  "native local: only exact hc evidence is exposed (%s)",
+  async (value) => {
+    const { a, target } = worker("local");
+    const bound = { ...target, generation: "legacy" };
+    const ref = {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t2",
+      agent_name: "reviewer",
+      target: bound,
+    };
+    const observe = vi.fn().mockResolvedValue({ ok: true, value });
+    const runtime = { observe_retirement: observe } as unknown as Runtime;
+    vi.mocked(agentProcessCommand).mockClear();
+    const read = inspectWorker(
+      { mode: "local", dataDir: "/controller", target: bound },
+      project,
+      { ...a, runtime_ref: ref },
+      undefined,
+      true,
+      "linux",
+      undefined,
+      runtime,
+    );
+    if (value === "unknown")
+      await expect(read).rejects.toThrow("local_terminal_unconfirmed");
+    else
+      expect(await read).toMatchObject({
+        terminals: [
+          {
+            address: "t2",
+            state: value === "alive" ? "live" : "finished",
+            screen: [],
+          },
+        ],
+        processes: null,
+        events: null,
+      });
+    expect(observe).toHaveBeenCalledWith(ref, {
+      project_id: project,
+      assignment_id: a.id,
+    });
+    expect(agentProcessCommand).not.toHaveBeenCalled();
+  },
+);
+
 test("collector: synthetic hc socket, generation, transcript, truncated command and redaction boundaries", () => {
   execFileSync(
     "/usr/bin/python3",

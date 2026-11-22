@@ -10,7 +10,7 @@ import {
   contextUsageLevel,
 } from "../context-usage.js";
 import type { Actor, Run } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
+import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HOST_OPS_TOOLS,
   type HostOpsExecution,
@@ -18,8 +18,15 @@ import {
   hostOpsPending,
   pendingHostOpsActions,
 } from "../host-ops.js";
-import type { AssignmentId, HumanActionId, RunId } from "../ids.js";
+import type {
+  AssignmentId,
+  CardId,
+  EventId,
+  HumanActionId,
+  RunId,
+} from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
+import { reviewDiscussionInstruction } from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { lastUpstreamInactivity } from "../upstream-health.js";
 import {
@@ -41,12 +48,22 @@ export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
+  readonly dispatch_stall_id?: string;
+  /** Host-resolved original notification; never an operator-supplied event. */
+  readonly review_trigger_id?: EventId;
   readonly tool: HostOpsExecutionTool;
   readonly context_usage?: ContextObservation;
   readonly context_stale_after_ms?: number;
   readonly target_id: AssignmentId | RunId;
   readonly reason: string;
   readonly snapshot?: HostOpsExecution["snapshot"];
+}
+
+function pausedReviewer(state: CommandState, id: AssignmentId) {
+  const item = state.work_items.find((w) => w.assignment_id === id);
+  return item?.kind === "verify" && item.status === "waiting_decision"
+    ? item
+    : undefined;
 }
 
 function target(d: CommandDraft, p: HostOpsActionParams) {
@@ -91,6 +108,20 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
       (a.scope === "standing" && a.role_id === "pm"),
     "unauthorized",
     "Target must be a standing PM",
+  );
+  // A stall is independently revalidated against its exact notification by
+  // the host before intent and signal. A generic restart has no such trigger.
+  const wait = pausedReviewer(d.state, a.id);
+  ensure(
+    p.tool === "host_ops_cancel_run" ||
+      !wait ||
+      (p.dispatch_stall_id &&
+        reviewDiscussionInstruction(
+          wait,
+          eventById(d.state.events, p.review_trigger_id),
+        )),
+    "illegal_transition",
+    "审核正在等待拍板，不能重启",
   );
   if (a.scope === "work_item") {
     const w = d.work(a.work_item_id);
@@ -212,6 +243,39 @@ export function beginHostOpsActionInDraft(
     "Automatic restarts are system-only",
   );
   const { assignment: a, run } = target(d, p);
+  const cause = eventById(state.events, p.dispatch_stall_id);
+  const turn =
+    cause?.type === "bell_turn_recovery_due" &&
+    cause.actor.kind === "system" &&
+    (cause.payload as { assignment_id: string }).assignment_id === a.id
+      ? (cause.payload as { run_id: string }).run_id
+      : undefined;
+  if (p.dispatch_stall_id) {
+    ensure(
+      p.tool !== "host_ops_cancel_run" &&
+        !run &&
+        !a.idle_retirement &&
+        !d.state.runs.some((r) => r.assignment_id === a.id && unfinished(r)),
+      "illegal_transition",
+      "派发积压已改变或指派不空闲",
+    );
+    ensure(
+      !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
+        const prior = e.payload as {
+          assignment_id?: string;
+          dispatch_stall_id?: string;
+          system_finished_run_id?: string;
+        };
+        return (
+          prior.assignment_id === a.id &&
+          (prior.dispatch_stall_id === p.dispatch_stall_id ||
+            (!!turn && prior.system_finished_run_id === turn))
+        );
+      }),
+      "illegal_transition",
+      "此积压已请求过换会话",
+    );
+  }
   if (p.upstream_incident_id)
     ensure(
       !state.events.some(
@@ -256,6 +320,8 @@ export function beginHostOpsActionInDraft(
   }
   const payload = {
     execution: true,
+    ...(turn ? { system_finished_run_id: turn } : {}),
+    ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
     ...(p.upstream_incident_id
       ? { upstream_incident_id: p.upstream_incident_id }
@@ -301,6 +367,11 @@ export function finishHostOpsAction(
   actor: Actor,
   action_id: HostOpsExecution["action_id"],
   ports: CommandPorts,
+  stall?: {
+    cause_id: string;
+    card_id: CardId | null;
+    review_trigger_id?: EventId;
+  },
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -335,18 +406,31 @@ export function finishHostOpsAction(
         ? unwrap(transition("runtime", a.runtime_state, "run_finished"))
         : a.runtime_state;
     d.put("assignments", {
-      ...(action.tool === "host_ops_restart_standing_pm" || action.context_usage
+      ...(action.tool === "host_ops_restart_standing_pm" ||
+      action.context_usage ||
+      action.dispatch_stall_id
         ? rest
         : a),
       runtime_ref: null,
       runtime_state,
     });
-    const sourceCard = assignmentCardId(a, state, previous?.trigger_event_id);
+    const currentStall =
+      action.dispatch_stall_id === stall?.cause_id ? stall : undefined;
+    // Standing stalls have no work item or previous Run. The revalidated cause
+    // owns the stream: null means project, not the last card the PM visited.
+    const sourceCard =
+      a.scope === "standing" && currentStall
+        ? currentStall.card_id
+        : assignmentCardId(a, state, previous?.trigger_event_id);
     const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
+    const wait = pausedReviewer(d.state, a.id);
+    const trigger = eventById(state.events, currentStall?.review_trigger_id);
     if (
       action.tool !== "host_ops_cancel_run" &&
+      (!action.dispatch_stall_id || currentStall) &&
+      (!wait || reviewDiscussionInstruction(wait, trigger)) &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
       (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
@@ -355,17 +439,21 @@ export function finishHostOpsAction(
       ensure(action.snapshot, "invariant_violation", "Missing launch snapshot");
       // C-154: an active standing PM keeps its Assignment and everything it
       // owns; only a PM the human already paused is resumed (no new handoff).
-      run = queueRunInDraft(d, {
-        ...action.snapshot,
-        assignment_id: a.id,
-        reuse_queued: true,
-        ...(action.tool === "host_ops_restart_standing_pm"
-          ? a.status === "suspended"
-            ? { resume: true }
-            : { restart_session: true }
-          : {}),
-        kind: previous?.kind ?? "followup",
-      });
+      run = queueRunInDraft(
+        d,
+        {
+          ...action.snapshot,
+          assignment_id: a.id,
+          reuse_queued: true,
+          ...(action.tool === "host_ops_restart_standing_pm"
+            ? a.status === "suspended"
+              ? { resume: true }
+              : { restart_session: true }
+            : {}),
+          kind: previous?.kind ?? "followup",
+        },
+        trigger,
+      );
     }
     const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
@@ -375,6 +463,10 @@ export function finishHostOpsAction(
         : card?.id,
       {
         action_id,
+        ...(!run && wait ? { result: "stopped_without_restart" } : {}),
+        ...(run && currentStall?.review_trigger_id
+          ? { stall_review_trigger: currentStall.review_trigger_id }
+          : {}),
         ...(action.context_usage
           ? {
               body,
@@ -662,4 +754,85 @@ export function requestExitConfirmationInDraft(
     { type: "human_action", body: p.instructions, human_action_id: id },
   );
   return { human_action_id: id, created: true };
+}
+
+/** Evidence changed before a stall recovery touched the terminal. Drop only this intent; never release a stop already in flight. */
+export function withdrawUnstartedStallRestart(
+  state: CommandState,
+  actor: Actor,
+  actionId: HostOpsExecution["action_id"],
+  ports: CommandPorts,
+  reason?: string,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === actionId,
+    );
+    if (
+      !action?.dispatch_stall_id ||
+      eventsOfType(state.events, "host_ops_action_deferred").some((e) => {
+        const p = e.payload as { action_id: string; reason: string };
+        return (
+          p.action_id === actionId &&
+          p.reason === "automatic_context_stop_started"
+        );
+      })
+    )
+      return;
+    return d.emit("host_ops_action_finished", undefined, {
+      action_id: actionId,
+      assignment_id: action.assignment_id,
+      result: "withdrawn_stall_changed",
+      ...(reason ? { reason } : {}),
+      body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
+    });
+  });
+}
+
+/** A pause after acceptance wins until the first release. After that point
+ * keep the fence and settle confirmed exit (without queuing a formal review). */
+export function guardReviewRestartStop(
+  state: CommandState,
+  actor: Actor,
+  actionId: HostOpsExecution["action_id"],
+  ports: CommandPorts,
+  beforeRelease: boolean,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    const action = pendingHostOpsActions(state.events).find(
+      (a) => a.action_id === actionId,
+    );
+    if (
+      action?.tool !== "host_ops_restart_assignment" ||
+      action.dispatch_stall_id
+    )
+      return false;
+    if (reviewRestartStopStarted(state, actionId)) return !beforeRelease;
+    if (pausedReviewer(state, action.assignment_id)) {
+      d.emit("host_ops_action_finished", undefined, {
+        action_id: actionId,
+        assignment_id: action.assignment_id,
+        result: "withdrawn_review_wait",
+      });
+      return false;
+    }
+    if (beforeRelease)
+      d.emit("host_ops_action_deferred", undefined, {
+        action_id: actionId,
+        assignment_id: action.assignment_id,
+        reason: "review_restart_stop_started",
+      });
+    return true;
+  });
+}
+export function reviewRestartStopStarted(
+  state: CommandState,
+  actionId: string,
+) {
+  return eventsOfType(state.events, "host_ops_action_deferred").some((e) => {
+    const p = e.payload as { action_id: string; reason: string };
+    return (
+      p.action_id === actionId && p.reason === "review_restart_stop_started"
+    );
+  });
 }

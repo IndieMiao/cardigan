@@ -6,6 +6,7 @@ export const sessionMaintenanceReasons = {
   closed: "工作项已关闭或负责人已变更",
   stopped: "等待人工恢复",
   held: "卡片已暂停",
+  retained_for_dispatch: "已保留终端，待投递时核对归属和空闲状态",
   retirement_pending: "等待确认会话退出",
   retirement_timeout: "终止超时，保留会话等待重试",
   retirement_unavailable: "未核：正常终止能力或进程身份不可用",
@@ -43,6 +44,7 @@ export function sessionMaintenanceNeedsAttention(
     "run_busy",
     "no_session",
     "recent_activity",
+    "retained_for_dispatch",
   ].includes(reason);
 }
 export interface SessionMaintenanceView {

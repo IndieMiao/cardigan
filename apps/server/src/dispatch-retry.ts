@@ -74,7 +74,11 @@ import {
 import { notificationBell, type StandingResolver } from "./dispatch-inbox.js";
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
-import { recordTurnWait, settleRefusedWake } from "./dispatch-turn-guard.js";
+import {
+  keptPromptBinding,
+  recordTurnWait,
+  settleRefusedWake,
+} from "./dispatch-turn-guard.js";
 import {
   legacyRepairAuthority,
   legacyRepairWake,
@@ -833,7 +837,23 @@ export async function retryDispatchedRuns(
     const status = await runtime
       .status(observed.a.runtime_ref)
       .catch(() => undefined);
-    const guard = status?.ok ? idleWakeGuard(status.value) : undefined;
+    const binding = keptPromptBinding(
+      project,
+      observed.a,
+      observed.run.harness,
+    );
+    const prompt =
+      binding &&
+      (await runtime
+        .observe_prompt?.(observed.a.runtime_ref, binding)
+        .catch(() => undefined));
+    const guard = binding
+      ? prompt?.ok && prompt.value
+        ? { prompt_binding: binding }
+        : undefined
+      : status?.ok
+        ? idleWakeGuard(status.value)
+        : undefined;
     if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
@@ -1033,7 +1053,7 @@ export async function retryDispatchedRuns(
           [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             ...guard,
-            ...(retirementHeld
+            ...(retirementHeld && !guard.prompt_binding
               ? {
                   retirement_owner: {
                     project_id: project,
@@ -1097,7 +1117,11 @@ export async function retryDispatchedRuns(
         sent = result.ok && result.value.sent;
         // A Run that advanced before wake can settle its bell, but only an
         // actual guarded send may resolve the wait captured at retry claim.
-        if (sent && retirementHeld && job.a.idle_retirement?.dispatch_wait)
+        if (
+          sent &&
+          retirementHeld &&
+          (guard.prompt_binding || job.a.idle_retirement?.dispatch_wait)
+        )
           resumedRetirement = job.a;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));

@@ -10,8 +10,14 @@ export {
   isHcVersionCompatible,
 } from "./hc-version.js";
 
+import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
+
+export { managedLoopback } from "./loopback-terminal.js";
+
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 import { terminalSnapshot } from "./terminal-activity.js";
@@ -28,6 +34,7 @@ import type {
   Assignment,
   IdleRetirementResult,
   Machine,
+  PromptObservation,
   RetirementEvidence,
   RetirementIdentity,
   Role,
@@ -42,6 +49,7 @@ import type {
 } from "@cardigan/domain";
 import { type AgentBinary, isAgentBinary } from "@cardigan/domain";
 import { registerAgentMachine } from "./agent-ssh.js";
+import { boundPrompt } from "./bound-prompt.js";
 import {
   type GovernedHcClient,
   governHcClient,
@@ -174,6 +182,19 @@ export class HerdrRuntime implements Runtime {
     Promise<RuntimeResult<RuntimeObservation>>
   >;
   private readonly statusEpochs: Map<string, number>;
+  // Per-adapter, bounded and intentionally not persisted. A cold adapter must
+  // decline if the core is down, rather than trusting a PID from stored input.
+  private readonly localProcesses = new Map<
+    string,
+    {
+      id: string;
+      project: string;
+      assignment: string;
+      name: string;
+      launch: RuntimeRef["launch_generation"];
+      pid: number;
+    }
+  >();
   private constructor(
     readonly session: string,
     readonly socketPath: string,
@@ -377,7 +398,98 @@ export class HerdrRuntime implements Runtime {
     );
     if (typeof launched.address !== "string")
       fail("runtime_unavailable", "hc did not return a terminal address");
+    this.localProcesses.delete(launched.address);
     return launched.address as string;
+  }
+  /** Remember only the real local, non-kept terminal just created by this launch.
+   * The signal-zero probes only check existence. No PID crosses the runtime port. */
+  private async localProcessReceipt(
+    ref: RuntimeRef,
+    launch: RuntimeLaunch,
+    assignment: Assignment,
+  ) {
+    if (
+      this.execution.mode !== "local" ||
+      assignment.machine_id !== "local" ||
+      process.platform !== "linux"
+    )
+      return;
+    try {
+      const t: Terminal = await this.json(["get", ref.terminal_ref]);
+      const project = launch.labels.project;
+      if (!project) return;
+      this.checkRetirementTerminal(
+        ref,
+        { project_id: project, assignment_id: assignment.id },
+        t,
+      );
+      const pid = t.pid;
+      if (
+        !pid ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 1 ||
+        t.keep !== false ||
+        t.state !== "live" ||
+        t.labels?.run !== launch.labels.run
+      )
+        return;
+      process.kill(pid, 0);
+      process.kill(-pid, 0);
+      const id = randomUUID();
+      if (this.localProcesses.size >= 1024) {
+        const oldest = this.localProcesses.keys().next().value;
+        if (oldest) this.localProcesses.delete(oldest);
+      }
+      this.localProcesses.set(ref.terminal_ref, {
+        id,
+        project,
+        assignment: assignment.id,
+        name: ref.agent_name,
+        launch: ref.launch_generation,
+        pid,
+      });
+      return id;
+    } catch {
+      // This evidence is optional; do not roll back a successful launch.
+      return;
+    }
+  }
+  confirm_local_exit(ref: RuntimeRef, owner: RetirementIdentity) {
+    return result(async () => {
+      this.checkRef(ref);
+      const receipt = this.localProcesses.get(ref.terminal_ref);
+      if (
+        this.execution.mode !== "local" ||
+        ref.machine_id !== "local" ||
+        !receipt ||
+        receipt.id !== ref.local_process_receipt ||
+        receipt.project !== owner.project_id ||
+        receipt.assignment !== owner.assignment_id ||
+        receipt.name !== ref.agent_name ||
+        receipt.launch?.run_id !== ref.launch_generation?.run_id ||
+        receipt.launch?.generation !== ref.launch_generation?.generation
+      )
+        return false;
+      // PID reuse, permission errors, a surviving group and an inaccessible or
+      // replaced socket are all ambiguous. Never start hc or signal a process.
+      for (const pid of [receipt.pid, -receipt.pid]) {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ESRCH") return false;
+        }
+      }
+      try {
+        await lstat(this.socketPath);
+        return false;
+      } catch (err) {
+        return (
+          (err as NodeJS.ErrnoException).code === "ENOENT" &&
+          this.localProcesses.get(ref.terminal_ref) === receipt
+        );
+      }
+    });
   }
   provision(
     assignment: Assignment,
@@ -429,7 +541,8 @@ export class HerdrRuntime implements Runtime {
       };
       this.checkRef(ref);
       this.invalidateStatus(ref);
-      return ref;
+      const receipt = await this.localProcessReceipt(ref, launch, assignment);
+      return receipt ? { ...ref, local_process_receipt: receipt } : ref;
     });
   }
   find_launch(assignment: Assignment, launch: RuntimeLaunch) {
@@ -469,6 +582,12 @@ export class HerdrRuntime implements Runtime {
       return ref;
     });
   }
+  observe_prompt(ref: RuntimeRef, binding: PromptObservation) {
+    return result(async () => {
+      this.checkRef(ref);
+      return !!(await boundPrompt(this.client, ref, binding));
+    });
+  }
   wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
     return result<RuntimeWakeResult>(async () => {
       this.checkRef(ref);
@@ -479,19 +598,21 @@ export class HerdrRuntime implements Runtime {
       this.invalidateStatus(ref);
       try {
         const guard = options?.observed_guard;
+        let ifIdle = options?.if_idle || guard?.state === "unknown";
         const sent = await this.client.execIfCurrent(
-          [
+          () => [
             "send",
             "--json",
-            ...(options?.if_idle || guard?.state === "unknown"
-              ? ["--if", "idle"]
-              : []),
+            ...(ifIdle ? ["--if", "idle"] : []),
             "--",
             ref.terminal_ref,
             doorbell,
           ],
           options?.before_send ?? (() => true),
-          (guard || options?.retirement_owner || options?.resource_preflight) &&
+          (guard ||
+            options?.retirement_owner ||
+            options?.resource_preflight ||
+            options?.prompt_binding) &&
             (async (raw) => {
               try {
                 if (
@@ -499,6 +620,15 @@ export class HerdrRuntime implements Runtime {
                   !(await options.resource_preflight())
                 )
                   return false;
+                if (options?.prompt_binding) {
+                  const state = await boundPrompt(
+                    raw,
+                    ref,
+                    options.prompt_binding,
+                  );
+                  if (!state) return false;
+                  ifIdle ||= state === "idle";
+                }
                 if (!guard && !options?.retirement_owner) return true;
                 // Read through the reserved slot, not the queue (capacity may be one).
                 const terminalState = async () => {
@@ -804,7 +934,11 @@ export class HerdrRuntime implements Runtime {
         )
       )
         fail(released.error.code, released.error.message);
-      const { agent_session_id: _previousSession, ...previous } = ref;
+      const {
+        agent_session_id: _previousSession,
+        local_process_receipt: _oldReceipt,
+        ...previous
+      } = ref;
       return {
         ...previous,
         terminal_ref: await this.launch(
@@ -878,14 +1012,67 @@ export class HerdrRuntime implements Runtime {
     )
       fail("runtime_conflict", "Idle terminal identity changed");
   }
+  /** The loopback relay can report a live address without the worker's owner
+   * labels. Inspect the same managed socket/account as worker diagnostics.
+   * Return only the fixed terminal projection, never a screen or controller PID. */
+  private async retirementTerminal(
+    ref: RuntimeRef,
+    owner: RetirementIdentity,
+    raw?: Pick<HcClient, "exec">,
+  ): Promise<Terminal> {
+    const execution = this.execution;
+    if (managedLoopback(execution) && ref.machine_id === "local") {
+      if (
+        ref.target?.project_id !== owner.project_id ||
+        ref.target?.session !== this.session
+      )
+        fail("runtime_conflict", "Loopback binding changed");
+      const run = ref.launch_generation?.run_id ?? owner.first_bell_run_id;
+      if (!run) fail("runtime_conflict", "Missing bound worker launch Run");
+      const terminal = ref.terminal_ref.slice(execution.machine.length + 1);
+      const t: Terminal = await loopbackTerminal(execution, {
+        project: owner.project_id,
+        assignment: owner.assignment_id,
+        launch_run: run,
+        generation: ref.launch_generation?.generation ?? null,
+        terminal,
+        session: this.session,
+      });
+      if (
+        t.address !== terminal ||
+        t.labels?.cardigan !== "1" ||
+        t.labels.run !== run ||
+        !["live", "finished"].includes(t.state) ||
+        !Number.isSafeInteger(t.created_ms) ||
+        (t.state === "live" &&
+          (!Number.isSafeInteger(t.pid) || (t.pid ?? 0) <= 1))
+      )
+        fail("runtime_conflict", "Unconfirmed worker terminal");
+      return { ...t, address: ref.terminal_ref };
+    }
+    return raw
+      ? JSON.parse(await raw.exec(["get", ref.terminal_ref, "--json"]))
+      : this.json(["get", ref.terminal_ref]);
+  }
   observe_retirement(
     ref: RuntimeRef,
-    identity: RetirementIdentity,
+    identity: RetirementIdentity & { readonly system_finished_turn?: true },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return result(async () => {
       this.checkRef(ref);
-      const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      const terminal: Terminal = identity.system_finished_turn
+        ? await this.retirementTerminal(ref, identity)
+        : await this.json(["get", ref.terminal_ref]);
       this.checkRetirementTerminal(ref, identity, terminal);
+      if (
+        identity.system_finished_turn &&
+        terminal.state === "live" &&
+        (terminal.keep ||
+          !["unknown", "idle", "done"].includes(
+            terminal.status?.state ?? "unknown",
+          ))
+      )
+        return "unknown";
       return terminal.state === "finished"
         ? "exited"
         : terminal.state === "live"
@@ -924,7 +1111,11 @@ export class HerdrRuntime implements Runtime {
         if (!Number.isSafeInteger(ms) || ms < 1 || ms > 30_000)
           fail("invalid_launch", "Invalid idle retirement timeout");
       stage = "get";
-      const first: Terminal = await this.json(["get", ref.terminal_ref]);
+      const readTerminal = () =>
+        options.system_finished_turn
+          ? this.retirementTerminal(ref, options)
+          : this.json(["get", ref.terminal_ref]);
+      const first: Terminal = await readTerminal();
       const check = (terminal: Terminal) => {
         state =
           terminal.state === "live" || terminal.state === "finished"
@@ -962,6 +1153,10 @@ export class HerdrRuntime implements Runtime {
         ...(identity ? [identity] : []),
       ];
       stage = "probe";
+      // A direct worker observation does not itself authorize the relay used
+      // by the pidfd helper. Revalidate its registration before the probe.
+      if (options.system_finished_turn && managedLoopback(this.execution))
+        await this.live();
       const raw = await this.client.exec(exec("probe"));
       reason = "probe_invalid";
       const identity = JSON.parse(raw);
@@ -973,9 +1168,7 @@ export class HerdrRuntime implements Runtime {
       )
         return failure("withdrawn", "probe_invalid");
       reason = "hc_failed";
-      const inspect = async () => {
-        stage = "confirm";
-        const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      const hasExited = (terminal: Terminal) => {
         check(terminal);
         if (terminal.state === "finished") return true;
         if (
@@ -985,6 +1178,10 @@ export class HerdrRuntime implements Runtime {
         )
           fail("runtime_conflict", "Idle terminal process changed");
         return false;
+      };
+      const inspect = async () => {
+        stage = "confirm";
+        return hasExited(await readTerminal());
       };
       const wait = async (ms: number) => {
         const until = Date.now() + ms;
@@ -1001,8 +1198,10 @@ export class HerdrRuntime implements Runtime {
           ["HUP", options.hangup_ms],
           ["TERM", options.terminate_ms],
         ] as const) {
+          if (options.system_finished_turn && mode === "HUP") continue;
           if (await inspect()) return exited;
           stage = mode;
+          let refused: RetirementEvidence["reason"] = "guard_changed";
           // The queue's guard runs after all waits and immediately before IO.
           if (
             !(await this.client.execIfCurrent(
@@ -1012,12 +1211,34 @@ export class HerdrRuntime implements Runtime {
                 attempted = true;
                 return true;
               },
+              options.system_finished_turn
+                ? async (raw) => {
+                    // Inside the acquired signal slot. Even if the address is reused
+                    // after this read, the helper can only signal the probed pidfd.
+                    if (!(await options.workspace_preflight())) return false;
+                    const target = await this.retirementTerminal(
+                      ref,
+                      options,
+                      raw,
+                    );
+                    if (hasExited(target)) {
+                      refused = "terminal_not_live";
+                      return false;
+                    }
+                    if (
+                      !["idle", "done", "unknown"].includes(
+                        target.status?.state ?? "unknown",
+                      )
+                    ) {
+                      refused = "terminal_busy";
+                      return false;
+                    }
+                    return true;
+                  }
+                : undefined,
             ))
           )
-            return failure(
-              attempted ? "uncertain" : "withdrawn",
-              "guard_changed",
-            );
+            return failure(attempted ? "uncertain" : "withdrawn", refused);
           if (await wait(budget)) return exited;
         }
         return failure("timeout", "still_live");

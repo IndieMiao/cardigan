@@ -7,6 +7,7 @@ import {
   buildExtMessage,
   type Decision,
   EXT_MESSAGE_DEFAULTS,
+  extInteraction,
   extMessageItems,
   type HumanAction,
 } from "@cardigan/domain";
@@ -103,7 +104,7 @@ function redeem(
 async function send(id: string) {
   const s = store.uow.read((tx) => loadCommandState(tx, project_id));
   const i = extMessageItems(s, project_id).find((i) => i.item_id === id)!;
-  const port = store.uow.run(() => app.prepare(s, i, null));
+  const port = store.uow.run(() => app.prepare(extInteraction(s, i), i, null));
   expect(
     await port!.send(
       buildExtMessage(i, "https://workbench.invalid"),
@@ -329,7 +330,7 @@ test("a busy writer cannot delay the SDK acknowledgement by 3 seconds", () => {
   }
 });
 
-test("outbox sends old notifications independently; each new binding reprojects only current cards and cannot reuse old refs", async () => {
+test("outbox activation and binding have independent watermarks; a new binding cannot reuse old refs", async () => {
   const legacy = vi.fn(async () => "sent" as const);
   const sender = new ExtMessageSender({
     store,
@@ -345,17 +346,31 @@ test("outbox sends old notifications independently; each new binding reprojects 
     startApplication: () => app,
     adapters: { lark: () => ({ send: legacy }) },
   });
+  const publish = (id: HumanAction["id"]) =>
+    store.uow.run((tx) => {
+      tx.human_actions.put(project_id, { ...h, id, key: id });
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        card_id: "C-1",
+        seq: tx.ids.nextEventSequence(project_id, "C-1"),
+        type: "human_action_requested",
+        actor: { kind: "human", project_id },
+        payload: { human_action_id: id },
+        created_at: new Date(now).toISOString(),
+      });
+    });
   sender.recordStatus();
   try {
+    publish("H-2");
     await sender.tick();
-    expect(legacy).toHaveBeenCalledTimes(2);
+    expect(legacy).toHaveBeenCalledTimes(1);
     expect(remote.create).not.toHaveBeenCalled();
     redeem(issue());
+    publish("H-3"); // Between binding and the first subsequent tick.
     await sender.tick();
-    expect(remote.create).toHaveBeenCalledTimes(2);
     await sender.tick();
-    expect(remote.create).toHaveBeenCalledTimes(2);
-    const r = db.prepare("SELECT * FROM feishu_cards WHERE item=?").get(h.id);
+    expect(remote.create).toHaveBeenCalledTimes(1);
+    const r = db.prepare("SELECT * FROM feishu_cards WHERE item=?").get("H-3");
     expect(r).toBeDefined();
     store.uow.run((tx) => {
       tx.human_actions.put(project_id, { ...h, status: "done" });
@@ -365,7 +380,7 @@ test("outbox sends old notifications independently; each new binding reprojects 
     receive("action", click(r!));
     expect(job).toBeUndefined();
     await sender.tick();
-    expect(remote.create).toHaveBeenCalledTimes(3);
+    expect(remote.create).toHaveBeenCalledTimes(1);
     expect(
       db
         .prepare(

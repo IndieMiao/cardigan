@@ -23,7 +23,13 @@ export function feishuBinding(db: DatabaseSync, scope: string) {
       "SELECT b.* FROM feishu_bindings b JOIN members m ON m.id=b.member AND m.role='owner' AND m.status='active' WHERE b.scope=?",
     )
     .get(scope) as
-    | { member: string; open_id: string; chat: string; generation: string }
+    | {
+        member: string;
+        open_id: string;
+        chat: string;
+        generation: string;
+        watermark: number;
+      }
     | undefined;
 }
 export function feishuAudit(
@@ -92,13 +98,9 @@ export function redeemFeishuCode(
     .get(scope, digestFeishu(code), now);
   if (!row || feishuBinding(db, scope)) return false;
   db.prepare("DELETE FROM feishu_codes WHERE scope=?").run(scope);
-  db.prepare("INSERT OR REPLACE INTO feishu_bindings VALUES(?,?,?,?,?)").run(
-    scope,
-    randomUUID(),
-    row.member!,
-    openId,
-    chat,
-  );
+  db.prepare(
+    "INSERT OR REPLACE INTO feishu_bindings(scope,generation,member,open_id,chat,watermark) VALUES(?,?,?,?,?,(SELECT COALESCE(MAX(rowid),0) FROM events))",
+  ).run(scope, randomUUID(), row.member!, openId, chat);
   feishuAudit(db, "bound", String(row.member));
   return true;
 }

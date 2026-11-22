@@ -23,12 +23,24 @@ export function originalRunTrigger(
     visited.add(event.id);
     const p = event.payload as Record<string, unknown> | null;
     const host = event.type === "host_ops_action_finished";
-    const previous = runById(state.runs, host ? p?.previous_run_id : p?.run_id);
     if (
       event.actor.kind !== "system" ||
       event.actor.project_id !== state.project_id ||
       p?.assignment_id !== source.assignment_id ||
-      (host ? p?.run_id : p?.replacement_run_id) !== source.id ||
+      (host ? p?.run_id : p?.replacement_run_id) !== source.id
+    )
+      return undefined;
+    // A stall has no previous Run: the host bound the live review signal at settlement.
+    if (host && typeof p?.stall_review_trigger === "string") {
+      const trigger = eventById(state.events, p.stall_review_trigger);
+      return trigger?.type === "review_submitted" ||
+        trigger?.type === "decision_resolved" ||
+        trigger?.type === "instruction_issued"
+        ? trigger
+        : undefined;
+    }
+    const previous = runById(state.runs, host ? p?.previous_run_id : p?.run_id);
+    if (
       !previous ||
       previous.assignment_id !== source.assignment_id ||
       previous.kind !== source.kind ||

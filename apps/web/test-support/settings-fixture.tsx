@@ -2,6 +2,10 @@ import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
 import type { PreferencesView } from "../src/api.js";
 import { fakeClient, NOW } from "../src/testing/fixtures.js";
+import {
+  FeishuConfigContext,
+  type FeishuConfigView,
+} from "../src/views/FeishuConfigGroups.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
@@ -33,6 +37,10 @@ const update = (patch: Partial<PreferencesView>) => {
 // Evidence scene: a change made elsewhere, seen by the next read.
 Object.assign(window, { settingsFixtureUpdate: update });
 // Synthetic private-chat binding scenes for design acceptance (no service or SDK).
+const feishuState =
+  new URLSearchParams(location.search).get("feishu") === "disabled"
+    ? "disabled"
+    : "connected";
 let feishuBound = false;
 Object.assign(window, {
   setFixtureFeishuBound: (bound: boolean) => {
@@ -43,7 +51,7 @@ const client = fakeClient({
   feishuBinding: async (action) => {
     if (action === "unbind") feishuBound = false;
     return {
-      state: "connected",
+      state: feishuState,
       bound: feishuBound,
       ...(action === "code"
         ? {
@@ -84,4 +92,46 @@ const client = fakeClient({
 });
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing screenshot fixture root");
-createRoot(root).render(<App client={client} />);
+// C-563: synthetic bot configuration for the grouped layout only (?feishuConfig=1);
+// production has no provider and shows the status group alone.
+const feishuConfig: FeishuConfigView | undefined = new URLSearchParams(
+  location.search,
+).has("feishuConfig")
+  ? {
+      enabled: true,
+      workbench_url: "https://workbench.example.test",
+      channels: {
+        lark: { enabled: true, per_minute: 20 },
+        lark_app: { enabled: false, per_minute: 20 },
+      },
+      quiet_hours: {
+        enabled: true,
+        start: "22:00",
+        end: "08:00",
+        timezone: "Asia/Shanghai",
+      },
+      secrets: {
+        lark_webhook: { set: true, updated_at: "2025-12-30T02:15:00Z" },
+        lark_sign_secret: { set: true, updated_at: "2025-12-30T02:15:00Z" },
+        app_id: { set: true, updated_at: "2025-12-20T09:40:00Z" },
+        app_secret: { set: true, updated_at: "2025-12-20T09:40:00Z" },
+        tenant_key: { set: false },
+      },
+      advanced: {
+        timeout_seconds: 10,
+        retry_attempts: 3,
+        retry_interval_seconds: 30,
+        title_max_chars: 60,
+        digest_max_items: 10,
+        bind_code_ttl_minutes: 10,
+        button_ttl_minutes: 1440,
+        bind_attempts_per_minute: 5,
+        max_concurrency: 4,
+      },
+    }
+  : undefined;
+createRoot(root).render(
+  <FeishuConfigContext.Provider value={feishuConfig}>
+    <App client={client} />
+  </FeishuConfigContext.Provider>,
+);

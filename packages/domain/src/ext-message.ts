@@ -1,8 +1,9 @@
-import type { CommandState } from "./commands/core.js";
+import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
-import { listNeedsYou } from "./commands/queries.js";
+import { selectNeedsYouDecisions } from "./commands/queries.js";
+import type { Event, ReadyCondition } from "./entities.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
-import { needsYouItemReady } from "./readiness.js";
+import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
 export const EXT_MESSAGE_DEFAULTS = {
   timeout_ms: 10_000,
@@ -22,6 +23,10 @@ export interface ExtMessageItem {
   readonly card_id?: CardId;
   readonly event_id: EventId;
   readonly created_at?: string;
+  /** Server-recorded creation, readiness and routing times; never adapter input. */
+  readonly activity_at?: readonly string[];
+  /** Legacy gated state with no recorded release/trigger time. */
+  readonly undated_ready?: true;
   readonly item_id: string;
   readonly kind: ExtMessageKind;
   readonly title?: string;
@@ -40,15 +45,7 @@ export type ExtMessageEntry =
       readonly item: string;
       readonly kind: ExtMessageKind;
     };
-export type ExtMessage =
-  | ExtMessageEntry
-  | {
-      readonly title: string;
-      readonly url: string;
-      readonly project: string;
-      readonly total: number;
-      readonly items: readonly ExtMessageEntry[];
-    };
+export type ExtMessage = ExtMessageEntry;
 
 /** The adapter receives only the approved projection, never domain objects or credentials. */
 export interface ExtMessageSignal {
@@ -117,27 +114,30 @@ export function buildExtMessage(
   };
 }
 
-/** Digest membership is projected afresh; the outbox never stores message text. */
+/** Intentionally cannot accept titles, item URLs, or actions. */
 export function buildExtMessageDigest(
-  project: ProjectId,
-  items: readonly ExtMessageItem[],
-  base: string,
-  policy: ExtMessagePolicy = EXT_MESSAGE_DEFAULTS,
-): ExtMessage {
-  if (!Number.isSafeInteger(policy.digest_limit) || policy.digest_limit < 1)
-    throw new Error("Invalid digest limit");
-  const pending = items.filter(
-    (i) => i.project_id === project && !i.handled && i.ready,
+  count: number,
+  workbench: string,
+): ExtMessageEntry {
+  return { title: `${count} 条待处理`, url: workbench };
+}
+
+function sameGate(gate: ReadyCondition | undefined, recorded: unknown) {
+  if (
+    !gate ||
+    !recorded ||
+    typeof recorded !== "object" ||
+    !("kind" in recorded) ||
+    recorded.kind !== gate.kind
+  )
+    return false;
+  if (gate.kind === "manual") return true;
+  return (
+    "card_id" in recorded &&
+    recorded.card_id === gate.card_id &&
+    (gate.kind !== "card_delivery" ||
+      ("after" in recorded ? recorded.after : undefined) === gate.after)
   );
-  return {
-    project,
-    title: `免打扰期间 ${pending.length} 条待处理`,
-    total: pending.length,
-    items: pending
-      .slice(0, policy.digest_limit)
-      .map((i) => buildExtMessage(i, base, policy.title_limit)),
-    url: extMessageUrl(base, project),
-  };
 }
 
 /** Replayable projection of canonical Needs You facts, including handled items for skip auditing. */
@@ -145,85 +145,141 @@ export function extMessageItems(
   state: CommandState,
   project: ProjectId,
 ): ExtMessageItem[] {
-  const result = listNeedsYou(state, { kind: "human", project_id: project });
+  const result = command(
+    state,
+    { kind: "human", project_id: project },
+    "list_needs_you",
+    undefined,
+    (d) => {
+      d.pm();
+      d.projectAccess();
+      return new Set(selectNeedsYouDecisions(d).map((q) => q.id));
+    },
+  );
   if (!result.ok) return [];
-  const view = result.value.data;
-  const sensitive = (ids: readonly CardId[]) =>
-    ids.some((id) => {
-      const card = state.cards.find((c) => c.id === id);
-      return !card || card.sensitive === true;
-    });
-  const source = (field: string, id: string) =>
-    state.events.find(
-      (e) =>
-        e.payload &&
-        typeof e.payload === "object" &&
-        field in e.payload &&
-        (e.payload as Record<string, unknown>)[field] === id,
+  const visible = result.value.data;
+  const cards = new Map(state.cards.map((c) => [c.id, c]));
+  const work = new Map(state.work_items.map((w) => [w.id, w.card_id]));
+  const decisions = new Map(state.decisions.map((q) => [q.id, q]));
+  const sensitive = (ids: readonly (CardId | undefined)[]) =>
+    ids.some(
+      (id) => !id || !cards.has(id) || cards.get(id)?.sensitive === true,
     );
+  // Preserve first-match stream order, including legacy events with both references.
+  const history = new Map<
+    string,
+    { source: Event; times: Set<string>; datedRelease: boolean }
+  >();
+  const gates = new Map<string, ReadyCondition | undefined>(
+    [...state.decisions, ...state.human_actions].map((item) => [
+      item.id,
+      item.ready_when,
+    ]),
+  );
+  const eventTimes = new Map<string, string>(
+    state.events.map((e) => [e.id, e.created_at]),
+  );
+  // A handoff or reissue never erases an earlier quiet touch. The readiness
+  // notification and the source change it references can straddle quiet hours.
+  for (const e of state.events) {
+    const p = e.payload;
+    if (!p || typeof p !== "object") continue;
+    const trigger =
+      "source_event_id" in p && typeof p.source_event_id === "string"
+        ? eventTimes.get(p.source_event_id)
+        : undefined;
+    for (const id of [
+      "decision_id" in p && p.decision_id,
+      "human_action_id" in p && p.human_action_id,
+    ]) {
+      if (typeof id !== "string") continue;
+      const entry = history.get(id) ?? {
+        source: e,
+        times: new Set<string>(),
+        datedRelease: false,
+      };
+      entry.times.add(e.created_at);
+      if (trigger) {
+        entry.times.add(trigger);
+        if (
+          e.type === NEEDS_YOU_ITEM_READY &&
+          "condition" in p &&
+          sameGate(gates.get(id), p.condition)
+        )
+          entry.datedRelease = true;
+      }
+      history.set(id, entry);
+    }
+  }
   const out: ExtMessageItem[] = [];
   for (const q of state.decisions) {
     if (q.decider !== "human") continue;
-    const event = source("decision_id", q.id);
-    if (!event) continue;
-    const cards = [
+    const facts = history.get(q.id);
+    if (!facts) continue;
+    const { source: event, times, datedRelease } = facts;
+    const ready = needsYouItemReady(state, q);
+    const related = [
       ...q.affected_cards,
       ...(q.card_id ? [q.card_id] : []),
-      ...state.work_items
-        .filter((w) => q.affected_work_items.includes(w.id))
-        .map((w) => w.card_id),
+      ...q.affected_work_items.map((id) => work.get(id)),
     ];
     out.push({
       project_id: project,
       ...(q.card_id ? { card_id: q.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      activity_at: [...times],
+      ...(ready && q.ready_when && !datedRelease
+        ? { undated_ready: true as const }
+        : {}),
       item_id: q.id,
       kind:
         q.trigger === "merge_confirmation" ? "merge_confirmation" : "decision",
       title: q.question,
-      sensitive: sensitive(cards),
-      ready: needsYouItemReady(state, q),
+      sensitive: sensitive(related),
+      ready,
       handled:
-        !view.decisions.some((v) => v.id === q.id) &&
-        !view.later.some((v) => v.kind === "decision" && v.id === q.id),
+        !visible.has(q.id) &&
+        (ready || !["open", "provisional", "snoozed"].includes(q.status)),
     });
   }
   for (const h of state.human_actions) {
     if (h.triage === "pm_ops") continue;
-    const event = source("human_action_id", h.id);
-    if (!event) continue;
+    const facts = history.get(h.id);
+    if (!facts) continue;
+    const { source: event, times, datedRelease } = facts;
+    if (h.ready_released) times.add(h.ready_released.at);
+    if (h.handoff) times.add(h.handoff.rewritten_at);
+    const ready = needsYouItemReady(state, h);
     out.push({
       project_id: project,
       ...(h.card_id ? { card_id: h.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      activity_at: [...times],
+      ...(ready && h.ready_when && !h.ready_released && !datedRelease
+        ? { undated_ready: true as const }
+        : {}),
       item_id: h.id,
       kind: "human_action",
       ...(h.handoff?.title ? { title: h.handoff.title } : {}),
       sensitive: sensitive([
         ...(h.card_id ? [h.card_id] : []),
-        ...state.work_items
-          .filter((w) => h.blocked_work_items.includes(w.id))
-          .map((w) => w.card_id),
+        ...h.blocked_work_items.map((id) => work.get(id)),
       ]),
-      ready: needsYouItemReady(state, h),
-      handled:
-        h.status !== "open" ||
-        (!view.human_actions.some((v) => v.id === h.id) &&
-          !view.later.some((v) => v.kind === "human_action" && v.id === h.id)),
+      ready,
+      handled: h.status !== "open",
     });
   }
   for (const n of notices(state)) {
     // A failed external delivery is a Workbench-only notice. Never recurse.
     if (n.kind === "external_message") continue;
-    const decision = state.decisions.find((q) => q.id === n.decision_id);
-    const createdAt = state.events.find((e) => e.id === n.id)?.created_at;
+    const decision = n.decision_id ? decisions.get(n.decision_id) : undefined;
     out.push({
       project_id: project,
       ...(n.card_id ? { card_id: n.card_id } : {}),
       event_id: n.id,
-      ...(createdAt ? { created_at: createdAt } : {}),
+      created_at: n.at,
       item_id: n.id,
       kind: "notice",
       title: n.question,
@@ -231,9 +287,7 @@ export function extMessageItems(
       sensitive: sensitive([
         ...(n.card_id ? [n.card_id] : []),
         ...(decision?.affected_cards ?? []),
-        ...state.work_items
-          .filter((w) => decision?.affected_work_items.includes(w.id))
-          .map((w) => w.card_id),
+        ...(decision?.affected_work_items.map((id) => work.get(id)) ?? []),
       ]),
       ready: true,
       handled: n.read,

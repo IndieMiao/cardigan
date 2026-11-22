@@ -85,16 +85,26 @@ function scenario() {
       ok: false,
       error: { code: "runtime_unavailable", message: "No core" },
     })),
-    resume_or_replace: vi.fn<Runtime["resume_or_replace"]>(
-      async (old, launch) => {
+    observe_retirement: vi.fn(async () => ({
+      ok: false as const,
+      error: {
+        code: "runtime_not_found" as const,
+        message: "Exact terminal missing",
+      },
+    })),
+    resume_or_replace: vi.fn(),
+    provision: vi.fn<Runtime["provision"]>(
+      async (_assignment, _role, _machine, launch) => {
         expect(
           unfinishedBellAttempts(f.store.database, f.project),
         ).toHaveLength(1);
         expect(launch.labels.run).toBe(run.id);
-        return { ok: true, value: { ...old, terminal_ref: "t9" } };
+        return {
+          ok: true,
+          value: { ...f.refFor(target.assignment), terminal_ref: "t9" },
+        };
       },
     ),
-    provision: vi.fn(),
     wake: vi.fn(),
     release: vi.fn<Runtime["release"]>(async () => ({
       ok: true,
@@ -143,6 +153,13 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
   "M5.6 %s between Runs replaces the Session, commits a handoff and dispatches exactly the queued Run",
   async (code) => {
     const s = scenario();
+    // Both forms of exact exit evidence permit a fresh launch, never a release
+    // by stale address. Ordinary status errors alone (next test) do not.
+    if (code === "runtime_unavailable")
+      s.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true,
+        value: "exited",
+      }));
     // Only the old Session is lost; the replacement terminal is starting.
     vi.mocked(s.runtime.status).mockImplementation(async (ref) =>
       ref.terminal_ref === "t9"
@@ -158,8 +175,9 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
     ).toBe("idle");
     await new Dispatcher(s.options).tick();
     await new Dispatcher(s.options).tick();
-    expect(s.runtime.resume_or_replace).toHaveBeenCalledOnce();
-    expect(s.runtime.provision).not.toHaveBeenCalled();
+    expect(s.runtime.provision).toHaveBeenCalledOnce();
+    expect(s.runtime.observe_retirement).toHaveBeenCalledOnce();
+    expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
     expect(s.runtime.wake).not.toHaveBeenCalled();
     expect(f.state().runs).toHaveLength(2);
     expect(f.state().runs.find((r) => r.id === s.run.id)).toMatchObject({
@@ -184,6 +202,68 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
     );
     expect(first).toContain(`run=${s.run.id}`);
     expect(s.notes().every((n) => n.status === "belled")).toBe(true);
+  },
+);
+
+test.each(["runtime_not_found", "runtime_unavailable"] as const)(
+  "C-554 queued followup cannot replace a still-live owner on a %s snapshot",
+  async (code) => {
+    const s = scenario();
+    vi.mocked(s.runtime.status).mockResolvedValue({
+      ok: false,
+      error: { code, message: "missing snapshot" },
+    });
+    s.runtime.observe_retirement = vi.fn(async () => ({
+      ok: true,
+      value: "alive",
+    }));
+    const d = new Dispatcher(s.options);
+    try {
+      await d.tick();
+      expect(s.runtime.observe_retirement).toHaveBeenCalledWith(
+        f.refFor(s.target.assignment),
+        { project_id: f.project, assignment_id: s.target.assignment.id },
+      );
+      expect(s.runtime.provision).not.toHaveBeenCalled();
+      expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
+      expect(s.runtime.release).not.toHaveBeenCalled();
+      expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
+        "queued",
+      );
+      expect(s.notes().map((n) => n.status)).toContain("pending");
+    } finally {
+      await d.close();
+    }
+  },
+);
+test.each([false, true])(
+  "queued system-ended Run with a stopped core requires independent local exit proof (%s)",
+  async (gone) => {
+    const s = scenario();
+    s.runtime.observe_retirement = vi.fn(async () => ({
+      ok: false,
+      error: { code: "runtime_unavailable", message: "core offline" },
+    }));
+    s.runtime.confirm_local_exit = vi.fn(async () => ({
+      ok: true,
+      value: gone,
+    }));
+    const d = new Dispatcher(s.options);
+    try {
+      await d.tick();
+      expect(s.runtime.confirm_local_exit).toHaveBeenCalledWith(
+        f.refFor(s.target.assignment),
+        { project_id: f.project, assignment_id: s.target.assignment.id },
+      );
+      expect(s.runtime.provision).toHaveBeenCalledTimes(gone ? 1 : 0);
+      expect(s.runtime.release).not.toHaveBeenCalled();
+      expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
+      expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(
+        gone ? "dispatched" : "queued",
+      );
+    } finally {
+      await d.close();
+    }
   },
 );
 
@@ -236,6 +316,7 @@ test.each(["dispatched", "running", "unknown"])(
       }
       await new Dispatcher(s.options).tick();
       expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
+      expect(s.runtime.provision).not.toHaveBeenCalled();
       // Probe unstarted dispatches for recovery and running sessions for idle
       // inbox delivery. An unreachable runtime must not be woken or replaced.
       expect(s.runtime.status).toHaveBeenCalledTimes(
@@ -251,7 +332,7 @@ test.each(["dispatched", "running", "unknown"])(
 
 test("M5.6 failed replacement records failure, compensates and escalates once; cancelled Run attention resolves", async () => {
   const s = scenario();
-  vi.mocked(s.runtime.resume_or_replace).mockResolvedValue({
+  vi.mocked(s.runtime.provision).mockResolvedValue({
     ok: false,
     error: { code: "runtime_unavailable", message: "Cannot restart" },
   });
@@ -296,7 +377,7 @@ test("M5.6 failed replacement records failure, compensates and escalates once; c
     reopened.close();
   }
   expect(f.state().cursors).toEqual(cursors);
-  expect(s.runtime.resume_or_replace).toHaveBeenCalledOnce();
+  expect(s.runtime.provision).toHaveBeenCalledOnce();
   expect(s.notes().every((n) => n.status === "resolved")).toBe(true);
   expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
   expect(f.state().runs.find((r) => r.id === s.run.id)?.status).toBe(

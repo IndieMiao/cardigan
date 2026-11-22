@@ -6,6 +6,7 @@ import type { ExtMessageItem } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   claimExtMessage,
+  groupExtMessage,
   listExtMessages,
   projectExtMessage,
   settleExtMessage,
@@ -46,6 +47,29 @@ test("migration upgrades an existing schema without rewriting existing notificat
     db.close();
   }
 });
+test.each([
+  ["rate:queued", "queued", "quiet-id", "rate:fixed-id"],
+  ["queued", "rate:queued", "rate:fixed-id", "quiet-id"],
+] as const)(
+  "%s cannot change payload class before a claim",
+  (owned, other, wrong, frozen) =>
+    withTempStore((store) =>
+      store.uow.run(() => {
+        const db = store.database;
+        const row = () => listExtMessages(db)[0]!;
+        projectExtMessage(db, item, "fake", at);
+        const stale = row();
+        groupExtMessage(db, stale, owned);
+        groupExtMessage(db, stale, other);
+        groupExtMessage(db, row(), other);
+        groupExtMessage(db, row(), wrong);
+        expect(row().digest_id).toBe(owned);
+        groupExtMessage(db, row(), frozen);
+        expect(row().digest_id).toBe(frozen);
+      }),
+    ),
+);
+
 test("replay is unique per item and channel, transactional and terminal rows cannot be claimed", () =>
   withTempStore((store) => {
     store.uow.run(() => {

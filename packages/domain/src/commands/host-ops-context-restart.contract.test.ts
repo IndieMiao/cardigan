@@ -9,11 +9,18 @@ import {
 import { recordContextUsageNotices } from "./context-usage.js";
 import { completeHumanAction } from "./coordination.js";
 import type { CommandState } from "./core.js";
-import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
+import {
+  beginHostOpsAction,
+  finishHostOpsAction,
+  withdrawUnstartedStallRestart,
+} from "./host-ops-actions.js";
 import {
   automaticContextRestartReady,
   beginAutomaticContextRestart,
+  beginStalledPatrolRestart,
+  beginSystemTurnRestart,
   recordAutomaticContextRestartResult,
+  systemTurnOwner,
 } from "./host-ops-context-restart.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
 import { setProjectPreferences } from "./preferences.js";
@@ -27,6 +34,7 @@ import {
   now,
   ports,
   role,
+  run,
   value,
 } from "./test-fixtures.js";
 
@@ -355,4 +363,287 @@ test("new-session queue is not success; dispatch records replacement, actual sta
   expect(success.changes.some((c) => c.collection === "human_actions")).toBe(
     false,
   );
+});
+
+test("system turn recovery binds the ended Run, target and expiry; uncertain exit keeps the intent and never creates a HumanAction", () => {
+  const f = setup(),
+    a = required(f.state.assignments[0]),
+    prior = required(f.state.runs[0]);
+  const finish: Event = {
+    id: f.io.ids.nextEventId(),
+    actor: actor(1, "coder"),
+    seq: 1,
+    type: "run_finished",
+    created_at: now,
+    payload: { finished_by: "system", run_id: prior.id },
+  };
+  const due: Event = {
+    ...finish,
+    id: f.io.ids.nextEventId(),
+    actor: system,
+    seq: 2,
+    type: "bell_turn_recovery_due",
+    payload: { run_id: prior.id, assignment_id: a.id },
+  };
+  const state: CommandState = {
+    ...f.state,
+    assignments: f.state.assignments.map((v) =>
+      v.id === a.id ? { ...v, runtime_ref: ref } : v,
+    ),
+    runs: f.state.runs.map((r) =>
+      r.id === prior.id
+        ? {
+            ...r,
+            status: "completed",
+            outcome: "blocked",
+            started_at: now,
+            finished_at: now,
+          }
+        : r,
+    ),
+    events: [finish, due],
+  };
+  const begin = (
+    s: CommandState,
+    who: Parameters<typeof beginSystemTurnRestart>[1] = system,
+  ) =>
+    beginSystemTurnRestart(
+      s,
+      who,
+      { assignment_id: a.id, cause_id: due.id, snapshot },
+      f.io,
+    );
+  expect(begin(state, human).ok).toBe(false);
+  expect(begin({ ...state, events: [due] }).ok).toBe(false);
+  expect(
+    begin({ ...state, events: [finish, { ...due, actor: human }] }).ok,
+  ).toBe(false);
+  expect(
+    begin({
+      ...state,
+      runs: [...state.runs, { ...prior, id: id("run", 99), status: "queued" }],
+    }).ok,
+  ).toBe(false);
+  const started = value(begin(state));
+  const pending = apply(state, started);
+  // A proven pre-signal refusal frees the assignment; a durable signal fence
+  // is never cleared by the same withdrawal, even after a service restart.
+  const withdraw = (s: CommandState) =>
+    value(
+      withdrawUnstartedStallRestart(
+        s,
+        system,
+        started.data.action_id,
+        f.io,
+        "terminal_busy",
+      ),
+    );
+  expect(
+    pendingHostOpsActions(apply(pending, withdraw(pending)).events),
+  ).toHaveLength(0);
+  const stopping: CommandState = {
+    ...pending,
+    events: [
+      ...pending.events,
+      {
+        ...due,
+        id: f.io.ids.nextEventId(),
+        type: "host_ops_action_deferred",
+        payload: {
+          action_id: started.data.action_id,
+          reason: "automatic_context_stop_started",
+        },
+      },
+    ],
+  };
+  expect(withdraw(stopping).events).toEqual([]);
+  const result = value(
+    recordAutomaticContextRestartResult(
+      pending,
+      system,
+      {
+        action_id: started.data.action_id,
+        result: "failed",
+        reason: "terminal_exit_unconfirmed",
+      },
+      f.io,
+    ),
+  );
+  expect(result.events).toMatchObject([
+    { type: "host_ops_action_deferred", payload: { notify_pm: true } },
+  ]);
+  expect(result.changes).toEqual([]);
+  expect(pendingHostOpsActions(apply(pending, result).events)).toHaveLength(1);
+  expect(begin(apply(pending, result)).ok).toBe(false);
+  const stopped = value(
+    finishHostOpsAction(pending, system, started.data.action_id, f.io, {
+      cause_id: due.id,
+      card_id: null,
+    }),
+  );
+  const failed = value(
+    recordAutomaticContextRestartResult(
+      apply(pending, stopped),
+      system,
+      {
+        action_id: started.data.action_id,
+        result: "failed",
+        reason: "replacement_launch_unconfirmed",
+      },
+      f.io,
+    ),
+  );
+  const fenced = apply(apply(pending, stopped), failed);
+  expect(fenced.human_actions.at(-1)).toMatchObject({ triage: "pm_ops" });
+  expect(hostOpsPending(fenced.events, a.id)).toBe(true);
+});
+
+test("only the system may replace a stalled patrol, once per cause and never with unfinished work", () => {
+  const f = setup();
+  const params = { assignment_id: f.ops.id, cause_id: "pending-1", snapshot };
+  const begin = (
+    state: CommandState,
+    who: Parameters<typeof beginStalledPatrolRestart>[1] = system,
+  ) => beginStalledPatrolRestart(state, who, params, f.io);
+  expect(begin(f.state, human).ok).toBe(false);
+  expect(begin(f.state, actor(10, "host_ops")).ok).toBe(false);
+  const busy = apply(
+    f.state,
+    value(
+      queueRun(f.state, system, { assignment_id: f.ops.id, ...snapshot }, f.io),
+    ),
+  );
+  expect(begin(busy).ok).toBe(false);
+  expect(
+    begin({
+      ...f.state,
+      assignments: f.state.assignments.map((a) =>
+        a.id === f.ops.id ? { ...a, worktree_path: "unverified" } : a,
+      ),
+    }).ok,
+  ).toBe(false);
+  const effect = value(begin(f.state));
+  const pending = apply(f.state, effect);
+  expect(begin(pending).ok).toBe(false);
+  // An independently confirmed exit is still settled if its cause expired,
+  // but no unrelated followup Run is authorized.
+  expect(
+    value(finishHostOpsAction(pending, system, effect.data.action_id, f.io))
+      .data.run,
+  ).toBeUndefined();
+  const finished = value(
+    finishHostOpsAction(pending, system, effect.data.action_id, f.io, {
+      cause_id: params.cause_id,
+      card_id: null,
+    }),
+  );
+  expect(finished.data.run?.status).toBe("queued");
+  expect(finished.data.assignment_id).toBe(f.ops.id);
+  expect(
+    finished.changes.find(
+      (c) => c.collection === "assignments" && c.entity.id === f.ops.id,
+    )?.entity,
+  ).not.toHaveProperty("session_ref");
+});
+
+test.each(["card", "project"] as const)(
+  "standing stall settlement keeps its %s stream and rechecks the card hold",
+  (stream) => {
+    const f = setup();
+    const card = required(f.state.cards[0]);
+    const params = { assignment_id: f.ops.id, cause_id: "note", snapshot };
+    const begun = value(
+      beginStalledPatrolRestart(f.state, system, params, f.io),
+    );
+    const pending = apply(f.state, begun);
+    const stall = {
+      cause_id: params.cause_id,
+      card_id: stream === "card" ? card.id : null,
+    };
+    const settle = (state: CommandState) =>
+      value(
+        finishHostOpsAction(state, system, begun.data.action_id, f.io, stall),
+      );
+    const result = settle(pending).data;
+    expect(required(result.run).trigger_event_id).toBe(result.event.id);
+    expect(result.event.card_id).toBe(stall.card_id ?? undefined);
+    const held = settle({
+      ...pending,
+      cards: pending.cards.map((c) =>
+        c.id === card.id
+          ? {
+              ...c,
+              hold: {
+                set_by: "system",
+                reason: "paused",
+                resume_condition: "test",
+                set_at: now,
+              },
+            }
+          : c,
+      ),
+    });
+    expect(Boolean(held.data.run)).toBe(stream === "project");
+  },
+);
+
+test("a generationless loopback owner needs an unambiguous confirmed bell on the entire bound ref", () => {
+  const state = fixture(),
+    created = run(),
+    reused = run(2, 1);
+  const bound = {
+    ...ref,
+    runtime_machine: "worker",
+    terminal_ref: "worker/t1",
+    target: {
+      project_id: state.project_id,
+      machine_id: "local",
+      session: "fixture",
+      generation: "legacy",
+      fingerprint: "a".repeat(64),
+    },
+  };
+  const first = {
+    ...created,
+    bell_delivery: { run_id: created.id, sent_at: now, runtime_ref: bound },
+  };
+  const later = {
+    ...reused,
+    bell_delivery: {
+      run_id: reused.id,
+      sent_at: "2099-01-01T00:00:00.000Z",
+      runtime_ref: bound,
+    },
+  };
+  const owner = (runs: typeof state.runs, endedRun = first.id) =>
+    systemTurnOwner({ ...state, runs }, created.assignment_id, bound, endedRun);
+  expect(owner([later, first], later.id)).toHaveProperty(
+    "first_bell_run_id",
+    first.id,
+  );
+  expect(owner([first], later.id)).not.toHaveProperty("first_bell_run_id");
+  for (const runs of [
+    [],
+    [created],
+    [
+      {
+        ...first,
+        bell_delivery: {
+          ...first.bell_delivery,
+          runtime_ref: {
+            ...bound,
+            target: { ...bound.target, fingerprint: "b".repeat(64) },
+          },
+        },
+      },
+    ],
+    [{ ...first, assignment_id: id("assignment", 9) }],
+    [{ ...first, bell_delivery: { ...first.bell_delivery, run_id: later.id } }],
+    [{ ...first, bell_delivery: { runtime_ref: bound, run_id: first.id } }],
+    [
+      first,
+      { ...later, bell_delivery: { ...later.bell_delivery, sent_at: now } },
+    ],
+  ])
+    expect(owner(runs)).not.toHaveProperty("first_bell_run_id");
 });

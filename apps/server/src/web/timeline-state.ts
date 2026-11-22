@@ -3,6 +3,10 @@ import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
 import { storyProgress } from "@cardigan/domain";
 import { timeRead } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
+import {
+  missingPrecheckTargets,
+  readPrecheckAttempts,
+} from "./card-checking.js";
 import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
 import { readMergeQueueState } from "./merge-queue-state.js";
@@ -198,8 +202,12 @@ export function readPagedCard(
     const mergeState = timed("merge_queue_sql", () =>
       readMergeQueueState(tx, project, { card, state }),
     );
+    const precheckEvents = timed("precheck_sql", () =>
+      readPrecheckAttempts(store, project, missingPrecheckTargets(state)),
+    );
     return timed("assemble", () =>
       cardDetail(state, cardId, {
+        precheckEvents,
         ...(card.story
           ? {
               storyProgress: storyProgress(

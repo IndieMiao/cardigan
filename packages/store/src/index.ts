@@ -20,6 +20,7 @@ export {
 } from "./dispatcher.js";
 export { persistEmployeeEffect } from "./employees.js";
 export * from "./ext-message.js";
+export * from "./ext-message-window.js";
 export * from "./feishu.js";
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
@@ -81,7 +82,10 @@ export {
   writeRole,
 } from "./roles.js";
 export * from "./run-capacity.js";
-export { backfillStandingModesInTransaction } from "./standing.js";
+export {
+  backfillStandingModesInTransaction,
+  standingResolver,
+} from "./standing.js";
 export {
   type AckEventsParams,
   type AckEventsResult,

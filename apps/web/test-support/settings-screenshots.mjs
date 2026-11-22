@@ -7,13 +7,14 @@ import { createServer } from "vite";
 import { chromium } from "./chromium.mjs";
 
 // C-455 evidence: settings fixture only (no backend, live data or e2e suite).
-// Usage: node settings-screenshots.mjs <output-dir> [--card-page] [--panels]
+// Usage: node settings-screenshots.mjs <output-dir> [--card-page | --panels | --feishu]
 // C-479: --panels captures only the capacity, roles, templates and employee
 // panels and their drawers (preferences/authorization are the default run).
 const root = fileURLToPath(new URL("../", import.meta.url));
 const output = resolve(process.argv[2] ?? "../../artifacts/settings");
 const cardPage = process.argv.includes("--card-page");
 const panels = process.argv.includes("--panels");
+const feishu = process.argv.includes("--feishu");
 await mkdir(output, { recursive: true });
 const server = await createServer({
   root,
@@ -129,6 +130,15 @@ try {
         ),
         help: box(content?.querySelector("[aria-label$='说明']")),
         statusTag: box(content?.querySelector("[data-ui='badge']")),
+        groups: [
+          ...(content?.querySelectorAll("[data-settings-group]") ?? []),
+        ].map((g) => ({
+          title: box(g.querySelector("h3")),
+          toggle: box(g.querySelector("h3 button")),
+          rows: box(g.querySelector(":scope > div:last-child")),
+          firstRow: box(g.querySelector("[data-settings-row]")),
+          value: box(g.querySelector("[data-settings-row] > div:last-child")),
+        })),
         table: box(content?.querySelector("table")),
         tableHead: box(content?.querySelector("th")),
         tableCell: box(content?.querySelector("td")),
@@ -205,6 +215,36 @@ try {
           document.documentElement.dataset.theme = theme;
         }, theme);
       };
+      if (feishu) {
+        for (const [state, badge] of [
+          ["disabled", "未启用"],
+          ["connected", "未绑定"],
+        ]) {
+          await open(
+            `?feishu=${state}#/p/p-1/settings?tab=feishu`,
+            `[...document.querySelectorAll('[data-ui="badge"]')].some(el => el.textContent.trim() === '${badge}')`,
+          );
+          await capture(`feishu-${state}`, width, theme);
+        }
+        // C-563: the six groups with synthetic configuration; 高级 folded, then open.
+        await open(
+          "?feishu=connected&feishuConfig=1#/p/p-1/settings?tab=feishu",
+          "!!document.querySelector('[data-settings-content]:not([hidden]) [aria-expanded=false]') && [...document.querySelectorAll('[data-ui=\"badge\"]')].some(el => el.textContent.trim() === '未绑定')",
+        );
+        await capture("feishu-config", width, theme);
+        await run(() => {
+          document
+            .querySelector(
+              "[data-settings-content]:not([hidden]) h3 button[aria-expanded=false]",
+            )
+            .click();
+        });
+        await until(
+          "!!document.querySelector('[data-settings-content]:not([hidden]) h3 button[aria-expanded=true]')",
+        );
+        await capture("feishu-config-advanced", width, theme);
+        continue;
+      }
       if (cardPage) {
         await open(
           "#/p/p-1/cards?view=board",
@@ -358,9 +398,11 @@ try {
           "!document.querySelector('.settings-layout')",
         );
         await click("并发与容量");
+        // C-511: the old entry now lands on the machine page.
         await until(
-          "[...document.querySelectorAll('h2')].some((h) => h.textContent.includes('并发与容量') && h.offsetParent) && document.body.textContent.includes('本机')",
+          "[...document.querySelectorAll('h2')].some((h) => (h.textContent.includes('并发与容量') || h.textContent.trim() === '机器') && h.offsetParent) && document.body.textContent.includes('本机')",
         );
+        await blur();
         await capture("capacity", width, theme);
         await click("角色");
         await until("document.body.textContent.includes('文档写手')");
@@ -444,14 +486,239 @@ try {
               clickCount: 1,
             });
           await until("!!document.querySelector('[role=dialog] dl')");
-          for (const type of ["keyDown", "keyUp"])
-            await send("Input.dispatchKeyEvent", {
-              type,
-              key: "Escape",
-              code: "Escape",
-              windowsVirtualKeyCode: 27,
+          const pressEscape = async () => {
+            for (const type of ["keyDown", "keyUp"])
+              await send("Input.dispatchKeyEvent", {
+                type,
+                key: "Escape",
+                code: "Escape",
+                windowsVirtualKeyCode: 27,
+              });
+            await until("!document.querySelector('[role=dialog]')");
+          };
+          await pressEscape();
+          // C-511: machine actions and the add-worker wizard (absent before).
+          const wizard = await evaluate(
+            "[...document.querySelectorAll('main button')].some((b) => b.offsetParent && b.textContent.trim() === '添加 worker')",
+          );
+          if (wizard) {
+            const press = (text) =>
+              run((text) => {
+                const target = [
+                  ...document.querySelectorAll(
+                    "[role=dialog] button, main button",
+                  ),
+                ].find(
+                  (b) =>
+                    b.offsetParent &&
+                    (b.textContent.trim() === text ||
+                      b.getAttribute("aria-label") === text),
+                );
+                if (!target) throw new Error(`Missing button: ${text}`);
+                target.click();
+              }, text);
+            const has = (text) =>
+              `[...document.querySelectorAll('[role=dialog] button, [role=dialog] table')].some((b) => b.offsetParent && (b.textContent.trim() === ${JSON.stringify(text)} || b.getAttribute('aria-label') === ${JSON.stringify(text)}))`;
+            /** The open drawer as seen, scrolled to `section` when given. */
+            const scene = async (name, section) => {
+              await run((section) => {
+                const d = document.querySelector("[role=dialog]");
+                const target =
+                  section === "@top"
+                    ? d.querySelector("[data-feedback-host]")
+                    : section
+                      ? [...d.querySelectorAll("h3, table, label")].find(
+                          (e) =>
+                            (e.tagName === "LABEL"
+                              ? e.firstChild?.textContent?.trim()
+                              : e.textContent.trim()) === section ||
+                            e.getAttribute("aria-label") === section,
+                        )
+                      : undefined;
+                if (section && !target)
+                  throw new Error(`Missing section: ${section}`);
+                if (target) target.scrollIntoView({ block: "start" });
+                else
+                  d.querySelector(".drawer-body, [data-ui]")?.scrollTo?.(0, 0);
+              }, section ?? null);
+              await delay(150);
+              await run(async () => {
+                await document.fonts.ready;
+                await new Promise((done) =>
+                  requestAnimationFrame(() => requestAnimationFrame(done)),
+                );
+              });
+              const shot = await send("Page.captureScreenshot", {
+                format: "png",
+              });
+              report.scenes[`${name}-${width}-${theme}`] = await run(() => {
+                const d = document.querySelector("[role=dialog]");
+                const r = d.getBoundingClientRect();
+                const box = (e) => {
+                  if (!e) return null;
+                  const b = e.getBoundingClientRect(),
+                    st = getComputedStyle(e);
+                  return {
+                    text: e.textContent.trim().slice(0, 24),
+                    x: Math.round(b.left * 10) / 10,
+                    y: Math.round(b.top * 10) / 10,
+                    w: Math.round(b.width * 10) / 10,
+                    h: Math.round(b.height * 10) / 10,
+                    font: `${st.fontSize}/${st.lineHeight} ${st.fontWeight}`,
+                  };
+                };
+                const hits = [
+                  ...d.querySelectorAll(".drawer-actions button"),
+                ].map((button) => {
+                  const b = button.getBoundingClientRect();
+                  const top = document.elementFromPoint(
+                    b.left + b.width / 2,
+                    b.top + b.height / 2,
+                  );
+                  return {
+                    name:
+                      button.getAttribute("aria-label") ??
+                      button.textContent.trim(),
+                    h: Math.round(b.height * 10) / 10,
+                    hit: !!top && button.contains(top),
+                  };
+                });
+                // Nothing inside the drawer may stick out of it sideways.
+                const outside = [...d.querySelectorAll("*")]
+                  .filter((e) => {
+                    const b = e.getBoundingClientRect();
+                    return (
+                      b.width > 0 &&
+                      !e.closest("pre") &&
+                      (b.right > r.right + 0.5 || b.left < r.left - 0.5)
+                    );
+                  })
+                  .slice(0, 5)
+                  .map(box);
+                return {
+                  drawer: { x: r.left, y: r.top, w: r.width, h: r.height },
+                  drawerScrollWidth: d.scrollWidth,
+                  drawerClientWidth: d.clientWidth,
+                  scrollWidth: document.documentElement.scrollWidth,
+                  hits,
+                  title: box(d.querySelector("h2")),
+                  section: box(d.querySelector("section h3")),
+                  fact: box(d.querySelector("dt")),
+                  input: box(d.querySelector("input")),
+                  button: box(d.querySelector("form [data-ui='button']")),
+                  tableHead: box(d.querySelector("th")),
+                  tableCell: box(d.querySelector("td")),
+                  statusTag: box(d.querySelector("td [data-ui='badge']")),
+                  longText: box(d.querySelector("pre")),
+                  // C-565: the step bar, its current step and a field hint.
+                  steps: box(d.querySelector("ol[aria-label]")),
+                  stepCurrent: box(d.querySelector("[aria-current='step']")),
+                  stepMarker: box(
+                    d.querySelector("[aria-current='step'] > span"),
+                  ),
+                  fieldHint: box(
+                    document.getElementById(
+                      d
+                        .querySelector("input[aria-describedby]")
+                        ?.getAttribute("aria-describedby")
+                        ?.split(" ")[0] ?? "",
+                    ),
+                  ),
+                  inputValues: [...d.querySelectorAll("form input")]
+                    .filter((i) => i.type !== "hidden" && !i.hidden)
+                    .map((i) => i.value),
+                  outside,
+                };
+              });
+              await writeFile(
+                resolve(output, `${name}-${width}-${theme}.png`),
+                Buffer.from(shot.data, "base64"),
+              );
+              for (const hit of report.scenes[`${name}-${width}-${theme}`].hits)
+                assert(
+                  hit.hit,
+                  `${name}-${width}-${theme}: ${hit.name} covered`,
+                );
+            };
+            // 立即检查 in progress (the synthetic check stays at SSH).
+            await run(() => {
+              const target = [...document.querySelectorAll("main button")].find(
+                (b) => b.offsetParent && b.textContent.trim() === "本机",
+              );
+              target.click();
             });
-          await until("!document.querySelector('[role=dialog]')");
+            await until(has("立即检查"));
+            await press("立即检查");
+            await until(
+              "document.querySelector('[role=dialog]').textContent.includes('正在检查：SSH…')",
+            );
+            await scene("machine-check-running");
+            await pressEscape();
+            // The wizard: form, preview, a failed step, then remote launch.
+            await press("添加 worker");
+            await until("!!document.querySelector('[role=dialog] form')");
+            // C-565: the first screen, prefilled (port, account, MCP).
+            await until(
+              "[...document.querySelectorAll('[role=dialog] input')].some((i) => i.value.endsWith('/mcp'))",
+            );
+            await scene("wizard-start");
+            await run(() => {
+              const values = {
+                机器编号: "studio",
+                名称: "工作室",
+                主机地址: "worker.invalid",
+                专用账号: "cg_studio",
+                UID: "1501",
+                GID: "1501",
+                "MCP 地址": "https://control.example.ts.net/mcp",
+              };
+              const set = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                "value",
+              ).set;
+              for (const label of document.querySelectorAll(
+                "[role=dialog] label",
+              )) {
+                const name = label.firstChild?.textContent?.trim();
+                const input = label.querySelector("input");
+                if (!input || !(name in values)) continue;
+                set.call(input, values[name]);
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+              }
+              document.activeElement?.blur?.();
+            });
+            await scene("wizard-form");
+            await scene("wizard-form-ids", "UID");
+            await press("预览配置");
+            await until(has("工作室 配置差异"));
+            await scene("wizard-preview");
+            await press("确认写入配置");
+            await until(has("开始检查"));
+            await press("开始检查");
+            await until(has("继续检查"));
+            await scene("wizard-failed");
+            await scene("wizard-commands", "目标机命令");
+            await press("继续检查");
+            // C-565: a stop the commands fix; the page will check again.
+            await until(
+              "document.querySelector('[role=dialog]').textContent.includes('自动复查中')",
+            );
+            await scene("wizard-recheck", "@top");
+            await press("继续检查");
+            await until(has("复查"));
+            await press("预览开启");
+            await until(has("派发配置差异"));
+            await run(() =>
+              document.querySelector("[role=dialog] [role=checkbox]").click(),
+            );
+            await scene("wizard-launch", "需谨慎");
+            await press("开启远程派发");
+            await until(
+              "document.querySelector('[role=dialog]').textContent.includes('已开启远程派发')",
+            );
+            await press("完成");
+            await until("!document.querySelector('[role=dialog]')");
+          }
         }
         continue;
       }

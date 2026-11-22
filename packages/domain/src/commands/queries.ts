@@ -77,6 +77,7 @@ import {
 import { notices } from "./notices.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
+import { resumeAttention } from "./resume-attention.js";
 import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
   runtimeUnknownDeferred,
@@ -758,6 +759,49 @@ export function needsYouView(
   );
 }
 
+/** Canonical group membership, without rendering bodies, reminders or merge evidence. */
+export function selectNeedsYouDecisions(
+  d: CommandDraft,
+  section?: NeedsYouSection,
+  includeDetails = false,
+) {
+  const { state, actor } = d;
+  return groupHumanDecisions(
+    d
+      .list("decisions")
+      .filter((q) => !section || section === decisionSection(state, q))
+      .filter(
+        (q) =>
+          (q.decider === "human" &&
+            ["open", "provisional", "snoozed"].includes(q.status)) ||
+          (failedConfirmedMergeCheck(state, q) &&
+            // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+            !(
+              hasActivePmOps(d, "resolve_delegated_decision") &&
+              pmFailedMergeCheck(state, q)
+            )) ||
+          decisionFollowupNeedsHuman(state, q),
+      )
+      .filter(
+        (q) =>
+          !["open", "provisional", "snoozed"].includes(q.status) ||
+          needsYouItemReady(state, q),
+      )
+      .filter((q) =>
+        actor.kind === "human"
+          ? q.trigger !== "merge_confirmation" ||
+            (!!q.card_id &&
+              currentMergeConfirmations(state, q.card_id).some(
+                (current) => current.id === q.id,
+              ))
+          : q.status === "snoozed" ||
+            !mergeConfirmationWaitingForCheck(state, q) ||
+            !!mergeCheckEndedWithoutPass(state, q),
+      ),
+    { details: includeDetails },
+  );
+}
+
 function selectNeedsYou<T>(
   d: CommandDraft,
   now: string | undefined,
@@ -810,6 +854,7 @@ function selectNeedsYou<T>(
     ...(isPmOps(d)
       ? {
           pm_queue: {
+            deferred_resumes: [...resumeAttention(state).values()],
             waiting_merge_checks: waiting,
             snoozed_merges: d
               .list("decisions")
@@ -957,39 +1002,9 @@ function selectNeedsYou<T>(
                   )[0] ?? null,
             };
           }),
-    decisions: groupHumanDecisions(
-      d
-        .list("decisions")
-        .filter((q) => !options.section || includes(decisionSection(state, q)))
-        .filter(
-          (q) =>
-            (q.decider === "human" &&
-              ["open", "provisional", "snoozed"].includes(q.status)) ||
-            (failedConfirmedMergeCheck(state, q) &&
-              // PM Ops handles it and syncs a notice (P2a-1 §2.6).
-              !(
-                hasActivePmOps(d, "resolve_delegated_decision") &&
-                pmFailedMergeCheck(state, q)
-              )) ||
-            decisionFollowupNeedsHuman(state, q),
-        )
-        .filter(
-          (q) =>
-            !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
-        )
-        .filter((q) =>
-          actor.kind === "human"
-            ? q.trigger !== "merge_confirmation" ||
-              (!!q.card_id &&
-                currentMergeConfirmations(state, q.card_id).some(
-                  (current) => current.id === q.id,
-                ))
-            : q.status === "snoozed" ||
-              !mergeConfirmationWaitingForCheck(state, q) ||
-              !!mergeCheckEndedWithoutPass(state, q),
-        ),
-      { details: includeDetails },
-    ).map(view),
+    decisions: selectNeedsYouDecisions(d, options.section, includeDetails).map(
+      view,
+    ),
     // C-503: the current, unconfirmed proposal of each open story waits on the
     // human's one-click confirmation; no decision or default stands in for it.
     story_proposals: includes("decisions") ? pendingStoryProposals(d) : [],

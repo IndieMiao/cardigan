@@ -12,10 +12,32 @@ import {
 } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
 import { useResource } from "../useResource.js";
+import {
+  FeishuConfigGroups,
+  FeishuStatusRows,
+  useFeishuConfig,
+} from "./FeishuConfigGroups.js";
 import { trackSettingsRead, useSettingWrite } from "./useSettingWrite.js";
 
 // /api/me/feishu addresses one binding regardless of the settings page's project.
 const bindingWriteKey = Symbol("feishu-binding");
+
+function bindingUnavailableReason(state: string | undefined) {
+  switch (state) {
+    case undefined:
+      return "读取中";
+    case "disabled":
+      return "未启用";
+    case "connecting":
+      return "连接中";
+    case "reconnecting":
+      return "重连中";
+    case "connected":
+      return undefined;
+    default:
+      return "离线";
+  }
+}
 
 export function FeishuSettings({ client }: { client: CardiganClient }) {
   const title = useId(),
@@ -33,6 +55,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
     return trackSettingsRead(client.feishuBinding());
   }, [client]);
   const resource = useResource(load, 0, visible);
+  const config = useFeishuConfig();
   const data = resource.data;
   const save = useSettingWrite({
     name: "飞书绑定",
@@ -104,23 +127,16 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
     restore.current = true;
     setConfirm(false);
   };
-  const label = !data
-    ? "读取中"
-    : data.bound
-      ? "已绑定"
-      : grant?.code
-        ? "等待飞书确认"
-        : expired
-          ? "绑定码已过期"
-          : data.state === "disabled"
-            ? "未启用"
-            : data.state !== "connected"
-              ? "未连接"
-              : "未绑定";
-  const disabled = save.busy || data?.state !== "connected" || !!resource.error;
+  const unavailableReason = bindingUnavailableReason(data?.state);
+  const label = data?.bound
+    ? "已绑定"
+    : (unavailableReason ??
+      (grant?.code ? "等待飞书确认" : expired ? "绑定码已过期" : "未绑定"));
+  const busyOrStale = save.busy || !!resource.error;
   return (
     <SettingsPanel title="飞书绑定" titleId={title} hidden={!visible}>
-      <SettingsGroup title="应用机器人">
+      <SettingsGroup title="状态">
+        {config && <FeishuStatusRows config={config} />}
         <SettingsRow
           label="绑定状态"
           status={
@@ -172,12 +188,12 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
             )
           ) : (
             <Button
-              aria-disabled={disabled}
-              title={
-                data?.state !== "connected" ? "应用机器人未连接" : undefined
-              }
+              disabled={!!unavailableReason}
+              aria-disabled={!!unavailableReason || busyOrStale}
+              data-disabled={busyOrStale || undefined}
+              title={unavailableReason}
               onClick={() => {
-                if (!disabled) void save.save(true);
+                if (!unavailableReason && !busyOrStale) void save.save(true);
               }}
             >
               {grant?.code ? "重新生成" : "绑定飞书"}
@@ -193,6 +209,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           </SettingsRow>
         )}
       </SettingsGroup>
+      {config && <FeishuConfigGroups config={config} />}
       <RequestFeedback
         interactive={save.saving}
         pending={save.saving || resource.pending}

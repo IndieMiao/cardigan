@@ -1,8 +1,10 @@
 import { expect, test } from "vitest";
 import {
+  acknowledgeRun,
   assign,
   cancelHumanAction,
   completeHumanAction,
+  dispatchRun,
   finishRun,
   hostOpsPending,
   queueRun,
@@ -251,6 +253,126 @@ test.each(["main", "backup"] as const)(
     ).toBe(false);
   },
 );
+
+const sameMachine = {
+  work_item_id: id("work_item", 1),
+  role_id: "coder",
+  machine_id: "worker-a",
+  recovery_source: "main" as const,
+  confirm_same_machine: true,
+};
+
+test.each([
+  ["main", human, "human"],
+  ["backup", actor(4, "pm"), "assignment:A-4"],
+] as const)(
+  "one worker: confirmed %s recovery creates and starts one audited successor",
+  (source, caller, confirmedBy) => {
+    const f = setup();
+    f.confirm();
+    const released = {
+      ...f.release(),
+      machines: [{ ...machine(), id: "worker-a" }],
+    };
+    const params = { ...sameMachine, recovery_source: source };
+    const next = value(assign(released, caller, params, f.io));
+    const recovery = {
+      previous_assignment_id: owner,
+      source,
+      same_machine_confirmed_by: confirmedBy,
+      ...(source === "backup" ? { backup } : {}),
+    };
+    expect(next.data.id).not.toBe(owner);
+    expect(next.data.recovery).toEqual(recovery);
+    expect(next.events).toContainEqual(
+      expect.objectContaining({
+        type: "work_item_assigned",
+        actor: caller,
+        payload: expect.objectContaining({
+          assignment_id: next.data.id,
+          machine_id: "worker-a",
+          recovery,
+        }),
+      }),
+    );
+    const current = apply(released, next);
+    expect(value(assign(current, caller, params, f.io))).toMatchObject({
+      data: { id: next.data.id },
+      events: [],
+      token_requests: [],
+    });
+    const queued = value(
+      queueRun(
+        current,
+        system,
+        {
+          assignment_id: next.data.id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        f.io,
+      ),
+    );
+    const queuedState = apply(current, queued);
+    const dispatched = value(
+      dispatchRun(
+        queuedState,
+        system,
+        {
+          run_id: queued.data.id,
+          runtime_ref: {
+            machine_id: "worker-a",
+            runtime_machine: "worker-a",
+            terminal_ref: "new-terminal",
+            agent_name: "successor",
+          },
+        },
+        f.io,
+      ),
+    );
+    const started = value(
+      acknowledgeRun(
+        apply(queuedState, dispatched),
+        actor(Number(next.data.id.slice(2)), "coder"),
+        { run_id: queued.data.id },
+        f.io,
+      ),
+    );
+    expect(started.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_started",
+        payload: { assignment_id: next.data.id, run_id: queued.data.id },
+      }),
+    );
+  },
+);
+
+test("same-machine confirmation is neither exit evidence nor permission and cannot choose a machine or source implicitly", () => {
+  const f = setup();
+  const rejected = (
+    state: typeof f.current,
+    params: Parameters<typeof assign>[2],
+    caller = human,
+  ) => expect(assign(state, caller, params, f.io).ok).toBe(false);
+  rejected(f.current, sameMachine);
+  rejected(f.confirm(), sameMachine); // not released yet
+  const released = f.release();
+  const { machine_id: _machine, ...noMachine } = sameMachine;
+  const { recovery_source: _source, ...noSource } = sameMachine;
+  rejected(released, noMachine);
+  rejected(released, noSource);
+  rejected(released, { ...sameMachine, machine_id: "local" });
+  rejected(released, { ...sameMachine, confirm_same_machine: false });
+  rejected(released, sameMachine, actor(2, "reviewer"));
+  const pm = actor(4, "pm");
+  if (pm.kind !== "assignment") throw new Error("Missing PM identity");
+  rejected(released, sameMachine, { ...pm, allowed_tools: [] });
+  rejected(released, sameMachine, system);
+  const late = value(
+    reportRemoteWorkerAlive(released, system, f.request.data.action_id, f.io),
+  );
+  rejected(apply(released, late), sameMachine);
+});
 
 test("normal release cannot authorize reassignment; changed runtime cannot consume confirmation", () => {
   const f = setup();

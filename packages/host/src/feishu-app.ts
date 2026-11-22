@@ -236,19 +236,21 @@ export class FeishuApp {
   }
   /** Created inside the outbox lease transaction, with the exact state used to claim the row. */
   prepare(
-    state: CommandState,
+    interaction: ReturnType<typeof extInteraction>,
     item: ExtMessageItem,
     digest: string | null,
   ): ExtMessagePort | undefined {
     const b = this.binding;
     if (!b) return;
-    const { options, basis, sensitive } = extInteraction(state, item),
+    const { options, basis, sensitive } = interaction,
       version = digest || !options.length ? "" : digestFeishu(basis);
     const actions = digest ? [] : options;
     const sendKey = digestFeishu(
       JSON.stringify([
         b.generation,
-        item.project_id,
+        // A rate digest spans projects. Its remote idempotency key must not
+        // change when the first member is handled between attempts.
+        digest?.startsWith("rate:") ? null : item.project_id,
         digest ?? item.item_id,
         version,
       ]),

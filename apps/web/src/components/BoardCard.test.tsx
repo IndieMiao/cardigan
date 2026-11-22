@@ -412,3 +412,82 @@ test("C-370 board names unfinished prerequisites and distinguishes early work fr
     ),
   ).toBeDefined();
 });
+
+// C-567: the server only sends `checking` while a check is queued or running.
+const precheckWait: CardListItem = {
+  ...card,
+  status: "in_progress",
+  waiting_on: [{ kind: "blocked", ref: "W-1", label: "W-1 阻塞" }],
+};
+const runningPrecheck = (status: "queued" | "running"): CardListItem => ({
+  ...precheckWait,
+  prechecks: [{ attempt_id: "P-1", head_sha: "a".repeat(40), status }],
+  checking: { precheck: { attempt_ids: ["P-1"], waiting_items: ["W-1"] } },
+});
+
+test.each(["queued", "running"] as const)(
+  "a %s precheck shows 预检中 instead of a red block",
+  (status) => {
+    const { container } = renderCard(runningPrecheck(status));
+    expect(screen.getByRole("link", { name: "预检中" }).textContent).toBe(
+      "预检中",
+    );
+    expect(screen.queryByRole("link", { name: /^阻塞：/ })).toBeNull();
+    expect(container.querySelector(".card-tile-blocked")).toBeNull();
+    expect(container.querySelector(".board-card-blocked")).toBeNull();
+  },
+);
+
+test.each(["passed", "failed"] as const)(
+  "after a %s precheck a remaining blocker reads as 阻塞 again",
+  (status) => {
+    const { container } = renderCard({
+      ...precheckWait,
+      prechecks: [{ attempt_id: "P-1", head_sha: "a".repeat(40), status }],
+    });
+    expect(screen.queryByRole("link", { name: "预检中" })).toBeNull();
+    expect(screen.getByRole("link", { name: "阻塞：W-1 阻塞" })).toBeTruthy();
+    expect(container.querySelector(".card-tile-blocked")).toBeTruthy();
+  },
+);
+
+test("a real blocker beside a running precheck stays 阻塞", () => {
+  const { container } = renderCard({
+    ...runningPrecheck("running"),
+    waiting_on: [
+      { kind: "blocked", ref: "W-1", label: "W-1 阻塞" },
+      { kind: "blocked", ref: "W-2", label: "W-2 阻塞" },
+    ],
+  });
+  expect(screen.getByRole("link", { name: "预检中" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "阻塞：W-2 阻塞" })).toBeTruthy();
+  expect(container.querySelector(".card-tile-blocked")).toBeTruthy();
+});
+
+test("a queued or running merge check shows 合并检查中 and nothing after it ends", () => {
+  const merging: CardListItem = {
+    ...card,
+    status: "awaiting_merge",
+    waiting_on: [],
+    checking: { merge_check: { attempt_id: "M-1", status: "running" } },
+  };
+  renderCard(merging);
+  expect(screen.getByRole("link", { name: "合并检查中" }).textContent).toBe(
+    "合并检查中",
+  );
+  cleanup();
+  const { checking: _done, ...finished } = merging;
+  renderCard(finished);
+  expect(screen.queryByRole("link", { name: "合并检查中" })).toBeNull();
+});
+
+test("check marks follow the waiting-marks display switch", () => {
+  render(
+    <BoardCard
+      card={runningPrecheck("running")}
+      projectId="p-1"
+      display={{ ...DEFAULT_CARD_DISPLAY, waiting: false }}
+    />,
+  );
+  expect(screen.queryByRole("link", { name: "预检中" })).toBeNull();
+});

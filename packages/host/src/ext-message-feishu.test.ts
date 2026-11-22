@@ -235,6 +235,7 @@ test("real HTTP digest retries once per attempt and reprojects handled/sensitive
     });
   try {
     store.createProject({ id: project_id, name: "Fictional" });
+    sender().recordStatus();
     store.uow.run((tx) => {
       tx.cards.put(project_id, card());
       for (let n = 1; n <= 22; n++) {
@@ -259,7 +260,7 @@ test("real HTTP digest retries once per attempt and reprojects handled/sensitive
     handle = (response) => response.writeHead(200).end('{"code":11232}');
     await sender().tick();
     expect(payloads).toHaveLength(1);
-    expect(JSON.stringify(payloads[0])).toContain("免打扰期间 22 条待处理");
+    expect(JSON.stringify(payloads[0])).toContain("22 条待处理");
     store.uow.run((tx) => {
       tx.human_actions.put(project_id, { ...action, status: "done" });
       tx.cards.put(project_id, card({ sensitive: true }));
@@ -271,14 +272,13 @@ test("real HTTP digest retries once per attempt and reprojects handled/sensitive
     handle = (response) => response.writeHead(200).end('{"code":0}');
     await sender().tick();
     expect(payloads).toHaveLength(2);
-    expect(JSON.stringify(payloads[1])).toContain("免打扰期间 21 条待处理");
-    expect(JSON.stringify(payloads[1]).match(/human-action-H-/gu)).toHaveLength(
-      20,
-    );
-    expect(JSON.stringify(payloads[1])).toContain("/needs-you");
-    expect(JSON.stringify(payloads[1])).toContain("有 1 条敏感事项待处理");
-    expect(JSON.stringify(payloads[1])).not.toContain("PRIVATE");
-    expect(JSON.stringify(payloads[1])).not.toContain('human-action-H-1"');
+    expect(JSON.stringify(payloads[1])).toContain("21 条待处理");
+    for (const payload of payloads) {
+      expect(JSON.stringify(payload)).toContain(config.workbench_url);
+      expect(JSON.stringify(payload)).not.toMatch(
+        /human-action-H-|敏感事项|PRIVATE|\/#\/p\//u,
+      );
+    }
     expect(
       listExtMessages(store.database).filter((r) => r.status === "sent"),
     ).toHaveLength(21);

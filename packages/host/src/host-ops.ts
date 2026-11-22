@@ -16,6 +16,7 @@ import {
   currentHarnessActivity,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
+  guardReviewRestartStop,
   type HarnessActivity,
   type HostOpsExecution,
   type HostOpsExecutionTool,
@@ -32,9 +33,12 @@ import {
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  reviewRestartStopStarted,
   type SessionActivity,
+  systemTurnOwner,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
+  withdrawUnstartedStallRestart,
   workerInspectionTarget,
 } from "@cardigan/domain";
 import {
@@ -60,7 +64,10 @@ import {
   writeContextSamples,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
-import { notifyAutomaticContextResult } from "./automatic-context-restart.js";
+import {
+  notifyAutomaticContextResult,
+  recoveryPm,
+} from "./automatic-context-restart.js";
 import {
   type ContextUsageOptions,
   contextThresholdView,
@@ -72,7 +79,13 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+import { stallWorkspace } from "./stall-evidence.js";
+import { StallPatrol } from "./stall-patrol.js";
+import {
+  revokeStoppedRunTokens,
+  stopRunRuntime,
+  stopSystemTurn,
+} from "./stop-run.js";
 import { UpstreamHealthMonitor } from "./upstream-health.js";
 
 import { inspectWorker } from "./worker-inspection.js";
@@ -138,10 +151,31 @@ export class HostOpsService {
   private readonly contextAbort = new AbortController();
   private contextPoll: Promise<void> | undefined;
   private closing = false;
+  private readonly stallPatrol: StallPatrol;
+  private stallPoll: Promise<void> | undefined;
+  private lastStallPoll = Number.NEGATIVE_INFINITY;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
+    this.stallPatrol = new StallPatrol(
+      options.store,
+      this.clock,
+      options.runtime,
+      (project) => this.stallExecution(project),
+      this.contextAbort.signal,
+    );
+  }
+  /** A project-local worker may have a different account and workspace root
+   * than the host default. Never fall back across a rejected registry binding. */
+  private stallExecution(project: ProjectId) {
+    try {
+      return this.options.workerExecution
+        ? this.options.workerExecution(project, "local")
+        : this.options.contextUsage?.execution;
+    } catch {
+      return undefined;
+    }
   }
   /** Each monitor (including its in-flight probes) belongs to one immutable launch generation. */
   private get upstream(): UpstreamHealthMonitor | undefined {
@@ -253,7 +287,8 @@ export class HostOpsService {
       }
       throw new ToolError(
         "illegal_transition",
-        "Worker unavailable or unconfigured",
+        "Worker inspection unavailable: worker_binding_unconfigured",
+        { reason: "worker_binding_unconfigured" },
       );
     };
     const execution = resolve();
@@ -265,6 +300,7 @@ export class HostOpsService {
       current,
       platform,
       harness,
+      this.options.runtime,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {
@@ -315,9 +351,10 @@ export class HostOpsService {
       ),
     );
     const observationStarted = performance.now();
-    const [sessions, deployment] = await Promise.all([
+    const [sessions, deployment, stalls] = await Promise.all([
       this.sessions(actor.project_id),
       readDeploymentDiagnostics(this.options.store, actor.project_id),
+      this.stallPatrol.diagnostics(actor.project_id),
     ]);
     const activity = await this.observeUpstream(
       actor.project_id,
@@ -365,6 +402,7 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        dispatch_stalls: stalls,
         ...(this.options.upstream
           ? { launch_warnings: launchWarnings(this.options.upstream) }
           : {}),
@@ -418,6 +456,7 @@ export class HostOpsService {
       reason?: string;
       idempotency_key: string;
       context_session_id?: string;
+      dispatch_stall_id?: string;
     },
   ) {
     const { store } = this.options,
@@ -476,18 +515,39 @@ export class HostOpsService {
         "stale_target",
         "精确上下文数据缺失、过期或会话已更换，请重新读取诊断",
       );
-    const params = {
-      ...(contextUsage
-        ? {
-            context_usage: contextUsage,
-            context_stale_after_ms:
-              this.options.contextUsage?.staleAfterMs ??
-              DEFAULT_CONTEXT_STALE_AFTER_MS,
-          }
-        : {}),
-      tool,
-      target_id: p.target_id as AssignmentId | RunId,
-      reason: p.reason ?? "",
+    const paramsFor = (state: CommandState) => {
+      const stall =
+        p.dispatch_stall_id &&
+        this.stallPatrol.current(
+          state,
+          p.target_id as AssignmentId,
+          p.dispatch_stall_id,
+        );
+      if (p.dispatch_stall_id && !stall)
+        throw new ToolError(
+          "stale_target",
+          "该指派已没有可以按此原因恢复的积压",
+          { reason: "stall_not_current" },
+        );
+      return {
+        ...(stall && stall.review_trigger_id
+          ? { review_trigger_id: stall.review_trigger_id }
+          : {}),
+        ...(p.dispatch_stall_id
+          ? { dispatch_stall_id: p.dispatch_stall_id }
+          : {}),
+        ...(contextUsage
+          ? {
+              context_usage: contextUsage,
+              context_stale_after_ms:
+                this.options.contextUsage?.staleAfterMs ??
+                DEFAULT_CONTEXT_STALE_AFTER_MS,
+            }
+          : {}),
+        tool,
+        target_id: p.target_id as AssignmentId | RunId,
+        reason: p.reason ?? "",
+      };
     };
     const activity =
       tool === "host_ops_cancel_run"
@@ -503,8 +563,47 @@ export class HostOpsService {
           undefined,
           activity,
         );
-      return unwrap(prepareHostOpsAction(state, actor, params)).data;
+      return unwrap(prepareHostOpsAction(state, actor, paramsFor(state))).data;
     });
+    if (p.dispatch_stall_id) {
+      const state = store.uow.read((tx) => loadCommandState(tx, project));
+      const stall = this.stallPatrol.current(
+        state,
+        preflight.assignment.id,
+        p.dispatch_stall_id,
+      );
+      if (!stall)
+        throw new ToolError(
+          "stale_target",
+          "该指派已没有可以按此原因恢复的积压",
+          { reason: "stall_not_current" },
+        );
+      const evidence = await this.stallPatrol.evidence(
+        state,
+        preflight.assignment,
+        stall,
+      );
+      if (!evidence.can_restart) {
+        const unsafeWorkspace =
+          evidence.workspace !== "clean" &&
+          evidence.workspace !== "no_worktree";
+        throw new ToolError(
+          "stale_target",
+          unsafeWorkspace
+            ? "工作区有改动或不能确认干净"
+            : "不能确认原终端轮次已结束",
+          {
+            reason: unsafeWorkspace
+              ? "workspace_unconfirmed"
+              : "turn_end_unconfirmed",
+            workspace: evidence.workspace,
+            process_state: evidence.process_state,
+            terminal_state: evidence.terminal_state,
+            terminal_owner: evidence.terminal_owner,
+          },
+        );
+      }
+    }
     const snapshot =
       tool === "host_ops_cancel_run"
         ? undefined
@@ -524,6 +623,7 @@ export class HostOpsService {
       store.runIdempotent(invocation, (tx) => {
         context.revalidateToken?.();
         const state = loadCommandState(tx, project);
+        const params = paramsFor(state);
         const fresh = unwrap(prepareHostOpsAction(state, actor, params)).data;
         const diagnosis =
           tool === "host_ops_cancel_run"
@@ -544,6 +644,7 @@ export class HostOpsService {
           throw new ToolError(
             "stale_target",
             "Target changed during preflight; read diagnostics again",
+            { reason: "preflight_target_changed" },
           );
         if (
           unfinishedBellAttempts(store.database, project).some(
@@ -690,6 +791,7 @@ export class HostOpsService {
       ...this.sessionPolls.values(),
       ...this.actionWorkers.values(),
       this.contextPoll,
+      this.stallPoll,
     ]);
   }
   /** Runtime/context observations must precede clustering, without holding the dispatcher. */
@@ -940,7 +1042,7 @@ export class HostOpsService {
         ),
       );
       persistEffect(tx, project, effect);
-      notifyAutomaticContextResult(store, project, effect);
+      notifyAutomaticContextResult(store, project, effect, tx);
     });
   }
 
@@ -960,7 +1062,7 @@ export class HostOpsService {
         ),
       );
       persistEffect(tx, project, effect);
-      notifyAutomaticContextResult(this.options.store, project, effect);
+      notifyAutomaticContextResult(this.options.store, project, effect, tx);
     });
   }
   /**
@@ -987,6 +1089,23 @@ export class HostOpsService {
         for (const project of this.options.store.listProjects())
           this.pollUpstream(project.id);
       this.scheduleContexts();
+      if (
+        !this.closing &&
+        !this.stallPoll &&
+        Date.parse(this.clock.now()) - this.lastStallPoll >= 30_000
+      ) {
+        this.lastStallPoll = Date.parse(this.clock.now());
+        this.stallPoll = (async () => {
+          for (const p of this.options.store.listProjects()) {
+            if (this.closing) break;
+            await this.stallPatrol.tick(p.id, this.options.snapshot);
+          }
+        })()
+          .catch((e) => this.options.onError?.(e))
+          .finally(() => {
+            this.stallPoll = undefined;
+          });
+      }
       await this.drain();
     });
     this.serial = next.catch(() => {});
@@ -1073,14 +1192,16 @@ export class HostOpsService {
         const key = JSON.stringify([project.id, action.assignment_id]);
         if (this.actionWorkers.has(key)) continue;
         if (
-          (this.upstream || action.automatic_context_restart) &&
+          (this.upstream ||
+            action.automatic_context_restart ||
+            action.dispatch_stall_id) &&
           action.tool !== "host_ops_cancel_run"
         ) {
           // Keep the original stop-time safety checks and lock inside the worker.
           // A slow project sample must not hold routing or unrelated cancellations.
           const worker = this.drainAction(project.id, action)
             .catch((error) => {
-              if (action.automatic_context_restart)
+              if (action.automatic_context_restart || action.dispatch_stall_id)
                 this.contextResult(
                   project.id,
                   action,
@@ -1118,13 +1239,49 @@ export class HostOpsService {
       });
       if (!lease) return;
       const fail = (reason: string) => {
-        if (action.automatic_context_restart)
+        if (action.dispatch_stall_id) {
+          const withdrawn = store.uow.run((tx) => {
+            const effect = unwrap(
+              withdrawUnstartedStallRestart(
+                loadCommandState(tx, project),
+                { kind: "system", project_id: project },
+                action.action_id,
+                { clock: this.clock, ids: tx.ids },
+                reason,
+              ),
+            );
+            persistEffect(tx, project, effect);
+            const e = effect.data;
+            if (e)
+              recordNotification(store.database, {
+                project_id: project,
+                event_id: e.id,
+                seq: e.seq,
+                kind: "run_attention",
+                at: e.created_at,
+                recipient: {
+                  kind: recoveryPm(
+                    tx.assignments.get(project, action.assignment_id),
+                  ),
+                },
+              });
+            return !!e;
+          });
+          if (withdrawn) return;
+          if (
+            !pendingHostOpsActions(read().events).some(
+              (a) => a.action_id === action.action_id,
+            )
+          )
+            return;
+        }
+        if (action.automatic_context_restart || action.dispatch_stall_id)
           this.contextResult(project, action, "failed", reason);
         else this.defer(project, action.action_id, reason);
       };
       const current = () => {
         const state = read();
-        return (
+        const claimed =
           state.events.findLast(
             (e) =>
               e.type === "host_ops_action_claimed" &&
@@ -1133,12 +1290,16 @@ export class HostOpsService {
           )?.id === lease &&
           pendingHostOpsActions(state.events).some(
             (a) => a.action_id === action.action_id,
-          ) &&
+          );
+        if (!claimed) return false;
+        const bound =
           JSON.stringify(
             state.assignments.find((a) => a.id === action.assignment_id)
               ?.runtime_ref,
-          ) === JSON.stringify(action.runtime_ref)
-        );
+          ) === JSON.stringify(action.runtime_ref);
+        if (!bound && action.system_finished_run_id)
+          fail("terminal_binding_changed");
+        return bound;
       };
       // Do not revoke credentials or release the Run slot until exit is proven.
       if (!current()) return;
@@ -1174,8 +1335,74 @@ export class HostOpsService {
           return;
         }
       }
+      let evidenceFailure: string | undefined;
+      const checkStall = async () => {
+        if (!action.dispatch_stall_id) return;
+        const state = read();
+        const a = state.assignments.find((a) => a.id === action.assignment_id);
+        const stall =
+          a && this.stallPatrol.current(state, a.id, action.dispatch_stall_id);
+        const view =
+          a && stall && (await this.stallPatrol.evidence(state, a, stall));
+        evidenceFailure = !view
+          ? "stall_not_current"
+          : !view.can_restart
+            ? `workspace=${view.workspace}; terminal_owner=${view.terminal_owner ?? "unknown"}; terminal_state=${view.terminal_state ?? "unknown"}`
+            : undefined;
+      };
+      // Only inspect the fixed workspace here: the runtime already owns
+      // its signal slot, so a nested runtime probe could wait on itself.
+      const checkWorkspace = async () => {
+        const state = read();
+        const a = state.assignments.find((a) => a.id === action.assignment_id);
+        const workspace = a
+          ? await stallWorkspace(
+              state,
+              a,
+              this.stallExecution(project),
+              this.contextAbort.signal,
+            )
+          : "unknown";
+        if (workspace === "clean" || workspace === "no_worktree") return true;
+        evidenceFailure = `workspace=${workspace}`;
+        return false;
+      };
+      const reviewRestart =
+        action.tool === "host_ops_restart_assignment" &&
+        !action.dispatch_stall_id &&
+        read().work_items.some(
+          (w) =>
+            w.assignment_id === action.assignment_id && w.kind === "verify",
+        );
+      const reviewStopGuard = (beforeRelease: boolean) =>
+        store.uow.run((tx) => {
+          const effect = unwrap(
+            guardReviewRestartStop(
+              loadCommandState(tx, project),
+              { kind: "system", project_id: project },
+              action.action_id,
+              { clock: this.clock, ids: tx.ids },
+              beforeRelease,
+            ),
+          );
+          persistEffect(tx, project, effect);
+          return effect.data;
+        });
       const mayStop = () => {
         if (this.closing || !current()) return false;
+        if (
+          action.dispatch_stall_id &&
+          (evidenceFailure ||
+            !this.stallPatrol.current(
+              read(),
+              action.assignment_id,
+              action.dispatch_stall_id,
+            ))
+        ) {
+          fail(evidenceFailure ?? "stall_not_current");
+          return false;
+        }
+        if (reviewRestart && !reviewStopGuard(false)) return false;
         if (action.tool === "host_ops_cancel_run") return true;
         if (this.upstream !== observationMonitor) {
           fail("upstream_configuration_changed");
@@ -1232,47 +1459,81 @@ export class HostOpsService {
           return false;
         }
       };
-      if (!mayStop()) return;
       const foreign =
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
       const stopStarted =
-        action.automatic_context_restart === true &&
-        read().events.some(
-          (e) =>
-            e.type === "host_ops_action_deferred" &&
-            (e.payload as { action_id?: string }).action_id ===
-              action.action_id &&
-            (e.payload as { reason?: string }).reason ===
-              "automatic_context_stop_started",
-        );
+        (reviewRestart && reviewRestartStopStarted(read(), action.action_id)) ||
+        ((action.automatic_context_restart === true ||
+          !!action.dispatch_stall_id) &&
+          read().events.some(
+            (e) =>
+              e.type === "host_ops_action_deferred" &&
+              (e.payload as { action_id?: string }).action_id ===
+                action.action_id &&
+              (e.payload as { reason?: string }).reason ===
+                "automatic_context_stop_started",
+          ));
+      // A started stop can only observe its exit. The original notice may
+      // already be ACKed; settlement rechecks it before allowing a new Run.
+      if (!(action.system_finished_run_id && stopStarted) && !mayStop()) return;
       if (foreign) {
-        if (action.automatic_context_restart) {
+        if (action.automatic_context_restart || action.dispatch_stall_id) {
           fail("当前主机无法确认旧会话退出");
           return;
         }
         if (!this.confirmedByHuman(project, action)) return;
-      } else if (
-        (await stopRunRuntime(
-          runtime,
-          action.runtime_ref,
-          () => {
-            if (!mayStop()) return false;
-            // Persist before the external stop: after a crash only observe its exit.
-            if (action.automatic_context_restart)
-              this.defer(
-                project,
-                action.action_id,
-                "automatic_context_stop_started",
-              );
-            return true;
-          },
-          stopStarted,
-          !stopStarted,
-        )) !== "exited"
-      ) {
-        if (!this.closing) fail("terminal_exit_unconfirmed");
-        return;
+      } else {
+        const beforeSignal = () => {
+          if (!mayStop()) return false;
+          if (reviewRestart && !reviewStopGuard(true)) return false;
+          if (action.automatic_context_restart || action.dispatch_stall_id)
+            this.defer(
+              project,
+              action.action_id,
+              "automatic_context_stop_started",
+            );
+          return true;
+        };
+        let result: string;
+        if (action.system_finished_run_id) {
+          if (!stopStarted) {
+            await checkStall();
+            if (!mayStop()) return;
+          }
+          result = await stopSystemTurn(
+            runtime,
+            action.runtime_ref,
+            systemTurnOwner(
+              read(),
+              action.assignment_id,
+              action.runtime_ref,
+              action.system_finished_run_id,
+            ),
+            stopStarted,
+            checkWorkspace,
+            beforeSignal,
+          );
+          // Exit can also be observed without sending anything. Exit alone
+          // does not authorize clearing the session and queuing its successor.
+          if (result === "exited" && !(await checkWorkspace()))
+            result = "withdrawn";
+          result = evidenceFailure ?? result;
+        } else {
+          result = await stopRunRuntime(
+            runtime,
+            action.runtime_ref,
+            beforeSignal,
+            stopStarted,
+            !stopStarted,
+            action.dispatch_stall_id ? checkStall : undefined,
+          );
+          if (result !== "exited") result = "terminal_exit_unconfirmed";
+        }
+        if (result !== "exited") {
+          if (!this.closing) fail(result);
+          return;
+        }
       }
       if (!current()) return;
       try {
@@ -1283,6 +1544,16 @@ export class HostOpsService {
         );
       } catch {
         fail("credential_cleanup_failed");
+        return;
+      }
+      // Credential scrubbing can wait on worker IO. Do not queue from a
+      // workspace observation made before that wait.
+      if (
+        action.system_finished_run_id &&
+        this.options.scrubCredentials &&
+        !(await checkWorkspace())
+      ) {
+        if (!this.closing) fail(evidenceFailure ?? "workspace=unknown");
         return;
       }
       store.uow.run((tx) => {
@@ -1298,10 +1569,17 @@ export class HostOpsService {
           return;
         const effect = unwrap(
           finishHostOpsAction(
-            loadCommandState(tx, project),
+            state,
             { kind: "system", project_id: project },
             action.action_id,
             { clock: this.clock, ids: tx.ids },
+            action.dispatch_stall_id
+              ? this.stallPatrol.current(
+                  state,
+                  action.assignment_id,
+                  action.dispatch_stall_id,
+                )
+              : undefined,
           ),
         );
         revokeStoppedRunTokens(tx, project, action.assignment_id);

@@ -3,6 +3,8 @@ import { isMergePrerequisite } from "../human-action.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
+import { closedResumeTarget, deferResume } from "./resume-attention.js";
+import { stoppedByHuman } from "./stop.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -52,27 +54,35 @@ function upgradedSinceRun(
   return versions.has(assignment.role_version);
 }
 
+export function resumeBlockReason(
+  d: CommandDraft,
+  item: WorkItem,
+): string | undefined {
+  if (item.reported_blocker) return "上报的阻塞尚未解除";
+  const decision = d
+    .list("decisions")
+    .find(
+      (q) =>
+        q.blocking &&
+        ["open", "provisional", "snoozed"].includes(q.status) &&
+        q.affected_work_items.includes(item.id),
+    );
+  if (decision) return `拍板 ${decision.id} 尚未解决`;
+  const action = d
+    .list("human_actions")
+    .find(
+      (h) =>
+        h.status === "open" &&
+        isMergePrerequisite(h) &&
+        h.blocked_work_items.includes(item.id),
+    );
+  if (action) return `合并前置操作 ${action.id} 尚未完成`;
+  if (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
+    return "审核轮数已达上限";
+}
+
 export function canResume(d: CommandDraft, item: WorkItem): boolean {
-  return !(
-    item.reported_blocker ||
-    d
-      .list("decisions")
-      .some(
-        (q) =>
-          q.blocking &&
-          ["open", "provisional", "snoozed"].includes(q.status) &&
-          q.affected_work_items.includes(item.id),
-      ) ||
-    d
-      .list("human_actions")
-      .some(
-        (h) =>
-          h.status === "open" &&
-          isMergePrerequisite(h) &&
-          h.blocked_work_items.includes(item.id),
-      ) ||
-    (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
-  );
+  return !resumeBlockReason(d, item);
 }
 
 export function resumeWork(
@@ -93,27 +103,31 @@ export function resumeWork(
 }
 
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
-  if (d.card(item.card_id).hold || item.manual_assign) return;
-  if (!item.assignment_id) return;
+  const card = d.card(item.card_id);
+  if (closedResumeTarget(item, card.status)) return;
+  if (card.hold) return deferResume(d, item, "卡片已暂停", event.id);
+  if (!item.assignment_id) return deferResume(d, item, "没有负责人", event.id);
   const assignment = d.get("assignments", item.assignment_id);
+  const stop = stoppedByHuman(d.state.events, assignment.id)
+    ? "指派已被人工停止"
+    : undefined;
+  const deferred = (reason: string) =>
+    deferResume(d, item, stop ?? reason, event.id);
   if (
     !hasRunTarget(assignment, {
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     })
   )
-    return;
+    return deferred("没有可执行的审核目标");
   const runs = d.list("runs").filter((r) => r.assignment_id === assignment.id);
+  if (assignment.status !== "active") return deferred("指派未激活");
+  if (runs.some((r) => r.inactivity_stop || r.dispatch_stop))
+    return deferred("Run 正在停止");
   if (
-    assignment.status !== "active" ||
-    runs.some(
-      (r) =>
-        r.inactivity_stop ||
-        r.dispatch_stop ||
-        !["completed", "failed", "cancelled"].includes(r.status),
-    )
+    runs.some((r) => !["completed", "failed", "cancelled"].includes(r.status))
   )
-    return;
+    return deferred("已有未结束的 Run");
   // A new delivery can hit the limit after the previous review Run already completed.
   const reviewLimit =
     item.status === "waiting_decision" &&
@@ -134,11 +148,14 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
           d.list("reviews").some((review) => review.run_id === r.id)),
     )
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  if (!previous) return;
+  if (!previous) return deferred("没有可沿用的阻塞 Run");
   // A retired role's model/CLI/profile cannot describe the next session. Keep
   // the durable resume event and let Dispatcher resolve the current trusted
   // launch configuration before queuing a Run. No historical Run is rewritten.
   if (upgradedSinceRun(d, item, assignment, previous)) {
+    // Keep the owner's notification even when stopped; it is not a Run.
+    // Dispatcher leaves it pending until an actual human restart.
+    if (stop) deferred(stop);
     // Every entry point needs a durable request independent of its cause's
     // notification/readiness policy. Router coalesces the cause for this owner.
     d.emit("work_item_resume_requested", item.card_id, {
@@ -152,6 +169,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     });
     return;
   }
+  if (stop) return deferred(stop);
   ensure(
     previous.role_version === assignment.role_version &&
       previous.model.trim() &&

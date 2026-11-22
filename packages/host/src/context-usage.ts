@@ -353,6 +353,9 @@ export async function readSessionContexts(
             run_id: run.id,
             session_id: metadata.session_id,
             updated_at: metadata.updated_at,
+            ...(metadata.model_output_at
+              ? { model_output_at: metadata.model_output_at }
+              : {}),
             ...(metadata.error &&
             progress &&
             progress.session_id === metadata.session_id &&

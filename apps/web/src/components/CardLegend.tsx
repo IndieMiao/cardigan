@@ -293,6 +293,31 @@ export const CARD_LEGEND_GROUPS: readonly {
         selectors: [".board-card-blocked", '[aria-label^="阻塞："]'],
       },
       {
+        id: "precheck",
+        element: (
+          <>
+            <StatusIcon status="running" />
+            预检中
+          </>
+        ),
+        meaning:
+          "作者的预检正在排队或运行；只等预检结果的工作项不按阻塞显示，也没有红色竖条。",
+        when: "存在排队或运行中的预检且开启“显示 → 等待标记”。预检结束后恢复为实际状态，失败退回或真正的阻塞照常显示。",
+        selectors: ['[aria-label="预检中"]'],
+      },
+      {
+        id: "merge_check",
+        element: (
+          <>
+            <StatusIcon status="running" />
+            合并检查中
+          </>
+        ),
+        meaning: "待合并的卡正在排队或运行合并检查。",
+        when: "卡片待合并、合并检查在排队或运行且开启“显示 → 等待标记”。检查结束后标记消失。",
+        selectors: ['[aria-label="合并检查中"]'],
+      },
+      {
         id: "review-reason",
         element: <StatusTag status="review" />,
         meaning:

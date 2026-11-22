@@ -14,6 +14,7 @@ import {
   requestDecision,
   requestHumanAction,
   reviewLimitAttention,
+  stopWorkItemAssignment,
   submitDelivery,
   submitReview,
   toolNames,
@@ -266,6 +267,55 @@ function upgradedBlocker() {
     ),
   );
 }
+
+test("a stopped upgraded owner retains a fresh-role notice AND one PM stop reason without queuing a Run", () => {
+  let state = upgradedBlocker();
+  const owner = id("assignment", 1);
+  state = apply(
+    state,
+    value(
+      stopWorkItemAssignment(
+        state,
+        human,
+        { assignment_id: owner, reason: "Wait for human restart" },
+        io,
+      ),
+    ),
+  );
+  const history = state.runs;
+  const resume = () =>
+    value(
+      updateWorkItem(
+        state,
+        office,
+        { work_item_id: producer, status: "in_progress" },
+        io,
+      ),
+    );
+  state = apply(state, resume());
+  state = apply(state, resume());
+  const facts = (type: string) => state.events.filter((e) => e.type === type);
+  expect(facts("work_item_resume_requested")).toMatchObject([
+    {
+      payload: {
+        assignment_id: owner,
+        role_version: 2,
+        previous_run_id: id("run", 1),
+      },
+    },
+  ]);
+  expect(facts("work_item_resume_deferred")).toHaveLength(1);
+  expect(state.runs).toEqual(history);
+  const pmState = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: "ops" as const } : a,
+    ),
+  };
+  expect(
+    value(listNeedsYou(pmState, ops, io.clock)).data.pm_queue?.deferred_resumes,
+  ).toMatchObject([{ work_item_id: producer, reason: "指派已被人工停止" }]);
+});
 
 test.each(["triage", "legacy"] as const)(
   "an upgraded human action resumed by %s persists a fresh-session request",

@@ -203,6 +203,32 @@ test.each([false, true])(
   },
 );
 
+test("a worker tool variable cannot shadow a provider setting or credential, including custom names", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1" },
+    role: roleFor("claude-code", "example"),
+    launch: parseLaunchConfig({
+      providers: {
+        fixture: {
+          harness: "claude-code",
+          env: { PROFILE_OPTION: "configured" },
+          secret_env: { SERVICE_LOGIN: "fixture" },
+        },
+      },
+      profiles: { example: { harness: "claude-code", provider: "fixture" } },
+    }),
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "fixture",
+    secrets: { fixture: "fixture-only" },
+  };
+  for (const key of ["PROFILE_OPTION", "SERVICE_LOGIN"])
+    expect(() =>
+      compileAssignmentLaunch({ ...input, worker_env: { [key]: "conflict" } }),
+    ).toThrow("Worker environment conflicts with launch profile");
+});
+
 test("all Agent harnesses default to nice 10 and accept only integers from 0 to 19", () => {
   for (const [harness, profile, binary] of [
     ["claude-code", "claude-agent", "claude"],
@@ -1020,13 +1046,14 @@ describe("provider credentials leave the run directory", () => {
     test(`${harness}: launch.sh hands over the credentials and deletes both files`, () => {
       const root = mkdtempSync(join(tmpdir(), "cardigan-launch-script-"));
       try {
+        const sdk = "/fixture/Android's SDK $(false)";
         const runDir = join(root, "run");
         mkdirSync(runDir, { recursive: true });
         mkdirSync(join(root, "bin"), { recursive: true });
         const fakeCli = join(root, "bin", binary);
         writeFileSync(
           fakeCli,
-          `#!/bin/sh\nenv | grep -E '^(MCP_TOKEN|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|DS_API_KEY)=' | sort\necho "args=$*"\n`,
+          `#!/bin/sh\nenv | grep -E '^(MCP_TOKEN|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY|DS_API_KEY|ANDROID_HOME)=' | sort\necho "args=$*"\n`,
         );
         chmodSync(fakeCli, 0o755);
 
@@ -1039,6 +1066,7 @@ describe("provider credentials leave the run directory", () => {
           work_dir: runDir,
           first_prompt: first,
           secrets,
+          worker_env: { ANDROID_HOME: sdk },
         });
         for (const file of compiled.files) {
           mkdirSync(join(file.path, ".."), { recursive: true });
@@ -1060,6 +1088,7 @@ describe("provider credentials leave the run directory", () => {
           env,
         });
 
+        expect(output).toContain(`ANDROID_HOME=${sdk}\n`);
         // The CLI saw both the token and the provider credential.
         expect(output).toContain("MCP_TOKEN=fictional-runtime-token");
         const secret = Object.values(compiled.secret_env)[0] ?? "";

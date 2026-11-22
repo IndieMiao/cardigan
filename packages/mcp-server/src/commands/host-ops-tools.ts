@@ -23,6 +23,7 @@ export interface HostOpsToolOptions {
         reason?: string;
         idempotency_key: string;
         context_session_id?: string;
+        dispatch_stall_id?: string;
       },
     ): Promise<unknown> | unknown;
   };
@@ -64,6 +65,7 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
         "Request an Assignment restart; the host confirms exit before asynchronously queuing a new Run.",
       input: z.object({
         assignment_id: id("assignment"),
+        dispatch_stall_id: z.string().min(1).max(200).optional(),
         context_session_id: z.string().min(1).optional(),
         reason,
         idempotency_key,
@@ -71,6 +73,9 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
       handler: (p, c) =>
         host().execute(c, "host_ops_restart_assignment", {
           target_id: p.assignment_id,
+          ...(p.dispatch_stall_id
+            ? { dispatch_stall_id: p.dispatch_stall_id }
+            : {}),
           ...(p.context_session_id
             ? { context_session_id: p.context_session_id }
             : {}),
@@ -107,6 +112,7 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
         "Request a new session for a numbered standing PM after the host confirms terminal exit.",
       input: z.object({
         assignment_id: id("assignment"),
+        dispatch_stall_id: z.string().min(1).max(200).optional(),
         context_session_id: z.string().min(1).optional(),
         reason,
         idempotency_key,
@@ -114,6 +120,9 @@ export function hostOpsTools(options: HostOpsToolOptions = {}) {
       handler: (p, c) =>
         host().execute(c, "host_ops_restart_standing_pm", {
           target_id: p.assignment_id,
+          ...(p.dispatch_stall_id
+            ? { dispatch_stall_id: p.dispatch_stall_id }
+            : {}),
           ...(p.context_session_id
             ? { context_session_id: p.context_session_id }
             : {}),
