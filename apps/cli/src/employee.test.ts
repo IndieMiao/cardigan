@@ -122,14 +122,13 @@ test("avatar list exposes all bundled names and employee add/update persist libr
   output = [];
   errors = [];
   expect(await main(["avatar", "list"], io)).toBe(0);
-  expect(output.join("\n").split("\n")).toHaveLength(60);
+  expect(output.join("\n").split("\n")).toHaveLength(69);
   expect(output.join("\n")).toContain("guan-yu  关羽  三国演义");
+  expect(output.join("\n")).toContain("xiao-he  萧何  历史人物");
   expect(await run([...add, "--avatar", "library:guan-yu"])).toBe(0);
   expect(snapshot().employees[0]?.avatar).toBe("library:guan-yu");
-  expect(await run(["update", "E-1", "--avatar", "library:sun-wukong"])).toBe(
-    0,
-  );
-  expect(snapshot().employees[0]?.avatar).toBe("library:sun-wukong");
+  expect(await run(["update", "E-1", "--avatar", "library:xiao-he"])).toBe(0);
+  expect(snapshot().employees[0]?.avatar).toBe("library:xiao-he");
   const before = snapshot();
   for (const reference of [
     "library:missing",
