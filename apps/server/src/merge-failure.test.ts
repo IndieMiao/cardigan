@@ -57,6 +57,11 @@ test("quoted paths with spaces, URLs, scp addresses, hosts and IPs are redacted"
       "ENOENT: no such file or directory, realpath '<路径>'",
     ],
     [
+      "fatal: '/tmp/x/Studio's Team/private-module' does not appear to be a git repository",
+      "fatal: '<路径>' does not appear to be a git repository",
+    ],
+    ['error: "/srv/a "quoted" dir/repo" missing', 'error: "<路径>" missing'],
+    [
       "ssh: connect to host 192.168.1.23 port 22: Connection refused",
       "ssh: connect to host <主机> port 22: Connection refused",
     ],
@@ -84,4 +89,45 @@ test("quoted paths with spaces, URLs, scp addresses, hosts and IPs are redacted"
   ];
   for (const [input, expected] of cases)
     expect(redactMergeFailure(new Error(input))).toBe(expected);
+});
+
+test("a real file-system error keeps only its code and operation", async () => {
+  const { realpath } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const missing = join(tmpdir(), "Studio's Team", "private-module");
+  const error = await realpath(missing).catch((e: unknown) => e);
+  expect(redactMergeFailure(error)).toBe("ENOENT（realpath）");
+  expect(mergeFailureReason("C-9", error)).not.toContain("Team");
+});
+
+test("a missing local source with quotes and spaces never reaches the reason", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { CentralRepositoryService } = await import("@cardigan/git-service");
+  const { CentralGitTransport } = await import("@cardigan/git-transport");
+  const root = await mkdtemp(join(tmpdir(), "cg-redact-"));
+  try {
+    const dataDir = join(root, "data");
+    const central = new CentralRepositoryService(
+      new CentralGitTransport({ dataDir }),
+      { dataDir },
+    );
+    for (const dir of ["Team Project", "Studio's Team", 'Quote "Team"']) {
+      const error = await mergeStage("同步源仓库", () =>
+        central.syncFromSource({
+          project_id: "p",
+          source_repo: join(root, dir, "private-module"),
+          base_branch: "main",
+        }),
+      ).catch((e: unknown) => e);
+      const reason = mergeFailureReason("C-9", error);
+      expect(reason).toContain("「同步源仓库」");
+      for (const leaked of ["Team", "private-module", root])
+        expect(reason).not.toContain(leaked);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

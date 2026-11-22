@@ -200,6 +200,9 @@ export class CentralRepositoryService {
    * other I/O failure, is an error.
    */
   async syncFromSource(project: CentralProject): Promise<SourceSync> {
+    // The branch name becomes a fetch refspec: never a pattern or full ref.
+    if (!validCentralBranch(project.base_branch))
+      throw new Error("Invalid baseline branch name");
     const repo = await this.ensureRepository(project),
       base = `refs/heads/${project.base_branch}`;
     let snapshot: Awaited<ReturnType<typeof this.sourceRefs>>;
@@ -242,6 +245,8 @@ export class CentralRepositoryService {
    * source created after the central clone is created on first use.
    */
   async ensureBranch(project: CentralProject): Promise<string> {
+    if (!validCentralBranch(project.base_branch))
+      throw new Error("Invalid baseline branch name");
     const repository = await this.ensureRepository(project);
     if (
       !(await this.git.readRef(repository, `refs/heads/${project.base_branch}`))

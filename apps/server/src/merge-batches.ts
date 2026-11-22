@@ -14,7 +14,9 @@ import {
   hasBatchFailureEvidence,
   identifyMergeBatchCulprit,
   type MergeBatch,
+  mergeBatchBranch,
   mergeBatches,
+  mergePlan,
   mergeQueue,
   mergeWindows,
   mergeWindowVersions,
@@ -259,19 +261,28 @@ export class MergeBatches {
       command(id, (s, a, p) =>
         abortMergeBatch(s, a, { batch_id: probe.id, reason: "interrupted" }, p),
       );
-    if (activeMergeFamilies(state(id).events).length || fenced(id)) {
+    if (fenced(id)) {
       this.recordFailures(id, failures);
       return;
     }
+    // Each branch owns one batch family at a time. A family stuck on its
+    // branch (for example an unreadable baseline) never blocks another branch.
+    const owned = new Set(
+      activeMergeFamilies(state(id).events).map((b) =>
+        mergeBatchBranch(state(id), b),
+      ),
+    );
     const queue = mergeQueue(state(id));
-    // The first branch in queue order whose baseline is readable forms the
-    // batch; other branches wait their turn, failed ones record why.
+    // The first free branch in queue order whose baseline is readable forms
+    // the batch; other branches wait their turn, failed ones record why.
     let branch: string | undefined;
-    for (const item of queue)
+    for (const item of queue) {
+      if (owned.has(item.plan.base_branch)) continue;
       if ((await baselineOf(item.plan.base_branch)) !== undefined) {
         branch = item.plan.base_branch;
         break;
       }
+    }
     this.recordFailures(id, failures);
     if (branch === undefined) return;
     const chosen: typeof queue = [];
@@ -415,12 +426,24 @@ export class MergeBatches {
         );
   }
 
-  /** Once per completion, like the direct merge loop: queued cards of a failed branch. */
+  /**
+   * Once per completion, like the direct merge loop: queued cards and members
+   * of an active family on a branch whose baseline could not be read.
+   */
   private recordFailures(id: string, failures: ReadonlyMap<string, unknown>) {
     if (!failures.size) return;
     const { state, command } = this.options;
     const snapshot = state(id);
-    for (const item of mergeQueue(snapshot)) {
+    const plans = [
+      ...mergeQueue(snapshot).map((q) => q.plan),
+      ...activeMergeFamilies(snapshot.events).flatMap((b) =>
+        b.members.flatMap((m) => {
+          const plan = mergePlan(snapshot, m.card_id);
+          return plan.ok ? [plan.value] : [];
+        }),
+      ),
+    ];
+    for (const item of plans.map((plan) => ({ plan }))) {
       if (!failures.has(item.plan.base_branch)) continue;
       const recorded = snapshot.events.some(
         (e) =>

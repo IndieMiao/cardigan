@@ -1361,6 +1361,64 @@ test("C-589: a queue branch that cannot sync records its step; other branches st
   expect(await baseline()).toBe(repos.base);
 }, 30_000);
 
+test("C-589: a passed batch stuck on an unreadable branch blocks only that branch", async () => {
+  const farm = "integration/farm";
+  git(repos.source, "checkout", "-q", "-b", farm);
+  const farmBase = commit(repos.source, "farm.txt", "farm\n");
+  git(repos.source, "checkout", "-q", "main");
+  const [onMain] = await queuedCards(1);
+  const { options, binding } = await gated("true", true);
+  let broken = false;
+  const sync = binding.sync.bind(binding);
+  vi.spyOn(binding, "sync").mockImplementation(async (view) => {
+    if (broken && view.base_branch === "main")
+      throw new Error("fixture outage");
+    return sync(view);
+  });
+  const executor = new MergeExecutor(options);
+  await executor.tick(); // Card check.
+  await executor.tick(); // Batch check; publication would follow next tick.
+  const mainBatch = mergeBatches(f.state().events).find((b) =>
+    b.members.some((m) => m.card_id === onMain),
+  );
+  expect(mainBatch?.status).toBe("passed");
+  broken = true;
+  const onFarm = m4Scenario(f, "auto", farm);
+  git(repos.agent, "fetch", "-q", "origin");
+  git(repos.agent, "checkout", "-q", "-B", "batch-farm", `origin/${farm}`);
+  const farmSha = commit(repos.agent, "farm-card.txt", "farm card\n");
+  git(repos.agent, "checkout", "-q", "main");
+  const delivered = await acceptThroughMergeGate(f, onFarm, farmSha);
+  await pin(delivered.product.id, farmSha);
+  for (let i = 0; i < 5; i++) await executor.tick();
+  const card = (id: string | undefined) =>
+    f.state().cards.find((c) => c.id === id);
+  expect(card(onFarm.card.id)?.status).toBe("done");
+  expect(card(onMain)?.status).toBe("awaiting_merge");
+  // The stuck family keeps its evidence for re-verification after recovery.
+  expect(
+    mergeBatches(f.state().events).find((b) => b.id === mainBatch?.id)?.status,
+  ).toBe("passed");
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "merge_failed")
+      .map((e) => [
+        e.card_id,
+        (e.payload as { result?: { reason?: string } }).result?.reason,
+      ]),
+  ).toEqual([
+    [onMain, expect.stringContaining("「同步源仓库」环节失败：fixture outage")],
+  ]);
+  const repository = await central.ensureCentral(project);
+  expect(git(repository, "rev-parse", `refs/heads/${farm}^1`)).toBe(farmBase);
+  expect(await baseline()).toBe(repos.base);
+  // After recovery the main batch is re-checked against the baseline and publishes.
+  broken = false;
+  for (let i = 0; i < 3; i++) await executor.tick();
+  expect(card(onMain)?.status).toBe("done");
+}, 40_000);
+
 test("C-391: recovery records all cards after CAS succeeded but recording crashed", async () => {
   await queuedCards(3);
   const { options, binding, errors } = await gated("true", true);

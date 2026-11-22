@@ -154,6 +154,15 @@ function validateMembers(
   }
 }
 
+/** The baseline branch a batch is built on: that of its members' cards. */
+export function mergeBatchBranch(
+  state: CommandState,
+  batch: Pick<MergeBatch, "members">,
+): string | undefined {
+  const first = batch.members[0]?.card_id;
+  return state.cards.find((c) => c.id === first)?.base_branch;
+}
+
 export function formMergeBatch(
   state: CommandState,
   actor: Actor,
@@ -171,11 +180,7 @@ export function formMergeBatch(
       "illegal_transition",
       "Merge queue is not enabled",
     );
-    ensure(
-      !activeMergeFamilies(state.events).length,
-      "illegal_transition",
-      "Another batch family owns the queue",
-    );
+
     ensure(
       p.members.length > 0 &&
         p.members.length <= config.max_batch_size &&
@@ -211,11 +216,20 @@ export function formMergeBatch(
       "illegal_transition",
       "Solo cards require a separate batch",
     );
-    // One candidate chain is built on one central branch.
+    // One candidate chain is built on one central branch; each branch owns
+    // its own queue, so a stuck family never blocks another branch.
     ensure(
       new Set(members.map((m) => m.plan.base_branch)).size === 1,
       "illegal_transition",
       "A merge batch must share one baseline branch",
+    );
+    const branch = members[0]?.plan.base_branch;
+    ensure(
+      !activeMergeFamilies(state.events).some(
+        (b) => mergeBatchBranch(state, b) === branch,
+      ),
+      "illegal_transition",
+      "Another batch family owns the queue",
     );
     const last = p.members[p.members.length - 1] as MergeBatchMember;
     const batch: MergeBatch = {

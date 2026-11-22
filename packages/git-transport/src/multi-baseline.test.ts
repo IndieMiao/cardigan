@@ -211,3 +211,14 @@ test("a central-only branch merges without a source branch; missing on both side
     f.central.ensureBranch(centralBranch(f.project, "nowhere")),
   ).rejects.toThrow(/missing in both/u);
 });
+
+test("pattern-like or full-ref branch names are refused before any fetch", async () => {
+  for (const name of ["*", "refs/heads/main", "a..b", "x y"]) {
+    const view = { ...f.project, base_branch: name };
+    await expect(f.central.ensureBranch(view)).rejects.toThrow(/Invalid/u);
+    await expect(f.central.syncFromSource(view)).rejects.toThrow(/Invalid/u);
+  }
+  expect(
+    await git(repo, "for-each-ref", "refs/cardigan/source/"),
+  ).not.toContain("refs/cardigan/source/main\n");
+});

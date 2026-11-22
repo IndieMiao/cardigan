@@ -38,6 +38,17 @@ export async function mergeStage<T>(
  * dropped.
  */
 export function redactMergeFailure(error: unknown): string {
+  // A system (file-system or process) error names a path whose quoting
+  // cannot be trusted: keep only the error code and the operation.
+  const system = error as { code?: unknown; syscall?: unknown } | null;
+  if (
+    error instanceof Error &&
+    typeof system?.code === "string" &&
+    /^E[A-Z0-9]+$/u.test(system.code) &&
+    typeof system.syscall === "string" &&
+    /^[a-z_]+$/u.test(system.syscall)
+  )
+    return `${system.code}（${system.syscall}）`;
   const raw =
     error instanceof Error
       ? error.message
@@ -53,7 +64,12 @@ export function redactMergeFailure(error: unknown): string {
       .map((l) => l.trim())
       .find((l) => l.length > 0) ?? "";
   const clean = line
-    // A quoted path may contain spaces: replace the whole quotation. Plain
+    // A quoted absolute path may itself contain quotes or spaces: redact up
+    // to the last matching quote of the line rather than guess its end.
+    .replace(/'(?:file:\/\/|~?\/).*'/gu, "'<路径>'")
+    .replace(/"(?:file:\/\/|~?\/).*"/gu, '"<路径>"')
+    .replace(/`(?:file:\/\/|~?\/).*`/gu, "`<路径>`")
+    // Other quotations naming a path or address are replaced whole. Plain
     // ref names stay readable.
     .replace(/(['"`])([^'"`]*)\1/gu, (whole, quote: string, body: string) =>
       /^refs\/[\w./-]+$/u.test(body) || !/[/\\@]|:\/\//u.test(body)

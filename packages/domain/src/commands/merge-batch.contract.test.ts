@@ -893,14 +893,32 @@ test("C-589: one batch never mixes baseline branches; each branch queues separat
     ),
   ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
   // Same-branch members still form a batch.
+  const farmBatch = formMergeBatch(
+    mixed,
+    system,
+    { base_sha: sha(1), members: [second], solo: false },
+    f.io,
+  );
+  expect(farmBatch).toMatchObject({ ok: true });
+  // Each branch owns one family: an active farm family does not block main,
+  // but a second farm family is refused.
+  const withFarm = apply(mixed, value(farmBatch));
   expect(
     formMergeBatch(
-      mixed,
+      withFarm,
+      system,
+      { base_sha: sha(1), members: [first], solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: true });
+  expect(
+    formMergeBatch(
+      withFarm,
       system,
       { base_sha: sha(1), members: [second], solo: false },
       f.io,
     ),
-  ).toMatchObject({ ok: true });
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
 });
 
 test("C-589: a merge window protects files only on its own baseline branch", async () => {
