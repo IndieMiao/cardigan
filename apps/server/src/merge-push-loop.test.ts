@@ -68,7 +68,11 @@ async function confirmFirstPush(
     ),
   );
 }
-async function fixture(run = "true") {
+async function fixture(
+  run = "true",
+  pushConfig?: (remote: string) => unknown,
+  branches: readonly string[] = [],
+) {
   const root = mkdtempSync(join(tmpdir(), "cg-push-loop-")),
     f = m4Fixture(),
     source = join(root, "source"),
@@ -88,6 +92,13 @@ async function fixture(run = "true") {
   writeFileSync(join(source, "base"), "base");
   git(source, "add", ".");
   git(source, "commit", "-m", "base");
+  for (const branch of branches) {
+    git(source, "checkout", "-b", branch);
+    writeFileSync(join(source, "branch"), branch);
+    git(source, "add", ".");
+    git(source, "commit", "-m", branch);
+    git(source, "checkout", "main");
+  }
   git(root, "init", "--bare", remote);
   git(root, "clone", source, work);
   f.store.setProjectRepo({
@@ -101,7 +112,9 @@ async function fixture(run = "true") {
       projects: {
         [f.project_id]: {
           checks: [{ name: "test", run }],
-          push: { remote: pathToFileURL(remote).href },
+          push: pushConfig
+            ? pushConfig(pathToFileURL(remote).href)
+            : { remote: pathToFileURL(remote).href },
         },
       },
     }),
@@ -153,9 +166,13 @@ async function fixture(run = "true") {
     store.uow.read((tx) =>
       loadCommandState(tx, f.project_id).events.filter((e) => e.type === type),
     );
-  async function card(policy: "auto" | "confirm" = "auto", from = center) {
-    const scenario = m4Scenario(f, policy);
-    git(work, "fetch", from, "main");
+  async function card(
+    policy: "auto" | "confirm" = "auto",
+    from = center,
+    branch = "main",
+  ) {
+    const scenario = m4Scenario(f, policy, branch);
+    git(work, "fetch", from, branch);
     git(work, "checkout", "-B", `agent/${scenario.card.id}`, "FETCH_HEAD");
     writeFileSync(join(work, scenario.card.id), "feature");
     git(work, "add", ".");
@@ -296,6 +313,81 @@ test("non-fast-forward blocks later pushes but not merges; a human repair releas
   expect(c.errors).toEqual([]);
 }, 30_000);
 
+test("C-589: each routed branch pushes to its own remote branch; an unrouted branch stays central and non-fast-forward is rejected", async () => {
+  const farm = "integration/farm";
+  const c = await fixture(
+    "true",
+    (remote) => [{ remote }, { remote, base_branch: farm }],
+    [farm, "scratch"],
+  );
+  await c.card("auto", c.center, "main");
+  await c.card("auto", c.center, farm);
+  await c.card("auto", c.center, "scratch");
+  await c.merge().tick();
+  expect(c.f.state().cards.every((card) => card.status === "done")).toBe(true);
+  expect(
+    c
+      .events("merge_push_queued")
+      .map((e) => (e.payload as { branch: string }).branch),
+  ).toEqual(["main", farm]);
+  // The first push of each route waits for the human to accept its boundary.
+  await c.push().tick();
+  const holds = c.events("merge_push_held");
+  expect(holds.map((e) => (e.payload as { branch: string }).branch)).toEqual([
+    "main",
+    farm,
+  ]);
+  for (const held of holds)
+    c.f.apply((s, a, p) =>
+      acceptMergePushHold(
+        s,
+        a,
+        {
+          human_action_id: (held.payload as { human_action_id: HumanActionId })
+            .human_action_id,
+          text: "远程为空，确认可以发布",
+        },
+        p,
+      ),
+    );
+  await c.push().tick();
+  await c.push().tick();
+  expect(c.events("merge_pushed")).toHaveLength(2);
+  expect(git(c.remote, "rev-parse", "main")).toBe(
+    git(c.center, "rev-parse", "main"),
+  );
+  expect(git(c.remote, "rev-parse", farm)).toBe(
+    git(c.center, "rev-parse", farm),
+  );
+  expect(git(c.remote, "for-each-ref", "--format=%(refname)")).not.toContain(
+    "scratch",
+  );
+  // A diverged remote branch rejects the push; nothing is forced.
+  const outside = join(c.root, "outside-farm");
+  git(c.root, "clone", "-b", farm, c.remote, outside);
+  writeFileSync(join(outside, "remote-only"), "remote");
+  git(outside, "add", ".");
+  git(outside, "commit", "-m", "remote change");
+  git(outside, "push", "origin", farm);
+  const remoteFarm = git(c.remote, "rev-parse", farm);
+  await c.card("auto", c.center, farm);
+  await c.card("auto", c.center, "main");
+  await c.merge().tick();
+  await c.push().tick();
+  expect(c.events("merge_push_failed")).toEqual([
+    expect.objectContaining({
+      payload: expect.objectContaining({ branch: farm, reason: "rejected" }),
+    }),
+  ]);
+  expect(git(c.remote, "rev-parse", farm)).toBe(remoteFarm);
+  // The main route keeps its own queue and still publishes.
+  expect(git(c.remote, "rev-parse", "main")).toBe(
+    git(c.center, "rev-parse", "main"),
+  );
+  expect(c.events("merge_pushed")).toHaveLength(3);
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
 test("a network failure persists backoff across Store reopen and never skips the first queued SHA", async () => {
   const c = await fixture();
   // Publish a first merge so the scenario starts from a trusted boundary.
@@ -395,7 +487,11 @@ test("credential permission changes retry once before pausing without reading th
     errors: [],
     forProject: () => ({
       ...c.configured,
-      push: { ...c.configured.push, keyFile, knownHostsFile },
+      push: c.configured.push?.map((route) => ({
+        ...route,
+        keyFile,
+        knownHostsFile,
+      })),
     }),
   };
   const loop = new MergePushExecutor({ ...c.options(), configuration });
@@ -491,7 +587,9 @@ test("one project waiting for an auth retry cannot block another project's push 
   const configuration = {
     errors: [],
     forProject: (id: string) =>
-      id === other.project_id ? { ...c.configured, push } : c.configured,
+      id === other.project_id
+        ? { ...c.configured, push: [push] }
+        : c.configured,
   };
   const scenario = m4Scenario(other, "auto"),
     sha = git(c.work, "rev-parse", "HEAD");

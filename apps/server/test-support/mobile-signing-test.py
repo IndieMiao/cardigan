@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import warnings
 from unittest.mock import patch
 import zipfile
 
@@ -32,6 +33,22 @@ def save(path, data):
 
 # Members rejected in a real Godot APK; AAPT2 resource path shortening emits them.
 AAPT2_SHORTENED = ('res/-8.xml', 'res/-B.png', 'res/-N.png', 'res/-p.png')
+# Shortened names differing only in case, from the same APK (C-593).
+CASE_ONLY = (('res/9n.9.png', 'res/9N.9.png'), ('res/Bt.png', 'res/BT.png'), ('res/bL.xml', 'res/Bl.xml'))
+# Member names only (no bytes) of the rejected Godot APK, sensen-godot attachment-62
+# (sha256 23751ada6f987c077a04be1206b0db9f5077f7dde8ce13c92da7749f62bbde37), exported by
+# the host with ZipFile.infolist() orig_filename in archive order and attached to C-593
+# as attachment-8919 (c593-member-names.json, sha256 35a6914f0e3759db...ce50dcb).
+# Stored one name per line; no name contains a line break.
+GODOT_APK_NAMES = Path(__file__).resolve().parent/'fixtures'/'mobile-signing'/'attachment-62-member-names.txt'
+GODOT_APK_NAMES_SHA256 = '4f3e9e304a47cf84c1d479542d74e84232798e12d94986d4d51e05ba08212471'
+GODOT_APK_MEMBERS, GODOT_APK_CASE_PAIRS = 6317, 19
+
+
+def godot_apk_names():
+    data = GODOT_APK_NAMES.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == GODOT_APK_NAMES_SHA256
+    return data.decode().splitlines()
 
 
 class Signing(unittest.TestCase):
@@ -48,6 +65,9 @@ class Signing(unittest.TestCase):
             z.writestr('assets/.import', b'fixture')
             for name in AAPT2_SHORTENED:
                 z.writestr(name, b'fixture')
+            for pair in CASE_ONLY:
+                for name in pair:
+                    z.writestr(name, name.encode())
         self.candidate.chmod(0o600)
         self.spec={'id':'1'*32,'version':'test-v1','app':'test.fixture','build':'job-1','commit':'b'*40,
                    'sha256':digest(self.candidate),'expires':int(time.time())+600,'platform':'android',
@@ -321,6 +341,9 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
             self.assertIn('assets/.import', z.namelist())
             for name in AAPT2_SHORTENED:
                 self.assertEqual(z.read(name), b'fixture')
+            for pair in CASE_ONLY:
+                for name in pair:
+                    self.assertEqual(z.read(name), name.encode())
         tree = directory(self.root, 'tree')
         with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, tree)
         self.assertEqual(caught.exception.category, 'archive_member_name')
@@ -337,14 +360,60 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
                 self.assertEqual(caught.exception.category, 'archive_member_name')
                 self.assertFalse(tree.joinpath(*name.split('/')).exists())
 
+    def test_case_only_names_in_apk_but_not_extracted_archives(self):
+        for pair in CASE_ONLY + (('x/.Cache/other', 'x/.cache/file'), ('Res/-8.xml', 'res/-8.xml'),
+                                 ('res/A', 'res/a/nested'), ('res/A/', 'res/a')):
+            with self.subTest(pair=pair):
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr('AndroidManifest.xml', b'fixture')
+                    for name in pair: z.writestr(name, b'' if name.endswith('/') else name.encode())
+                self.assertLessEqual({n.removesuffix('/') for n in pair}, inspect_zip(self.candidate, apk=True))
+                # Writing members to a tree keeps the alias rule, for APK flag or iOS archive.
+                for apk in (False, True):
+                    tree = directory(self.root, 'tree-%d-%s' % (apk, hashlib.sha256(repr(pair).encode()).hexdigest()[:8]))
+                    with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, tree, apk=apk)
+                    self.assertEqual(caught.exception.category, 'archive_member_name')
+
+    def test_exact_duplicate_apk_members_still_rejected(self):
+        for first, second in (('res/9n.9.png', 'res/9n.9.png'), ('res/9N.9.png', 'res/9N.9.png'),
+                              ('AndroidManifest.xml', 'AndroidManifest.xml'), ('res/', 'res/'), ('res/x', 'res/x/')):
+            with self.subTest(name=second):
+                with zipfile.ZipFile(self.candidate, 'w') as z, warnings.catch_warnings():
+                    warnings.simplefilter('ignore')  # zipfile warns on duplicate names
+                    z.writestr('AndroidManifest.xml' if first != 'AndroidManifest.xml' else 'classes.dex', b'fixture')
+                    z.writestr(first, b''); z.writestr(second, b'')
+                with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)
+                self.assertEqual(caught.exception.category, 'archive_member_name')
+
+    def test_real_godot_apk_name_list_passes_every_rule(self):
+        names = godot_apk_names()
+        self.assertEqual(len(names), GODOT_APK_MEMBERS)
+        self.assertEqual(len(set(names)), GODOT_APK_MEMBERS)
+        folded = {}
+        for name in names: folded.setdefault(name.lower(), []).append(name)
+        aliases = [group for group in folded.values() if len(group) > 1]
+        self.assertEqual(len(aliases), GODOT_APK_CASE_PAIRS)
+        self.assertTrue(all(len(group) == 2 for group in aliases))
+        self.assertLessEqual({n for pair in CASE_ONLY for n in pair} | set(AAPT2_SHORTENED), set(names))
+        with zipfile.ZipFile(self.candidate, 'w') as z:
+            for name in names: z.writestr(name, name.encode())
+        self.assertEqual(inspect_zip(self.candidate, apk=True), set(names))
+        signed = self.root/'signed.apk'
+        platforms.android(json.loads(self.policy.read_bytes()), self.candidate, signed, self.root)
+        with zipfile.ZipFile(signed) as z:
+            self.assertEqual(z.namelist(), names)
+            for group in aliases:
+                for name in group: self.assertEqual(z.read(name), name.encode())
+
     def test_apk_member_name_boundaries(self):
         for name in ('../other','assets/../x','./file','x/.','/absolute','ok//file','ok//',
                      'a\\b','x/line\nfeed','x/ctrl\x01','x/trailing.','x/trailing ',
-                     'x/.Cache/other','x/.cache/file/nested',
+                     'x/.cache/file/nested','x/.cache/file','x/.cache/file/',
                      '-/../x','res/-..','res/-.','res/- ','/-8.xml','res//-8.xml','res/-\x01',
-                     'res/-8.XML','res/-8.xml/nested'):
+                     'res/-8.xml','res/-8.xml/nested'):
             with self.subTest(name=name):
-                with zipfile.ZipFile(self.candidate,'w') as z:
+                with zipfile.ZipFile(self.candidate,'w') as z, warnings.catch_warnings():
+                    warnings.simplefilter('ignore')  # zipfile warns on duplicate names
                     z.writestr('x/.cache/file',b'first'); z.writestr('res/-8.xml',b'first')
                     z.writestr(name,b'fixture')
                 with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)

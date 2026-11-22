@@ -47,7 +47,14 @@ export type CommandState = {
       readonly conflict_threshold?: number;
       readonly window_timeout_ms?: number;
     };
-    readonly merge_push?: { readonly target: string; readonly branch: string };
+    /** Push routes: merges into `base_branch` are pushed to `branch` of `target`. */
+    readonly merge_push?: readonly {
+      readonly target: string;
+      readonly branch: string;
+      readonly base_branch: string;
+      /** The registered baseline: older records without a branch belong here. */
+      readonly registered?: boolean;
+    }[];
   };
   /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */
   readonly assignment_tool_scopes?: Readonly<

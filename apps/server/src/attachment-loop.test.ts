@@ -332,3 +332,20 @@ test.each(["artifact", "evidence"] as const)(
     expect(paths.slice(0, 3).every((path) => existsSync(path))).toBe(true);
   },
 );
+
+test("bounds scan work, resumes past young blobs, and honors a reference added between pages", async () => {
+  const f = fixture();
+  for (let i = 0; i < 260; i++)
+    blob(f.directory, i.toString(16).padStart(64, "0"), 30 * DAY);
+  const gc = new AttachmentGc({ ...f, clock });
+  const first = await gc.tick();
+  expect(first.scanned).toBeLessThanOrEqual(128);
+  expect(gc.pending).toBe(true);
+  const kept = Array.from({ length: 260 }, (_, i) =>
+    i.toString(16).padStart(64, "0"),
+  ).find((d) => existsSync(join(f.directory, d)));
+  if (!kept) throw Error("missing next page");
+  record(f.store, "F-1", kept);
+  while (gc.pending) expect((await gc.tick()).scanned).toBeLessThanOrEqual(128);
+  expect(existsSync(join(f.directory, kept))).toBe(true);
+});

@@ -133,6 +133,10 @@ async function fixture() {
     CentralRepositoryService.prototype,
     "ensureCentral",
   ).mockResolvedValue(central);
+  vi.spyOn(
+    CentralRepositoryService.prototype,
+    "ensureBranch",
+  ).mockResolvedValue(central);
   vi.spyOn(AgentGitTransport.prototype, "ensureClone").mockImplementation(
     async (_, repository) => {
       await mkdir(repository, { recursive: true });

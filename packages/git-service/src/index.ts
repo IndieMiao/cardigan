@@ -46,10 +46,12 @@ export {
   type CentralOptions,
   type CentralProject,
   CentralRepositoryService,
+  centralBranch,
   type MergeOutcome,
   PrecheckMergeConflict,
   type PreparedMerge,
   type SourceSync,
+  validCentralBranch,
 } from "./central.js";
 export {
   defaultRepositoryLock,
@@ -321,7 +323,8 @@ export class GitWorktreeService {
     const { path, repository, readonly, baselineRef, branch } = target,
       a = input.assignment,
       card = input.card as Card;
-    const central = await this.central.ensureCentral(project);
+    // The card's branch may exist only in the source so far.
+    const central = await this.central.ensureBranch(project);
     await this.git.ensureClone(central, repository);
     const checkoutRef = input.target_sha ?? `refs/remotes/${baselineRef}`;
     const existing = (await this.git.listWorktrees(repository)).find(
@@ -799,6 +802,17 @@ export class GitWorktreeService {
 
   /** §3.6: gather the facts `reconcile` needs; this method never deletes. */
   async listWorktreeState(project: CentralProject): Promise<WorktreeState> {
+    const pages = this.listWorktreeStatePages(project);
+    for (;;) {
+      const page = await pages.next();
+      if (page.done) return page.value;
+    }
+  }
+
+  /** Pause between probe batches. A partial directory list is not a state. */
+  async *listWorktreeStatePages(
+    project: CentralProject,
+  ): AsyncGenerator<void, WorktreeState> {
     const root = join(this.worktrees, project.project_id),
       checksRoot = join(this.checks, project.project_id),
       buildsRoot = join(this.builds, project.project_id),
@@ -829,16 +843,22 @@ export class GitWorktreeService {
       ...builds,
       ...registered.map((entry) => entry.path),
     ]);
-    const existing = await Promise.all(
-      [...candidates].map(async (path) => {
-        try {
-          return (await this.files.isDirectory(path)) ? path : undefined;
-        } catch (error) {
-          if (code(error) === "ENOENT") return undefined;
-          throw error;
-        }
-      }),
-    );
+    const existing: string[] = [];
+    let count = 0;
+    let until = performance.now() + 250;
+    for (const path of candidates) {
+      if (count >= 16 || (count > 0 && performance.now() >= until)) {
+        yield;
+        count = 0;
+        until = performance.now() + 250;
+      }
+      count++;
+      try {
+        if (await this.files.isDirectory(path)) existing.push(path);
+      } catch (error) {
+        if (code(error) !== "ENOENT") throw error;
+      }
+    }
     const state: WorktreeState = {
       project_id: project.project_id,
       machine_id: this.machineId,
@@ -846,9 +866,7 @@ export class GitWorktreeService {
       checks_root: checksRoot,
       builds_root: buildsRoot,
       registered,
-      directories: existing.filter(
-        (path): path is string => path !== undefined,
-      ),
+      directories: existing,
       failed_clones: clones.filter((path) =>
         basename(path).startsWith(".clone-"),
       ),

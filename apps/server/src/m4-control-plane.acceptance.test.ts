@@ -230,7 +230,7 @@ test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without 
     store: s.store(),
     git: s.binding(),
     runtime: s.runtime,
-  }).tick();
+  }).sweep();
   expect(decisions(s)).toHaveLength(1);
   expect(decisions(s)[0]?.resolution?.option).toBe("keep");
   expect(readFileSync(join(path, "shared.txt"), "utf8")).toBe("unfinished\n");

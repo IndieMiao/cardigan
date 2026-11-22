@@ -2156,17 +2156,25 @@ export class Dispatcher {
     if (!this.startup) {
       this.startup = new Map();
       for (const { id: project } of store.listProjects()) {
-        const ids = this.state(project)
-          .runs.filter((r) => startupCandidate(r))
+        const ids = store.uow
+          .read((tx) => tx.runs.list(project))
+          .filter((r) => startupCandidate(r))
           .map((r) => r.id);
         if (ids.length) this.startup.set(project, new Set(ids));
       }
     }
-    for (const [project, ids] of this.startup) {
+    const until = performance.now() + 250;
+    let count = 0;
+    for (const [project, ids] of [...this.startup]) {
+      // Rotate projects and retryable IDs so an unreachable terminal cannot starve another.
+      this.startup.delete(project);
+      this.startup.set(project, ids);
       for (const id of [...ids]) {
         if (this.closing) return;
-        if ((await this.checkStartupRun(project, id)) !== "retry")
-          ids.delete(id);
+        const result = await this.checkStartupRun(project, id);
+        ids.delete(id);
+        if (result === "retry") ids.add(id);
+        if (++count >= 16 || performance.now() >= until) return;
       }
       if (!ids.size) this.startup.delete(project);
     }

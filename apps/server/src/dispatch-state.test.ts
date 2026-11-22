@@ -94,7 +94,14 @@ test("monitor, dispatch, merge, merge-push and cleanup reuse Store snapshots acr
           checks: [],
           env: {},
           totalTimeoutMs: 1000,
-          push: { target: "a".repeat(64), branch: "main" } as never,
+          push: [
+            {
+              target: "a".repeat(64),
+              branch: "main",
+              baseBranch: "main",
+              registered: true,
+            },
+          ] as never,
         }),
       },
     });

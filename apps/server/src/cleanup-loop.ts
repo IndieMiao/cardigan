@@ -4,8 +4,6 @@ import type {
   AssignmentId,
   CardId,
   Clock,
-  CommandState,
-  Decision,
   ProjectId,
   Runtime,
   RuntimeRef,
@@ -15,15 +13,13 @@ import {
   releaseAssignment,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
-import { RuntimeTargets } from "@cardigan/host";
-import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { unrevokedTokensForProject } from "@cardigan/store";
 import { buildCheckoutIdle } from "./build-checkouts.js";
 import type { ReconcileGit } from "./git.js";
-import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
+import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
 import { runSystemCommand, systemClock } from "./merge-loop.js";
-import { reconcileRunResources } from "./run-resource-cleanup.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /**
@@ -49,7 +45,10 @@ export interface CleanupOptions {
 const exists = (path: string) =>
   access(path).then(
     () => true,
-    () => false,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    },
   );
 
 export class CleanupExecutor {
@@ -62,9 +61,18 @@ export class CleanupExecutor {
   private get clock(): Clock {
     return this.options.clock ?? systemClock;
   }
-  private state(project_id: ProjectId) {
-    return this.options.store.uow.read((tx) =>
-      loadCommandState(tx, project_id),
+  private readonly owners = new MaintenanceBatch<ProjectId, AssignmentId>();
+  private readonly releases = new MaintenanceBatch<ProjectId, AssignmentId>();
+  private readonly pass = new Map<
+    ProjectId,
+    Set<"releases" | "owners" | "builds">
+  >();
+  private readonly builds = new MaintenanceBatch<ProjectId, string>();
+  pending(project: ProjectId) {
+    return (
+      this.owners.has(project) ||
+      this.releases.has(project) ||
+      this.builds.has(project)
     );
   }
   private report(message: string) {
@@ -82,17 +90,32 @@ export class CleanupExecutor {
     return next;
   }
 
+  /** Finish the current pass. Each tick consumes at least one pending entry
+   * of a bounded page, so this ends; the timer loop pages instead. */
+  async sweep(project_id?: ProjectId): Promise<void> {
+    const projects = () =>
+      project_id
+        ? [project_id]
+        : this.options.store.listProjects().map((entry) => entry.id);
+    do await this.tick(project_id);
+    while (projects().some((project) => this.pending(project)));
+  }
+
   private async project(project_id: ProjectId) {
-    // C-221: `cleanup.*` spans are timing only (no added await when off; the
-    // async ones wrap calls that were already awaited).
-    profileSpanSync("cleanup.release_closed", () =>
-      this.releaseClosed(project_id),
-    );
+    const done =
+      this.pass.get(project_id) ?? new Set<"releases" | "owners" | "builds">();
+    this.pass.set(project_id, done);
+    if (!done.has("releases")) {
+      await profileSpan("cleanup.release_closed", () =>
+        this.releaseClosed(project_id),
+      );
+      if (!this.releases.has(project_id)) done.add("releases");
+    }
     // Re-read after releasing: released Assignments are what cleanup looks at.
-    const state = profileSpanSync("cleanup.state", () =>
-      this.state(project_id),
+    const assignments = profileSpanSync("cleanup.state", () =>
+      this.options.store.uow.read((tx) => tx.assignments.list(project_id)),
     );
-    const candidates = state.assignments.filter(
+    const candidates = assignments.filter(
       (candidate) =>
         candidate.status === "released" ||
         (candidate.status === "suspended" &&
@@ -112,27 +135,43 @@ export class CleanupExecutor {
           this.options.store.revokeToken(token.id);
     });
     // §12.6: a terminal whose exit is unconfirmed may still use its directories.
-    const unconfirmed = new Set<string>();
+    const unconfirmed = new Set(
+      candidates.filter((a) => a.runtime_ref).map((a) => String(a.id)),
+    );
     const missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[] =
       [];
-    for (const assignment of candidates) {
-      if (
-        assignment.runtime_ref !== null &&
-        !(await profileSpan("cleanup.revoke_and_release", () =>
-          this.releaseTerminal(assignment, missing),
-        ))
-      ) {
-        unconfirmed.add(assignment.id);
-        continue;
-      }
-      if (
-        assignment.scope === "work_item" &&
-        assignment.worktree_path !== undefined
-      )
-        await profileSpan("cleanup.settle", () =>
-          this.settle(project_id, assignment),
-        );
-    }
+    const eligible = new Map(candidates.map((a) => [a.id, a]));
+    if (!done.has("owners"))
+      await this.owners.run(
+        project_id,
+        () =>
+          candidates
+            .filter(
+              (a) =>
+                a.runtime_ref ||
+                (a.worktree_path && !this.cleaned.has(`${project_id}/${a.id}`)),
+            )
+            .map((a) => a.id),
+        async (id) => {
+          const assignment = eligible.get(id);
+          if (!assignment) return;
+          if (
+            assignment.runtime_ref !== null &&
+            !(await profileSpan("cleanup.revoke_and_release", () =>
+              this.releaseTerminal(assignment, missing),
+            ))
+          )
+            return;
+          unconfirmed.delete(id);
+          if (
+            assignment.scope === "work_item" &&
+            assignment.worktree_path !== undefined
+          )
+            await profileSpan("cleanup.settle", () =>
+              this.settle(project_id, assignment),
+            );
+        },
+      );
     if (missing.length) {
       const cleared = runSystemCommand(
         this.options.store,
@@ -146,16 +185,15 @@ export class CleanupExecutor {
           `terminal cleanup recording failed: ${cleared.error.code} ${cleared.error.message}`,
         );
     }
-    await profileSpan("cleanup.idle_builds", () =>
-      this.removeIdleBuilds(project_id, unconfirmed),
-    );
-    if (this.options.runtime instanceof RuntimeTargets)
-      await reconcileRunResources(
-        this.options.store,
-        this.options.runtime,
-        project_id,
-        (line) => this.report(line),
+    if (!this.owners.has(project_id) && done.has("releases"))
+      done.add("owners");
+    if (!done.has("builds")) {
+      await profileSpan("cleanup.idle_builds", () =>
+        this.removeIdleBuilds(project_id, unconfirmed),
       );
+      if (!this.builds.has(project_id)) done.add("builds");
+    }
+    if (!this.pending(project_id)) this.pass.delete(project_id);
   }
 
   /**
@@ -169,14 +207,16 @@ export class CleanupExecutor {
     unconfirmed: ReadonlySet<string>,
   ) {
     const git = this.options.git;
-    if (!git.listBuildCheckouts || !git.removeBuildCheckout) return;
+    const remove = git.removeBuildCheckout?.bind(git);
+    if (!git.listBuildCheckouts || !remove) return;
     const project = git.projectOf(project_id);
     if (project === undefined) return;
     const runs = () =>
       this.options.store.uow.read((tx) => tx.runs.list(project_id));
-    let owners: readonly string[] | undefined;
+    let owners: readonly string[] | undefined = [];
     try {
-      owners = await git.listBuildCheckouts(project);
+      if (!this.builds.has(project_id))
+        owners = await git.listBuildCheckouts(project);
       if (owners === undefined) return;
     } catch (error) {
       this.report(
@@ -184,60 +224,74 @@ export class CleanupExecutor {
       );
       return;
     }
-    for (const assignment_id of owners) {
-      // A released Assignment whose terminal release failed this round keeps
-      // its build until the next round confirms the exit (§12.6).
-      if (unconfirmed.has(assignment_id)) continue;
-      if (!buildCheckoutIdle(runs(), assignment_id)) continue;
-      try {
-        await git.removeBuildCheckout({
-          project,
-          assignment_id,
-          // Re-read under the repository lock: a Run queued meanwhile wins.
-          idle: () => buildCheckoutIdle(runs(), assignment_id),
-        });
-      } catch (error) {
-        // Reconcile reports the leftover after the cleanup grace.
-        this.report(
-          `build checkout cleanup for ${assignment_id} failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+    const listed = owners;
+    await this.builds.run(
+      project_id,
+      () => [...listed],
+      async (assignment_id) => {
+        // A released Assignment whose terminal release failed this round keeps
+        // its build until the next round confirms the exit (§12.6).
+        if (unconfirmed.has(assignment_id)) return;
+        if (!buildCheckoutIdle(runs(), assignment_id)) return;
+        try {
+          await remove({
+            project,
+            assignment_id,
+            // Re-read under the repository lock: a Run queued meanwhile wins.
+            idle: () => buildCheckoutIdle(runs(), assignment_id),
+          });
+        } catch (error) {
+          // Reconcile reports the leftover after the cleanup grace.
+          this.report(
+            `build checkout cleanup for ${assignment_id} failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    );
   }
 
   /** §3.6: release every work-item Assignment of a done or cancelled card. */
   private releaseClosed(project_id: ProjectId) {
-    const state = this.state(project_id);
-    const closed = new Set(
-      state.cards
-        .filter((card) => ["done", "cancelled"].includes(card.status))
-        .map((card) => card.id as CardId),
-    );
-    const workItemCard = new Map(
-      state.work_items.map((item) => [item.id, item.card_id]),
-    );
-    for (const assignment of state.assignments) {
-      if (assignment.scope !== "work_item") continue;
-      if (assignment.status === "released") continue;
-      const card = workItemCard.get(assignment.work_item_id);
-      if (card === undefined || !closed.has(card)) continue;
-      const released = runSystemCommand(
-        this.options.store,
-        project_id,
-        (current, actor, ports) =>
-          releaseAssignment(
-            current,
-            actor,
-            { assignment_id: assignment.id },
-            ports,
-          ),
-        this.clock,
-      );
-      if (!released.ok)
-        this.report(
-          `release of ${assignment.id} was rejected: ${released.error.code} ${released.error.message}`,
+    return this.releases.run(
+      project_id,
+      () =>
+        this.options.store.uow.read((tx) => {
+          const closed = new Set(
+            tx.cards
+              .list(project_id)
+              .filter((card) => ["done", "cancelled"].includes(card.status))
+              .map((c) => c.id as CardId),
+          );
+          const items = new Set(
+            tx.work_items
+              .list(project_id)
+              .filter((item) => closed.has(item.card_id))
+              .map((item) => item.id),
+          );
+          return tx.assignments
+            .list(project_id)
+            .filter(
+              (a) =>
+                a.scope === "work_item" &&
+                a.status !== "released" &&
+                items.has(a.work_item_id),
+            )
+            .map((a) => a.id);
+        }),
+      async (id) => {
+        const released = runSystemCommand(
+          this.options.store,
+          project_id,
+          (current, actor, ports) =>
+            releaseAssignment(current, actor, { assignment_id: id }, ports),
+          this.clock,
         );
-    }
+        if (!released.ok)
+          this.report(
+            `release of ${id} was rejected: ${released.error.code} ${released.error.message}`,
+          );
+      },
+    );
   }
 
   /** Only absence proves there is no terminal resource left to sweep. */
@@ -273,25 +327,23 @@ export class CleanupExecutor {
     return false;
   }
 
-  /** The newest cleanup decision of an Assignment, if any. */
-  private cleanupDecision(
-    state: CommandState,
-    assignment: Assignment,
-  ): Decision | undefined {
-    return state.decisions
-      .filter(
-        (decision) =>
-          decision.trigger === "worktree_cleanup" &&
-          decision.assignment_id === assignment.id &&
-          decision.status !== "superseded",
-      )
-      .at(-1);
-  }
-
   private async settle(project_id: ProjectId, assignment: Assignment) {
-    if (this.cleaned.has(assignment.id)) return;
-    const state = this.state(project_id),
-      decision = this.cleanupDecision(state, assignment);
+    if (this.cleaned.has(`${project_id}/${assignment.id}`)) return;
+    // A worktree that is already gone needs no decision and no removal.
+    if (!(await exists(assignment.worktree_path as string))) {
+      this.cleaned.add(`${project_id}/${assignment.id}`);
+      return;
+    }
+    const decision = this.options.store.uow.read((tx) =>
+      tx.decisions
+        .list(project_id)
+        .findLast(
+          (d) =>
+            d.trigger === "worktree_cleanup" &&
+            d.assignment_id === assignment.id &&
+            d.status !== "superseded",
+        ),
+    );
     if (decision?.status === "resolved") {
       if (decision.resolution?.option === "keep") {
         // §3.6: after `keep` the worktree stays and is never asked about again.
@@ -315,14 +367,9 @@ export class CleanupExecutor {
     assignment: Assignment,
     force: boolean,
   ) {
-    if (this.cleaned.has(assignment.id)) return;
+    if (this.cleaned.has(`${project_id}/${assignment.id}`)) return;
     const project = this.options.git.projectOf(project_id);
     if (project === undefined) return;
-    // A worktree that is already gone needs no decision and no removal.
-    if (!(await exists(assignment.worktree_path as string))) {
-      this.cleaned.add(assignment.id);
-      return;
-    }
     try {
       const outcome = await this.options.git.removeWorktree({
         project,
@@ -333,7 +380,7 @@ export class CleanupExecutor {
         outcome.status === "removed" ||
         outcome.status === "already_removed"
       ) {
-        this.cleaned.add(assignment.id);
+        this.cleaned.add(`${project_id}/${assignment.id}`);
         return;
       }
       // Dirty or unreachable: ask the human once, with the reason.
@@ -379,6 +426,7 @@ export function startCleanupLoop(options: {
   readonly store: Store;
   readonly git: ReconcileGit;
   readonly runtime: Runtime;
+  readonly startup?: LoopStartup | undefined;
   readonly intervalMs?: number;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
@@ -394,8 +442,16 @@ export function startCleanupLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "cleanup",
-    tick: () => executor.tick(),
+    initialDelayMs: options.startup
+      ? Math.min(3000, options.intervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS)
+      : 0,
+    ...projectCycle(
+      () => options.store.listProjects().map((p) => p.id),
+      (p) => executor.tick(p),
+      (p) => executor.pending(p),
+    ),
     intervalMs: options.intervalMs ?? DEFAULT_CLEANUP_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),

@@ -47,6 +47,11 @@ def inspect_zip(path, dest=None, *, apk=False):
         require(n <= 16000 and size <= 4*1024*1024, 'archive_too_large')
         f.seek(offset-16)
         require(f.read(16) != b'APK Sig Block 42')
+    # Names differing only in case are legal inside an APK (AAPT2 shortened
+    # resources emit res/9n.9.png beside res/9N.9.png). An APK is only checked
+    # in place and handed to tools as one file, so case aliases are rejected
+    # only when members would be written to a (possibly case-insensitive) tree.
+    fold_case = dest is not None or not apk
     with path.open('rb') as raw, zipfile.ZipFile(raw) as z:
         seen, spell, dirs, files, total = set(), {}, set(), set(), 0
         require(len(z.infolist()) == n)
@@ -64,7 +69,7 @@ def inspect_zip(path, dest=None, *, apk=False):
             require(not (i.flag_bits & 1) and i.compress_type in (0,8))
             require(stat.S_IFMT(i.external_attr >> 16) in (0, stat.S_IFDIR if i.is_dir() else stat.S_IFREG))
             require(name not in seen, 'archive_member_name')
-            for j in range(len(parts)):
+            for j in range(len(parts) if fold_case else 0):
                 prefix='/'.join(parts[:j+1]); require(spell.setdefault(prefix.lower(),prefix)==prefix, 'archive_member_name')
             parents = {'/'.join(parts[:j]) for j in range(1,len(parts))}
             require(not files.intersection(parents) and (i.is_dir() or name not in dirs), 'archive_member_name')
