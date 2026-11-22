@@ -1,7 +1,7 @@
 // The private project binding configures tools, not the account, launch policy,
 // credential routing or subprocess loaders. Never include input in diagnostics.
 const credential =
-  /TOKEN|SECRET|KEY|PASS(?:WORD|WD|PHRASE)|(?:^|_)PASS(?:_|$)|CREDENTIAL|AUTH|COOKIE|BEARER/u;
+  /TOKEN|SECRET|KEY|PASS(?:WORD|WD|PHRASE)|(?:^|_)(?:PASS|PWD|PRIVATE|CERT|ACCESS_ID)(?:_|$)|CREDENTIAL|AUTH|COOKIE|BEARER/u;
 const reserved = new Set([
   "PATH",
   "HOME",
@@ -31,6 +31,13 @@ const reserved = new Set([
   "PS3",
   "PS4",
   "PROMPT_COMMAND",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "MANPAGER",
+  "BROWSER",
+  "LESSOPEN",
+  "LESSCLOSE",
   "GCONV_PATH",
   "LOCPATH",
   "GLIBC_TUNABLES",
@@ -49,13 +56,11 @@ const reserved = new Set([
   "ANDROID_SERIAL",
   "ADB_SERVER_SOCKET",
   "PLAYWRIGHT_BROWSERS_PATH",
-  "SSL_CERT_FILE",
-  "SSL_CERT_DIR",
   "CURL_CA_BUNDLE",
   "REQUESTS_CA_BUNDLE",
 ]);
 const reservedPattern =
-  /^(?:CARDIGAN|HC|HERDR|MCP|SSH|GIT|XDG|LD|DYLD|LC|BASH|NODE|NPM|PNPM|CODEX|CLAUDE|ANTHROPIC|OPENAI|PI)_|^PYTHON|_PROXY$/u;
+  /^(?:CARDIGAN|HC|HERDR|MCP|SSH|GIT|XDG|LD|DYLD|OPENSSL|LC|BASH|NODE|NPM|PNPM|CODEX|CLAUDE|ANTHROPIC|OPENAI|PI)_|^PYTHON|_PROXY$/u;
 
 /** Canonical, bounded literal data shared by launch and capability probes. */
 export function parseWorkerEnvironment(
