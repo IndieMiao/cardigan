@@ -10,12 +10,16 @@
       "import": "./dist/index.js"
     }
   },
+  "scripts": {
+    "build:agent-tools": "tsc -b && node scripts/agent-tools.mjs"
+  },
   "dependencies": {
     "@cardigan/domain": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.2",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@cardigan/store": "workspace:*"
+    "@cardigan/store": "workspace:*",
+    "rolldown": "1.2.16"
   }
 }
