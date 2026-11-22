@@ -33,6 +33,7 @@ import {
   groupExtMessage,
   hasExtMessage,
   invalidateExtHistory,
+  markExtQuiet,
   openExtRateBatch,
   ownsExtDispatch,
   pendingExtGroupSize,
@@ -136,10 +137,6 @@ function planChannel(
   const knownOverflow = new Set<string>(
     previous ? JSON.parse(previous.ordinary) : [],
   );
-  const wasWaiting = new Set<string>(
-    previous ? JSON.parse(previous.waiting) : [],
-  );
-  const waiting: string[] = [];
   const heldOverflow: string[] = [];
   const heldQuiet: string[] = [];
   const collecting = collectingExtRateBatch(store.database, channel);
@@ -147,7 +144,7 @@ function planChannel(
   const unassigned = config.quiet_hours
     ? new Map(
         pendingExtMessages(store.database, project, channel)
-          .filter((row) => row.digest_id === null && row.attempts === 0)
+          .filter((row) => row.digest_id === null)
           .map((row) => [itemKey(row.item_kind, row.item_id), row] as const),
       )
     : undefined;
@@ -179,26 +176,22 @@ function planChannel(
       through === null ||
       !afterExtWatermark(store.database, project, item.event_id, through);
     const earlier = previousSingles.has(key);
-    const evidence = item.ready_evidence;
-    // An observation of a closed gate invalidates birth-time inference, not a
-    // later release fact. Once admitted, use the saved class, not replay time.
     const quietItem =
+      quiet ||
       remembered.has(key) ||
-      (item.ready &&
-        !earlier &&
-        !knownOverflow.has(key) &&
-        evidence !== undefined &&
-        (evidence.basis === "release" || !wasWaiting.has(key)) &&
-        extMessageQuiet(config, evidence.at));
-    if (config.quiet_hours && (!item.ready || wasWaiting.has(key)))
-      waiting.push(key);
-    const ordinaryReady = item.ready && !quietItem && (!quiet || earlier);
+      (!!config.quiet_hours &&
+        (item.undated_ready === true ||
+          [...(item.activity_at ?? [item.created_at]), row?.updated_at].some(
+            (at) => at !== undefined && extMessageQuiet(config, at),
+          )));
+    if (row && row.attempts > 0 && !quietItem) continue;
+    const ordinaryReady = item.ready && !quietItem;
     const assignedRate =
       knownOverflow.has(key) ||
       (batchOpen && !earlier && ordinaryReady && inRange);
-    if (!inRange && !quiet && !quietItem && !assignedRate) continue;
+    if (!inRange && !quietItem && !assignedRate) continue;
     if (!item.ready && channel.startsWith("lark_app:")) {
-      if (remembered.has(key)) heldQuiet.push(key);
+      if (quietItem) heldQuiet.push(key);
       if (knownOverflow.has(key)) heldOverflow.push(key);
       continue;
     }
@@ -230,9 +223,9 @@ function planChannel(
     : [];
   // A competing reservation between read and commit can only shorten this
   // prefix. Reclassify the observed IDs, never rescan readiness at a later clock.
-  function classify(available: number) {
+  function classify(available: number, enqueueQuiet = false) {
     const singles = new Set(
-      eligiblePrefix.slice(0, available).map((c) => c.key),
+      eligiblePrefix.slice(0, enqueueQuiet ? 0 : available).map((c) => c.key),
     );
     const overflowTail = new Set(heldOverflow);
     const admissions: {
@@ -257,14 +250,13 @@ function planChannel(
           c.inRange &&
           c.ordinaryReady &&
           !singles.has(key));
-      const deferred = !rate && (quiet || c.quietItem);
+      const deferred = !rate && (enqueueQuiet || c.quietItem);
       if (!c.inRange && !deferred && !rate) continue;
-      const group = rate ? rateQueue : item.ready && deferred ? "queued" : null;
+      const group = rate ? rateQueue : deferred ? "queued" : null;
       if (rate) hasRate = true;
       if (deferred) singles.delete(key);
       if (row) {
-        if (group && item.ready) admissions.push({ row, group });
-        else if (rate) overflowTail.add(key);
+        if (group) admissions.push({ row, group });
       } else if (!c.rank) {
         writes.push({ item, channel, group });
       } else {
@@ -277,27 +269,21 @@ function planChannel(
         }
       }
     }
-    const waitingKeys = JSON.stringify(waiting);
     const members = JSON.stringify(remaining),
       overflowKeys = JSON.stringify([...overflowTail]),
       singleKeys = JSON.stringify([...singles]);
     const next =
-      !remaining.length &&
-      !overflowTail.size &&
-      !singles.size &&
-      !waiting.length
+      !remaining.length && !overflowTail.size && !singles.size
         ? null
         : previous?.members === members &&
             previous.ordinary === overflowKeys &&
-            previous.singles === singleKeys &&
-            previous.waiting === waitingKeys
+            previous.singles === singleKeys
           ? previous
           : {
               stamp: randomUUID(),
               members,
               ordinary: overflowKeys,
               singles: singleKeys,
-              waiting: waitingKeys,
             };
     return {
       channel,
@@ -708,12 +694,12 @@ export class ExtMessageSender {
           return false;
         for (const [i, initial] of plan.plans.entries()) {
           let p = initial;
-          if (p.singles.size) {
-            const left = available(p.channel, this.clock.now());
-            if (left < p.singles.size) {
-              p = { ...p, ...p.classify(left) };
-              plan.plans[i] = p;
-            }
+          const enqueueAt = this.clock.now();
+          const enqueueQuiet = extMessageQuiet(config, enqueueAt);
+          const left = available(p.channel, enqueueAt);
+          if (enqueueQuiet || left < p.singles.size) {
+            p = { ...p, ...p.classify(left, enqueueQuiet) };
+            plan.plans[i] = p;
           }
           // The quota can already be full when the read plan first discovers
           // ordinary overflow, even if every row in this write batch is deferred.
@@ -727,9 +713,10 @@ export class ExtMessageSender {
           )
             deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, group } of p.writes)
-            projectExtMessage(store.database, item, channel, now, group);
+            projectExtMessage(store.database, item, channel, enqueueAt, group);
           for (const { row, group } of p.admissions)
-            groupExtMessage(store.database, row, group);
+            if (group === "queued") markExtQuiet(store.database, row);
+            else groupExtMessage(store.database, row, group);
           if (p.previous !== p.next)
             saveExtQuietOverflow(store.database, projectId, p.channel, p.next);
         }
@@ -827,26 +814,13 @@ export class ExtMessageSender {
       appChannel && first ? extInteraction(state, first) : undefined;
     const message = !first
       ? undefined
-      : digest?.startsWith("rate:")
-        ? { title: `${eligible.length} 条待处理`, url: config.workbench_url }
-        : digest === null
-          ? buildExtMessage(
-              first,
-              config.workbench_url,
-              config.policy.title_limit,
-            )
-          : buildExtMessageDigest(
-              project,
-              eligible.map(({ item }, i) =>
-                appChannel &&
-                i < config.policy.digest_limit &&
-                (i === 0 ? interaction : extInteraction(state, item))?.sensitive
-                  ? { ...item, sensitive: true }
-                  : item,
-              ),
-              config.workbench_url,
-              config.policy,
-            );
+      : digest === null
+        ? buildExtMessage(
+            first,
+            config.workbench_url,
+            config.policy.title_limit,
+          )
+        : buildExtMessageDigest(eligible.length, config.workbench_url);
     const claimed = store.uow.run((tx) => {
       if (
         !this.current(candidate.channel) ||
@@ -916,7 +890,7 @@ export class ExtMessageSender {
         )
           return enqueueRate();
         if (quiet || extMessageQuiet(config, claimAt)) {
-          if (single) groupExtMessage(store.database, candidate, "queued");
+          if (digest === null) markExtQuiet(store.database, candidate);
           return "deferred" as const;
         }
         if (
@@ -930,6 +904,7 @@ export class ExtMessageSender {
           )
         ) {
           if (single) return enqueueRate();
+          if (digest === null) markExtQuiet(store.database, candidate);
           return "deferred" as const;
         }
         // The last reservation may precede the first overflow outbox row. A
@@ -1002,6 +977,8 @@ export class ExtMessageSender {
         !activation ||
         nowQuiet ||
         Date.parse(dispatchAt) >= claimed.sendBy ||
+        (digest === null &&
+          store.snapshotVersion(project) !== projection.version) ||
         (appChannel &&
           candidate.channel !== `lark_app:${this.app?.binding?.generation}`) ||
         !ownsExtDispatch(
@@ -1010,6 +987,7 @@ export class ExtMessageSender {
           activation.epoch,
           claimed.lease,
           claimed.rows.length,
+          digest,
         )
       ) {
         store.uow.run(() => {
@@ -1019,9 +997,12 @@ export class ExtMessageSender {
               store.database,
               row,
               claimed.lease,
-              nowQuiet && row.digest_id === null && row.attempts === 0
-                ? "queued"
+              nowQuiet && row.digest_id === null
+                ? row.attempts === 0
+                  ? "queued"
+                  : randomUUID()
                 : row.digest_id,
+              digest,
             );
             if (released && row.digest_id === rateQueue)
               restoredOverflow = true;

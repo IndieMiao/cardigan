@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtMessageItem } from "@cardigan/domain";
 
@@ -46,7 +47,6 @@ export interface ExtQuietOverflow {
   readonly stamp: string;
   readonly members: string; // Quiet tail. All sets contain item keys, never message content.
   readonly ordinary: string; // Known overflow not yet materialized in the outbox.
-  readonly waiting: string; // Observed unready, even outside the bounded write batch.
   readonly singles: string; // Ordinary prefix, not a reservation of channel budget.
 }
 /** Only read the membership document in the read snapshot. */
@@ -57,7 +57,7 @@ export function extQuietOverflow(
 ): ExtQuietOverflow | null {
   const row = prepare(
     db,
-    "SELECT stamp,members,ordinary,singles,waiting FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
+    "SELECT stamp,members,ordinary,singles FROM ext_message_quiet_overflow WHERE project_id=? AND channel=?",
   ).get(project, channel);
   return row
     ? {
@@ -65,7 +65,6 @@ export function extQuietOverflow(
         members: String(row.members),
         ordinary: String(row.ordinary),
         singles: String(row.singles),
-        waiting: String(row.waiting),
       }
     : null;
 }
@@ -95,8 +94,8 @@ export function saveExtQuietOverflow(
   } else {
     prepare(
       db,
-      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary,singles,waiting) VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary,singles=excluded.singles,waiting=excluded.waiting`,
+      `INSERT INTO ext_message_quiet_overflow(project_id,channel,stamp,members,ordinary,singles) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(project_id,channel) DO UPDATE SET stamp=excluded.stamp,members=excluded.members,ordinary=excluded.ordinary,singles=excluded.singles`,
     ).run(
       project,
       channel,
@@ -104,7 +103,6 @@ export function saveExtQuietOverflow(
       checkpoint.members,
       checkpoint.ordinary,
       checkpoint.singles,
-      checkpoint.waiting,
     );
   }
 }
@@ -133,8 +131,16 @@ export function projectExtMessage(
   );
 }
 
-/** Admit a single or freeze an open group. Neither a stale row nor the clock
- * can move a member between the count-only and detailed payload classes. */
+/** Monotone downgrade, including unsettled or leased single attempts. A retry
+ * remains its own frozen group, keeping its existing attempt count and due time. */
+export function markExtQuiet(db: DatabaseSync, row: ExtMessageRow) {
+  prepare(
+    db,
+    `UPDATE ext_message_outbox SET digest_id=CASE WHEN attempts=0 THEN 'queued' ELSE ? END
+    WHERE project_id=? AND item_kind=? AND item_id=? AND channel=? AND status='pending' AND digest_id IS NULL`,
+  ).run(randomUUID(), ...key(row));
+}
+/** Admit a fresh single or freeze an open group. Never thaw or move frozen members. */
 export function groupExtMessage(
   db: DatabaseSync,
   row: ExtMessageRow,
@@ -211,14 +217,16 @@ export function releaseUnsentExtMessage(
   original: ExtMessageRow,
   lease: string,
   digest: string | null,
+  claimedDigest: string | null,
 ) {
   return (
     prepare(
       db,
-      `UPDATE ext_message_outbox SET attempts=?,digest_id=?,lease_id=NULL,lease_until=NULL,next_attempt_at=?
+      `UPDATE ext_message_outbox SET attempts=?,digest_id=CASE WHEN digest_id IS ? THEN ? ELSE digest_id END,lease_id=NULL,lease_until=NULL,next_attempt_at=?
     WHERE project_id=? AND item_kind=? AND item_id=? AND channel=? AND status='pending' AND lease_id=?`,
     ).run(
       original.attempts,
+      claimedDigest,
       digest,
       original.next_attempt_at,
       ...key(original),

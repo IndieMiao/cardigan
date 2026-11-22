@@ -200,7 +200,7 @@ test("projection follows current handled/readiness state, preferred title and al
     extMessageItems({ ...state, cards: [] }, project).every((i) => i.sensitive),
   ).toBe(true);
 });
-test("readiness replay uses the matching gate fact, never an older request or another gate; evidence is not exported", () => {
+test("projection preserves creation, readiness and repeated routing times without exporting them", () => {
   const state = fixture();
   const card_id = state.cards[0]!.id;
   const gate = { kind: "card_merged" as const, card_id };
@@ -210,14 +210,19 @@ test("readiness replay uses the matching gate fact, never an older request or an
     { human_action_id: action.id },
     1,
   );
+  const trigger = {
+    ...event("card_merged", {}, 2),
+    created_at: "2026-01-01T00:01:59.999Z",
+  };
   const fact = {
     ...event(
       "needs_you_item_ready",
       {
         human_action_id: action.id,
         condition: { card_id, kind: "card_merged" },
+        source_event_id: trigger.id,
       },
-      2,
+      3,
     ),
     created_at: at,
   };
@@ -231,21 +236,32 @@ test("readiness replay uses the matching gate fact, never an older request or an
       },
       state.project_id,
     )[0]!;
-  expect(project(action, [origin]).ready_evidence).toEqual({
-    basis: "source",
-    at: origin.created_at,
+  const reroute = {
+    ...origin,
+    id: event("human_action_requested", {}, 4).id,
+    seq: 4,
+    created_at: "2026-01-01T00:03:00.000Z",
+  };
+  const ready = project({ ...action, ready_when: gate }, [
+    origin,
+    trigger,
+    fact,
+    reroute,
+  ]);
+  expect(ready).toMatchObject({
+    ready: true,
+    event_id: origin.id,
+    activity_at: [
+      origin.created_at,
+      at,
+      trigger.created_at,
+      reroute.created_at,
+    ],
   });
-  const gated = { ...action, ready_when: gate };
-  expect(project(gated, [origin])).toMatchObject({ ready: true });
-  expect(project(gated, [origin]).ready_evidence).toBeUndefined();
-  expect(
-    project({ ...action, ready_when: { kind: "card_delivery", card_id } }, [
-      origin,
-      fact,
-    ]).ready_evidence,
-  ).toBeUndefined();
-  const ready = project(gated, [origin, fact]);
-  expect(ready.ready_evidence).toEqual({ basis: "release", at });
+  expect(ready.undated_ready).toBeUndefined();
+  expect(project({ ...action, ready_when: gate }, [origin]).undated_ready).toBe(
+    true,
+  );
   expect(
     project(
       {
@@ -254,15 +270,11 @@ test("readiness replay uses the matching gate fact, never an older request or an
         ready_released: { by: "human", reason: "fixture", at },
       },
       [origin],
-    ).ready_evidence,
-  ).toEqual({ basis: "release", at });
-  expect(
-    project(action, [origin, { ...origin, id: fact.id, seq: 2 }])
-      .ready_evidence,
-  ).toBeUndefined();
+    ).activity_at,
+  ).toEqual([origin.created_at, at]);
   expect(
     buildExtMessage(ready, "https://workbench.invalid"),
-  ).not.toHaveProperty("ready_evidence");
+  ).not.toHaveProperty("activity_at");
 });
 test("projection preserves the first source in stream order and canonical handoff groups", () => {
   const second = { ...decision, id: id("decision", 2), key: id("decision", 2) };
@@ -457,45 +469,11 @@ test("delegated notices use the question title, omit the notice body and respect
   ).toBe(true);
 });
 
-test("digest filters current state and project, truncates titles and items, and redacts sensitive metadata", () => {
-  const pending = Array.from({ length: 23 }, (_, n) => ({
-    ...item,
-    item_id: `Q-${n + 1}`,
-    title: "😀".repeat(130),
-    sensitive: n === 0,
-  }));
-  const digest = buildExtMessageDigest(
-    "fictional",
-    [
-      ...pending,
-      { ...item, handled: true, title: "PRIVATE handled" },
-      { ...item, ready: false, title: "PRIVATE deferred" },
-      { ...item, project_id: "other", title: "PRIVATE other" },
-    ],
-    "https://workbench.invalid",
-  );
-  expect(digest.title).toBe("免打扰期间 23 条待处理");
-  expect(digest.url).toBe("https://workbench.invalid/#/p/fictional/needs-you");
-  if (!("items" in digest)) throw new Error("Expected digest");
-  expect(digest.items).toHaveLength(20);
-  expect(digest.items[0]).toEqual({
-    project: "fictional",
-    title: "有 1 条敏感事项待处理",
-    url: "https://workbench.invalid/#/p/fictional/cards/C-1?at=decision-Q-1",
+test("a summary carries only its eligible count and the workbench entrance", () => {
+  expect(buildExtMessageDigest(23, "https://workbench.invalid")).toEqual({
+    title: "23 条待处理",
+    url: "https://workbench.invalid",
   });
-  expect(digest.items[1]?.title).toBe("😀".repeat(120));
-  expect(JSON.stringify(digest)).not.toContain("PRIVATE");
-  const configured = buildExtMessageDigest(
-    "fictional",
-    pending,
-    "https://workbench.invalid",
-    {
-      ...EXT_MESSAGE_DEFAULTS,
-      title_limit: 2,
-      digest_limit: 1,
-    },
-  );
-  expect(configured).toMatchObject({ total: 23, items: [digest.items[0]] });
 });
 
 test("interactive eligibility is lost when a linked item is restricted, held by someone else, or unresolvable", () => {

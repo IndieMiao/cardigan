@@ -15,4 +15,3 @@ CREATE TABLE ext_message_rate_batches (channel TEXT PRIMARY KEY, through INTEGER
 -- None of these identities grants a lease or spends a channel slot.
 ALTER TABLE ext_message_quiet_overflow ADD COLUMN ordinary TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE ext_message_quiet_overflow ADD COLUMN singles TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE ext_message_quiet_overflow ADD COLUMN waiting TEXT NOT NULL DEFAULT '[]';

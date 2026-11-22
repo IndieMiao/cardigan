@@ -217,10 +217,11 @@ export function ownsExtDispatch(
   epoch: string,
   lease: string,
   members: number,
+  digest: string | null,
 ) {
   return !!prepare(
     db,
     `SELECT 1 FROM ext_message_channels WHERE name=? AND epoch=? AND
-    (SELECT COUNT(*) FROM ext_message_outbox WHERE lease_id=? AND status='pending')=?`,
-  ).get(name, epoch, lease, members);
+    (SELECT COUNT(*) FROM ext_message_outbox WHERE lease_id=? AND digest_id IS ? AND status='pending')=?`,
+  ).get(name, epoch, lease, digest, members);
 }

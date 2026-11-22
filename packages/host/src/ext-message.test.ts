@@ -13,7 +13,6 @@ import {
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   claimExtMessage,
-  deferExtRateBatch,
   listExtMessages,
   projectExtMessage,
   Store,
@@ -936,25 +935,10 @@ const addTitledAction = (n: number) => {
   );
 };
 
-// C-555#135: cell expectations are independent of enqueue and restart timing.
-const matrixCells = [false, true].flatMap((full) =>
-  [false, true].flatMap((open) =>
-    [false, true].flatMap((quietSource) =>
-      (["before", "enter", "during", "wake"] as const).flatMap((claim) =>
-        [false, true].flatMap((enqueued) =>
-          [false, true].map((restart) => ({
-            full,
-            open,
-            quietSource,
-            claim,
-            enqueued,
-            restart,
-          })),
-        ),
-      ),
-    ),
-  ),
-);
+const summaryOf = (count: number) => ({
+  title: `${count} 条待处理`,
+  url: config.workbench_url,
+});
 const matrixTime = (ms: number) =>
   new Date(Date.UTC(2026, 0, 1) + ms).toISOString();
 const matrixEntry = (n: number) => ({
@@ -980,7 +964,7 @@ function holdMatrixAction(n: number) {
   });
 }
 
-// C-555#183: the same readiness history must produce identical deliveries,
+// Quiet creation must produce the same count-only deliveries,
 // whether a bounded projection materialized the tail or the sender restarted.
 const wakeCases = (["A", "B", "C"] as const).flatMap((scenario) =>
   [false, true].flatMap((extraScan) =>
@@ -1037,41 +1021,10 @@ test.each(wakeCases)(
     now = matrixTime(wake);
     for (const unlock of release.slice(scenario === "B" ? 32 : 0)) unlock();
     const target = config.channels.fake!.credential;
-    const first = {
-      at: now,
-      target,
-      message:
-        scenario === "C"
-          ? {
-              project: project_id,
-              title: "免打扰期间 2 条待处理",
-              total: 2,
-              items: [matrixEntry(101), matrixEntry(102)],
-              url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
-            }
-          : matrixEntry(scenario === "A" ? 101 : 133),
-    };
     await active.tick();
-    expect(calls).toEqual([first]);
-    now = matrixTime(wake + 59_999);
-    await active.tick();
-    expect(calls).toEqual([first]);
-    advance(1);
-    const expected =
-      scenario === "C"
-        ? [first]
-        : [
-            first,
-            {
-              at: now,
-              target,
-              message: {
-                title: `${scenario === "A" ? 33 : 1} 条待处理`,
-                url: config.workbench_url,
-              },
-            },
-          ];
-    await active.tick();
+    const expected = [
+      { at: now, target, message: summaryOf(scenario === "A" ? 34 : 2) },
+    ];
     expect(calls).toEqual(expected);
     for (let i = 0; i < 4; i++) {
       advance(60_000);
@@ -1107,213 +1060,71 @@ test.each([false, true])(
     now = matrixTime(180_000);
     await sender().tick();
     expect(fake.messages).toEqual([
-      duringQuiet
-        ? {
-            project: project_id,
-            title: "免打扰期间 1 条待处理",
-            total: 1,
-            items: [matrixEntry(101)],
-            url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
-          }
-        : matrixEntry(101),
+      duringQuiet ? summaryOf(1) : matrixEntry(101),
     ]);
   },
 );
 
-test.each(matrixCells)(
-  "admission matrix full=$full open=$open quietSource=$quietSource claim=$claim enqueued=$enqueued restart=$restart",
-  async ({ full, open, quietSource, claim, enqueued, restart }) => {
+test.each(["enqueue", "retry", "route", "dispatch"] as const)(
+  "a quiet %s cannot recover details after restart",
+  async (edge) => {
     config = {
       ...config,
       quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
-      policy: { ...config.policy, max_per_minute: full ? 1 : 2 },
-    };
-    const calls: {
-      at: number;
-      target: string | undefined;
-      message: ExtMessage;
-    }[] = [];
-    const start = () =>
-      sender({
-        adapters: {
-          fake: (target) => ({
-            async send(message) {
-              calls.push({ at: Date.parse(now), target, message });
-              return "sent";
-            },
-          }),
-        },
-      });
-    let active = start();
-    active.recordStatus();
-    now = matrixTime(119_998);
-    if (full) {
-      addTitledAction(1);
-      await active.tick();
-    }
-    const baseline = calls.length;
-    expect(baseline).toBe(full ? 1 : 0);
-    const release = [holdMatrixAction(90), holdMatrixAction(91)];
-    if (enqueued) await active.tick();
-    expect(
-      rows()
-        .filter((r) => r.item_id === "H-90" || r.item_id === "H-91")
-        .map((r) => r.digest_id),
-    ).toEqual(enqueued ? [null, null] : []);
-    if (open) store.uow.run(() => deferExtRateBatch(store.database, "fake"));
-    const unreachable =
-      quietSource && (claim === "before" || claim === "enter");
-    now = matrixTime(
-      quietSource && !unreachable
-        ? claim === "wake"
-          ? 179_999
-          : 120_000
-        : 119_999,
-    );
-    if (!unreachable) for (const unlock of release) unlock();
-    const claimTime =
-      claim === "before"
-        ? 119_999
-        : claim === "enter"
-          ? 120_000
-          : claim === "during"
-            ? 150_000
-            : 180_000;
-    // Stop immediately after the checked projection commit, before any claim.
-    // For an unreachable cell no readiness write is required; the read suffices.
-    let read = false,
-      boundary = false;
-    store.observe({
-      transaction(kind) {
-        if (kind === "read") read = true;
-        if (!read || (!unreachable && kind !== "run")) return;
-        store.observe(undefined);
-        boundary = true;
-        now = matrixTime(claimTime);
-        if (restart) void active.stop();
-      },
-    });
-    await active.tick();
-    expect(boundary).toBe(true);
-    store.observe(undefined);
-    if (restart) {
-      await active.stop();
-      store.close();
-      store = Store.open({ dataDir: dir });
-      active = start();
-    }
-    await active.tick();
-    if (unreachable) {
-      expect(calls.slice(baseline)).toEqual([]);
-      return;
-    }
-    if (claim === "enter" || claim === "during")
-      expect(calls.slice(baseline)).toEqual([]);
-    if (claim === "before" && !full)
-      expect(calls.length).toBeGreaterThan(baseline);
-    if (now < matrixTime(180_000)) {
-      now = matrixTime(180_000);
-      await active.tick();
-    }
-    for (let n = 0; n < 3; n++) {
-      await active.tick();
-      advance(60_000);
-    }
-    const expected = quietSource
-      ? "details"
-      : full || open
-        ? "count"
-        : claim === "enter" || claim === "during"
-          ? "details"
-          : "single";
-    const earliest = Date.parse(
-      matrixTime(claim === "before" && !full ? 119_999 : 180_000),
-    );
-    expect([...new Set(calls.slice(baseline).map((c) => c.at))]).toEqual([
-      earliest,
-    ]);
-    const entries = [matrixEntry(90), matrixEntry(91)];
-    expect(calls.slice(baseline).map((c) => c.message)).toEqual(
-      expected === "count"
-        ? [{ title: "2 条待处理", url: config.workbench_url }]
-        : expected === "details"
-          ? [
-              {
-                project: project_id,
-                title: "免打扰期间 2 条待处理",
-                total: 2,
-                items: entries,
-                url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
-              },
-            ]
-          : entries,
-    );
-    for (const c of calls) {
-      expect(c.target).toBe("SYNTHETIC_SECRET");
-      expect(
-        c.at < Date.parse(matrixTime(120_000)) ||
-          c.at >= Date.parse(matrixTime(180_000)),
-      ).toBe(true);
-      expect(
-        calls.filter((v) => v.at > c.at - 60_000 && v.at <= c.at).length,
-      ).toBeLessThanOrEqual(full ? 1 : 2);
-    }
-  },
-);
-
-test.each([false, true])(
-  "one remaining slot admits only the prefix across quiet, restart=%s",
-  async (restart) => {
-    config = {
-      ...config,
-      quiet_hours: { timezone: "UTC", start: "00:02", end: "00:03" },
-      policy: { ...config.policy, max_per_minute: 2 },
     };
     const active = sender();
     active.recordStatus();
-    now = matrixTime(119_998);
+    now = matrixTime(119_999);
     addTitledAction(1);
-    await active.tick();
-    const release = [holdMatrixAction(90), holdMatrixAction(91)];
-    await active.tick();
-    advance(1);
-    for (const unlock of release) unlock();
-    let read = false;
-    store.observe({
-      transaction(kind) {
-        if (kind === "read") read = true;
-        else if (read) {
-          store.observe(undefined);
-          advance(1);
-          if (restart) void active.stop();
-        }
-      },
-    });
-    await active.tick();
-    expect(now).toBe(matrixTime(120_000));
-    if (restart) {
-      await active.stop();
-      store.close();
-      store = Store.open({ dataDir: dir });
+    if (edge === "retry") {
+      fake.result = "retryable";
+      await active.tick();
+      expect(fake.messages).toEqual([matrixEntry(1)]);
+      fake.messages = [];
+      fake.result = "sent";
+      advance(1);
+      await active.tick();
+    } else if (edge === "dispatch") {
+      afterClaim(() => advance(1));
+      await active.tick();
+      expect(rows()).toMatchObject([{ status: "pending", attempts: 0 }]);
+    } else if (edge === "route") {
+      advance(1);
+      store.uow.run((tx) =>
+        tx.events.append(project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project_id),
+          type: "human_action_requested",
+          actor: { kind: "system", project_id },
+          created_at: now,
+          payload: { human_action_id: "H-1" },
+        }),
+      );
+    } else {
+      let read = false;
+      store.observe({
+        transaction(kind) {
+          if (kind === "read") {
+            read = true;
+            advance(1);
+          } else if (read) {
+            store.observe(undefined);
+            void active.stop();
+          }
+        },
+      });
+      await active.tick();
+      expect(rows()).toMatchObject([{ status: "pending" }]);
     }
-    await sender().tick();
-    expect(fake.messages).toHaveLength(1);
+    expect(fake.messages).toEqual([]);
+    await active.stop();
+    store.close();
+    store = Store.open({ dataDir: dir });
     now = matrixTime(180_000);
     await sender().tick();
     advance(60_000);
     await sender().tick();
-    expect(fake.messages.slice(1)).toHaveLength(2);
-    expect(fake.messages.slice(1)).toContainEqual({
-      title: "1 条待处理",
-      url: config.workbench_url,
-    });
-    expect(fake.messages.slice(1)).toContainEqual({
-      project: project_id,
-      total: 1,
-      items: [matrixEntry(90)],
-      title: "免打扰期间 1 条待处理",
-      url: `${config.workbench_url}/#/p/${project_id}/needs-you`,
-    });
+    expect(fake.messages).toEqual([summaryOf(1)]);
   },
 );
 
@@ -1502,14 +1313,7 @@ test.each(
     if (edge === "mixed quiet items") {
       expect(delivered).toHaveLength(2);
       expect(delivered).toContainEqual(summary);
-      expect(delivered).toContainEqual(
-        expect.objectContaining({
-          total: 1,
-          items: [
-            expect.objectContaining({ item: "H-51", title: "Fixture 51" }),
-          ],
-        }),
-      );
+      expect(delivered).toContainEqual(summaryOf(1));
     } else expect(delivered).toEqual([summary]);
     advance(60_000);
     await awake.tick();
@@ -1524,7 +1328,7 @@ test.each(
     ),
   ),
 )(
-  "an older source first released during quiet hours is not a rate member: $edge, limit $limit",
+  "an older source released during quiet hours sends no details: $edge, limit $limit",
   async ({ limit, edge }) => {
     config = {
       ...config,
@@ -1593,17 +1397,7 @@ test.each(
       title: "2 条待处理",
       url: config.workbench_url,
     });
-    expect(fake.messages.slice(limit)).toContainEqual(
-      expect.objectContaining({
-        total: 1,
-        items: [
-          expect.objectContaining({
-            item: "H-90",
-            url: expect.stringContaining("human-action-H-90"),
-          }),
-        ],
-      }),
-    );
+    expect(fake.messages.slice(limit)).toContainEqual(summaryOf(1));
   },
 );
 
@@ -1717,11 +1511,9 @@ test("a configured one-slot channel counts retry attempts and its count-only sum
   expect(fake.messages).toHaveLength(2);
   advance(60_000);
   await sender().tick();
+  expect(fake.messages.slice(1)).toHaveLength(2);
   expect(fake.messages.slice(1)).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({ item: "H-1" }),
-      { title: "2 条待处理", url: config.workbench_url },
-    ]),
+    expect.arrayContaining([summaryOf(1), summaryOf(2)]),
   );
   expect(rows().map((r) => r.status)).toEqual(["sent", "sent", "sent"]);
 });
@@ -1767,7 +1559,7 @@ test("a failed overflow summary retries in its original group and drops handled 
   });
 });
 
-test("quiet digest survives restart, removes handled items, rechecks sensitivity, and truncates once", async () => {
+test("quiet digest survives restart, omits handled items and reveals no individual links", async () => {
   quiet();
   startChannel();
   for (let n = 2; n <= 23; n++) addAction(n);
@@ -1785,16 +1577,7 @@ test("quiet digest survives restart, removes handled items, rechecks sensitivity
   advance(8 * 3600000);
   await sender().tick();
   expect(fake.messages).toHaveLength(1);
-  const digest = fake.messages[0];
-  if (!digest) throw new Error("Expected digest");
-  expect(digest.title).toBe("免打扰期间 22 条待处理");
-  if (!("items" in digest)) throw new Error("Expected digest");
-  expect(digest.items).toHaveLength(20);
-  expect(
-    digest.items.every(
-      (i) => i.title === "有 1 条敏感事项待处理" && !("card" in i),
-    ),
-  ).toBe(true);
+  expect(fake.messages[0]).toEqual(summaryOf(22));
   expect(rows().filter((r) => r.status === "sent")).toHaveLength(22);
   expect(rows().find((r) => r.item_id === "H-1")?.status).toBe("skipped");
   await sender().tick();
@@ -1809,10 +1592,7 @@ test("restart after quiet hours projects unscanned source events into one digest
   // Both source events happened while quiet, even though no sender was running then.
   await sender().tick();
   expect(fake.messages).toHaveLength(1);
-  expect(fake.messages[0]).toMatchObject({
-    total: 2,
-    title: "免打扰期间 2 条待处理",
-  });
+  expect(fake.messages[0]).toEqual(summaryOf(2));
   addAction(3);
   await sender().tick();
   expect(fake.messages).toHaveLength(2);
@@ -1838,9 +1618,7 @@ test("recovery spanning two projection batches sends one quiet digest and does n
   await sender().tick();
   await sender().tick();
   expect(fake.messages).toHaveLength(2);
-  const digest = fake.messages[1];
-  expect(digest).toMatchObject({ total: 33, title: "免打扰期间 33 条待处理" });
-  expect(digest && "items" in digest && digest.items).toHaveLength(20);
+  expect(fake.messages[1]).toEqual(summaryOf(33));
   expect(rows().filter((r) => r.status === "sent")).toHaveLength(34);
 });
 
@@ -1864,7 +1642,7 @@ test("a quiet scan just before wake keeps all 33 earlier ready items in one dige
   expect(fake.messages).toEqual([]);
   advance(1000);
   await active.tick();
-  expect(fake.messages).toMatchObject([{ total: 33 }]);
+  expect(fake.messages).toEqual([summaryOf(33)]);
   expect(rows().filter((r) => r.status === "sent")).toHaveLength(33);
 });
 
@@ -1896,7 +1674,7 @@ test("after restart only surviving quiet-scan members join the digest, not new o
   expect(fake.messages).toMatchObject([{ item: "H-1000" }]);
   await active.tick();
   await active.tick();
-  expect(fake.messages).toMatchObject([{ item: "H-1000" }, { total: 64 }]);
+  expect(fake.messages).toMatchObject([{ item: "H-1000" }, summaryOf(64)]);
   expect(rows().some((r) => r.item_id === handled)).toBe(false);
   expect(
     store.database.prepare("SELECT 1 FROM ext_message_quiet_overflow").get(),
@@ -1927,7 +1705,7 @@ test("an awake projection cannot overwrite a quiet scan committed by a concurren
     expect(fake.messages).toEqual([]);
     expect(rows()).toHaveLength(32);
     await awake.tick();
-    expect(fake.messages).toMatchObject([{ total: 33 }]);
+    expect(fake.messages).toEqual([summaryOf(33)]);
   } finally {
     other.close();
   }
@@ -1993,10 +1771,7 @@ test("a digest is claimed atomically by concurrent senders and retry drops newly
   });
   advance(30000);
   await sender().tick();
-  expect(fake.messages[0]).toMatchObject({
-    total: 1,
-    items: [{ title: "有 1 条敏感事项待处理" }],
-  });
+  expect(fake.messages[0]).toEqual(summaryOf(1));
   expect(rows().find((r) => r.item_id === "H-1")).toMatchObject({
     attempts: 1,
     status: "skipped",
