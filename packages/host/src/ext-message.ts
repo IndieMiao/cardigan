@@ -28,6 +28,7 @@ import {
   extAttemptAvailable,
   extAttemptSlots,
   extChannelActivation,
+  extFilterExcludes,
   extFilterProjectScope,
   extQuietOverflow,
   extQuietStamp,
@@ -1130,8 +1131,19 @@ export class ExtMessageSender {
         (p) => store.snapshotVersion(p) === projections.get(p)!.version,
       );
       for (const row of claimed.rows) {
-        const status =
-          result === "sent"
+        // C-580: the filter may have been saved while this send was in
+        // flight. An unsent item it now excludes stops quietly.
+        const dropped =
+          result !== "sent" &&
+          extFilterExcludes(
+            store.database,
+            row.project_id,
+            row.item_kind,
+            row.event_id,
+          );
+        const status = dropped
+          ? "skipped"
+          : result === "sent"
             ? "sent"
             : result === "permanent" ||
                 result === "adapter_unavailable" ||
@@ -1146,7 +1158,7 @@ export class ExtMessageSender {
           tx,
           row,
           status,
-          result === "sent" ? null : result,
+          result === "sent" || dropped ? null : result,
           now,
           next,
         );

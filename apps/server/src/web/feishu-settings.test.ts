@@ -13,11 +13,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { notices } from "@cardigan/domain";
 import {
   ExtMessageSender,
   extFingerprints,
+  LiveExtMessageSender,
   loadExtMessageConfig,
 } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   activateExtChannels,
   extChannelActivation,
@@ -821,4 +824,50 @@ test("C-580 excluded project identifiers are stored only as digests", async () =
   );
   expect(rows).toContain("project:");
   expect(rows).not.toContain(tenant);
+});
+test("C-580 a send in flight when the kind is switched off settles quietly without an undelivered notice", async () => {
+  fixture();
+  h.store.createProject({ id: project_id, name: "C-580 fixture" });
+  const started = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<"permanent">();
+  const live = new LiveExtMessageSender(path, {
+    store: h.store,
+    startApplication: () => undefined,
+    adapters: {
+      lark: () => ({
+        send: () => {
+          started.resolve();
+          return reply.promise;
+        },
+      }),
+    },
+  });
+  live.start();
+  try {
+    const on = await preview({ settings: { "filter.notice": true } });
+    expect((await confirm(on)).status).toBe(200);
+    await live.tick();
+    makeNotice();
+    const pending = live.tick();
+    await started.promise;
+    const off = await preview({ settings: { "filter.notice": false } });
+    expect((await confirm(off)).status).toBe(200);
+    reply.resolve("permanent");
+    await pending;
+    await live.tick();
+    const external = h.store.uow
+      .read((tx) => notices(loadCommandState(tx, project_id)))
+      .filter((n) => n.kind === "external_message");
+    expect(external).toEqual([]);
+    expect(
+      h.store.database
+        .prepare(
+          "SELECT status,attempts FROM ext_message_outbox WHERE item_kind='notice'",
+        )
+        .all(),
+    ).toEqual([{ status: "skipped", attempts: 1 }]);
+  } finally {
+    reply.resolve("permanent");
+    await live.stop();
+  }
 });

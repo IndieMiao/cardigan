@@ -181,6 +181,31 @@ export function activateExtFilterMarks(
   return marks;
 }
 
+/**
+ * C-580: the recorded filter (as last saved or activated) excludes this item.
+ * Used to settle a send that was already in flight when the filter changed:
+ * its failure must not become a retry or an undelivered notice.
+ */
+export function extFilterExcludes(
+  db: DatabaseSync,
+  project: string,
+  kind: string,
+  source: string,
+): boolean {
+  for (const scope of [`kind:${kind}`, extFilterProjectScope(project)]) {
+    const row = prepare(
+      db,
+      "SELECT enabled,watermark FROM ext_message_filter_marks WHERE scope=?",
+    ).get(scope);
+    if (!row) continue;
+    if (Number(row.enabled) !== 1) return true;
+    const watermark = Number(row.watermark);
+    if (watermark > 0 && !afterExtWatermark(db, project, source, watermark))
+      return true;
+  }
+  return false;
+}
+
 export function afterExtWatermark(
   db: DatabaseSync,
   project: string,
