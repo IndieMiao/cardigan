@@ -1,5 +1,6 @@
 import {
   type CommandState,
+  holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
   type ProjectId,
@@ -97,6 +98,7 @@ export function visibleTools(
           assignment.role_id === "pm" &&
           assignment.standing_mode === "office" &&
           assignment.external === true)) &&
+      (tool.name !== "publish_artifact" || holdsPublicationTool(assignment)) &&
       (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );
 }

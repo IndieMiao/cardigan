@@ -66,7 +66,7 @@ export async function receiveArtifact(
   }
 }
 
-async function openArtifact(dir: string | undefined, a: Attachment) {
+export async function openArtifact(dir: string | undefined, a: Attachment) {
   const blob = a.streamed_artifact;
   if (!blob || blob.expired)
     throw ToolError.notFound("Artifact is not available");
