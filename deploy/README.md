@@ -32,7 +32,7 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 
 ## Agent 附件助手（C-595）
 
-`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、组只读），由 worker 向导首装、人工升级或 `cardigan-helper-v2` 签名升级随 helper 一起更新；在 C-595 之前登记的签名升级入口只收三个 helper，需要按新版 `enroll-helper-worker.sh` 重新登记后才会带上附件助手。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对它们与当前发布一致。
+`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、组只读），由 worker 向导首装、人工升级或 `cardigan-helper-v2` 签名升级随 helper 一起更新；在 C-595 之前登记的签名升级入口只收三个 helper：巡检会发出带暂存命令的维护待办，管理员执行一次人工升级后入口迁移到 v2，之后自动升级一并更新附件助手。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对它们与当前发布一致。
 
 ## 安装 cardigan 命令
 

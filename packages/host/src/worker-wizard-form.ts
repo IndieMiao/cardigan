@@ -160,16 +160,20 @@ function targetCommands(
         ].join(" && ")
       : `sudo groupadd --gid ${gid} ${user} && sudo useradd --uid ${uid} --gid ${gid} --home-dir ${home} --no-create-home --shell /bin/sh ${user}`,
     directories: workerDirectoryCommand(mac, project, user, work),
-    // C-595: the attachment tools sit beside the helpers, root-owned and group read-only.
+    // C-595: the attachment tools sit beside the helpers. Always (re)install them so an
+    // existing copy with the right bytes but a writable mode or owner is corrected.
     helpers: [
+      ...["worker-files.py", "worker-git.py"].map(
+        (file) =>
+          `sudo test ! -L ${work}/libexec/${file} && (sudo cmp -s /opt/cardigan/deploy/${file} ${work}/libexec/${file} || (sudo test ! -e ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}))`,
+      ),
+      `sudo test ! -L ${work}/libexec/agent-tools && sudo install -d -o root -g ${user} -m 0750 ${work}/libexec/agent-tools`,
       ...[
-        "worker-files.py",
-        "worker-git.py",
         "agent-tools/download-attachment.mjs",
         "agent-tools/upload-evidence.mjs",
       ].map(
         (file) =>
-          `${file.startsWith("agent-tools/") ? `sudo test ! -L ${work}/libexec/agent-tools && sudo install -d -o root -g ${user} -m 0750 ${work}/libexec/agent-tools && ` : ""}sudo test ! -L ${work}/libexec/${file} && (sudo cmp -s /opt/cardigan/deploy/${file} ${work}/libexec/${file} || (sudo test ! -e ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}))`,
+          `sudo test ! -L ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}`,
       ),
     ].join(" && "),
     tools: mac

@@ -220,6 +220,10 @@ const PROBLEM_TEXT = {
   not_executable: "无法执行",
 } as const;
 
+/** A fixed per-file reason that installing the current release can fix. */
+export const agentToolsReinstallable = (reason: string) =>
+  reason.startsWith("附件助手 ");
+
 /** Readable reason for a failed check; undefined means installed and current. */
 export function agentToolsProblem(output: string): string | undefined {
   const status = RESULT.exec(output)?.[1];

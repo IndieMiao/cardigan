@@ -2,6 +2,10 @@ import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import {
+  agentToolsStale,
+  requestAgentToolsMigration,
+} from "./agent-tools-maintenance.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   matchesWorkerPlatform,
@@ -22,6 +26,7 @@ import {
   upgradeState,
 } from "./worker-upgrade-gate.js";
 import {
+  installedAgentTools,
   installRelease,
   promotionPending,
 } from "./worker-upgrade-transport.js";
@@ -43,20 +48,42 @@ export async function patrolHelperUpgrade(
     check: () => Promise<Check>;
   },
   initial: Check,
-  adapters = {
+  adapters: {
+    install: typeof installRelease;
+    workerCheck: typeof onboardWorker;
+    promotionPending: typeof promotionPending;
+    /** C-595: current helpers but missing/stale attachment tools also install once per release. */
+    toolsStale?: typeof agentToolsStale;
+    requestMigration?: typeof requestAgentToolsMigration;
+  } = {
     install: installRelease,
     workerCheck: onboardWorker,
     promotionPending,
+    toolsStale: agentToolsStale,
+    requestMigration: requestAgentToolsMigration,
   },
 ): Promise<Check> {
   const { store, project, machine, execution, signal } = options;
   if (machine === "local" || execution.mode !== "agent-ssh") return initial;
   const previous = upgradeState(store, project, machine);
   const wasHeld = !!previous && previous.state !== "verified";
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) return initial;
+  const key = upgradeKey(execution.target?.fingerprint);
+  const os = store.uow.read((tx) => tx.machines.get(project, machine))?.os;
+  let toolsStale = false;
+  if (!wasHeld && !initial.blockers.some(helperMismatch)) {
+    // One attempt per release key; an entry that cannot take the tools is not retried.
+    if (
+      initial.blockers.length ||
+      previous?.release_key === key ||
+      !os ||
+      !adapters.toolsStale
+    )
+      return initial;
+    toolsStale = await adapters.toolsStale(execution, machine, os, signal);
+    if (!toolsStale) return initial;
+  }
   if (initial.blockers.includes("machine_not_ready")) return initial;
   const root = dirname(runtimeWorkersPath(options.env));
-  const key = upgradeKey(execution.target?.fingerprint);
 
   let stage = "configuration";
   const start = Date.now();
@@ -106,7 +133,7 @@ export async function patrolHelperUpgrade(
       ? { ...held, blockers: [...initial.blockers, upgradeHold] }
       : initial;
   }
-  const needsInstall = initial.blockers.some(helperMismatch);
+  const needsInstall = toolsStale || initial.blockers.some(helperMismatch);
   if (!needsInstall && initial.blockers.length)
     return { ...held, blockers: [...initial.blockers, upgradeHold] };
   try {
@@ -161,6 +188,19 @@ export async function patrolHelperUpgrade(
     if (needsInstall) {
       stage = "install";
       before = await adapters.install(execution, project, identity, signal);
+      // A v1 entry upgraded only the helpers: never treat that as tools installed.
+      if (!installedAgentTools(before) && os && adapters.requestMigration)
+        await adapters
+          .requestMigration(
+            store,
+            project,
+            machine,
+            execution,
+            os,
+            "签名升级入口在 C-595 之前登记（v1），本次自动升级只更新了三个 helper",
+            signal,
+          )
+          .catch(() => undefined);
     }
     stage = "worker_check";
     if (
