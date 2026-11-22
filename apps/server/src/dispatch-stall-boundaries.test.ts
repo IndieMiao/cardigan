@@ -126,6 +126,7 @@ test.each(["pending", "belled"] as const)(
 
 test("an instruction ACKed by the original Run is consumed only on its own card stream", async () => {
   const f = setup();
+  f.ownTerminals();
   const { assignment: a, card, item } = f.target;
   const run = f.session(a, false);
   f.advance(300_000);
@@ -247,6 +248,7 @@ function reviewerFixture() {
 
 test("a cleaned verifier build allows recovery; an existing unreadable checkout, link or dirty work blocks it", async () => {
   const { f, a, card, item, tree, parent, build } = reviewerFixture();
+  f.ownTerminals();
   f.advance(1);
   const e = f.event(
     "instruction_issued",
@@ -277,8 +279,50 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   expect(await row()).toMatchObject({ workspace: "clean", can_restart: true });
   await f.restart(a, e.id);
   await f.service.tick();
-  await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
+  // Same guards as turn recovery: one owner-bound idle stop, never by address.
+  await vi.waitFor(() => expect(f.runtime.retire_idle).toHaveBeenCalledOnce());
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  await vi.waitFor(() =>
+    expect(
+      f.state().events.filter((v) => v.type === "host_ops_action_finished"),
+    ).toMatchObject([{ payload: { assignment_id: a.id } }]),
+  );
 });
+
+test.each(["unowned", "busy", "finished_without_kernel_proof"] as const)(
+  "an ordinary instruction stall without owner and exit proof stays read-only for Ops (%s)",
+  async (mode) => {
+    const { f, a, card, item } = reviewerFixture();
+    f.ownTerminals();
+    if (mode === "unowned") delete f.runtime.observe_retirement;
+    if (mode === "busy") f.working.add(f.refFor(a).terminal_ref);
+    if (mode === "finished_without_kernel_proof")
+      // The terminal row finished; no launch receipt or registered group.
+      f.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true as const,
+        value: "exited" as const,
+      }));
+    f.advance(1);
+    const e = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      undefined,
+      card.id,
+    );
+    f.advance(610_000);
+    expect((await f.view()).dispatch_stalls[0]).toMatchObject({
+      can_restart: false,
+      terminal_owner:
+        mode === "unowned" || mode === "busy" ? "unconfirmed" : "confirmed",
+    });
+    await expect(f.restart(a, e.id)).rejects.toMatchObject({
+      code: "stale_target",
+    });
+    await f.service.tick();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+  },
+);
 
 function endedReviewer(discussWhileWaiting = false) {
   const fixture = reviewerFixture();
@@ -894,7 +938,10 @@ test.each([
     if (mode === "dirty_at_exit") {
       writeFileSync(join(tree, "keep"), "original");
       exited = true; // The old terminal exited by itself, without a stop.
-      return { ok: true, value: { outcome: "exited" } };
+      return {
+        ok: true,
+        value: { outcome: "exited", process_group_exited: true },
+      };
     }
     if (mode === "dirty_in_slot") {
       writeFileSync(join(tree, "keep"), "original");
@@ -914,7 +961,7 @@ test.each([
     signaled();
     exited = mode !== "exit_unconfirmed";
     return exited
-      ? { ok: true, value: { outcome: "exited" } }
+      ? { ok: true, value: { outcome: "exited", process_group_exited: true } }
       : {
           ok: true,
           value: {
@@ -1274,7 +1321,10 @@ test("synthetic review handoff: reading the bell is not a restart; safe fresh ev
       expect(await opts.workspace_preflight()).toBe(true);
       expect(opts.before_signal()).toBe(true);
       retired = true;
-      return { ok: true, value: { outcome: "exited" } };
+      return {
+        ok: true,
+        value: { outcome: "exited", process_group_exited: true },
+      };
     });
     f.runtime.observe_retirement = async () => ({
       ok: true,
@@ -1627,6 +1677,7 @@ test.each([
   "review pause %s does not authorize an unrelated followup",
   async (when) => {
     const f = setup();
+    f.ownTerminals();
     const a = f.target.assignment;
     const { signal, pause } = rejected(f);
     if (when === "before_request") {
@@ -1650,11 +1701,12 @@ test.each([
     await f.restart(a, signal.id);
     if (when === "before_stop") pause();
     if (when === "after_stop") {
-      const release = vi.mocked(f.runtime.release).getMockImplementation();
-      if (!release) throw new Error("missing fixture release");
-      vi.mocked(f.runtime.release).mockImplementationOnce(async (ref) => {
+      const retire = f.runtime.retire_idle;
+      if (!retire) throw new Error("missing fixture stop");
+      f.runtime.retire_idle = vi.fn(async (ref, opts) => {
+        const result = await retire(ref, opts);
         pause();
-        return release(ref);
+        return result;
       });
     }
     await f.service.tick();
@@ -1671,8 +1723,9 @@ test.each([
     } else {
       expect(f.state().runs.filter((r) => r.status === "queued")).toEqual([]);
       if (when === "before_stop")
-        expect(f.runtime.release).not.toHaveBeenCalled();
+        expect(f.runtime.retire_idle).not.toHaveBeenCalled();
     }
+    expect(f.runtime.release).not.toHaveBeenCalled();
   },
 );
 

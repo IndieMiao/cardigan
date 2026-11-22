@@ -321,6 +321,7 @@ test.each([
   "a standing PM recovery keeps the %s stream through queued dispatch (already read: %s, competing stream: %s)",
   async (stream, alreadyRead, competitor) => {
     const f = setup();
+    f.ownTerminals();
     const pm = { ...f.pm(), standing_mode: "office" as const };
     const card = f.target.card;
     const sourceCard = stream === "card" ? card.id : undefined;
@@ -511,6 +512,7 @@ test.each([false, true])(
   "patrol supervisor recovers its own overdue bell once, including after dispatch handoff=%s",
   async (handoff) => {
     const f = setup();
+    f.ownTerminals();
     const a = f.ops;
     const ref = f.refFor(a);
     f.store.uow.run((tx) =>
@@ -558,7 +560,9 @@ test.each([false, true])(
           .runs.some((r) => r.assignment_id === a.id && r.status === "queued"),
       ).toBe(true),
     );
-    expect(f.runtime.release).toHaveBeenCalledOnce();
+    // Owner-bound idle stop with kernel exit proof; never released by address.
+    expect(f.runtime.retire_idle).toHaveBeenCalledOnce();
+    expect(f.runtime.release).not.toHaveBeenCalled();
     expect(
       f.state().assignments.find((v) => v.id === a.id)?.session_ref,
     ).toBeUndefined();
@@ -690,6 +694,7 @@ test("unconfirmed plan feedback points at the author, without guessing from word
 
 test("worktree dirtied after an accepted request withdraws it before release, without a stuck fence", async () => {
   const f = setup();
+  f.ownTerminals();
   const a = f
     .state()
     .assignments.find((a) => a.id === f.target.assignment.id) as Assignment;
@@ -712,5 +717,6 @@ test("worktree dirtied after an accepted request withdraws it before release, wi
     ).toMatchObject({ result: "withdrawn_stall_changed" }),
   );
   expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.runtime.retire_idle).not.toHaveBeenCalled();
   expect(f.state().human_actions).toHaveLength(0);
 });

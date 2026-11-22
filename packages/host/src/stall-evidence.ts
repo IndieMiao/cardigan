@@ -380,16 +380,16 @@ export async function stallEvidence(
     a.runtime_ref && bound
       ? runtime.status(a.runtime_ref).catch(() => undefined)
       : undefined,
-    (systemTurn || transfer) &&
     a.runtime_ref?.machine_id === a.machine_id &&
-    bound
+    bound &&
+    (systemTurn || transfer || a.machine_id === "local")
       ? observeTurnOwner(
           runtime,
           a.runtime_ref,
           systemTurn
             ? systemTurnOwner(state, a.id, a.runtime_ref, systemTurn)
             : { project_id: state.project_id, assignment_id: a.id },
-          !transfer,
+          !!systemTurn,
         )
       : undefined,
   ]);
@@ -411,6 +411,17 @@ export async function stallEvidence(
       (observed.value.process === "exited" || idleWakeGuard(observed.value)));
   const ownerConfirmed =
     owner?.ok && (owner.value === "alive" || owner.value === "exited");
+  // An ordinary stall row gets the same ownership and exit guards as turn
+  // recovery: this Assignment's idle terminal, a kernel-proven exit, or no
+  // session at all. A matching address or a generic status is not enough.
+  const ordinaryOwned = () =>
+    !a.runtime_ref
+      ? !!safeTerminal
+      : owner?.ok === true &&
+        (owner.value === "alive"
+          ? !!observed?.ok && !!idleWakeGuard(observed.value)
+          : owner.value === "exited" &&
+            localTurnExitProof(state, a, runtime, a.runtime_ref, execution));
   const unknownOrIdle =
     (!observed?.ok &&
       observed?.error.code !== "runtime_conflict" &&
@@ -419,9 +430,7 @@ export async function stallEvidence(
       (["unknown", "idle", "done"].includes(observed.value.agent) ||
         observed.value.process === "exited"));
   return {
-    ...(systemTurn || transfer
-      ? { terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed" }
-      : {}),
+    terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed",
     workspace,
     terminal_state,
     process_state: observed?.ok
@@ -446,7 +455,9 @@ export async function stallEvidence(
             owner.value === "alive" &&
             !!observed?.ok &&
             idleWakeGuard(observed.value)
-        : (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
+        : (systemTurn
+            ? !!ownerConfirmed && unknownOrIdle
+            : !!safeTerminal && (await ordinaryOwned())) &&
           (a.machine_id === "local" || !!remoteExited)) &&
       (writableInPlace(workspace) || workspace === "no_worktree"),
   };

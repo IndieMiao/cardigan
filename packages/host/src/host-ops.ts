@@ -1732,6 +1732,43 @@ export class HostOpsService {
           if (result === "exited" && !(await checkWorkspace()))
             result = "withdrawn";
           result = evidenceFailure ?? result;
+        } else if (action.dispatch_stall_id) {
+          // Ordinary stall rows use the turn-recovery guards: re-read the
+          // evidence, one owner-bound idle stop and kernel exit proof. Never
+          // force-release by address; without proof the row goes to Ops.
+          if (!stopStarted) {
+            await checkStall();
+            if (!mayStop()) return;
+          }
+          const a = read().assignments.find(
+            (v) => v.id === action.assignment_id,
+          );
+          result = !action.runtime_ref
+            ? a && !a.runtime_ref
+              ? "exited" // Never provisioned: no session to stop.
+              : "terminal_exit_unconfirmed"
+            : !a || a.machine_id !== "local"
+              ? "terminal_exit_unconfirmed"
+              : await stopSystemTurn(
+                  runtime,
+                  action.runtime_ref,
+                  { project_id: project, assignment_id: a.id },
+                  stopStarted,
+                  checkWorkspace,
+                  beforeSignal,
+                  async () =>
+                    !!action.runtime_ref &&
+                    (await localTurnExitProof(
+                      read(),
+                      a,
+                      runtime,
+                      action.runtime_ref,
+                      this.stallExecution(project, a.machine_id),
+                    )),
+                );
+          if (result === "exited" && !(await checkWorkspace()))
+            result = "withdrawn";
+          result = evidenceFailure ?? result;
         } else {
           result = await stopRunRuntime(
             runtime,
@@ -1739,7 +1776,6 @@ export class HostOpsService {
             beforeSignal,
             stopStarted,
             !stopStarted,
-            action.dispatch_stall_id ? checkStall : undefined,
           );
           if (result !== "exited") result = "terminal_exit_unconfirmed";
         }
