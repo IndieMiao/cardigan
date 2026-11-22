@@ -168,6 +168,8 @@ export function MachineAgentLimit({
           max={machine.run_limit_maximum}
           mergeCheckSlots={slots ?? 0}
           description={
+            // A zero maximum is an invalid host configuration, not a cap.
+            machine.run_limit_maximum > 0 &&
             machine.run_limit >= machine.run_limit_maximum
               ? hostMaximumHint(machine.run_limit_maximum)
               : `最多可设 ${machine.run_limit_maximum} 个`

@@ -109,12 +109,15 @@ type AgentCapacity = ExecutionCapacity["agents"][number];
  * The limited (non-standing) count from the shared capacity read, beside the
  * limit the machine read confirmed (the same value as its resource limits),
  * so one drawer never shows two limits. Standing sessions are exempt.
- * C-576: the count is the scheduler's own occupancy (running Runs plus
- * startup and stop reservations), so it is labelled 占用, not 运行中.
+ * C-576: the count is what the scheduler compares with the limit: running
+ * Runs plus startup and stop reservations, plus the Agent slots this host's
+ * own merge checks take (`merge_check_slots`). It is labelled 占用, not 运行中.
  */
 const OCCUPIED_LABEL = "占用 / 上限";
 const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
-  `${capacity ? capacity.running : "—"} / ${m.run_limit || "不可用"}`;
+  `${
+    capacity ? capacity.running + capacity.merge_check_slots : "—"
+  } / ${m.run_limit || "不可用"}`;
 /**
  * The shared capacity read as the machine panel uses it, in one of two
  * states (Q-1013). Usable: the last successful read is shown, also while an
@@ -192,7 +195,7 @@ function LatestCheck({ machine }: { machine: MachineView }) {
   return <CheckTag check={{ ...check, label }} />;
 }
 const MACHINES_HELP =
-  "占用：调度计入上限的 Agent 会话，含运行中、启动中和等待停止的会话；常驻 PM 和主机运维不计入。上限：点“详情”修改，未改过时为主机配置的默认值，不超过主机配置的最大值。最近检查：机器检查或接入检查的结果与时间。";
+  "占用：调度计入上限的 Agent 会话，含运行中、启动中和等待停止的会话，以及本机合并检查占用的名额；常驻 PM 和主机运维不计入。上限：点“详情”修改，未改过时为主机配置的默认值，不超过主机配置的最大值。最近检查：机器检查或接入检查的结果与时间。";
 
 /**
  * C-512: the machines this host manages. Machines are global; the detail

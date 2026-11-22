@@ -550,6 +550,40 @@ test("C-576: a limit at the host maximum says why it cannot go higher", async ()
   expect(dialog.queryByText("最多可设 16 个")).toBeNull();
 });
 
+test("C-576: 占用 counts this host's merge check slots, as the scheduler does", async () => {
+  // The scheduler compares running + merge check slots with the limit: 5 + 2
+  // fills a limit of 6, so ordinary work cannot start.
+  const busy: ExecutionCapacity = {
+    ...capacity,
+    agents: capacity.agents.map((a) =>
+      a.machine_id === "local" ? { ...a, running: 5, merge_check_slots: 2 } : a,
+    ),
+  };
+  await openMachines(client({ executionCapacity: async () => busy }));
+  const rows = within(table()).getAllByRole("row");
+  await waitFor(() => expect(rows[1]?.textContent).toContain("7 / 6"));
+  fireEvent.click(screen.getByRole("button", { name: "本机 详情" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await dialog.findByText("概况");
+  expect(
+    dialog.getByText("占用 / 上限", { selector: "dt" }).nextElementSibling
+      ?.textContent,
+  ).toBe("7 / 6");
+});
+
+test("C-576: an invalid host configuration shows its warning, not a maximum of 0", async () => {
+  const c = capacityClient({
+    machine: vi.fn(async (_p: string, id: string) => ({
+      machine: { ...byId(id), run_limit: 0, run_limit_maximum: 0 },
+    })),
+  });
+  await openMachines(c);
+  fireEvent.click(screen.getByRole("button", { name: "本机 详情" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  await dialog.findByText("主机并发配置无效，请联系主机管理员");
+  expect(dialog.queryByText(/主机配置的最大值为 0/u)).toBeNull();
+});
+
 test("C-511: an old ?tab=capacity link lands on the machine page and replaces itself", async () => {
   window.location.hash = "#/p/p-1/settings?tab=capacity";
   render(<App client={client()} />);
