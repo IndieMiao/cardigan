@@ -70,6 +70,26 @@ export function deploymentRolePolicyHash(role: RoleDefinition): string {
   return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
 }
 
+/**
+ * Supervisors built before machine requirements hash the previous pack without
+ * required_capabilities, and the supervisor does not upgrade with the release.
+ * That legacy hash cannot vouch for the requirements, so accept it only when the
+ * role already carries the next default's requirements: the upgrade loses nothing.
+ */
+function matchesPreviousDefault(
+  role: RoleDefinition,
+  baseline: string,
+  next: RoleDefinition,
+): boolean {
+  if (deploymentRolePolicyHash(role) === baseline) return true;
+  const requirements = (r: RoleDefinition) =>
+    JSON.stringify([...(r.required_capabilities ?? [])].sort());
+  return (
+    deploymentRolePolicyHash({ ...role, required_capabilities: [] }) ===
+      baseline && requirements(role) === requirements(next)
+  );
+}
+
 /** Fingerprint the loaded package, not the mutable project role definitions. */
 let loadedPackHash: string | undefined;
 type PublishedRole = {
@@ -211,7 +231,7 @@ export function upgradeDeployedRoles(
         );
         continue;
       }
-      if (currentHash !== baseline) {
+      if (!matchesPreviousDefault(latest, baseline, source)) {
         if (source.instructions === undefined)
           throw new Error("Default role instructions missing");
         const diff = roleUpgradeDiff(latest, {
@@ -268,20 +288,18 @@ export function upgradeDeployedRoles(
     for (const role of listRoleVersions(tx, project)) {
       if (!isDefaultRoleId(role.role_id)) continue;
       const policy_hash = deploymentRolePolicyHash(role);
-      const expected = deploymentRolePolicyHash(
-        defaultRoleDefinition(role.role_id, {
-          harness: role.harness,
-          launch_profile_ref: role.launch_profile_ref,
-        }),
-      );
+      const source = defaultRoleDefinition(role.role_id, {
+        harness: role.harness,
+        launch_profile_ref: role.launch_profile_ref,
+      });
       const baseline = previousDefaults[role.role_id];
       roles[role.role_id] = {
         version: role.version,
         policy_hash,
         disposition:
-          policy_hash === expected
+          policy_hash === deploymentRolePolicyHash(source)
             ? "matched"
-            : baseline && policy_hash !== baseline
+            : baseline && !matchesPreviousDefault(role, baseline, source)
               ? "conflict"
               : "unverified",
       };

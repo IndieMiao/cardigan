@@ -58,6 +58,19 @@ import { acquireRepositoryFlock } from "./repository-lock.js";
 
 const exec = promisify(execFile);
 const PROJECT = "cardigan";
+/** Must hash exactly like deploymentRolePolicyHash, or every default looks hand-edited. */
+export const ROLE_PACK_SNAPSHOT_SCRIPT = `import { pathToFileURL } from 'node:url';
+  import { createHash } from 'node:crypto';
+  const m = await import(pathToFileURL(process.argv[1]).href);
+  const values = Object.fromEntries(Object.keys(m.DEFAULT_ROLE_KINDS).map(id => {
+    const r = m.defaultRoleDefinition(id, { harness: 'codex', launch_profile_ref: 'deployment' });
+    const p = { instructions: r.instructions, allowed_tools: [...r.allowed_tools].sort(),
+      capabilities: [...r.capabilities].sort(), kind: r.kind, worktree: r.worktree,
+      ...(r.required_capabilities?.length
+        ? { required_capabilities: [...r.required_capabilities].sort() } : {}) };
+    return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
+  }));
+  process.stdout.write(JSON.stringify(values));`;
 class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
@@ -1036,22 +1049,12 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     const previous = this.state.previous;
     if (!previous) throw new Error("Previous role pack unavailable");
     const snapshot = async (release: string) => {
-      const script = `import { pathToFileURL } from 'node:url';
-        import { createHash } from 'node:crypto';
-        const m = await import(pathToFileURL(process.argv[1]).href);
-        const values = Object.fromEntries(Object.keys(m.DEFAULT_ROLE_KINDS).map(id => {
-          const r = m.defaultRoleDefinition(id, { harness: 'codex', launch_profile_ref: 'deployment' });
-          const p = { instructions: r.instructions, allowed_tools: [...r.allowed_tools].sort(),
-            capabilities: [...r.capabilities].sort(), kind: r.kind, worktree: r.worktree };
-          return [id, createHash('sha256').update(JSON.stringify(p)).digest('hex')];
-        }));
-        process.stdout.write(JSON.stringify(values));`;
       const result = await this.command(
         process.execPath,
         [
           "--input-type=module",
           "-e",
-          script,
+          ROLE_PACK_SNAPSHOT_SCRIPT,
           join(release, "packages/roles/dist/index.js"),
         ],
         release,

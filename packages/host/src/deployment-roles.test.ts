@@ -1,10 +1,20 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment } from "@cardigan/domain";
-import { defaultRoleDefinition } from "@cardigan/roles";
-import { getRoleVersion, Store, writeRole } from "@cardigan/store";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { type Assignment, upgradeRole } from "@cardigan/domain";
+import { DEFAULT_ROLE_KINDS, defaultRoleDefinition } from "@cardigan/roles";
+import {
+  getRoleVersion,
+  listRoleVersions,
+  persistRoleEffect,
+  Store,
+  writeRole,
+} from "@cardigan/store";
 import { expect, test } from "vitest";
+import { ROLE_PACK_SNAPSHOT_SCRIPT } from "./deployment-node.js";
 import {
   deploymentRolePolicyHash,
   rotateIdleDeployedRoles,
@@ -377,4 +387,137 @@ test("MC-2 deployed machine capabilities append a role version while keeping wor
   } finally {
     store.close();
   }
+});
+
+test.each([
+  "legacy_baseline",
+  "full_baseline",
+  "manual",
+  "requirements_changed",
+] as const)(
+  "a role upgraded by the CLI from the previous default upgrades on the next deployment: %s",
+  (mode) => {
+    const store = Store.open({ dbPath: ":memory:" });
+    const project = "cli-upgrade";
+    try {
+      store.createProject({ id: project });
+      const launch = {
+        harness: "codex" as const,
+        launch_profile_ref: "fixture",
+      };
+      const nextDefault = defaultRoleDefinition("design_director", launch);
+      const previousDefault = {
+        ...nextDefault,
+        instructions: "Earlier default instructions",
+      };
+      expect(previousDefault.required_capabilities).toEqual([
+        "browser.chromium",
+      ]);
+      const { required_capabilities: _, ...beforeRequirements } =
+        previousDefault;
+      store.uow.run((tx) => {
+        writeRole(
+          tx,
+          project,
+          { ...beforeRequirements, core_prompt: "", version: 1 },
+          { mode: "add" },
+        );
+        // Same write as `cardigan role upgrade design_director --from-default`.
+        const upgraded = upgradeRole(
+          { project_id: project, roles: listRoleVersions(tx, project) },
+          { kind: "human", project_id: project },
+          "design_director",
+          previousDefault,
+          { ids: tx.ids, clock: { now: () => "2026-11-19T00:00:00.000Z" } },
+        );
+        if (!upgraded.ok || upgraded.value.unchanged)
+          throw new Error("Expected a CLI upgrade");
+        persistRoleEffect(tx, project, upgraded.value.effect);
+        if (mode === "manual" || mode === "requirements_changed")
+          writeRole(
+            tx,
+            project,
+            {
+              ...previousDefault,
+              core_prompt: "",
+              version: 3,
+              ...(mode === "manual"
+                ? {
+                    instructions: `${previousDefault.instructions}\nProject review rule`,
+                  }
+                : { required_capabilities: ["browser.chromium", "gpu"] }),
+            },
+            { mode: "update" },
+          );
+      });
+      const before = store.uow.read((tx) =>
+        getRoleVersion(tx, project, "design_director"),
+      );
+      // A supervisor built before machine requirements omits them from its snapshot.
+      const baseline =
+        mode === "full_baseline"
+          ? deploymentRolePolicyHash(previousDefault)
+          : deploymentRolePolicyHash({
+              ...previousDefault,
+              required_capabilities: [],
+            });
+      upgradeDeployedRoles(
+        store,
+        project,
+        ["design_director"],
+        { design_director: baseline },
+        new Set(["fixture"]),
+      );
+      store.uow.read((tx) => {
+        const after = getRoleVersion(tx, project, "design_director");
+        const events = tx.events.listAfter(project, undefined, 0);
+        const receipt = events
+          .filter((e) => e.type === "host_role_pack_published")
+          .at(-1)?.payload as {
+          roles: Record<string, { disposition: string }>;
+        };
+        if (mode === "legacy_baseline" || mode === "full_baseline") {
+          expect(after).toMatchObject({
+            version: 3,
+            instructions: nextDefault.instructions,
+            required_capabilities: ["browser.chromium"],
+          });
+          expect(tx.human_actions.list(project)).toEqual([]);
+          expect(events.map((e) => e.type)).toContain("host_role_upgraded");
+          expect(receipt.roles.design_director?.disposition).toBe("matched");
+        } else {
+          expect(after).toEqual(before);
+          const actions = tx.human_actions.list(project);
+          expect(actions).toHaveLength(1);
+          expect(actions[0]?.instructions).toContain("当前版本有手工改动");
+          expect(receipt.roles.design_director?.disposition).toBe("conflict");
+        }
+      });
+    } finally {
+      store.close();
+    }
+  },
+);
+
+test("the supervisor's previous-pack snapshot hashes every default like the deployed release", async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, [
+    "--input-type=module",
+    "-e",
+    ROLE_PACK_SNAPSHOT_SCRIPT,
+    fileURLToPath(new URL("../../roles/dist/index.js", import.meta.url)),
+  ]);
+  const launch = {
+    harness: "codex" as const,
+    launch_profile_ref: "deployment",
+  };
+  expect(JSON.parse(stdout)).toEqual(
+    Object.fromEntries(
+      Object.keys(DEFAULT_ROLE_KINDS).map((id) => [
+        id,
+        deploymentRolePolicyHash(
+          defaultRoleDefinition(id as keyof typeof DEFAULT_ROLE_KINDS, launch),
+        ),
+      ]),
+    ),
+  );
 });
