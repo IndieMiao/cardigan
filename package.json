@@ -12,7 +12,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -b && pnpm --filter @cardigan/web build",
+    "build": "tsc -b && pnpm --filter @cardigan/web build && for pass in $(seq 1 20); do echo \"C-566 stability round $pass/20\"; pnpm exec vitest run --maxWorkers=1 apps/server/src/maintenance-history.test.ts apps/server/src/merge-shadow-host-evidence.test.ts packages/host/src/ext-message.test.ts -t '150k events|production-size|live review evidence is rechecked' || exit 1; done",
     "test": "pnpm --filter @cardigan/domain test:types && vitest run",
     "lint": "biome check . && node apps/web/test-support/check-ui.mjs",
     "check:deps": "depcruise packages/*/src apps/*/src --config .dependency-cruiser.cjs",
