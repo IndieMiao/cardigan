@@ -65,25 +65,52 @@ with contextlib.ExitStack() as stack:
         'x' * 70000 + claude_idle: 'unknown',
     }
     saved, quiet = rpc, dict(t, status=None, turn=3)
-    shown, record = [claude_idle], [quiet]
+    shown, record, calls = [claude_idle], [quiet], []
     def core(method, params):
         assert params['terminal'] == c['terminal']
+        calls.append(method)
         if method == 'terminal.read':
             assert params['lines'] == 0
-            return {'text': shown[0]}
+            return {'text': shown.pop(0) if len(shown) > 1 else shown[0]}
         return dict(record.pop(0) if len(record) > 1 else record[0])
     rpc = Mock(side_effect=core)
+    settle = stack.enter_context(patch.object(worker.time, 'sleep', side_effect=lambda _: calls.append('sleep')))
     for screen, expected in screens.items():
-        shown[0] = screen
+        shown[:] = [screen]
         assert observe() == expected, (screen[-60:], expected)
-    shown[0] = claude_idle
+    shown[:] = [claude_idle]
     for changed in (dict(turn=4), dict(status={'state': 'working'}), dict(pid=43), dict(foreground={'pid': 43}),
                     dict(created_ms=2)):
         record[:] = [quiet, {**quiet, **changed}]
         assert observe() == 'unknown', changed
     record[:] = [quiet]
-    shown[0] = None
+    busy = '✻ Working… (3s · esc to interrupt)\n' + claude_idle
+    # V-2993: the idle snapshot was taken, then the old turn redrew the screen
+    # busy before the record was re-read; status, turn and PIDs never changed.
+    shown[:] = [claude_idle, busy]
+    assert observe() == 'unknown'
+    # Two idle-looking screens that differ: something is still drawing.
+    shown[:] = [claude_idle, 'more output\n' + claude_idle]
+    assert observe() == 'unknown'
+    shown[:] = [None]
     assert observe() == 'unknown'  # an invalid read never passes
+    # The owner's own final check: get, read, wait, get, read; the last read
+    # is the last observation before TERM.
+    c.update(agent_name='cli', cwd='/fixture/tree')
+    owned = dict(quiet, name='cli', cwd='/fixture/tree', rm=False, foreground={'pid': 42})
+    record[:] = [owned]
+    shown[:] = [claude_idle, busy]
+    calls.clear()
+    assert worker.darwin_retirement(c, terminal_owner=42) == 'unknown'
+    assert calls == ['terminal.get', 'terminal.read', 'sleep', 'terminal.get', 'terminal.read'], calls
+    shown[:] = [codex_idle]
+    calls.clear()
+    assert worker.darwin_retirement(c, terminal_owner=42) == 'alive'
+    assert calls == ['terminal.get', 'terminal.read', 'sleep', 'terminal.get', 'terminal.read'], calls
+    settle.assert_called_with(worker.SETTLE_SECONDS)
+    assert worker.SETTLE_SECONDS > 1
+    record[:] = [quiet]
+    shown[:] = [claude_idle]
     c['require_idle'] = False
     rpc.reset_mock()
     assert observe() == 'alive'

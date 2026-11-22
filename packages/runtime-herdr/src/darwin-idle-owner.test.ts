@@ -432,7 +432,7 @@ const hcBinary =
   process.env.CARDIGAN_TEST_HC ?? join(homedir(), ".local/bin/hc");
 const hcAvailable = testHcBinary({ binary: hcBinary });
 test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
-  "real hc: a null-status session at its empty prompt is stopped; one still in its turn or reporting busy is not",
+  "real hc: a null-status session at its steady empty prompt is stopped; one still in its turn, redrawing or reporting busy is not",
   async () => {
     vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
     // Short, canonical paths: Darwin limits UNIX socket names to 104 bytes.
@@ -454,7 +454,10 @@ test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
       file: argv[0]!,
       args: argv.slice(1),
     });
-    const owned = async (screen: "idle" | "busy", report?: "working") => {
+    const owned = async (
+      screen: "idle" | "busy" | "ticking",
+      report?: "working",
+    ) => {
       const w = await enrolledWorkspace(dir);
       // Names are unique among live terminals; the owner checks its own.
       w.config.agent_name = ["fixture", screen, report]
@@ -544,6 +547,11 @@ test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
       expect(await running.stop()).toEqual(refused);
       expect((await running.record()).state).toBe("live");
       process.kill(running.enrolled.pid, 0);
+      // Still redrawing above an idle-looking prompt: two reads differ, kept.
+      const drawing = await owned("ticking");
+      expect(await drawing.stop()).toEqual(refused);
+      expect((await drawing.record()).state).toBe("live");
+      process.kill(drawing.enrolled.pid, 0);
       // Back at its own empty prompt: signed, TERM to the direct child only.
       const before = await quiet.record();
       expect(before.foreground.pid).toBe(before.pid);
@@ -562,7 +570,7 @@ test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
       const working = await owned("idle", "working");
       expect(await working.stop()).toEqual(refused);
       process.kill(working.enrolled.pid, 0);
-      for (const s of [running, working]) await hc("kill", s.terminal);
+      for (const s of [running, drawing, working]) await hc("kill", s.terminal);
     } finally {
       await stopCore({
         session,

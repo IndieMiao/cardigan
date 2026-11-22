@@ -13,6 +13,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -167,6 +168,8 @@ def core_rpc(home, session, system):
 IDLE_FOOTERS = {True: re.compile(r'\? for shortcuts|\d+% context left', re.I),
                 False: re.compile(r'\? for shortcuts|shift\+tab to cycle', re.I)}
 BUSY = re.compile(r'esc to (?:interrupt|cancel)|press enter to confirm', re.I)
+# Longer than the once-a-second elapsed-time redraw of a running turn.
+SETTLE_SECONDS = 1.5
 
 
 def prompt_idle(screen, codex):
@@ -222,14 +225,22 @@ def darwin_retirement(c, terminal_owner=None):
                 return type(status) is dict and status.get('state') in ('idle', 'done')
             # hc only relays OSC 7501. Claude Code and Codex never send it, so a
             # null status says nothing about the turn. Require the client's own
-            # empty input prompt on this exact terminal generation, bracketed by
-            # an unchanged record; anything unclassifiable keeps the session.
-            text = rpc('terminal.read', dict(terminal=c['terminal'], lines=0)).get('text')
-            if type(text) is not str or not (prompt_idle(text, True) or prompt_idle(text, False)):
+            # empty input prompt on this exact terminal generation, twice and
+            # byte-identical across an unchanged record: a running turn redraws
+            # its elapsed-time line at least every second. The last read is the
+            # last observation before any signal; anything else keeps the session.
+            def screen():
+                text = rpc('terminal.read', dict(terminal=c['terminal'], lines=0)).get('text')
+                return text if type(text) is str and (prompt_idle(text, True) or prompt_idle(text, False)) else None
+            first = screen()
+            if first is None:
                 return False
+            time.sleep(SETTLE_SECONDS)
             again = rpc('terminal.get', dict(terminal=c['terminal']))
-            return (all(again.get(k) == t.get(k) for k in ('address', 'created_ms', 'pid', 'state', 'keep', 'status', 'turn', 'labels'))
-                    and (again.get('foreground') or {}).get('pid') == (t.get('foreground') or {}).get('pid'))
+            if not (all(again.get(k) == t.get(k) for k in ('address', 'created_ms', 'pid', 'state', 'keep', 'status', 'turn', 'labels'))
+                    and (again.get('foreground') or {}).get('pid') == (t.get('foreground') or {}).get('pid')):
+                return False
+            return screen() == first
         def live(t):
             return t.get('state') == 'live' and t.get('keep') is False and (not c['require_idle'] or idle(t))
         if observed != 'alive' or not live(t):

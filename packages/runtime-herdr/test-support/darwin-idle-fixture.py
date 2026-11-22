@@ -25,7 +25,9 @@ c.update(user='fixture', gid=1234, primitive=str(root/'native.py'))
 (root/'native.py').write_text(f"import os,runpy\nbirth=runpy.run_path({str(native)!r})['darwin_identity' if os.uname().sysname=='Darwin' else 'linux_identity']\ndef darwin_identity(pid):\n b,_,s,g=birth(pid);return b,{uid},s,g")
 
 IDLE = 'done\r\n' + '─' * 20 + '\r\n❯ \r\n' + '─' * 20 + '\r\n  ? for shortcuts'
-SCREENS = dict(idle=IDLE, busy='✻ Working… (3s · esc to interrupt)\r\n' + IDLE)
+# `ticking` keeps redrawing a line above an idle-looking prompt, like any
+# client still drawing output: never two identical reads.
+SCREENS = dict(idle=IDLE, busy='✻ Working… (3s · esc to interrupt)\r\n' + IDLE, ticking='tick {n}\r\n' + IDLE)
 
 def rpc(method, params):
     if method == 'terminal.read':
@@ -40,7 +42,7 @@ def rpc(method, params):
 
 # Same identity primitive as the shipped worker launcher. Only the core and the
 # platform selection are substituted on Linux; there is no production socket.
-script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); sys.argv[6:] and print(sys.argv[6], end='', flush=True); sys.argv[7:] and print(f'\\x1b]7501;state={sys.argv[7]}\\x07', end='', flush=True); time.sleep(20)"
+script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); sys.argv[7:] and print(f'\\x1b]7501;state={sys.argv[7]}\\x07', end='', flush=True); s=(sys.argv[6:] or [''])[0]; [(print('\\x1b[2J\\x1b[H'+s.replace('{n}',str(i)), end='', flush=True), time.sleep(0.4 if '{n}' in s else 20)) for i in range(50 if '{n}' in s else 1)]"
 mode = sys.argv[3].split(':') if len(sys.argv) > 3 else ['']
 real = mode[0] == 'real'
 draw = [SCREENS[mode[1] if len(mode) > 1 else 'idle'], *mode[2:3]] if real else []
