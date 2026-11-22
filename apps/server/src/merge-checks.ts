@@ -36,10 +36,11 @@ import {
   validateBatchStartupObservation,
   validateMergeBatchMembers,
 } from "@cardigan/domain";
-import type {
-  CentralProject,
-  MergeOutcome,
-  PreparedMerge,
+import {
+  type CentralProject,
+  centralBranch,
+  type MergeOutcome,
+  type PreparedMerge,
 } from "@cardigan/git-service";
 import {
   abandonedGithubRequest,
@@ -108,6 +109,11 @@ import {
   pushCheckCandidateOrWait,
 } from "./git.js";
 import { MergeBatches } from "./merge-batches.js";
+import {
+  MergeStageError,
+  mergeFailureReason,
+  mergeStage,
+} from "./merge-failure.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
@@ -192,7 +198,10 @@ function repositoryWaitReason(timeouts: number, retryAt: string) {
 }
 
 interface Task {
+  /** The project's central repository seen through the card's baseline branch. */
   project: CentralProject;
+  /** The card's baseline branch cannot be used; preparation records the failure. */
+  branchError?: unknown;
   plan: MergePlan;
   settings: Settings;
   entered: string;
@@ -700,19 +709,28 @@ export class MergeChecks {
         previous_sha: task.batch.base_sha,
       };
     }
+    if (task.branchError)
+      throw new MergeStageError("选择基线分支", task.branchError);
     const git = this.git();
     // Background Git can outlive its admission tick, so give it a separate
     // sample rather than appending a duration to a tick that already logged.
     const sync = () => git.sync(task.project);
-    await (tickProfiler()?.tick("merge.git_sync", sync) ?? sync());
-    const baseline = await git.baseline(task.project),
+    await mergeStage(
+      "同步源仓库",
+      () => tickProfiler()?.tick("merge.git_sync", sync) ?? sync(),
+    );
+    const baseline = await mergeStage("读取基线", () =>
+        git.baseline(task.project),
+      ),
       id = `${task.project.project_id}/${task.plan.card_id}`;
     const key = JSON.stringify([task.project, task.plan, baseline]);
     const cached = this.prepared.get(id);
     const value =
       cached?.key === key
         ? cached.value
-        : await git.prepare(task.project, task.plan);
+        : await mergeStage("准备合并候选", () =>
+            git.prepare(task.project, task.plan),
+          );
     if (value.status !== "conflicted" && this.valid(task))
       this.command(task.project.project_id, (s, a, p) =>
         recordMergePreparation(
@@ -1352,6 +1370,13 @@ export class MergeChecks {
     );
     const ancestor = this.options.git.isBaselineAncestor;
     if (!config || !project || !request || !ancestor) return;
+    const card = this.state(intent.project).cards.find(
+      (c) => c.id === intent.card,
+    );
+    const view = branchView(
+      project,
+      card?.base_branch ? { base_branch: card.base_branch } : undefined,
+    ).project;
     const { client, poller } = this.githubProvider(config);
     const executor = new GithubCheckExecutor({
       config,
@@ -1362,13 +1387,13 @@ export class MergeChecks {
       context: () => ({
         card: intent.card,
         delivery: request.delivery,
-        baselineBranch: project.base_branch,
+        baselineBranch: view.base_branch,
       }),
       push: async () => {
         throw new Error("Recovery cannot publish candidates");
       },
       isBaselineAncestor: (sha, branch) =>
-        ancestor.call(this.options.git, project, sha, branch),
+        ancestor.call(this.options.git, view, sha, branch),
     });
     const work = executor
       .recoverAbandoned(
@@ -2021,28 +2046,31 @@ export class MergeChecks {
     await tryPublication(task.project.project_id, async () => {
       if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
-      await this.git().publish(
-        task.project,
-        task.plan.completion_id,
-        candidate,
-        mergePublicationGuard({
-          store: this.options.store,
-          project: task.project.project_id as ProjectId,
-          plan: task.plan,
-          clock: this.options.clock,
-          settings: mergeProjectSettings(
-            this.options.configuration,
-            task.project.project_id,
-          ),
-          stopped: () =>
-            this.abort.signal.aborted || this.fenced(task.project.project_id),
-          result: {
-            kind: "merged",
-            merge_sha: candidate.candidate_sha,
-            previous_sha: candidate.previous_sha,
-            tree_sha: candidate.tree_sha,
-          },
-        }),
+      const git = this.git();
+      await mergeStage("发布合并", () =>
+        git.publish(
+          task.project,
+          task.plan.completion_id,
+          candidate,
+          mergePublicationGuard({
+            store: this.options.store,
+            project: task.project.project_id as ProjectId,
+            plan: task.plan,
+            clock: this.options.clock,
+            settings: mergeProjectSettings(
+              this.options.configuration,
+              task.project.project_id,
+            ),
+            stopped: () =>
+              this.abort.signal.aborted || this.fenced(task.project.project_id),
+            result: {
+              kind: "merged",
+              merge_sha: candidate.candidate_sha,
+              previous_sha: candidate.previous_sha,
+              tree_sha: candidate.tree_sha,
+            },
+          }),
+        ),
       );
     });
   }
@@ -2061,7 +2089,7 @@ export class MergeChecks {
     )
       this.record(task, {
         kind: "failed",
-        reason: "合并候选准备或结果记录失败，未发布未经检查的代码",
+        reason: mergeFailureReason(task.plan.card_id, error, "检查或结果记录"),
       });
   }
   /** Awaits the check round this call started, or only the publish pass. */
@@ -2547,7 +2575,7 @@ export class MergeChecks {
           const plan = last && mergePlan(state, last.card_id);
           if (plan?.ok)
             tasks.push({
-              project,
+              ...branchView(project, plan.value),
               plan: plan.value,
               settings,
               batch,
@@ -2644,7 +2672,7 @@ export class MergeChecks {
           continue;
         }
         tasks.push({
-          project,
+          ...branchView(project, plan.value),
           plan: plan.value,
           settings,
           entered,
@@ -2733,5 +2761,18 @@ export class MergeChecks {
     } finally {
       slot.release();
     }
+  }
+}
+
+/** The card's branch view of the central repository; an unusable name fails at preparation. */
+function branchView(
+  project: CentralProject,
+  plan: Pick<MergePlan, "base_branch"> | undefined,
+): Pick<Task, "project" | "branchError"> {
+  if (!plan) return { project };
+  try {
+    return { project: centralBranch(project, plan.base_branch) };
+  } catch (error) {
+    return { project, branchError: error };
   }
 }

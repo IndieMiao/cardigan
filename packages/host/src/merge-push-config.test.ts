@@ -61,13 +61,16 @@ test("valid push paths are metadata-checked and the default branch follows the r
   expect(config.errors).toEqual([]);
   expect(config.forProject("p")).toMatchObject({
     status: "enabled",
-    push: {
-      remote: f.push.remote,
-      branch: "release",
-      keyFile: join(f.keys, "key"),
-      knownHostsFile: join(f.keys, "known"),
-      target: expect.stringMatching(/^[a-f0-9]{64}$/u),
-    },
+    push: [
+      {
+        remote: f.push.remote,
+        branch: "release",
+        baseBranch: "release",
+        keyFile: join(f.keys, "key"),
+        knownHostsFile: join(f.keys, "known"),
+        target: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+    ],
   });
   expect(config.forProject("other")).toEqual({ status: "disabled" });
 });
@@ -127,6 +130,47 @@ test("local file transport needs no key; a branch override remains explicit", as
   });
   expect((await f.load()).forProject("p")).toMatchObject({
     status: "enabled",
-    push: { branch: "topic/release" },
+    push: [{ branch: "topic/release", baseBranch: "release" }],
   });
+});
+test("a push list routes each central baseline branch to its own remote branch", async () => {
+  const f = await fixture();
+  const single = await parseMergePushConfig(f.push, f.dataDir, "release");
+  await f.save([
+    f.push,
+    { ...f.push, base_branch: "integration/farm" },
+    { ...f.push, base_branch: "hotfix", branch: "deploy/hotfix" },
+  ]);
+  const config = await f.load();
+  expect(config.errors).toEqual([]);
+  const enabled = config.forProject("p");
+  if (enabled.status !== "enabled") throw new Error("Expected enabled");
+  expect(enabled.push?.map((r) => [r.baseBranch, r.branch, r.remote])).toEqual([
+    ["release", "release", f.push.remote],
+    // Without `branch` a route pushes to the remote branch of the same name.
+    ["integration/farm", "integration/farm", f.push.remote],
+    ["hotfix", "deploy/hotfix", f.push.remote],
+  ]);
+  // The registered baseline keeps the target of a single-object config, so
+  // its existing push history continues.
+  expect(enabled.push?.[0]?.target).toBe(single.target);
+  expect(new Set(enabled.push?.map((r) => r.target)).size).toBe(3);
+});
+test.each([
+  ["duplicate base branch", [{}, { branch: "other" }], "同一个 base_branch"],
+  [
+    "two routes to one remote branch",
+    [{}, { base_branch: "other", branch: "release" }],
+    "同一远程分支",
+  ],
+  ["empty list", [], "不能为空"],
+  ["invalid base branch", [{ base_branch: "a..b" }], "base_branch"],
+])("push list rejects %s", async (_name, patches, message) => {
+  const f = await fixture();
+  await f.save(
+    (patches as Record<string, unknown>[]).map((p) => ({ ...f.push, ...p })),
+  );
+  const config = await f.load();
+  expect(config.forProject("p").status).toBe("invalid");
+  expect(config.errors.join(" ")).toContain(message);
 });

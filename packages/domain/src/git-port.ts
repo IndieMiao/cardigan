@@ -140,6 +140,12 @@ export interface GitCentralPort {
     selection: GitBackupSelection,
   ): Promise<GitPreparedBackup>;
   readRef(repository: string, ref: string): Promise<string | undefined>;
+  /** Whether a local source advertises this exact ref (read from `repository`). */
+  sourceHasRef?(
+    repository: string,
+    source: string,
+    ref: string,
+  ): Promise<boolean>;
   isAncestor(
     repository: string,
     ancestor: string,

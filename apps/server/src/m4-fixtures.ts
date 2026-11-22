@@ -418,6 +418,7 @@ export function m4Fixture(
 export function m4Scenario(
   fixture: M4Fixture,
   policy: "confirm" | "auto" = "confirm",
+  base_branch = "main",
 ): M4Scenario {
   const templates: readonly CardTemplate[] = [
     { ...developmentCardTemplate, merge: policy },
@@ -433,7 +434,7 @@ export function m4Scenario(
           acceptance_criteria: ["merged"],
           source: { kind: "quote", text: "fixture" },
           repo: "example/repo",
-          base_branch: "main",
+          base_branch,
         },
         { ...p, templates },
       ),

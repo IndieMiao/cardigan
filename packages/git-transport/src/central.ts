@@ -602,6 +602,23 @@ export class CentralGitTransport
       ]);
     await (remote ? this.workerEndpoint(fetch) : fetch(local));
   }
+  async sourceHasRef(repository: string, source: string, ref: string) {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
+    await this.checked(repository, ["check-ref-format", ref]);
+    const { remote, local } = await this.fetchSource(source);
+    if (remote) throw new Error("Only a local source can be queried");
+    const raw = await this.checked(
+      repository,
+      ["ls-remote", "--refs", "--", local, ref],
+      {},
+      strictRefNames,
+    );
+    return raw
+      .split("\n")
+      .filter(Boolean)
+      .some((line) => line.split("\t")[1] === ref);
+  }
   private async backupInventory(
     repository: string,
     decode: OutputDecoder,
