@@ -17,7 +17,13 @@ import {
 } from "../api.js";
 import { runLimitSetting, useCapacity } from "../components/Capacity.js";
 import { Drawer } from "../components/Drawer.js";
-import { EmptyState, StatusTag, Time } from "../components/Foundation.js";
+import {
+  EmptyState,
+  formatTime,
+  StatusTag,
+  Time,
+  useNow,
+} from "../components/Foundation.js";
 import { IdTag } from "../components/IdTag.js";
 import { CardDetailLayout } from "../components/layout/CardDetailLayout.js";
 import { DataTableCell } from "../components/layout/DataTableLayout.js";
@@ -103,9 +109,15 @@ type AgentCapacity = ExecutionCapacity["agents"][number];
  * The limited (non-standing) count from the shared capacity read, beside the
  * limit the machine read confirmed (the same value as its resource limits),
  * so one drawer never shows two limits. Standing sessions are exempt.
+ * C-576: the count is what the scheduler compares with the limit: running
+ * Runs plus startup and stop reservations, plus the Agent slots this host's
+ * own merge checks take (`merge_check_slots`). It is labelled 占用, not 运行中.
  */
+const OCCUPIED_LABEL = "占用 / 上限";
 const limited = (m: MachineView, capacity: AgentCapacity | undefined) =>
-  `${capacity ? capacity.running : "—"} / ${m.run_limit || "不可用"}`;
+  `${
+    capacity ? capacity.running + capacity.merge_check_slots : "—"
+  } / ${m.run_limit || "不可用"}`;
 /**
  * The shared capacity read as the machine panel uses it, in one of two
  * states (Q-1013). Usable: the last successful read is shown, also while an
@@ -162,6 +174,28 @@ function CheckTag({ check }: { check: MachineCheckRow | undefined }) {
     <StatusTag status="not_run" label="未检查" subdued />
   );
 }
+/**
+ * C-576: the machine's latest check, its time and, when another project ran
+ * it, that project. It replaces 最近心跳: the registry's `last_seen` is only
+ * written on registration and onboarding, never by running work.
+ */
+function LatestCheck({ machine }: { machine: MachineView }) {
+  const now = useNow();
+  const latest = latestMachineCheck(machine);
+  if (!latest) return <CheckTag check={undefined} />;
+  const { check, binding } = latest;
+  // One tag, so the result, its time and its project share one type size.
+  const label = [
+    check.label,
+    check.checked_at && formatTime(check.checked_at, now),
+    !binding.is_current && binding.project_name,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return <CheckTag check={{ ...check, label }} />;
+}
+const MACHINES_HELP =
+  "占用：调度计入上限的 Agent 会话，含运行中、启动中和等待停止的会话，以及本机合并检查占用的名额；常驻 PM 和主机运维不计入。上限：点“详情”修改，未改过时为主机配置的默认值，不超过主机配置的最大值。最近检查：机器检查或接入检查的结果与时间。";
 
 /**
  * C-512: the machines this host manages. Machines are global; the detail
@@ -237,6 +271,7 @@ export function MachinesSettings({
       tabIndex={-1}
       title="机器"
       titleId="machines-title"
+      help={MACHINES_HELP}
       actions={
         canEdit && client.createWorkerWizard ? (
           <Button
@@ -268,25 +303,25 @@ export function MachinesSettings({
             <TableRow>
               <TableHead>名称</TableHead>
               <TableHead>系统</TableHead>
-              <TableHead>最近心跳</TableHead>
-              <TableHead>非常驻 / 上限</TableHead>
+              <TableHead>{OCCUPIED_LABEL}</TableHead>
               <TableHead>最近检查</TableHead>
               <TableHead>状态</TableHead>
+              <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {machines.map((machine) => {
-              const latest = latestMachineCheck(machine);
+              const openDetail = () => {
+                remember();
+                setOpen(machine);
+              };
               return (
                 <TableRow key={machine.id}>
                   <DataTableCell data-record="lead">
                     <Button
                       variant="link"
                       aria-haspopup="dialog"
-                      onClick={() => {
-                        remember();
-                        setOpen(machine);
-                      }}
+                      onClick={openDetail}
                     >
                       {machine.label}
                     </Button>
@@ -294,20 +329,24 @@ export function MachinesSettings({
                   <DataTableCell nowrap data-label="系统">
                     {platform(machine)}
                   </DataTableCell>
-                  <DataTableCell nowrap data-label="最近心跳">
-                    <Time value={machine.last_seen} />
-                  </DataTableCell>
-                  <DataTableCell nowrap data-label="非常驻 / 上限">
+                  <DataTableCell nowrap data-label={OCCUPIED_LABEL}>
                     {limited(machine, capacity.of(machine.id))}
                   </DataTableCell>
                   <DataTableCell nowrap data-label="最近检查">
-                    <CheckTag check={latest?.check} />
-                    {latest && !latest.binding.is_current && (
-                      <> {latest.binding.project_name}</>
-                    )}
+                    <LatestCheck machine={machine} />
                   </DataTableCell>
-                  <DataTableCell nowrap data-record="aside">
+                  <DataTableCell nowrap data-label="状态">
                     <MachineStatus status={machine.status} />
+                  </DataTableCell>
+                  {/* C-576: an explicit way into the detail, where the limit is edited. */}
+                  <DataTableCell nowrap data-record="aside">
+                    <Button
+                      aria-haspopup="dialog"
+                      aria-label={`${machine.label} 详情`}
+                      onClick={openDetail}
+                    >
+                      详情
+                    </Button>
                   </DataTableCell>
                 </TableRow>
               );
@@ -525,13 +564,13 @@ function MachineFacts({
           <SettingsFact label="状态">
             <MachineStatus status={machine.status} />
           </SettingsFact>
-          <SettingsFact label="最近心跳">
-            <Time value={machine.last_seen} />
+          <SettingsFact label="最近检查">
+            <LatestCheck machine={machine} />
           </SettingsFact>
           <SettingsFact label="全部在跑">
             {machineActiveRuns(machine)}
           </SettingsFact>
-          <SettingsFact label="非常驻 / 上限">
+          <SettingsFact label={OCCUPIED_LABEL}>
             {limited(machine, capacity)}
           </SettingsFact>
           <SettingsFact label="排队">{capacity?.queued ?? "—"}</SettingsFact>

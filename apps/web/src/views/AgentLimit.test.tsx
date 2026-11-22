@@ -126,13 +126,21 @@ test.each([16, 8, 24])(
     });
     expect(input.max).toBe(String(maximum));
     fireEvent.change(input, { target: { value: String(maximum + 1) } });
-    expect(screen.getByText(`并发上限不能超过 ${maximum}。`)).toBeTruthy();
+    expect(
+      screen.getByText(
+        `主机配置的最大值为 ${maximum}，如需更高请联系主机运维。`,
+      ),
+    ).toBeTruthy();
     expect(input.getAttribute("aria-invalid")).toBe("true");
     fireEvent.blur(input);
     fireEvent.keyDown(input, { key: "Enter" });
     expect(setRunLimit).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: String(maximum) } });
-    expect(screen.queryByText(`并发上限不能超过 ${maximum}。`)).toBeNull();
+    expect(
+      screen.queryByText(
+        `主机配置的最大值为 ${maximum}，如需更高请联系主机运维。`,
+      ),
+    ).toBeNull();
     fireEvent.keyDown(input, { key: "Enter" });
     await screen.findByText("并发上限已保存，下一轮调度生效");
     expect(setRunLimit).toHaveBeenCalledWith(
