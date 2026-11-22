@@ -11,13 +11,16 @@ import {
 import { join } from "node:path";
 import {
   acknowledgeRun,
+  createHostOpsAssignment,
   dispatchRun,
+  HOST_OPS_ROLE_TOOLS,
   type Runtime,
   recordDecision,
   requestDecision,
   stopWorkItemAssignment,
 } from "@cardigan/domain";
 import { HostOpsService } from "@cardigan/host";
+import { authenticate, unwrap } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
 import {
   listBellAttempts,
@@ -439,6 +442,7 @@ test.each([
   "live_during_backup",
   "finished_group_alive",
   "finished_group_gone",
+  "missing_after_token",
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
@@ -459,7 +463,8 @@ test.each([
       mode === "finished_group_gone" ||
       keepsMaterial ||
       (trackedEdit && mode !== "shared_at_launch");
-    const backedUp = resumes || mode.endsWith("_at_launch");
+    const backedUp =
+      resumes || mode.endsWith("_at_launch") || mode === "missing_after_token";
     const s = scenario(),
       a = s.target.assignment,
       branch = "agent/test/writer";
@@ -556,6 +561,7 @@ test.each([
         value: { process: "alive", agent: "idle", observed_seq: 1 },
       });
     };
+    let backupFails = true;
     const backup = vi.fn(async () => {
       if (mode === "monitor_refresh")
         f.store.uow.run((tx) => {
@@ -585,7 +591,8 @@ test.each([
           workspace,
         ]);
       }
-      if (mode === "backup_failure") throw new Error("unavailable");
+      if (mode === "backup_failure" && backupFails)
+        throw new Error("unavailable");
       return { sha, ref: "refs/cardigan/stall-backups/test" };
     });
     const service = new HostOpsService({
@@ -770,6 +777,25 @@ test.each([
           // Make the mode differ even on hosts with a nonstandard umask.
           const original = statSync(workspace).mode;
           chmodSync(workspace, original ^ 0o010);
+        } else if (mode === "missing_after_token") {
+          // The first recheck passes; the checkout disappears once this
+          // attempt's token exists, before the final recheck and provision.
+          const original = f.store.uow;
+          const tokens = () =>
+            original.run((tx) => tx.tokensForAssignment(f.project, a.id));
+          const before = tokens().length;
+          let moved = false;
+          vi.spyOn(f.store, "uow", "get").mockReturnValue({
+            ...original,
+            run: (work) => {
+              const result = original.run(work);
+              if (!moved && tokens().length > before) {
+                moved = true;
+                renameSync(workspace, kept);
+              }
+              return result;
+            },
+          });
         } else {
           renameSync(workspace, kept);
           if (mode === "replaced_at_launch")
@@ -822,8 +848,15 @@ test.each([
           expect(events("host_ops_action_taken")).toHaveLength(1);
           expect(queuedRun()?.status).toBe("queued");
         }
-        if (mode === "missing_at_launch")
+        if (mode === "missing_at_launch" || mode === "missing_after_token")
           expect(existsSync(workspace)).toBe(false);
+        if (mode === "missing_after_token")
+          // Only this attempt's credentials are withdrawn.
+          expect(
+            f.store.uow
+              .run((tx) => tx.tokensForAssignment(f.project, a.id))
+              .filter((t) => t.revoked_at === null),
+          ).toHaveLength(0);
         if (mode === "shared_at_launch")
           expect(readFileSync(join(workspace, "source"), "utf8")).toBe(
             "tracked edit",
@@ -849,6 +882,59 @@ test.each([
         if (mode === "finished_group_alive") {
           expect(s.runtime.confirm_local_group_exit).toHaveBeenCalled();
           expect(s.runtime.provision).not.toHaveBeenCalled();
+        }
+        if (mode === "backup_failure") {
+          // The system withdrew before any signal. Once the backup recovers,
+          // Ops takes over the same incident and the original queue resumes.
+          backupFails = false;
+          f.store.uow.run((tx) =>
+            tx.roles.put(f.project, {
+              role_id: "host_ops",
+              role_version: 1,
+              allowed_tools: HOST_OPS_ROLE_TOOLS,
+              capabilities: [],
+            }),
+          );
+          const ops = f.apply((st, actor, p) =>
+            createHostOpsAssignment(st, actor, {}, p),
+          ).assignment;
+          const token = f.store.issueToken({
+            project_id: f.project,
+            assignment_id: ops.id,
+            role: { role_version: 1, allowed_tools: HOST_OPS_ROLE_TOOLS },
+          });
+          const context = {
+            identity: unwrap(authenticate(f.store, token.token)),
+            store: f.store,
+          };
+          const cause = events("bell_turn_recovery_due")[0]?.id as string;
+          await service.tools.execute(context, "host_ops_restart_assignment", {
+            target_id: a.id,
+            reason: "fixture",
+            dispatch_stall_id: cause,
+            idempotency_key: "ops-takeover",
+          });
+          await vi.waitFor(
+            async () => {
+              await service.tick();
+              expect(
+                events("host_ops_action_finished").filter(
+                  (e) => (e.payload as { run_id?: string }).run_id === s.run.id,
+                ),
+              ).toHaveLength(1);
+            },
+            { timeout: 10_000 },
+          );
+          expect(events("host_ops_action_taken")).toMatchObject([
+            { actor: { kind: "system" } },
+            { actor: { kind: "assignment" } },
+          ]);
+          expect(events("dispatch_stall_backup_verified")).toHaveLength(1);
+          await d.tick();
+          expect(startRun).toHaveBeenCalledOnce();
+          expect(s.runtime.provision).toHaveBeenCalledOnce();
+          expect(s.runtime.retire_idle).not.toHaveBeenCalled();
+          expect(s.runtime.release).not.toHaveBeenCalled();
         }
       }
     } finally {

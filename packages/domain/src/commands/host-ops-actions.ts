@@ -439,8 +439,26 @@ export function beginHostOpsActionInDraft(
       "illegal_transition",
       "派发积压已改变或指派不空闲",
     );
+    // A system attempt withdrawn before any signal does not consume the
+    // incident for Ops, who may recover it once the evidence is current.
+    const withdrawnUnsignalled = new Set(
+      eventsOfType(state.events, "host_ops_action_finished")
+        .filter(
+          (e) =>
+            (e.payload as { result?: string }).result ===
+            "withdrawn_stall_changed",
+        )
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    );
     ensure(
       !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
+        // Only Ops may take it over; the system never retries its own attempt.
+        if (
+          d.actor.kind !== "system" &&
+          e.actor.kind === "system" &&
+          withdrawnUnsignalled.has(e.id)
+        )
+          return false;
         const prior = e.payload as {
           assignment_id?: string;
           dispatch_stall_id?: string;

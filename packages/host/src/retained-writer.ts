@@ -177,11 +177,8 @@ export function retainedWriterForRun(
   a: Assignment,
 ) {
   const action = automaticContextActionForRun(state.events, run);
-  if (
-    !action?.dispatch_stall_id ||
-    (!action.system_finished_run_id && !action.retirement_handoff)
-  )
-    return;
+  // Every stall recovery (turn or ordinary row) resumes a writer in place.
+  if (!action?.dispatch_stall_id) return;
   const row = eventsOfType(state.events, "dispatch_stall_backup_verified").find(
     (e) =>
       e.actor.kind === "system" &&

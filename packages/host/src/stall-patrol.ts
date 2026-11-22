@@ -548,11 +548,18 @@ export class StallPatrol {
       await this.recoverTurn(state, stall, snapshot);
     }
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
+    // A withdrawn automatic attempt is left to Ops; never retry it here.
+    const attempted = new Set(
+      eventsOfType(state.events, "host_ops_action_taken").map(
+        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+      ),
+    );
     const own = [...actionable].find(
       (s) =>
         s.assignment_id === patrol.id &&
         s.kind === "standing_backlog" &&
-        !s.system_finished_run_id,
+        !s.system_finished_run_id &&
+        !attempted.has(s.cause_id),
     );
     if (!own) return;
     if (

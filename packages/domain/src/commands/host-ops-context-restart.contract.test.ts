@@ -451,6 +451,30 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   expect(
     pendingHostOpsActions(apply(pending, withdraw(pending)).events),
   ).toHaveLength(0);
+  // A pre-signal withdrawal leaves the incident to Ops, never to a second
+  // automatic attempt; a signalled or in-flight attempt still consumes it.
+  const withdrawn = apply(pending, withdraw(pending));
+  const takeover = (s: CommandState) =>
+    beginHostOpsAction(
+      s,
+      actor(10, "host_ops"),
+      {
+        tool: "host_ops_restart_assignment",
+        target_id: a.id,
+        reason: "evidence recovered",
+        dispatch_stall_id: due.id,
+        snapshot,
+      },
+      f.io,
+    );
+  expect(begin(withdrawn).ok).toBe(false);
+  expect(takeover(pending).ok).toBe(false);
+  expect(value(takeover(withdrawn)).events).toMatchObject([
+    {
+      type: "host_ops_action_taken",
+      payload: { assignment_id: a.id, dispatch_stall_id: due.id },
+    },
+  ]);
   const stopping: CommandState = {
     ...pending,
     events: [
@@ -485,6 +509,7 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   expect(result.changes).toEqual([]);
   expect(pendingHostOpsActions(apply(pending, result).events)).toHaveLength(1);
   expect(begin(apply(pending, result)).ok).toBe(false);
+  expect(takeover(apply(pending, result)).ok).toBe(false);
   const stopped = value(
     finishHostOpsAction(pending, system, started.data.action_id, f.io, {
       cause_id: due.id,

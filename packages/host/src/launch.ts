@@ -1385,7 +1385,11 @@ async function launch(
       publication === undefined
     )
       throw error;
+    // A later checkout recheck (before any terminal exists) withdraws only
+    // this attempt's token, credentials and publication; the queue stays.
+    const refused = error instanceof RetainedWriterRefused && ref === undefined;
     const deferred =
+      !refused &&
       step !== "sentinel write" &&
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
@@ -1404,8 +1408,8 @@ async function launch(
       let exited = false;
       try {
         exited = await publication.stop(
-          deferred || retry,
-          deferred || retry
+          deferred || retry || refused,
+          deferred || retry || refused
             ? undefined
             : {
                 reason,
@@ -1424,6 +1428,7 @@ async function launch(
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
+      if (refused && exited) throw error;
       if (retry && exited)
         throw new RunPreflightDeferred(targetFailure.reason, { cause: error });
       throw new HostLaunchError(
@@ -1441,8 +1446,9 @@ async function launch(
       clock,
       step,
       report,
-      keepRun: deferred,
+      keepRun: deferred || refused,
       ...(!deferred &&
+      !refused &&
       step === "directory preparation" &&
       ref === undefined &&
       tokenId === undefined
@@ -1461,6 +1467,7 @@ async function launch(
       ...(tokenId === undefined ? {} : { tokenId }),
     });
     if (deferred) throw new RunTargetDeferred();
+    if (refused) throw error;
     throw error instanceof HostLaunchError
       ? error
       : new HostLaunchError(step, messageOf(error), { cause: error });

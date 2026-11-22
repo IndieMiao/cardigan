@@ -1245,6 +1245,9 @@ export class HostOpsService {
     const turnRecovery = !!(
       action.system_finished_run_id || action.retirement_handoff
     );
+    // Every stall recovery (turn or ordinary row) preserves a writer checkout
+    // and proves exit the same way before its successor is queued.
+    const preserve = turnRecovery || !!action.dispatch_stall_id;
     const unlock = await tryHostOpsLock(store, project, action.assignment_id);
     if (!unlock) return;
     let unlockLaunch: Awaited<ReturnType<typeof tryHostOpsLock>>;
@@ -1576,7 +1579,7 @@ export class HostOpsService {
           return true;
         };
         let result: string;
-        if (turnRecovery) {
+        if (preserve) {
           if (!stopStarted) {
             await checkStall();
             if (!mayStop()) return;
@@ -1726,46 +1729,36 @@ export class HostOpsService {
                         this.stallExecution(project, a.machine_id),
                       )),
                   );
-          } else return;
+          } else {
+            // Ordinary stall rows use the same guards: the evidence recheck and
+            // writer backup above, one owner-bound idle stop and kernel exit
+            // proof. Never force-release by address; without proof go to Ops.
+            result = !action.runtime_ref
+              ? a && !a.runtime_ref
+                ? "exited" // Never provisioned: no session to stop.
+                : "terminal_exit_unconfirmed"
+              : !a || remote
+                ? "terminal_exit_unconfirmed"
+                : await stopSystemTurn(
+                    runtime,
+                    action.runtime_ref,
+                    { project_id: project, assignment_id: a.id },
+                    stopStarted,
+                    checkWorkspace,
+                    beforeSignal,
+                    async () =>
+                      !!action.runtime_ref &&
+                      (await localTurnExitProof(
+                        read(),
+                        a,
+                        runtime,
+                        action.runtime_ref,
+                        this.stallExecution(project, a.machine_id),
+                      )),
+                  );
+          }
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.
-          if (result === "exited" && !(await checkWorkspace()))
-            result = "withdrawn";
-          result = evidenceFailure ?? result;
-        } else if (action.dispatch_stall_id) {
-          // Ordinary stall rows use the turn-recovery guards: re-read the
-          // evidence, one owner-bound idle stop and kernel exit proof. Never
-          // force-release by address; without proof the row goes to Ops.
-          if (!stopStarted) {
-            await checkStall();
-            if (!mayStop()) return;
-          }
-          const a = read().assignments.find(
-            (v) => v.id === action.assignment_id,
-          );
-          result = !action.runtime_ref
-            ? a && !a.runtime_ref
-              ? "exited" // Never provisioned: no session to stop.
-              : "terminal_exit_unconfirmed"
-            : !a || a.machine_id !== "local"
-              ? "terminal_exit_unconfirmed"
-              : await stopSystemTurn(
-                  runtime,
-                  action.runtime_ref,
-                  { project_id: project, assignment_id: a.id },
-                  stopStarted,
-                  checkWorkspace,
-                  beforeSignal,
-                  async () =>
-                    !!action.runtime_ref &&
-                    (await localTurnExitProof(
-                      read(),
-                      a,
-                      runtime,
-                      action.runtime_ref,
-                      this.stallExecution(project, a.machine_id),
-                    )),
-                );
           if (result === "exited" && !(await checkWorkspace()))
             result = "withdrawn";
           result = evidenceFailure ?? result;
@@ -1798,7 +1791,7 @@ export class HostOpsService {
       // Credential scrubbing can wait on worker IO. Do not queue from a
       // workspace observation made before that wait.
       if (
-        turnRecovery &&
+        preserve &&
         this.options.scrubCredentials &&
         !(await checkWorkspace())
       ) {

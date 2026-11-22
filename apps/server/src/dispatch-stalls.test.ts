@@ -720,3 +720,78 @@ test("worktree dirtied after an accepted request withdraws it before release, wi
   expect(f.runtime.retire_idle).not.toHaveBeenCalled();
   expect(f.state().human_actions).toHaveLength(0);
 });
+
+test("an ordinary writer stall is not stopped by Ops until its committed branch backup is verified", async () => {
+  const f = setup();
+  f.ownTerminals();
+  const a = f
+    .state()
+    .assignments.find((a) => a.id === f.target.assignment.id) as Assignment;
+  const path = join(f.dataDir, "agent", "worktrees", f.project, a.id);
+  const branch = "agent/test/ordinary-writer";
+  mkdirSync(path, { recursive: true });
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q", "-b", branch);
+  const commit = (message: string) =>
+    git(
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      message,
+    );
+  commit("base");
+  const base = git("rev-parse", "HEAD");
+  // A clean tree with a newer local commit: clean is not backed up.
+  commit("local work");
+  f.store.uow.run((tx) => {
+    const role = tx.roles.get(f.project, {
+      role_id: a.role_id,
+      role_version: a.role_version,
+    });
+    if (!role) throw new Error("missing role");
+    tx.roles.put(f.project, { ...role, worktree: "write" });
+    tx.assignments.put(f.project, {
+      ...a,
+      worktree_path: path,
+      branch,
+      base_sha: base,
+    });
+  });
+  f.advance(1);
+  const e = f.event("instruction_issued", { work_item_id: f.target.item.id });
+  f.advance(610000);
+  expect((await f.view()).dispatch_stalls).toMatchObject([
+    { cause_id: e.id, workspace: "clean", can_restart: true },
+  ]);
+  await f.restart(a, e.id);
+  await f.service.tick();
+  await vi.waitFor(() =>
+    expect(
+      f.state().events.find((ev) => ev.type === "host_ops_action_finished")
+        ?.payload,
+    ).toMatchObject({ reason: "workspace_backup_unconfirmed" }),
+  );
+  // No backup, no stop: the session, its binding and the checkout stay.
+  expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(
+    f
+      .state()
+      .events.filter((ev) => ev.type === "dispatch_stall_backup_verified"),
+  ).toEqual([]);
+  expect(f.state().assignments.find((v) => v.id === a.id)?.runtime_ref).toEqual(
+    f.refFor(a),
+  );
+  expect(
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id && r.status === "queued"),
+  ).toEqual([]);
+  expect(git("log", "-1", "--format=%s")).toBe("local work");
+});
