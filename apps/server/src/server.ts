@@ -770,6 +770,9 @@ async function assembleServer(
         ...(config.providerCooldownMs !== undefined
           ? { providerCooldownMs: config.providerCooldownMs }
           : {}),
+        ...(config.mcpHandshakeTimeoutMs !== undefined
+          ? { mcpHandshakeTimeoutMs: config.mcpHandshakeTimeoutMs }
+          : {}),
         ...options.dispatcher,
         startup: startup.promise,
         ...((options.dispatcher.runtimeFailureLimit ??

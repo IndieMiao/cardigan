@@ -1,6 +1,7 @@
 import {
   DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
   DEFAULT_FRAMEWORK_WAIT_REMINDER_MS,
+  DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS,
   DEFAULT_MERGE_BLOCKED_REMINDER_MS,
   DEFAULT_PROVIDER_COOLDOWN_MS,
   DEFAULT_PROVIDER_FAILURES,
@@ -74,6 +75,8 @@ export interface ServerConfig {
    * the Card tools and rebuild it once. On unless CARDIGAN_MCP_SESSION_CHECK=0.
    */
   readonly mcpSessionCheck?: boolean;
+  /** C-600: CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS; 180 s by default. */
+  readonly mcpHandshakeTimeoutMs?: number;
 }
 
 export interface ServerEnv extends ExecutionEnv {
@@ -122,6 +125,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
   readonly CARDIGAN_MCP_SESSION_CHECK?: string | undefined;
+  readonly CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS?: string | undefined;
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
@@ -274,6 +278,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       "CARDIGAN_DISPATCH_TIMEOUT_MS",
       600_000,
     ),
+    ...(nonEmpty(env.CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS) === undefined
+      ? {}
+      : {
+          mcpHandshakeTimeoutMs: interval(
+            env.CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS,
+            "CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS",
+            DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS,
+          ),
+        }),
     ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
     runtimeUnknownGraceMs,
     ...(nonEmpty(env.CARDIGAN_FRAMEWORK_WAIT_REMINDER_MS) === undefined

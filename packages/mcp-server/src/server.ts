@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -6,7 +6,12 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
-import { MCP_SESSION_FAILURE, type OwnerMessagePort } from "@cardigan/domain";
+import {
+  MCP_SESSION_FAILURE,
+  MCP_SESSION_HEADER,
+  MCP_SESSION_KEY_PATTERN,
+  type OwnerMessagePort,
+} from "@cardigan/domain";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
@@ -551,6 +556,17 @@ export async function startMcpServer(
   };
 }
 
+/**
+ * C-600: digest of the per-launch key a verified harness sends from its own
+ * MCP configuration; absent or malformed headers prove nothing.
+ */
+function sessionKeyDigest(req: IncomingMessage): string | undefined {
+  const value = req.headers[MCP_SESSION_HEADER.toLowerCase()];
+  return typeof value === "string" && MCP_SESSION_KEY_PATTERN.test(value)
+    ? createHash("sha256").update(value).digest("hex")
+    : undefined;
+}
+
 async function serveMcp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -586,6 +602,7 @@ async function serveMcp(
         identity.actor.project_id,
         identity.actor.assignment_id,
         "tools_listed",
+        sessionKeyDigest(req),
       );
     },
     refuseToolCall: () => {
@@ -593,11 +610,12 @@ async function serveMcp(
         identity.actor.project_id,
         identity.actor.assignment_id,
         "tool_called",
+        sessionKeyDigest(req),
       );
       return handshake === "missing"
         ? {
             code: "illegal_transition",
-            message: `${MCP_SESSION_FAILURE}（启动时未列出工具）。系统会重建会话；请停止本会话的工作，不要改用命令行或其它方式调用 Card MCP。`,
+            message: `${MCP_SESSION_FAILURE}（本次启动的 Harness 未列出工具）。系统会重建会话；请停止本会话的工作，不要改用命令行或其它方式调用 Card MCP。`,
           }
         : undefined;
     },

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,16 +119,45 @@ test.each([
         store.uow.read((tx) => tx.assignments.get(project, assignment.id))
           ?.mcp_handshake,
       ).toBe(expected);
+      // The key lives only in the harness's own MCP configuration; the
+      // Assignment keeps its digest.
+      const config =
+        harness === "codex"
+          ? await readFile(
+              join(launched.run_dir, "codex", "config.toml"),
+              "utf8",
+            )
+          : harness === "claude-code"
+            ? await readFile(join(launched.run_dir, "mcp.json"), "utf8")
+            : "";
+      const key = /"X-Cardigan-Session"\s*[:=]\s*"([A-Za-z0-9_-]+)"/u.exec(
+        config,
+      )?.[1];
+      const digest = store.uow.read((tx) =>
+        tx.assignments.get(project, assignment.id),
+      )?.mcp_session_key_sha256;
+      if (expected) {
+        expect(key).toMatch(/^[A-Za-z0-9_-]{32}$/u);
+        expect(digest).toBe(
+          createHash("sha256")
+            .update(key ?? "")
+            .digest("hex"),
+        );
+        const script = await readFile(
+          join(launched.run_dir, "launch.sh"),
+          "utf8",
+        );
+        expect(script).not.toContain(key);
+      } else {
+        expect(digest).toBeUndefined();
+        if (!verify) expect(config).not.toContain("X-Cardigan-Session");
+      }
       const script = await readFile(
         join(launched.run_dir, "launch.sh"),
         "utf8",
       );
-      expect(script).toContain(
-        `export NO_PROXY='127.0.0.1'"\${NO_PROXY:+,$NO_PROXY}"`,
-      );
-      expect(script).toContain(
-        `export no_proxy='127.0.0.1'"\${no_proxy:+,$no_proxy}"`,
-      );
+      expect(script).toContain("cardigan_bypass '127.0.0.1'");
+      expect(script).toContain('export NO_PROXY="$cardigan_upper"');
     } finally {
       store.close();
       await rm(root, { recursive: true, force: true });

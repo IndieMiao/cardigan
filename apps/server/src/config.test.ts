@@ -398,3 +398,15 @@ test("C-600 the MCP session check is on unless explicitly turned off", () => {
       resolveServerConfig({ CARDIGAN_MCP_SESSION_CHECK: value }),
     ).toThrow("CARDIGAN_MCP_SESSION_CHECK");
 });
+
+test("C-600 the MCP handshake deadline is a positive millisecond setting", () => {
+  expect(resolveServerConfig({}).mcpHandshakeTimeoutMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: "90000" })
+      .mcpHandshakeTimeoutMs,
+  ).toBe(90000);
+  for (const value of ["0", "-1", "1.5", "soon"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS: value }),
+    ).toThrow("CARDIGAN_MCP_HANDSHAKE_TIMEOUT_MS");
+});

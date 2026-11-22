@@ -189,6 +189,8 @@ export interface DispatcherOptions {
   /** Passive standing-PM observation; inactivity cancellation keeps its existing policy. */
   readonly providerFailureThreshold?: number;
   readonly providerCooldownMs?: number;
+  /** C-600: deadline for a verified new session to list the Card tools. */
+  readonly mcpHandshakeTimeoutMs?: number;
   readonly pmRecoveryIntervalMs?: number;
   readonly proveReviewLimit?: NonNullable<MergeGit["proveReviewLimit"]>;
   readonly recoverLaunches?: (project: ProjectId) => Promise<void>;

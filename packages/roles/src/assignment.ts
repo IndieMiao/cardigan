@@ -17,6 +17,7 @@ import {
   type CompiledAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  MCP_SESSION_KEY_PATTERN,
   RUN_RESOURCE_RULE,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
@@ -28,9 +29,10 @@ import {
   compileResolvedLaunch,
 } from "./compile.js";
 import {
+  launchProxyBypass,
+  launchProxyBypassShell,
   MCP_PROXY_BYPASS_KEYS,
   mcpProxyBypassHost,
-  withMcpProxyBypass,
 } from "./mcp-proxy.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
@@ -61,6 +63,11 @@ export function compileAssignmentLaunch(
   const agentNice = input.agent_nice ?? 10;
   if (!Number.isInteger(agentNice) || agentNice < 0 || agentNice > 19)
     throw new Error("Agent niceness must be an integer from 0 to 19");
+  if (
+    input.mcp.session_key !== undefined &&
+    !MCP_SESSION_KEY_PATTERN.test(input.mcp.session_key)
+  )
+    throw new Error("Invalid MCP session key");
   const identity = employeeIdentityPrompt(input.employee?.identity);
   const policyRule = input.resource_bindings
     ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
@@ -285,11 +292,21 @@ export function compileAssignmentLaunch(
     env[key] = value;
   }
   // C-600: the Card MCP host never goes through a proxy, whatever the
-  // harness reads from the system; profile-provided entries are kept.
+  // harness reads from the system; existing exceptions keep their meaning.
+  // A bypass list is routing, not a credential: it never rides the secret
+  // channel, so refuse that before any launch material exists.
+  if (MCP_PROXY_BYPASS_KEYS.some((key) => Object.hasOwn(secretEnv, key)))
+    throw new Error(
+      "NO_PROXY/no_proxy cannot be a provider secret; set it in provider env",
+    );
   const mcpHost = mcpProxyBypassHost(input.mcp.url);
-  if (mcpHost)
-    for (const key of MCP_PROXY_BYPASS_KEYS)
-      env[key] = withMcpProxyBypass(env[key] ?? secretEnv[key], mcpHost);
+  // Without profile values, a local launch merges the account's own lists
+  // when launch.sh runs; everything else carries the merged values here.
+  const inheritBypass =
+    mcpHost !== undefined &&
+    !input.worker_launch &&
+    MCP_PROXY_BYPASS_KEYS.every((key) => !Object.hasOwn(env, key));
+  Object.assign(env, launchProxyBypass(input.mcp.url, env));
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -363,6 +380,9 @@ export function compileAssignmentLaunch(
               command,
               args,
               env,
+              ...(inheritBypass && mcpHost
+                ? { proxyBypass: launchProxyBypassShell(mcpHost, shellQuote) }
+                : {}),
               localSetup: adapter.localSetup?.(input, shellQuote) ?? "",
             }),
         mode: 0o700,
@@ -438,15 +458,17 @@ function launchScriptContent(options: {
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly localSetup: string;
+  /** C-600: merge the account's inherited NO_PROXY lists at run time. */
+  readonly proxyBypass?: string;
 }): string {
   const quote = shellQuote;
   const exports = Object.entries(options.env)
-    .map(([name, value]) =>
-      // C-600: keep the host account's own bypass entries after the MCP host.
-      (MCP_PROXY_BYPASS_KEYS as readonly string[]).includes(name)
-        ? `export ${name}=${quote(value)}"\${${name}:+,\$${name}}"`
-        : `export ${name}=${quote(value)}`,
+    .filter(
+      ([name]) =>
+        options.proxyBypass === undefined ||
+        !(MCP_PROXY_BYPASS_KEYS as readonly string[]).includes(name),
     )
+    .map(([name, value]) => `export ${name}=${quote(value)}`)
     .join("\n");
   const args = options.args.map(quote).join(" ");
   const credentials =
@@ -480,7 +502,7 @@ if [ -z "$MCP_TOKEN" ]; then
 fi
 export MCP_TOKEN
 ${credentials}${exports}
-${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
+${options.proxyBypass ?? ""}${options.env.CARDIGAN_RUN_COMMAND ? 'export CARDIGAN_SESSION_PID=$$\nCARDIGAN_SESSION_BIRTH=$(exec env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB -c "$CARDIGAN_RUN_COMMAND" observe-session "$$" "$CARDIGAN_RESOURCE_SESSION") || CARDIGAN_SESSION_BIRTH=unavailable\nexport CARDIGAN_SESSION_BIRTH\n' : ""}# Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
 # all start an interactive session with one (see the harness table below). It is

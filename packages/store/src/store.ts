@@ -1124,15 +1124,19 @@ export class Store {
   }
 
   /**
-   * C-600: advance the current session's Card MCP handshake. A native
-   * `tools/list` turns `pending` into `listed`; a tool call while `pending`
-   * proves the session has no native tools and turns it into `missing`.
-   * Returns the resulting state; legacy and unverified sessions have none.
+   * C-600: advance the current verified session's Card MCP handshake.
+   * `key_sha256` is the digest of the request's session header (or, for
+   * `deadline`, the session the host timed). Only the launch's own key
+   * counts as native: its `tools/list` or tool call turns `pending` into
+   * `listed`. Any other tool call while pending proves the session has no
+   * native tools (`missing`), and so does an expired `deadline` for the same
+   * session. Other states never change here. Returns the resulting state.
    */
   advanceMcpHandshake(
     project_id: ProjectId,
     assignment_id: AssignmentId,
-    observed: "tools_listed" | "tool_called",
+    observed: "tools_listed" | "tool_called" | "deadline",
+    key_sha256?: string,
   ): Assignment["mcp_handshake"] {
     const read = () => {
       const row = this.#db
@@ -1140,9 +1144,20 @@ export class Store {
         .get(project_id, assignment_id) as { doc: string } | undefined;
       return row && (JSON.parse(row.doc) as Assignment);
     };
-    // Every tool call passes here: only a pending session takes the write lock.
+    const next = (a: Assignment): NonNullable<Assignment["mcp_handshake"]> => {
+      const own =
+        key_sha256 !== undefined && key_sha256 === a.mcp_session_key_sha256;
+      if (observed === "deadline") return own ? "missing" : "pending";
+      if (own) return "listed";
+      return observed === "tool_called" ? "missing" : "pending";
+    };
+    // Every request passes here: only a changing pending session writes.
     const seen = read();
-    if (seen?.status !== "active" || seen.mcp_handshake !== "pending")
+    if (
+      seen?.status !== "active" ||
+      seen.mcp_handshake !== "pending" ||
+      next(seen) === "pending"
+    )
       return seen?.mcp_handshake;
     return this.#run(() => {
       const assignment = read();
@@ -1152,7 +1167,8 @@ export class Store {
         assignment.mcp_handshake !== "pending"
       )
         return assignment.mcp_handshake;
-      const mcp_handshake = observed === "tools_listed" ? "listed" : "missing";
+      const mcp_handshake = next(assignment);
+      if (mcp_handshake === "pending") return mcp_handshake;
       this.#db
         .prepare(
           "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",

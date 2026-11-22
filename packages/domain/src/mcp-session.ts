@@ -16,3 +16,18 @@ export const MCP_SESSION_FAILURE = "MCP 初始化失败：会话没有原生 Car
 export function dispatchReasonText(reason: string): string {
   return reason === "mcp_unavailable" ? MCP_SESSION_FAILURE : reason;
 }
+
+/**
+ * C-600: header a verified harness sends from its own MCP configuration with
+ * the per-launch session key; the endpoint stores only its SHA-256.
+ */
+export const MCP_SESSION_HEADER = "X-Cardigan-Session";
+/** C-600: shape of a session key (URL-safe, no quoting needed anywhere). */
+export const MCP_SESSION_KEY_PATTERN = /^[A-Za-z0-9_-]{22,128}$/u;
+
+/**
+ * C-600: default time a verified new session has, from dispatch, to list the
+ * Card tools before it counts as an MCP initialize failure. Harness MCP
+ * startup takes seconds; the host may configure another positive value.
+ */
+export const DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS = 180_000;

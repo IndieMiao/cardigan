@@ -6,6 +6,7 @@ import { type AddressInfo, connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startMcpServer } from "@cardigan/mcp-server";
+import { launchProxyBypass } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -21,6 +22,12 @@ import {
   workerMcpConfig,
 } from "./worker-mcp.js";
 
+// C-600: the launch compiler's bypass function, so a test can stand for
+// launch material that stopped naming the Card host.
+vi.mock("@cardigan/roles", async (original) => {
+  const actual = await original<typeof import("@cardigan/roles")>();
+  return { ...actual, launchProxyBypass: vi.fn(actual.launchProxyBypass) };
+});
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<object>()),
   agentProcessCommand: vi.fn(),
@@ -29,6 +36,8 @@ let root: string, server: Server, endpoint: string;
 let proxyTarget: string | undefined, observedHost: string | undefined;
 let authorization: string | undefined, challenge: string | undefined;
 let systemProxy: string | undefined;
+/** Emulate macOS urllib, which applies the system exception list itself. */
+let darwin = false;
 let status: number,
   body: unknown,
   requests: number,
@@ -138,6 +147,8 @@ beforeEach(() => {
   authorization = `Bearer ${credential}`;
   challenge = undefined;
   systemProxy = undefined;
+  darwin = false;
+  vi.mocked(launchProxyBypass).mockClear();
   vi.mocked(agentProcessCommand)
     .mockReset()
     .mockImplementation(async (_config, args) => {
@@ -148,7 +159,7 @@ beforeEach(() => {
       // server. Only this test adds its CA and synthetic DNS mapping.
       // A system proxy is simulated with macOS's `_scproxy` interface,
       // including an exception list the harness client does not honour.
-      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}${systemProxy ? `import sys, types\nscproxy = types.ModuleType("_scproxy")\nscproxy._get_proxies = lambda: {"http": ${JSON.stringify(systemProxy)}, "https": ${JSON.stringify(systemProxy)}}\nscproxy._get_proxy_settings = lambda: {"exclude_simple": False, "exceptions": ["*.ts.net"]}\nsys.modules["_scproxy"] = scproxy\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup(host, port, *a, **kw) if host == "127.0.0.1" else lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
+      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}${systemProxy ? `import sys, types\nscproxy = types.ModuleType("_scproxy")\nscproxy._get_proxies = lambda: {"http": ${JSON.stringify(systemProxy)}, "https": ${JSON.stringify(systemProxy)}}\nscproxy._get_proxy_settings = lambda: {"exclude_simple": False, "exceptions": ["*.ts.net"]}\nsys.modules["_scproxy"] = scproxy\n${darwin ? "sys.platform = 'darwin'\n" : ""}` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup(host, port, *a, **kw) if host == "127.0.0.1" else lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
       return { file: "python3", args: ["-I", "-B", "-c", prefix + args[4]] };
     });
 });
@@ -397,7 +408,6 @@ async function deadProxy() {
 }
 
 test("C-600 the launch's NO_PROXY keeps the harness route direct despite a system proxy", async () => {
-  expect(launchNoProxy(endpoint)).toEqual(["control.example-tailnet.ts.net"]);
   systemProxy = await deadProxy();
   authorization = undefined;
   status = 401;
@@ -406,10 +416,11 @@ test("C-600 the launch's NO_PROXY keeps the harness route direct despite a syste
   await expect(
     checkWorkerMcpReachability(execution()),
   ).resolves.toBeUndefined();
-  for (const entry of [".example-tailnet.ts.net", "ts.net", "*"])
-    await expect(
-      checkWorkerMcpReachability(execution(), ["localhost", entry]),
-    ).resolves.toBeUndefined();
+  // The probe reads exactly what the launch compiler adds for this address.
+  expect(launchProxyBypass).toHaveBeenCalledWith(endpoint, {});
+  expect(launchNoProxy(execution(), endpoint)).toBe(
+    "control.example-tailnet.ts.net",
+  );
   // Authenticated launch preflight takes the same route.
   authorization = `Bearer ${credential}`;
   status = 200;
@@ -418,42 +429,54 @@ test("C-600 the launch's NO_PROXY keeps the harness route direct despite a syste
   await expect(
     checkWorkerMcp(execution(), credential),
   ).resolves.toBeUndefined();
-  expect(requests).toBe(5);
+  expect(requests).toBe(2);
 });
 
-test("C-600 without a covering NO_PROXY the machine check reports the system proxy route", async () => {
-  systemProxy = await deadProxy();
-  authorization = undefined;
-  status = 401;
-  challenge = "Bearer";
-  body = { error: { code: "unauthorized", message: "unauthorized" } };
-  // The OS exception list (*.ts.net) is ignored, exactly like the harness.
-  for (const noProxy of [[], ["other.ts.net"], ["tailnet.ts.net"]])
-    await expect(
-      checkWorkerMcpReachability(execution(), noProxy),
-    ).rejects.toThrow(/^mcp_harness_proxy_failed$/);
-  expect(requests).toBe(0);
+test.each([false, true])(
+  "C-600 launch material without the Card host fails the machine check on the system proxy route (macOS urllib=%s)",
+  async (macos) => {
+    darwin = macos;
+    // The default HTTPS port is where macOS urllib's exception matching bites
+    // (the fixture's address lookup ignores the port).
+    const config = {
+      ...execution(),
+      mcp: {
+        url: "https://control.example-tailnet.ts.net/mcp",
+        timeoutMs: 3000,
+      },
+    };
+    // The OS exception list (*.ts.net) is ignored, exactly like the harness.
+    vi.mocked(launchProxyBypass).mockReturnValue({});
+    systemProxy = await deadProxy();
+    authorization = undefined;
+    status = 401;
+    challenge = "Bearer";
+    body = { error: { code: "unauthorized", message: "unauthorized" } };
+    await expect(checkWorkerMcpReachability(config)).rejects.toThrow(
+      /^mcp_harness_proxy_failed$/,
+    );
+    expect(requests).toBe(0);
 
-  const proxy = await connectProxy();
-  systemProxy = proxy.url;
-  try {
-    await expect(
-      checkWorkerMcpReachability(execution(), []),
-    ).resolves.toBeUndefined();
-    expect(proxy.tunnels()).toBe(1);
-    expect(requests).toBe(1);
-  } finally {
-    await proxy.close();
-  }
-});
+    const proxy = await connectProxy();
+    systemProxy = proxy.url;
+    try {
+      await expect(checkWorkerMcpReachability(config)).resolves.toBeUndefined();
+      expect(proxy.tunnels()).toBe(1);
+      expect(requests).toBe(1);
+    } finally {
+      await proxy.close();
+    }
+  },
+);
 
 test("C-600 without a system proxy setting the probe connects directly", async () => {
+  vi.mocked(launchProxyBypass).mockReturnValue({});
   authorization = undefined;
   status = 401;
   challenge = "Bearer";
   body = { error: { code: "unauthorized", message: "unauthorized" } };
   await expect(
-    checkWorkerMcpReachability(execution(), []),
+    checkWorkerMcpReachability(execution()),
   ).resolves.toBeUndefined();
   expect(requests).toBe(1);
 });

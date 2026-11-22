@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mcpProxyBypassHost } from "@cardigan/roles";
+import { launchProxyBypass } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -55,8 +55,11 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
 // C-600: the route is the harness's. Its HTTP client takes the account's system
 // proxy (macOS SystemConfiguration, without the exception list) unless the
 // launch's NO_PROXY names the host; the probe environment has no other proxy.
+// urllib would re-apply the system exception list to a chosen proxy, so the
+// probe turns that check off: the harness does not apply it either.
 const probe = `
 import http.client, json, socket, ssl, sys, urllib.error, urllib.parse, urllib.request
+urllib.request.proxy_bypass = lambda host: False
 def harness_proxy(data):
     try:
         import _scproxy
@@ -66,7 +69,7 @@ def harness_proxy(data):
     if not isinstance(proxy, str) or not proxy:
         return None
     host = (urllib.parse.urlsplit(data["url"]).hostname or "").lower()
-    for entry in data["no_proxy"]:
+    for entry in data["no_proxy"].split(","):
         entry = entry.strip().lower()
         if entry == "*" or (entry.lstrip(".") and (host == entry.lstrip(".")
                 or host.endswith("." + entry.lstrip(".")))):
@@ -141,10 +144,18 @@ def main():
 print(main())
 `;
 
-/** The NO_PROXY entries every launch adds for this Card MCP address. */
-export function launchNoProxy(url: string): readonly string[] {
-  const host = mcpProxyBypassHost(url);
-  return host ? [host] : [];
+/**
+ * The NO_PROXY a launch on this worker carries for the Card MCP address, as
+ * the harness reads it (upper case first). Computed by the launch compiler's
+ * own function over the worker's configured launch environment, so a launch
+ * that stopped naming the host is caught here as the system-proxy route.
+ */
+export function launchNoProxy(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+  url: string,
+): string {
+  const values = launchProxyBypass(url, execution.env ?? {});
+  return values.NO_PROXY ?? values.no_proxy ?? "";
 }
 
 /** Authenticated startup never accepts a reachability-only result. */
@@ -159,20 +170,18 @@ export function checkWorkerMcp(
 
 /**
  * A human machine check needs no Assignment credential and grants no
- * authority. It follows the harness route: the system proxy unless the
- * launch's NO_PROXY (by default, exactly what launches add) names the host.
+ * authority. It follows the harness route: the worker account's system proxy
+ * unless the launch's NO_PROXY (`launchNoProxy`) names the host.
  */
 export function checkWorkerMcpReachability(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
-  noProxy?: readonly string[],
 ): Promise<void> {
-  return probeWorkerMcp(execution, undefined, noProxy);
+  return probeWorkerMcp(execution);
 }
 
 async function probeWorkerMcp(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
   token?: string,
-  noProxy?: readonly string[],
 ): Promise<void> {
   const config = workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
   const started = Date.now();
@@ -217,7 +226,7 @@ async function probeWorkerMcp(
       child.stdin.end(
         JSON.stringify({
           ...config,
-          no_proxy: noProxy ?? launchNoProxy(config.url),
+          no_proxy: launchNoProxy(execution, config.url),
           authenticate: token !== undefined,
           token,
         }),

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,9 @@ import { type RunningServer, startMcpServer } from "./server.js";
 import { acceptingVerifierFor } from "./test-support.js";
 
 const project_id = "p-ack" as ProjectId;
+/** C-600: the per-launch key a harness sends from its MCP configuration. */
+const SESSION_KEY = "fictional-session-key-0123456789";
+const SESSION_DIGEST = createHash("sha256").update(SESSION_KEY).digest("hex");
 const NOW = "2026-01-01T00:00:00.000Z";
 const human: Actor = { kind: "human", project_id };
 const agent = (assignment_id: string): Actor => ({
@@ -170,7 +174,9 @@ function dispatchedRun(
           terminal_ref: "t1",
           agent_name: "coder-abcdef12-c-1-w-1-a-1",
         },
-        ...(options.verify ? { verify_mcp_session: true as const } : {}),
+        ...(options.verify
+          ? { verify_mcp_session: { key_sha256: SESSION_DIGEST } }
+          : {}),
       },
       p,
     ),
@@ -397,9 +403,24 @@ describe("the HTTP layer", () => {
 describe("C-600 a verified session must list the Card tools natively", () => {
   let running: RunningServer;
   const tools = ["whoami", "get_card", "get_updates"];
+  let token: string;
+  const connect = async (key?: string) => {
+    const client = new Client({ name: "fictional-client", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(running.url), {
+        requestInit: {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(key ? { "X-Cardigan-Session": key } : {}),
+          },
+        },
+      }),
+    );
+    return client;
+  };
   const start = async (verify: boolean) => {
     const seeded = dispatchedRun("none", { verify });
-    const token = store.issueToken({
+    token = store.issueToken({
       project_id,
       assignment_id: seeded.assignment.id,
       role: {
@@ -413,13 +434,7 @@ describe("C-600 a verified session must list the Card tools natively", () => {
       port: 0,
       log: () => undefined,
     });
-    const client = new Client({ name: "fictional-client", version: "0.0.0" });
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL(running.url), {
-        requestInit: { headers: { Authorization: `Bearer ${token}` } },
-      }),
-    );
-    return { ...seeded, client };
+    return seeded;
   };
   const handshake = (id: Assignment["id"]) =>
     store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake;
@@ -427,22 +442,32 @@ describe("C-600 a verified session must list the Card tools natively", () => {
     await running?.close();
   });
 
-  test("the harness's tools/list unlocks the session and its first call starts the Run", async () => {
-    const { assignment, run_id, client } = await start(true);
+  test("only this launch's harness unlocks the session; its first call starts the Run", async () => {
+    const { assignment, run_id } = await start(true);
     expect(handshake(assignment.id)).toBe("pending");
-    // initialize alone proves nothing.
+    // Another client of the same Token (or a wrong key) listing proves nothing.
+    const other = await connect();
+    await other.listTools();
+    const wrong = await connect("another-launch-key-0123456789");
+    await wrong.listTools();
+    expect(handshake(assignment.id)).toBe("pending");
+    // initialize alone proves nothing either.
+    const native = await connect(SESSION_KEY);
+    expect(handshake(assignment.id)).toBe("pending");
     expect(read(run_id)?.status).toBe("dispatched");
-    await client.listTools();
+    await native.listTools();
     expect(handshake(assignment.id)).toBe("listed");
-    const who = await client.callTool({ name: "whoami", arguments: {} });
+    const who = await native.callTool({ name: "whoami", arguments: {} });
     expect(who.isError).not.toBe(true);
     expect(read(run_id)?.status).toBe("running");
-    await client.close();
+    for (const client of [other, wrong, native]) await client.close();
   });
 
-  test("a call without a native listing is refused, never starts the Run and stays refused", async () => {
-    const { assignment, run_id, client } = await start(true);
-    const refused = await client.callTool({ name: "whoami", arguments: {} });
+  test("a call that is not this launch's harness is refused, never starts the Run and stays refused", async () => {
+    const { assignment, run_id } = await start(true);
+    const wrapper = await connect();
+    await wrapper.listTools();
+    const refused = await wrapper.callTool({ name: "whoami", arguments: {} });
     expect(refused.isError).toBe(true);
     expect(refused.structuredContent).toMatchObject({
       error: {
@@ -452,20 +477,22 @@ describe("C-600 a verified session must list the Card tools natively", () => {
     });
     expect(handshake(assignment.id)).toBe("missing");
     expect(read(run_id)?.status).toBe("dispatched");
-    // A wrapper listing afterwards cannot revive the session.
-    await client.listTools();
-    const again = await client.callTool({ name: "get_updates", arguments: {} });
+    // Even the harness's own key cannot revive the session afterwards.
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    const again = await native.callTool({ name: "get_updates", arguments: {} });
     expect(again.isError).toBe(true);
     expect(read(run_id)?.status).toBe("dispatched");
     expect(
       store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
         ?.last_mcp_activity_at,
     ).toBeUndefined();
-    await client.close();
+    for (const client of [wrapper, native]) await client.close();
   });
 
   test("sessions launched without verification keep the old behaviour", async () => {
-    const { assignment, run_id, client } = await start(false);
+    const { assignment, run_id } = await start(false);
+    const client = await connect();
     const who = await client.callTool({ name: "whoami", arguments: {} });
     expect(who.isError).not.toBe(true);
     expect(handshake(assignment.id)).toBeUndefined();

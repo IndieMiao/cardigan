@@ -53,7 +53,7 @@ exports[`claude-code LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "a51da9719410a3d12da02848e62a24b41f00e3482ba74bbff52c623a49b34cf4",
+      "sha256": "6a95852fb29fb82cdcd9c7a149dcf44276b0658070f834fd1b3fd04ba19734e7",
     },
   ],
   "harness": "claude-code",
@@ -105,7 +105,7 @@ exports[`codex LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "f97a1e55a4c57610d0eb23437d25412211a893a3c8fec3bb9449d8c7e8f34e03",
+      "sha256": "4aaee7265fb1312ca2d52bd7f77ec3ccc6fe755c00b36a643137f8cb240e96ac",
     },
   ],
   "harness": "codex",
@@ -169,7 +169,7 @@ exports[`pi LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "bad34a4b4c7e245f5e4c4425447e3a4b41607f59e0a583b8457f8422a5ccc4c5",
+      "sha256": "0225baafef99f742ba1998f5f59e72ca45c5097e0914c36c959530288e287221",
     },
   ],
   "harness": "pi",

@@ -553,11 +553,15 @@ interface AssignmentFields {
   readonly last_mcp_activity_at?: Timestamp;
   /**
    * C-600: whether the current session's harness listed the Card MCP tools.
-   * `pending` is set when a verified launch dispatches a new session, the
-   * native `tools/list` turns it into `listed`, and a tool call made before
-   * that (no native tools, e.g. a wrapper) turns it into `missing`.
+   * `pending` is set when a verified launch dispatches a new session. Only a
+   * request carrying that launch's session key (sent by the harness from its
+   * own MCP configuration) counts as native: its `tools/list` turns the state
+   * into `listed`. Any other tool call while pending, or no listing within
+   * the host's handshake deadline, turns it into `missing`.
    */
   readonly mcp_handshake?: McpHandshake;
+  /** C-600: SHA-256 (hex) of the current verified session's key. */
+  readonly mcp_session_key_sha256?: string;
   /** Immutable scheduling flag; true only for standing Office assignments. */
   readonly external?: boolean;
 }
@@ -603,7 +607,7 @@ export interface Run {
     readonly idle_check_at?: Timestamp;
     readonly escalated_at?: Timestamp;
   };
-  readonly failure_reason?: "provider_unavailable";
+  readonly failure_reason?: "provider_unavailable" | "mcp_unavailable";
   readonly provider_probe?: {
     readonly episode: EventId;
     readonly at: Timestamp;

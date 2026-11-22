@@ -6,6 +6,7 @@ import {
   type CommandState,
   c3ExitCandidate,
   claimDispatchStop,
+  DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS,
   dispatchedAt,
   dispatchRecoveryFailed,
   dispatchRecoveryQueuedAt,
@@ -92,6 +93,8 @@ interface ProviderWatch {
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   providerFailureThreshold?: number;
   providerCooldownMs?: number;
+  /** C-600: how long a verified new session may take to list the Card tools. */
+  mcpHandshakeTimeoutMs?: number;
 }
 async function providerSample(
   options: ProviderWatch,
@@ -535,21 +538,41 @@ export async function retryDispatchedRuns(
         }
       }
     }
-    // C-600: the session called a tool before its harness listed the Card
-    // tools. Rebuild it once without waiting for the dispatch timeout.
+    // C-600: this launch's harness never listed the Card tools — a tool call
+    // came from something else, or nothing arrived within the handshake
+    // deadline. Stop that terminal without waiting for the dispatch timeout;
+    // recovery rebuilds the session once, then settles and reports.
     if (
       owner &&
       candidate.status === "dispatched" &&
       !candidate.started_at &&
-      mcpSessionMissing(owner)
+      owner.mcp_handshake === "pending" &&
+      owner.mcp_session_key_sha256
     ) {
-      const state = read();
+      const since = dispatchedAt(candidates, candidate);
+      const now = clock.now();
       if (
-        dispatchRecoveryUsed(state.events, owner.id) ||
-        recoveryChainUsed(state, candidate)
+        since &&
+        Date.parse(now) -
+          Date.parse(since) -
+          dispatchTargetWaitMs(candidate, now) >=
+          (options.mcpHandshakeTimeoutMs ?? DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS)
       )
-        store.uow.run((tx) => finishRecovery(tx, candidate.id, 0));
-      else await stopRun(candidate.id, "mcp_unavailable");
+        store.advanceMcpHandshake(
+          project,
+          owner.id,
+          "deadline",
+          owner.mcp_session_key_sha256,
+        );
+    }
+    const current = owner && read().assignments.find((a) => a.id === owner.id);
+    if (
+      current &&
+      candidate.status === "dispatched" &&
+      !candidate.started_at &&
+      mcpSessionMissing(current)
+    ) {
+      await stopRun(candidate.id, "mcp_unavailable");
       continue;
     }
     if (c3ExitCandidate(read(), candidate)) {

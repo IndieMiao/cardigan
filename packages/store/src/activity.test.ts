@@ -84,9 +84,11 @@ test("touchAssignmentActivity is visible to a second connection", () => {
   });
 });
 
-test("C-600 the MCP handshake only advances a pending session, in a write visible to command state", () => {
+test("C-600 only the launch's own key advances a pending session; anything else proves it has no native tools", () => {
   withTempStore((store, dataDir) => {
     const id = assignment().id;
+    const own = "a".repeat(64),
+      other = "b".repeat(64);
     store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
     // Legacy and unverified sessions have no handshake to advance.
     expect(
@@ -101,14 +103,32 @@ test("C-600 the MCP handshake only advances a pending session, in a write visibl
         tx.assignments.put(project_id, {
           ...assignment(),
           mcp_handshake: "pending",
+          mcp_session_key_sha256: own,
         }),
       );
     pending();
+    // Another client of the same Token listing tools proves nothing.
     expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
+      "pending",
+    );
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tools_listed", other),
+    ).toBe("pending");
+    // A deadline for another session does not touch this one.
+    expect(store.advanceMcpHandshake(project_id, id, "deadline", other)).toBe(
+      "pending",
+    );
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed", own)).toBe(
       "listed",
     );
-    // A later premature-looking call cannot undo a native listing.
+    // Later calls without the key cannot undo a native listing.
     expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "listed",
+    );
+
+    // A native call before listing (same key) is still native.
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called", own)).toBe(
       "listed",
     );
 
@@ -116,8 +136,8 @@ test("C-600 the MCP handshake only advances a pending session, in a write visibl
     expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
       "missing",
     );
-    // Listing afterwards (e.g. by a wrapper) does not revive the session.
-    expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
+    // Listing afterwards does not revive the session.
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed", own)).toBe(
       "missing",
     );
     const reopened = StoreFor.open({ dataDir });
@@ -130,11 +150,18 @@ test("C-600 the MCP handshake only advances a pending session, in a write visibl
       reopened.close();
     }
 
+    // The host's deadline for this very session.
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "deadline", own)).toBe(
+      "missing",
+    );
+
     store.uow.run((tx) =>
       tx.assignments.put(project_id, {
         ...assignment(),
         status: "released",
         mcp_handshake: "pending",
+        mcp_session_key_sha256: own,
       }),
     );
     expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(

@@ -30,6 +30,8 @@ export {
   compileAssignmentLaunch,
   LAUNCH_SCRIPT_NAME,
   MCP_SERVER_NAME,
+  MCP_SESSION_HEADER,
+  MCP_SESSION_KEY_PATTERN,
   RUN_RESOURCE_RULE,
   SECRETS_FILE_NAME,
   START_FILE_NAME,
@@ -63,6 +65,7 @@ export {
   reportLaunchWarnings,
 } from "./launch-diagnostics.js";
 export {
+  launchProxyBypass,
   MCP_PROXY_BYPASS_KEYS,
   mcpProxyBypassHost,
   withMcpProxyBypass,

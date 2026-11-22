@@ -1,7 +1,11 @@
 import { join } from "node:path";
 import { HARNESS_CATALOG } from "@cardigan/domain";
 import type { BrowserServer } from "../assignment-types.js";
-import { BROWSER_MCP_SERVER_NAME, TOKEN_ENV_VAR } from "../assignment-types.js";
+import {
+  BROWSER_MCP_SERVER_NAME,
+  MCP_SESSION_HEADER,
+  TOKEN_ENV_VAR,
+} from "../assignment-types.js";
 import type {
   LaunchProfileDefinition,
   ProviderDefinition,
@@ -49,6 +53,7 @@ function codexConfig(
   coreFile: string,
   trustedPaths: readonly string[],
   browser: BrowserServer | undefined,
+  sessionKey: string | undefined,
 ): string {
   const lines = [
     `model_instructions_file = ${JSON.stringify(coreFile)}`,
@@ -59,6 +64,12 @@ function codexConfig(
     `[mcp_servers.${serverName}]`,
     `url = ${JSON.stringify(url)}`,
     `bearer_token_env_var = ${JSON.stringify(TOKEN_ENV_VAR)}`,
+    // C-600: sent on every request of this session's native MCP client.
+    ...(sessionKey
+      ? [
+          `http_headers = { ${JSON.stringify(MCP_SESSION_HEADER)} = ${JSON.stringify(sessionKey)} }`,
+        ]
+      : []),
     "",
   ];
   for (const tool of tools) {
@@ -220,6 +231,7 @@ export const codex: HarnessAdapter = {
               ...(input.build_dir ? [input.build_dir] : []),
             ],
         browser,
+        input.mcp.session_key,
       ),
       mode: 0o600,
     });

@@ -79,7 +79,16 @@ export interface AssignmentMcpEndpoint {
   /** Card MCP streamable HTTP endpoint, e.g. `http://127.0.0.1:3004/mcp`. */
   readonly url: string;
   readonly server_name?: string;
+  /**
+   * C-600: per-launch key the harness sends as `MCP_SESSION_HEADER` from its
+   * own MCP configuration (never the environment), so the endpoint can tell
+   * this harness's native requests from any other client of the Token.
+   */
+  readonly session_key?: string;
 }
+
+/** C-600: header and key shape shared with the Card MCP endpoint. */
+export { MCP_SESSION_HEADER, MCP_SESSION_KEY_PATTERN } from "@cardigan/domain";
 
 export interface CompileAssignmentInput {
   readonly assignment: AssignmentIdentity;

@@ -273,6 +273,9 @@ export function recoverDispatch(
               ? "delivery_retry_exhausted"
               : undefined;
     if (!reason) return;
+    // C-600: a session without Card tools settles only through its own stop
+    // fence and exit proof, never by escalation that leaves it running.
+    if (reason === "mcp_unavailable" && !stopping) return;
     // A prior unconfirmed-stop alert cannot prevent later exit settlement.
     if (
       !stopped &&
@@ -290,6 +293,10 @@ export function recoverDispatch(
       ((!restart && dispatchRecoveryUsed(state.events, a.id)) ||
         recoveryChainUsed(state, run));
     const unreadable = unreadableCommentTrigger(state, run);
+    // C-600: a session without Card tools is never left running, also once
+    // its single rebuild is spent: the confirmed stop settles it as a failed
+    // start before the escalation below.
+    const mcp = reason === "mcp_unavailable";
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
       (e) =>
@@ -308,7 +315,7 @@ export function recoverDispatch(
       (!recovered ||
         unreadable ||
         reviewWake === "obsolete" ||
-        (stopped && policy)) &&
+        (stopped && (policy || mcp))) &&
       !p.stop_failed &&
       !startupFailed
     ) {
@@ -331,8 +338,12 @@ export function recoverDispatch(
               ? `${context}；无权读取触发评论所在卡片，确认终端退出后取消，不再重排。`
               : reviewWake
                 ? `${context}；审核目标已暂停或变更，确认终端退出后不再重排。`
-                : `${context}；${dispatchReasonText(reason)}，确认终端退出后自动重排一次。`,
+                : mcp && recovered
+                  ? `${context}；${MCP_SESSION_FAILURE}，已确认终端退出，记为启动失败，不再重排。`
+                  : `${context}；${dispatchReasonText(reason)}，确认终端退出后自动重排一次。`,
         );
+        if (mcp)
+          d.put("runs", { ...cancelled, failure_reason: "mcp_unavailable" });
         if (provider) {
           d.put("runs", {
             ...cancelled,
@@ -472,8 +483,7 @@ export function recoverDispatch(
         return next;
       }
     }
-    const mcp = reason === "mcp_unavailable";
-    const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
     const ops = state.assignments.find(
       (candidate) =>
         candidate.status === "active" &&
