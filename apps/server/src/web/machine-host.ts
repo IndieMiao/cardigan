@@ -206,6 +206,8 @@ export function machineHost(
           status: result.health.status === "passed" ? "passed" : "failed",
           failed_steps: result.health.blockers,
           ...(result.maintenance ? { maintenance: result.maintenance } : {}),
+          // C-599: a CLI check that joins this one reads the same tools outcome.
+          ...(result.agent_tools ? { agent_tools: result.agent_tools } : {}),
         };
       }
 

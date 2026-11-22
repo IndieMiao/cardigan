@@ -65,25 +65,35 @@ export async function patrolHelperUpgrade(
   const wasHeld = !!previous && previous.state !== "verified";
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
-  let toolsOnly = false;
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) {
-    // Only an enrolled, otherwise healthy binding that has not tried this key yet.
-    if (
-      initial.blockers.length ||
-      previous?.release_key === key ||
-      !adapters.toolsStale
-    )
-      return initial;
+  const helpersStale = initial.blockers.some(helperMismatch);
+  // C-599: an enrolled, otherwise healthy binding that has not tried this key
+  // yet also installs for missing/stale tools, including while it recovers.
+  let toolsStale = false;
+  const seen = confirmedTools(store);
+  const slot = `${project}\0${machine}`;
+  if (
+    !helpersStale &&
+    !initial.blockers.length &&
+    previous?.release_key !== key &&
+    seen.get(slot) !== key &&
+    adapters.toolsStale
+  ) {
+    let enrolled = false;
     try {
-      if (!enrolledUpgradeIdentity(root, project, machine)) return initial;
+      enrolled = !!enrolledUpgradeIdentity(root, project, machine);
     } catch {
-      return initial;
+      /* An unreadable enrollment never authorizes an install. */
     }
     const os = store.uow.read((tx) => tx.machines.get(project, machine))?.os;
-    if (!os || !(await adapters.toolsStale(execution, machine, os, signal)))
-      return initial;
-    toolsOnly = true;
+    if (enrolled && os) {
+      toolsStale = await adapters.toolsStale(execution, machine, os, signal);
+      // Current tools need no further remote probe for this key in this process.
+      if (!toolsStale) seen.set(slot, key);
+    }
   }
+  // A tools-only refresh of a released machine never holds dispatch before it writes.
+  const toolsOnly = !wasHeld && !helpersStale && toolsStale;
+  if (!wasHeld && !helpersStale && !toolsStale) return initial;
   if (initial.blockers.includes("machine_not_ready")) return initial;
 
   let stage = "configuration";
@@ -140,7 +150,7 @@ export async function patrolHelperUpgrade(
       ? { ...held, blockers: [...initial.blockers, upgradeHold] }
       : initial;
   }
-  const needsInstall = toolsOnly || initial.blockers.some(helperMismatch);
+  const needsInstall = toolsStale || helpersStale;
   if (!needsInstall && initial.blockers.length)
     return { ...held, blockers: [...initial.blockers, upgradeHold] };
   try {
@@ -148,6 +158,7 @@ export async function patrolHelperUpgrade(
     if (adapters.promotionPending(execution.dataDir))
       return toolsOnly ? initial : held;
   } catch {
+    if (toolsOnly) return initial;
     /* Missing/invalid deployment proof is recorded as an installation failure. */
   }
   const claimed = store.uow.run((tx) => {
@@ -236,7 +247,38 @@ export async function patrolHelperUpgrade(
     );
     return result;
   } catch {
+    if (toolsOnly && stage === "configuration") {
+      // Nothing was sent yet: undo the claim instead of holding a healthy machine.
+      store.uow.run(() =>
+        previous
+          ? store.database
+              .prepare(
+                "UPDATE worker_helper_upgrades SET release_key=?,state=?,pending_final=? WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+              )
+              .run(
+                String(previous.release_key),
+                String(previous.state),
+                previous.pending_final ?? null,
+                project,
+                machine,
+                key,
+              )
+          : store.database
+              .prepare(
+                "DELETE FROM worker_helper_upgrades WHERE project_id=? AND machine_id=? AND release_key=? AND state='installing'",
+              )
+              .run(project, machine, key),
+      );
+      return initial;
+    }
     fail();
     return held;
   }
+}
+
+const toolsCache = new WeakMap<Store, Map<string, string>>();
+function confirmedTools(store: Store) {
+  const seen = toolsCache.get(store) ?? new Map<string, string>();
+  toolsCache.set(store, seen);
+  return seen;
 }

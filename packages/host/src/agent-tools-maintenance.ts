@@ -123,7 +123,10 @@ export interface AgentToolsReconcileOptions {
   readonly observation: string;
   readonly health: MachineHealth;
   readonly capabilities: readonly MachineCapability[];
-  readonly target: { execution: ExecutionConfig; machine: { os: string } };
+  /** Absent when the observation failed before its binding fence. */
+  readonly target:
+    | { execution: ExecutionConfig; machine: { os: string } }
+    | undefined;
   /** Re-resolves the binding after staging; a change abandons this outcome. */
   readonly currentBinding: () => Promise<string | undefined>;
   /** True while this observation is still the machine's latest record. */
@@ -144,9 +147,33 @@ export interface AgentToolsReconcileOptions {
 export async function reconcileAgentToolsAction(
   o: AgentToolsReconcileOptions,
 ): Promise<AgentToolsOutcome | undefined> {
+  try {
+    return await reconcile(o);
+  } catch {
+    // Never keep an earlier command when this outcome could not be recorded.
+    try {
+      if (o.machine !== "local" && hasOpenNotice(o.store, o.project, o.machine))
+        o.store.uow.run((tx) =>
+          retire(
+            tx,
+            o.project,
+            o.machine,
+            { now: o.now },
+            "附件助手待办刷新失败，旧的补装命令作废",
+          ),
+        );
+    } catch {
+      /* The observation itself stays recorded; guidance reports no command. */
+    }
+    return { status: "unverifiable" };
+  }
+}
+
+async function reconcile(
+  o: AgentToolsReconcileOptions,
+): Promise<AgentToolsOutcome | undefined> {
   const { store, project, machine } = o;
-  // Capabilities are only probed for a passing machine; nothing was learned otherwise.
-  if (machine === "local" || o.health.status !== "passed") return undefined;
+  if (machine === "local") return undefined;
   const clock = { now: o.now };
   const settle = (
     outcome: AgentToolsOutcome,
@@ -158,6 +185,12 @@ export async function reconcileAgentToolsAction(
         retire(tx, project, machine, clock, reason);
       return outcome;
     });
+  // Nothing about the tools was verified (helper mismatch, a new release,
+  // offline, rebinding): no earlier command may outlive this check.
+  if (o.health.status !== "passed" || !o.target) {
+    settle({ status: "unverifiable" }, "本次机器检查未通过，旧的补装命令作废");
+    return undefined;
+  }
   if (o.capabilities.some((c) => c.key === AGENT_TOOLS_CAPABILITY))
     return settle(
       { status: "current" },
@@ -167,7 +200,7 @@ export async function reconcileAgentToolsAction(
     (f) => f.key === AGENT_TOOLS_CAPABILITY,
   )?.reason;
   if (!problem) return undefined;
-  const { execution } = o.target;
+  const { execution, machine: registered } = o.target;
   const pinned = execution.target;
   const stale = "当前绑定或控制端发行材料无法核验，旧的补装命令作废";
   if (
@@ -203,13 +236,13 @@ export async function reconcileAgentToolsAction(
         "签名自动升级未通过核验，按升级待办恢复",
       );
     note =
-      "签名自动升级已对本版本执行，附件助手仍未就绪；C-595 之前登记的 v1 入口只能更新三个 helper，需要迁移";
+      "签名自动升级已对本版本执行一次，附件助手仍未就绪：C-595 之前登记的 v1 入口只能更新三个 helper，需要本命令迁移；v2 入口则是安装后复查未通过";
   }
   let terminal: ActionCommand | undefined;
   try {
     terminal = await (o.stage ?? stageWorkerUpgrade)(
       execution as Worker,
-      o.target.machine.os,
+      registered.os,
       o.signal,
     );
   } catch {

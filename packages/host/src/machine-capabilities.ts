@@ -236,25 +236,24 @@ export async function refreshMachineObservations(
   const owns = () =>
     readMachineObservationsInTransaction(store, project, machine, now()).health
       ?.evidence_ref === `machine-observation:${observation}`;
-  const tools =
-    recorded && checkedTarget
-      ? await reconcileAgentToolsAction({
-          store,
-          project,
-          machine,
-          observation,
-          health,
-          capabilities,
-          target: checkedTarget,
-          currentBinding: async () =>
-            (await options.target()).execution.target?.fingerprint,
-          stillCurrent: owns,
-          ...(options.env ? { env: options.env } : {}),
-          ...(options.stageUpgrade ? { stage: options.stageUpgrade } : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
-          now,
-        }).catch(() => undefined)
-      : undefined;
+  const tools = recorded
+    ? await reconcileAgentToolsAction({
+        store,
+        project,
+        machine,
+        observation,
+        health,
+        capabilities,
+        target: checkedTarget,
+        currentBinding: async () =>
+          (await options.target()).execution.target?.fingerprint,
+        stillCurrent: owns,
+        ...(options.env ? { env: options.env } : {}),
+        ...(options.stageUpgrade ? { stage: options.stageUpgrade } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        now,
+      })
+    : undefined;
   const observed = () => ({
     ...readMachineObservations(store, project, machine, now()),
     ...(tools ? { agent_tools: tools } : {}),

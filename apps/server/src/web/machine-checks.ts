@@ -83,7 +83,12 @@ export class MachineChecks extends MachineCheckJournal {
           job,
           (progress) =>
             host.check(project, machine, kind, progress, this.signal, job.id),
-          ({ status, failed_steps }) => ({ status, failed_steps }),
+          // C-599: keep the tools outcome (never a command) for a joined CLI check.
+          ({ status, failed_steps, agent_tools }) => ({
+            status,
+            failed_steps,
+            ...(agent_tools ? { agent_tools } : {}),
+          }),
           (tx, final) => {
             machineAudit(
               tx,

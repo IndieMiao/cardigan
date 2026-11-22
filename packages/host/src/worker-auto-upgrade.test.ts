@@ -989,3 +989,77 @@ test("C-599: standalone and joined explicit checks get the same verified command
     ]),
   ).not.toContain(command);
 });
+
+test("C-599: any failed observation retires the tools notice; helper mismatch keeps only the helper one", async () => {
+  const f = await setup("linux");
+  f.tools.output = missing;
+  f.stageUpgrade.mockResolvedValue({ ...f.terminal, command: "tools-command" });
+  await f.manual("machine");
+  expect(open(f).map((a) => a.terminal?.command)).toEqual(["tools-command"]);
+  // Offline / target problem: nothing verified, no command survives.
+  await f.manual("machine", f.target.fingerprint, false);
+  expect(open(f)).toEqual([]);
+  await f.manual("machine");
+  expect(open(f)).toHaveLength(1);
+  // A new release whose helpers differ: only the helper upgrade notice remains.
+  f.stageUpgrade.mockResolvedValue({
+    ...f.terminal,
+    command: "helper-command",
+  });
+  expect(await f.run(mismatch)).toEqual(mismatch);
+  expect(open(f)).toEqual([
+    expect.objectContaining({
+      terminal: expect.objectContaining({ command: "helper-command" }),
+      helper_upgrade: { machine_id: machine, binding: f.target.fingerprint },
+    }),
+  ]);
+});
+
+test("C-599: a held worker recovering under a new key also installs stale tools", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.store.database
+    .prepare(
+      "INSERT INTO worker_helper_upgrades(project_id,machine_id,release_key,state) VALUES (?,?,?,'failed')",
+    )
+    .run(project, machine, "old-key");
+  f.tools.output = missing;
+  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  f.adapters.install.mockImplementationOnce(async () => {
+    f.tools.output = "agent-tools ok";
+    return v2Result;
+  });
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.isHeld()).toBe(false);
+  expect(toolsPayload(f)).toEqual(["verified"]);
+});
+
+test("C-599: a tools-only refresh that fails before sending anything does not hold dispatch", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  f.options.bindingCurrent.mockReturnValue(false);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(f.isHeld()).toBe(false);
+  expect(upgradeState(f.store, project, machine)).toBeUndefined();
+  expect(open(f)).toEqual([]);
+  f.options.bindingCurrent.mockReturnValue(true);
+  f.adapters.install.mockResolvedValueOnce(v2Result);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-599: current tools are probed once per release key, not on every patrol", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = "agent-tools ok";
+  const toolsStale = vi.fn(async () => false);
+  Object.assign(f.adapters, { toolsStale });
+  expect(await f.run(pass)).toEqual(pass);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(toolsStale).toHaveBeenCalledOnce();
+  expect(f.adapters.install).not.toHaveBeenCalled();
+});
