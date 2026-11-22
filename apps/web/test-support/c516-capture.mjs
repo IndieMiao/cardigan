@@ -593,7 +593,7 @@ try {
       await until("!!document.querySelector('[role=dialog] form input')");
       await fill("端点", "https://gateway.example.test");
       await scene("models-provider", measureDrawer);
-      // A key secrets.env no longer has: shown as 已失效, not choosable.
+      // A key secrets.env does not have: shown as 未设置 (C-549), not choosable.
       await models(theme);
       await row("codex-sol");
       await click("编辑 Provider");
@@ -602,7 +602,7 @@ try {
       await scene("models-provider-stale-key", measureDrawer);
       assert(
         results["models-provider-stale-key"].options.includes(
-          "OPENAI_API_KEY（已失效）",
+          "OPENAI_API_KEY（未设置）",
         ),
       );
       await key("Escape", 27);
