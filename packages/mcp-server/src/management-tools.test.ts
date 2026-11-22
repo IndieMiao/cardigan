@@ -1051,8 +1051,8 @@ test.each(
       work_item_id: reviewer.id,
       role_id: "reviewer",
     });
+    const producer = await coder();
     if (target === "current") {
-      const producer = await coder();
       await ok(producer, "submit_delivery", {
         work_item_id: work("coder").id,
         kind: "code",
@@ -1104,13 +1104,30 @@ test.each(
         summary: "Review limit",
       });
     });
-    if (paused)
+    if (paused) {
       await ok(office, "record_decision", {
         decision_id: q.id,
         option: "pause",
         rationale: "Check first",
         raw_quote: "Wait",
+        pause_plan: {
+          owner: work("coder").assignment_id,
+          confirmers: [assignment.id],
+          next_step: "复核",
+        },
       });
+      const plan = await ok<{ id: string }>(producer, "post_comment", {
+        card_id: card.id,
+        body: "方案",
+        review_plan: { decision_id: q.id, step: "propose" },
+      });
+      await ok(await connect(assignment), "post_comment", {
+        card_id: card.id,
+        body: "确认",
+        reply_to: plan.id,
+        review_plan: { decision_id: q.id, step: "confirm" },
+      });
+    }
     const params = {
       decision_id: q.id,
       option: "raise_limit",

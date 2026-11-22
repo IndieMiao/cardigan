@@ -198,6 +198,11 @@ test("PM pause committed while Git is pending wins, including after restart", as
               decision_id: decisionId,
               option: "pause",
               rationale: "先暂停",
+              pause_plan: {
+                owner: f.coder.id,
+                confirmers: [f.reviewer.id],
+                next_step: "复核",
+              },
             },
           },
           p,

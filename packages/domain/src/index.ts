@@ -250,6 +250,7 @@ export {
   type ReviewLimitAttention,
   reviewLimitAttention,
 } from "./review-limit-attention.js";
+export { pauseDiscussionFor } from "./review-pause.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./role-rule.js";
@@ -261,6 +262,9 @@ export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
 export { sharedMustFixes } from "./shared-findings.js";
 export {
+  canParkForDiscussion,
+  parkedPauseRepair,
+  pauseDiscussionDecision,
   repairWakeTarget,
   resumableReviewWithdrawal,
   reviewDiscussionInstruction,

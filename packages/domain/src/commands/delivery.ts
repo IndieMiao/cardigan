@@ -57,6 +57,7 @@ import {
 } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
+import { checkPauseDelivery } from "./review-pause.js";
 import {
   deliveryTree,
   reusableReviews,
@@ -100,6 +101,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   const item = system ? d.work(p.work_item_id) : d.ownWork(p.work_item_id);
   checkEmployeeSeparation(d, item, d.assignment?.employee_id);
   checkReviewPlanGate(d, item);
+  checkPauseDelivery(d, item);
   ensure(
     item.kind === "produce",
     "unauthorized",

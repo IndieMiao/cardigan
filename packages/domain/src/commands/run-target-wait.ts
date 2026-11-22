@@ -3,10 +3,17 @@ import type { Actor, Assignment, Run } from "../entities.js";
 import type { RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import {
+  discussionWithdrawal,
   repairWakeTarget,
   reviewRunWakeDisposition,
 } from "../shared-review-wake.js";
-import { type CommandPorts, type CommandState, command } from "./core.js";
+import { transition } from "../transitions.js";
+import {
+  type CommandPorts,
+  type CommandState,
+  command,
+  unwrap,
+} from "./core.js";
 
 export function dispatchTargetWaitMs(run: Run, now: string): number {
   const wait = run.dispatch_target_wait;
@@ -32,11 +39,15 @@ export function runTargetWaitReason(
   return undefined;
 }
 
-/** Recheck target waits without changing Run status, review budget or delivery history. */
+/** Recheck waits; only a positively withdrawn first repair can return to its queue. */
 export function refreshRunTargetWait(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId; withdrawn_attempt_id?: string },
+  p: {
+    run_id: RunId;
+    withdrawn_attempt_id?: string;
+    no_transport_attempts?: true;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "refresh_run_target_wait", ports, (d) => {
@@ -69,6 +80,33 @@ export function refreshRunTargetWait(
       run.inactivity_stop
     )
       return false;
+    // Do not treat a dispatched Run as dormant. Only an exact pre-send
+    // withdrawal and a fresh host check of transport history can return it
+    // to the existing queue. Normal admission then owns its next send.
+    const receipt =
+      actor.kind === "system" &&
+      p.no_transport_attempts &&
+      reason === "shared_review_paused" &&
+      discussionWithdrawal(state, owner, run);
+    if (receipt) {
+      const { bell_delivery: _address, ...queued } = run;
+      d.put("runs", {
+        ...queued,
+        status: unwrap(transition("run", run.status, "launch_withdrawn")),
+        queue_reason: "awaiting_dispatch",
+        queue_entered_at: run.queue_entered_at ?? d.now,
+        dispatch_target_wait: run.dispatch_target_wait ?? {
+          since: d.now,
+          elapsed_ms: 0,
+        },
+      });
+      d.emit("run_pause_repair_requeued", card, {
+        run_id: run.id,
+        assignment_id: owner.id,
+        withdrawal_event_id: receipt.id,
+      });
+      return true;
+    }
     const waiting = reason !== undefined;
     if (waiting && !run.dispatch_target_wait?.since) {
       d.put("runs", {

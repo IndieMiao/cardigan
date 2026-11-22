@@ -17,7 +17,10 @@ import {
   recoveryTargetCurrent,
 } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
-import { reviewRunWakeDisposition } from "../shared-review-wake.js";
+import {
+  canParkForDiscussion,
+  reviewRunWakeDisposition,
+} from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import {
   type CommandPorts,
@@ -383,6 +386,7 @@ export function recoverDispatch(
               r.id !== run.id &&
               r.assignment_id === a.id &&
               !standingRunDormant(a, r) &&
+              !canParkForDiscussion(state, a, r, run) &&
               (!finished(r) ||
                 r.dispatch_stop ||
                 r.inactivity_stop ||

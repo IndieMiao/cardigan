@@ -105,13 +105,17 @@ function cardView(
   const deliveries = d
     .list("deliveries")
     .filter((v) => items.some((w) => w.id === v.work_item_id));
-  const open = d
+  const decisions = d
     .list("decisions")
     .filter(
       (q) =>
-        ["open", "provisional", "snoozed"].includes(q.status) &&
+        (q.review_pause ||
+          ["open", "provisional", "snoozed"].includes(q.status)) &&
         affects(d, q, id),
     );
+  const open = decisions.filter((q) =>
+    ["open", "provisional", "snoozed"].includes(q.status),
+  );
   const actions = d
     .list("human_actions")
     .filter(
@@ -137,7 +141,7 @@ function cardView(
     events: d.state.events,
     deliveries,
     reviews: d.list("reviews"),
-    decisions: open,
+    decisions,
     human_actions: actions,
     status,
   });

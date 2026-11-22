@@ -41,6 +41,7 @@ test.each([2, 3])(
         .filter((w) => w.kind === "verify")
         .map((w) => w.status),
     ).toEqual(["waiting_decision", "waiting_decision"]);
+    f.confirmPause();
     expect(f.decide(other, "raise_limit").ok).toBe(true);
     expect(f.decide(n, "raise_limit").ok).toBe(false);
     expect(
@@ -253,12 +254,18 @@ test("legacy findings without an impact cannot enter a new verdict, directly or 
   expect(state.reviews[0]?.issues).toEqual([legacy]);
 });
 
-test("continuing after a new delivery resumes its reviewers, not the old repair", async () => {
+test("a historical unmanaged pause with a newer delivery resumes its reviewers, not the old repair", async () => {
   const f = await fixture();
   f.review(2, [first]);
   f.review(3, [], f.refs());
   expect(f.decide(2, "pause").ok).toBe(true);
-  const newer = apply(f.state, await parallelDelivery(f.state, f.io));
+  // Reopen a pre-C-569 pause: it had no plan, so a replacement could
+  // already exist. New managed pauses reject the write until settlement.
+  const legacy = {
+    ...f.state,
+    decisions: f.state.decisions.map(({ review_pause: _plan, ...q }) => q),
+  };
+  const newer = apply(legacy, await parallelDelivery(legacy, f.io));
   const q = newer.decisions[0];
   if (!q) throw Error("Missing shared pause");
   const continued = value(
@@ -322,6 +329,71 @@ test("invariant 11: only a host's exact withdrawn repair can resume on the same 
     target_sha: f.target.subject.value,
   };
   expect(receipt.payload).toMatchObject(expected);
+  const admission = {
+    ...receipt,
+    id: f.io.ids.nextEventId(),
+    type: "run_dispatched",
+    seq: receipt.seq - 1,
+    payload: { run_id: run.id, assignment_id: producer.id },
+  };
+  const canPark = (
+    evidence: typeof s.events,
+    transportChecked = true,
+    bell_delivery?: Run["bell_delivery"],
+  ) =>
+    value(
+      refreshRunTargetWait(
+        {
+          ...s,
+          events: [...s.events, ...evidence],
+          assignments: s.assignments.map((a) =>
+            a.id !== producer.id
+              ? a
+              : {
+                  ...a,
+                  runtime_ref: {
+                    machine_id: a.machine_id,
+                    runtime_machine: "local",
+                    terminal_ref: "fixture",
+                    agent_name: "fixture",
+                  },
+                },
+          ),
+          runs: s.runs.map((r) =>
+            r.id === run.id && bell_delivery ? { ...r, bell_delivery } : r,
+          ),
+        },
+        { kind: "system", project_id: s.project_id },
+        {
+          run_id: run.id,
+          ...(transportChecked ? { no_transport_attempts: true } : {}),
+        },
+        f.io,
+      ),
+    ).events.some((e) => e.type === "run_pause_repair_requeued");
+  expect(canPark([admission, receipt])).toBe(true);
+  expect(canPark([admission, receipt], false)).toBe(false);
+  expect(canPark([receipt])).toBe(false);
+  expect(canPark([admission])).toBe(false);
+  expect(canPark([admission, { ...receipt, actor: actor() }])).toBe(false);
+  expect(
+    canPark([
+      admission,
+      {
+        ...receipt,
+        payload: { ...admission.payload, ...expected, delivery_id: "other" },
+      },
+    ]),
+  ).toBe(false);
+  expect(canPark([receipt, { ...admission, seq: receipt.seq + 1 }])).toBe(
+    false,
+  );
+  expect(
+    canPark([admission, receipt], true, {
+      run_id: run.id,
+      received_at: receipt.created_at,
+    }),
+  ).toBe(false);
   const canResume = (event = receipt) =>
     resumableReviewWithdrawal(
       { ...f.state, events: [...f.state.events, event] },
@@ -329,6 +401,7 @@ test("invariant 11: only a host's exact withdrawn repair can resume on the same 
       run,
     );
   expect(canResume()).toBe(false);
+  f.confirmPause();
   expect(f.decide(3, "raise_limit").ok).toBe(true);
   expect(resumableReviewWithdrawal(f.state, producer, run)).toBe(false);
   expect(canResume()).toBe(true);

@@ -116,6 +116,15 @@ async function fixture() {
             decision_id: decision.id,
             option,
             rationale: "人工判断",
+            ...(option === "pause"
+              ? {
+                  pause_plan: {
+                    owner: f.coder.id,
+                    confirmers: [f.reviewer.id],
+                    next_step: "核对历史记录",
+                  },
+                }
+              : {}),
           },
         },
         f.io,
