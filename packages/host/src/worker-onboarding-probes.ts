@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { agentProcessCommand } from "@cardigan/runtime-herdr";
+import { workerDirectoryCommand } from "./worker-directory-command.js";
 import {
   helpers as helperNames,
   workerHelperDigests,
@@ -270,11 +271,12 @@ export function workerNextAction(
 ): string {
   const e = config.worker.execution;
   if (step === "directories") {
-    const guide = config.worker.os === "darwin" ? "macos" : "linux";
-    const python =
-      guide === "macos" ? "/opt/homebrew/bin/python3" : "/usr/bin/python3";
-    const installer = `sudo ${python} -IB /opt/cardigan/deploy/install-${guide}-worker.py --project ${config.worker.project_id}`;
-    return `${installer} --check && ${installer} --apply`;
+    return workerDirectoryCommand(
+      config.worker.os === "darwin",
+      config.worker.project_id,
+      e.user ?? "",
+      e.agentRoot,
+    );
   }
   if (step === "helpers") {
     const guide = config.worker.os === "darwin" ? "macos" : "linux";

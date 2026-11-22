@@ -29,6 +29,9 @@ class UpgradeTest(unittest.TestCase):
         (self.live / 'previous').write_text('leave-intact')
         self.cfg = {'project': 'sample', 'rev': 'c' * 40, 'manifest': {p.name: digest(p) for p in self.release.iterdir()}}
         self.backup = self.root / ('deploy.bak-' + 'c' * 12 + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
+        owner = self.root.stat()
+        m = mock.patch.dict(upgrade.__globals__, DEPLOY_OWNER=(owner.st_uid, owner.st_gid))
+        m.start(); self.addCleanup(m.stop)
         self.calls = []
         for command in ('os.chown', 'os.fchown'):
             m = mock.patch(command)
@@ -50,7 +53,7 @@ class UpgradeTest(unittest.TestCase):
                 self.assertTrue(all(digest(self.lib / n) == self.cfg['manifest'][n] for n in names))
             if fail:
                 raise ValueError('check_failed')
-        upgrade(self.work, self.release, self.live, self.lib, 123, self.cfg, digest, installer)
+        upgrade(self.work, self.release, self.live, self.lib, 123, self.cfg, digest, installer, lambda _: True)
 
     def test_linux(self):
         self.run_upgrade('linux')
@@ -73,12 +76,41 @@ class UpgradeTest(unittest.TestCase):
         other = self.root / 'other-lib'; other.mkdir()
         for name in names:
             (other / name).write_text('old-other')
-        upgrade(self.work, self.release, self.live, other, 124, self.cfg, digest, lambda _: None)
-        self.assertEqual(len(list(self.root.glob('deploy.bak-*'))), 2)
+        original = self.live.stat().st_ino
+        with mock.patch.dict(upgrade.__globals__, exchange_directories=mock.Mock(side_effect=AssertionError)):
+            upgrade(self.work, self.release, self.live, other, 124, self.cfg, digest, lambda _: None, lambda _: True)
+        self.assertEqual(original, self.live.stat().st_ino)
+        self.assertEqual(len(list(self.root.glob('deploy.bak-*'))), 1)
         self.assertEqual((self.backup / 'previous').read_text(), 'leave-intact')
         for n in names:
             self.assertEqual((other / n).read_text(), 'new-' + n)
             self.assertEqual((self.lib / (n + '.bak-' + 'c' * 12)).read_text(), 'old-' + n)
+
+    def test_interruption_on_either_side_of_exchange_keeps_shared_entry(self):
+        with mock.patch.dict(upgrade.__globals__, exchange_directories=mock.Mock(side_effect=InterruptedError)):
+            with self.assertRaises(InterruptedError):
+                self.run_upgrade('darwin')
+        self.assertEqual((self.live / 'previous').read_text(), 'leave-intact')
+        # Another binding can stage and exchange without using the failed one's work or backups.
+        self.cfg['project'] = 'other'
+        lib = self.root / 'other-lib'; lib.mkdir()
+        for n in names:
+            (lib / n).write_text('other')
+        with mock.patch.object(Path, 'rename', side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                upgrade(self.work, self.release, self.live, lib, 124, self.cfg, digest, lambda _: None, lambda _: True)
+        self.assertEqual({p.name: digest(p) for p in self.live.iterdir()}, self.cfg['manifest'])
+        self.assertTrue(any((p / 'previous').is_file() for p in self.root.glob('deploy.new-*')))
+        self.assertTrue(all((lib / n).read_text() == 'other' for n in names))
+
+    def test_old_release_stage_or_backup_requires_operator(self):
+        for name in ('deploy.new-', 'deploy.bak-'):
+            path = self.root / (name + 'c' * 12)
+            path.mkdir()
+            with self.assertRaisesRegex(ValueError, 'existing_deploy_backup'):
+                self.run_upgrade('darwin')
+            path.rmdir()
+        self.assertTrue((self.live / 'previous').is_file())
 
     def test_installer_check_fails(self):
         with self.assertRaisesRegex(ValueError, 'check_failed'):

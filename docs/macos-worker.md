@@ -330,6 +330,8 @@ Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新�
 
 ### 可选：为已登记的 Mac 接入受限 helper 升级
 
+旧安装器只可用向导维护唯一且能核实的 `worker.json`。出现命名配置时先核验并更新安装器，不要手改命令指向旧绑定。人工升级复用已匹配的共享发行目录；不同版本只作原子交换，不支持则停止。若有中断留下的备份或暂存目录，保留现场，按 `docs/plans/C-551.md` 核对。
+
 **每个新项目分别接入。** 下例针对命名配置。先在控制主机 prepare，再在 worker 安装专属零参数入口及公钥，核对指纹和唯一 sudo 规则后才 activate。不要用某个项目的接入材料替另一个项目授权。已有 `worker.json` 的旧接入不用重跑、不迁移密钥；若该旧绑定尚未接入，两端沿用无 `--project-config`、无 `--project` 的旧命令，账号为 `cardigan_updater`，入口和备份仍在 `/opt/cardigan-helper-upgrade`。旧版 bootstrap 不会自动更新。
 
 默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker-example.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对接入包来自已部署的已审发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
