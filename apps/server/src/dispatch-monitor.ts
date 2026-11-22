@@ -4,6 +4,8 @@ import type {
   CommandState,
   Event,
   ProjectId,
+  RemoteWorkerLoss,
+  Runtime,
   RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
@@ -14,6 +16,7 @@ import {
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   type RuntimeDisconnectCause,
+  reconnectRun,
   releaseLostRemoteWorker,
   remoteWorkerLosses,
   remoteWorkerLossReleased,
@@ -38,16 +41,24 @@ import {
 } from "./dispatch-alert.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import { dispatcherInterval } from "./dispatch-loop.js";
+import { cleanReleasedOrphan, type SnapshotOrphan } from "./orphan-cleanup.js";
 import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
 
 /** HerdrRuntime implements this host-side subscription interface. */
-export interface RuntimeEventSource {
+export interface RuntimeEventSource extends Pick<Runtime, "retire_idle"> {
+  probeRemoteProcess?(
+    project: ProjectId,
+    assignment: Assignment["id"],
+    ref: RuntimeRef,
+    saved?: RemoteWorkerLoss["process"],
+  ): Promise<RuntimeObservation["process"] | "unreachable">;
   events(
     ref: RuntimeRef,
     signal?: AbortSignal,
   ): AsyncIterable<RuntimeResult<RuntimeEvent>>;
 }
 export interface RuntimeMonitorOptions {
+  snapshotOrphan?: SnapshotOrphan;
   store: Store;
   runtime: RuntimeEventSource;
   clock?: Clock;
@@ -108,6 +119,7 @@ export class RuntimeMonitor {
   private readonly unknownGrace: number;
   private lastReconciledAt: number;
   private readonly subscriptions = new Map<string, Subscription>();
+  private readonly probes = new Set<string>();
   private readonly tasks = new Set<Promise<void>>();
   private stopped = false;
   private failure: unknown;
@@ -311,6 +323,7 @@ export class RuntimeMonitor {
     ref: RuntimeRef,
     process: RuntimeObservation["process"],
     cause: RuntimeDisconnectCause = "exit",
+    proof?: string,
   ) {
     const alive = process === "alive";
     const { store } = this.options;
@@ -321,6 +334,20 @@ export class RuntimeMonitor {
         (loss) =>
           loss.assignment_id === id && keyOf(loss.runtime_ref) === keyOf(ref),
       );
+      if (
+        !a ||
+        (proof !== undefined && this.probeKey(state, a, ref, loss) !== proof)
+      )
+        return;
+      if (
+        a.machine_id !== "local" &&
+        !proof &&
+        (loss || (alive && a.runtime_state === "unknown"))
+      ) {
+        if (alive || process === "exited")
+          this.probe(project, state, a, ref, loss);
+        return;
+      }
       if (loss) {
         if (alive)
           persistEffect(
@@ -367,7 +394,7 @@ export class RuntimeMonitor {
         return;
       // The fresh transaction has checked the complete RuntimeRef. An exit
       // before the first MCP start is a failed replacement, not a retryable Run.
-      if (!alive && cause === "exit")
+      if (!alive && cause === "exit" && (a.machine_id === "local" || proof))
         for (const run of runs)
           failAutomaticContextRun(
             store,
@@ -389,6 +416,10 @@ export class RuntimeMonitor {
           this.fact(tx, state, a, "runtime_exit_observed");
         return;
       }
+      if (proof && alive && a.runtime_state === "unknown")
+        this.fact(tx, state, a, "remote_worker_process_checked", {
+          process: "alive",
+        });
       if (!alive || a.runtime_state === "unknown") {
         const event = alive ? "reconnected" : "connection_lost";
         tx.assignments.put(project, {
@@ -401,7 +432,11 @@ export class RuntimeMonitor {
           if (alive && r.status !== "unknown") continue;
           tx.runs.put(project, {
             ...r,
-            status: unwrap(transition("run", r.status, event)),
+            status: unwrap(
+              alive
+                ? reconnectRun(r)
+                : transition("run", r.status, "connection_lost"),
+            ),
           });
         }
       }
@@ -455,7 +490,90 @@ export class RuntimeMonitor {
     };
     tx.events.append(state.project_id, event);
   }
-  private expire(project: ProjectId) {
+  private probeKey(
+    state: CommandState,
+    a: Assignment,
+    ref: RuntimeRef,
+    loss?: RemoteWorkerLoss,
+  ) {
+    return JSON.stringify([
+      a.id,
+      a.status,
+      a.runtime_state,
+      a.runtime_ref,
+      ref,
+      activeRuns(state, a).map((r) => [r.id, r.status]),
+      lostFact(state, a)?.id,
+      loss?.action_id,
+      loss && hostOpsExitConfirmation(state, loss.action_id),
+      state.work_items.find((w) => w.id === a.work_item_id)?.assignment_id,
+    ]);
+  }
+  private probe(
+    project: ProjectId,
+    state: CommandState,
+    a: Assignment,
+    ref: RuntimeRef,
+    loss?: RemoteWorkerLoss,
+  ) {
+    const slot = `${project}/${a.id}`;
+    if (this.probes.has(slot)) return;
+    this.probes.add(slot);
+    const stamp = this.probeKey(state, a, ref, loss);
+    const task = Promise.resolve()
+      .then(() =>
+        this.options.runtime.probeRemoteProcess?.(
+          project,
+          a.id,
+          ref,
+          loss?.process,
+        ),
+      )
+      .catch(() => "unknown" as const)
+      .then(async (result) => {
+        if (this.stopped) return;
+        const process = result ?? "unknown";
+        if (process === "alive" || loss)
+          this.observe(
+            project,
+            a.id,
+            ref,
+            process === "unreachable" ? "unknown" : process,
+            "exit",
+            stamp,
+          );
+        else this.expire(project, { id: a.id, stamp, process });
+        if (
+          loss &&
+          process !== "exited" &&
+          remoteWorkerLossReleased(state.events, loss.action_id)
+        )
+          await cleanReleasedOrphan({
+            store: this.options.store,
+            project,
+            clock: this.clock,
+            loss,
+            alive: process === "alive",
+            stopped: () => this.stopped,
+            runtime: this.options.runtime,
+            ...(this.options.snapshotOrphan
+              ? { snapshot: this.options.snapshotOrphan }
+              : {}),
+          });
+      })
+      .catch((error) => {
+        this.failure = error;
+      })
+      .finally(() => {
+        this.probes.delete(slot);
+        this.tasks.delete(task);
+      });
+    this.tasks.add(task);
+  }
+  private expire(
+    project: ProjectId,
+    checked?: { id: Assignment["id"]; stamp: string; process: string },
+  ) {
     const { store, standing } = this.options;
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
@@ -464,14 +582,16 @@ export class RuntimeMonitor {
         const loss = remoteWorkerLosses(state.events).find(
           (loss) => loss.assignment_id === a.id,
         );
+        if (checked && checked.id !== a.id) continue;
         if (
-          a.status === "released" &&
-          loss &&
-          hostOpsExitConfirmation(state, loss.action_id).status === "rejected"
-        ) {
-          this.recoverLost(tx, project, a);
-          continue;
-        }
+          loss?.runtime_ref &&
+          !state.events.some(
+            (e) =>
+              e.type === "remote_worker_exit_observed" &&
+              payloadString(e.payload, "action_id") === loss.action_id,
+          )
+        )
+          this.probe(project, state, a, loss.runtime_ref, loss);
         if (a.status === "active" && a.runtime_state === "lost") {
           this.recoverLost(tx, project, a);
           continue;
@@ -502,6 +622,29 @@ export class RuntimeMonitor {
           this.fact(tx, state, a, "runtime_unknown_surfaced");
         if (Date.parse(at) - Date.parse(since.created_at) < this.grace)
           continue;
+        if (a.machine_id !== "local") {
+          if (!a.runtime_ref) continue;
+          if (!checked) {
+            this.probe(project, state, a, a.runtime_ref);
+            continue;
+          }
+          if (this.probeKey(state, a, a.runtime_ref) !== checked.stamp)
+            continue;
+          const last = state.events.findLast(
+            (e) =>
+              e.type === "remote_worker_process_checked" &&
+              payloadString(e.payload, "assignment_id") === a.id &&
+              payloadString(e.payload, "disconnect_id") === since.id,
+          );
+          if (
+            payloadString(last?.payload ?? null, "process") !== checked.process
+          )
+            this.fact(tx, state, a, "remote_worker_process_checked", {
+              process: checked.process,
+              disconnect_id: since.id,
+            });
+          if (checked.process === "unknown") continue;
+        }
         tx.assignments.put(project, {
           ...a,
           runtime_state: unwrap(

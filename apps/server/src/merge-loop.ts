@@ -168,14 +168,19 @@ export class MergeExecutor {
   }
   private state(project_id: ProjectId) {
     return this.options.store.uow.read((tx) =>
-      loadCommandState(
-        tx,
-        project_id,
-        this.options.gate
-          ? mergeProjectSettings(this.options.gate.configuration, project_id)
-          : undefined,
-      ),
+      loadCommandState(tx, project_id, this.settings(project_id)),
     );
+  }
+
+  private settings(project: ProjectId) {
+    return (
+      this.options.gate &&
+      mergeProjectSettings(this.options.gate.configuration, project)
+    );
+  }
+  private withGate(state: CommandState): CommandState {
+    const settings = this.settings(state.project_id);
+    return settings ? { ...state, project_settings: settings } : state;
   }
 
   /** Delegation grants consent only; both publication paths retain their own gates. */
@@ -186,7 +191,7 @@ export class MergeExecutor {
       project_id,
       (s, a, p) =>
         recordAutomaticMergeWaits(
-          s,
+          this.withGate(s),
           a,
           {
             ...(this.options.mergeBlockedReminderMs === undefined
@@ -214,6 +219,11 @@ export class MergeExecutor {
           (c) => c.id === q.card_id && c.status === "awaiting_merge",
         ),
     )) {
+      if (
+        state.project_settings?.merge_gate_enabled === false &&
+        decision.decider !== "system"
+      )
+        continue;
       // Re-read preferences, the completion version and blockers in the write
       // transaction. Not-yet-due or ineligible decisions wait for another tick.
       try {
@@ -223,18 +233,7 @@ export class MergeExecutor {
           project_id,
           (s, a, ports) =>
             (system ? systemConfirmMerge : autoConfirmMerge)(
-              {
-                ...s,
-                ...(this.options.gate
-                  ? {
-                      project_settings:
-                        mergeProjectSettings(
-                          this.options.gate.configuration,
-                          project_id,
-                        ) ?? {},
-                    }
-                  : {}),
-              },
+              this.withGate(s),
               a,
               { decision_id: decision.id },
               ports,
@@ -360,6 +359,7 @@ export class MergeExecutor {
                 project: project_id,
                 plan,
                 clock: this.clock,
+                settings: this.settings(project_id),
                 stopped: () =>
                   this.stopped ||
                   this.checks?.configured(project_id) === true ||

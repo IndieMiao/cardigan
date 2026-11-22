@@ -2,7 +2,10 @@ import { expect, test, vi } from "vitest";
 import { agentProcessCommand } from "./agent-ssh.js";
 import { workerFiles } from "./worker-files.js";
 import { workerGitFailure } from "./worker-git.js";
-import { WorkerPreparationFailure } from "./worker-preparation-failure.js";
+import {
+  WorkerPreparationFailure,
+  WorkerTransportUnavailable,
+} from "./worker-preparation-failure.js";
 
 vi.mock("./agent-ssh.js", () => ({ agentProcessCommand: vi.fn() }));
 const target = {
@@ -12,7 +15,7 @@ const target = {
   generation: "one",
   fingerprint: "a".repeat(64),
 };
-const checkStatus = () =>
+const checkStatus = (timeout_ms = 5000) =>
   workerFiles(
     {
       mode: "agent-ssh",
@@ -27,7 +30,7 @@ const checkStatus = () =>
         header_max_bytes: 4096,
         file_max_bytes: 32,
         batch_max_bytes: 64,
-        timeout_ms: 5000,
+        timeout_ms,
       },
       fileHelper: { path: "/helper", python: "/python" },
     },
@@ -64,6 +67,29 @@ test.each([
     });
   },
 );
+
+test("a command deadline is not positive evidence of a connection failure", async () => {
+  vi.mocked(agentProcessCommand).mockResolvedValueOnce({
+    file: process.execPath,
+    args: [
+      "-e",
+      "process.stdin.resume();process.stdin.on('end',()=>setTimeout(()=>{},5000));",
+    ],
+  });
+  const slow = checkStatus(250);
+  await expect(slow).rejects.toBeInstanceOf(WorkerPreparationFailure);
+  await expect(slow).rejects.not.toBeInstanceOf(WorkerTransportUnavailable);
+  vi.mocked(agentProcessCommand).mockResolvedValueOnce({
+    file: process.execPath,
+    args: [
+      "-e",
+      "process.stderr.write('ssh: connect to host fixture port 22: Connection refused');process.exitCode=255",
+    ],
+  });
+  await expect(checkStatus()).rejects.toBeInstanceOf(
+    WorkerTransportUnavailable,
+  );
+});
 
 test("a missing local SSH entry is sanitized but not a worker fault; an invalid remote reply is", async () => {
   vi.mocked(agentProcessCommand).mockRejectedValueOnce(

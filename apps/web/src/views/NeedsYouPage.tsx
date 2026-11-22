@@ -64,6 +64,7 @@ import {
 } from "../components/StoryProposal.js";
 import { Button } from "../components/ui/button.js";
 import * as Dialog from "../components/ui/dialog.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { Textarea } from "../components/ui/textarea.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
@@ -1666,6 +1667,9 @@ function HumanAction({
   elapsed,
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
+  const [conclusion, setConclusion] = useState<
+    "exited" | "false_alarm" | "unconfirmed" | ""
+  >("");
   const action = useAction(done);
   if (item.completion_notice !== undefined)
     return (
@@ -1704,6 +1708,13 @@ function HumanAction({
       }
       time={
         <>
+          {item.last_loss_observation && (
+            <>
+              最近核对：
+              <Time value={item.last_loss_observation.at} />
+              {" · "}
+            </>
+          )}
           {waitLabel(item.waited_ms, elapsed)}
           {item.due && (
             <>
@@ -1717,11 +1728,13 @@ function HumanAction({
         <StatusTag
           status="todo"
           label={
-            item.triage === "host"
-              ? item.host_operator === "external"
-                ? "待外接操作员"
-                : "待主机操作"
-              : "待你执行"
+            item.last_loss_observation
+              ? "已记录：无法确认"
+              : item.triage === "host"
+                ? item.host_operator === "external"
+                  ? "待外接操作员"
+                  : "待主机操作"
+                : "待你执行"
           }
         />
       }
@@ -1830,11 +1843,48 @@ function HumanAction({
         data-needs-focus=""
         onSubmit={(e) => {
           e.preventDefault();
-          void action.run([projectId, item.id, "complete", text], (key) =>
-            client.completeAction(projectId, item.id, text, key),
+          if (item.requires_loss_conclusion && !conclusion) return;
+          void action.run(
+            [projectId, item.id, "complete", text, conclusion],
+            async (key) => {
+              if (!conclusion)
+                return client.completeAction(projectId, item.id, text, key);
+              await client.completeAction(
+                projectId,
+                item.id,
+                text,
+                key,
+                conclusion,
+              );
+              if (conclusion === "unconfirmed") {
+                setText((draft) => (draft === text ? "" : draft));
+              }
+            },
           );
         }}
       >
+        {item.requires_loss_conclusion && (
+          <label>
+            失联结论
+            <SelectControl
+              required
+              aria-label={`${item.id} 失联结论`}
+              value={conclusion}
+              onValueChange={(v) =>
+                setConclusion(
+                  v === "exited" || v === "false_alarm" || v === "unconfirmed"
+                    ? v
+                    : "",
+                )
+              }
+            >
+              <option value="">请选择</option>
+              <option value="exited">已退出</option>
+              <option value="false_alarm">仍在运行（误报）</option>
+              <option value="unconfirmed">无法确认</option>
+            </SelectControl>
+          </label>
+        )}
         <label>
           执行结果
           <Textarea
@@ -1844,7 +1894,7 @@ function HumanAction({
           />
         </label>
         <button type="submit" disabled={action.busy || !text.trim()}>
-          确认已完成
+          {conclusion === "unconfirmed" ? "记录核对结果" : "确认已完成"}
         </button>
       </form>
       <RequestFeedback
