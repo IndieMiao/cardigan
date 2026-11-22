@@ -70,6 +70,7 @@ import {
   readExecution,
   readExecutionRuns,
 } from "./execution-state.js";
+import { FeishuSettings } from "./feishu-settings.js";
 import {
   applySecurityHeaders,
   clearedSessionCookie,
@@ -129,6 +130,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly feishuSettingsPath?: string;
   readonly launchSettings?: {
     dir: string;
     effective: () => import("@cardigan/roles").LaunchConfig;
@@ -201,6 +203,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly feishuSettings: FeishuSettings | undefined;
   readonly launchSettings: LaunchSettings | undefined;
   readonly wizards: WorkerWizards;
   readonly checks: MachineChecks;
@@ -268,6 +271,9 @@ export async function startWebServer(
     ...process.env,
     CARDIGAN_DATA_DIR: options.dataDir ?? process.env.CARDIGAN_DATA_DIR,
   });
+  const feishuSettings = options.feishuSettingsPath
+    ? new FeishuSettings(store, options.feishuSettingsPath)
+    : undefined;
   const launchSettings = options.launchSettings
     ? new LaunchSettings(
         store,
@@ -412,6 +418,7 @@ export async function startWebServer(
         hcSession: options.hcSession,
         runtimeUnknownGraceMs: options.runtimeUnknownGraceMs,
         launchSettings,
+        feishuSettings,
         roleLaunchConfig: launchSettings
           ? () => launchSettings.effective()
           : options.roleLaunchConfig,
@@ -460,6 +467,7 @@ export async function startWebServer(
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
         launchSettings?.checks.beginShutdown();
+        feishuSettings?.beginShutdown();
         let cancel = (): void => {};
         // Stop listening first, then end the streams; `close` also drops the
         // connections that are already idle.
@@ -469,6 +477,7 @@ export async function startWebServer(
             checks.settled(),
             wizards.settled(),
             launchSettings?.checks.drain(),
+            feishuSettings?.drain(),
           ]).then(
             () => (error ? reject(error) : resolve()),
             (reason) => reject(error ?? reason),
@@ -497,6 +506,23 @@ async function handleApi(context: RequestContext): Promise<void> {
   // Everything below needs a session; an MCP Bearer token does not count.
   const session = requireSession(context);
 
+  if (
+    path === "/api/feishu-settings" ||
+    path.startsWith("/api/feishu-settings/")
+  ) {
+    if (!context.feishuSettings)
+      throw new HttpRejection(503, "unavailable", "未配置飞书设置");
+    const owner = createHash("sha256")
+      .update(`feishu-settings:${sessionToken(req)}`)
+      .digest("hex");
+    return context.feishuSettings.serve(
+      path.slice("/api/feishu-settings".length),
+      req,
+      res,
+      () => requireSession(context),
+      owner,
+    );
+  }
   if (
     path === "/api/launch-settings" ||
     path.startsWith("/api/launch-settings/")

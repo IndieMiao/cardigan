@@ -18,8 +18,13 @@ import {
   feishuAudit,
   feishuBinding,
   type Store,
+  type StoreTransactionContext,
 } from "@cardigan/store";
 import type { ExtMessageConfiguration } from "./ext-message-config.js";
+import {
+  currentExtGeneration,
+  type ExtGeneration,
+} from "./ext-message-generation.js";
 import { feishuCard, feishuReceipt } from "./feishu-card.js";
 import {
   type AppCredential,
@@ -82,10 +87,42 @@ function transport(c: AppCredential, timeout: number): AppTransport {
     },
   };
 }
+/** No recipient or message content can be supplied by a Workbench request. */
+export function boundTestAdapter(
+  store: Store,
+  credential: string | undefined,
+  member: string,
+  timeout: number,
+  makeTransport = transport,
+): ExtMessagePort | undefined {
+  const c = parseAppCredential(credential),
+    scope = appScope(c),
+    binding = feishuBinding(store.database, scope);
+  if (!binding || binding.member !== member) return;
+  const client = makeTransport(c, timeout);
+  return {
+    send: async (message, signal) => {
+      if (
+        signal.aborted ||
+        feishuBinding(store.database, scope)?.generation !== binding.generation
+      )
+        return "permanent";
+      return (await client.create(
+        binding.open_id,
+        randomUUID(),
+        feishuCard(message, "", []),
+      ))
+        ? "sent"
+        : "permanent";
+    },
+  };
+}
 export function startFeishu(
   store: Store,
   config: ExtMessageConfiguration,
   gate: Gate,
+  tx?: StoreTransactionContext,
+  generation?: ExtGeneration,
 ) {
   const status = (scope: string, state: string) =>
     store.database
@@ -120,8 +157,9 @@ export function startFeishu(
       gate,
       Date.now,
       config.config.channels.lark_app.action_ttl_ms,
+      generation,
     );
-    store.uow.run(() => {
+    const recover = () => {
       store.database
         .prepare("DELETE FROM feishu_codes WHERE scope<>?")
         .run(scope);
@@ -130,12 +168,15 @@ export function startFeishu(
         .run(scope);
       status(scope, "connecting");
       app.recover();
-    });
+    };
+    if (tx) recover();
+    else store.uow.run(recover);
     const worker = new Worker(
       new URL("./feishu-ws-worker.js", import.meta.url),
       {
         workerData: {
           credential: c,
+          generation,
           path: store.database.location(),
           limits: {
             bindingAttempts:
@@ -160,7 +201,7 @@ export function startFeishu(
     worker.on(
       "message",
       (m: { state?: string; job?: FeishuJob; bindingFailure?: string }) => {
-        if (app.stopped) return;
+        if (app.stopped || !currentExtGeneration(generation)) return;
         try {
           if (m.bindingFailure) {
             void app.remote.bindingFailure(m.bindingFailure).catch(() => {});
@@ -209,12 +250,15 @@ export class FeishuApp {
     readonly gate: Gate,
     readonly now = Date.now,
     readonly actionTtl = 86_400_000,
+    readonly generation?: ExtGeneration,
   ) {}
   get db() {
     return this.store.database;
   }
   get binding() {
-    return feishuBinding(this.db, this.scope);
+    return currentExtGeneration(this.generation)
+      ? feishuBinding(this.db, this.scope)
+      : undefined;
   }
   abandon(ref: string) {
     this.db
