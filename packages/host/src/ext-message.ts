@@ -28,6 +28,7 @@ import {
   extAttemptAvailable,
   extAttemptSlots,
   extChannelActivation,
+  extFilterProjectScope,
   extQuietOverflow,
   extQuietStamp,
   extRateBatch,
@@ -322,7 +323,13 @@ export function activateExtMessageFilter(
 ) {
   if (c.status !== "loaded") return undefined;
   const filter = c.config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
-  return activateExtFilterMarks(db, filter.kinds, filter.excluded_projects);
+  return activateExtFilterMarks(
+    db,
+    filter.kinds,
+    EXT_MESSAGE_FILTER_DEFAULTS.kinds,
+    filter.excluded_projects,
+    c.publication,
+  );
 }
 export function extFingerprints(
   c: ExtMessageConfiguration,
@@ -700,12 +707,13 @@ export class ExtMessageSender {
           afterExtWatermark(store.database, projectId, item.event_id, mark)
         );
       };
+      const projectScope = extFilterProjectScope(projectId);
       const filtered = new Set<string>();
       const items = extMessageItems(state, projectId).map((item) => {
         if (
           extMessageAllowed(filter, item) &&
           after(`kind:${item.kind}`, item) &&
-          after(`project:${item.project_id}`, item)
+          after(projectScope, item)
         )
           return item;
         filtered.add(itemKey(item.kind, item.item_id));

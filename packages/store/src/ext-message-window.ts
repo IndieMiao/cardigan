@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
 import { prepare } from "./statements.js";
@@ -112,16 +112,29 @@ export function invalidateExtHistory(
 }
 
 /**
+ * C-580: the stored key of a project filter scope. A digest, never the
+ * identifier itself: the excluded list is free text in the private
+ * configuration and must not leave it even when it holds a credential.
+ */
+export const extFilterProjectScope = (project: string) =>
+  `project:${createHash("sha256").update(project).digest("hex")}`;
+
+/**
  * C-580: record the push filter of the configuration being activated and
- * return the cutoff of every enabled scope. A scope never seen before keeps
- * no cutoff (0); one switched from off to on starts at the current event
- * position. Project scopes no longer excluded are switched on. Caller owns
- * the activation transaction.
+ * return the cutoff of every enabled scope. A scope switched from off to on
+ * starts at the event position of the settings save that published this
+ * configuration (the publication's recorded watermark), or of this
+ * activation when no save is recorded (a hand-edited file). A scope without a
+ * record compares against `defaults`, the filter in force before any record
+ * existed. Project scopes no longer excluded are switched on. Caller owns the
+ * activation transaction.
  */
 export function activateExtFilterMarks(
   db: DatabaseSync,
   kinds: Readonly<Record<string, boolean>>,
+  defaults: Readonly<Record<string, boolean>>,
   excludedProjects: readonly string[],
+  publication?: string,
 ): Map<string, number> {
   const scopes = new Map<string, boolean>(
     Object.entries(kinds).map(([kind, on]) => [`kind:${kind}`, on]),
@@ -131,17 +144,33 @@ export function activateExtFilterMarks(
     "SELECT scope FROM ext_message_filter_marks WHERE scope GLOB 'project:*'",
   ).all())
     scopes.set(String(row.scope), true);
-  for (const id of excludedProjects) scopes.set(`project:${id}`, false);
+  for (const id of excludedProjects)
+    scopes.set(extFilterProjectScope(id), false);
   const marks = new Map<string, number>();
-  let now: number | undefined;
+  let cutoff: number | undefined;
+  const switchedOn = () => {
+    if (cutoff !== undefined) return cutoff;
+    const saved = publication
+      ? prepare(
+          db,
+          "SELECT watermark FROM feishu_settings_publications WHERE publication=?",
+        ).get(publication)
+      : undefined;
+    cutoff = saved ? Number(saved.watermark) : extEventWatermark(db);
+    return cutoff;
+  };
   for (const [scope, on] of scopes) {
     const row = prepare(
       db,
       "SELECT enabled,watermark FROM ext_message_filter_marks WHERE scope=?",
     ).get(scope);
-    const was = row ? Number(row.enabled) === 1 : undefined;
+    const was = row
+      ? Number(row.enabled) === 1
+      : scope.startsWith("kind:")
+        ? defaults[scope.slice("kind:".length)] !== false
+        : true;
     let watermark = row ? Number(row.watermark) : 0;
-    if (on && was === false) watermark = now ??= extEventWatermark(db);
+    if (on && !was) watermark = switchedOn();
     if (!row || was !== on || Number(row.watermark) !== watermark)
       prepare(
         db,
