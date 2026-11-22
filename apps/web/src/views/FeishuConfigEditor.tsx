@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   FEISHU_SECRET_KEYS,
@@ -42,6 +42,12 @@ import {
   STALE,
   saveProblem,
 } from "./feishu-config.js";
+import {
+  type HeldFeishuDraft,
+  holdFeishuDraft,
+  releaseFeishuDraft,
+} from "./feishu-draft.js";
+import { SettingPlaceContext } from "./useSettingWrite.js";
 
 type SecretValues = Partial<Record<FeishuSecretKey, string>>;
 type Edited = DraftField | DraftSwitch;
@@ -64,6 +70,7 @@ export function FeishuConfigEditor({
   onSaved,
   onClose,
   hidden = false,
+  initial,
 }: {
   client: CardiganClient;
   view: FeishuSettingsView;
@@ -73,16 +80,19 @@ export function FeishuConfigEditor({
    * panel is shown again; closing the tab still asks while it is unconfirmed.
    */
   hidden?: boolean;
+  /** A held draft (V-2857) to continue; its credential values were dropped. */
+  initial?: HeldFeishuDraft | undefined;
   /** Read the settings again through the page's ordered reader. */
   reread: () => Promise<FeishuSettingsView>;
   onSaved: () => void;
   onClose: () => void;
 }) {
-  const [base, setBase] = useState(view);
-  const [draft, setDraft] = useState(() => draftFrom(view));
+  const [base, setBase] = useState(initial?.base ?? view);
+  const [draft, setDraft] = useState(() => initial?.draft ?? draftFrom(view));
   const [edited, setEdited] = useState<ReadonlySet<Edited>>(() => new Set());
   const [values, setValues] = useState<SecretValues>({});
-  const [attempted, setAttempted] = useState(false);
+  // A restored draft shows its problems at once (e.g. credentials to retype).
+  const [attempted, setAttempted] = useState(initial !== undefined);
   const [preview, setPreview] = useState<{
     change: FeishuSettingsChange;
     result: FeishuSettingsPreview;
@@ -90,7 +100,11 @@ export function FeishuConfigEditor({
   const [problem, setProblem] = useState<string>();
   const [busy, setBusy] = useState(false);
   // Credential values were dropped after a failed save: retype them.
-  const [dropped, setDropped] = useState(false);
+  const [dropped, setDropped] = useState(
+    () =>
+      initial !== undefined &&
+      Object.values(initial.draft.secrets).includes("replace"),
+  );
   const sending = useRef(false);
   const keys = useRef(new Map<string, string>());
   const alive = useRef(true);
@@ -103,7 +117,48 @@ export function FeishuConfigEditor({
   }, []);
   const built = buildChange(base, draft, values);
   const reviewing = preview !== undefined;
-  const guard = useDiscardGuard(built.dirty || reviewing, onClose);
+  const dirty = built.dirty || reviewing;
+  // V-2857: a draft out of view is held (memory only, no credential values)
+  // so ordinary navigation does not destroy it; the shell names it until the
+  // person returns, confirms or discards it.
+  const place = useContext(SettingPlaceContext);
+  const project = place?.project;
+  const finished = useRef(false);
+  const latest = useRef({ base, draft, dirty });
+  latest.current = { base, draft, dirty };
+  const reveal = place?.reveal;
+  useEffect(() => {
+    if (!project) return;
+    if (hidden && dirty)
+      holdFeishuDraft({
+        project,
+        base,
+        draft,
+        ...(reveal ? { reveal } : {}),
+      });
+    else releaseFeishuDraft(project);
+  }, [project, hidden, dirty, base, draft, reveal]);
+  useEffect(
+    () => () => {
+      if (!project || finished.current) return;
+      const { base, draft, dirty } = latest.current;
+      // The settings page went away with the draft unconfirmed.
+      if (dirty) holdFeishuDraft({ project, base, draft });
+      else releaseFeishuDraft(project);
+    },
+    [project],
+  );
+  const close = () => {
+    finished.current = true;
+    if (project) releaseFeishuDraft(project);
+    onClose();
+  };
+  const saved = () => {
+    finished.current = true;
+    if (project) releaseFeishuDraft(project);
+    onSaved();
+  };
+  const guard = useDiscardGuard(dirty, close);
   const leave = () => {
     if (!sending.current) guard.confirmClose();
   };
@@ -222,7 +277,7 @@ export function FeishuConfigEditor({
           withSecrets ? secrets : undefined,
         );
         keys.current.delete(preview_id);
-        if (alive.current) onSaved();
+        if (alive.current) saved();
         return;
       } catch (error) {
         if (!alive.current) return;
@@ -244,7 +299,7 @@ export function FeishuConfigEditor({
             // A recorded receipt answers success; anything else stays unknown.
             await client.confirmFeishuSettings(version, preview_id, key);
             keys.current.delete(preview_id);
-            if (alive.current) onSaved();
+            if (alive.current) saved();
             return;
           } catch {
             if (!alive.current) return;

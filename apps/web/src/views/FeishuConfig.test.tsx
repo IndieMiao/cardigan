@@ -23,6 +23,11 @@ import {
 import { fakeClient } from "../testing/fixtures.js";
 import { FeishuSettings } from "./FeishuSettings.js";
 import { buildChange, draftFrom } from "./feishu-config.js";
+import {
+  FeishuDraftNotice,
+  heldFeishuDraft,
+  resetFeishuDrafts,
+} from "./feishu-draft.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { resetSettingWrites } from "./useSettingWrite.js";
 
@@ -37,6 +42,7 @@ vi.stubGlobal(
 afterEach(() => {
   cleanup();
   resetSettingWrites();
+  resetFeishuDrafts();
   window.location.hash = "";
   vi.useRealTimers();
 });
@@ -710,4 +716,99 @@ test("a cleared credential still shows when it was last changed", async () => {
   const block = secretBlock("群机器人签名密钥");
   expect(block.textContent).toContain("未设置");
   expect(block.textContent).toContain("最后修改");
+});
+
+// V-2857: a draft out of view survives ordinary navigation and is named.
+async function go(hash: string) {
+  await act(async () => {
+    window.location.hash = hash;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+function Shell({ client, page }: { client: CardiganClient; page: boolean }) {
+  return (
+    <>
+      {page && <SettingsPage projectId="p-1" client={client} />}
+      <FeishuDraftNotice />
+    </>
+  );
+}
+
+test("leaving the settings page keeps an unconfirmed draft, names it once and restores it", async () => {
+  const { client } = setup();
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={client} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  type("标题长度（字）", "99");
+  expect(screen.queryByText("飞书配置有未确认的修改，还没有保存。")).toBeNull();
+  // Browser back to another settings tab: the drawer steps aside.
+  await go("#/p/p-1/settings");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "编辑飞书配置" })).toBeNull(),
+  );
+  expect(
+    screen.getAllByText("飞书配置有未确认的修改，还没有保存。"),
+  ).toHaveLength(1);
+  // An ordinary link out of settings (e.g. 活动) unmounts the page.
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={client} page={false} />);
+  expect(
+    screen.getAllByText("飞书配置有未确认的修改，还没有保存。"),
+  ).toHaveLength(1);
+  const unload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(true);
+  // 继续编辑 returns to the Feishu settings with the draft.
+  fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+  expect(window.location.hash).toBe("#/p/p-1/settings?tab=feishu");
+  await go("#/p/p-1/settings?tab=feishu");
+  rerender(<Shell client={client} page />);
+  expect(
+    (await screen.findByLabelText<HTMLInputElement>("标题长度（字）")).value,
+  ).toBe("99");
+  expect(screen.queryByText("飞书配置有未确认的修改，还没有保存。")).toBeNull();
+  // Discarding it ends the hold.
+  fireEvent.keyDown(dialog(), { key: "Escape" });
+  fireEvent.click(await screen.findByRole("button", { name: "放弃修改" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(heldFeishuDraft("p-1")).toBeUndefined();
+  const after = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(after);
+  expect(after.defaultPrevented).toBe(false);
+});
+
+test("a held draft never keeps credential values; they are retyped on return", async () => {
+  const { client } = setup();
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={client} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  fireEvent.click(
+    within(secretBlock("群机器人签名密钥")).getByRole("button", {
+      name: "填写",
+    }),
+  );
+  type("新群机器人签名密钥", SIGN);
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={client} page={false} />);
+  expect(JSON.stringify(heldFeishuDraft("p-1"))).not.toContain(SIGN);
+  await go("#/p/p-1/settings?tab=feishu");
+  rerender(<Shell client={client} page />);
+  const input =
+    await screen.findByLabelText<HTMLInputElement>("新群机器人签名密钥");
+  expect(input.value).toBe("");
+  expect(dialog().textContent).toContain("凭据没有保存，输入框已清空");
+});
+
+test("a saved or untouched editor holds nothing", async () => {
+  const { client } = setup();
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  const { rerender } = render(<Shell client={client} page />);
+  await screen.findByText("每分钟 20 条");
+  await openEditor();
+  await go("#/p/p-1/activity");
+  rerender(<Shell client={client} page={false} />);
+  expect(heldFeishuDraft("p-1")).toBeUndefined();
+  expect(screen.queryByText("飞书配置有未确认的修改，还没有保存。")).toBeNull();
 });

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import {
   ApiError,
   type CardiganClient,
@@ -27,7 +34,12 @@ import {
   type FeishuTestState,
 } from "./FeishuConfigGroups.js";
 import { testOutcome } from "./feishu-config.js";
-import { trackSettingsRead, useSettingWrite } from "./useSettingWrite.js";
+import { type HeldFeishuDraft, heldFeishuDraft } from "./feishu-draft.js";
+import {
+  SettingPlaceContext,
+  trackSettingsRead,
+  useSettingWrite,
+} from "./useSettingWrite.js";
 
 // /api/me/feishu addresses one binding regardless of the settings page's project.
 const bindingWriteKey = Symbol("feishu-binding");
@@ -68,6 +80,14 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   const settings = useFeishuSettingsReader(client, visible);
   const config = settings.data;
   const [editing, setEditing] = useState(false);
+  // V-2857: a draft held when the settings page was left continues here.
+  const project = useContext(SettingPlaceContext)?.project;
+  const [held, setHeld] = useState<HeldFeishuDraft | undefined>(() =>
+    project ? heldFeishuDraft(project) : undefined,
+  );
+  useEffect(() => {
+    if (held && config && visible && !editing) setEditing(true);
+  }, [held, config, visible, editing]);
   const [savedNote, setSavedNote] = useState("");
   const editButton = useRef<HTMLButtonElement>(null);
   const { remember } = useDrawerReturnFocus(
@@ -282,12 +302,17 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           view={config}
           reread={settings.read}
           hidden={!visible}
+          initial={held}
           onSaved={() => {
+            setHeld(undefined);
             setEditing(false);
             setSavedNote("已保存飞书配置");
             settings.reload();
           }}
-          onClose={() => setEditing(false)}
+          onClose={() => {
+            setHeld(undefined);
+            setEditing(false);
+          }}
         />
       )}
       <RequestFeedback
