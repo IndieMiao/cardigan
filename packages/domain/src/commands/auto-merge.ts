@@ -63,7 +63,8 @@ export function autoMergeSchedule(
     );
     // §7.4: PM handoffs, D12 and scope changes need an explicit human answer.
     ensure(
-      !mergeRequiresHuman(state, decision) &&
+      state.project_settings?.merge_gate_enabled !== false &&
+        !mergeRequiresHuman(state, decision) &&
         !humanDecidedMergeQuestions(state, card.id).length &&
         (!card.risk_tags?.length || riskTagAutoMergeAllowed(state, decision)),
       "illegal_transition",

@@ -259,7 +259,7 @@ export async function main(
     if (command === "assignment") {
       return await runAssignmentCommand(rest, io);
     }
-    if (command === "preference") return runPreferenceCommand(rest, io);
+    if (command === "preference") return await runPreferenceCommand(rest, io);
     if (command === "cpu-profile") return runCpuProfileCommand(rest, io);
     if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {

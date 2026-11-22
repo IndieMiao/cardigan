@@ -19,6 +19,7 @@ import {
 } from "./tools/types.js";
 
 export interface ToolServerOptions {
+  readonly projectSettings?: ToolContext["projectSettings"];
   readonly store: McpBackend;
   readonly identity: Identity;
   readonly tools: readonly ToolDefinition[];
@@ -85,6 +86,7 @@ export function createMcpServer(options: ToolServerOptions): Server {
   const context: ToolContext = {
     store,
     identity,
+    projectSettings: options.projectSettings,
     ...(options.revalidateToken
       ? { revalidateToken: options.revalidateToken }
       : {}),

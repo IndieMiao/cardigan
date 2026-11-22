@@ -206,6 +206,7 @@ export interface DispatcherOptions {
   readonly baselineForWait?: (
     project: ProjectId,
   ) => Promise<{ branch: string; sha: string } | undefined>;
+  readonly mergeGateEnabled?: (project: ProjectId) => boolean;
   readonly frameworkWaitReminderMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
