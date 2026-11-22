@@ -9,6 +9,10 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, type FeishuBindingView } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
+import {
+  FeishuConfigContext,
+  type FeishuConfigView,
+} from "./FeishuConfigGroups.js";
 import { FeishuSettings } from "./FeishuSettings.js";
 import { SettingsPage } from "./SettingsPage.js";
 import { resetSettingWrites, SettingsSaveNotice } from "./useSettingWrite.js";
@@ -303,4 +307,106 @@ test("a late cross-project unlink failure unlocks the binding and links back to 
   expect(window.location.hash).toBe("#/p/a/settings?tab=feishu");
   rerender(projectView("a", client));
   expect(await screen.findByText("未能解除飞书绑定：请刷新")).toBeTruthy();
+});
+
+const syntheticConfig: FeishuConfigView = {
+  enabled: true,
+  workbench_url: "https://workbench.example.test",
+  channels: {
+    lark: { enabled: true, per_minute: 20 },
+    lark_app: { enabled: false, per_minute: 15 },
+  },
+  quiet_hours: {
+    enabled: true,
+    start: "22:00",
+    end: "08:00",
+    timezone: "Asia/Shanghai",
+  },
+  secrets: {
+    lark_webhook: { set: true, updated_at: "2025-12-30T02:15:00Z" },
+    lark_sign_secret: { set: true },
+    app_id: { set: true },
+    app_secret: { set: true },
+    tenant_key: { set: false },
+  },
+  advanced: {
+    timeout_seconds: 10,
+    retry_attempts: 3,
+    retry_interval_seconds: 30,
+    title_max_chars: 60,
+    digest_max_items: 10,
+    bind_code_ttl_minutes: 10,
+    button_ttl_minutes: 1440,
+    bind_attempts_per_minute: 5,
+    max_concurrency: 4,
+  },
+};
+const groupTitles = () =>
+  [...document.querySelectorAll("[data-settings-group] h3")].map((h) =>
+    h.textContent?.trim(),
+  );
+
+test("without configuration the settings page shows only the status group with the binding entry", async () => {
+  const api = vi.fn(async () => ({ state: "connected", bound: false }));
+  window.location.hash = "#/p/p-1/settings?tab=feishu";
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ feishuBinding: api })}
+    />,
+  );
+  await screen.findByText("未绑定");
+  const panel = screen.getByRole("region", { name: "飞书绑定" });
+  expect(
+    [...panel.querySelectorAll("[data-settings-group] h3")].map((h) =>
+      h.textContent?.trim(),
+    ),
+  ).toEqual(["状态"]);
+  expect(panel.querySelector("[role=switch], input")).toBeNull();
+  expect(screen.queryByText("消息推送")).toBeNull();
+  expect(screen.getByRole("button", { name: "绑定飞书" })).toBeTruthy();
+});
+
+test("synthetic configuration lays out six read-only groups with 高级 folded", async () => {
+  const api = vi.fn(async () => ({ state: "connected", bound: true }));
+  render(
+    <FeishuConfigContext.Provider value={syntheticConfig}>
+      <FeishuSettings client={fakeClient({ feishuBinding: api })} />
+    </FeishuConfigContext.Provider>,
+  );
+  await screen.findByText("已绑定");
+  expect(groupTitles()).toEqual([
+    "状态",
+    "渠道",
+    "免打扰",
+    "限速",
+    "凭据",
+    "高级",
+  ]);
+  // The binding entry keeps working inside the status group.
+  const status = screen.getByRole("region", { name: "状态" });
+  expect(status.textContent).toContain("已开启");
+  expect(status.textContent).toContain("绑定状态");
+  expect(
+    status.contains(screen.getByRole("button", { name: "解除绑定" })),
+  ).toBe(true);
+  expect(screen.getByText("每分钟 15 条")).toBeTruthy();
+  expect(screen.getByText("22:00–08:00")).toBeTruthy();
+  const secrets = screen.getByRole("region", { name: "凭据" });
+  expect(secrets.textContent).toContain("未设置");
+  expect(secrets.querySelector("input")).toBeNull();
+  // Layout only: no switches, inputs or save entries in any group.
+  expect(document.querySelector("[role=switch], input, textarea")).toBeNull();
+  expect(
+    screen
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim())
+      .filter(Boolean),
+  ).toEqual(["解除绑定", "高级"]);
+  const advanced = screen.getByRole("button", { name: "高级" });
+  expect(advanced.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.getByText("重试次数").closest("[hidden]")).not.toBeNull();
+  fireEvent.click(advanced);
+  expect(screen.getByText("重试次数").closest("[hidden]")).toBeNull();
+  expect(screen.getByText("1440 分钟")).toBeTruthy();
 });

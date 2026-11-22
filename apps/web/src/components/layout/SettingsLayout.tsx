@@ -18,6 +18,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "../ui/dialog.js";
+import { ChevronRightIcon } from "../ui/icons.js";
 import { Input } from "../ui/input.js";
 import { cardDetailDrawerClassName } from "./CardDetailLayout.js";
 import { DataTableLayout } from "./DataTableLayout.js";
@@ -98,19 +99,35 @@ export function SettingsPanel({
   );
 }
 
-/** A titled group of rows. `caution` marks settings only the human may loosen. */
+/**
+ * A titled group of rows. `caution` marks settings only the human may loosen.
+ * `collapsible` turns the title into a disclosure button (folded by default
+ * unless `defaultOpen`); folded rows stay out of the page and the tab order.
+ */
 export function SettingsGroup({
   title,
   description,
   tone,
+  collapsible = false,
+  defaultOpen = false,
   children,
 }: {
   title: ReactNode;
   description?: ReactNode;
   tone?: "caution";
+  collapsible?: boolean;
+  defaultOpen?: boolean;
   children: ReactNode;
 }) {
   const id = useId();
+  const [open, setOpen] = useState(defaultOpen);
+  const folded = collapsible && !open;
+  const heading = (
+    <>
+      {tone === "caution" && <TriangleAlert aria-hidden="true" />}
+      {title}
+    </>
+  );
   return (
     <section
       aria-labelledby={id}
@@ -120,12 +137,26 @@ export function SettingsGroup({
     >
       <div className={styles.groupHeading}>
         <h3 id={id}>
-          {tone === "caution" && <TriangleAlert aria-hidden="true" />}
-          {title}
+          {collapsible ? (
+            <button
+              type="button"
+              className={styles.groupToggle}
+              aria-expanded={open}
+              aria-controls={`${id}-rows`}
+              onClick={() => setOpen((value) => !value)}
+            >
+              <ChevronRightIcon aria-hidden="true" />
+              {heading}
+            </button>
+          ) : (
+            heading
+          )}
         </h3>
         {description && <p>{description}</p>}
       </div>
-      <div className={styles.rows}>{children}</div>
+      <div id={`${id}-rows`} className={styles.rows} hidden={folded}>
+        {children}
+      </div>
     </section>
   );
 }

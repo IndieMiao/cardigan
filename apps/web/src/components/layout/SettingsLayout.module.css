@@ -159,6 +159,38 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
+  /* Disclosure title: a control-high hit area that keeps the heading line. */
+  .groupToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-height: var(--ui-control);
+    margin: calc((var(--ui-leading) - var(--ui-control)) / 2) 0;
+    margin-inline-start: calc(-1 * var(--ui-space-1));
+    padding: 0 var(--ui-space-1);
+    border: 0;
+    border-radius: var(--ui-radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .groupToggle:hover {
+    background: var(--surface-muted);
+  }
+  .groupToggle:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .groupToggle :global(.lucide) {
+    color: var(--text-muted);
+  }
+  .groupToggle[aria-expanded="true"] :global(.lucide) {
+    transform: rotate(90deg);
+  }
+  .rows[hidden] {
+    display: none;
+  }
   .group[data-tone="caution"] .groupHeading h3 {
     color: var(--status-wait);
   }

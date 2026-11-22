@@ -721,7 +721,7 @@ async function checkNativeSession(harnessName: string, changed = false) {
     command: "/usr/bin/python3",
     args: [
       "-c",
-      "import os,stat; from pathlib import Path; assert os.environ['MCP_TOKEN']=='SYNTHETIC-TOKEN'; assert os.environ['SYNTHETIC_PROVIDER']=='fixture-only'; base=Path.cwd(); assert Path(os.environ['TMPDIR'])==base/'temporary'; assert Path(os.environ['XDG_CACHE_HOME'])==base/'cache'; assert os.environ['TMP']==os.environ['TEMP']==os.environ['TMPDIR']; assert Path(os.environ['npm_config_store_dir'])==base/'cache/pnpm'; assert stat.S_IMODE((base/'temporary').stat().st_mode)==0o700; print('ok')",
+      "import os,stat; from pathlib import Path; assert os.environ['MCP_TOKEN']=='SYNTHETIC-TOKEN'; assert os.environ['SYNTHETIC_PROVIDER']=='fixture-only'; assert os.environ['ANDROID_ADB_SERVER_PORT']=='15037'; base=Path.cwd(); assert Path(os.environ['TMPDIR'])==base/'temporary'; assert Path(os.environ['XDG_CACHE_HOME'])==base/'cache'; assert os.environ['TMP']==os.environ['TEMP']==os.environ['TMPDIR']; assert Path(os.environ['npm_config_store_dir'])==base/'cache/pnpm'; assert stat.S_IMODE((base/'temporary').stat().st_mode)==0o700; print('ok')",
     ],
     env: {
       [harnessName === "pi" ? "PI_CODING_AGENT_DIR" : "CODEX_HOME"]: join(
@@ -730,6 +730,7 @@ async function checkNativeSession(harnessName: string, changed = false) {
         identity.generation,
         harnessName,
       ),
+      ANDROID_ADB_SERVER_PORT: "15037",
       TMPDIR: "/shared/temporary",
       XDG_CACHE_HOME: "/shared/cache",
     },

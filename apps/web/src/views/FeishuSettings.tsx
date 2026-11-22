@@ -12,6 +12,11 @@ import {
 } from "../components/RequestFeedback.js";
 import { Button } from "../components/ui/button.js";
 import { useResource } from "../useResource.js";
+import {
+  FeishuConfigGroups,
+  FeishuStatusRows,
+  useFeishuConfig,
+} from "./FeishuConfigGroups.js";
 import { trackSettingsRead, useSettingWrite } from "./useSettingWrite.js";
 
 // /api/me/feishu addresses one binding regardless of the settings page's project.
@@ -50,6 +55,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
     return trackSettingsRead(client.feishuBinding());
   }, [client]);
   const resource = useResource(load, 0, visible);
+  const config = useFeishuConfig();
   const data = resource.data;
   const save = useSettingWrite({
     name: "飞书绑定",
@@ -129,7 +135,8 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   const busyOrStale = save.busy || !!resource.error;
   return (
     <SettingsPanel title="飞书绑定" titleId={title} hidden={!visible}>
-      <SettingsGroup title="应用机器人">
+      <SettingsGroup title="状态">
+        {config && <FeishuStatusRows config={config} />}
         <SettingsRow
           label="绑定状态"
           status={
@@ -202,6 +209,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           </SettingsRow>
         )}
       </SettingsGroup>
+      {config && <FeishuConfigGroups config={config} />}
       <RequestFeedback
         interactive={save.saving}
         pending={save.saving || resource.pending}
