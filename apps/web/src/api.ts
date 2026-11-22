@@ -1730,6 +1730,45 @@ export interface LaunchSettingsView {
   readonly models?: Readonly<Record<string, LaunchModelView>>;
   /** Key names present in secrets.env; values never leave the host. */
   readonly secret_keys?: readonly string[];
+  /** C-564: the `permission_mode` values offered per harness (none = not used). */
+  readonly permission_modes?: Readonly<Record<string, readonly string[]>>;
+}
+
+/** C-564 `POST /api/launch-settings/models`: one saved Provider's model choices. */
+export interface LaunchModelOption extends LaunchModelMetadata {
+  readonly id: string;
+  /** Found in the models.dev catalog, the Provider's own listing, or both. */
+  readonly sources: readonly ("catalog" | "provider")[];
+}
+export interface LaunchModelList {
+  readonly version: string;
+  readonly provider: string;
+  readonly catalog: {
+    readonly status: "ok" | "stale" | "unavailable" | "not_listed";
+    readonly providers: readonly string[];
+    readonly fetched_at: string | null;
+  };
+  readonly listing: {
+    readonly status:
+      | "ok"
+      | "partial"
+      | "failed"
+      | "no_endpoint"
+      | "missing_secret";
+  };
+  readonly models: readonly LaunchModelOption[];
+}
+/** C-564 `POST /api/launch-settings/model-check`: a typed ID against the saved Provider's list. */
+export interface LaunchModelCheck {
+  readonly provider: string;
+  readonly model: string;
+  readonly status:
+    | "listed"
+    | "not_listed"
+    | "incomplete"
+    | "failed"
+    | "no_endpoint"
+    | "missing_secret";
 }
 
 /** C-515 profile fields a person may set; `null` clears an optional one. */
@@ -2000,6 +2039,14 @@ export interface CardiganClient {
     profile: string,
     mode: LaunchProfileCheck["mode"],
   ): Promise<LaunchCheckStarted>;
+  /** C-564: a saved Provider's model choices (catalog + its own listing; no inference). */
+  launchModels(version: string, provider: string): Promise<LaunchModelList>;
+  /** C-564: whether the saved Provider lists a typed model ID (nothing saved, no inference). */
+  checkLaunchModel(
+    version: string,
+    provider: string,
+    model: string,
+  ): Promise<LaunchModelCheck>;
   /** C-549: list the Provider's models once (no profile, no inference). */
   startProviderCheck(
     version: string,
@@ -3091,6 +3138,22 @@ export class HttpCardiganClient implements CardiganClient {
       method: "POST",
       body: JSON.stringify({ version, preview_id: previewId, secrets }),
       idempotencyKey,
+    });
+  }
+  launchModels(version: string, provider: string): Promise<LaunchModelList> {
+    return this.request("/api/launch-settings/models", {
+      method: "POST",
+      body: JSON.stringify({ version, provider }),
+    });
+  }
+  checkLaunchModel(
+    version: string,
+    provider: string,
+    model: string,
+  ): Promise<LaunchModelCheck> {
+    return this.request("/api/launch-settings/model-check", {
+      method: "POST",
+      body: JSON.stringify({ version, provider, model }),
     });
   }
   startProviderCheck(
