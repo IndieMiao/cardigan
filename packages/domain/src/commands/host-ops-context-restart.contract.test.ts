@@ -12,6 +12,7 @@ import type { CommandState } from "./core.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
+  untouchedStallSuccessor,
   withdrawUnstartedStallRestart,
 } from "./host-ops-actions.js";
 import {
@@ -388,7 +389,16 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   const state: CommandState = {
     ...f.state,
     assignments: f.state.assignments.map((v) =>
-      v.id === a.id ? { ...v, runtime_ref: ref } : v,
+      v.id === a.id
+        ? {
+            ...v,
+            runtime_ref: {
+              ...ref,
+              terminal_ref: "target",
+              agent_name: "target",
+            },
+          }
+        : v,
     ),
     runs: f.state.runs.map((r) =>
       r.id === prior.id
@@ -646,4 +656,55 @@ test("a generationless loopback owner needs an unambiguous confirmed bell on the
     ],
   ])
     expect(owner(runs)).not.toHaveProperty("first_bell_run_id");
+});
+
+test("stall recovery distinguishes one pristine queue from dispatch evidence or a second executable Run", () => {
+  const f = setup(),
+    a = f.state.assignments[0]!;
+  const r = {
+    ...run(),
+    id: id("run", 77),
+    assignment_id: a.id,
+    role_version: a.role_version,
+    status: "queued" as const,
+    started_at: undefined,
+    finished_at: undefined,
+  };
+  const { started_at: _s, finished_at: _f, ...queued } = r;
+  const event: Event = {
+    id: f.io.ids.nextEventId(),
+    seq: 1,
+    type: "run_queued",
+    actor: system,
+    created_at: now,
+    payload: { run_id: r.id, assignment_id: a.id },
+  };
+  const state = { ...f.state, runs: [queued], events: [event] };
+  expect(untouchedStallSuccessor(state, a, queued)).toBe(true);
+  expect(untouchedStallSuccessor({ ...state, events: [] }, a, queued)).toBe(
+    false,
+  );
+  expect(
+    untouchedStallSuccessor(
+      { ...state, events: [event, { ...event, type: "run_dispatched" }] },
+      a,
+      queued,
+    ),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(
+      { ...state, runs: [queued, { ...queued, id: id("run", 78) }] },
+      a,
+      queued,
+    ),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(state, a, {
+      ...queued,
+      bell_delivery: { run_id: r.id },
+    }),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(state, a, { ...queued, recovery_runtime: ref }),
+  ).toBe(false);
 });

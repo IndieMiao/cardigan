@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type CommandState,
@@ -6,6 +7,7 @@ import {
   type RetirementIdentity,
   type Runtime,
   type RuntimeRef,
+  sharedStallRegistration,
   systemTurnOwner,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
@@ -14,6 +16,7 @@ import {
   type ExecutionConfig,
   executionPaths,
   runtimeOwnsRef,
+  workerFiles,
 } from "@cardigan/runtime-herdr";
 import { captureTranscript } from "./capture-transcript.js";
 
@@ -27,6 +30,16 @@ for path in sys.argv[1:]:
         break
     if not stat.S_ISDIR(mode): sys.exit(1)
 else: print("present")`;
+
+// Only the verdict leaves the worker. Git may report names of private material,
+// and a large listing must not be copied to the control host (even on failure).
+const inspectStatus = `import subprocess, sys
+with subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL) as p:
+    dirty = False
+    while p.stdout.read(65536): dirty = True
+    if p.wait(): sys.exit(1)
+    print('dirty' if dirty else 'clean')`;
 
 /** No fallback from a remote Assignment to the controller or another registration. */
 function boundWorkspaceTarget(
@@ -58,6 +71,7 @@ export async function stallWorkspace(
   a: Assignment,
   execution?: ExecutionConfig,
   signal?: AbortSignal,
+  expectedHead?: string,
 ): Promise<Workspace> {
   if (!boundWorkspaceTarget(state.project_id, a, execution)) return "unknown";
   if (
@@ -109,7 +123,7 @@ export async function stallWorkspace(
       else if (status !== "missing") return "unknown";
     }
     for (const target of paths) {
-      const git = async (args: string[]) => {
+      const git = async (args: string[], classify = false) => {
         const argv = [
           ...gitSafetyArguments,
           "--no-optional-locks",
@@ -123,20 +137,36 @@ export async function stallWorkspace(
           target,
           ...args,
         ];
-        return run("git", argv);
+        return classify
+          ? run("python3", ["-IB", "-c", inspectStatus, "git", ...argv])
+          : run("git", argv);
       };
       if ((await git(["rev-parse", "--show-toplevel"])).trimEnd() !== target)
         return "unknown";
       if (
-        await git([
-          "status",
-          "--porcelain=v1",
-          "-z",
-          "--untracked-files=normal",
-          "--ignore-submodules=none",
-        ])
+        expectedHead &&
+        (role?.worktree !== "write" ||
+          !a.branch ||
+          (await git(["symbolic-ref", "-q", "HEAD"])).trimEnd() !==
+            `refs/heads/${a.branch}` ||
+          (await git(["rev-parse", "--verify", "HEAD^{commit}"])).trimEnd() !==
+            expectedHead)
       )
-        return "dirty";
+        return "unknown";
+      const status = (
+        await git(
+          [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+            "--ignored=matching",
+            "--ignore-submodules=none",
+          ],
+          true,
+        )
+      ).trimEnd();
+      if (status !== "clean") return status === "dirty" ? "dirty" : "unknown";
     }
     return "clean";
   } catch {
@@ -171,6 +201,55 @@ export async function observeTurnOwner(
   }
   return exact;
 }
+/** Remote recovery only settles an already exited registered launch. The
+ * worker journal and terminal observations are independent; a missing row,
+ * PID reuse alone, or an unbound status response cannot authorize release. */
+export async function remoteStallExit(
+  state: CommandState,
+  a: Assignment,
+  execution?: ExecutionConfig,
+) {
+  const ref = a.runtime_ref,
+    gen = ref?.launch_generation;
+  if (
+    !ref ||
+    !gen ||
+    a.machine_id === "local" ||
+    execution?.mode !== "agent-ssh" ||
+    !execution.target ||
+    !boundWorkspaceTarget(state.project_id, a, execution)
+  )
+    return false;
+  const launch = state.runs.find(
+    (r) => r.id === gen.run_id && r.assignment_id === a.id,
+  )?.launch_publication;
+  if (
+    !launch?.process ||
+    !isDeepStrictEqual(launch.target, ref.target) ||
+    launch.generation !== gen.generation ||
+    !isDeepStrictEqual(launch.runtime_ref, ref)
+  )
+    return false;
+  try {
+    const evidence = await workerFiles(
+      execution,
+      {
+        project: state.project_id,
+        assignment: a.id,
+        run: gen.run_id,
+        generation: gen.generation,
+        target: execution.target.fingerprint,
+      },
+      "status",
+    );
+    return (
+      evidence.observed === "exited" &&
+      isDeepStrictEqual(launch.process, evidence.process)
+    );
+  } catch {
+    return false;
+  }
+}
 export async function stallEvidence(
   state: CommandState,
   a: Assignment,
@@ -179,10 +258,14 @@ export async function stallEvidence(
   signal?: AbortSignal,
   systemTurn?: string,
 ) {
-  const bound = boundWorkspaceTarget(state.project_id, a, execution);
+  // Conflicting live registrations invalidate ownership, even when hc has a
+  // matching address/name. No filesystem or process access on their behalf.
+  const bound =
+    !sharedStallRegistration(state, a) &&
+    boundWorkspaceTarget(state.project_id, a, execution);
   const [workspace, observed, owner] = await Promise.all([
-    stallWorkspace(state, a, execution, signal),
-    a.runtime_ref && (a.machine_id === "local" || bound)
+    bound ? stallWorkspace(state, a, execution, signal) : ("unknown" as const),
+    a.runtime_ref && bound
       ? runtime.status(a.runtime_ref).catch(() => undefined)
       : undefined,
     systemTurn && a.runtime_ref?.machine_id === a.machine_id && bound
@@ -193,6 +276,14 @@ export async function stallEvidence(
         )
       : undefined,
   ]);
+  const remoteExited =
+    systemTurn &&
+    a.machine_id !== "local" &&
+    owner?.ok &&
+    owner.value === "exited" &&
+    observed?.ok &&
+    observed.value.process === "exited" &&
+    (await remoteStallExit(state, a, execution));
   const terminal_state = observed?.ok ? observed.value.agent : null;
   // A blocked/error/unknown CLI may still be in its old turn, regardless of MCP silence.
   const safeTerminal =
@@ -222,8 +313,9 @@ export async function stallEvidence(
         ? owner.value
         : null,
     can_restart:
+      bound &&
       (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
-      a.machine_id === "local" &&
+      (a.machine_id === "local" || !!remoteExited) &&
       (workspace === "clean" || workspace === "no_worktree"),
   };
 }

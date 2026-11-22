@@ -9,7 +9,7 @@ import {
   contextUsageFresh,
   contextUsageLevel,
 } from "../context-usage.js";
-import type { Actor, Run } from "../entities.js";
+import type { Actor, Assignment, Run } from "../entities.js";
 import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HOST_OPS_TOOLS,
@@ -44,6 +44,65 @@ import { stoppedByHuman } from "./stop.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
+/** A queued successor is work to preserve, not the process we observed. Only
+ * a pristine, host-created queue can be reused by a fenced bell recovery. */
+export function untouchedStallSuccessor(
+  state: CommandState,
+  a: Assignment,
+  r: Run,
+) {
+  if (
+    r.assignment_id !== a.id ||
+    r.role_version !== a.role_version ||
+    r.status !== "queued" ||
+    r.started_at ||
+    r.finished_at ||
+    r.heartbeat_at ||
+    r.bell_delivery ||
+    r.recovery_runtime ||
+    r.launch_publication ||
+    r.pending_finish ||
+    r.dispatch_stop ||
+    r.inactivity_stop ||
+    r.preparation_retry ||
+    r.dispatch_target_wait ||
+    state.runs.some(
+      (other) =>
+        other.id !== r.id && other.assignment_id === a.id && unfinished(other),
+    )
+  )
+    return false;
+  const matches = (e: CommandState["events"][number]) => {
+    const p = e.payload as { run_id?: string; assignment_id?: string };
+    return p.run_id === r.id && p.assignment_id === a.id;
+  };
+  return (
+    eventsOfType(state.events, "run_queued").some(
+      (e) => e.actor.project_id === state.project_id && matches(e),
+    ) &&
+    !["run_dispatched", "run_started", "run_dispatch_aborted"].some((type) =>
+      eventsOfType(state.events, type).some(
+        (e) => (e.payload as { run_id?: string }).run_id === r.id,
+      ),
+    )
+  );
+}
+
+export function sharedStallRegistration(state: CommandState, a: Assignment) {
+  const ref = a.runtime_ref;
+  return state.assignments.some(
+    (other) =>
+      other.id !== a.id &&
+      other.status !== "released" &&
+      other.machine_id === a.machine_id &&
+      ((!!a.worktree_path && other.worktree_path === a.worktree_path) ||
+        (!!ref &&
+          other.runtime_ref?.runtime_machine === ref.runtime_machine &&
+          (other.runtime_ref.terminal_ref === ref.terminal_ref ||
+            other.runtime_ref.agent_name === ref.agent_name))),
+  );
+}
+
 export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
@@ -86,8 +145,26 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "illegal_transition",
     "Assignment role upgrade is pending",
   );
+  const cause = eventById(d.state.events, p.dispatch_stall_id);
+  if (p.dispatch_stall_id)
+    ensure(
+      !sharedStallRegistration(d.state, a),
+      "invariant_violation",
+      "会话或工作区存在其它登记，不能接续",
+    );
+  const remoteExitOnly =
+    p.tool === "host_ops_restart_assignment" &&
+    a.scope === "work_item" &&
+    !!a.runtime_ref?.launch_generation &&
+    a.runtime_ref.target?.machine_id === a.machine_id &&
+    a.runtime_ref.target.project_id === d.state.project_id &&
+    cause?.type === "bell_turn_recovery_due" &&
+    cause.actor.kind === "system" &&
+    (cause.payload as { assignment_id?: string }).assignment_id === a.id;
   ensure(
-    !a.external && a.machine_id === "local" && a.runtime_state !== "released",
+    !a.external &&
+      (a.machine_id === "local" || remoteExitOnly) &&
+      a.runtime_state !== "released",
     "illegal_transition",
     "Target must be a local managed Assignment",
   );
@@ -254,9 +331,14 @@ export function beginHostOpsActionInDraft(
   if (p.dispatch_stall_id) {
     ensure(
       p.tool !== "host_ops_cancel_run" &&
-        !run &&
+        (!run || (!!turn && untouchedStallSuccessor(state, a, run))) &&
         !a.idle_retirement &&
-        !d.state.runs.some((r) => r.assignment_id === a.id && unfinished(r)),
+        !d.state.runs.some(
+          (r) =>
+            r.assignment_id === a.id &&
+            unfinished(r) &&
+            (!turn || !untouchedStallSuccessor(state, a, r)),
+        ),
       "illegal_transition",
       "派发积压已改变或指派不空闲",
     );
@@ -386,7 +468,16 @@ export function finishHostOpsAction(
       "Target runtime reference changed",
     );
     const previous = action.run_id ? d.get("runs", action.run_id) : undefined;
+    // The stored target is the queued successor in this case. It must still be
+    // the same untouched queue; do not cancel or settle a raced dispatch.
+    if (previous && action.system_finished_run_id)
+      ensure(
+        untouchedStallSuccessor(state, a, previous),
+        "stale_target",
+        "后继已开始派发",
+      );
     if (
+      !action.system_finished_run_id &&
       previous &&
       unfinished(previous) &&
       (action.tool === "host_ops_cancel_run" ||
@@ -457,7 +548,16 @@ export function finishHostOpsAction(
         trigger,
       );
     }
-    const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
+    const backup = action.system_finished_run_id
+      ? (eventsOfType(state.events, "dispatch_stall_backup_verified").find(
+          (e) =>
+            e.actor.kind === "system" &&
+            (e.payload as { action_id?: string }).action_id === action_id,
+        )?.payload as { ref: string; sha: string } | undefined)
+      : undefined;
+    const body = action.system_finished_run_id
+      ? `空闲会话接续：${a.id} 的旧轮次 ${action.system_finished_run_id} 已确认退出；${backup ? `已验证备份 ${backup.ref}（${backup.sha}）；` : ""}${run ? `后继 ${run.id} 等待派发` : "工作目标已变化，不启动后继"}。`
+      : `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
       "host_ops_action_finished",
       run && state.runs.some((r) => r.id === run?.id)
@@ -481,6 +581,14 @@ export function finishHostOpsAction(
             }
           : {}),
         assignment_id: a.id,
+        ...(action.system_finished_run_id
+          ? {
+              old_run_id: action.system_finished_run_id,
+              ...(backup
+                ? { backup_ref: backup.ref, backup_sha: backup.sha }
+                : {}),
+            }
+          : {}),
         ...(run ? { run_id: run.id } : {}),
         ...(run && previous
           ? {

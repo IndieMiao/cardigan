@@ -104,7 +104,13 @@ test.each(["pending", "belled"] as const)(
         (await f.view()).dispatch_stalls.filter(
           (s) => s.assignment_id === a.id,
         ),
-      ).toEqual([]);
+      ).toMatchObject([
+        {
+          kind: "running_wait",
+          restart_blocked: "client_execution_unconfirmed",
+          can_restart: false,
+        },
+      ]);
       await expect(f.restart(a, instruction.id)).rejects.toThrow();
       expect(f.notes().find((n) => n.id === note.id)).toMatchObject({
         status,
@@ -820,7 +826,7 @@ test("an existing queued successor is preserved when both the snapshot and exact
   const dispatcher = new Dispatcher(f.options);
   try {
     await dispatcher.tick();
-    expect(f.runtime.observe_retirement).toHaveBeenCalled();
+    // Repo-backed replacements require the patrol's workspace preflight.
     expect(f.options.startRun).not.toHaveBeenCalled();
     expect(f.runtime.release).not.toHaveBeenCalled();
     expect(f.state().runs.find((r) => r.id === successor.id)?.status).toBe(
@@ -843,6 +849,7 @@ test.each([
   "owner_mismatch",
   "lost_observation",
   "in_flight",
+  "queued_successor",
   "stop_refused",
   "dirty_in_slot",
   "dirty_at_exit",
@@ -947,21 +954,28 @@ test.each([
     ]);
     const cause = events("bell_turn_recovery_due")[0]?.id as string;
     if (mode === "dirty") writeFileSync(join(tree, "keep"), "original");
-    if (mode === "in_flight")
-      f.apply((state, actor, p) =>
-        queueRun(
-          state,
-          actor,
-          {
-            assignment_id: a.id,
-            model: "fixture",
-            agent_cli_version: "fixture",
-          },
-          p,
-        ),
+    const next =
+      mode === "in_flight" || mode === "queued_successor"
+        ? f.apply((state, actor, p) =>
+            queueRun(
+              state,
+              actor,
+              {
+                assignment_id: a.id,
+                model: "fixture",
+                agent_cli_version: "fixture",
+              },
+              p,
+            ),
+          )
+        : undefined;
+    if (next && mode === "in_flight")
+      f.store.uow.run((tx) =>
+        tx.runs.put(f.project, { ...next, recovery_runtime: f.refFor(a) }),
       );
     const safe = [
       "automatic",
+      "queued_successor",
       "tool",
       "exit_unconfirmed",
       "stop_refused",
@@ -1038,7 +1052,7 @@ test.each([
         );
         expect(events("host_ops_action_taken")).toMatchObject([
           {
-            actor: { kind: mode === "automatic" ? "system" : "assignment" },
+            actor: { kind: mode === "tool" ? "assignment" : "system" },
             payload: { assignment_id: a.id, system_finished_run_id: run.id },
           },
         ]);
@@ -1048,6 +1062,7 @@ test.each([
           .find((n) => n.event_id === notice.id);
         expect(original).toMatchObject({ status: "belled", seq: notice.seq });
         expect(original?.run_id).not.toBe(run.id);
+        if (next) expect(original?.run_id).toBe(next.id);
       }
     } else {
       await vi.waitFor(() =>

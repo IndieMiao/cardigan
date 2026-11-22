@@ -1,44 +1,33 @@
-/** Publish only a commit already present on the registered writer branch.
- * Never switch branches, change an index, copy untracked files or push. The
- * action id fixes the ref across retries: a later HEAD cannot overwrite it. */
+/** Pin only a commit already captured by the registered writer backup. This
+ * port is bound to the host-owned bare repository; no workspace Git writes. */
 export async function pinStallBackup(
-  git: (args: string[]) => Promise<string>,
+  git: {
+    create(ref: string, sha: string): Promise<unknown>;
+    read(ref: string): Promise<string | undefined>;
+    tree(sha: string): Promise<string>;
+  },
   assignment: string,
   action: string,
-  branch: string,
+  sha: string,
 ) {
   if (
     !/^A-[1-9][0-9]*$/u.test(assignment) ||
     !/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(action) ||
-    !/^agent\/[\w.-]+\/[\w.-]+$/u.test(branch)
+    !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha)
   )
-    throw new Error("Invalid stall backup binding");
-  const ref = `refs/heads/backup/stall/${assignment}/${action}`;
-  const read = async (...args: string[]) => (await git(args)).trimEnd();
-  const head = async () => {
-    if ((await read("symbolic-ref", "-q", "HEAD")) !== `refs/heads/${branch}`)
-      throw new Error("Stall backup branch changed");
-    return read("rev-parse", "--verify", "HEAD^{commit}");
-  };
-  const sha = await head();
-  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(sha))
-    throw new Error("Invalid stall backup HEAD");
-  // Create-only. On replay or an ambiguous transport result, trust only an
-  // independent read of the exact ref, never a successful subprocess exit.
-  try {
-    await git(["update-ref", "--no-deref", ref, sha, "0".repeat(sha.length)]);
-  } catch {
-    /* verify below */
+    throw new Error("Invalid stall backup identity");
+  const ref = `refs/cardigan/stall-backups/${assignment}/${action}`;
+  if ((await git.read(ref)) === undefined) {
+    try {
+      await git.create(ref, sha);
+    } catch {
+      /* An ambiguous CAS needs read-back. */
+    }
   }
   if (
-    (await read(
-      "for-each-ref",
-      "--format=%(refname) %(objectname) %(symref)",
-      ref,
-    )) !== `${ref} ${sha}` ||
-    (await read("rev-parse", "--verify", `${ref}^{commit}`)) !== sha ||
-    (await head()) !== sha
+    (await git.read(ref)) !== sha ||
+    !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(await git.tree(sha))
   )
-    throw new Error("Stall backup could not be verified");
+    throw new Error("Stall backup verification failed");
   return { ref, sha };
 }

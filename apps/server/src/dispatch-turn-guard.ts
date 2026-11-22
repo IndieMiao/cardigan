@@ -121,6 +121,7 @@ export function recordTurnWait(
       | "first_write_guard";
     observation: string;
     notes: readonly Notification[];
+    queued_run_id?: Run["id"];
     timeoutMs: number;
     standing?: StandingResolver | undefined;
   },
@@ -137,7 +138,9 @@ export function recordTurnWait(
       (e) =>
         e.card_id === card &&
         payloadString(e.payload, "reason") === reason &&
-        payloadString(e.payload, "run_id") === turn.id,
+        payloadString(e.payload, "run_id") === turn.id &&
+        (ids.length > 0 ||
+          payloadString(e.payload, "queued_run_id") === input.queued_run_id),
     );
   const waits = matching("bell_wake_deferred");
   const first = new Map<string, string>();
@@ -150,6 +153,9 @@ export function recordTurnWait(
     run_id: turn.id,
     reason,
     activity_source: observation,
+    ...(!ids.length && input.queued_run_id
+      ? { queued_run_id: input.queued_run_id }
+      : {}),
   };
   const unseen = ids.filter((id) => !first.has(id));
   const emptyWait = waits.find(

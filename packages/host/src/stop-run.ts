@@ -60,7 +60,8 @@ export async function stopSystemTurn(
     const exact = await observeTurnOwner(runtime, ref, owner);
     return exact?.ok === true && exact.value === "exited";
   };
-  if (alreadyStopping)
+  // Remote stall recovery observes an exit; it never acquires new signal authority.
+  if (alreadyStopping || ref.machine_id !== "local")
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
   if (ref.local_process_receipt) {
     const before = await observeTurnOwner(runtime, ref, owner);

@@ -16,8 +16,10 @@ import {
   reviewWakeBlocked,
   runById,
   runsOf,
+  sharedStallRegistration,
   stoppedByHuman,
   systemEndedTurn,
+  untouchedStallSuccessor,
 } from "@cardigan/domain";
 import type { standingResolver } from "@cardigan/store";
 
@@ -33,6 +35,9 @@ export function dispatchStallMs() {
   return value;
 }
 export type StallKind =
+  | "retirement_wait"
+  | "running_wait"
+  | "queued_successor"
   | "notification_backlog"
   | "resume_not_dispatched"
   | "standing_backlog"
@@ -147,6 +152,7 @@ export function dispatchStallCauses(
     source: Pick<Event, "seq" | "card_id" | "created_at"> & { id: string },
     trigger = eventById(state.events, source.id),
     handoff?: Event,
+    auditOnly?: string,
   ) {
     const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
@@ -156,7 +162,7 @@ export function dispatchStallCauses(
       | { run_id: string; session_key: string }
       | undefined;
     if (
-      (!due && !(age >= threshold)) ||
+      (!auditOnly && !due && !(age >= threshold)) ||
       !a ||
       at < a.created_at ||
       a.status !== "active" ||
@@ -172,7 +178,10 @@ export function dispatchStallCauses(
       return;
     // Sequence numbers are local to the source stream, not to the displayed card.
     if (
+      kind !== "retirement_wait" &&
+      kind !== "running_wait" &&
       kind !== "resume_not_dispatched" &&
+      kind !== "queued_successor" &&
       (acked.get(`${a.id}/${sourceCard ?? ""}`) ?? -1) >= seq
     )
       return;
@@ -183,9 +192,13 @@ export function dispatchStallCauses(
         r.dispatch_stop ||
         r.inactivity_stop,
     );
-    if (unfinished && !due) return;
+    const onlySuccessor =
+      !!binding && runs.some((r) => untouchedStallSuccessor(state, a, r));
+    if (unfinished && !due && !auditOnly) return;
     const blocked = (() => {
-      if (unfinished) return "unfinished_run";
+      if (auditOnly) return auditOnly;
+      if (sharedStallRegistration(state, a)) return "shared_registration";
+      if (unfinished && !onlySuccessor) return "unfinished_run";
       if (
         binding &&
         (binding.session_key !== turnSessionKey(a) ||
@@ -307,6 +320,90 @@ export function dispatchStallCauses(
       eventById(state.events, n.event_id),
       handoff?.event,
     );
+  }
+  // Expose existing supervisor incidents, without treating their age as stop
+  // authority. Do not turn ordinary comments on a working Run into incidents.
+  for (const a of state.assignments) {
+    const wait = a.idle_retirement?.dispatch_wait;
+    const event = wait && eventById(state.events, wait.event_id);
+    const queue =
+      event &&
+      runById(state.runs, (event.payload as { run_id: string }).run_id);
+    if (
+      event?.type === "session_maintenance_attention" &&
+      event.actor.kind === "system" &&
+      queue?.assignment_id === a.id &&
+      queue.status === "queued" &&
+      a.idle_retirement?.phase === "waiting"
+    ) {
+      add(
+        "retirement_wait",
+        a,
+        event,
+        event,
+        undefined,
+        "retirement_exit_unconfirmed",
+      );
+    }
+  }
+  const liveNotes = new Set(
+    notes.filter((n) => n.status !== "needs_attention").map((n) => n.id),
+  );
+  const belled = new Set(
+    notes.filter((n) => n.status === "belled").map((n) => n.run_id),
+  );
+  for (const type of ["run_inbox_stalled", "run_inactive"])
+    for (const event of eventsOfType(state.events, type)) {
+      const p = event.payload as {
+        assignment_id: Assignment["id"];
+        run_id: string;
+        notification_ids?: string[];
+      };
+      const r = runById(state.runs, p.run_id);
+      if (
+        event.actor.kind !== "system" ||
+        r?.status !== "running" ||
+        r.assignment_id !== p.assignment_id ||
+        !(type === "run_inactive"
+          ? belled.has(r.id)
+          : p.notification_ids?.some((id) => liveNotes.has(id)))
+      )
+        continue;
+      add(
+        "running_wait",
+        assignments.get(p.assignment_id),
+        event,
+        event,
+        undefined,
+        "client_execution_unconfirmed",
+      );
+    }
+  // An empty bell has no Notification row. Bind it to this precise queue, not
+  // whatever happens to be waiting at the address when the next patrol runs.
+  for (const e of eventsOfType(state.events, "bell_turn_recovery_due")) {
+    const p = e.payload as {
+      queued_run_id?: string;
+      run_id?: string;
+      assignment_id: string;
+      session_key?: string;
+    };
+    if (!p.queued_run_id || e.actor.kind !== "system") continue;
+    const owner = assignments.get(p.assignment_id as Assignment["id"]),
+      queue = runById(state.runs, p.queued_run_id);
+    if (
+      owner &&
+      queue &&
+      untouchedStallSuccessor(state, owner, queue) &&
+      p.session_key === turnSessionKey(owner) &&
+      systemEndedTurn(state, owner)?.id === p.run_id
+    )
+      add(
+        "queued_successor",
+        owner,
+        e,
+        eventById(state.events, queue.trigger_event_id),
+        e,
+      );
   }
   for (const e of eventsOfType(state.events, "work_item_resume_requested")) {
     const p = e.payload as {

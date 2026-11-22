@@ -1,8 +1,4 @@
-import {
-  type Event,
-  eventsOfType,
-  pendingHostOpsActions,
-} from "@cardigan/domain";
+import { type Event, eventsOfType } from "@cardigan/domain";
 import type { DispatchStall } from "./dispatch-stalls.js";
 
 type Incident = Pick<
@@ -27,15 +23,6 @@ export function overdueStallHandoffs(
     ),
   );
   // An automatic attempt that failed does not count as Ops pickup.
-  for (const action of pendingHostOpsActions(events)) {
-    if (action.dispatch_stall_id)
-      outstanding.delete(
-        key(
-          action.assignment_id,
-          action.system_finished_run_id ?? action.dispatch_stall_id,
-        ),
-      );
-  }
   for (const e of eventsOfType(events, "host_ops_action_taken")) {
     if (e.actor.kind !== "assignment" || e.actor.role_id !== "host_ops")
       continue;

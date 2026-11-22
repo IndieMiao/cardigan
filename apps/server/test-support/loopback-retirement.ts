@@ -63,7 +63,7 @@ export async function loopbackFixture(
         keep: false,
         created_ms: 1234,
         ...(sample !== "incomplete" ? { pid: 12345 } : {}),
-        status: { state: sample === "busy" ? "working" : "unknown" },
+        status: { state: sample === "busy" ? "working" : "idle" },
         labels: {
           ...labels,
           ...(sample === "conflict" ? { assignment: "other" } : {}),

@@ -1272,3 +1272,21 @@ test("failed first evidence commit leaves neither a backup nor its generation", 
     ),
   );
 });
+
+test("stall backups capture only the bound writer, verify the immutable ref, and never collect unpublished files", async () => {
+  const a = required(assignments[0]),
+    root = required(repositories.get(key(f.project_id, a.machine_id))),
+    action = "1".repeat(26);
+  const sha = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "untracked"), "private fixture");
+  const backup = await service.stallBackup(f.project_id, a, action);
+  expect(git(center(), "rev-parse", backup.ref)).toBe(sha);
+  expect(
+    git(center(), "ls-tree", "-r", "--name-only", backup.ref),
+  ).not.toContain("untracked");
+  expect(events()).toMatchObject([{ payload: { assignment_id: a.id, sha } }]);
+  expect(await service.stallBackup(f.project_id, a, action)).toEqual(backup);
+  commit(root, "next");
+  await expect(service.stallBackup(f.project_id, a, action)).rejects.toThrow();
+  expect(git(center(), "rev-parse", backup.ref)).toBe(sha);
+});

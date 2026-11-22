@@ -18,6 +18,7 @@ function adapter(finishAfter?: string) {
     created_ms: 1000,
     labels: { project: "fixture", assignment: "A-1" },
     keep: false,
+    status: { state: "idle" },
   };
   const client: HcClient = {
     available: async () => true,
@@ -303,3 +304,27 @@ test.skipIf(process.platform !== "linux")(
     }
   },
 );
+
+test("silence, an unreported activity state and a matching address do not authorize a system-turn stop", async () => {
+  const f = adapter(),
+    runtime = await f.create();
+  f.terminal.status.state = "unknown";
+  const opts = {
+    ...options(),
+    system_finished_turn: true as const,
+    workspace_preflight: vi.fn(async () => true),
+  };
+  expect(value(await runtime.observe_retirement(ref, opts))).toBe("unknown");
+  expect(value(await runtime.retire_idle(ref, opts))).toMatchObject({
+    outcome: "withdrawn",
+    evidence: { reason: "terminal_busy" },
+  });
+  expect(opts.workspace_preflight).not.toHaveBeenCalled();
+  expect(
+    vi
+      .mocked(f.client.exec)
+      .mock.calls.filter(
+        ([args]) => args.includes("TERM") || args.includes("HUP"),
+      ),
+  ).toHaveLength(0);
+});

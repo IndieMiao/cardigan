@@ -209,10 +209,15 @@ export function automaticContextActionForRun(
       const action = intents.get(
         (e.payload as { action_id: Event["id"] }).action_id,
       );
-      if (action) indexed.set(e.id, action);
+      if (action) {
+        indexed.set(e.id, action);
+        const run = (e.payload as { run_id?: string }).run_id;
+        if (run && action.system_finished_run_id && run === action.run_id)
+          indexed.set(`queue/${run}`, action);
+      }
     }
     launches = indexed;
     automaticLaunches.set(events, launches);
   }
-  return launches.get(run.trigger_event_id);
+  return launches.get(run.trigger_event_id) ?? launches.get(`queue/${run.id}`);
 }

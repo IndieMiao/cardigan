@@ -79,7 +79,7 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { stallWorkspace } from "./stall-evidence.js";
+import { remoteStallExit, stallWorkspace } from "./stall-evidence.js";
 import { StallPatrol } from "./stall-patrol.js";
 import {
   revokeStoppedRunTokens,
@@ -91,6 +91,11 @@ import { UpstreamHealthMonitor } from "./upstream-health.js";
 import { inspectWorker } from "./worker-inspection.js";
 
 interface Options {
+  stallBackup?: (
+    project: ProjectId,
+    a: Assignment,
+    action: string,
+  ) => Promise<{ ref: string; sha: string }>;
   workerInspectionIntervalMs?: number;
   workerExecution?: (project: ProjectId, machine: string) => ExecutionConfig;
   upstream?: LaunchConfig | undefined;
@@ -1357,6 +1362,7 @@ export class HostOpsService {
       };
       // Only inspect the fixed workspace here: the runtime already owns
       // its signal slot, so a nested runtime probe could wait on itself.
+      let backup: { ref: string; sha: string } | undefined;
       const checkWorkspace = async () => {
         const state = read();
         const a = state.assignments.find((a) => a.id === action.assignment_id);
@@ -1366,6 +1372,7 @@ export class HostOpsService {
               a,
               this.stallExecution(project, a.machine_id),
               this.contextAbort.signal,
+              backup?.sha,
             )
           : "unknown";
         if (workspace === "clean" || workspace === "no_worktree") return true;
@@ -1506,19 +1513,90 @@ export class HostOpsService {
             await checkStall();
             if (!mayStop()) return;
           }
-          result = await stopSystemTurn(
-            runtime,
-            action.runtime_ref,
-            systemTurnOwner(
-              read(),
-              action.assignment_id,
-              action.runtime_ref,
-              action.system_finished_run_id,
-            ),
-            stopStarted,
-            checkWorkspace,
-            beforeSignal,
+          const a = read().assignments.find(
+            (v) => v.id === action.assignment_id,
           );
+          const write =
+            a &&
+            read().roles.find(
+              (r) =>
+                r.role_id === a.role_id && r.role_version === a.role_version,
+            )?.worktree === "write";
+          if (a && write && a.worktree_path) {
+            try {
+              backup = await this.options.stallBackup?.(
+                project,
+                a,
+                action.action_id,
+              );
+              if (!backup || !(await checkWorkspace())) throw new Error();
+              const verified = backup;
+              store.uow.run((tx) => {
+                const state = loadCommandState(tx, project);
+                if (
+                  !pendingHostOpsActions(state.events).some(
+                    (v) => v.action_id === action.action_id,
+                  ) ||
+                  JSON.stringify(
+                    state.assignments.find((v) => v.id === a.id),
+                  ) !== JSON.stringify(a)
+                )
+                  throw new Error();
+                if (
+                  !state.events.some(
+                    (e) =>
+                      e.type === "dispatch_stall_backup_verified" &&
+                      (e.payload as { action_id?: string }).action_id ===
+                        action.action_id,
+                  )
+                ) {
+                  const card = state.work_items.find(
+                    (w) => w.id === a.work_item_id,
+                  )?.card_id;
+                  tx.events.append(project, {
+                    id: tx.ids.nextEventId(),
+                    seq: tx.ids.nextEventSequence(project, card),
+                    ...(card ? { card_id: card } : {}),
+                    actor: { kind: "system", project_id: project },
+                    type: "dispatch_stall_backup_verified",
+                    created_at: this.clock.now(),
+                    payload: {
+                      action_id: action.action_id,
+                      assignment_id: a.id,
+                      system_finished_run_id:
+                        action.system_finished_run_id ?? null,
+                      ...verified,
+                    },
+                  });
+                }
+              });
+            } catch {
+              fail("workspace_backup_unconfirmed");
+              return;
+            }
+          }
+          const remote = a && a.machine_id !== "local";
+          result =
+            remote &&
+            !(await remoteStallExit(
+              read(),
+              a,
+              this.stallExecution(project, a.machine_id),
+            ))
+              ? "terminal_exit_unconfirmed"
+              : await stopSystemTurn(
+                  runtime,
+                  action.runtime_ref,
+                  systemTurnOwner(
+                    read(),
+                    action.assignment_id,
+                    action.runtime_ref,
+                    action.system_finished_run_id,
+                  ),
+                  !!remote || stopStarted,
+                  checkWorkspace,
+                  beforeSignal,
+                );
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.
           if (result === "exited" && !(await checkWorkspace()))

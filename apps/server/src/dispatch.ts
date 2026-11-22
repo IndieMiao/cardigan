@@ -990,7 +990,14 @@ export class Dispatcher {
       let previousExitConfirmed = false;
       // Only an existing queued Run can take the between-Runs recovery path.
       // A new notice needs the stall patrol's independent workspace check.
-      if (queued && systemTurn && sessionLoss) {
+      if (
+        queued &&
+        systemTurn &&
+        sessionLoss &&
+        a.machine_id === "local" &&
+        !a.worktree_path &&
+        !runtimeRef.worktree_path
+      ) {
         // A missing event-snapshot row is not exit proof: check the bound
         // terminal itself, or its local launch receipt when the core is gone.
         const exact = await this.options.runtime
@@ -1602,6 +1609,7 @@ export class Dispatcher {
         reason,
         observation,
         notes: pending,
+        ...(queued ? { queued_run_id: queued.id } : {}),
         timeoutMs: this.dispatchTimeoutMs,
         standing: this.options.standing,
       });

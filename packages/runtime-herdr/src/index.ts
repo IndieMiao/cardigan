@@ -1068,9 +1068,7 @@ export class HerdrRuntime implements Runtime {
         identity.system_finished_turn &&
         terminal.state === "live" &&
         (terminal.keep ||
-          !["unknown", "idle", "done"].includes(
-            terminal.status?.state ?? "unknown",
-          ))
+          !["idle", "done"].includes(terminal.status?.state ?? "unknown"))
       )
         return "unknown";
       return terminal.state === "finished"
@@ -1130,6 +1128,11 @@ export class HerdrRuntime implements Runtime {
       // A kept terminal can replace a signalled program with a shell. Do not
       // silently change that policy or mistake the shell for the retired CLI.
       if (first.keep) return failure("withdrawn", "kept_terminal");
+      if (
+        options.system_finished_turn &&
+        !["idle", "done"].includes(first.status?.state ?? "unknown")
+      )
+        return failure("withdrawn", "terminal_busy");
       if (first.state !== "live")
         return failure("withdrawn", "terminal_not_live");
       if (!Number.isSafeInteger(first.pid) || (first.pid ?? 0) <= 1)
@@ -1226,7 +1229,7 @@ export class HerdrRuntime implements Runtime {
                       return false;
                     }
                     if (
-                      !["idle", "done", "unknown"].includes(
+                      !["idle", "done"].includes(
                         target.status?.state ?? "unknown",
                       )
                     ) {

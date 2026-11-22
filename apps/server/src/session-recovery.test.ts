@@ -86,11 +86,8 @@ function scenario() {
       error: { code: "runtime_unavailable", message: "No core" },
     })),
     observe_retirement: vi.fn(async () => ({
-      ok: false as const,
-      error: {
-        code: "runtime_not_found" as const,
-        message: "Exact terminal missing",
-      },
+      ok: true as const,
+      value: "exited" as const,
     })),
     resume_or_replace: vi.fn(),
     provision: vi.fn<Runtime["provision"]>(
@@ -153,13 +150,7 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
   "M5.6 %s between Runs replaces the Session, commits a handoff and dispatches exactly the queued Run",
   async (code) => {
     const s = scenario();
-    // Both forms of exact exit evidence permit a fresh launch, never a release
-    // by stale address. Ordinary status errors alone (next test) do not.
-    if (code === "runtime_unavailable")
-      s.runtime.observe_retirement = vi.fn(async () => ({
-        ok: true,
-        value: "exited",
-      }));
+    // Both snapshot errors still require a separate positive exit observation.
     // Only the old Session is lost; the replacement terminal is starting.
     vi.mocked(s.runtime.status).mockImplementation(async (ref) =>
       ref.terminal_ref === "t9"

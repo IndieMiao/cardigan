@@ -41,7 +41,15 @@ test("only unresolved, unclaimed incidents escalate once, fifteen minutes after 
     type: "host_ops_action_taken",
     payload: { ...incident, dispatch_stall_id: "original", execution: true },
   };
-  expect(notices(900_000, [claimed])).toEqual([]);
+  expect(notices(900_000, [claimed])).toEqual([alert]);
+  expect(
+    notices(900_000, [
+      {
+        ...claimed,
+        actor: { kind: "assignment", role_id: "host_ops" } as Event["actor"],
+      },
+    ]),
+  ).toEqual([]);
   expect(
     notices(900_000, [
       claimed,

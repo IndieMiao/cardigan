@@ -26,15 +26,24 @@ test("a recovery ref pins the exact branch without moving it, and replays never 
   try {
     await git(["init", "-q", "-b", branch]);
     await git(["commit", "--allow-empty", "-qm", "first"]);
-    const original = await pinStallBackup(git, "A-1", id, branch);
-    expect(await pinStallBackup(git, "A-1", id, branch)).toEqual(original);
+    const port = {
+      create: (ref: string, sha: string) =>
+        git(["update-ref", ref, sha, "0".repeat(sha.length)]),
+      read: async (ref: string) =>
+        (await git(["for-each-ref", "--format=%(objectname)", ref])).trim() ||
+        undefined,
+      tree: async (sha: string) =>
+        (await git(["rev-parse", "--verify", `${sha}^{tree}`])).trim(),
+    };
+    const sha = (await git(["rev-parse", "HEAD"])).trim();
+    const original = await pinStallBackup(port, "A-1", id, sha);
+    expect(await pinStallBackup(port, "A-1", id, sha)).toEqual(original);
     await git(["commit", "--allow-empty", "-qm", "second"]);
-    await expect(pinStallBackup(git, "A-1", id, branch)).rejects.toThrow();
+    const next = (await git(["rev-parse", "HEAD"])).trim();
+    await expect(pinStallBackup(port, "A-1", id, next)).rejects.toThrow();
     expect((await git(["rev-parse", original.ref])).trim()).toBe(original.sha);
     writeFileSync(join(dir, "untracked"), "fixture");
-    await expect(
-      pinStallBackup(git, "A-1", id, "agent/C-1/W-2"),
-    ).rejects.toThrow();
+    expect((await git(["rev-parse", "HEAD"])).trim()).toBe(next);
     expect(await git(["status", "--porcelain"])).toBe("?? untracked\n");
   } finally {
     rmSync(dir, { recursive: true, force: true });

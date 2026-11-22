@@ -5,6 +5,7 @@ import type {
   RuntimeRef,
 } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import * as worker from "@cardigan/runtime-herdr";
 import { expect, test, vi } from "vitest";
 import { stallEvidence } from "./stall-evidence.js";
 import { stopSystemTurn } from "./stop-run.js";
@@ -30,6 +31,7 @@ const owner = {
 } as Assignment;
 const state = {
   project_id: "fixture",
+  assignments: [owner],
   runs: [],
   roles: [],
 } as unknown as CommandState;
@@ -102,4 +104,84 @@ test("a missing row after a started stop does not settle the old execution", asy
   expect(await probe()).toBe("exited");
   expect(runtime.retire_idle).not.toHaveBeenCalled();
   expect(runtime.release).not.toHaveBeenCalled();
+});
+
+test("remote recovery needs both the bound generation's OS exit and its finished terminal, and never signals it", async () => {
+  const generation = "b".repeat(32),
+    generated = {
+      ...ref,
+      launch_generation: { generation, run_id: "R-1" as const },
+    };
+  const a = { ...owner, runtime_ref: generated };
+  const identity = {
+    machine: ref.target!.fingerprint,
+    terminal: generation,
+    uid: 1000,
+    pid: 42,
+    process_group: 42,
+    start: "20",
+    boot: "boot",
+  };
+  const launch = {
+    generation,
+    target: ref.target,
+    process: identity,
+    runtime_ref: generated,
+  };
+  const s = {
+    ...state,
+    assignments: [a],
+    runs: [{ id: "R-1", assignment_id: a.id, launch_publication: launch }],
+  } as unknown as CommandState;
+  const reply = {
+    version: 1 as const,
+    phase: "running" as const,
+    observed: "exited" as const,
+    process: identity,
+    project: state.project_id,
+    assignment: a.id,
+    run: "R-1",
+    generation,
+    target: identity.machine,
+  };
+  const status = vi.spyOn(worker, "workerFiles").mockResolvedValue(reply);
+  const runtime = {
+    status: vi.fn(async () => ({
+      ok: true,
+      value: { agent: "unknown", process: "exited" },
+    })),
+    observe_retirement: vi.fn(async () => ({ ok: true, value: "exited" })),
+    retire_idle: vi.fn(),
+    release: vi.fn(),
+  } as unknown as Runtime;
+  try {
+    expect(
+      await stallEvidence(s, a, runtime, execution, undefined, "R-1"),
+    ).toMatchObject({ can_restart: true });
+    status.mockResolvedValue({
+      ...reply,
+      process: { ...identity, start: "other" },
+    });
+    expect(
+      await stallEvidence(s, a, runtime, execution, undefined, "R-1"),
+    ).toMatchObject({ can_restart: false });
+    status.mockResolvedValue({ ...reply, observed: "alive" });
+    expect(
+      await stallEvidence(s, a, runtime, execution, undefined, "R-1"),
+    ).toMatchObject({ can_restart: false });
+    expect(
+      await stopSystemTurn(
+        runtime,
+        generated,
+        { project_id: s.project_id, assignment_id: a.id },
+        false,
+        vi.fn(),
+        vi.fn(),
+      ),
+    ).toBe("exited");
+    expect(runtime.retire_idle).not.toHaveBeenCalled();
+    expect(runtime.release).not.toHaveBeenCalled();
+  } finally {
+    status.mockRestore();
+  }
 });
