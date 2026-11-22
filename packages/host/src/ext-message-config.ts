@@ -129,6 +129,19 @@ function privateText(
     closeSync(fd);
   }
 }
+/**
+ * C-580: only the push filter of the file currently published at `path`, or
+ * undefined when it cannot be read. Never reads credential files.
+ */
+export function loadExtMessageFilter(
+  path: string,
+): ExtMessageFilter | undefined {
+  try {
+    return parseFilter(record(parse(privateText(path))).filter);
+  } catch {
+    return undefined;
+  }
+}
 export function loadExtMessageConfig(
   path = defaultExtMessagePath(),
   credentialDir = dirname(path),

@@ -825,49 +825,70 @@ test("C-580 excluded project identifiers are stored only as digests", async () =
   expect(rows).toContain("project:");
   expect(rows).not.toContain(tenant);
 });
-test("C-580 a send in flight when the kind is switched off settles quietly without an undelivered notice", async () => {
-  fixture();
-  h.store.createProject({ id: project_id, name: "C-580 fixture" });
-  const started = Promise.withResolvers<void>();
-  const reply = Promise.withResolvers<"permanent">();
-  const live = new LiveExtMessageSender(path, {
-    store: h.store,
-    startApplication: () => undefined,
-    adapters: {
-      lark: () => ({
-        send: () => {
-          started.resolve();
-          return reply.promise;
-        },
-      }),
-    },
-  });
-  live.start();
-  try {
-    const on = await preview({ settings: { "filter.notice": true } });
-    expect((await confirm(on)).status).toBe(200);
-    await live.tick();
-    makeNotice();
-    const pending = live.tick();
-    await started.promise;
-    const off = await preview({ settings: { "filter.notice": false } });
-    expect((await confirm(off)).status).toBe(200);
-    reply.resolve("permanent");
-    await pending;
-    await live.tick();
-    const external = h.store.uow
-      .read((tx) => notices(loadCommandState(tx, project_id)))
-      .filter((n) => n.kind === "external_message");
-    expect(external).toEqual([]);
-    expect(
-      h.store.database
-        .prepare(
-          "SELECT status,attempts FROM ext_message_outbox WHERE item_kind='notice'",
-        )
-        .all(),
-    ).toEqual([{ status: "skipped", attempts: 1 }]);
-  } finally {
-    reply.resolve("permanent");
-    await live.stop();
-  }
-});
+test.each([
+  { defer: false, muted: true },
+  { defer: true, muted: true },
+  { defer: true, muted: false },
+])(
+  "C-580 a send in flight while the filter is saved (recovery pending: $defer, its kind switched off: $muted)",
+  async ({ defer, muted }) => {
+    fixture();
+    h.store.createProject({ id: project_id, name: "C-580 fixture" });
+    const db = h.store.database;
+    const started = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<"permanent">();
+    const live = new LiveExtMessageSender(path, {
+      store: h.store,
+      startApplication: () => undefined,
+      adapters: {
+        lark: () => ({
+          send: () => {
+            started.resolve();
+            return reply.promise;
+          },
+        }),
+      },
+    });
+    live.start();
+    try {
+      const on = await preview({ settings: { "filter.notice": true } });
+      expect((await confirm(on)).status).toBe(200);
+      await live.tick();
+      makeNotice();
+      const sending = live.tick();
+      await started.promise;
+      const off = await preview({
+        settings: muted
+          ? { "filter.notice": false }
+          : { "filter.decision": false },
+      });
+      // Optionally: the file is published but its database commit fails.
+      if (defer)
+        db.exec(
+          `CREATE TABLE c580_late(id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+           CREATE TRIGGER c580_late_reject AFTER UPDATE OF result ON feishu_settings_requests
+           WHEN NEW.result='applied' BEGIN INSERT INTO c580_late VALUES('missing'); END;`,
+        );
+      expect((await confirm(off)).status).toBe(200);
+      if (defer) db.exec("DROP TRIGGER c580_late_reject");
+      reply.resolve("permanent");
+      await sending;
+      await state(); // recovery, when pending
+      await live.tick();
+      const external = h.store.uow
+        .read((tx) => notices(loadCommandState(tx, project_id)))
+        .filter((n) => n.kind === "external_message");
+      expect(external).toHaveLength(muted ? 0 : 1);
+      expect(
+        db
+          .prepare(
+            "SELECT status,attempts FROM ext_message_outbox WHERE item_kind='notice'",
+          )
+          .all(),
+      ).toEqual([{ status: muted ? "skipped" : "failed", attempts: 1 }]);
+    } finally {
+      reply.resolve("permanent");
+      await live.stop();
+    }
+  },
+);

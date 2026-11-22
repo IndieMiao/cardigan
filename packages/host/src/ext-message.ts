@@ -56,6 +56,7 @@ import {
   type ExtMessageConfiguration,
   extChannelLimit,
   extMessageQuiet,
+  loadExtMessageFilter,
 } from "./ext-message-config.js";
 import { createFeishuAdapter } from "./ext-message-feishu.js";
 import {
@@ -1125,6 +1126,10 @@ export class ExtMessageSender {
       result = await sendExtMessage(port, message, config.policy.timeout_ms);
     }
     const now = this.clock.now();
+    const published =
+      result !== "sent" && this.options.generation
+        ? loadExtMessageFilter(this.options.generation.path)
+        : undefined;
     const settledVersions = store.uow.run((tx) => {
       finishExtAttempt(store.database, claimed.lease, Date.parse(now));
       const stillCurrent = participants.filter(
@@ -1133,14 +1138,21 @@ export class ExtMessageSender {
       for (const row of claimed.rows) {
         // C-580: the filter may have been saved while this send was in
         // flight. An unsent item it now excludes stops quietly.
+        // The published file is checked too: its database record may still
+        // be awaiting recovery after the save already returned "applied".
         const dropped =
           result !== "sent" &&
-          extFilterExcludes(
+          (extFilterExcludes(
             store.database,
             row.project_id,
             row.item_kind,
             row.event_id,
-          );
+          ) ||
+            (published !== undefined &&
+              !extMessageAllowed(published, {
+                kind: row.item_kind as ExtMessageItem["kind"],
+                project_id: row.project_id,
+              })));
         const status = dropped
           ? "skipped"
           : result === "sent"
