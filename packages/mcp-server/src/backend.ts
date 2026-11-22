@@ -178,6 +178,12 @@ export interface McpBackend {
     assignment_id: AssignmentId,
     at?: string,
   ): boolean;
+  /** C-600: record the session's native `tools/list` or a premature tool call. */
+  advanceMcpHandshake?(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+  ): string | undefined;
   /**
    * Transactions. Read-only paths use `read` (`BEGIN DEFERRED`), so they do not
    * take the write lock and keep working while another process writes.

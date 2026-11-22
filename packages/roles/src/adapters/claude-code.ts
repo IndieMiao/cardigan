@@ -31,6 +31,7 @@ export const claudeCode: HarnessAdapter = {
   },
   versionArgs: ["--version"],
   contextSource: "claude_transcript:last_usage",
+  listsMcpToolsAtStartup: true,
   readContext: readClaudeContext,
   compile({ input, resolved, providerEnv, secretEnv, profileArgs, extraArgs }) {
     // Claude Code reads provider settings from a settings file. Cardigan writes

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { mcpProxyBypassHost } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -15,6 +16,7 @@ const codes = [
   "mcp_protocol_error",
   "mcp_gateway_error",
   "mcp_worker_failed",
+  "mcp_harness_proxy_failed",
 ] as const;
 type Code = (typeof codes)[number];
 export class WorkerMcpError extends Error {
@@ -50,8 +52,26 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
 
 // Executed by the worker's isolated Python. URL/token go only through stdin.
 // initialize authenticates without acknowledging a Run or touching tool activity.
+// C-600: the route is the harness's. Its HTTP client takes the account's system
+// proxy (macOS SystemConfiguration, without the exception list) unless the
+// launch's NO_PROXY names the host; the probe environment has no other proxy.
 const probe = `
-import http.client, json, socket, ssl, sys, urllib.error, urllib.request
+import http.client, json, socket, ssl, sys, urllib.error, urllib.parse, urllib.request
+def harness_proxy(data):
+    try:
+        import _scproxy
+        proxy = _scproxy._get_proxies().get("https")
+    except Exception:
+        return None
+    if not isinstance(proxy, str) or not proxy:
+        return None
+    host = (urllib.parse.urlsplit(data["url"]).hostname or "").lower()
+    for entry in data["no_proxy"]:
+        entry = entry.strip().lower()
+        if entry == "*" or (entry.lstrip(".") and (host == entry.lstrip(".")
+                or host.endswith("." + entry.lstrip(".")))):
+            return None
+    return proxy
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -62,11 +82,11 @@ def read_reply(response):
         raise http.client.IncompleteRead(raw)
     return raw
 
-def check():
+def check(data, proxy):
     try:
-        data = json.load(sys.stdin)
         context = ssl.create_default_context()
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"https": proxy} if proxy else {}),
             urllib.request.HTTPSHandler(context=context), NoRedirect())
         body = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":"2025-03-26","capabilities":{},
@@ -110,8 +130,22 @@ def check():
         return "mcp_unreachable"
     except Exception:
         return "mcp_protocol_error"
-print(check())
+def main():
+    try:
+        data = json.load(sys.stdin)
+        proxy = harness_proxy(data)
+    except Exception:
+        return "mcp_worker_failed"
+    code = check(data, proxy)
+    return "mcp_harness_proxy_failed" if proxy and code != "ok" else code
+print(main())
 `;
+
+/** The NO_PROXY entries every launch adds for this Card MCP address. */
+export function launchNoProxy(url: string): readonly string[] {
+  const host = mcpProxyBypassHost(url);
+  return host ? [host] : [];
+}
 
 /** Authenticated startup never accepts a reachability-only result. */
 export function checkWorkerMcp(
@@ -123,16 +157,22 @@ export function checkWorkerMcp(
   return probeWorkerMcp(execution, token);
 }
 
-/** A human machine check needs no Assignment credential and grants no authority. */
+/**
+ * A human machine check needs no Assignment credential and grants no
+ * authority. It follows the harness route: the system proxy unless the
+ * launch's NO_PROXY (by default, exactly what launches add) names the host.
+ */
 export function checkWorkerMcpReachability(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+  noProxy?: readonly string[],
 ): Promise<void> {
-  return probeWorkerMcp(execution);
+  return probeWorkerMcp(execution, undefined, noProxy);
 }
 
 async function probeWorkerMcp(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
   token?: string,
+  noProxy?: readonly string[],
 ): Promise<void> {
   const config = workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
   const started = Date.now();
@@ -175,7 +215,12 @@ async function probeWorkerMcp(
         else resolve(output.trim());
       });
       child.stdin.end(
-        JSON.stringify({ ...config, authenticate: token !== undefined, token }),
+        JSON.stringify({
+          ...config,
+          no_proxy: noProxy ?? launchNoProxy(config.url),
+          authenticate: token !== undefined,
+          token,
+        }),
       );
     });
     if (code !== "ok")

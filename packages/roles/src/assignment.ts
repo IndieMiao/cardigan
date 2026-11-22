@@ -27,6 +27,11 @@ import {
   type CompiledLaunch,
   compileResolvedLaunch,
 } from "./compile.js";
+import {
+  MCP_PROXY_BYPASS_KEYS,
+  mcpProxyBypassHost,
+  withMcpProxyBypass,
+} from "./mcp-proxy.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
   BrowserLaunchDefinition,
@@ -279,6 +284,12 @@ export function compileAssignmentLaunch(
       throw new Error("Worker environment conflicts with launch profile");
     env[key] = value;
   }
+  // C-600: the Card MCP host never goes through a proxy, whatever the
+  // harness reads from the system; profile-provided entries are kept.
+  const mcpHost = mcpProxyBypassHost(input.mcp.url);
+  if (mcpHost)
+    for (const key of MCP_PROXY_BYPASS_KEYS)
+      env[key] = withMcpProxyBypass(env[key] ?? secretEnv[key], mcpHost);
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -430,7 +441,12 @@ function launchScriptContent(options: {
 }): string {
   const quote = shellQuote;
   const exports = Object.entries(options.env)
-    .map(([name, value]) => `export ${name}=${quote(value)}`)
+    .map(([name, value]) =>
+      // C-600: keep the host account's own bypass entries after the MCP host.
+      (MCP_PROXY_BYPASS_KEYS as readonly string[]).includes(name)
+        ? `export ${name}=${quote(value)}"\${${name}:+,\$${name}}"`
+        : `export ${name}=${quote(value)}`,
+    )
     .join("\n");
   const args = options.args.map(quote).join(" ");
   const credentials =

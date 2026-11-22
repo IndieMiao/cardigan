@@ -15,6 +15,7 @@ import {
   hasRunTarget,
   hostOpsPending,
   idleWakeGuard,
+  mcpSessionMissing,
   type ProjectId,
   providerStartFailed,
   type Run,
@@ -533,6 +534,23 @@ export async function retryDispatchedRuns(
           continue;
         }
       }
+    }
+    // C-600: the session called a tool before its harness listed the Card
+    // tools. Rebuild it once without waiting for the dispatch timeout.
+    if (
+      owner &&
+      candidate.status === "dispatched" &&
+      !candidate.started_at &&
+      mcpSessionMissing(owner)
+    ) {
+      const state = read();
+      if (
+        dispatchRecoveryUsed(state.events, owner.id) ||
+        recoveryChainUsed(state, candidate)
+      )
+        store.uow.run((tx) => finishRecovery(tx, candidate.id, 0));
+      else await stopRun(candidate.id, "mcp_unavailable");
+      continue;
     }
     if (c3ExitCandidate(read(), candidate)) {
       const ref = candidate.recovery_runtime;

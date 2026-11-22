@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { request } from "node:http";
+import { createServer as createHttpServer, request } from "node:http";
 import { createServer, type Server } from "node:https";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startMcpServer } from "@cardigan/mcp-server";
@@ -17,6 +17,7 @@ import { runtimeWorkerMcpHosts } from "./runtime-workers-config.js";
 import {
   checkWorkerMcp,
   checkWorkerMcpReachability,
+  launchNoProxy,
   workerMcpConfig,
 } from "./worker-mcp.js";
 
@@ -27,6 +28,7 @@ vi.mock("@cardigan/runtime-herdr", async (original) => ({
 let root: string, server: Server, endpoint: string;
 let proxyTarget: string | undefined, observedHost: string | undefined;
 let authorization: string | undefined, challenge: string | undefined;
+let systemProxy: string | undefined;
 let status: number,
   body: unknown,
   requests: number,
@@ -135,6 +137,7 @@ beforeEach(() => {
   observedHost = undefined;
   authorization = `Bearer ${credential}`;
   challenge = undefined;
+  systemProxy = undefined;
   vi.mocked(agentProcessCommand)
     .mockReset()
     .mockImplementation(async (_config, args) => {
@@ -143,7 +146,9 @@ beforeEach(() => {
       expect(args.join(" ")).not.toContain(endpoint);
       // The SSH seam runs the actual worker program locally against a fixture TLS
       // server. Only this test adds its CA and synthetic DNS mapping.
-      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
+      // A system proxy is simulated with macOS's `_scproxy` interface,
+      // including an exception list the harness client does not honour.
+      const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}${systemProxy ? `import sys, types\nscproxy = types.ModuleType("_scproxy")\nscproxy._get_proxies = lambda: {"http": ${JSON.stringify(systemProxy)}, "https": ${JSON.stringify(systemProxy)}}\nscproxy._get_proxy_settings = lambda: {"exclude_simple": False, "exceptions": ["*.ts.net"]}\nsys.modules["_scproxy"] = scproxy\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup(host, port, *a, **kw) if host == "127.0.0.1" else lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
       return { file: "python3", args: ["-I", "-B", "-c", prefix + args[4]] };
     });
 });
@@ -349,4 +354,106 @@ test("SSH failure is redacted", async () => {
     /^mcp_worker_failed$/,
   );
   expect(requests).toBe(0);
+});
+
+/** A CONNECT proxy, like the local proxy app that captured the tailnet traffic. */
+async function connectProxy() {
+  let tunnels = 0;
+  const proxy = createHttpServer();
+  proxy.on("connect", (_req, client: Socket, head: Buffer) => {
+    tunnels++;
+    const upstream = connect(
+      (server.address() as AddressInfo).port,
+      "127.0.0.1",
+      () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        upstream.write(head);
+        upstream.pipe(client);
+        client.pipe(upstream);
+      },
+    );
+    upstream.on("error", () => client.destroy());
+    client.on("error", () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
+    tunnels: () => tunnels,
+    close: () =>
+      new Promise<void>((resolve) => {
+        proxy.closeAllConnections();
+        proxy.close(() => resolve());
+      }),
+  };
+}
+
+/** A proxy address nothing listens on, as when the proxy cannot reach the tailnet. */
+async function deadProxy() {
+  const probe = createHttpServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const port = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return `http://127.0.0.1:${port}`;
+}
+
+test("C-600 the launch's NO_PROXY keeps the harness route direct despite a system proxy", async () => {
+  expect(launchNoProxy(endpoint)).toEqual(["control.example-tailnet.ts.net"]);
+  systemProxy = await deadProxy();
+  authorization = undefined;
+  status = 401;
+  challenge = "Bearer";
+  body = { error: { code: "unauthorized", message: "unauthorized" } };
+  await expect(
+    checkWorkerMcpReachability(execution()),
+  ).resolves.toBeUndefined();
+  for (const entry of [".example-tailnet.ts.net", "ts.net", "*"])
+    await expect(
+      checkWorkerMcpReachability(execution(), ["localhost", entry]),
+    ).resolves.toBeUndefined();
+  // Authenticated launch preflight takes the same route.
+  authorization = `Bearer ${credential}`;
+  status = 200;
+  body = validReply;
+  challenge = undefined;
+  await expect(
+    checkWorkerMcp(execution(), credential),
+  ).resolves.toBeUndefined();
+  expect(requests).toBe(5);
+});
+
+test("C-600 without a covering NO_PROXY the machine check reports the system proxy route", async () => {
+  systemProxy = await deadProxy();
+  authorization = undefined;
+  status = 401;
+  challenge = "Bearer";
+  body = { error: { code: "unauthorized", message: "unauthorized" } };
+  // The OS exception list (*.ts.net) is ignored, exactly like the harness.
+  for (const noProxy of [[], ["other.ts.net"], ["tailnet.ts.net"]])
+    await expect(
+      checkWorkerMcpReachability(execution(), noProxy),
+    ).rejects.toThrow(/^mcp_harness_proxy_failed$/);
+  expect(requests).toBe(0);
+
+  const proxy = await connectProxy();
+  systemProxy = proxy.url;
+  try {
+    await expect(
+      checkWorkerMcpReachability(execution(), []),
+    ).resolves.toBeUndefined();
+    expect(proxy.tunnels()).toBe(1);
+    expect(requests).toBe(1);
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("C-600 without a system proxy setting the probe connects directly", async () => {
+  authorization = undefined;
+  status = 401;
+  challenge = "Bearer";
+  body = { error: { code: "unauthorized", message: "unauthorized" } };
+  await expect(
+    checkWorkerMcpReachability(execution(), []),
+  ).resolves.toBeUndefined();
+  expect(requests).toBe(1);
 });

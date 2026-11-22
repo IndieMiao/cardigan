@@ -83,3 +83,62 @@ test("touchAssignmentActivity is visible to a second connection", () => {
     }
   });
 });
+
+test("C-600 the MCP handshake only advances a pending session, in a write visible to command state", () => {
+  withTempStore((store, dataDir) => {
+    const id = assignment().id;
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
+    // Legacy and unverified sessions have no handshake to advance.
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tool_called"),
+    ).toBeUndefined();
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake,
+    ).toBeUndefined();
+
+    const pending = () =>
+      store.uow.run((tx) =>
+        tx.assignments.put(project_id, {
+          ...assignment(),
+          mcp_handshake: "pending",
+        }),
+      );
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
+      "listed",
+    );
+    // A later premature-looking call cannot undo a native listing.
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "listed",
+    );
+
+    pending();
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "missing",
+    );
+    // Listing afterwards (e.g. by a wrapper) does not revive the session.
+    expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
+      "missing",
+    );
+    const reopened = StoreFor.open({ dataDir });
+    try {
+      expect(
+        reopened.uow.read((tx) => tx.assignments.get(project_id, id))
+          ?.mcp_handshake,
+      ).toBe("missing");
+    } finally {
+      reopened.close();
+    }
+
+    store.uow.run((tx) =>
+      tx.assignments.put(project_id, {
+        ...assignment(),
+        status: "released",
+        mcp_handshake: "pending",
+      }),
+    );
+    expect(store.advanceMcpHandshake(project_id, id, "tool_called")).toBe(
+      "pending",
+    );
+  });
+});

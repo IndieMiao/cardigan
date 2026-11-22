@@ -63,6 +63,11 @@ export {
   reportLaunchWarnings,
 } from "./launch-diagnostics.js";
 export {
+  MCP_PROXY_BYPASS_KEYS,
+  mcpProxyBypassHost,
+  withMcpProxyBypass,
+} from "./mcp-proxy.js";
+export {
   type CatalogEntry,
   catalogCache,
   catalogEntries,

@@ -27,6 +27,8 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
     "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
+    "NO_PROXY": "127.0.0.1",
+    "no_proxy": "127.0.0.1",
   },
   "files": [
     {
@@ -163,6 +165,8 @@ export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export DISABLE_AUTOUPDATER='1'
 export CLAUDE_CONFIG_DIR='/srv/cardigan/runs/A-12/claude'
+export NO_PROXY='127.0.0.1'"\${NO_PROXY:+,$NO_PROXY}"
+export no_proxy='127.0.0.1'"\${no_proxy:+,$no_proxy}"
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
@@ -237,7 +241,9 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
     "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
+    "NO_PROXY": "127.0.0.1",
     "OPENAI_BASE_URL": "https://codex.example.invalid/v1",
+    "no_proxy": "127.0.0.1",
   },
   "files": [
     {
@@ -381,6 +387,8 @@ export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
 export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export CODEX_HOME='/srv/cardigan/runs/A-12/codex'
+export NO_PROXY='127.0.0.1'"\${NO_PROXY:+,$NO_PROXY}"
+export no_proxy='127.0.0.1'"\${no_proxy:+,$no_proxy}"
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
@@ -436,7 +444,9 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/srv/agent/worktrees/A-12",
     "GIT_CONFIG_VALUE_2": "/srv/agent/repos/p-demo",
+    "NO_PROXY": "127.0.0.1",
     "PI_CODING_AGENT_DIR": "/srv/cardigan/runs/A-12/pi",
+    "no_proxy": "127.0.0.1",
   },
   "files": [
     {
@@ -615,6 +625,8 @@ export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
 export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export PI_CODING_AGENT_DIR='/srv/cardigan/runs/A-12/pi'
+export NO_PROXY='127.0.0.1'"\${NO_PROXY:+,$NO_PROXY}"
+export no_proxy='127.0.0.1'"\${no_proxy:+,$no_proxy}"
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi

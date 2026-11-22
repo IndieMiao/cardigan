@@ -32,6 +32,15 @@ export interface ToolServerOptions {
    * Run look started.
    */
   readonly onToolCall?: () => void;
+  /** C-600: runs on `tools/list`; a native harness lists tools at startup. */
+  readonly onToolList?: () => void;
+  /**
+   * C-600: refuses every tool call of a session that has no native Card
+   * tools, before it can acknowledge its Run or act on the project.
+   */
+  readonly refuseToolCall?: () =>
+    | { readonly code: string; readonly message: string }
+    | undefined;
 }
 
 /** The `tools/list` entries for an already filtered tool set. */
@@ -97,9 +106,14 @@ export function createMcpServer(options: ToolServerOptions): Server {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: listedTools(visible),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+      options.onToolList?.();
+    } catch {
+      // Bookkeeping never fails the listing; the call gate re-reads it.
+    }
+    return { tools: listedTools(visible) };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const toolName = request.params.name;
@@ -111,6 +125,18 @@ export function createMcpServer(options: ToolServerOptions): Server {
       phases[name] = now - stageAt;
       stageAt = now;
     };
+    const refused = options.refuseToolCall?.();
+    if (refused !== undefined) {
+      log({
+        event: "tool",
+        method: "tools/call",
+        tool: toolName,
+        assignment_id: identity.actor.assignment_id,
+        code: "mcp_session_unavailable",
+        duration_ms: performance.now() - startedAt,
+      });
+      return errorResult(refused);
+    }
     // Any tool call counts as the Agent having started (even a forbidden one):
     // this is the first moment the Assignment proves it is awake.
     if (options.onToolCall !== undefined) {

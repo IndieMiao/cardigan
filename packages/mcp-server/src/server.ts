@@ -6,7 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
-import type { OwnerMessagePort } from "@cardigan/domain";
+import { MCP_SESSION_FAILURE, type OwnerMessagePort } from "@cardigan/domain";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
@@ -580,6 +580,26 @@ async function serveMcp(
       if (options.acknowledgeRuns !== false) {
         acknowledgeDispatchedRun(options.store, identity);
       }
+    },
+    onToolList: () => {
+      options.store.advanceMcpHandshake?.(
+        identity.actor.project_id,
+        identity.actor.assignment_id,
+        "tools_listed",
+      );
+    },
+    refuseToolCall: () => {
+      const handshake = options.store.advanceMcpHandshake?.(
+        identity.actor.project_id,
+        identity.actor.assignment_id,
+        "tool_called",
+      );
+      return handshake === "missing"
+        ? {
+            code: "illegal_transition",
+            message: `${MCP_SESSION_FAILURE}（启动时未列出工具）。系统会重建会话；请停止本会话的工作，不要改用命令行或其它方式调用 Card MCP。`,
+          }
+        : undefined;
     },
     revalidateToken: () => {
       const token = bearerToken(req.headers.authorization);

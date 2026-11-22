@@ -96,6 +96,7 @@ export const toolNames = [
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 export type RoleWorktree = "none" | "write" | "readonly";
+export type McpHandshake = "pending" | "listed" | "missing";
 export interface RoleReference {
   readonly launch_profile_ref?: string;
   /** Legacy references may not declare a worktree policy. */
@@ -550,6 +551,13 @@ interface AssignmentFields {
   readonly released_at?: Timestamp;
   /** Last authenticated MCP call (M3.2); the watchdog of §3.3 reads it. */
   readonly last_mcp_activity_at?: Timestamp;
+  /**
+   * C-600: whether the current session's harness listed the Card MCP tools.
+   * `pending` is set when a verified launch dispatches a new session, the
+   * native `tools/list` turns it into `listed`, and a tool call made before
+   * that (no native tools, e.g. a wrapper) turns it into `missing`.
+   */
+  readonly mcp_handshake?: McpHandshake;
   /** Immutable scheduling flag; true only for standing Office assignments. */
   readonly external?: boolean;
 }
@@ -685,7 +693,8 @@ export interface Run {
       | "provider_unavailable"
       | "delivery_retry_exhausted"
       | "server_restart"
-      | "runtime_exited";
+      | "runtime_exited"
+      | "mcp_unavailable";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {

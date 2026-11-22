@@ -165,6 +165,7 @@ export const codex: HarnessAdapter = {
   },
   versionArgs: ["--version"],
   contextSource: "codex_rollout:last_token_usage",
+  listsMcpToolsAtStartup: true,
   readContext: readCodexContext,
   compile({ resolved, providerEnv, secretEnv, profileArgs, extraArgs }) {
     // Codex keeps its own config; Cardigan only composes arguments:

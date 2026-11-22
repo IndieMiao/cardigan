@@ -14,6 +14,7 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { MCP_SESSION_FAILURE } from "../mcp-session.js";
 import { providerStarted } from "../provider-start.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
@@ -451,6 +452,11 @@ export interface DispatchRunParams {
    * bell-triggered path reuses one session, it never provisions a second one.
    */
   readonly runtime_ref?: RuntimeRef;
+  /**
+   * C-600: with a new `runtime_ref`, require the session's harness to list the
+   * Card MCP tools before its first tool call (`mcp_handshake: pending`).
+   */
+  readonly verify_mcp_session?: true;
   readonly base_sha?: string;
   /** Host-only D5 replacement, committed together with dispatch and its handoff. */
   readonly replacement?: {
@@ -728,6 +734,8 @@ export function dispatchRun(
     runtime = unwrap(transition("runtime", runtime, "run_started"));
     const nextAssignment = { ...assignment };
     if (p.replacement) delete nextAssignment.session_ref;
+    // C-600: the handshake belongs to the session; a reused one keeps it.
+    if (p.runtime_ref !== undefined) delete nextAssignment.mcp_handshake;
     d.put("assignments", {
       ...nextAssignment,
       runtime_state: runtime,
@@ -736,6 +744,9 @@ export function dispatchRun(
       ...(ref.branch ? { branch: ref.branch } : {}),
       ...(base_sha ? { base_sha } : {}),
       ...(ref.agent_session_id ? { session_ref: ref.agent_session_id } : {}),
+      ...(p.runtime_ref !== undefined && p.verify_mcp_session
+        ? { mcp_handshake: "pending" as const }
+        : {}),
     });
     const scope =
       assignment.scope === "work_item"
@@ -784,6 +795,13 @@ export function acknowledgeRun(
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    // C-600: a call before the harness listed the Card tools is not native.
+    ensure(
+      assignment.mcp_handshake !== "pending" &&
+        assignment.mcp_handshake !== "missing",
+      "illegal_transition",
+      MCP_SESSION_FAILURE,
+    );
     ensure(
       !run.recovery_policy ||
         run.recovery_policy.root_run_id === run.id ||

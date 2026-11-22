@@ -69,6 +69,11 @@ export interface ServerConfig {
    * connections are cut; SSE streams end at once. 10 seconds by default.
    */
   readonly shutdownGraceMs?: number;
+  /**
+   * C-600: refuse tool calls from a new session whose harness never listed
+   * the Card tools and rebuild it once. On unless CARDIGAN_MCP_SESSION_CHECK=0.
+   */
+  readonly mcpSessionCheck?: boolean;
 }
 
 export interface ServerEnv extends ExecutionEnv {
@@ -116,6 +121,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_RUNTIME_FAILURE_LIMIT?: string | undefined;
   readonly CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS?: string | undefined;
   readonly CARDIGAN_SHUTDOWN_GRACE_MS?: string | undefined;
+  readonly CARDIGAN_MCP_SESSION_CHECK?: string | undefined;
 }
 
 export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
@@ -192,7 +198,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     );
   }
   const dataDir = resolveDataDirectory(env);
+  const sessionCheck = nonEmpty(env.CARDIGAN_MCP_SESSION_CHECK);
+  if (sessionCheck !== undefined && !["0", "1"].includes(sessionCheck))
+    throw new Error("CARDIGAN_MCP_SESSION_CHECK must be 0 or 1");
   return {
+    mcpSessionCheck: sessionCheck !== "0",
     ...(checkLogLimits ? { checkLogLimits } : {}),
     ...(attachmentInlineBytes === undefined ? {} : { attachmentInlineBytes }),
     dataDir,

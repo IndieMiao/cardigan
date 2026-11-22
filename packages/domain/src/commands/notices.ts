@@ -92,6 +92,8 @@ const systemNoticeEvents = new Map([
   ["standing_pm_recovery_started", "常驻 PM 已恢复执行"],
   ["office_wait_started", "等待 PM Office"],
   ["office_wait_overdue", "PM Office 等待超时"],
+  // C-600: a rebuilt session still had no native Card tools.
+  ["mcp_session_failed", "会话 MCP 初始化失败"],
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {

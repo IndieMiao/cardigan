@@ -97,7 +97,7 @@ function ports(tx: TransactionContext): CommandPorts {
 /** A card with one coder assignment, dispatched with a runtime ref. */
 function dispatchedRun(
   worktree: Role["worktree"] = "none",
-  options: { readonly dispatch?: boolean } = {},
+  options: { readonly dispatch?: boolean; readonly verify?: boolean } = {},
 ) {
   if (worktree !== "none") {
     store.uow.run((tx) =>
@@ -170,6 +170,7 @@ function dispatchedRun(
           terminal_ref: "t1",
           agent_name: "coder-abcdef12-c-1-w-1-a-1",
         },
+        ...(options.verify ? { verify_mcp_session: true as const } : {}),
       },
       p,
     ),
@@ -390,5 +391,85 @@ describe("the HTTP layer", () => {
     const run = store.uow.read((tx) => tx.runs.list(project_id)[0]);
     expect(run?.status).toBe("running");
     expect(assignment.id).toBe(run?.assignment_id);
+  });
+});
+
+describe("C-600 a verified session must list the Card tools natively", () => {
+  let running: RunningServer;
+  const tools = ["whoami", "get_card", "get_updates"];
+  const start = async (verify: boolean) => {
+    const seeded = dispatchedRun("none", { verify });
+    const token = store.issueToken({
+      project_id,
+      assignment_id: seeded.assignment.id,
+      role: {
+        role_version: seeded.assignment.role_version,
+        allowed_tools: tools,
+      },
+    }).token;
+    running = await startMcpServer({
+      store,
+      host: "127.0.0.1",
+      port: 0,
+      log: () => undefined,
+    });
+    const client = new Client({ name: "fictional-client", version: "0.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(running.url), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    );
+    return { ...seeded, client };
+  };
+  const handshake = (id: Assignment["id"]) =>
+    store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake;
+  afterEach(async () => {
+    await running?.close();
+  });
+
+  test("the harness's tools/list unlocks the session and its first call starts the Run", async () => {
+    const { assignment, run_id, client } = await start(true);
+    expect(handshake(assignment.id)).toBe("pending");
+    // initialize alone proves nothing.
+    expect(read(run_id)?.status).toBe("dispatched");
+    await client.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    const who = await client.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    await client.close();
+  });
+
+  test("a call without a native listing is refused, never starts the Run and stays refused", async () => {
+    const { assignment, run_id, client } = await start(true);
+    const refused = await client.callTool({ name: "whoami", arguments: {} });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toMatchObject({
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("MCP 初始化失败"),
+      },
+    });
+    expect(handshake(assignment.id)).toBe("missing");
+    expect(read(run_id)?.status).toBe("dispatched");
+    // A wrapper listing afterwards cannot revive the session.
+    await client.listTools();
+    const again = await client.callTool({ name: "get_updates", arguments: {} });
+    expect(again.isError).toBe(true);
+    expect(read(run_id)?.status).toBe("dispatched");
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+        ?.last_mcp_activity_at,
+    ).toBeUndefined();
+    await client.close();
+  });
+
+  test("sessions launched without verification keep the old behaviour", async () => {
+    const { assignment, run_id, client } = await start(false);
+    const who = await client.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBeUndefined();
+    expect(read(run_id)?.status).toBe("running");
+    await client.close();
   });
 });

@@ -1124,6 +1124,49 @@ export class Store {
   }
 
   /**
+   * C-600: advance the current session's Card MCP handshake. A native
+   * `tools/list` turns `pending` into `listed`; a tool call while `pending`
+   * proves the session has no native tools and turns it into `missing`.
+   * Returns the resulting state; legacy and unverified sessions have none.
+   */
+  advanceMcpHandshake(
+    project_id: ProjectId,
+    assignment_id: AssignmentId,
+    observed: "tools_listed" | "tool_called",
+  ): Assignment["mcp_handshake"] {
+    const read = () => {
+      const row = this.#db
+        .prepare("SELECT doc FROM assignments WHERE project_id = ? AND id = ?")
+        .get(project_id, assignment_id) as { doc: string } | undefined;
+      return row && (JSON.parse(row.doc) as Assignment);
+    };
+    // Every tool call passes here: only a pending session takes the write lock.
+    const seen = read();
+    if (seen?.status !== "active" || seen.mcp_handshake !== "pending")
+      return seen?.mcp_handshake;
+    return this.#run(() => {
+      const assignment = read();
+      if (assignment === undefined) return undefined;
+      if (
+        assignment.status !== "active" ||
+        assignment.mcp_handshake !== "pending"
+      )
+        return assignment.mcp_handshake;
+      const mcp_handshake = observed === "tools_listed" ? "listed" : "missing";
+      this.#db
+        .prepare(
+          "UPDATE assignments SET doc = ? WHERE project_id = ? AND id = ?",
+        )
+        .run(
+          JSON.stringify({ ...assignment, mcp_handshake } satisfies Assignment),
+          project_id,
+          assignment_id,
+        );
+      return mcp_handshake;
+    });
+  }
+
+  /**
    * M5.1: the operator's Workbench password (§14). Setting it revokes every
    * open web session, so a stolen cookie dies with the old password.
    */

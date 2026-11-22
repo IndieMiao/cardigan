@@ -41,6 +41,7 @@ import {
   compileAssignmentLaunch,
   compiledLaunchSettings,
   firstPrompt,
+  getHarnessAdapter,
   type LaunchConfig,
   resolveProfile,
   SECRETS_FILE_NAME,
@@ -184,6 +185,11 @@ export interface LaunchHost {
     readonly secrets: Readonly<Record<string, string>>;
   };
   readonly mcpUrl: string;
+  /**
+   * C-600: new sessions must list the Card MCP tools before their first tool
+   * call; a session without native tools is refused and rebuilt once.
+   */
+  readonly verifyMcpSession?: boolean;
   readonly dataDir: string;
   readonly execution?: ExecutionConfig | undefined;
   readonly clock?: Clock | undefined;
@@ -1304,6 +1310,10 @@ async function launch(
                 : { tool_catalog: toolCatalog }),
             },
             runtime_ref: dispatchRef,
+            ...(host.verifyMcpSession &&
+            getHarnessAdapter(compiled.harness).listsMcpToolsAtStartup
+              ? { verify_mcp_session: true }
+              : {}),
             ...(baseSha === undefined ? {} : { base_sha: baseSha }),
             ...(input.replacement ? { replacement: input.replacement } : {}),
           },

@@ -26,6 +26,8 @@ exports[`claude-code LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
+    "NO_PROXY": "example.invalid",
+    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -51,7 +53,7 @@ exports[`claude-code LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "e0412437a842a30bef61edf100848bdb289db02b14d58d400facd3195450411d",
+      "sha256": "a51da9719410a3d12da02848e62a24b41f00e3482ba74bbff52c623a49b34cf4",
     },
   ],
   "harness": "claude-code",
@@ -81,6 +83,8 @@ exports[`codex LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
+    "NO_PROXY": "example.invalid",
+    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -101,7 +105,7 @@ exports[`codex LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "3a38b40976953e1eb1cc714bd19e65edfc4bd9aa5e4b5333cf83efb20d4d4514",
+      "sha256": "f97a1e55a4c57610d0eb23437d25412211a893a3c8fec3bb9449d8c7e8f34e03",
     },
   ],
   "harness": "codex",
@@ -132,7 +136,9 @@ exports[`pi LP-2 launch parity 1`] = `
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_0": "",
     "GIT_CONFIG_VALUE_1": "/fixture/work",
+    "NO_PROXY": "example.invalid",
     "PI_CODING_AGENT_DIR": "/fixture/run/pi",
+    "no_proxy": "example.invalid",
   },
   "files": [
     {
@@ -163,7 +169,7 @@ exports[`pi LP-2 launch parity 1`] = `
     {
       "mode": 448,
       "path": "/fixture/run/launch.sh",
-      "sha256": "eaf0075b65527bf87813342778aa84f0a817b6ec58b1446d274c8b1fafb23671",
+      "sha256": "bad34a4b4c7e245f5e4c4425447e3a4b41607f59e0a583b8457f8422a5ccc4c5",
     },
   ],
   "harness": "pi",

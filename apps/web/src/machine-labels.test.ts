@@ -44,6 +44,9 @@ test("MC-5 health distinguishes unchecked, checking, failed, passed and expired"
   });
   expect(healthBlockerLabel("machine_check_failed")).toBe("机器检查失败");
   expect(healthBlockerLabel("other_code")).toBe("other_code");
+  expect(healthBlockerLabel("mcp_harness_proxy_failed")).toBe(
+    "Agent 经系统代理连不上 Card MCP",
+  );
 });
 
 test("MC-5 requirements and exclusion reasons read as prose; unknown text is kept", () => {
