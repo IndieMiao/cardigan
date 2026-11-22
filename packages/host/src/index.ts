@@ -163,7 +163,12 @@ export {
   publishModelFile,
   withLaunchSnapshot,
 } from "./launch-model-intent.js";
-export { probeModel } from "./launch-model-probe.js";
+export {
+  findProviderModel,
+  listProviderModels,
+  MAX_LISTED_MODELS,
+  probeModel,
+} from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
 export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
@@ -217,7 +222,9 @@ export {
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {
+  type ModelCatalogSnapshot,
   parseCachedLaunchConfig,
+  readModelCatalog,
   stageModelLaunchConfig,
 } from "./model-catalog.js";
 export {

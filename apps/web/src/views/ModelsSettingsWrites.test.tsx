@@ -179,7 +179,9 @@ test("an edit sends only the changed fields and clears emptied ones", async () =
       .hasAttribute("disabled"),
   ).toBe(true);
   fireEvent.change(field(form, "推理强度"), { target: { value: "medium" } });
-  fireEvent.change(field(form, "权限模式"), { target: { value: "" } });
+  changeControl(within(form).getByRole("combobox", { name: /权限模式/ }), {
+    target: { value: "" },
+  });
   fireEvent.click(within(form).getByRole("button", { name: "预览修改" }));
   await within(dialog).findByRole("form", { name: "确认编辑启动配置" });
   expect(api.previewLaunchChange).toHaveBeenCalledWith(V1, {
@@ -976,10 +978,10 @@ test("a profile field changed and put back is not sent after a refresh", async (
   const click = (name: string) =>
     fireEvent.click(within(d).getByRole("button", { name }));
   click("编辑");
-  const permission = field(d, "权限模式");
-  const orig = (permission as HTMLInputElement).value;
-  fireEvent.change(permission, { target: { value: "plan" } });
-  fireEvent.change(permission, { target: { value: orig } });
+  const permission = () =>
+    within(d).getByRole("combobox", { name: /权限模式/ });
+  changeControl(permission(), { target: { value: "plan" } });
+  changeControl(permission(), { target: { value: "bypassPermissions" } });
   fireEvent.change(field(d, "推理强度"), { target: { value: "medium" } });
   click("预览修改");
   await within(d).findByRole("button", { name: "确认保存" });
