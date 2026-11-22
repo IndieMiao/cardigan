@@ -237,3 +237,33 @@ test("C-581 a refresh does not pull the reader back to the anchor's tab; a new a
     document.getElementById("entry-C-1#9")?.closest(".timeline-entry"),
   );
 });
+
+test("C-581 returning to an earlier anchor (A → B → A) positions it again; refreshes of that visit stay put", async () => {
+  const { view, props } = await openAtAnchor();
+  const rowOf = (id: string) =>
+    document.getElementById(id)?.closest(".timeline-entry");
+  // A's visit is settled by the wheel and a refresh.
+  view.rerender(<CardDetailPage {...props} revision={1} />);
+  await landed();
+  const atB = scroll.mock.calls.length;
+  view.rerender(
+    <CardDetailPage {...props} anchor="entry-C-1#9" revision={1} />,
+  );
+  await landed();
+  await waitFor(() => expect(scroll.mock.calls.length).toBeGreaterThan(atB));
+  expect(scroll.mock.contexts.at(-1)).toBe(rowOf("entry-C-1#9"));
+  // Back to A without touching B (browser back): a new visit of A.
+  const backToA = scroll.mock.calls.length;
+  view.rerender(<CardDetailPage {...props} revision={1} />);
+  await landed();
+  await waitFor(() =>
+    expect(scroll.mock.calls.length).toBeGreaterThan(backToA),
+  );
+  expect(scroll.mock.contexts.at(-1)).toBe(rowOf(anchor));
+  fireEvent.wheel(window);
+  const settledA = scroll.mock.calls.length;
+  view.rerender(<CardDetailPage {...props} revision={2} />);
+  await landed();
+  relayout();
+  expect(scroll.mock.calls.length).toBe(settledA);
+});

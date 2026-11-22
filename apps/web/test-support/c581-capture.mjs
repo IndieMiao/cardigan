@@ -68,6 +68,8 @@ const probe = `(() => {
     q4Title: rect(q4title),
     q4Input: rect(q4),
     anchorEntry: rect(anchor?.closest('.timeline-entry') ?? anchor),
+    entry9: rect(document.getElementById('entry-C-1#9')?.closest('.timeline-entry') ?? null),
+    viewport: innerHeight,
     active: document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName ?? null,
     q4Value: q4?.value ?? null,
     hash: location.hash,
@@ -241,7 +243,7 @@ try {
       await evaluate("window.__c581.arrive()");
       await settled();
       await step("08-another-live-refresh");
-      const jumps = steps.slice(2).map((s, i) => ({
+      const jumps = steps.slice(2, 8).map((s, i) => ({
         from: steps[i + 1].step,
         to: s.step,
         // The script's own wheel before "整组按默认" is not a jump.
@@ -250,7 +252,32 @@ try {
             (s.scrollY - (s.scrollBeforeClick ?? steps[i + 1].scrollY)) * 100,
           ) / 100,
       }));
-      records.push({ case: prefix, viewport: { width, height }, steps, jumps });
+      // A → B → back to A without touching B, then a refresh of that visit.
+      const visible = (box) => !!box && box.bottom > 0 && box.top < height;
+      await evaluate("location.hash = '#/p/p-1/cards/C-1?at=entry-C-1%239'");
+      await settled();
+      await step("09-link-to-entry-9");
+      await evaluate("history.back()");
+      await settled();
+      await step("10-back-to-entry-8");
+      await evaluate("window.__c581.arrive()");
+      await settled();
+      await step("11-refresh-after-back");
+      const [toB, backToA, refresh] = steps.slice(8);
+      const navigation = {
+        entry9VisibleAfterLink: visible(toB.entry9),
+        entry8VisibleAfterBack: visible(backToA.anchorEntry),
+        hashAfterBack: backToA.hash,
+        refreshDelta:
+          Math.round((refresh.scrollY - backToA.scrollY) * 100) / 100,
+      };
+      records.push({
+        case: prefix,
+        viewport: { width, height },
+        steps,
+        jumps,
+        navigation,
+      });
     }
   }
   assert.equal(browser.errors.length, 0, "browser exceptions");

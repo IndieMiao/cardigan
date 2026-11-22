@@ -509,7 +509,10 @@ function CardContent({
   // back to the latest entry on an unrelated SSE update.
   // C-581: a refresh re-runs this effect and a new ResizeObserver reports once
   // on observe, so a settled location must not observe or position again.
-  const settled = useRef<string | undefined>(undefined);
+  // Settling belongs to one visit: navigating away and back (A → B → A) is a
+  // new visit and positions again; only refreshes of the same visit stay put.
+  const settled = useRef<string | undefined>(undefined),
+    visit = useRef<string | undefined>(undefined);
   useEffect(() => {
     const region = scroll.current;
     if (!region) return;
@@ -518,6 +521,10 @@ function CardContent({
     let location: string | undefined;
     if (anchor) {
       location = `${anchor}/${filters.type ?? ""}/${filters.author ?? ""}`;
+      if (visit.current !== location) {
+        visit.current = location;
+        settled.current = undefined;
+      }
       if (!anchorReady) {
         // A refresh started after the row was positioned: its follow is over.
         if (lastAnchor.current === location) settled.current = location;
@@ -548,6 +555,7 @@ function CardContent({
       // C-205: start at the decision summary; explicit timeline anchors still win.
       lastAnchor.current = undefined;
       settled.current = undefined;
+      visit.current = undefined;
       return;
     }
     let following = true;
