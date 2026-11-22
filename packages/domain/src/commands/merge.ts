@@ -906,7 +906,11 @@ export function syncSystemMerge(d: CommandDraft, card: Card) {
     requestConfirmation(d, card, target.value);
     return;
   }
-  if (q?.decider !== "system" || !["open", "resolved"].includes(q.status))
+  // C-591: a PM hold leaves a system-held confirmation snoozed; recheck it too.
+  if (
+    q?.decider !== "system" ||
+    !["open", "snoozed", "resolved"].includes(q.status)
+  )
     return;
   const reason =
     (!systemMergeEnabled(state, card)

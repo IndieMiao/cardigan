@@ -798,7 +798,7 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and a notice citing the basis (e.g. the human's answer or a review); merge stays with the system or the human.",
       resolveDelegatedDecision,
     ),
     wire(
@@ -814,7 +814,7 @@ export function managementTools(clock?: Clock) {
     wire("request_decision", "Request a scoped decision.", requestDecision),
     wire(
       "record_decision",
-      "Record a decision through PM Office.",
+      "Record a decision through PM Office. A system-held merge confirmation (decider=system) accepts only hold or request_changes, with the rationale and raw_quote citing the basis.",
       recordDecision,
     ),
     wire(

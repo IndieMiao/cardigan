@@ -365,6 +365,41 @@ try {
     );
     await feishuScene("feishu-held-restored", width, theme, "高级");
   };
+  /** C-580: which messages are pushed: the group, the drawer section, preview and saved. */
+  const feishuPush = async (width, theme, open) => {
+    await open(
+      "?feishu=connected&feishuConfig=1&feishuProjects=1#/p/p-1/settings?tab=feishu",
+      "[...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '推送的项目全部')",
+    );
+    await capture("feishu-push", width, theme);
+    await feishuPress("编辑配置");
+    await until("!!document.querySelector('[role=dialog] form')");
+    await delay(300);
+    await feishuScene("feishu-push-edit", width, theme, "推送哪些消息");
+    await run(() => {
+      const d = document.querySelector("[role=dialog]");
+      [...d.querySelectorAll("label")]
+        .find((l) => l.firstChild?.textContent?.trim() === "知会")
+        .querySelector("[role=switch]")
+        .click();
+      [...d.querySelectorAll("label")]
+        .find((l) => l.textContent.trim() === "合成项目二")
+        .querySelector("[role=checkbox]")
+        .click();
+    });
+    await until(
+      "document.querySelector('[role=dialog] [role=checkbox][aria-checked=false]') !== null",
+    );
+    await feishuScene("feishu-push-edited", width, theme, "推送哪些消息");
+    await feishuPress("预览修改");
+    await until(dialogHas("确认修改"));
+    await feishuScene("feishu-push-preview", width, theme);
+    await feishuPress("确认保存");
+    await until(
+      "!document.querySelector('[role=dialog]') && [...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent === '推送的项目Cardigan 自己')",
+    );
+    await capture("feishu-push-saved", width, theme);
+  };
   const click = (text) =>
     run((text) => {
       const button = [
@@ -442,6 +477,7 @@ try {
         );
         await capture("feishu-tests", width, theme);
         await feishuEditor(width, theme);
+        await feishuPush(width, theme, open);
         continue;
       }
       if (cardPage) {

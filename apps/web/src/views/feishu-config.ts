@@ -30,11 +30,44 @@ export type DraftField =
   | "action_ttl"
   | "binding_attempts"
   | "pending_limit";
-export type DraftSwitch = "enabled" | "lark" | "lark_app" | "quiet";
+export type DraftSwitch = "enabled" | "lark" | "lark_app" | "quiet" | PushKind;
+/** C-580: one switch per pushed item kind, in display order. */
+export const PUSH_KINDS = [
+  "push_decision",
+  "push_human_action",
+  "push_merge_confirmation",
+  "push_notice",
+] as const;
+export type PushKind = (typeof PUSH_KINDS)[number];
+export const PUSH_LABELS: Record<
+  PushKind,
+  { label: string; description: string }
+> = {
+  push_decision: { label: "待你拍板", description: "需要你拍板的事项" },
+  push_human_action: {
+    label: "待你执行",
+    description: "需要你本人去做的事项",
+  },
+  push_merge_confirmation: {
+    label: "合并确认",
+    description: "只推需要你本人确认的合并",
+  },
+  push_notice: { label: "知会", description: "PM 代拍、自动合并等通知" },
+};
+/** The projects list edit (C-580); not a switch or a text field. */
+export const PROJECTS_EDIT = "projects" as const;
+const EXCLUDED_KEY = "filter.excluded_projects";
 
 export interface FeishuDraft {
   readonly switches: Readonly<Record<DraftSwitch, boolean>>;
   readonly fields: Readonly<Record<DraftField, string>>;
+  /** C-580: projects not pushed, sorted; projects created later are pushed. */
+  readonly excluded: readonly string[];
+  /**
+   * The project choices were touched. Needed when the read hid the list (it
+   * held a credential): any save must then send a corrected list.
+   */
+  readonly projectsTouched: boolean;
   /** Masked fields (they held a credential) the person has retyped. */
   readonly retyped: ReadonlySet<DraftField>;
   readonly secrets: Readonly<
@@ -47,6 +80,10 @@ const SWITCH_KEYS: Record<DraftSwitch, string> = {
   lark: "channels.lark.enabled",
   lark_app: "channels.lark_app.enabled",
   quiet: "quiet_hours.enabled",
+  push_decision: "filter.decision",
+  push_human_action: "filter.human_action",
+  push_merge_confirmation: "filter.merge_confirmation",
+  push_notice: "filter.notice",
 };
 
 type Unit = "text" | "count" | "seconds" | "minutes" | "delays";
@@ -71,6 +108,41 @@ const FIELDS: Record<DraftField, { key: string; unit: Unit }> = {
 };
 export const draftFields = Object.keys(FIELDS) as DraftField[];
 const MAX_INT = 2147483647;
+
+/** The read's excluded projects, sorted (an unreadable value reads as none). */
+export function excludedFrom(view: FeishuSettingsView): string[] {
+  const value = view.settings[EXCLUDED_KEY];
+  return Array.isArray(value)
+    ? value.filter((id): id is string => typeof id === "string").sort()
+    : [];
+}
+/** The read hid the excluded list because a member held a credential. */
+export const excludedMasked = (view: FeishuSettingsView) =>
+  view.settings[EXCLUDED_KEY] === null;
+/**
+ * The person's own project choices against `view`: project → excluded. Only
+ * these are replayed on a newer read, so another session's choices for other
+ * projects are kept.
+ */
+export function projectEdits(view: FeishuSettingsView, draft: FeishuDraft) {
+  const before = new Set(excludedFrom(view));
+  const after = new Set(draft.excluded);
+  const out = new Map<string, boolean>();
+  for (const id of new Set([...before, ...after]))
+    if (before.has(id) !== after.has(id)) out.set(id, after.has(id));
+  return out;
+}
+/** `edits` replayed on another read's excluded list. */
+export function replayProjectEdits(
+  excluded: readonly string[],
+  edits: ReadonlyMap<string, boolean>,
+): string[] {
+  const out = new Set(excluded);
+  for (const [id, excludedNow] of edits)
+    if (excludedNow) out.add(id);
+    else out.delete(id);
+  return [...out].sort();
+}
 
 const msText = (ms: unknown, per: number) =>
   typeof ms === "number" ? String(ms / per) : "";
@@ -98,6 +170,8 @@ export function draftFrom(view: FeishuSettingsView): FeishuDraft {
     fields: Object.fromEntries(
       draftFields.map((field) => [field, text(field)]),
     ) as Record<DraftField, string>,
+    excluded: excludedFrom(view),
+    projectsTouched: false,
     retyped: new Set(),
     secrets: {},
   };
@@ -240,7 +314,9 @@ function parseField(field: DraftField, text: string): unknown {
  * the person's text is kept.
  */
 export function netEdits(view: FeishuSettingsView, draft: FeishuDraft) {
-  const out = new Set<DraftField | DraftSwitch>();
+  const out = new Set<DraftField | DraftSwitch | typeof PROJECTS_EDIT>();
+  if (projectEdits(view, draft).size || draft.projectsTouched)
+    out.add(PROJECTS_EDIT);
   for (const [k, key] of Object.entries(SWITCH_KEYS) as [DraftSwitch, string][])
     if (draft.switches[k] !== (view.settings[key] === true)) out.add(k);
   const masked = new Set(maskedFields(view));
@@ -289,7 +365,7 @@ export function withoutTypedSecrets(
 }
 
 export type DraftProblems = Partial<
-  Record<DraftField | FeishuSecretKey, string>
+  Record<DraftField | FeishuSecretKey | typeof PROJECTS_EDIT, string>
 >;
 
 /**
@@ -323,6 +399,11 @@ export function buildChange(
   }
   for (const [k, key] of Object.entries(SWITCH_KEYS))
     merged[key] = draft.switches[k as DraftSwitch];
+  const hiddenProjects = excludedMasked(view);
+  if (
+    hiddenProjects ? draft.projectsTouched : projectEdits(view, draft).size > 0
+  )
+    settings[EXCLUDED_KEY] = [...draft.excluded];
   // The attempt count follows the retry delays (server rule: delays + 1).
   if ("policy.retry_delays_ms" in settings) {
     const attempts =
@@ -400,10 +481,14 @@ export function buildChange(
     Object.keys(draft.secrets).length > 0 ||
     draft.retyped.size > 0 ||
     Object.keys(problems).length > 0;
-  if (changed)
+  if (changed) {
     for (const field of masked)
       if (!draft.retyped.has(field) && !problems[field])
         problems[field] = "原值含有凭据内容，已隐藏；保存前请重新填写。";
+    if (hiddenProjects && !draft.projectsTouched)
+      problems[PROJECTS_EDIT] =
+        "原值含有凭据内容，已隐藏；保存前请重新勾选推送的项目。";
+  }
   if (!changed || Object.keys(problems).length > 0) return { problems, dirty };
   return {
     change: {
@@ -436,6 +521,11 @@ const KEY_LABELS: Record<string, string> = {
   "channels.lark_app.action_ttl_ms": "按钮有效期",
   "channels.lark_app.binding_attempts_per_minute": "每分钟绑定尝试",
   "channels.lark_app.pending_limit": "待处理上限",
+  "filter.decision": "推送待你拍板",
+  "filter.human_action": "推送待你执行",
+  "filter.merge_confirmation": "推送合并确认",
+  "filter.notice": "推送知会",
+  [EXCLUDED_KEY]: "不推送的项目",
 };
 export const diffLabel = (key: string) =>
   key.startsWith("secrets.")
@@ -445,10 +535,19 @@ export const diffLabel = (key: string) =>
 const seconds = (ms: number) => `${ms / 1000} 秒`;
 const minutes = (ms: number) => `${ms / 60000} 分钟`;
 /** A setting's value for display (never a credential: those read as `null`). */
-export function formatValue(key: string, value: unknown): string {
+export function formatValue(
+  key: string,
+  value: unknown,
+  /** Project names by identifier; unknown identifiers show as they are. */
+  names?: ReadonlyMap<string, string>,
+): string {
   if (value === null) return "已隐藏";
   if (value === undefined || value === "") return "—";
   if (typeof value === "boolean") return value ? "开启" : "关闭";
+  if (key === EXCLUDED_KEY && Array.isArray(value))
+    return value.length
+      ? value.map((id) => names?.get(String(id)) ?? String(id)).join("、")
+      : "无";
   if (key === "policy.retry_delays_ms" && Array.isArray(value))
     return value.length
       ? value.map((ms) => seconds(Number(ms))).join("、")

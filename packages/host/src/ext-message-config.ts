@@ -7,7 +7,13 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { EXT_MESSAGE_DEFAULTS, type ExtMessagePolicy } from "@cardigan/domain";
+import {
+  EXT_MESSAGE_DEFAULTS,
+  EXT_MESSAGE_FILTER_DEFAULTS,
+  EXT_MESSAGE_KINDS,
+  type ExtMessageFilter,
+  type ExtMessagePolicy,
+} from "@cardigan/domain";
 import { parse } from "yaml";
 import { parseFeishuCredential } from "./ext-message-feishu.js";
 import { parseAppCredential } from "./feishu-inbox.js";
@@ -32,6 +38,8 @@ export interface ExtMessageConfig {
     readonly start: string;
     readonly end: string;
   };
+  /** C-580: absent only in hand-built test configurations; defaults apply. */
+  readonly filter?: ExtMessageFilter;
 }
 export type ExtMessageConfiguration =
   | { readonly status: "missing" | "invalid" }
@@ -71,6 +79,30 @@ const integer = (value: unknown, fallback: number): number => {
     return invalid();
   return n;
 };
+/** C-580: project identifiers as `cardigan project create` accepts them. */
+export const extProjectIdPattern = /^[a-z0-9][a-z0-9._-]*$/u;
+export const extMaxExcludedProjects = 256;
+function parseFilter(value: unknown): ExtMessageFilter {
+  if (value === undefined) return EXT_MESSAGE_FILTER_DEFAULTS;
+  const raw = record(value);
+  const kinds = Object.fromEntries(
+    EXT_MESSAGE_KINDS.map((kind) => [
+      kind,
+      bool(raw[kind], EXT_MESSAGE_FILTER_DEFAULTS.kinds[kind]),
+    ]),
+  ) as unknown as ExtMessageFilter["kinds"];
+  const excluded = raw.excluded_projects ?? [];
+  if (
+    !Array.isArray(excluded) ||
+    excluded.length > extMaxExcludedProjects ||
+    new Set(excluded).size !== excluded.length ||
+    !excluded.every(
+      (id) => typeof id === "string" && extProjectIdPattern.test(id),
+    )
+  )
+    return invalid();
+  return { kinds, excluded_projects: excluded as string[] };
+}
 /** Check the opened file, not a path stat before an attacker could swap it. */
 function privateText(
   path: string,
@@ -95,6 +127,19 @@ function privateText(
     return readFileSync(fd, "utf8");
   } finally {
     closeSync(fd);
+  }
+}
+/**
+ * C-580: only the push filter of the file currently published at `path`, or
+ * undefined when it cannot be read. Never reads credential files.
+ */
+export function loadExtMessageFilter(
+  path: string,
+): ExtMessageFilter | undefined {
+  try {
+    return parseFilter(record(parse(privateText(path))).filter);
+  } catch {
+    return undefined;
   }
 }
 export function loadExtMessageConfig(
@@ -230,6 +275,7 @@ export function loadExtMessageConfig(
         channels.lark_app = { enabled: true };
       }
     }
+    const filter = parseFilter(raw.filter);
     let quiet_hours: ExtMessageConfig["quiet_hours"];
     if (raw.quiet_hours !== undefined) {
       const quiet = record(raw.quiet_hours);
@@ -262,6 +308,7 @@ export function loadExtMessageConfig(
         workbench_url: base,
         channels,
         policy,
+        filter,
         ...(quiet_hours ? { quiet_hours } : {}),
       },
     };

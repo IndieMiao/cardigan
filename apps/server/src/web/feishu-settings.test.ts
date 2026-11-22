@@ -13,12 +13,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { notices } from "@cardigan/domain";
 import {
   ExtMessageSender,
   extFingerprints,
+  LiveExtMessageSender,
   loadExtMessageConfig,
 } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
+  activateExtChannels,
   extChannelActivation,
   extEventWatermark,
   Store,
@@ -584,3 +588,307 @@ test("a masked link cannot be sent or unmasked by rotating or clearing the crede
   );
   expect(JSON.stringify(await state())).not.toContain(sign);
 });
+test("C-580 push filter reads its defaults, saves through preview and confirm, and keeps channel epochs", async () => {
+  fixture();
+  const s = await state();
+  expect(
+    Object.fromEntries(
+      Object.entries(s.settings).filter(([k]) => k.startsWith("filter.")),
+    ),
+  ).toEqual({
+    "filter.decision": true,
+    "filter.human_action": true,
+    "filter.merge_confirmation": true,
+    "filter.notice": false,
+    "filter.excluded_projects": [],
+  });
+  const before = loadExtMessageConfig(path);
+  const change = {
+    settings: {
+      "filter.notice": true,
+      "filter.decision": false,
+      "filter.excluded_projects": ["sensen-godot"],
+    },
+  };
+  const p = await preview(change);
+  expect(p.diff).toEqual([
+    { key: "filter.decision", before: true, after: false },
+    { key: "filter.notice", before: false, after: true },
+    {
+      key: "filter.excluded_projects",
+      before: [],
+      after: ["sensen-godot"],
+    },
+  ]);
+  expect((await confirm(p)).status).toBe(200);
+  expect(parse(settings()).filter).toEqual({
+    notice: true,
+    decision: false,
+    excluded_projects: ["sensen-godot"],
+  });
+  const after = loadExtMessageConfig(path);
+  expect(after).toMatchObject({
+    status: "loaded",
+    config: {
+      filter: {
+        kinds: {
+          decision: false,
+          human_action: true,
+          merge_confirmation: true,
+          notice: true,
+        },
+        excluded_projects: ["sensen-godot"],
+      },
+    },
+  });
+  // The filter is not a channel rotation: pending retries keep their epoch.
+  expect(extFingerprints(after, true)).toEqual(extFingerprints(before, true));
+  const reread = await state();
+  expect(reread.settings["filter.notice"]).toBe(true);
+  expect(reread.settings["filter.excluded_projects"]).toEqual(["sensen-godot"]);
+});
+test.each([
+  { "filter.notice": "yes" },
+  { "filter.excluded_projects": "cardigan" },
+  { "filter.excluded_projects": ["Cardigan"] },
+  { "filter.excluded_projects": ["../escape"] },
+  { "filter.excluded_projects": ["cardigan", "cardigan"] },
+  { "filter.projects": ["cardigan"] },
+])(
+  "C-580 an invalid push filter change is refused before any write: %j",
+  async (settings) => {
+    const original = fixture();
+    const { version } = await state();
+    const r = await post("preview", { version, change: { settings } });
+    expect(r.status).toBe(400);
+    expect(readFileSync(path, "utf8")).toBe(original);
+  },
+);
+test("C-580 a kind switched back on is cut off at the save, not at the later background reload", async () => {
+  fixture();
+  const db = h.store.database;
+  const mark = () =>
+    db
+      .prepare(
+        "SELECT enabled,watermark FROM ext_message_filter_marks WHERE scope='kind:notice'",
+      )
+      .get();
+  new ExtMessageSender({
+    store: h.store,
+    configuration: loadExtMessageConfig(path),
+    startApplication: () => undefined,
+  }).recordStatus();
+  expect(mark()).toEqual({ enabled: 0, watermark: 0 });
+  const p = await preview({ settings: { "filter.notice": true } });
+  expect((await confirm(p)).status).toBe(200);
+  const atSave = extEventWatermark(db);
+  expect(mark()).toEqual({ enabled: 1, watermark: atSave });
+  // Facts recorded after the save are after the cutoff; a background reload
+  // of the same publication keeps it.
+  h.store.uow.run((tx) =>
+    tx.events.append(project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project_id),
+      type: "host_role_upgraded",
+      actor: { kind: "system", project_id },
+      created_at: new Date().toISOString(),
+      payload: {},
+    }),
+  );
+  new ExtMessageSender({
+    store: h.store,
+    configuration: loadExtMessageConfig(path),
+    startApplication: () => undefined,
+  }).recordStatus();
+  expect(mark()).toEqual({ enabled: 1, watermark: atSave });
+});
+test("C-580 an excluded project list holding a credential is hidden on read and cannot be previewed until corrected", async () => {
+  fixture();
+  // A hand-edited list whose member equals the synthetic tenant key.
+  writeFileSync(
+    path,
+    `${settings()}filter:\n  excluded_projects: [cardigan, ${tenant}]\n`,
+    { mode: 0o600 },
+  );
+  const read = await state();
+  expect(read.settings["filter.excluded_projects"]).toBeNull();
+  const r = await get();
+  expect(r.body).not.toContain(tenant);
+  const { version } = read;
+  const unsafe = await post("preview", {
+    version,
+    change: { settings: { "filter.notice": true } },
+  });
+  expect(unsafe.status).toBe(400);
+  expect(unsafe.body).not.toContain(tenant);
+  const fixed = await preview({
+    settings: { "filter.excluded_projects": ["cardigan"] },
+  });
+  expect(JSON.stringify(fixed)).not.toContain(tenant);
+  expect(fixed.diff).toEqual([
+    { key: "filter.excluded_projects", before: null, after: ["cardigan"] },
+  ]);
+});
+test("C-580 any project identifier the CLI can create can be excluded", async () => {
+  fixture();
+  const long = `p${"x".repeat(200)}`;
+  const p = await preview({ settings: { "filter.excluded_projects": [long] } });
+  expect((await confirm(p)).status).toBe(200);
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: { filter: { excluded_projects: [long] } },
+  });
+});
+
+// C-580 (V-2900): the filter cutoff is the save that published it.
+const makeNotice = () =>
+  h.store.uow.run((tx) =>
+    tx.events.append(project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project_id),
+      type: "host_role_upgraded",
+      actor: { kind: "system", project_id },
+      created_at: new Date().toISOString(),
+      payload: {},
+    }),
+  );
+const pushSender = () =>
+  new ExtMessageSender({
+    store: h.store,
+    configuration: loadExtMessageConfig(path),
+    startApplication: () => undefined,
+    adapters: { lark: () => ({ send: mock.send }) },
+  });
+test("C-580 the first save after upgrade that switches notices on does not send notices from before it", async () => {
+  fixture();
+  h.store.createProject({ id: project_id, name: "C-580 fixture" });
+  // A channel already active before the upgrade; no filter record yet.
+  h.store.uow.run((tx) =>
+    activateExtChannels(
+      h.store.database,
+      tx,
+      extFingerprints(loadExtMessageConfig(path), true),
+      new Date().toISOString(),
+    ),
+  );
+  makeNotice();
+  const p = await preview({ settings: { "filter.notice": true } });
+  expect((await confirm(p)).status).toBe(200);
+  makeNotice();
+  const sender = pushSender();
+  sender.recordStatus();
+  await sender.tick();
+  expect(mock.send).toHaveBeenCalledTimes(1);
+});
+test.each(["web", "background"])(
+  "C-580 an applied save recovered first by the %s keeps the save as the cutoff",
+  async (first) => {
+    fixture();
+    const db = h.store.database;
+    h.store.createProject({ id: project_id, name: "C-580 fixture" });
+    pushSender().recordStatus();
+    makeNotice();
+    const p = await preview({ settings: { "filter.notice": true } });
+    // The publication renames the file, then its database commit fails.
+    db.exec(
+      `CREATE TABLE c580_abort(id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+       CREATE TRIGGER c580_reject_commit AFTER UPDATE OF result ON feishu_settings_requests
+       WHEN NEW.result='applied' BEGIN INSERT INTO c580_abort VALUES('missing'); END;`,
+    );
+    expect((await confirm(p)).status).toBe(200);
+    expect(JSON.parse(audit())).toMatchObject([{ result: "prepared" }]);
+    makeNotice(); // after the save, before recovery
+    db.exec("DROP TRIGGER c580_reject_commit");
+    if (first === "web") await state();
+    const sender = pushSender();
+    sender.recordStatus();
+    if (first === "background") await state();
+    makeNotice();
+    await sender.tick();
+    expect(mock.send).toHaveBeenCalledTimes(2);
+  },
+);
+test("C-580 excluded project identifiers are stored only as digests", async () => {
+  const original = fixture();
+  // A hand-edited list whose member equals the synthetic tenant key.
+  writeFileSync(
+    path,
+    `${original}filter:\n  excluded_projects: [${tenant}]\n`,
+    { mode: 0o600 },
+  );
+  pushSender().recordStatus();
+  writeFileSync(path, original, { mode: 0o600 });
+  pushSender().recordStatus();
+  const rows = JSON.stringify(
+    h.store.database.prepare("SELECT * FROM ext_message_filter_marks").all(),
+  );
+  expect(rows).toContain("project:");
+  expect(rows).not.toContain(tenant);
+});
+test.each([
+  { defer: false, muted: true },
+  { defer: true, muted: true },
+  { defer: true, muted: false },
+])(
+  "C-580 a send in flight while the filter is saved (recovery pending: $defer, its kind switched off: $muted)",
+  async ({ defer, muted }) => {
+    fixture();
+    h.store.createProject({ id: project_id, name: "C-580 fixture" });
+    const db = h.store.database;
+    const started = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<"permanent">();
+    const live = new LiveExtMessageSender(path, {
+      store: h.store,
+      startApplication: () => undefined,
+      adapters: {
+        lark: () => ({
+          send: () => {
+            started.resolve();
+            return reply.promise;
+          },
+        }),
+      },
+    });
+    live.start();
+    try {
+      const on = await preview({ settings: { "filter.notice": true } });
+      expect((await confirm(on)).status).toBe(200);
+      await live.tick();
+      makeNotice();
+      const sending = live.tick();
+      await started.promise;
+      const off = await preview({
+        settings: muted
+          ? { "filter.notice": false }
+          : { "filter.decision": false },
+      });
+      // Optionally: the file is published but its database commit fails.
+      if (defer)
+        db.exec(
+          `CREATE TABLE c580_late(id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+           CREATE TRIGGER c580_late_reject AFTER UPDATE OF result ON feishu_settings_requests
+           WHEN NEW.result='applied' BEGIN INSERT INTO c580_late VALUES('missing'); END;`,
+        );
+      expect((await confirm(off)).status).toBe(200);
+      if (defer) db.exec("DROP TRIGGER c580_late_reject");
+      reply.resolve("permanent");
+      await sending;
+      await state(); // recovery, when pending
+      await live.tick();
+      const external = h.store.uow
+        .read((tx) => notices(loadCommandState(tx, project_id)))
+        .filter((n) => n.kind === "external_message");
+      expect(external).toHaveLength(muted ? 0 : 1);
+      expect(
+        db
+          .prepare(
+            "SELECT status,attempts FROM ext_message_outbox WHERE item_kind='notice'",
+          )
+          .all(),
+      ).toEqual([{ status: muted ? "skipped" : "failed", attempts: 1 }]);
+    } finally {
+      reply.resolve("permanent");
+      await live.stop();
+    }
+  },
+);

@@ -16,7 +16,11 @@ import {
   buildExtMessage,
   buildExtMessageDigest,
   EXT_MESSAGE_DEFAULTS,
+  EXT_MESSAGE_FILTER_DEFAULTS,
+  EXT_MESSAGE_KINDS,
+  type ExtMessageFilter,
   type ExtMessageItem,
+  extMessageAllowed,
   extMessageItems,
 } from "./ext-message.js";
 
@@ -198,6 +202,97 @@ test("projection follows current handled/readiness state, preferred title and al
   expect(extMessageItems(sensitive, project)[0]?.sensitive).toBe(true);
   expect(
     extMessageItems({ ...state, cards: [] }, project).every((i) => i.sensitive),
+  ).toBe(true);
+});
+test("C-580 default filter pushes decisions, actions and human merge confirmations, never notices", () => {
+  expect(EXT_MESSAGE_FILTER_DEFAULTS).toEqual({
+    kinds: {
+      decision: true,
+      human_action: true,
+      merge_confirmation: true,
+      notice: false,
+    },
+    excluded_projects: [],
+  });
+  expect(
+    EXT_MESSAGE_KINDS.filter((kind) =>
+      extMessageAllowed(EXT_MESSAGE_FILTER_DEFAULTS, { ...item, kind }),
+    ),
+  ).toEqual(["decision", "human_action", "merge_confirmation"]);
+  // A project created after the filter was saved is pushed by default.
+  expect(
+    extMessageAllowed(EXT_MESSAGE_FILTER_DEFAULTS, {
+      kind: "decision",
+      project_id: "created-later",
+    }),
+  ).toBe(true);
+});
+test("C-580 kinds and projects filter independently; excluding one project never mutes another", () => {
+  const filter: ExtMessageFilter = {
+    kinds: {
+      decision: false,
+      human_action: true,
+      merge_confirmation: true,
+      notice: true,
+    },
+    excluded_projects: ["sensen-godot"],
+  };
+  const allowed = (kind: ExtMessageItem["kind"], project_id: string) =>
+    extMessageAllowed(filter, { kind, project_id });
+  expect(allowed("decision", "cardigan")).toBe(false);
+  expect(allowed("notice", "cardigan")).toBe(true);
+  expect(allowed("human_action", "cardigan")).toBe(true);
+  for (const kind of EXT_MESSAGE_KINDS)
+    expect(allowed(kind, "sensen-godot")).toBe(false);
+  // Prefixes and lookalikes are distinct projects.
+  expect(allowed("notice", "sensen")).toBe(true);
+  expect(allowed("notice", "sensen-godot-2")).toBe(true);
+  // A missing kind (older or hand-edited configuration) is not pushed.
+  expect(
+    extMessageAllowed(
+      {
+        kinds: { decision: true } as ExtMessageFilter["kinds"],
+        excluded_projects: [],
+      },
+      { kind: "notice", project_id: "cardigan" },
+    ),
+  ).toBe(false);
+});
+test("C-580 merge confirmation items are only those the human decides", () => {
+  const merge = {
+    ...decision,
+    trigger: "merge_confirmation" as const,
+    question: "将 C-1 合并到 main？",
+  };
+  const state = {
+    ...fixture(),
+    decisions: [
+      merge,
+      {
+        ...merge,
+        id: id("decision", 2),
+        key: id("decision", 2),
+        decider: "system" as const,
+      },
+      {
+        ...merge,
+        id: id("decision", 3),
+        key: id("decision", 3),
+        decider: "role:pm" as const,
+      },
+    ],
+    events: [
+      event("decision_requested", { decision_id: "Q-1" }, 1),
+      event("system_merge_pending", { decision_id: "Q-2" }, 2),
+      event("decision_requested", { decision_id: "Q-3" }, 3),
+    ],
+  };
+  const items = extMessageItems(state, state.project_id);
+  expect(items.map((i) => [i.item_id, i.kind])).toEqual([
+    ["Q-1", "merge_confirmation"],
+  ]);
+  expect(
+    items.every((i) => extMessageAllowed(EXT_MESSAGE_FILTER_DEFAULTS, i)),
   ).toBe(true);
 });
 test("projection preserves creation, readiness and repeated routing times without exporting them", () => {

@@ -20,7 +20,7 @@ import {
   fakeFeishuSettings,
   syntheticFeishuView,
 } from "../testing/feishu-settings.js";
-import { fakeClient } from "../testing/fixtures.js";
+import { fakeClient, project } from "../testing/fixtures.js";
 import { FeishuSettings } from "./FeishuSettings.js";
 import { buildChange, draftFrom } from "./feishu-config.js";
 import {
@@ -93,7 +93,7 @@ async function confirm() {
   });
 }
 
-test("the server read fills six read-only groups; 高级 stays folded", async () => {
+test("the server read fills seven read-only groups; 高级 stays folded", async () => {
   const { client } = setup();
   render(<FeishuSettings client={client} />);
   await screen.findByText("已绑定");
@@ -101,6 +101,7 @@ test("the server read fills six read-only groups; 高级 stays folded", async ()
   expect(groupTitles()).toEqual([
     "状态",
     "渠道",
+    "推送哪些消息",
     "免打扰",
     "限速",
     "凭据",
@@ -914,4 +915,240 @@ test("a late success does not clear a newer draft held after it", async () => {
   expect(
     screen.getAllByText("飞书配置有未确认的修改，还没有保存。"),
   ).toHaveLength(1);
+});
+
+// C-580: which messages are pushed (synthetic server, no outside service).
+const pushRows = () =>
+  [
+    ...screen
+      .getByRole("region", { name: "推送哪些消息" })
+      .querySelectorAll("[data-settings-row]"),
+  ].map((row) => row.textContent);
+const otherProject = {
+  id: "p-2",
+  name: "合成项目二",
+  created_at: "2026-01-01T00:00:00.000Z",
+};
+
+test("C-580 the push group names each kind with its default and the pushed projects", async () => {
+  const { client } = setup(
+    {},
+    { projects: async () => [project, otherProject] },
+  );
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目全部"));
+  expect(pushRows()).toEqual([
+    "待你拍板需要你拍板的事项开启",
+    "待你执行需要你本人去做的事项开启",
+    "合并确认只推需要你本人确认的合并开启",
+    "知会PM 代拍、自动合并等通知关闭",
+    "推送的项目全部",
+  ]);
+});
+
+test("C-580 push switches and project choices save through preview and confirm, then read back", async () => {
+  const { client, server, reads } = setup(
+    {},
+    { projects: async () => [project, otherProject] },
+  );
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目全部"));
+  await openEditor();
+  const notice = within(dialog()).getByRole("switch", { name: "知会" });
+  expect(notice.getAttribute("aria-checked")).toBe("false");
+  // The kind is described next to its switch.
+  expect(
+    document.getElementById(notice.getAttribute("aria-describedby") ?? "")
+      ?.textContent,
+  ).toBe("PM 代拍、自动合并等通知");
+  fireEvent.click(notice);
+  const second = within(dialog()).getByRole("checkbox", {
+    name: "合成项目二",
+  });
+  expect(second.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(second);
+  await preview();
+  expect(server.log.previews).toEqual([
+    {
+      settings: {
+        "filter.notice": true,
+        "filter.excluded_projects": ["p-2"],
+      },
+    },
+  ]);
+  const review = within(dialog());
+  expect(review.getByText("推送知会")).toBeTruthy();
+  expect(review.getByText("不推送的项目")).toBeTruthy();
+  expect(server.log.confirms).toHaveLength(0);
+  const before = reads.mock.calls.length;
+  await confirm();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(reads.mock.calls.length).toBeGreaterThan(before));
+  expect(server.view.settings["filter.notice"]).toBe(true);
+  await waitFor(() =>
+    expect(pushRows()).toEqual([
+      "待你拍板需要你拍板的事项开启",
+      "待你执行需要你本人去做的事项开启",
+      "合并确认只推需要你本人确认的合并开启",
+      "知会PM 代拍、自动合并等通知开启",
+      "推送的项目Cardigan 自己",
+    ]),
+  );
+  // A new editor starts from the saved read.
+  await openEditor();
+  expect(
+    within(dialog())
+      .getByRole("checkbox", { name: "合成项目二" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+test("C-580 a project checked again after unchecking is no edit; a stale read keeps only the project edit", async () => {
+  const { client, server } = setup(
+    {},
+    { projects: async () => [project, otherProject] },
+  );
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目全部"));
+  await openEditor();
+  const first = within(dialog()).getByRole("checkbox", {
+    name: "Cardigan 自己",
+  });
+  fireEvent.click(first);
+  fireEvent.click(first);
+  expect(
+    within(dialog())
+      .getByRole("button", { name: "预览修改" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  fireEvent.click(
+    within(dialog()).getByRole("checkbox", { name: "合成项目二" }),
+  );
+  server.changeElsewhere({ "filter.decision": false });
+  await preview();
+  await act(async () => {
+    fireEvent.click(
+      within(dialog()).getByRole("button", { name: "刷新并重新预览" }),
+    );
+  });
+  expect(server.log.previews.at(-1)).toEqual({
+    settings: { "filter.excluded_projects": ["p-2"] },
+  });
+});
+
+test("C-580 a refused push filter save explains why and keeps the edits", async () => {
+  const { client, server } = setup(
+    {
+      confirmError: () =>
+        new ApiError(400, "invalid_settings", "飞书配置或凭据无效"),
+    },
+    { projects: async () => [project, otherProject] },
+  );
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目全部"));
+  await openEditor();
+  fireEvent.click(within(dialog()).getByRole("switch", { name: "待你拍板" }));
+  fireEvent.click(
+    within(dialog()).getByRole("checkbox", { name: "合成项目二" }),
+  );
+  await preview();
+  await confirm();
+  expect(within(dialog()).getByRole("alert").textContent).toContain("没有保存");
+  expect(server.view.settings["filter.decision"]).toBe(true);
+  expect(
+    within(dialog())
+      .getByRole("switch", { name: "待你拍板" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+  expect(
+    within(dialog())
+      .getByRole("checkbox", { name: "合成项目二" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+test("C-580 change rules: an excluded project no longer listed stays choosable by its identifier", () => {
+  const view = {
+    ...syntheticFeishuView(),
+    settings: {
+      ...syntheticFeishuView().settings,
+      "filter.excluded_projects": ["retired", "p-2"],
+    },
+  };
+  const draft = draftFrom(view);
+  expect(draft.excluded).toEqual(["p-2", "retired"]);
+  expect(buildChange(view, draft, {}).change).toBeUndefined();
+  expect(buildChange(view, { ...draft, excluded: ["p-2"] }, {}).change).toEqual(
+    { settings: { "filter.excluded_projects": ["p-2"] } },
+  );
+});
+
+test("C-580 a stale read keeps another session's project choices and replays only mine", async () => {
+  const { client, server } = setup(
+    {},
+    { projects: async () => [project, otherProject] },
+  );
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目全部"));
+  await openEditor();
+  fireEvent.click(
+    within(dialog()).getByRole("checkbox", { name: "合成项目二" }),
+  );
+  // Another session excluded the first project meanwhile.
+  server.changeElsewhere({ "filter.excluded_projects": ["p-1"] });
+  await preview();
+  await act(async () => {
+    fireEvent.click(
+      within(dialog()).getByRole("button", { name: "刷新并重新预览" }),
+    );
+  });
+  expect(server.log.previews.at(-1)).toEqual({
+    settings: { "filter.excluded_projects": ["p-1", "p-2"] },
+  });
+  // The preview names the projects as the choices do.
+  const review = within(dialog());
+  expect(review.getByText("Cardigan 自己")).toBeTruthy();
+  expect(review.getByText("Cardigan 自己、合成项目二")).toBeTruthy();
+});
+
+test("C-580 a hidden project list must be chosen again before any save", async () => {
+  const hidden = syntheticFeishuView();
+  const server = fakeFeishuSettings({
+    ...hidden,
+    settings: { ...hidden.settings, "filter.excluded_projects": null },
+  });
+  const client = fakeClient({
+    feishuBinding: async () => ({ state: "connected", bound: true }),
+    ...server.client,
+    projects: async () => [project, otherProject],
+  });
+  render(<FeishuSettings client={client} />);
+  await screen.findByText("每分钟 20 条");
+  await waitFor(() => expect(pushRows().at(-1)).toBe("推送的项目已隐藏"));
+  await openEditor();
+  fireEvent.click(within(dialog()).getByRole("switch", { name: "知会" }));
+  await preview();
+  expect(server.log.previews).toEqual([]);
+  expect(
+    within(dialog()).getByText(
+      "原值含有凭据内容，已隐藏；保存前请重新勾选推送的项目。",
+    ),
+  ).toBeTruthy();
+  fireEvent.click(
+    within(dialog()).getByRole("checkbox", { name: "合成项目二" }),
+  );
+  await preview();
+  expect(server.log.previews).toEqual([
+    {
+      settings: {
+        "filter.notice": true,
+        "filter.excluded_projects": ["p-2"],
+      },
+    },
+  ]);
 });

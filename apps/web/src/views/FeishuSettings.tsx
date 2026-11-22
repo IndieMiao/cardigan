@@ -78,6 +78,9 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
   }, [client]);
   const resource = useResource(load, 0, visible);
   const settings = useFeishuSettingsReader(client, visible);
+  // C-580: project names for the push filter; a failed read keeps identifiers.
+  const loadProjects = useCallback(() => client.projects(), [client]);
+  const projects = useResource(loadProjects, 0, visible);
   const config = settings.data;
   const [editing, setEditing] = useState(false);
   // V-2857: a draft held when the settings page was left continues here.
@@ -293,6 +296,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           config={config}
           bound={data?.bound}
           tests={tests}
+          projects={projects.data}
           onTest={(channel) => void sendTest(channel)}
         />
       )}
@@ -303,6 +307,7 @@ export function FeishuSettings({ client }: { client: CardiganClient }) {
           reread={settings.read}
           hidden={!visible}
           initial={held}
+          projects={projects.data}
           onSaved={() => {
             setHeld(undefined);
             setEditing(false);

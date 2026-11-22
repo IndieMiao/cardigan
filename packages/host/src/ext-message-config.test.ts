@@ -191,3 +191,49 @@ test("an unreadable private application secret never disables the independent ol
   });
   expect(JSON.stringify(c)).not.toContain("SYNTHETIC_PRIVATE");
 });
+test("C-580 the push filter defaults to decisions, actions and merge confirmations without notices", () => {
+  write("enabled: false\n");
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: {
+      filter: {
+        kinds: {
+          decision: true,
+          human_action: true,
+          merge_confirmation: true,
+          notice: false,
+        },
+        excluded_projects: [],
+      },
+    },
+  });
+  write(
+    "enabled: false\nfilter:\n  decision: false\n  notice: true\n  excluded_projects: [sensen-godot]\n",
+  );
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: {
+      filter: {
+        kinds: {
+          decision: false,
+          human_action: true,
+          merge_confirmation: true,
+          notice: true,
+        },
+        excluded_projects: ["sensen-godot"],
+      },
+    },
+  });
+});
+test.each([
+  "filter: []",
+  "filter: { notice: 'yes' }",
+  "filter: { excluded_projects: cardigan }",
+  "filter: { excluded_projects: [Cardigan] }",
+  "filter: { excluded_projects: ['../x'] }",
+  "filter: { excluded_projects: [cardigan, cardigan] }",
+  "filter: { excluded_projects: [1] }",
+])("C-580 an invalid push filter fails closed: %s", (extra) => {
+  write(`enabled: false\n${extra}\n`);
+  expect(loadExtMessageConfig(path)).toEqual({ status: "invalid" });
+});
