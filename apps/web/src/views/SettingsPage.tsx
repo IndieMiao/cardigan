@@ -171,10 +171,6 @@ export function SettingsPage({
           >
             偏好
           </SettingsNavItem>
-          {/* C-511: the old entry, kept; limits are edited per machine now. */}
-          <SettingsNavItem current={false} onClick={() => setTab("machines")}>
-            并发与容量
-          </SettingsNavItem>
           <SettingsNavItem
             current={tab === "authorization"}
             onClick={() => setTab("authorization")}
