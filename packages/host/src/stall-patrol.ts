@@ -13,6 +13,8 @@ import {
   observedLocalExitCause,
   type ProjectId,
   type Runtime,
+  type RuntimeRef,
+  STANDING_PM_STALL_EVENTS,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -30,6 +32,7 @@ import {
 } from "./dispatch-stalls.js";
 import { stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
+import { StandingPmRecovery } from "./standing-pm-recovery.js";
 
 function turnKey(s: DispatchStall) {
   return s.retirement_handoff ? s.cause_id : s.system_finished_run_id;
@@ -151,8 +154,24 @@ function oldestPerGroup(causes: DispatchStall[]) {
   return rows;
 }
 
+/** C-596 already replaced this PM's session after the bell expired: the old turn is moot. */
+function standingRestarted(state: CommandState, stall: DispatchStall) {
+  const due = eventById(state.events, stall.cause_id);
+  return (
+    !!due &&
+    eventsOfType(state.events, STANDING_PM_STALL_EVENTS.restart).some(
+      (e) =>
+        e.actor.kind === "system" &&
+        (e.payload as { assignment_id?: string }).assignment_id ===
+          stall.assignment_id &&
+        e.created_at >= due.created_at,
+    )
+  );
+}
+
 /** Called by the existing host service's tick. Reads never publish or start a recovery. */
 export class StallPatrol {
+  private readonly standingPm: StandingPmRecovery;
   constructor(
     private store: Store,
     private clock: Clock,
@@ -162,7 +181,17 @@ export class StallPatrol {
       machine: Assignment["machine_id"],
     ) => ExecutionConfig | undefined,
     private signal: AbortSignal,
-  ) {}
+    owns?: (ref: RuntimeRef) => boolean,
+  ) {
+    this.standingPm = new StandingPmRecovery(
+      store,
+      clock,
+      runtime,
+      signal,
+      undefined,
+      owns,
+    );
+  }
   private causes(state: CommandState) {
     const handoffs = dispatchHandoffs(state);
     const live = this.store.listNotifications({
@@ -390,10 +419,11 @@ export class StallPatrol {
           : !!stall.system_finished_run_id &&
               p.system_finished_run_id === stall.system_finished_run_id;
       });
-    const handled = (s: CommandState) => recorded(s, "host_ops_action_taken");
+    const handled = (s: CommandState) =>
+      recorded(s, "host_ops_action_taken") || standingRestarted(s, stall);
     // A failed automatic attempt is neither a recovery nor Ops pickup. Hand the
     // incident off once, without starting a second stop for the same turn.
-    if (a && handled(state)) {
+    if (a && recorded(state, "host_ops_action_taken")) {
       const failure = failedAutomaticAttempt(state, (e) =>
         incidentMatches(stall, e.payload),
       );
@@ -420,7 +450,7 @@ export class StallPatrol {
         });
       return;
     }
-    if (!a || hostOpsPending(state.events, a.id)) return;
+    if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
     const view = await this.evidence(state, a, stall);
     let reason =
       stall.restart_blocked ?? (!view.can_restart ? "unsafe_evidence" : null);
@@ -550,6 +580,7 @@ export class StallPatrol {
       seen.add(key);
       await this.recoverTurn(state, stall, snapshot);
     }
+    if (!this.signal.aborted) await this.standingPm.tick(project, snapshot);
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;
     // A withdrawn automatic attempt is left to Ops; never retry it here.
     const attempted = new Set(

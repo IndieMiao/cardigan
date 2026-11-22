@@ -180,6 +180,7 @@ export class HostOpsService {
       options.runtime,
       (project, machine) => this.stallExecution(project, machine),
       this.contextAbort.signal,
+      (ref) => options.ownsRuntimeRef?.(ref) !== false,
     );
   }
   /** A project-local worker may have a different account and workspace root
@@ -1571,7 +1572,14 @@ export class HostOpsService {
       // already be ACKed; settlement rechecks it before allowing a new Run.
       if (!(turnRecovery && stopStarted) && !mayStop()) return;
       if (foreign) {
-        if (action.automatic_context_restart || action.dispatch_stall_id) {
+        // Automatic sources never ask the human to confirm the exit: a
+        // C-596 restart stays pending (one executor) and the standing-PM
+        // patrol hands it to host operations.
+        if (
+          action.automatic_context_restart ||
+          action.dispatch_stall_id ||
+          action.standing_pm_stall
+        ) {
           fail("当前主机无法确认旧会话退出");
           return;
         }

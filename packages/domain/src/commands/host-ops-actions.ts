@@ -195,6 +195,8 @@ export interface HostOpsActionParams {
   /** Internal system path only; never accepted by the MCP tool. */
   readonly automatic_context_restart?: boolean;
   readonly dispatch_stall_id?: string;
+  /** C-596 system path only; never accepted by the MCP tool. */
+  readonly standing_pm_stall?: boolean;
   /** Host-resolved original notification; never an operator-supplied event. */
   readonly review_trigger_id?: EventId;
   readonly tool: HostOpsExecutionTool;
@@ -396,7 +398,7 @@ export function beginHostOpsAction(
 ) {
   return command(state, actor, p.tool, ports, (d) => {
     ensure(
-      !p.automatic_context_restart,
+      !p.automatic_context_restart && !p.standing_pm_stall,
       "unauthorized",
       "Automatic restarts are system-only",
     );
@@ -411,9 +413,15 @@ export function beginHostOpsActionInDraft(
 ) {
   const state = d.state;
   ensure(
-    !p.automatic_context_restart || d.actor.kind === "system",
+    (!p.automatic_context_restart && !p.standing_pm_stall) ||
+      d.actor.kind === "system",
     "unauthorized",
     "Automatic restarts are system-only",
+  );
+  ensure(
+    !p.standing_pm_stall || p.tool === "host_ops_restart_standing_pm",
+    "validation_failed",
+    "Only a standing PM restart can carry the stall source",
   );
   const { assignment: a, run } = target(d, p);
   const cause = eventById(state.events, p.dispatch_stall_id);
@@ -526,6 +534,7 @@ export function beginHostOpsActionInDraft(
     ...(handoff ? { retirement_handoff: handoff } : {}),
     ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
+    ...(p.standing_pm_stall ? { standing_pm_stall: true } : {}),
     ...(p.upstream_incident_id
       ? { upstream_incident_id: p.upstream_incident_id }
       : {}),
