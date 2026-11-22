@@ -162,7 +162,7 @@ export const transitionTables: {
       release: "released",
     },
     lost: {
-      reconnected: "idle",
+      loss_corrected: "idle",
       session_replaced: "idle",
       release: "released",
     },

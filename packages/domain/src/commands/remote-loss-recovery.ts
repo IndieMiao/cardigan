@@ -24,7 +24,7 @@ export function correctRemoteLoss(d: CommandDraft, loss: RemoteWorkerLoss) {
     "stale_target",
     "Lost session is no longer current",
   );
-  const idle = unwrap(transition("runtime", a.runtime_state, "reconnected"));
+  const idle = unwrap(transition("runtime", a.runtime_state, "loss_corrected"));
   d.put("assignments", {
     ...a,
     runtime_state: runs.length

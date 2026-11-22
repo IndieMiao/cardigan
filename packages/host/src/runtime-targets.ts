@@ -276,7 +276,11 @@ export class RuntimeTargets implements Runtime {
         const old =
           r.launch_publication?.target ??
           (r.status !== "queued" ? a.runtime_ref?.target : undefined);
-        return old && old.fingerprint !== fingerprint;
+        return (
+          old &&
+          old.fingerprint !== fingerprint &&
+          r.session_environment_binding !== fingerprint
+        );
       }),
     );
   }
@@ -357,6 +361,80 @@ export class RuntimeTargets implements Runtime {
     if (assignment.runtime_ref)
       this.targetForRef(assignment.runtime_ref, project);
     return target;
+  }
+  changedSessionEnvironment(project: ProjectId, a: Assignment) {
+    if (!a.runtime_ref?.target || a.machine_id === "local") return;
+    try {
+      const fp = this.resolve(project, a.machine_id).execution.target
+        ?.fingerprint;
+      return fp !== a.runtime_ref.target.fingerprint ? fp : undefined;
+    } catch {
+      return "unverified";
+    } // unconfigured refs must not take the replacement path
+  }
+  private sessionTarget(project: ProjectId, a: Assignment): Target {
+    const ref = a.runtime_ref;
+    if (!ref || !this.changedSessionEnvironment(project, a))
+      return this.launchTarget(project, a);
+    const current = this.resolve(project, a.machine_id);
+    const pinned = this.targetForRef(ref, project);
+    const owner = this.options.store.uow.read((tx) => {
+      const bound = tx.assignments.get(project, a.id);
+      if (
+        tx.assignments
+          .list(project)
+          .some(
+            (other) =>
+              other.id !== a.id &&
+              other.status === "active" &&
+              other.machine_id === a.machine_id &&
+              ((bound?.worktree_path &&
+                other.worktree_path === bound.worktree_path) ||
+                other.runtime_ref?.terminal_ref === ref.terminal_ref),
+          )
+      )
+        return;
+      return bound;
+    });
+    if (
+      !owner ||
+      owner.external ||
+      owner.status !== "active" ||
+      !isDeepStrictEqual(owner.runtime_ref, ref) ||
+      owner.machine_id !== ref.machine_id ||
+      a.machine_id !== ref.machine_id ||
+      !["online", "degraded"].includes(current.machine.status) ||
+      upgradeHeld(this.options.store, project, a.machine_id) ||
+      current.execution.mode !== "agent-ssh" ||
+      pinned.execution.mode !== "agent-ssh" ||
+      !isDeepStrictEqual(current.execution.env, pinned.execution.env)
+    )
+      return rejected("target_mismatch");
+    return pinned;
+  }
+  /** Snapshots and before-wake prep may address this session, never provision a new one. */
+  forSession(project: ProjectId, a: Assignment) {
+    return this.changedSessionEnvironment(project, a)
+      ? this.forLaunch(project, a, () => this.sessionTarget(project, a))
+      : this.forLaunch(project, a);
+  }
+  async canAdmitSession(
+    project: ProjectId,
+    a: Assignment,
+    fingerprint: string,
+  ) {
+    try {
+      // Other old Runs still have to drain. Check the new environment before
+      // admitting new work; checking only the old PATH is not deployment evidence.
+      const current = await this.forLaunch(project, {
+        machine_id: a.machine_id,
+        runtime_ref: null,
+      });
+      this.sessionTarget(project, a);
+      return current.execution.target?.fingerprint === fingerprint;
+    } catch {
+      return false;
+    }
   }
   /** Recheck opt-in at publication boundaries without issuing another probe. */
   assertLaunchAllowed(
@@ -846,21 +924,76 @@ export class RuntimeTargets implements Runtime {
   wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
     if (ref.machine_id === "local")
       return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
-    const current = () => {
-      if (!ref.target) return rejected("target_mismatch");
-      return this.launchTarget(ref.target.project_id, {
-        machine_id: ref.machine_id,
-        runtime_ref: ref,
-      });
-    };
+    const binding = ref.target;
+    if (!binding)
+      return Promise.resolve(
+        failure<import("@cardigan/domain").RuntimeWakeResult>(),
+      );
+    const project = binding.project_id;
+    const claim = options?.session_run;
+    const owner =
+      claim &&
+      this.options.store.uow.read((tx) =>
+        tx.assignments.get(project, claim.assignment_id),
+      );
+    const historical =
+      !!owner &&
+      isDeepStrictEqual(ref, owner.runtime_ref) &&
+      this.changedSessionEnvironment(project, owner);
+    const current = () =>
+      historical && owner
+        ? this.sessionTarget(project, owner)
+        : this.launchTarget(project, {
+            machine_id: ref.machine_id,
+            runtime_ref: ref,
+          });
     return this.invoke(current, (runtime) =>
       runtime.wake(ref, bell, {
         ...options,
+        ...(historical && owner
+          ? {
+              retirement_owner: {
+                project_id: project,
+                assignment_id: owner.id,
+              },
+              ...(options?.observed_guard ? {} : { if_idle: true }),
+            }
+          : {}),
         before_send: () => {
-          if (options?.before_send && !options.before_send()) return false;
           try {
-            // Recheck after hc FIFO/slot waits, immediately before the actual send.
-            current();
+            if (options?.before_send ? !options.before_send() : historical)
+              return false;
+            current(); // The synchronous caller may itself revoke authorization.
+            if (
+              historical &&
+              owner &&
+              historical !== this.changedSessionEnvironment(project, owner)
+            )
+              return false;
+            if (historical && owner && claim) {
+              if (
+                !this.options.store.uow.read((tx) => {
+                  const run = tx.runs.get(project, claim.run_id);
+                  return (
+                    run?.assignment_id === owner.id &&
+                    !tx.runs
+                      .list(project)
+                      .some(
+                        (r) =>
+                          r.assignment_id === owner.id &&
+                          r.id !== run.id &&
+                          ![
+                            "queued",
+                            "completed",
+                            "failed",
+                            "cancelled",
+                          ].includes(r.status),
+                      )
+                  );
+                })
+              )
+                return false;
+            }
             return true;
           } catch {
             return false;
@@ -1134,7 +1267,7 @@ export class RuntimeTargets implements Runtime {
   ) {
     let checked: Target;
     try {
-      checked = await this.forLaunch(project, assignment);
+      checked = await this.forSession(project, assignment);
     } catch (error) {
       // Version discovery keeps the typed cause; other invalid launches remain permanent.
       return error instanceof RuntimeTargetError
@@ -1142,7 +1275,14 @@ export class RuntimeTargets implements Runtime {
         : failure<string>(error);
     }
     return this.invoke(
-      () => this.checkedTarget(checked, project, assignment),
+      () => {
+        const current = this.sessionTarget(project, assignment);
+        if (
+          !isDeepStrictEqual(current.execution.target, checked.execution.target)
+        )
+          return rejected("target_changed");
+        return current;
+      },
       (runtime) => runtime.captureAgent(command, args, timeout),
     );
   }

@@ -214,7 +214,10 @@ test("remote target loss keeps the original five-minute deadline across reconnec
   const start = () => {
     monitor = new RuntimeMonitor({
       store: f.store,
-      runtime: events.source,
+      runtime: {
+        ...events.source,
+        probeRemoteProcess: async () => "unreachable",
+      },
       clock: f.clock,
       eventSilenceMs: 3600000,
     });

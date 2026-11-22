@@ -1488,3 +1488,57 @@ test.each([
     expect((await restarted.status(ref)).ok).toBe(false);
   },
 );
+
+test("only a checked PATH-only binding can reuse the original session; a revoked send slot stays closed", async () => {
+  const base = assignment("worker-a");
+  const ref = value(
+    await router.provision(base, role, machine("worker-a"), launch),
+  );
+  const a = { ...base, runtime_ref: ref, runtime_state: "idle" as const };
+  store.uow.run((tx) => tx.assignments.put("fixture", a));
+  workers = workers.map((w) => ({
+    ...w,
+    execution: { ...w.execution, path: "/next/bin:/usr/bin" },
+  }));
+  const fp = router.changedSessionEnvironment("fixture", a);
+  if (!fp) throw new Error("missing edited target");
+  expect(await router.canAdmitSession("fixture", a, fp)).toBe(true);
+  expect((await router.forSession("fixture", a)).execution.target).toEqual(
+    ref.target,
+  );
+  await expect(router.forLaunch("fixture", a)).rejects.toThrow(
+    "target_mismatch",
+  );
+  const run = {
+    id: "R-2",
+    assignment_id: a.id,
+    status: "dispatched",
+    kind: "initial",
+    trigger_event_id: "fixture",
+    role_version: 1,
+    model: "fixture",
+    agent_cli_version: "fixture",
+    outcome: null,
+    summary: "",
+    session_environment_binding: fp,
+  } as import("@cardigan/domain").Run;
+  store.uow.run((tx) => tx.runs.put("fixture", run));
+  expect((await router.forLaunch("fixture", base)).execution).toMatchObject({
+    path: "/next/bin:/usr/bin",
+  });
+  await router.wake(ref, "next", {
+    session_run: { assignment_id: a.id, run_id: run.id },
+    before_send: () => true,
+  });
+  const options = calls.mock.calls.findLast(
+    (c) => c[1] === "wake",
+  )?.[4] as RuntimeWakeOptions;
+  expect(options).toMatchObject({
+    if_idle: true,
+    retirement_owner: { project_id: "fixture", assignment_id: a.id },
+  });
+  expect(options.before_send?.()).toBe(true);
+  workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+  expect(options.before_send?.()).toBe(false);
+  expect(await router.canAdmitSession("fixture", a, fp)).toBe(false);
+});

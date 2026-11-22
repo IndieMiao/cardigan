@@ -48,6 +48,11 @@ export interface PromptBinding extends PromptObservation {
   readonly require_disconnect?: true;
 }
 export interface RuntimeWakeOptions {
+  /** Host claim; never infer a Run or owner from bell text. */
+  readonly session_run?: {
+    assignment_id: Assignment["id"];
+    run_id: RunId;
+  };
   readonly prompt_binding?: PromptBinding;
   /** A retirement-held ref must still belong to this owner at the send slot. */
   readonly retirement_owner?: RetirementIdentity;
