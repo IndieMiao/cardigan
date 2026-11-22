@@ -84,7 +84,7 @@ export const CARD_LEGEND_GROUPS: readonly {
           </span>
         ),
         meaning: "有待拍板或待人执行的事项。",
-        when: "存在拍板或人工操作等待，且没有阻塞。",
+        when: "有拍板（包括暂停后的结案）或人工操作等待，且没有阻塞。只等方案、确认或系统派发时不显示琥珀色竖条。",
         selectors: [".card-tile-waiting"],
       },
       {
@@ -291,6 +291,14 @@ export const CARD_LEGEND_GROUPS: readonly {
         meaning: "红色实心圆内感叹号，提示工作无法继续。",
         when: "存在阻塞且开启“显示 → 等待标记”。同类原因合并在一个提示里，不同类标记可同时出现。",
         selectors: [".board-card-blocked", '[aria-label^="阻塞："]'],
+      },
+      {
+        id: "review-phase",
+        element: <>{icon("review_phase")}审核暂停阶段</>,
+        meaning:
+          "待方案：负责人提方案；待确认：指定人员确认当前方案。待 PM 结案恢复或待你结案恢复：确认已齐，等拍板人恢复返工。",
+        when: "开启“显示 → 等待标记”时显示当前阶段。结案后若返工尚未派发，显示“已允许返工但未派发”，此时等系统，不需要再拍板。",
+        selectors: [".review-phase-badge"],
       },
       {
         id: "precheck",

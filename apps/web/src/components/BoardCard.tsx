@@ -28,6 +28,7 @@ const paths = {
   attachment: "m7 11 6-6a2 2 0 0 1 3 3l-7 7a4 4 0 0 1-6-6l7-7m-5 11 7-7",
   human_action:
     "M5 9V5a1 1 0 0 1 2 0v4-6a1 1 0 0 1 2 0v6-5a1 1 0 0 1 2 0v5-3a1 1 0 0 1 2 0v6l2-2a1 1 0 0 1 2 2l-4 5H7L3 12a1 1 0 0 1 2-1l2 2",
+  review_phase: "M3 5h1m3 0h10M3 10h1m3 0h10M3 15h1m3 0h10",
   reason: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 6v6m0-9v.1",
 } as const;
 
@@ -102,9 +103,12 @@ export function BoardCard({
   );
   const blocked = reasons.has("blocked");
   const waiting =
-    checks.waiting.some((item) => !!item.review_phase) ||
     reasons.has("decision") ||
-    reasons.has("human_action");
+    reasons.has("human_action") ||
+    checks.waiting.some(
+      ({ review_phase }) =>
+        review_phase === "待你结案恢复" || review_phase === "待 PM 结案恢复",
+    );
   const complete =
     card.progress.total > 0 && card.progress.completed === card.progress.total;
   const queuedAhead = card.queued_runs?.length
@@ -211,8 +215,9 @@ export function BoardCard({
             .map((item) =>
               badge(
                 item.label,
-                <BoardCardIcon name="reason" />,
+                <BoardCardIcon name="review_phase" />,
                 item.review_phase,
+                "review-phase-badge",
               ),
             )}
         {display.waiting &&

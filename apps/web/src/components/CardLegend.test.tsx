@@ -63,7 +63,14 @@ test("all card statuses, priorities, display settings and state classes have leg
   for (const { key } of CARD_DISPLAY_FIELDS) {
     const ids =
       key === "waiting"
-        ? ["decision", "human_action", "blocked", "precheck", "merge_check"]
+        ? [
+            "decision",
+            "human_action",
+            "review-phase",
+            "blocked",
+            "precheck",
+            "merge_check",
+          ]
         : key === "progress"
           ? [
               "progress-empty",
@@ -97,6 +104,26 @@ test("every rendered card signal and metadata badge is explained across normal, 
   const base = cardGuideExample(0);
   const variants = [
     base,
+    {
+      ...base,
+      waiting_on: (
+        [
+          "待方案",
+          "待确认",
+          "待 PM 结案恢复",
+          "待你结案恢复",
+          "已允许返工但未派发",
+        ] as const
+      ).map((phase, i) => ({
+        kind:
+          phase === "已允许返工但未派发"
+            ? ("review" as const)
+            : ("decision" as const),
+        ref: `Q-${i + 1}`,
+        review_phase: phase,
+        label: `${phase} ${phase === "已允许返工但未派发" ? "W" : "Q"}-${i + 1}`,
+      })),
+    },
     {
       ...base,
       progress: { completed: 3, total: 3 },

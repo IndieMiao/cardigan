@@ -492,11 +492,17 @@ test("check marks follow the waiting-marks display switch", () => {
   expect(screen.queryByRole("link", { name: "预检中" })).toBeNull();
 });
 
-test.each(["待方案", "待确认", "已允许返工但未派发"] as const)(
+test.each([
+  ["待方案", false],
+  ["待确认", false],
+  ["待 PM 结案恢复", true],
+  ["待你结案恢复", true],
+  ["已允许返工但未派发", false],
+] as const)(
   "shows %s on the default board without a misleading decision badge",
-  (phase) => {
+  (phase, needsDecision) => {
     const label = `${phase} Q-1`;
-    renderCard({
+    const { container } = renderCard({
       ...example,
       waiting_on: [
         {
@@ -510,6 +516,7 @@ test.each(["待方案", "待确认", "已允许返工但未派发"] as const)(
     expect(screen.getByRole("link", { name: label }).textContent).toContain(
       phase,
     );
+    expect(!!container.querySelector(".card-tile-waiting")).toBe(needsDecision);
     expect(screen.queryByRole("link", { name: /等你拍板/ })).toBeNull();
   },
 );
