@@ -31,6 +31,7 @@ const sample = [
   "What\u0027s new",
   "修复离线启动。",
   "Download",
+  "File: app-release.apk",
   "https://example.invalid/app.apk（18 MB）",
   `SHA-256：${"a".repeat(64)}`,
   "安装：下载后覆盖安装。",
@@ -236,6 +237,7 @@ test("rejects invalid content, recipient overrides, attachments and sensitive ca
   for (const args of [
     { text: "X".repeat(4001) },
     { text: "@all" },
+    { text: "客服：tel:+15550100000" },
     { attachment_id: "attachment-1" },
     { attachments: [] },
     { receive_id: "group" },

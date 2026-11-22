@@ -26,12 +26,14 @@ export function ownerTextError(text: string): string | undefined {
   if (/[@＠]|<\s*at\b/i.test(text)) return "私聊正文不支持 @ 提及";
   if (/\p{Cc}/u.test(text.replace(/[\r\n\t]/g, "")))
     return "正文含非文字控制字符";
-  if (
-    /\b(?!https?:)[a-z][a-z\d+.-]*:\/\/|\b(?:data|file|javascript|mailto):/i.test(
-      text,
-    )
-  )
-    return "正文链接仅支持 http 或 https";
+  // A heading such as "File: app.apk" has no URI payload after the colon.
+  // Consume each link as a unit: a port or another colon in an HTTPS path
+  // is not the start of a second scheme.
+  for (const [, scheme] of text.matchAll(
+    /\b([a-z][a-z\d+.-]*):[^\s<>"'()，。；、（）]+/gi,
+  )) {
+    if (!/^https?$/i.test(scheme ?? "")) return "正文链接仅支持 http 或 https";
+  }
 }
 
 export interface OwnerMessageInput {
