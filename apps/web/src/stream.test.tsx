@@ -794,3 +794,56 @@ test.each(["card_created", "card_updated"])(
     expect(read).toHaveBeenCalledTimes(cleared);
   },
 );
+
+// C-567 review V-2790: another card's precheck settling refreshes an open
+// detail that only waits for it; events of unrelated cards still do not.
+test("a cross-card precheck wait refreshes the open detail when that precheck ends", async () => {
+  window.location.hash = "#/p/p-1/cards/C-1";
+  const base = cardDetail();
+  let running = true;
+  const read = vi.fn<CardiganClient["card"]>(async () => ({
+    ...base,
+    decisions: [],
+    merge_confirmations: [],
+    card: {
+      ...base.card,
+      id: "C-1",
+      status: "in_progress" as const,
+      prechecks: [],
+      waiting_on: [{ kind: "blocked" as const, ref: "W-1", label: "W-1 阻塞" }],
+      ...(running
+        ? {
+            checking: {
+              precheck: {
+                attempt_ids: ["attempt-on-C-2"],
+                waiting_items: ["W-1"],
+                cards: ["C-2"],
+              },
+            },
+          }
+        : {}),
+    },
+  }));
+  const { client, connections } = live({ card: read });
+  render(<App client={client} />);
+  const line = await screen.findByRole("region", { name: "卡片状态" });
+  expect(line.textContent).toContain("预检中");
+  expect(line.textContent).not.toContain("W-1 阻塞");
+  act(() => connections.last.emit("open"));
+  await settle();
+  const before = read.mock.calls.length;
+  act(() => connections.last.emit("change", change("C-3", 1)));
+  await settle();
+  expect(read).toHaveBeenCalledTimes(before);
+  running = false;
+  act(() =>
+    connections.last.emit("change", {
+      stream: "C-2",
+      seq: 1,
+      type: "precheck_finished",
+    }),
+  );
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(before + 1));
+  await waitFor(() => expect(line.textContent).not.toContain("预检中"));
+  expect(line.textContent).toContain("W-1 阻塞");
+});

@@ -63,7 +63,7 @@ test("all card statuses, priorities, display settings and state classes have leg
   for (const { key } of CARD_DISPLAY_FIELDS) {
     const ids =
       key === "waiting"
-        ? ["decision", "human_action", "blocked"]
+        ? ["decision", "human_action", "blocked", "precheck", "merge_check"]
         : key === "progress"
           ? [
               "progress-empty",
@@ -106,6 +106,15 @@ test("every rendered card signal and metadata badge is explained across normal, 
         { kind: "human_action" as const, ref: "H-1", label: "连接设备" },
         { kind: "blocked" as const, ref: "W-1", label: "缺少环境" },
       ],
+    },
+    {
+      ...base,
+      status: "awaiting_merge" as const,
+      waiting_on: [{ kind: "blocked" as const, ref: "W-2", label: "W-2 阻塞" }],
+      checking: {
+        precheck: { attempt_ids: ["P-1"], waiting_items: ["W-2"] },
+        merge_check: { attempt_id: "M-1", status: "running" as const },
+      },
     },
     {
       ...base,
