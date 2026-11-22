@@ -8,6 +8,8 @@ import {
   retirementReasons,
 } from "../runtime-types.js";
 import {
+  darwinWorker,
+  needsRetirementHandoff,
   retirementOwnsSession,
   sessionMaintenanceCandidate,
 } from "../session-maintenance.js";
@@ -251,6 +253,47 @@ export function trackRetirementDispatch(
   });
 }
 
+/** Adopt capped pre-upgrade records too, even when their Run is already queued.
+ * Never clear the stop fence, change a retry into an exit or replace a wait receipt. */
+export function handoffIdleSessionRetirement(
+  state: CommandState,
+  actor: Actor,
+  id: AssignmentId,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_idle_assignment_role", ports, (d) => {
+    ensure(
+      actor.kind === "system",
+      "unauthorized",
+      "Only the system may hand off retirement",
+    );
+    const a = d.get("assignments", id);
+    return needsRetirementHandoff(state, a) ? handoff(d, a) : a;
+  });
+}
+function handoff(d: CommandDraft, a: Assignment) {
+  const p = a.idle_retirement!;
+  // A timeout from the old signal path also means a signal may have been sent.
+  const phase = p.last_failure === "timeout" ? "stopping" : p.phase;
+  const next: Assignment = {
+    ...a,
+    idle_retirement: { ...p, phase, handoff: true },
+  };
+  d.put("assignments", next);
+  d.emit(
+    "idle_session_retirement_handed_off",
+    d.work(a.work_item_id!).card_id,
+    {
+      assignment_id: a.id,
+      machine_id: a.machine_id,
+      phase,
+      failures: p.failures,
+      reason: p.evidence?.reason ?? "confirmation_pending",
+    },
+  );
+  return next;
+}
+
 /** Host evidence only. Unknown outcomes retain the launch fence across restarts. */
 export function settleIdleSessionRetirement(
   state: CommandState,
@@ -268,7 +311,7 @@ export function settleIdleSessionRetirement(
     );
     const a = d.get("assignments", id),
       pending = a.idle_retirement;
-    if (pending?.phase !== "stopping") return a;
+    if (pending?.phase !== "stopping" || pending.handoff) return a;
     ensure(
       retirementOwnsSession(a) ||
         (a.runtime_ref === null && stoppedByHuman(state.events, a.id)),
@@ -330,21 +373,29 @@ export function settleIdleSessionRetirement(
       pending.evidence?.reason === "kept_terminal" &&
       (!pending.evidence.observation ||
         pending.evidence.observation === "alive");
-    const failures = !kept && previouslyKept ? 1 : pending.failures + 1;
+    const darwin = darwinWorker(state, a);
+    const failures =
+      !darwin && !kept && previouslyKept ? 1 : pending.failures + 1;
     const notify =
       !kept && failures >= 3 && !pending.notice_sent && !pending.dispatch_wait;
     const next: Assignment = {
       ...a,
       idle_retirement: {
         ...pending,
-        phase: outcome === "uncertain" ? "stopping" : "waiting",
+        phase:
+          outcome === "uncertain" || (darwin && outcome === "timeout")
+            ? "stopping"
+            : "waiting",
         last_failure: outcome,
         evidence,
         failures,
         retry_at: new Date(Date.parse(d.now) + retryMs).toISOString(),
-        ...(pending.notice_sent || notify ? { notice_sent: true } : {}),
+        ...(pending.notice_sent || (notify && !darwin)
+          ? { notice_sent: true }
+          : {}),
       },
     };
+    if (needsRetirementHandoff(state, next)) return handoff(d, next);
     d.put("assignments", next);
     if (notify) {
       const facts = [

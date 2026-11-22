@@ -1,4 +1,4 @@
-import type { Assignment, Machine, RuntimeRef } from "./entities.js";
+import type { Assignment, Machine, Run, RuntimeRef } from "./entities.js";
 import type { RunId } from "./ids.js";
 import type { Role } from "./role.js";
 import type { IdleRetirementResult, RuntimeResult } from "./runtime-types.js";
@@ -76,6 +76,10 @@ export interface RuntimeInteractionReader {
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
 export interface RetirementIdentity {
+  /** Host-enrolled native identity for this exact remote launch; never a stop capability. */
+  readonly enrolled_process?: NonNullable<
+    NonNullable<Run["launch_publication"]>["process"]
+  >;
   /** First host-confirmed bell on this exact legacy ref; the worker must
    * independently show this Run as the terminal's original launch label. */
   readonly first_bell_run_id?: RunId;

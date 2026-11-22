@@ -164,7 +164,59 @@ def core_rpc(home, session, system):
             yield rpc
 
 
+def darwin_retirement(c):
+    # Both facts are read on the pinned SSH account. The native receipt comes
+    # from the original host launch journal, never from this terminal listing.
+    import runpy
+    user = pwd.getpwuid(os.getuid())
+    p = c['process']
+    if (platform.system() != 'Darwin' or os.getuid() == 0 or os.getuid() != os.geteuid()
+            or user.pw_name != c['user'] or user.pw_gid != os.getegid() or os.getegid() != c['gid']
+            or p['uid'] != os.getuid() or p['pid'] <= 1 or not p['boot'] or not p['start']
+            or p['terminal'] != c['generation'] or p['machine'] != c['target']
+            or not re.fullmatch(r'[a-zA-Z0-9_-]{1,48}', c['session'])
+            or not re.fullmatch(r't[0-9a-z]{1,12}', c['terminal'])):
+        raise ValueError()
+    with core_rpc(user.pw_dir, c['session'], 'darwin') as rpc:
+        t = rpc('terminal.get', dict(terminal=c['terminal']))
+        labels = dict(cardigan='1', project=c['project'], assignment=c['assignment'],
+                      run=c['launch_run'], generation=c['generation'])
+        if (t['address'] != c['terminal'] or type(t.get('created_ms')) != int or
+                not all(t['labels'].get(k) == v for k, v in labels.items())):
+            raise ValueError()
+        observed = darwin_execution(p, runpy.run_path(c['primitive'])['darwin_identity'])
+        if t['state'] == 'finished' and observed == 'exited':
+            return 'exited'
+        if t['state'] == 'live' and t.get('keep') is True:
+            return 'kept'
+        idle = (t.get('status') or {}).get('state') in ('idle', 'done')
+        if (t['state'] == 'live' and observed == 'alive' and p['pid'] == t.get('pid')
+                and t.get('keep') is False and (idle or not c['require_idle'])):
+            return 'alive'
+        return 'unknown'
+
+
+def darwin_execution(p, native):
+    try:
+        boot, uid, start, pgid = native(p['pid'])
+    except (OSError, ValueError):
+        try:
+            os.kill(p['pid'], 0)  # existence only; permission denied is NOT exit
+        except ProcessLookupError:
+            return 'exited'
+        except PermissionError:
+            pass
+        return 'unknown'
+    if not boot or not start:
+        return 'unknown'
+    if (boot, start) != (p['boot'], p['start']):
+        return 'exited'
+    return 'alive' if (uid, pgid) == (p['uid'], p['process_group']) else 'unknown'
+
+
 def retirement_terminal(c):
+    if c.get('platform') == 'darwin':
+        return darwin_retirement(c)
     # Narrow private read for the controller's existing pidfd retirement path.
     # Read the bound worker socket, never infer exit from an absent address.
     user = pwd.getpwuid(os.getuid())

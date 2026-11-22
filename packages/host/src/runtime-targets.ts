@@ -658,7 +658,10 @@ export class RuntimeTargets implements Runtime {
   }
   private async invoke<T>(
     target: () => Pick<Target, "execution" | "session">,
-    call: (runtime: Adapter) => Promise<RuntimeResult<T>>,
+    call: (
+      runtime: Adapter,
+      target: Pick<Target, "execution" | "session">,
+    ) => Promise<RuntimeResult<T>>,
     onTargetRefusal?: (
       code: RuntimeErrorCode,
       cause?: unknown,
@@ -682,7 +685,7 @@ export class RuntimeTargets implements Runtime {
       if (!created.ok && onTargetRefusal)
         return onTargetRefusal(created.error.code);
       delegated = created.ok;
-      const result = created.ok ? await call(created.value) : created;
+      const result = created.ok ? await call(created.value, current) : created;
       return result.ok
         ? result
         : {
@@ -856,12 +859,47 @@ export class RuntimeTargets implements Runtime {
         Promise.resolve({ ok: true as const, value: false }),
     );
   }
+  /** Only the controller's original enrollment can identify a recycled worker PID. */
+  private enrolledProcess(ref: RuntimeRef, owner: RetirementIdentity) {
+    const launch = ref.launch_generation,
+      target = ref.target;
+    if (!launch || !target || target.project_id !== owner.project_id) return;
+    return this.options.store.uow.read((tx) => {
+      const run = tx.runs.get(target.project_id, launch.run_id),
+        p = run?.launch_publication;
+      if (
+        run?.assignment_id !== owner.assignment_id ||
+        p?.generation !== launch.generation ||
+        p.target.fingerprint !== target.fingerprint ||
+        p.runtime_ref?.terminal_ref !== ref.terminal_ref ||
+        p.process?.terminal !== launch.generation ||
+        p.process.machine !== target.fingerprint
+      )
+        return;
+      return p.process;
+    });
+  }
+  private withEnrollment<T extends RetirementIdentity>(
+    ref: RuntimeRef,
+    owner: T,
+    execution: ExecutionConfig,
+  ): T {
+    if (execution.mode !== "agent-ssh" || !execution.macosCore) return owner;
+    const enrolled = this.enrolledProcess(ref, owner);
+    const { enrolled_process: _untrusted, ...identity } = owner;
+    return {
+      ...identity,
+      ...(enrolled ? { enrolled_process: enrolled } : {}),
+    } as T;
+  }
   observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {
     return this.invoke(
       () => this.targetForRef(ref, identity.project_id),
-      (runtime) =>
-        runtime.observe_retirement?.(ref, identity) ??
-        Promise.resolve({ ok: true as const, value: "unknown" as const }),
+      (runtime, target) =>
+        runtime.observe_retirement?.(
+          ref,
+          this.withEnrollment(ref, identity, target.execution),
+        ) ?? Promise.resolve({ ok: true as const, value: "unknown" as const }),
     );
   }
   async retire_idle(
@@ -870,7 +908,7 @@ export class RuntimeTargets implements Runtime {
   ) {
     return this.invoke<IdleRetirementResult>(
       () => this.targetForRef(ref, options.project_id),
-      (runtime) => {
+      (runtime, target) => {
         if (!runtime.retire_idle)
           return Promise.resolve({
             ok: true,
@@ -879,7 +917,10 @@ export class RuntimeTargets implements Runtime {
               evidence: { stage: "target", reason: "unsupported" },
             },
           });
-        return runtime.retire_idle(ref, options);
+        return runtime.retire_idle(
+          ref,
+          this.withEnrollment(ref, options, target.execution),
+        );
       },
       retirementRefusal,
     );

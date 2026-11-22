@@ -18,6 +18,7 @@ import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
 
 export { managedLoopback } from "./loopback-terminal.js";
 
+import { darwinRetirementObservation } from "./darwin-retirement.js";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 import { terminalSnapshot } from "./terminal-activity.js";
@@ -1060,6 +1061,14 @@ export class HerdrRuntime implements Runtime {
   ): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return result(async () => {
       this.checkRef(ref);
+      if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
+        const observed = await darwinRetirementObservation(
+          this.execution,
+          ref,
+          identity,
+        );
+        return observed === "kept" ? "unknown" : observed;
+      }
       const terminal: Terminal = identity.system_finished_turn
         ? await this.retirementTerminal(ref, identity)
         : await this.json(["get", ref.terminal_ref]);
@@ -1110,6 +1119,26 @@ export class HerdrRuntime implements Runtime {
       for (const ms of [options.hangup_ms, options.terminate_ms])
         if (!Number.isSafeInteger(ms) || ms < 1 || ms > 30_000)
           fail("invalid_launch", "Invalid idle retirement timeout");
+      if (this.execution.mode === "agent-ssh" && this.execution.macosCore) {
+        stage = "probe";
+        const observed = await darwinRetirementObservation(
+          this.execution,
+          ref,
+          options,
+        );
+        if (observed === "exited") return exited;
+        // The address persists when a kept terminal's program is replaced;
+        // terminal.kill cannot compare process generation or activity at use.
+        return failure(
+          "withdrawn",
+          observed === "kept"
+            ? "kept_terminal"
+            : observed === "alive"
+              ? "conditional_close_unavailable"
+              : "probe_invalid",
+          { observation: observed === "kept" ? "unknown" : observed },
+        );
+      }
       stage = "get";
       const readTerminal = () =>
         options.system_finished_turn

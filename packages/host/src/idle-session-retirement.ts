@@ -5,6 +5,8 @@ import {
   type Clock,
   type CommandEffect,
   confirmWaitingRetirementExit,
+  handoffIdleSessionRetirement,
+  needsRetirementHandoff,
   type ProjectId,
   type RetirementDispatchWait,
   type RetirementEvidence,
@@ -185,7 +187,9 @@ export async function retireIdleSessions(
           a.scope === "work_item" &&
           !a.external &&
           a.status === "active" &&
-          (a.idle_retirement?.phase === "stopping" ||
+          !(a.idle_retirement?.handoff && retirementOwnsSession(a)) &&
+          (needsRetirementHandoff(state, a) ||
+            a.idle_retirement?.phase === "stopping" ||
             (runtime.retire_idle &&
               sessionMaintenanceCandidate(state, a, clock.now(), threshold)
                 .candidate)),
@@ -198,12 +202,16 @@ export async function retireIdleSessions(
               ? 2
               : 1;
         return priority(a) - priority(b);
-      });
+      })
+      .map((a) => ({ a, adopt: needsRetirementHandoff(state, a) }));
   });
   let attempted = 0;
-  for (const a of candidates) {
-    if (attempted >= limit) break;
-    if (Date.parse(a.idle_retirement?.retry_at ?? "") > Date.parse(clock.now()))
+  for (const { a, adopt } of candidates) {
+    if (!adopt && attempted >= limit) continue;
+    if (
+      !adopt &&
+      Date.parse(a.idle_retirement?.retry_at ?? "") > Date.parse(clock.now())
+    )
       continue;
     const unlock = await tryHostOpsLock(store, project, a.id);
     if (!unlock) {
@@ -222,9 +230,27 @@ export async function retireIdleSessions(
           current = state.assignments.find((v) => v.id === a.id);
         if (
           !current ||
+          (current.idle_retirement?.handoff &&
+            retirementOwnsSession(current)) ||
           JSON.stringify(current.runtime_ref) !== JSON.stringify(a.runtime_ref)
         )
           return;
+        if (needsRetirementHandoff(state, current)) {
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              handoffIdleSessionRetirement(
+                state,
+                { kind: "system", project_id: project },
+                a.id,
+                { ids: tx.ids, clock },
+              ),
+            ),
+          );
+          return;
+        }
+        if (adopt) return; // stale migration candidate; no runtime slot was reserved
         if (current.idle_retirement?.phase === "stopping")
           return { pending: current, recovering: true };
         const inFlight = store
@@ -234,7 +260,8 @@ export async function retireIdleSessions(
             (owner) =>
               owner.status === "active" &&
               (owner.role_upgrade ||
-                owner.idle_retirement?.phase === "stopping"),
+                (owner.idle_retirement?.phase === "stopping" &&
+                  !owner.idle_retirement.handoff)),
           ).length;
         if (inFlight >= limit) return;
         const effect = beginIdleSessionRetirement(

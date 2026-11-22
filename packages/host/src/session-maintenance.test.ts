@@ -6,7 +6,11 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
-import { fixture, human } from "../../domain/src/commands/test-fixtures.js";
+import {
+  fixture,
+  human,
+  machine,
+} from "../../domain/src/commands/test-fixtures.js";
 import { upgradeIdleAssignmentRoles } from "./assignment-role-upgrade.js";
 import { readAttention } from "./attention.js";
 import {
@@ -20,16 +24,22 @@ import {
   sessionMaintenanceScan,
 } from "./session-maintenance.js";
 
-function setup(dbPath = ":memory:", version = 1, manual = false) {
+function setup(
+  dbPath = ":memory:",
+  version = 1,
+  manual = false,
+  machineId = "local",
+) {
   const store = Store.open({ dbPath }),
     state = fixture(),
     project = human.project_id;
   const a = {
     ...state.assignments[0]!,
     role_version: version,
+    machine_id: machineId,
     last_mcp_activity_at: "2030-01-01T00:00:00Z",
     runtime_ref: {
-      machine_id: "local",
+      machine_id: machineId,
       runtime_machine: "fixture",
       terminal_ref: "t1",
       agent_name: "fixture",
@@ -42,6 +52,14 @@ function setup(dbPath = ":memory:", version = 1, manual = false) {
   });
   store.createProject({ id: project });
   store.uow.run((tx) => {
+    if (machineId !== "local")
+      tx.machines.put(project, {
+        ...machine(),
+        id: machineId,
+        label: machineId,
+        herdr_machine: machineId,
+        os: "darwin",
+      });
     tx.cards.put(project, state.cards[0]!);
     tx.work_items.put(project, state.work_items[0]!);
     tx.assignments.put(project, a);
@@ -869,3 +887,49 @@ test("kept shells are observed without operator requests or repeated signals", a
     f.store.close();
   }
 });
+
+test.each(["pidfd_unavailable", "kept_terminal"] as const)(
+  "capped historical Darwin %s is handed to the queued Run without another observation",
+  async (reason) => {
+    const f = setup(":memory:", 2, false, "fixture-worker"),
+      retire = vi.fn();
+    Object.assign(f.runtime, { retire_idle: retire });
+    try {
+      f.store.uow.run((tx) => {
+        tx.assignments.put(f.project, {
+          ...f.a,
+          idle_retirement: {
+            phase: "waiting",
+            failures: 5,
+            started_at: "2030-01-01T00:00:00Z",
+            threshold_minutes: 60,
+            runtime_ref: f.a.runtime_ref,
+            last_failure: "unavailable",
+            evidence: { stage: "probe", reason, observation: "alive" },
+          },
+        });
+        const r = tx.runs.list(f.project)[0]!;
+        tx.runs.put(f.project, { ...r, status: "queued" });
+      });
+      await f.tick();
+      await f.tick();
+      const state = f.state();
+      expect(state.assignments[0]?.idle_retirement).toMatchObject({
+        phase: "waiting",
+        handoff: true,
+        failures: 5,
+      });
+      expect(
+        state.events.filter(
+          (e) => e.type === "idle_session_retirement_handed_off",
+        ),
+      ).toHaveLength(1);
+      expect(retire).not.toHaveBeenCalled();
+      expect(f.runtime.observe_retirement).not.toHaveBeenCalled();
+      expect(state.runs[0]?.status).toBe("queued");
+      expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+    } finally {
+      f.store.close();
+    }
+  },
+);
