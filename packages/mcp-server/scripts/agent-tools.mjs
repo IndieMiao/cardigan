@@ -20,6 +20,12 @@ export async function generateAgentTools() {
       input: join(packageRoot, "dist", `${name}.js`),
       platform: "node",
       logLevel: "silent",
+      // The domain package is pure (no IO, §20.2): keep only what the tools use,
+      // so unrelated domain changes do not alter the committed bundles.
+      treeshake: {
+        moduleSideEffects: (id) =>
+          /[\\/]packages[\\/]domain[\\/]/u.test(id) ? false : undefined,
+      },
     });
     try {
       const { output } = await bundle.generate({
