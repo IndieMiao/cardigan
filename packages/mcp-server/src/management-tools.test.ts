@@ -2665,6 +2665,20 @@ test("MCP recovery selection is validated and cannot become an ordinary assign w
     (await raw(office, "assign", { ...params, recovery_source: "backup" }))
       .isError,
   ).toBe(true);
+  const refusal = await raw(office, "assign", {
+    ...params,
+    recovery_source: "main",
+    confirm_same_machine: true,
+  });
+  const error = {
+    code: "validation_failed",
+    message: "同机恢复需要已确认旧进程退出并已释放的失联指派",
+  };
+  expect(refusal).toMatchObject({
+    isError: true,
+    structuredContent: { error },
+    content: [{ type: "text", text: JSON.stringify({ error }) }],
+  });
   expect(rows()).toEqual(before);
   await ok<AssignmentReply>(office, "assign", params);
   expect(

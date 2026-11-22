@@ -1317,10 +1317,22 @@ function routeAssignment(input: RouteInput, draft: Draft): void {
   // Verification assignment notices wait in the inbox until a current target
   // exists. Dispatcher checks the fresh delivery state before queuing a Run.
   if (
-    item.kind !== "verify" &&
+    item.kind === "produce" &&
     !canStartWork({ item, work_items: input.snapshot.work_items })
-  )
-    return;
+  ) {
+    // A same-machine successor continues already-started work. Only its own assignment event may wake it.
+    const resume =
+      item.status === "in_progress" &&
+      !item.reported_blocker &&
+      assignment.id === payloadString(input.event.payload, "assignment_id") &&
+      input.event.actor.kind === "assignment" &&
+      assignment.recovery?.same_machine_confirmed_by ===
+        `assignment:${input.event.actor.assignment_id}` &&
+      item.depends_on.every((id) =>
+        input.snapshot.work_items.some((w) => w.id === id && succeeded(w)),
+      );
+    if (!resume) return;
+  }
   note(
     input,
     draft,
@@ -2392,7 +2404,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "human_action",
           "6.4/human action completed",
-          `${payloadString(input.event.payload, "assignment_id")} 旧进程已由人确认退出，${payloadString(input.event.payload, "work_item_id")} 等待 PM 选择备份或基线及另一台机器重新指派。`,
+          `${payloadString(input.event.payload, "assignment_id")} 旧进程已由人确认退出，${payloadString(input.event.payload, "work_item_id")} 等待 PM 选择备份或基线并指定机器；使用原机器须显式确认同机恢复。`,
         );
       break;
     case "human_action_requested":
