@@ -486,12 +486,21 @@
   .fieldHint :where(p) {
     margin: 0;
   }
+  /* A command moves to the next line whole rather than breaking inside. */
+  .fieldHint code {
+    display: inline-block;
+    max-width: 100%;
+  }
+  /* A hint under a control outside a label (a toggle group) sits as close. */
+  .dialogFields [data-ui="toggle-group"] + .fieldHint {
+    margin-block-start: calc(var(--ui-space-1) - var(--ui-space-3));
+  }
   /* C-565: the steps of a multi-step drawer, wrapping on narrow screens. */
   .steps {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: var(--ui-space-1) var(--ui-space-2);
+    gap: var(--ui-space-1) var(--ui-space-4);
     margin: 0 0 var(--ui-space-4);
     padding: 0;
     list-style: none;
@@ -508,12 +517,6 @@
   .stepMarker > :global(.lucide) {
     width: var(--ui-arrow);
     height: var(--ui-arrow);
-  }
-  .steps > li > :global(.lucide) {
-    flex: none;
-    width: var(--ui-icon);
-    height: var(--ui-icon);
-    margin-inline-end: var(--ui-space-1);
   }
   .steps > li:is([data-state="done"], [data-state="current"]) {
     color: var(--text);

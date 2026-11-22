@@ -674,7 +674,7 @@ try {
             await until(
               "document.querySelector('[role=dialog]').textContent.includes('会自动复查')",
             );
-            await scene("wizard-recheck");
+            await scene("wizard-recheck", "概况");
             await press("继续检查");
             await until(has("复查"));
             await press("预览开启");

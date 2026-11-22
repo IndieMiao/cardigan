@@ -1,4 +1,4 @@
-import { Check, ChevronRight, CircleHelp, TriangleAlert } from "lucide-react";
+import { Check, CircleHelp, TriangleAlert } from "lucide-react";
 import {
   type ComponentProps,
   type ReactNode,
@@ -608,7 +608,6 @@ export function SettingsSteps({
             data-state={state}
             aria-current={state === "current" ? "step" : undefined}
           >
-            {i > 0 && <ChevronRight aria-hidden="true" />}
             <span className={styles.stepMarker} aria-hidden="true">
               {state === "done" ? <Check /> : i + 1}
             </span>
