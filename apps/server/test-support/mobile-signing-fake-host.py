@@ -39,11 +39,12 @@ if kind == 'refused':
     sys.exit(1)
 if kind == 'unclaimed':
     wait('claim')
-if kind == 'hang':
-    print(f'accepted {rid} 1 sign', flush=True)
+if kind in ('hang', 'transfer'):
+    # transfer: a long deadline, still sending the input when the server stops.
+    print(f'accepted {rid} {1 if kind == "hang" else 900} sign', flush=True)
     time.sleep(60)
     sys.exit(1)
-mode = 'stored' if kind == 'stored' else 'lookup' if kind == 'lookup' else 'sign'
+mode = kind if kind in ('stored', 'lookup', 'resume') else 'sign'
 print(f'accepted {rid} {600 if kind == "stored" else 900} {mode}', flush=True)
 if kind == 'slow':
     wait('ready')

@@ -6,6 +6,7 @@ import subprocess
 import stat
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # reviewed release, not cwd
 from common import (LIMIT, SCOPE, canonical, config, database, digest, directory, json,
@@ -121,6 +122,19 @@ def observe(db, rid, state, sha, category=None):
     return {'state': state, 'sha256': sha}
 
 
+def undispatched(root, s, peer, dial):
+    # Read-only receipt query at the pinned peer (C-601). `absent` or `received`
+    # means the signer never got a commit for this number, so the key was never
+    # used. The signer re-checks this under its serial lock before accepting a resend.
+    with dial(root, peer) as p:
+        send(p.stdin, canonical({'mode':'receipt','grant':s,'size':0,'dispatch_states':True}).encode())
+        p.stdin.close()
+        response = json.loads(line(p.stdout))
+        require(not p.stdout.read(1) and p.wait(timeout=10)==0)
+    require(type(response) is dict)
+    return response.get('state') in ('absent', 'received')
+
+
 def request(root, db, identity, fence, dial=connect, accepted=lambda rid, seconds, mode: None):
     ctx = scope(identity)
     require(set(identity) == set(SCOPE))
@@ -145,13 +159,23 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         seconds = budget(root, 0 if state == 'signed' else inp.stat().st_size if inp.exists() else LIMIT)
         signal.signal(signal.SIGALRM, stop('timed_out'))
         signal.setitimer(signal.ITIMER_REAL, seconds)
-        # A durable claim before contacting the peer. A lost reply permits lookup only.
+        # A claimed request whose input transfer was cut off before the commit
+        # (server restart, interrupted helper) resends the same number to the
+        # peer fixed at the first dispatch. Anything else is a lookup only.
+        resume = False
+        if state == 'pending' and inp.exists():
+            pinned = db.execute('SELECT peer FROM dispatch_peer WHERE id=?', (rid,)).fetchone()
+            resume = pinned is not None and pinned[0] == peer and undispatched(root, s, peer, dial)
+        # A durable claim before contacting the peer. A lost reply permits lookup or resend only.
         with transaction(db):
             fresh = db.execute("UPDATE grants SET state='pending' WHERE id=? AND NOT revoked AND state='approved'", (rid,)).rowcount == 1
             if fresh:
                 db.execute('INSERT INTO dispatch_peer VALUES(?,?)', (rid,peer))
-            event(db, ctx, rid, 'request' if fresh else 'lookup')
-        accepted(rid, seconds, 'sign' if fresh else 'stored' if state == 'signed' else 'lookup')
+            elif resume:
+                require(db.execute("SELECT 1 FROM grants WHERE id=? AND state='pending' AND NOT revoked", (rid,)).fetchone())
+            event(db, ctx, rid, 'request' if fresh else 'resume' if resume else 'lookup')
+        accepted(rid, seconds, 'sign' if fresh else 'resume' if resume else 'stored' if state == 'signed' else 'lookup')
+        fresh = fresh or resume  # both move the input; the signer dedupes by number
         output = directory(root,'outputs') / rid
         if state == 'signed':
             fence()
@@ -218,6 +242,18 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         raise
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def watch_parent(parent, interval=1):
+    # C-601: a helper whose server exited (restart, deployment, crash) can never
+    # pass the fence. End it as `interrupted`, freeing the signer, instead of
+    # leaving an orphan that holds the transfer while it waits for a commit.
+    def run():
+        while os.getppid() == parent:
+            time.sleep(interval)
+        # To the main thread, so a blocking read or write there is interrupted.
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def checked_output(db,rid,output):
@@ -288,6 +324,7 @@ def main():
     if cmd == 'request':
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             signal.signal(sig, stop('interrupted'))
+        watch_parent(os.getppid())
         def accepted(rid, seconds, mode):
             send(sys.stdout.buffer, f'accepted {rid} {seconds} {mode}'.encode())
         rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence,accepted=accepted)
