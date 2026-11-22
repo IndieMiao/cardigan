@@ -154,6 +154,53 @@ async function projectDirectory(
     await parent.close();
   }
 }
+/** Legacy base clones recorded the bundle URL, not the center. The proof is
+ * the host's existing source.path; never open the URL or create the record. */
+export async function matchesAgentBundleOrigin(
+  config: AgentExecution,
+  project: string,
+  origin: string,
+  center: string,
+): Promise<boolean> {
+  if (
+    !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project) ||
+    origin !== join(config.agentRoot, "inputs", project, "source.bundle")
+  )
+    return false;
+  const root = await agentRoot(config);
+  try {
+    const inputs = await projectDirectory(
+      root,
+      "inputs",
+      project,
+      config,
+      false,
+    );
+    try {
+      const file = await open(
+        at(inputs, "source.path"),
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      try {
+        const s = await file.stat();
+        return (
+          s.isFile() &&
+          s.uid === process.getuid?.() &&
+          (s.mode & 0o7777) === 0o600 &&
+          s.nlink === 1 &&
+          s.size === Buffer.byteLength(center) &&
+          (await file.readFile("utf8")) === center
+        );
+      } finally {
+        await file.close();
+      }
+    } finally {
+      await inputs.close();
+    }
+  } finally {
+    await root.close();
+  }
+}
 /** Protect namespace parents before any Agent or Git process gets a writable leaf. */
 export async function prepareAgentProject(
   config: AgentExecution,

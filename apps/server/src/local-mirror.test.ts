@@ -1,12 +1,19 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import {
+  CentralGitTransport,
+  LocalGitTransport,
+} from "@cardigan/git-transport";
 import type { AgentExecution } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
@@ -49,7 +56,7 @@ afterEach(() => {
   f.close();
 });
 
-test.each(["local", "agent-ssh"])(
+test.each(["local", "agent-ssh", "legacy-bundle"])(
   "%s: one reconciliation refreshes center branches without a local Assignment",
   async (mode) => {
     const { dataDir } = f;
@@ -93,10 +100,23 @@ test.each(["local", "agent-ssh"])(
     const center = join(dataDir, "central", `${f.project_id}.git`);
     const parent = git(center, "rev-parse", "farm-dev");
     git(center, "branch", "retired", parent);
+    git(center, "branch", "integration", parent);
     git(dataDir, "clone", "-q", "--no-local", center, mirror);
     const dotGit = join(mirror, ".git");
     git(mirror, "config", "core.sharedRepository", "0660");
     const gitPermissions = permissions(dotGit);
+    const inputs = join(agentRoot, "inputs", f.project_id),
+      bundle = join(inputs, "source.bundle"),
+      record = join(inputs, "source.path");
+    if (mode === "legacy-bundle") {
+      mkdirSync(inputs, { recursive: true });
+      for (const dir of [agentRoot, join(agentRoot, "inputs"), inputs])
+        chmodSync(dir, 0o2750);
+      writeFileSync(record, center, { mode: 0o600 });
+      git(mirror, "remote", "set-url", "origin", bundle);
+    }
+    git(mirror, "branch", "integration", parent);
+    git(mirror, "update-ref", "refs/remotes/elsewhere/integration", parent);
     const configBefore = readFileSync(join(dotGit, "config"));
     const heads = () =>
       git(
@@ -125,6 +145,7 @@ test.each(["local", "agent-ssh"])(
       worker,
       "refs/heads/farm-dev:refs/heads/farm-dev",
     );
+    git(center, "branch", "-D", "integration");
     git(center, "branch", "integration/dynamicfarm", merged);
     git(center, "branch", "-D", "retired");
     git(center, "update-ref", "refs/cardigan/candidates/A-1", merged);
@@ -172,6 +193,64 @@ test.each(["local", "agent-ssh"])(
     expect(git(mirror, "rev-parse", "origin/integration/dynamicfarm")).toBe(
       parent,
     );
+    // Inverse D/F conflict: remove the stale child so its parent can be a ref.
+    git(center, "branch", "-D", "integration/dynamicfarm");
+    git(center, "branch", "integration", merged);
+    await executor.tick();
+    expect(report).not.toHaveBeenCalled();
+    expect(git(mirror, "rev-parse", "refs/remotes/origin/integration")).toBe(
+      merged,
+    );
+    expect(
+      git(
+        mirror,
+        "for-each-ref",
+        "refs/remotes/origin/integration/dynamicfarm",
+      ),
+    ).toBe("");
+    expect(git(mirror, "rev-parse", "refs/remotes/elsewhere/integration")).toBe(
+      parent,
+    );
+    expect(heads()).toBe(headsBefore);
+    if (mode === "legacy-bundle") {
+      const refused = async () => {
+        report.mockClear();
+        await executor.tick();
+        expect(report).toHaveBeenCalledWith(
+          `Local mirror refresh failed for ${f.project_id}`,
+        );
+        expect(
+          git(mirror, "rev-parse", "refs/remotes/origin/integration"),
+        ).toBe(merged);
+      };
+      // A bundle URL alone is not proof: require this project's prior host record.
+      git(center, "branch", "-f", "integration", parent);
+      git(
+        mirror,
+        "remote",
+        "set-url",
+        "origin",
+        join(agentRoot, "inputs/other/source.bundle"),
+      );
+      await refused();
+      git(mirror, "remote", "set-url", "origin", bundle);
+      writeFileSync(record, source);
+      await refused();
+      unlinkSync(record);
+      await refused();
+      expect(existsSync(record)).toBe(false);
+      const elsewhere = join(dataDir, "foreign-record");
+      writeFileSync(elsewhere, center, { mode: 0o600 });
+      symlinkSync(elsewhere, record);
+      await refused();
+      unlinkSync(record);
+      writeFileSync(record, center, { mode: 0o600 });
+      report.mockClear();
+      await executor.tick();
+      expect(report).not.toHaveBeenCalled();
+      expect(git(mirror, "rev-parse", "origin/integration")).toBe(parent);
+      expect(readFileSync(join(dotGit, "config"))).toEqual(configBefore);
+    }
     git(
       mirror,
       "symbolic-ref",
@@ -212,6 +291,36 @@ test("missing mirror stays absent; a foreign origin is reported without changing
     git(mirror, "for-each-ref", "refs/remotes/origin/new-host-branch"),
   ).toBe("");
   git(mirror, "remote", "set-url", "origin", center);
+  // An old machine-local URL mapping is not the verified center. Reject it
+  // before starting any transfer or deleting a conflicting tracking ref.
+  const mapping = `url.${join(f.dataDir, "retired-center")}.insteadOf`;
+  git(mirror, "config", mapping, center);
+  git(mirror, "update-ref", "refs/remotes/origin/new-host-branch/old", "HEAD");
+  const refs = () =>
+    git(mirror, "for-each-ref", "--format=%(refname) %(objectname)");
+  const before = refs();
+  const transfer = vi.spyOn(
+    CentralGitTransport.prototype,
+    "distributeMirrorHeads",
+  );
+  const clear = vi.spyOn(
+    LocalGitTransport.prototype,
+    "clearMirrorNameConflicts",
+  );
+  try {
+    report.mockClear();
+    await executor.tick();
+    expect(report).toHaveBeenCalledWith(
+      `Local mirror refresh failed for ${f.project_id}`,
+    );
+    expect(transfer).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalled();
+    expect(refs()).toBe(before);
+  } finally {
+    transfer.mockRestore();
+    clear.mockRestore();
+  }
+  git(mirror, "config", "--unset", mapping);
   await executor.tick();
   expect(git(mirror, "rev-parse", "origin/new-host-branch")).toBe(
     git(center, "rev-parse", "new-host-branch"),

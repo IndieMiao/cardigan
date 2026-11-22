@@ -532,8 +532,8 @@ export class CentralGitTransport
       ? this.workerEndpoint(push)
       : push(path));
   }
-  /** Isolated accounts cannot fetch from the private center. The bound Agent
-   * receiver writes only the fetch-equivalent tracking refs, never local heads. */
+  /** Fetch-equivalent distribution: the sender is the verified private center,
+   * never a URL resolved by the mirror. Only remote-tracking refs are updated. */
   async distributeMirrorHeads(repository: string, receivePack: string) {
     await this.workerEndpoint((endpoint) =>
       this.checked(repository, [

@@ -70,6 +70,8 @@ import {
   agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
+  matchesAgentBundleOrigin,
+  mirrorReceivePack,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
 import type {
@@ -1006,13 +1008,36 @@ export class ServerGit implements GitBinding {
             ? agentWorkspace(this.options.captureAgent)
             : undefined;
         const local = new LocalGitTransport("git", {}, workspace);
-        await local.verifyMirror(repository, source);
-        if (execution.mode === "agent-ssh") {
-          const receiver = await agentReceivePack(execution, repository, {
-            mirror: true,
-          });
-          await this.transport.distributeMirrorHeads(source, receiver);
-        } else await local.fetchMirrorHeads(repository, source);
+        await local.verifyMirror(
+          repository,
+          source,
+          execution.mode === "agent-ssh"
+            ? (origin) =>
+                matchesAgentBundleOrigin(
+                  execution,
+                  project.project_id,
+                  origin,
+                  source,
+                )
+            : undefined,
+        );
+        const receiver = await mirrorReceivePack(execution, repository);
+        const transfer = () =>
+          this.transport.distributeMirrorHeads(source, receiver);
+        try {
+          await transfer();
+        } catch (error) {
+          // Only retry if there is a concrete directory/file conflict to clear.
+          const heads = await this.transport.listRefs(source, "refs/heads/");
+          if (
+            !(await local.clearMirrorNameConflicts(
+              repository,
+              heads.map(({ ref }) => ref.slice("refs/heads/".length)),
+            ))
+          )
+            throw error;
+          await transfer();
+        }
       },
     );
   }

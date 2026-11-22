@@ -248,9 +248,37 @@ export async function agentUploadPack(
 export async function agentReceivePack(
   config: AgentConfig,
   repository: string,
-  options?: { mirror: true },
 ): Promise<string> {
-  return agentPack(config, repository, "receive-pack", options?.mirror);
+  return agentPack(config, repository, "receive-pack");
+}
+/** Mirror transfers always originate in the verified center. Even same-user
+ * clones only receive: their Git config cannot redirect the source. */
+export async function mirrorReceivePack(
+  config: ExecutionConfig,
+  repository: string,
+) {
+  if (config.mode === "agent-ssh")
+    return agentPack(config, repository, "receive-pack", true);
+  if (
+    !isAbsolute(repository) ||
+    dirname(resolve(repository)) !== join(config.dataDir, "agent", "repos")
+  )
+    fail(
+      "invalid_launch",
+      "Local mirror requires a configured base repository",
+    );
+  return `sh -c ${shellQuote(`exec env ${packService(repository, "receive-pack", true)}`)} --`;
+}
+function packService(
+  repository: string,
+  service: "upload-pack" | "receive-pack",
+  mirror: boolean,
+) {
+  // A pruning push must not delete origin/HEAD (which can dereference to main).
+  const receiverOptions = mirror
+    ? "-c receive.hideRefs=refs/remotes/origin/HEAD -c receive.autogc=false "
+    : "";
+  return `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git ${receiverOptions}-c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
 }
 async function agentPack(
   config: AgentConfig,
@@ -270,11 +298,7 @@ async function agentPack(
       "Git pack service requires a configured Agent base repository",
     );
   await checkAgentFiles(config);
-  // A pruning push must not delete origin/HEAD (which can dereference to main).
-  const receiverOptions = mirror
-    ? "-c receive.hideRefs=refs/remotes/origin/HEAD -c receive.autogc=false "
-    : "";
-  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git ${receiverOptions}-c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
+  const remote = packService(repository, service, mirror);
   // Ignore Git's appended path; the command is bound to the host-selected repository.
   return `sh -c ${shellQuote(`exec ${agentSshCommand(config)} ${shellQuote(remote)}`)} --`;
 }

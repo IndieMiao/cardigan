@@ -70,6 +70,7 @@ export {
   agentProcessCommand,
   agentReceivePack,
   agentUploadPack,
+  mirrorReceivePack,
   validateSshConfig,
 } from "./agent-ssh.js";
 export {
@@ -107,6 +108,7 @@ export {
   checkLockName,
   clearAgentSentinel,
   type LaunchFile,
+  matchesAgentBundleOrigin,
   prepareAgentCheckout,
   prepareAgentProject,
   prepareCheckLock,
