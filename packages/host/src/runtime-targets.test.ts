@@ -253,7 +253,16 @@ test.each([
 ] as const)(
   "$os runtime methods, get probes and events select two machines with identical Assignment and terminal numbers",
   async (platform) => {
-    workers = workers.map((worker) => ({ ...worker, ...platform }));
+    workers = workers.map((worker) => ({
+      ...worker,
+      ...platform,
+      execution: {
+        ...worker.execution,
+        ...(platform.os === "darwin" && {
+          macosCore: { python: "/bin/python3", retiredLaunchdLabel: "fixture" },
+        }),
+      },
+    }));
     store.uow.run((tx) => {
       for (const worker of workers)
         tx.machines.put("fixture", {
@@ -277,13 +286,14 @@ test.each([
       value(await router.resume_or_replace(ref, launch));
       value(await router.human_entry(ref));
       value(await router.release(ref, { force: true }));
+      const eligible = vi.fn(() => true);
       value(
         await router.retire_idle(ref, {
           project_id: "fixture",
           assignment_id: "A-1",
           hangup_ms: 1,
           terminate_ms: 1,
-          before_signal: () => true,
+          before_signal: eligible,
         }),
       );
       value(
@@ -317,6 +327,16 @@ test.each([
       expect(
         (await router.forLaunch("fixture", assignment(id))).machine.id,
       ).toBe(id);
+      // The adapter holds this callback between its first probe and the signal.
+      const gate = calls.mock.calls.find(
+        (c) => c[0] === id && c[1] === "retire_idle",
+      )?.[3].before_signal;
+      expect(gate()).toBe(true);
+      workers = workers.map((w) =>
+        w.machine_id === id ? { ...w, allow_remote_launch: false } : w,
+      );
+      expect(gate()).toBe(false);
+      expect(eligible).toHaveBeenCalledTimes(1);
     }
   },
 );
@@ -975,7 +995,7 @@ test.each(["configuration", "permission", "status"])(
   },
 );
 
-test("disabling launch retains existing observation and release, but prevents replacement", async () => {
+test("revoking remote authorization rejects old observation, release and replacement", async () => {
   const ref = value(
     await router.provision(
       assignment("worker-a"),
@@ -993,9 +1013,9 @@ test("disabling launch retains existing observation and release, but prevents re
     ok: false,
     error: { message: expect.stringContaining("remote_launch_disabled") },
   });
-  value(await router.status(ref));
-  value(await router.release(ref, { force: true }));
-  expect(calls.mock.calls.map((c) => c[1])).toEqual(["status", "release"]);
+  expect((await router.status(ref)).ok).toBe(false);
+  expect((await router.release(ref, { force: true })).ok).toBe(false);
+  expect(calls).not.toHaveBeenCalled();
 });
 
 test.each(["disabled", "offline", "draining"] as const)(
@@ -1034,8 +1054,10 @@ test.each(["disabled", "offline", "draining"] as const)(
     finishPreparation.resolve();
     expect(await sending).toMatchObject({ ok: false });
     expect(calls).not.toHaveBeenCalled();
-    value(await router.status(ref));
-    value(await router.release(ref, { force: true }));
+    expect((await router.status(ref)).ok).toBe(state !== "disabled");
+    expect((await router.release(ref, { force: true })).ok).toBe(
+      state !== "disabled",
+    );
   },
 );
 
@@ -1386,4 +1408,191 @@ test("a manual confirmation may ignore drain but not a failed automatic upgrade"
     failed_steps: [upgradeHold],
   });
   expect(observed.health?.available).toBe(false);
+});
+
+test("machine checks persist a fixed routing reason before or during the probe", async () => {
+  const options = {
+    store,
+    project: "fixture",
+    machine: "worker-a",
+    catalog: () => [],
+  };
+  const check = () => observeRegisteredMachine(options, () => router);
+  workers = workers.map((w) => ({ ...w, arch: "other" }));
+  expect((await check()).health?.blockers).toEqual([
+    "invalid_launch",
+    "target_mismatch",
+  ]);
+  workers = workers.map((w) => ({
+    ...w,
+    arch: "x64",
+    execution: { ...w.execution, path: "" },
+  }));
+  expect((await check()).health?.blockers).toEqual([
+    "invalid_launch",
+    "worker_configuration_incomplete",
+  ]);
+});
+
+test.each([
+  { os: "linux", arch: "x64" },
+  { os: "darwin", arch: "arm64" },
+] as const)(
+  "$os environment edits drain only the affected binding and survive restart",
+  async (platform) => {
+    workers = workers.map((w) => ({ ...w, ...platform }));
+    store.uow.run((tx) => {
+      for (const w of workers)
+        tx.machines.put("fixture", {
+          ...machine(w.machine_id, w.execution.machine),
+          ...platform,
+        });
+    });
+    const a = assignment("worker-a");
+    const ref = value(
+      await router.provision(a, role, machine("worker-a"), launch),
+    );
+    let run = {
+      id: "R-1",
+      assignment_id: a.id,
+      trigger_event_id: "evt",
+      kind: "initial",
+      status: "running",
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "fixture",
+      outcome: null,
+      summary: "",
+    } as import("@cardigan/domain").Run;
+    store.uow.run((tx) => {
+      tx.assignments.put("fixture", { ...a, runtime_ref: ref });
+      tx.runs.put("fixture", run);
+    });
+    workers = workers.map((w) =>
+      w.machine_id === "worker-a"
+        ? {
+            ...w,
+            execution: {
+              ...w.execution,
+              path: "/new/bin:/usr/bin",
+              env: { ANDROID_HOME: "/new/sdk" },
+            },
+          }
+        : w,
+    );
+    const restarted = router.forProject("fixture");
+    expect(restarted.executionForRef(ref)).toMatchObject({
+      path: "/usr/bin:/bin",
+      target: ref.target,
+    });
+    expect((await restarted.status(ref)).ok).toBe(true);
+    expect(
+      await restarted.forLaunch("fixture", assignment("worker-b")),
+    ).toBeDefined();
+    await expect(
+      restarted.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("worker_binding_draining");
+    // A publication may outlive its process: waiting work must not drain itself.
+    if (!ref.target) throw new Error("Missing target");
+    const oldPublication = {
+      generation: "old",
+      target: ref.target,
+      phase: "preparing" as const,
+      lease_until: "2030-01-01T00:00:00.000Z",
+      agent_name: "fixture",
+      work_dir: "fixture",
+      sha: null,
+      token_id: null,
+      runtime_ref: null,
+      process: null,
+      log_offset: 0,
+      artifacts: [],
+      wait: true,
+      provision_attempted: true,
+    };
+    run = {
+      ...run,
+      status: "queued",
+      queue_reason: "awaiting_dispatch",
+      launch_publication: oldPublication,
+    };
+    store.uow.run((tx) => {
+      tx.assignments.put("fixture", { ...a, runtime_ref: null });
+      tx.runs.put("fixture", run);
+    });
+    expect(restarted.bindingState("fixture", "worker-a").pending).toBe(true);
+    store.uow.run((tx) =>
+      tx.runs.put("fixture", {
+        ...run,
+        launch_publication: { ...oldPublication, phase: "exited" },
+      }),
+    );
+    expect(restarted.bindingState("fixture", "worker-a").pending).toBe(false);
+    expect(value(await restarted.check("fixture", "worker-a"))).toMatchObject({
+      launch_enabled: true,
+      blockers: [],
+    });
+    expect((await restarted.forLaunch("fixture", a)).execution).toMatchObject({
+      path: "/new/bin:/usr/bin",
+    });
+    workers = workers.map((w) => ({
+      ...w,
+      execution: { ...w.execution, user: "different" },
+    }));
+    expect((await restarted.status(ref)).ok).toBe(false);
+  },
+);
+
+test("only a checked PATH-only binding can reuse the original session; a revoked send slot stays closed", async () => {
+  const base = assignment("worker-a");
+  const ref = value(
+    await router.provision(base, role, machine("worker-a"), launch),
+  );
+  const a = { ...base, runtime_ref: ref, runtime_state: "idle" as const };
+  store.uow.run((tx) => tx.assignments.put("fixture", a));
+  workers = workers.map((w) => ({
+    ...w,
+    execution: { ...w.execution, path: "/next/bin:/usr/bin" },
+  }));
+  const fp = router.changedSessionEnvironment("fixture", a);
+  if (!fp) throw new Error("missing edited target");
+  expect(await router.canAdmitSession("fixture", a, fp)).toBe(true);
+  expect((await router.forSession("fixture", a)).execution.target).toEqual(
+    ref.target,
+  );
+  await expect(router.forLaunch("fixture", a)).rejects.toThrow(
+    "target_mismatch",
+  );
+  const run = {
+    id: "R-2",
+    assignment_id: a.id,
+    status: "dispatched",
+    kind: "initial",
+    trigger_event_id: "fixture",
+    role_version: 1,
+    model: "fixture",
+    agent_cli_version: "fixture",
+    outcome: null,
+    summary: "",
+    session_environment_binding: fp,
+  } as import("@cardigan/domain").Run;
+  store.uow.run((tx) => tx.runs.put("fixture", run));
+  expect((await router.forLaunch("fixture", base)).execution).toMatchObject({
+    path: "/next/bin:/usr/bin",
+  });
+  await router.wake(ref, "next", {
+    session_run: { assignment_id: a.id, run_id: run.id },
+    before_send: () => true,
+  });
+  const options = calls.mock.calls.findLast(
+    (c) => c[1] === "wake",
+  )?.[4] as RuntimeWakeOptions;
+  expect(options).toMatchObject({
+    if_idle: true,
+    retirement_owner: { project_id: "fixture", assignment_id: a.id },
+  });
+  expect(options.before_send?.()).toBe(true);
+  workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+  expect(options.before_send?.()).toBe(false);
+  expect(await router.canAdmitSession("fixture", a, fp)).toBe(false);
 });

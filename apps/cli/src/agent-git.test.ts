@@ -1059,8 +1059,10 @@ process.exit(result.status ?? 98);
       `#!/usr/bin/env node
 const {spawnSync}=require('node:child_process');
 const command=process.argv.at(-1);
+// Refuse the pack BEFORE Git receives a successful remote acknowledgement.
+if(command.includes('receive-pack')) process.exit(255);
 const result=spawnSync('sh',['-c',command],{stdio:'inherit'});
-process.exit(command.includes('receive-pack') ? 255 : result.status ?? 98);
+process.exit(result.status ?? 98);
 `,
       { mode: 0o700 },
     );
@@ -1211,4 +1213,12 @@ print('atomic publication checked')
     ]);
     expect(stdout.trim()).toBe("atomic publication checked");
   });
+});
+
+test("orphan backup preserves the real index and includes unstaged and untracked files in a recoverable ref", async () => {
+  await exec("python3", [
+    "-IB",
+    "apps/cli/test-support/orphan-workspace.py",
+    "deploy/worker-git.py",
+  ]);
 });

@@ -1716,6 +1716,7 @@ export function completeHumanAction(
   actor: Actor,
   p: {
     human_action_id: HumanActionId;
+    conclusion?: "exited" | "false_alarm" | "unconfirmed";
     text: string;
     attachments?: readonly string[];
   },

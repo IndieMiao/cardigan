@@ -161,7 +161,11 @@ export const transitionTables: {
       declared_lost: "lost",
       release: "released",
     },
-    lost: { session_replaced: "idle", release: "released" },
+    lost: {
+      loss_corrected: "idle",
+      session_replaced: "idle",
+      release: "released",
+    },
   },
   run: {
     queued: { dispatch: "dispatched", cancel: "cancelled" },
@@ -182,7 +186,11 @@ export const transitionTables: {
       cancel: "cancelled",
       connection_lost: "unknown",
     },
-    unknown: { reconnected: "running", cancel: "cancelled" },
+    unknown: {
+      reconnected: "running",
+      reconnected_before_start: "dispatched",
+      cancel: "cancelled",
+    },
   },
   notification: {
     pending: {
@@ -262,6 +270,15 @@ export function transition<M extends keyof MachineStates>(
         },
       }
     : { ok: true, value: to };
+}
+
+/** Process liveness cannot acknowledge dispatch on the agent's behalf. */
+export function reconnectRun(run: { status: RunStatus; started_at?: string }) {
+  return transition(
+    "run",
+    run.status,
+    run.started_at ? "reconnected" : "reconnected_before_start",
+  );
 }
 
 /** Mirrors `DEFAULT_REVIEW_MAX_ROUNDS` (C-253); stored limits always win. */

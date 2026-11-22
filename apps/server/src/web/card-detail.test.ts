@@ -1,6 +1,36 @@
 import { expect, test } from "vitest";
-import type { CardDetail } from "../../../web/src/api.js";
+import type { CardDetail, CardPage } from "../../../web/src/api.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+
+test("cleared deadlines are absent from refreshed board and detail reads", async () => {
+  const { updateCard } = await import("@cardigan/domain");
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const card_id = f.card.id;
+    const write = (deadline: string | null) =>
+      f.command((s, a, p) => updateCard(s, a, { card_id, deadline }, p));
+    const detail = async () =>
+      ((await f.call(f.projectPath(`/cards/${card_id}`))).json as CardDetail)
+        .card;
+    const board = async () =>
+      (
+        (await f.call(f.projectPath("/cards?mode=board&view=summary")))
+          .json as CardPage
+      ).cards.find((c) => c.id === card_id);
+    write("2026-11-28");
+    expect(await detail()).toHaveProperty("deadline", "2026-11-28");
+    expect(await board()).toBeDefined();
+    write(null);
+    expect(await detail()).not.toHaveProperty("deadline");
+    const refreshed = await board();
+    expect(refreshed).toBeDefined();
+    expect(refreshed).not.toHaveProperty("deadline");
+  } finally {
+    await f.close();
+  }
+}, 30_000);
 
 test("U3 detail binds authors and reviews to their own events and reports the last card update", async () => {
   const f = await m5Cross();

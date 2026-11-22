@@ -129,6 +129,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     ...(options.git?.proveReviewLimit
       ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
       : {}),
+    mergeGateEnabled: (project) =>
+      (options.mergeGate?.configuration.forProject(project).status ??
+        "disabled") !== "disabled",
     mergeShadowTick: (project) => shadow.tick(project),
     ...(options.frameworkWaitReminderMs !== undefined
       ? { frameworkWaitReminderMs: options.frameworkWaitReminderMs }
@@ -218,6 +221,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       : { inactivityGraceMs: options.inactivityGraceMs }),
   });
   const monitor = new RuntimeMonitor({
+    ...(options.git?.snapshotOrphan
+      ? { snapshotOrphan: options.git.snapshotOrphan.bind(options.git) }
+      : {}),
     store: options.store,
     runtime: options.runtime,
     clock,

@@ -95,6 +95,16 @@ export function fullTime(value: string): string {
     timeZoneName: "longOffset",
   }).format(new Date(value));
 }
+/** The current time, refreshed every minute, for relative times. */
+export function useNow(): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
+
 export function Time({
   value,
   relative = false,
@@ -102,11 +112,7 @@ export function Time({
   value: string | null | undefined;
   relative?: boolean;
 }) {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 60000);
-    return () => clearInterval(timer);
-  }, []);
+  const now = useNow();
   if (!value || !Number.isFinite(Date.parse(value)))
     return <span>时间未知</span>;
   const title = fullTime(value);

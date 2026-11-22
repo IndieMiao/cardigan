@@ -20,6 +20,7 @@ import {
   onboardWorker,
   parseWorkerOnboarding,
   RuntimeTargets,
+  runtimeTargetBinding,
   WORKER_PROBES,
 } from "@cardigan/host";
 import {
@@ -232,6 +233,146 @@ test("CLI and Workbench checks use only the dispatch owner's accepted browser di
     }
   } finally {
     runtimeCheck.mockRestore();
+    store.close();
+  }
+});
+
+test("apply-config checks the applied environment without modifying or trusting a changed enrollment", async () => {
+  await bootstrap();
+  expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+    0,
+  );
+  const draft = join(
+    configRoot,
+    "worker-onboarding/worker-a/example.runtime-workers.yaml",
+  );
+  const enrolled = readFileSync(draft, "utf8");
+  const effective = parse(enrolled);
+  const binding = effective.machines[0].projects[0];
+  binding.path = `/new/tool/bin:${binding.path}`;
+  binding.env = { ANDROID_HOME: "/new/sdk" };
+  const applied = join(configRoot, "runtime-workers.yaml");
+  writeFileSync(applied, stringify(effective), { mode: 0o600 });
+  const probe = vi.fn(
+    async (_step: string, config: ReturnType<typeof parseWorkerOnboarding>) => {
+      expect(config.worker.execution).toMatchObject({
+        path: binding.path,
+        env: binding.env,
+      });
+      return true;
+    },
+  );
+  const machine = vi
+    .spyOn(RuntimeTargets.prototype, "check")
+    .mockResolvedValue({
+      ok: true,
+      value: { machine_id: "worker-a", blockers: [], launch_enabled: false },
+    });
+  try {
+    expect(await runWorkerCommand(["apply-config", ...args], io, probe)).toBe(
+      0,
+    );
+    expect(probe).toHaveBeenCalledTimes(WORKER_PROBES.length);
+    expect(machine).toHaveBeenCalledTimes(1);
+    expect(readFileSync(draft, "utf8")).toBe(enrolled);
+    probe.mockClear();
+    machine.mockClear();
+    binding.user = "different";
+    writeFileSync(applied, stringify(effective));
+    await expect(
+      runWorkerCommand(["apply-config", ...args], io, probe),
+    ).rejects.toThrow();
+    expect(probe).not.toHaveBeenCalled();
+    expect(machine).not.toHaveBeenCalled();
+  } finally {
+    machine.mockRestore();
+  }
+});
+
+test("Workbench confirmation and regular worker checks use the applied PATH, not the enrollment PATH", async () => {
+  await bootstrap();
+  expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+    0,
+  );
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  const host = machineHost(
+    store,
+    { mode: "local", dataDir },
+    "example",
+    io.env,
+  );
+  const input = parse(readFileSync(file, "utf8"));
+  const oldBinding = runtimeTargetBinding(
+    parseWorkerOnboarding(input, dataDir).worker,
+  ).fingerprint;
+  const draft = join(
+    configRoot,
+    "worker-onboarding/worker-a/example.runtime-workers.yaml",
+  );
+  const original = readFileSync(draft, "utf8");
+  const runtime = parse(original);
+  const edited = runtime.machines[0].projects[0];
+  edited.path = `/new/bin:${edited.path}`;
+  edited.allow_remote_launch = true;
+  const live = join(configRoot, "runtime-workers.yaml");
+  writeFileSync(live, stringify(runtime), { mode: 0o600 });
+  const webCheck = (binding?: string) =>
+    host.check(
+      "example",
+      "worker-a",
+      "worker",
+      () => {},
+      new AbortController().signal,
+      "fixture-check",
+      binding ? { binding } : undefined,
+    );
+  const probe = vi.fn(
+    async (_step: string, config: ReturnType<typeof parseWorkerOnboarding>) =>
+      config.worker.execution.path === edited.path,
+  );
+  const actual =
+    await vi.importActual<typeof import("@cardigan/host")>("@cardigan/host");
+  try {
+    const registered = store.uow.read((tx) =>
+      tx.machines.get("example", "worker-a"),
+    );
+    if (!registered) throw new Error("missing test machine");
+    const fingerprint = host.bindingFingerprint?.("example", registered);
+    if (!fingerprint) throw new Error("missing test binding");
+    expect(fingerprint).not.toBe(oldBinding);
+    expect(await webCheck(oldBinding)).toMatchObject({
+      status: "failed",
+      failed_steps: ["configuration"],
+    });
+    for (const pin of [fingerprint, undefined]) {
+      vi.mocked(onboardWorker).mockImplementationOnce((opts) =>
+        actual.onboardWorker({ ...opts, probe }),
+      );
+      expect(await webCheck(pin)).toMatchObject({ status: "passed" });
+    }
+    expect(await runWorkerCommand(["check", ...args], io, probe)).toBe(0);
+    expect(probe).toHaveBeenCalledTimes(3 * WORKER_PROBES.length);
+    expect(readFileSync(draft, "utf8")).toBe(original);
+    // Even a correct live fingerprint cannot confirm a different enrollment.
+    for (const change of [
+      "user",
+      "generation",
+      "known_hosts_file",
+      "removed",
+    ]) {
+      const changed = structuredClone(runtime);
+      if (change === "removed") changed.machines = [];
+      else if (change === "known_hosts_file")
+        changed.machines[0][change] += ".new";
+      else changed.machines[0].projects[0][change] = "other";
+      writeFileSync(live, stringify(changed));
+      const pin =
+        host.bindingFingerprint?.("example", registered) ?? fingerprint;
+      await expect(webCheck(pin)).rejects.toThrow();
+    }
+    expect(probe).toHaveBeenCalledTimes(3 * WORKER_PROBES.length);
+  } finally {
     store.close();
   }
 });
@@ -653,3 +794,16 @@ test.each(["wizard", "capability"] as const)(
     }
   },
 );
+
+test("apply-config dry-run describes drain and both checks without opening the registry", async () => {
+  expect(
+    await runWorkerCommand(["apply-config", ...args, "--dry-run"], io),
+  ).toBe(0);
+  expect(lines.join(" ")).toMatch(/排空.*worker.*机器/u);
+  await expect(
+    runWorkerCommand(["apply-config", ...args], {
+      ...io,
+      env: { ...io.env, MCP_TOKEN: "fixture" },
+    }),
+  ).rejects.toThrow(/人类/u);
+});

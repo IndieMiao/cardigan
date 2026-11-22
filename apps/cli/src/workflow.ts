@@ -93,7 +93,7 @@ const USAGE = [
   "    card create 可用 --work-item-requirements <JSON> 按模板 key 追加机器要求；能力版本只接受无版本、=、>=。",
   "  cardigan card create [--template <id>] [--parent-card <C-id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "    界面或设计模板需加 --state-and-save 无写入，或传含 save_timing、leave_behavior、failure_feedback、consistency 的 JSON 对象。",
-  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
+  "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--deadline <YYYY-MM-DD>|none] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    create/update 支持 --is-ui-framework on|off、--depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
@@ -119,7 +119,7 @@ const USAGE = [
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
   "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
-  "  cardigan human-action done <H-n> --text <结果> [--project <p>]",
+  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed] [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -446,6 +446,7 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
     "goal",
     "acceptance",
     "priority",
+    "deadline",
     "status",
     "risk-tags",
     "is-ui-framework",
@@ -465,6 +466,19 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
   const changed = fields.filter((name) => flags[name] !== undefined);
   if (changed.length === 0) {
     throw new CliError("至少提供一个要修改的字段", EXIT.usage, [USAGE]);
+  }
+  const deadline = optional(flags, "deadline");
+  if (deadline !== undefined && deadline !== "none") {
+    const date = new Date(`${deadline}T00:00:00Z`);
+    if (
+      !Number.isFinite(date.getTime()) ||
+      date.toISOString().slice(0, 10) !== deadline
+    )
+      throw new CliError(
+        "--deadline 只接受 YYYY-MM-DD 日期或 none",
+        EXIT.usage,
+        [USAGE],
+      );
   }
   const status = optional(flags, "status");
   const supersededBy = optional(flags, "superseded-by");
@@ -530,6 +544,9 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
     ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
     ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
     ...(priority === undefined ? {} : { priority }),
+    ...(deadline === undefined
+      ? {}
+      : { deadline: deadline === "none" ? null : deadline }),
     ...(status === undefined ? {} : { status }),
     ...(riskTags === undefined ? {} : { risk_tags: riskTags }),
   };
@@ -2174,13 +2191,24 @@ async function humanActionDone(
   const [sub, ...rest] = args;
   if (sub !== "done") {
     throw new CliError(
-      "用法：cardigan human-action done <H-n> --text <结果>",
+      "用法：cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm|unconfirmed]",
       EXIT.usage,
       [USAGE],
     );
   }
   const parsed = parseArgs(rest, []);
   const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const conclusion = optional(parsed.flags, "conclusion");
+  if (
+    conclusion &&
+    conclusion !== "exited" &&
+    conclusion !== "false_alarm" &&
+    conclusion !== "unconfirmed"
+  )
+    throw new CliError(
+      "--conclusion 须为 exited、false_alarm 或 unconfirmed",
+      EXIT.usage,
+    );
   const text = required(parsed.flags, "text");
 
   const store = await openPlacementStore(io, parsed.flags);
@@ -2199,11 +2227,21 @@ async function humanActionDone(
         completeHumanAction(
           state,
           actor,
-          { human_action_id: humanActionId, text },
+          {
+            human_action_id: humanActionId,
+            text,
+            ...(conclusion === "exited" ||
+            conclusion === "false_alarm" ||
+            conclusion === "unconfirmed"
+              ? { conclusion }
+              : {}),
+          },
           ports,
         ),
     });
-    io.stdout(`已完成 ${humanActionId}：${action.status}`);
+    io.stdout(
+      `${action.status === "open" ? "已记录" : "已完成"} ${humanActionId}：${action.status}`,
+    );
     return EXIT.ok;
   } finally {
     store.close();

@@ -51,6 +51,7 @@ import {
   type Result,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
+  remoteExitAction,
   requiresUiStateAndSave,
   resolveReferences,
   roleKind,
@@ -1575,6 +1576,7 @@ export function needsYou(
       state.timeline,
       (entry) => entry.human_action_id === action.id,
     );
+    const stored = state.human_actions.find((a) => a.id === action.id);
     const helper = workerHelperAction(state, action);
     const machine =
       helper && state.machines?.find((m) => m.id === helper.machine_id);
@@ -1592,11 +1594,7 @@ export function needsYou(
         ? action.terminal
         : undefined;
     return {
-      ...webAuthorView(
-        state,
-        state.human_actions.find((a) => a.id === action.id)?.requested_by ??
-          "system",
-      ),
+      ...webAuthorView(state, stored?.requested_by ?? "system"),
       kind: "human_action" as const,
       id: action.id,
       card_id: action.card_id ?? null,
@@ -1605,6 +1603,20 @@ export function needsYou(
           ? "当前升级命令不可用，请主机运维重新核对目标和发行材料。"
           : (action.handoff?.instructions ?? action.instructions),
       terminal,
+      ...(remoteExitAction(state, action.id)
+        ? {
+            requires_loss_conclusion: true,
+            ...(stored?.status === "open" &&
+            stored.result?.conclusion === "unconfirmed"
+              ? {
+                  last_loss_observation: {
+                    conclusion: stored.result.conclusion,
+                    at: stored.result.at,
+                  },
+                }
+              : {}),
+          }
+        : {}),
       helper_checks: action.helper_checks,
       ...(action.handoff
         ? {
