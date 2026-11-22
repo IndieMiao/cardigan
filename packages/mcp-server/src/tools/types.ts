@@ -1,7 +1,9 @@
 import {
+  type CommandState,
   holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
+  type ProjectId,
   type ToolName,
 } from "@cardigan/domain";
 import type { z } from "zod";
@@ -10,6 +12,9 @@ import type { McpBackend } from "../backend.js";
 
 /** What a tool handler may use. */
 export interface ToolContext {
+  readonly projectSettings?:
+    | ((project: ProjectId) => CommandState["project_settings"])
+    | undefined;
   readonly store: McpBackend;
   readonly identity: Identity;
   /** Write handlers recheck revocation after asynchronous preflight. */

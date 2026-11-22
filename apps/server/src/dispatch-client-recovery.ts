@@ -354,6 +354,9 @@ export class ClientRecovery {
         const result = await runtime
           .wake(ref, `请继续当前 ${run.id} 未完成的工作。`, {
             prompt_binding: binding,
+            ...(ref.machine_id !== "local"
+              ? { session_run: { assignment_id: a.id, run_id: run.id } }
+              : {}),
             before_send: () =>
               write(claimed, "客户端断流，领取本轮唯一续跑提示", sameEvidence),
           })

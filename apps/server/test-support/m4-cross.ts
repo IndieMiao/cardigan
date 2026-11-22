@@ -114,6 +114,7 @@ export async function m4Cross(
     agent?: boolean;
     /** C-49 defaults merge confirmation to PM Ops; these fixtures cover the human path. */
     pmMergeConfirmation?: boolean;
+    mergeGate?: "enabled" | "disabled";
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "cardigan-m4-cross-"));
@@ -263,12 +264,13 @@ export async function m4Cross(
   };
   let output = "",
     stderr = "";
+  const configDir = roleConfig(root, "fixture");
   const io: CliIo = {
     ...createProcessIo(),
     cwd: root,
     env: {
       CARDIGAN_DATA_DIR: dataDir,
-      CARDIGAN_CONFIG_DIR: roleConfig(root, "fixture"),
+      CARDIGAN_CONFIG_DIR: configDir,
       CARDIGAN_PROJECT: project_id,
       ...(execution.mode === "agent-ssh"
         ? {
@@ -371,6 +373,9 @@ export async function m4Cross(
     server = await startCardiganServer({
       store: db(),
       config: { dataDir, host: "localhost", port, execution },
+      ...(options.mergeGate
+        ? { env: { ...process.env, CARDIGAN_CONFIG_DIR: configDir } }
+        : {}),
       git: binding,
       log: () => {},
       warn: () => {},
@@ -672,6 +677,7 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
                 "resolve_delegated_decision",
                 "triage_human_action",
                 "replace_verification_work_item",
+                "publish_artifact",
               ].includes(tool) &&
                 !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
                 !(
@@ -772,8 +778,19 @@ const child=spawnSync('sh',['-c',args.slice(at+2).join(' ')],{cwd:${JSON.stringi
       await review(pm, completion);
       return completion;
     }
+    if (options.mergeGate === "enabled")
+      await writeFile(
+        join(configDir, "merge-gate.yaml"),
+        JSON.stringify({
+          projects: {
+            [project_id]: { checks: [{ name: "unit", run: "true" }] },
+          },
+        }),
+        { mode: 0o600 },
+      );
     await open();
     return {
+      configDir,
       root,
       dataDir,
       source,

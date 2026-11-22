@@ -658,6 +658,7 @@ test.each(["provision", "replacement", "cleanup_unknown", "adapter_unknown"])(
 
 test.each([
   "ready",
+  "environment_during_launch",
   "disabled",
   "reachability",
   "authentication",
@@ -740,6 +741,15 @@ test.each([
     if (resolved.mode !== "agent-ssh")
       throw new Error("Invalid target fixture");
     execution = resolved;
+    if (mode === "environment_during_launch")
+      vi.mocked(checkWorkerMcp).mockImplementationOnce(async () => {
+        order.push("mcp");
+        execution = {
+          ...execution,
+          path: "/changed/bin:/usr/bin",
+          env: { ANDROID_HOME: "/changed/sdk" },
+        };
+      });
     if (mode === "authentication") failAt = "mcp";
     if (mode === "revoked_after_auth")
       vi.mocked(checkWorkerMcp).mockImplementationOnce(async () => {
@@ -757,7 +767,7 @@ test.each([
       expect((await f.start(true)).run.id).toBe(f.run.id);
       expect(order.filter((op) => op === "provision")).toHaveLength(1);
       expect(order.filter((op) => op === "commit")).toHaveLength(1);
-    } else if (mode === "ready") {
+    } else if (mode === "ready" || mode === "environment_during_launch") {
       const launched = await f.start();
       expect(launched.runtime_ref).toMatchObject({
         machine_id: "worker-a",
@@ -781,7 +791,8 @@ test.each([
       if (mode === "revoked_after_provision") {
         expect(order).toContain("publish");
         expect(order).toContain("provision");
-        expect(order).toContain("release");
+        expect(order).not.toContain("release");
+        expect(order).not.toContain("clear");
       } else {
         expect(order).not.toContain("publish");
         expect(order).not.toContain("provision");
@@ -861,14 +872,13 @@ test.each(["mcp", "inspect"])(
         return result;
       });
     }
-    await expect(f.start()).rejects.toThrow("withdrawn");
+    await expect(f.start()).rejects.toThrow("exit_unconfirmed");
     expect(order).not.toContain("publish");
     expect(order).not.toContain("provision");
     expect(order).not.toContain("commit");
-    expect(order.filter((operation) => operation === "clear")).toHaveLength(2);
+    expect(order.filter((operation) => operation === "clear")).toHaveLength(0);
     expect(f.latest()).toMatchObject({
-      status: "cancelled",
-      launch_publication: { phase: "exited" },
+      launch_publication: { phase: "stopping" },
     });
     expect(preparationCount()).toBe(0);
     const tokens = store.uow.run((tx) =>

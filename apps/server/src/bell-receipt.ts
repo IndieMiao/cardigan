@@ -154,6 +154,9 @@ export async function checkBellReceipts(
         [text, review].filter(Boolean).join("\n"),
         {
           ...guard,
+          ...(ref.machine_id !== "local"
+            ? { session_run: { assignment_id: owner.id, run_id: original.id } }
+            : {}),
           ...(preflight ? { resource_preflight: preflight } : {}),
           before_send: () =>
             store.uow.run((tx) => {

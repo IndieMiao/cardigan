@@ -344,6 +344,41 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   );
 });
 
+test.each([false, true])(
+  "C-577: enabling auto-merge uses the current gate when reassigning confirmations (configured=%s)",
+  async (configured) => {
+    const { confirmation } = await seatAwaitingMerge();
+    expect(confirmation.decider).toBe("human");
+    if (configured) enableMergeGate();
+    expect((await cardigan("preference", "set", "auto-merge", "on")).code).toBe(
+      0,
+    );
+    const open = state().decisions.filter(
+      (q) => q.trigger === "merge_confirmation" && q.status === "open",
+    );
+    if (configured) {
+      expect(open.map((q) => q.decider)).toEqual(["system"]);
+    } else {
+      expect(open).toEqual([confirmation]);
+      expect((await cardigan("needs-you")).out).toContain("待你拍板（1）");
+    }
+  },
+);
+
+test("C-577: merge status reports the persisted system decider before handoff", async () => {
+  await seatAwaitingMerge();
+  store.uow.run((tx) => {
+    const q = tx.decisions
+      .list(project)
+      .find((q) => q.trigger === "merge_confirmation");
+    if (!q) throw new Error("Missing confirmation");
+    tx.decisions.put(project, { ...q, decider: "system" });
+  });
+  expect((await cardigan("merge", "status", card_id)).out).toContain(
+    "Q-1 open decider=system",
+  );
+});
+
 test("C-112: merge status names the human action that holds the merge", async () => {
   await seatAwaitingMerge();
   expect((await cardigan("merge", "confirm", card_id)).code).toBe(0);

@@ -21,7 +21,7 @@ try:
         if uid != os.getuid(): sys.exit(21)
         if fields[0] == 'Z': sys.exit(23)
         if marker not in (root / 'environ').read_bytes().split(b'\0'): sys.exit(22)
-        identity = {'pid': pid, 'uid': uid, 'start': start, 'boot': boot}
+        identity = {'pid': pid, 'uid': uid, 'start': start, 'boot': boot, 'group': int(fields[2])}
         if mode == 'probe':
             print(json.dumps(identity))
         elif mode in ('HUP', 'TERM'):
