@@ -4,13 +4,14 @@ import {
   type RuntimeTargets,
 } from "@cardigan/host";
 import type { Store } from "@cardigan/store";
-import { startTimerLoop } from "./loop.js";
+import { type LoopStartup, startTimerLoop } from "./loop.js";
 import { reconcileHelperActions } from "./reconcile-helper-actions.js";
 import { MachineChecks } from "./web/machine-checks.js";
 import type { MachineHost } from "./web/machine-host.js";
 
 export function startMachineCapabilityLoop(options: {
   readonly store: Store;
+  readonly startup?: LoopStartup | undefined;
   readonly runtime: Pick<RuntimeTargets, "refreshMachine">;
   readonly verification?: { host: MachineHost; clock: Clock };
   readonly onError: (error: unknown) => void;
@@ -25,8 +26,10 @@ export function startMachineCapabilityLoop(options: {
       options.verification.host,
     );
   const loop = startTimerLoop({
+    startup: options.startup,
     signal: controller.signal,
     name: "machine-capabilities",
+    initialDelayMs: options.startup ? 1000 : 0,
     intervalMs: MACHINE_CAPABILITY_INTERVAL_MS,
     // Tools may need several bounded probes. This is independent of dispatch.
     slowTickMs: MACHINE_CAPABILITY_INTERVAL_MS,

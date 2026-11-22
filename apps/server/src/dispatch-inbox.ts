@@ -276,11 +276,15 @@ export function routeStreamEvents(
   const size = options.batchSize ?? 100;
   if (!Number.isSafeInteger(size) || size < 1 || size > 1000)
     throw new Error("Invalid routing page size");
-  const card = stream === PROJECT_EVENT_STREAM ? undefined : (stream as CardId);
   return store.uow.run((tx) => {
-    const events = tx.events
-      .listAfter(project, card, store.routerCursor(project, stream))
-      .slice(0, size);
+    // LIMIT inside the indexed seek, not after decoding the entire backlog
+    // under the stream write lock. Cursor and notifications still commit together.
+    const events = store.database
+      .prepare(
+        `SELECT doc FROM events WHERE project_id=? AND stream=? AND seq>? ORDER BY seq LIMIT ?`,
+      )
+      .all(project, stream, store.routerCursor(project, stream), size)
+      .map((row) => JSON.parse(String(row.doc)) as Event);
     if (events.length === 0) return 0;
     const snapshot = (options.loadState ?? loadCommandState)(tx, project),
       at = (options.clock ?? dispatcherClock).now();

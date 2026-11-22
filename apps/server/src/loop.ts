@@ -6,11 +6,15 @@ import { profileTick } from "./tick-profile.js";
  * caller stops it before closing host resources, and `stop()` waits for the
  * tick that is currently running — SIGTERM must not cut a merge in half.
  */
+/** Shared by all loops of one assembled server. False means startup failed. */
+export type LoopStartup = Promise<boolean>;
 export interface TimerLoopOptions {
+  readonly startup?: LoopStartup | undefined;
   readonly name: string;
   readonly tick: () => Promise<void>;
   readonly intervalMs?: number;
   readonly initialDelayMs?: number;
+  readonly continueSoon?: () => boolean;
   readonly slowTickMs?: number;
   /** Tick failures are reported and retried on the next interval. */
   readonly onError: (error: unknown) => void;
@@ -55,6 +59,17 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
     });
   const done = (async () => {
     try {
+      if (
+        options.startup &&
+        !stopping &&
+        !(await Promise.race([
+          options.startup,
+          new Promise<boolean>((resolve) => {
+            wake = () => resolve(false);
+          }),
+        ]))
+      )
+        return;
       if (initial && !stopping) await delay(initial);
       while (!stopping) {
         const started = performance.now();
@@ -71,7 +86,10 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
               ),
             );
         }
-        if (!stopping) await delay(interval);
+        if (!stopping)
+          await delay(
+            options.continueSoon?.() ? Math.min(interval, 250) : interval,
+          );
       }
     } finally {
       options.signal?.removeEventListener("abort", requestStop);

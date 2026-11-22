@@ -113,6 +113,7 @@ export async function runServer(
   const webConfig = resolveWebConfig(env);
   // Each role owns a connection to the same WAL database.
   const store = Store.open({ dataDir: config.dataDir });
+  const ready = Promise.withResolvers<void>();
   let server: CardiganServer | undefined;
   let refresh: () => Promise<unknown>;
   try {
@@ -130,6 +131,7 @@ export async function runServer(
     refresh = host.refreshLaunch;
     server = await startCardiganServer({
       role: options.role ?? "web",
+      backgroundReady: ready.promise,
       onBackgroundOwner: host.publishWhileBackgroundOwner,
       config,
       env,
@@ -204,6 +206,7 @@ export async function runServer(
     }),
   );
 
+  ready.resolve();
   return shutdown;
 }
 
