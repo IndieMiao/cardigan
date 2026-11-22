@@ -1,9 +1,9 @@
 import { type CommandState, command } from "./commands/core.js";
 import { notices } from "./commands/notices.js";
 import { selectNeedsYouDecisions } from "./commands/queries.js";
-import type { Event } from "./entities.js";
+import type { Event, ReadyCondition } from "./entities.js";
 import type { CardId, EventId, ProjectId } from "./ids.js";
-import { needsYouItemReady } from "./readiness.js";
+import { NEEDS_YOU_ITEM_READY, needsYouItemReady } from "./readiness.js";
 
 export const EXT_MESSAGE_DEFAULTS = {
   timeout_ms: 10_000,
@@ -23,6 +23,10 @@ export interface ExtMessageItem {
   readonly card_id?: CardId;
   readonly event_id: EventId;
   readonly created_at?: string;
+  /** Server-recorded creation, readiness and routing times; never adapter input. */
+  readonly activity_at?: readonly string[];
+  /** Legacy gated state with no recorded release/trigger time. */
+  readonly undated_ready?: true;
   readonly item_id: string;
   readonly kind: ExtMessageKind;
   readonly title?: string;
@@ -41,15 +45,7 @@ export type ExtMessageEntry =
       readonly item: string;
       readonly kind: ExtMessageKind;
     };
-export type ExtMessage =
-  | ExtMessageEntry
-  | {
-      readonly title: string;
-      readonly url: string;
-      readonly project: string;
-      readonly total: number;
-      readonly items: readonly ExtMessageEntry[];
-    };
+export type ExtMessage = ExtMessageEntry;
 
 /** The adapter receives only the approved projection, never domain objects or credentials. */
 export interface ExtMessageSignal {
@@ -118,27 +114,30 @@ export function buildExtMessage(
   };
 }
 
-/** Digest membership is projected afresh; the outbox never stores message text. */
+/** Intentionally cannot accept titles, item URLs, or actions. */
 export function buildExtMessageDigest(
-  project: ProjectId,
-  items: readonly ExtMessageItem[],
-  base: string,
-  policy: ExtMessagePolicy = EXT_MESSAGE_DEFAULTS,
-): ExtMessage {
-  if (!Number.isSafeInteger(policy.digest_limit) || policy.digest_limit < 1)
-    throw new Error("Invalid digest limit");
-  const pending = items.filter(
-    (i) => i.project_id === project && !i.handled && i.ready,
+  count: number,
+  workbench: string,
+): ExtMessageEntry {
+  return { title: `${count} 条待处理`, url: workbench };
+}
+
+function sameGate(gate: ReadyCondition | undefined, recorded: unknown) {
+  if (
+    !gate ||
+    !recorded ||
+    typeof recorded !== "object" ||
+    !("kind" in recorded) ||
+    recorded.kind !== gate.kind
+  )
+    return false;
+  if (gate.kind === "manual") return true;
+  return (
+    "card_id" in recorded &&
+    recorded.card_id === gate.card_id &&
+    (gate.kind !== "card_delivery" ||
+      ("after" in recorded ? recorded.after : undefined) === gate.after)
   );
-  return {
-    project,
-    title: `免打扰期间 ${pending.length} 条待处理`,
-    total: pending.length,
-    items: pending
-      .slice(0, policy.digest_limit)
-      .map((i) => buildExtMessage(i, base, policy.title_limit)),
-    url: extMessageUrl(base, project),
-  };
 }
 
 /** Replayable projection of canonical Needs You facts, including handled items for skip auditing. */
@@ -167,29 +166,57 @@ export function extMessageItems(
       (id) => !id || !cards.has(id) || cards.get(id)?.sensitive === true,
     );
   // Preserve first-match stream order, including legacy events with both references.
-  const decisionSources = new Map<string, Event>();
-  const actionSources = new Map<string, Event>();
+  const history = new Map<
+    string,
+    { source: Event; times: Set<string>; datedRelease: boolean }
+  >();
+  const gates = new Map<string, ReadyCondition | undefined>(
+    [...state.decisions, ...state.human_actions].map((item) => [
+      item.id,
+      item.ready_when,
+    ]),
+  );
+  const eventTimes = new Map<string, string>(
+    state.events.map((e) => [e.id, e.created_at]),
+  );
+  // A handoff or reissue never erases an earlier quiet touch. The readiness
+  // notification and the source change it references can straddle quiet hours.
   for (const e of state.events) {
     const p = e.payload;
     if (!p || typeof p !== "object") continue;
-    if (
-      "decision_id" in p &&
-      typeof p.decision_id === "string" &&
-      !decisionSources.has(p.decision_id)
-    )
-      decisionSources.set(p.decision_id, e);
-    if (
-      "human_action_id" in p &&
-      typeof p.human_action_id === "string" &&
-      !actionSources.has(p.human_action_id)
-    )
-      actionSources.set(p.human_action_id, e);
+    const trigger =
+      "source_event_id" in p && typeof p.source_event_id === "string"
+        ? eventTimes.get(p.source_event_id)
+        : undefined;
+    for (const id of [
+      "decision_id" in p && p.decision_id,
+      "human_action_id" in p && p.human_action_id,
+    ]) {
+      if (typeof id !== "string") continue;
+      const entry = history.get(id) ?? {
+        source: e,
+        times: new Set<string>(),
+        datedRelease: false,
+      };
+      entry.times.add(e.created_at);
+      if (trigger) {
+        entry.times.add(trigger);
+        if (
+          e.type === NEEDS_YOU_ITEM_READY &&
+          "condition" in p &&
+          sameGate(gates.get(id), p.condition)
+        )
+          entry.datedRelease = true;
+      }
+      history.set(id, entry);
+    }
   }
   const out: ExtMessageItem[] = [];
   for (const q of state.decisions) {
     if (q.decider !== "human") continue;
-    const event = decisionSources.get(q.id);
-    if (!event) continue;
+    const facts = history.get(q.id);
+    if (!facts) continue;
+    const { source: event, times, datedRelease } = facts;
     const ready = needsYouItemReady(state, q);
     const related = [
       ...q.affected_cards,
@@ -201,6 +228,10 @@ export function extMessageItems(
       ...(q.card_id ? { card_id: q.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      activity_at: [...times],
+      ...(ready && q.ready_when && !datedRelease
+        ? { undated_ready: true as const }
+        : {}),
       item_id: q.id,
       kind:
         q.trigger === "merge_confirmation" ? "merge_confirmation" : "decision",
@@ -214,13 +245,21 @@ export function extMessageItems(
   }
   for (const h of state.human_actions) {
     if (h.triage === "pm_ops") continue;
-    const event = actionSources.get(h.id);
-    if (!event) continue;
+    const facts = history.get(h.id);
+    if (!facts) continue;
+    const { source: event, times, datedRelease } = facts;
+    if (h.ready_released) times.add(h.ready_released.at);
+    if (h.handoff) times.add(h.handoff.rewritten_at);
+    const ready = needsYouItemReady(state, h);
     out.push({
       project_id: project,
       ...(h.card_id ? { card_id: h.card_id } : {}),
       event_id: event.id,
       created_at: event.created_at,
+      activity_at: [...times],
+      ...(ready && h.ready_when && !h.ready_released && !datedRelease
+        ? { undated_ready: true as const }
+        : {}),
       item_id: h.id,
       kind: "human_action",
       ...(h.handoff?.title ? { title: h.handoff.title } : {}),
@@ -228,7 +267,7 @@ export function extMessageItems(
         ...(h.card_id ? [h.card_id] : []),
         ...h.blocked_work_items.map((id) => work.get(id)),
       ]),
-      ready: needsYouItemReady(state, h),
+      ready,
       handled: h.status !== "open",
     });
   }

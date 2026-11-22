@@ -130,6 +130,15 @@ try {
         ),
         help: box(content?.querySelector("[aria-label$='说明']")),
         statusTag: box(content?.querySelector("[data-ui='badge']")),
+        groups: [
+          ...(content?.querySelectorAll("[data-settings-group]") ?? []),
+        ].map((g) => ({
+          title: box(g.querySelector("h3")),
+          toggle: box(g.querySelector("h3 button")),
+          rows: box(g.querySelector(":scope > div:last-child")),
+          firstRow: box(g.querySelector("[data-settings-row]")),
+          value: box(g.querySelector("[data-settings-row] > div:last-child")),
+        })),
         table: box(content?.querySelector("table")),
         tableHead: box(content?.querySelector("th")),
         tableCell: box(content?.querySelector("td")),
@@ -217,6 +226,23 @@ try {
           );
           await capture(`feishu-${state}`, width, theme);
         }
+        // C-563: the six groups with synthetic configuration; 高级 folded, then open.
+        await open(
+          "?feishu=connected&feishuConfig=1#/p/p-1/settings?tab=feishu",
+          "!!document.querySelector('[data-settings-content]:not([hidden]) [aria-expanded=false]') && [...document.querySelectorAll('[data-ui=\"badge\"]')].some(el => el.textContent.trim() === '未绑定')",
+        );
+        await capture("feishu-config", width, theme);
+        await run(() => {
+          document
+            .querySelector(
+              "[data-settings-content]:not([hidden]) h3 button[aria-expanded=false]",
+            )
+            .click();
+        });
+        await until(
+          "!!document.querySelector('[data-settings-content]:not([hidden]) h3 button[aria-expanded=true]')",
+        );
+        await capture("feishu-config-advanced", width, theme);
         continue;
       }
       if (cardPage) {

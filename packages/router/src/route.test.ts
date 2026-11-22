@@ -570,6 +570,52 @@ test("§6.4/S6 an MCP assign wakes the new Assignment so the host can start it",
   expect(result.notifications[0]?.work_item_id).toBe("W-1");
 });
 
+test("only the PM's current same-machine successor notice wakes an in-progress producer", () => {
+  const actor = { ...agent("A-3"), role_id: "pm" };
+  const wake = event(
+    "work_item_assigned",
+    { work_item_id: "W-1", assignment_id: "A-4" },
+    { actor },
+  );
+  const item = workItem("W-1", { assignment_id: "A-4", status: "in_progress" });
+  const state = snapshot({
+    work_items: [item],
+    assignments: [
+      assignment("A-4", {
+        work_item_id: "W-1",
+        recovery: {
+          previous_assignment_id: "A-1",
+          source: "main",
+          same_machine_confirmed_by: "assignment:A-3",
+        },
+      }),
+    ],
+  });
+  expect(recipients(routeEvent({ event: wake, snapshot: state }))).toEqual([
+    "assignment:A-4",
+  ]);
+  for (const stale of [
+    { ...wake, actor: human() },
+    { ...wake, payload: { ...(wake.payload as object), assignment_id: "A-1" } },
+  ])
+    expect(recipients(routeEvent({ event: stale, snapshot: state }))).toEqual(
+      [],
+    );
+  expect(
+    recipients(
+      routeEvent({
+        event: wake,
+        snapshot: {
+          ...state,
+          work_items: [
+            workItem("W-1", { assignment_id: "A-4", status: "blocked" }),
+          ],
+        },
+      }),
+    ),
+  ).toEqual([]);
+});
+
 test("§6.4/C-88 a verification assignment notice is retained for dispatch after delivery", () => {
   const result = routeEvent({
     event: event(

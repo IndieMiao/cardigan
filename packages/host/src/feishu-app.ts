@@ -248,7 +248,9 @@ export class FeishuApp {
     const sendKey = digestFeishu(
       JSON.stringify([
         b.generation,
-        item.project_id,
+        // A rate digest spans projects. Its remote idempotency key must not
+        // change when the first member is handled between attempts.
+        digest?.startsWith("rate:") ? null : item.project_id,
         digest ?? item.item_id,
         version,
       ]),

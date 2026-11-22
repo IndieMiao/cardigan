@@ -857,6 +857,43 @@ test("human-action reports domain rejection in Chinese with the same exit code",
   expect(printed()).toBe("");
 });
 
+test("assign forwards explicit same-machine consent and shows the domain's specific refusal", async () => {
+  await bootstrap();
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "dev",
+      "--title",
+      "Recovery",
+      "--goal",
+      "Recover",
+      "--acceptance",
+      "Starts",
+      "--repo",
+      "example/repo",
+    ]),
+  ).toBe(0);
+  const args = [
+    "assign",
+    "W-1",
+    "--role",
+    "coder",
+    "--machine",
+    "local",
+    "--recovery-source",
+    "main",
+  ];
+  expect(await run([...args, "--confirm-same-machine"])).toBe(2);
+  expect(errors.join("\n")).toContain(
+    "同机恢复需要已确认旧进程退出并已释放的失联指派（validation_failed）",
+  );
+  expect(printed()).toBe("");
+  expect(await run([...args, "--confirm-same-machine", "false"])).toBe(2);
+  expect(errors.join("\n")).toContain("无值开关");
+});
+
 test("P2a-6: CLI assign separates authors, reviewers and PM acceptance and rejects a borrowed identity", async () => {
   await bootstrap();
   expect(
