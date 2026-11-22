@@ -991,7 +991,29 @@ export interface PlainSummary {
   readonly impact: string;
   readonly risk: string;
 }
+export interface ReviewPauseInput {
+  readonly owner: AssignmentId;
+  readonly confirmers: readonly AssignmentId[];
+  readonly next_step: string;
+  readonly review_at?: Timestamp;
+}
+export interface ReviewPause extends ReviewPauseInput {
+  readonly repair_target?: {
+    readonly delivery_id: DeliveryId;
+    readonly target_sha: string;
+  };
+  readonly review_at: Timestamp;
+  readonly period_ms: number;
+  readonly proposal?: TimelineEntryId;
+  readonly confirmations: readonly {
+    readonly by: AssignmentId;
+    readonly entry: TimelineEntryId;
+  }[];
+  readonly ops_reminded_at?: Timestamp;
+  readonly office_reminded_at?: Timestamp;
+}
 interface DecisionFields {
+  readonly review_pause?: ReviewPause;
   /** Control-plane binding for a consecutive-rejection decision (absent on legacy questions). */
   readonly review_intervention?: {
     readonly review_id: ReviewId;

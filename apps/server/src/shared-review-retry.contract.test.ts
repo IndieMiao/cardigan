@@ -1,6 +1,10 @@
 import { acknowledgeRun, type Runtime } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
-import { beginDispatchRetry, listBellAttempts } from "@cardigan/store";
+import {
+  beginDispatchRetry,
+  finishBellAttempt,
+  listBellAttempts,
+} from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { actor } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { sharedRepairStore as fixture } from "../test-support/shared-repair.js";
@@ -112,6 +116,9 @@ test.each([
   "superseded",
   "unknown",
   "interrupted",
+  "pending_claim",
+  "failed_claim",
+  "sent_claim",
 ] as const)(
   "withdrawn first repair has one owner after restart: %s",
   async (phase) => {
@@ -186,13 +193,64 @@ test.each([
         target_sha: f.target.subject.value,
       }),
     );
+    if (
+      phase === "pending_claim" ||
+      phase === "failed_claim" ||
+      phase === "sent_claim"
+    ) {
+      // Even a genuine withdrawal cannot vouch for a different attempt.
+      f.store.uow.run(() => {
+        beginDispatchRetry(f.store.database, {
+          id: "other-attempt",
+          project_id: f.project,
+          assignment_id: f.owner,
+          run_id: run.id,
+          notification_ids: [],
+          started_at: f.clock.now(),
+          lease_until: new Date(Date.parse(f.clock.now()) + 1000).toISOString(),
+        });
+        if (phase !== "pending_claim")
+          expect(
+            finishBellAttempt(
+              f.store.database,
+              f.project,
+              "other-attempt",
+              phase === "sent_claim" ? "sent" : "failed",
+              f.clock.now(),
+            ),
+          ).toBe(true);
+      });
+      await loop().tick();
+      f.advance(30_001);
+      await loop().tick();
+      const state = f.read();
+      expect(
+        state.events.some((e) => e.type === "run_pause_repair_requeued"),
+      ).toBe(false);
+      expect(state.runs.find((r) => r.id === run.id)?.status).toBe(
+        "dispatched",
+      );
+      expect(
+        state.runs.some(
+          (r) =>
+            r.assignment_id === f.owner &&
+            r.kind === "followup" &&
+            ["dispatched", "running"].includes(r.status),
+        ),
+      ).toBe(false);
+      expect(writes).toBe(0);
+      return;
+    }
+    // Proposal already settled: exercise the original first-repair retry
+    // path, not admission of a still-needed discussion (covered separately).
+    f.confirm();
     f.advance(12 * 60_000);
     await loop().tick();
     if (phase === "superseded")
       f.store.uow.run((tx) =>
         tx.deliveries.put(f.project, { ...f.target, status: "superseded" }),
       );
-    f.resume();
+    f.release();
     if (phase === "interrupted") {
       // Simulate a previous process that committed its claim but did not
       // persist the IO outcome. Neither its lease nor its expiry proves no IO.

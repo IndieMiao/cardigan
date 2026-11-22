@@ -144,7 +144,11 @@ export {
   VERIFIER_LAUNCH_REVISION,
   WORKTREE_LAUNCH_LEASE_MS,
 } from "./launch.js";
-export { launchFilesStamp } from "./launch-files-stamp.js";
+export {
+  launchFileStamp,
+  launchFilesStamp,
+  withSecretsStamp,
+} from "./launch-files-stamp.js";
 export { launchFingerprint } from "./launch-fingerprint.js";
 export {
   acceptedHostProfiles,

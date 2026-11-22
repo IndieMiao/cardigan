@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  postComment,
   sharedMustFixes,
   submitReview,
   updateWorkItem,
@@ -113,6 +114,15 @@ export async function sharedRepairStore() {
               decision_id: q.id,
               option,
               rationale: "fixture",
+              ...(option === "pause"
+                ? {
+                    pause_plan: {
+                      owner,
+                      confirmers: [id("assignment", 2), id("assignment", 3)],
+                      next_step: "提交方案",
+                    },
+                  }
+                : {}),
             },
           },
           { ids: tx.ids, clock },
@@ -121,6 +131,38 @@ export async function sharedRepairStore() {
       persistEffect(tx, project, effect);
       return effect.events.find((e) => e.type === "decision_resolved");
     });
+  const confirm = () => {
+    const entry = (
+      n: number,
+      step: "propose" | "confirm",
+      reply_to?: import("@cardigan/domain").TimelineEntryId,
+    ) =>
+      store.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        const q = state.decisions[0];
+        if (!q?.card_id) throw Error("Missing pause");
+        const effect = value(
+          postComment(
+            state,
+            n === 1
+              ? actor()
+              : actor(n, n === 2 ? "reviewer" : "independent_reviewer"),
+            {
+              card_id: q.card_id,
+              body: "核对方案",
+              review_plan: { decision_id: q.id, step },
+              ...(reply_to ? { reply_to } : {}),
+            },
+            { ids: tx.ids, clock },
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return effect.data;
+      });
+    const p = entry(1, "propose");
+    entry(2, "confirm", p?.id);
+    entry(3, "confirm", p?.id);
+  };
   const e = reject(2);
   if (!e?.card_id) throw Error("Missing first rejection");
   store.advanceRouterCursor(project, e.card_id, e.seq - 1);
@@ -139,6 +181,11 @@ export async function sharedRepairStore() {
       reject(3);
       decide("pause");
     },
-    resume: () => decide("raise_limit"),
+    confirm,
+    release: () => decide("raise_limit"),
+    resume: () => {
+      confirm();
+      return decide("raise_limit");
+    },
   };
 }

@@ -242,13 +242,23 @@ async function intervention(
     option: ReviewLimitResolution["option"],
     rationale = "导出功能本轮不做",
     decision = q,
+    pausePlan: ReviewLimitResolution["pause_plan"] | null = {
+      owner: f.coder.id,
+      confirmers: peer ? [f.reviewer.id, peer.id] : [f.reviewer.id],
+      next_step: "提交状态与证据表",
+    },
   ) =>
     updateWorkItem(
       f.state,
       pm,
       {
         work_item_id: required(decision.affected_work_items[0]),
-        review_limit_decision: { decision_id: decision.id, option, rationale },
+        review_limit_decision: {
+          decision_id: decision.id,
+          option,
+          rationale,
+          ...(option === "pause" && pausePlan ? { pause_plan: pausePlan } : {}),
+        },
       },
       f.io,
     );
@@ -565,8 +575,10 @@ test("provisional review: refuse initial before enqueue, dispatch only the direc
 });
 
 test("settlement retires an old unstarted initial created inside this review wait", async () => {
-  const { f, resolve } = await intervention();
+  const { f, resolve, comment } = await intervention();
   f.commit(resolve("pause"));
+  const proposal = required(f.commit(comment(f.coder, "propose")));
+  f.commit(comment(f.reviewer, "confirm", proposal.id));
   // Model the previous CLI's two-transaction start, without changing the real waiting item.
   const former = {
     ...f.state,

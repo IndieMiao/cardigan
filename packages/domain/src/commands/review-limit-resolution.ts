@@ -1,8 +1,13 @@
-import type { Decision, WorkItem } from "../entities.js";
+import type { Decision, ReviewPauseInput, WorkItem } from "../entities.js";
 import { eventById, eventsForDecision } from "../event-index.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
-import { dispatchedRepair, sharedReworkItem } from "../shared-review-wake.js";
+import { pauseOwners, pendingPause } from "../review-pause.js";
+import {
+  dispatchedRepair,
+  repairTarget,
+  sharedReworkItem,
+} from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { verificationTarget } from "../verification-activity.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
@@ -17,12 +22,12 @@ import {
 } from "./independent-review-limit-delegation.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
+import { instructPauseOwner, prepareReviewPause } from "./review-pause.js";
 import {
   currentReviewTarget,
   rejectionStreak,
   reviewRound,
 } from "./review-round.js";
-
 import { applyReviewStrategy, strategyOptions } from "./review-strategy.js";
 
 export type ReviewLimitOption =
@@ -40,6 +45,7 @@ export function isReviewLimitOption(s: string): s is ReviewLimitOption {
 export interface ReviewLimitResolution {
   readonly decision_id: DecisionId;
   readonly option: ReviewLimitOption | "escalate";
+  readonly pause_plan?: ReviewPauseInput;
   readonly rationale: string;
 }
 
@@ -113,26 +119,31 @@ export function resolveReviewLimit(
     : q.review_limit_group
       ? d.get("deliveries", q.review_limit_group.delivery_id)
       : currentReviewTarget(d, independent);
-  recordDecisionResolution(d, q, {
-    option: p.option,
-    rationale: p.rationale,
-    raw_quote: p.rationale,
-    resolved_by: d.author,
-    via: "delegated",
-    proxy_authority: independent
-      ? independentReviewDelegationAuthority(d)
-      : delegationAuthority(d, q.category ?? "general"),
-    ...(target
-      ? { review_limit_target: independentReviewLimitTarget(target) }
-      : {}),
-    ...(independent
-      ? {
-          notice: `PM 排查后确认独立复核${p.option === "raise_limit" ? "增加一轮" : p.option === "pause" ? "暂停" : q.options.find((o) => o.key === p.option)?.description}：${p.rationale}。加轮不等于复核通过或确认合并。`,
-        }
-      : {}),
-    via_chain: [d.author],
-    at: d.now,
-  });
+  recordDecisionResolution(
+    d,
+    q,
+    {
+      option: p.option,
+      rationale: p.rationale,
+      raw_quote: p.rationale,
+      resolved_by: d.author,
+      via: "delegated",
+      proxy_authority: independent
+        ? independentReviewDelegationAuthority(d)
+        : delegationAuthority(d, q.category ?? "general"),
+      ...(target
+        ? { review_limit_target: independentReviewLimitTarget(target) }
+        : {}),
+      ...(independent
+        ? {
+            notice: `PM 排查后确认独立复核${p.option === "raise_limit" ? "增加一轮" : p.option === "pause" ? "暂停" : q.options.find((o) => o.key === p.option)?.description}：${p.rationale}。加轮不等于复核通过或确认合并。`,
+          }
+        : {}),
+      via_chain: [d.author],
+      at: d.now,
+    },
+    p.pause_plan,
+  );
   return d.work(item.id);
 }
 
@@ -207,6 +218,7 @@ export function recordDecisionResolution(
   d: CommandDraft,
   q: Decision,
   resolution: NonNullable<Decision["resolution"]>,
+  pausePlan?: ReviewPauseInput,
 ): Decision {
   const result: Decision = {
     ...q,
@@ -220,7 +232,21 @@ export function recordDecisionResolution(
       ),
     ),
     resolution,
+    ...(q.trigger === "review_limit" &&
+    resolution.option === "pause" &&
+    (pausePlan ||
+      resolution.via === "delegated" ||
+      d.actor.kind === "assignment")
+      ? { review_pause: prepareReviewPause(d, q, pausePlan) }
+      : {}),
   };
+  const paused = pendingPause(q);
+  if (paused && d.actor.kind !== "human")
+    ensure(
+      !pauseOwners(paused).length,
+      "illegal_transition",
+      `${q.id} 的暂停方案尚未全部确认；无法继续时请升级给人`,
+    );
   // Validate the transition before incrementing; repeat resolutions cannot add rounds.
   if (q.trigger === "review_limit" && resolution.option !== "pause") {
     ensure(
@@ -329,10 +355,9 @@ export function recordDecisionResolution(
             reviews: d.list("reviews"),
           })),
     );
+    const target = repairTarget(q);
     const rework =
-      q.card_id === card &&
-      resolution.option === "raise_limit" &&
-      q.review_limit_group
+      q.card_id === card && resolution.option === "raise_limit" && target
         ? sharedReworkItem(
             {
               decisions: d.list("decisions"),
@@ -344,11 +369,11 @@ export function recordDecisionResolution(
         : undefined;
     const pendingRepair =
       rework &&
-      q.review_limit_group &&
+      target &&
       dispatchedRepair(
         { ...d.state, decisions: d.list("decisions") },
         rework,
-        q.review_limit_group.delivery_id,
+        target.delivery_id,
       );
     const event = d.emit(
       result.status === "provisional"
@@ -425,5 +450,7 @@ export function recordDecisionResolution(
     );
     for (const item of unblocked) queueResumedRun(d, item, event);
   }
+  if (result.status === "provisional" && result.review_pause)
+    instructPauseOwner(d, result, result.review_pause);
   return result;
 }

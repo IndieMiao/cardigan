@@ -8,6 +8,7 @@ import type {
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
   PlainSummary,
+  ReviewPauseInput,
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
@@ -835,6 +836,7 @@ export function recordDecision(
     option: string;
     rationale: string;
     snooze_until?: string;
+    pause_plan?: ReviewPauseInput;
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
@@ -1086,6 +1088,7 @@ function resolveDecisionDraft(
     option: string;
     rationale: string;
     snooze_until?: string;
+    pause_plan?: ReviewPauseInput;
     raw_quote: string;
     via_chain?: readonly Author[];
     batch?: string;
@@ -1116,45 +1119,50 @@ function resolveDecisionDraft(
   if (decision.trigger === "merge_confirmation" && p.option === "hold")
     return snoozeMergeConfirmation(d, decision, p);
   const actor = d.actor;
-  const result = recordDecisionResolution(d, decision, {
-    option: p.option,
-    rationale: p.rationale,
-    resolved_by: decision.decider === "human" ? "human" : d.author,
-    via: delegated
-      ? "delegated"
-      : actor.kind === "human"
-        ? "needs_you"
-        : "pm_office_chat",
-    ...(delegated
-      ? {
-          proxy_authority:
-            decision.trigger === "merge_confirmation"
-              ? mergeDelegationAuthority(d)
-              : delegationAuthority(d, decision.category ?? "general"),
-        }
-      : {}),
-    ...(delegated &&
-    decision.category &&
-    highRiskCategories.includes(decision.category)
-      ? {
-          notice: `PM 依常驻授权代拍；授权依据：${delegationAuthority(d, decision.category)}\n${p.notice?.trim() || p.rationale}`,
-        }
-      : delegated && p.notice?.trim()
-        ? { notice: p.notice.trim() }
+  const result = recordDecisionResolution(
+    d,
+    decision,
+    {
+      option: p.option,
+      rationale: p.rationale,
+      resolved_by: decision.decider === "human" ? "human" : d.author,
+      via: delegated
+        ? "delegated"
+        : actor.kind === "human"
+          ? "needs_you"
+          : "pm_office_chat",
+      ...(delegated
+        ? {
+            proxy_authority:
+              decision.trigger === "merge_confirmation"
+                ? mergeDelegationAuthority(d)
+                : delegationAuthority(d, decision.category ?? "general"),
+          }
         : {}),
-    ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
-    ...(p.merge_override ? { merge_override: p.merge_override } : {}),
-    ...(p.via_suggestion && !delegated
-      ? { via_suggestion: true as const }
-      : {}),
-    ...(p.human_decided_merge_basis
-      ? { human_decided_merge_basis: p.human_decided_merge_basis }
-      : {}),
-    raw_quote: p.raw_quote,
-    via_chain: [...(p.via_chain ?? []), d.author],
-    ...(p.batch ? { batch: p.batch } : {}),
-    at: d.now,
-  });
+      ...(delegated &&
+      decision.category &&
+      highRiskCategories.includes(decision.category)
+        ? {
+            notice: `PM 依常驻授权代拍；授权依据：${delegationAuthority(d, decision.category)}\n${p.notice?.trim() || p.rationale}`,
+          }
+        : delegated && p.notice?.trim()
+          ? { notice: p.notice.trim() }
+          : {}),
+      ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
+      ...(p.merge_override ? { merge_override: p.merge_override } : {}),
+      ...(p.via_suggestion && !delegated
+        ? { via_suggestion: true as const }
+        : {}),
+      ...(p.human_decided_merge_basis
+        ? { human_decided_merge_basis: p.human_decided_merge_basis }
+        : {}),
+      raw_quote: p.raw_quote,
+      via_chain: [...(p.via_chain ?? []), d.author],
+      ...(p.batch ? { batch: p.batch } : {}),
+      at: d.now,
+    },
+    p.pause_plan,
+  );
   if (
     decision.trigger === "merge_confirmation" &&
     p.option === "request_changes"
@@ -1187,6 +1195,7 @@ export function resolveDelegatedDecision(
     option: string;
     rationale: string;
     snooze_until?: string;
+    pause_plan?: ReviewPauseInput;
     escalate?: boolean;
     role_rule_basis?: RoleRuleBasis;
     decision_evidence?: readonly MergeDecisionEvidence[];
@@ -1472,6 +1481,7 @@ export function resolveDelegatedDecision(
         decision_id: q.id,
         option: p.option,
         rationale: p.rationale,
+        ...(p.pause_plan ? { pause_plan: p.pause_plan } : {}),
       });
       return d.get("decisions", q.id);
     }

@@ -763,7 +763,7 @@ test("a reference found at confirmation makes the delete unavailable", async () 
   expect(confirmLaunchChange).toHaveBeenCalledTimes(1);
 });
 
-test("a secret key secrets.env no longer has is shown but not choosable", async () => {
+test("a secret key secrets.env does not have is shown as unset but not choosable", async () => {
   const api = harness();
   await openModels(api.client);
   const d = await openProfile("codex-sol");
@@ -771,7 +771,7 @@ test("a secret key secrets.env no longer has is shown but not choosable", async 
   const choice = within(d).getByRole("combobox", {
     name: /密钥引用 OPENAI_API_KEY/,
   });
-  expect(choice.textContent).toContain("（已失效）");
+  expect(choice.textContent).toContain("（未设置）");
   fireEvent.keyDown(choice, { key: "ArrowDown" });
   const enabled = screen
     .getAllByRole("option")

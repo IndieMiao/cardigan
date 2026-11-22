@@ -2344,6 +2344,357 @@
           }
         }
       }
+    },
+    {
+      "id": "xiao-he",
+      "name": "萧何",
+      "novel": "历史人物",
+      "bio": "西汉开国丞相，出处《史记·萧相国世家》；定律令、总揽后勤，汉初“功人”第一。",
+      "background": "#A9BFCF",
+      "files": {
+        "full": {
+          "path": "xiao-he/full.webp",
+          "sha256": "f8bd0e49806249b3e32446ae6e507453dc4372cce6b434750f36b1422bcc9837",
+          "bytes": 802330,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "xiao-he/head-64.webp",
+            "sha256": "5475ae6b3f8010ca8690e39aea87ddf2dff7b3e999599fa31d4163b03dab22e6",
+            "bytes": 4962,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "xiao-he/head-128.webp",
+            "sha256": "5539b528717c1ebbc33eaa66409e401b8860dd3a418f2afc10e513b5879f9508",
+            "bytes": 16342,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "xiao-he/head-256.webp",
+            "sha256": "b1aaf39c45cbbb83d82ba7517914b833747e6aef0d14bccf1bc3ced0e9d04c71",
+            "bytes": 56202,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "liu-bang",
+      "name": "刘邦",
+      "novel": "历史人物",
+      "bio": "西汉开国皇帝汉高祖，出处《史记·高祖本纪》；豪爽领头的布衣天子。",
+      "background": "#D8A77C",
+      "files": {
+        "full": {
+          "path": "liu-bang/full.webp",
+          "sha256": "10b15182acd66c696f8627b309c63495c81e0066c52e2855374f1d6b8011b818",
+          "bytes": 961158,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "liu-bang/head-64.webp",
+            "sha256": "8a8c99e50979dec0a768624bd59a75dd5de90d2fb22e5214d8d84005960333da",
+            "bytes": 5718,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "liu-bang/head-128.webp",
+            "sha256": "4bbcdea8eb4f781df65138719fc13805aec18041f211957dd6ee09b9566fa0db",
+            "bytes": 19210,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "liu-bang/head-256.webp",
+            "sha256": "3740b6b1df123a89ef5bae54c3c10b63b237f0eab7d614e261b2635df225be31",
+            "bytes": 66634,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "hou-yi",
+      "name": "后裔",
+      "novel": "历史人物",
+      "bio": "原型为上古射日英雄后羿，出处《淮南子·本经训》，以善射闻名。",
+      "background": "#AEBB95",
+      "files": {
+        "full": {
+          "path": "hou-yi/full.webp",
+          "sha256": "838edffa1e68152b67986375847928860118770ad1c30390ca02df74956beee0",
+          "bytes": 879430,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "hou-yi/head-64.webp",
+            "sha256": "ec1ef6108a75b80bfc7e80c3092164760ba3ed2dd8a526a66a443ef76d5ee01f",
+            "bytes": 6014,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "hou-yi/head-128.webp",
+            "sha256": "8ea689b9d195ddab2e8cf7998de4a550c529ef5a5f24bb8f96167f1bfd86902f",
+            "bytes": 19136,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "hou-yi/head-256.webp",
+            "sha256": "a0df30227db99474598dbdeb7985e6ae5fea1419d723d9ae73e9b2f48a0c8cfa",
+            "bytes": 63258,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhang-heng",
+      "name": "张衡",
+      "novel": "历史人物",
+      "bio": "东汉科学家、文学家，出处《后汉书·张衡传》；发明地动仪与浑天仪。",
+      "background": "#9FB9C2",
+      "files": {
+        "full": {
+          "path": "zhang-heng/full.webp",
+          "sha256": "75e9596b4f06fc4bccda41aaaf8b56c7ad0b05178097d8ca72bdaf8014b0ff4c",
+          "bytes": 932522,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "zhang-heng/head-64.webp",
+            "sha256": "3b4289911862cea74bb85e4031978a1069c78cea8ac1a0e4534afb9f4b26bdb1",
+            "bytes": 5168,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhang-heng/head-128.webp",
+            "sha256": "9403dcc86fc8089356694526e497f0d219fe2cd350adb52292ca0477bd8983fc",
+            "bytes": 16836,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhang-heng/head-256.webp",
+            "sha256": "e6cb504426ec212fae3e036792689ccb2f5eb8f7187c4ca0f58e6ed7fc41e9fe",
+            "bytes": 58236,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "li-yuanfang",
+      "name": "李元芳",
+      "novel": "历史人物",
+      "bio": "唐代武将，狄仁杰的副手，出处《旧唐书》及相关唐代记载；以干练机敏、擅长侦查护卫闻名。",
+      "background": "#B7C2C9",
+      "files": {
+        "full": {
+          "path": "li-yuanfang/full.webp",
+          "sha256": "b79d68f3ebee4d97657116ec5c7943fefe4b9f73878bf98792ca6cff8c66f852",
+          "bytes": 908774,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "li-yuanfang/head-64.webp",
+            "sha256": "2c52e22e848107a0a593e0bf44fe3f4a5609eed7fa5f0f7e6cb72db4f87af220",
+            "bytes": 5630,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "li-yuanfang/head-128.webp",
+            "sha256": "2263b72e91e207fc1cf7949115648d563b001e6d3767246f3eeb20382ffd5750",
+            "bytes": 17756,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "li-yuanfang/head-256.webp",
+            "sha256": "93eeddc82289eae4ac7a4872112a08b4fbd3804113241f482ad311f32996976a",
+            "bytes": 59942,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "meng-tian",
+      "name": "蒙恬",
+      "novel": "历史人物",
+      "bio": "秦代名将，出处《史记·蒙恬列传》；传说曾改良毛笔。",
+      "background": "#8FADAE",
+      "files": {
+        "full": {
+          "path": "meng-tian/full.webp",
+          "sha256": "b2e36cf623077fb5a92e1d03e72ea6eb3982cfaaa5d5306a7f61173c916f037a",
+          "bytes": 893188,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "meng-tian/head-64.webp",
+            "sha256": "42dae5dc5aaeba146c440f9b9e598a287903d4ef22396418edf5fc6d38230656",
+            "bytes": 5640,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "meng-tian/head-128.webp",
+            "sha256": "1278d625f6d235356b6b562b79ccf495f74eb1b9947d5da602e84c19a0197325",
+            "bytes": 17716,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "meng-tian/head-256.webp",
+            "sha256": "635ae1278a9a284c4ae6caa17b5b08b435cedf20e29c0df89a4022d36add34fc",
+            "bytes": 58516,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "di-renjie",
+      "name": "狄仁杰",
+      "novel": "历史人物",
+      "bio": "唐代名相，以断案明察闻名，出处《旧唐书·狄仁杰传》。",
+      "background": "#7FA39A",
+      "files": {
+        "full": {
+          "path": "di-renjie/full.webp",
+          "sha256": "93bf53839834d64a45fdea264f2072adf0274e7c18fc300271334f4378822d68",
+          "bytes": 827660,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "di-renjie/head-64.webp",
+            "sha256": "cc48f1595ab46bc79b9dd1e59674061449d742c3e936682f10207c8dd61acf63",
+            "bytes": 5314,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "di-renjie/head-128.webp",
+            "sha256": "c5c6eefd570b1f9a9a7e141905860b743b07374d93cfb56a381434912361fd08",
+            "bytes": 17296,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "di-renjie/head-256.webp",
+            "sha256": "b7238e0a05b62b1bd6188c4f0ca0c4f4b3bccc202b56f9f77ad3cef65bde312e",
+            "bytes": 58792,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "zhuang-zhou",
+      "name": "庄周",
+      "novel": "历史人物",
+      "bio": "战国思想家庄子，出处《庄子·齐物论》“庄周梦蝶”。",
+      "background": "#C7B79A",
+      "files": {
+        "full": {
+          "path": "zhuang-zhou/full.webp",
+          "sha256": "680a41ccb026c3bbd514e923c02d311846d4aac659466dcdbd6a9b86b6e78ee5",
+          "bytes": 849504,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "zhuang-zhou/head-64.webp",
+            "sha256": "902970803df6f3d0d4dcccddaa744c257112e48bc1514df368894c74d3d1dbdd",
+            "bytes": 4956,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "zhuang-zhou/head-128.webp",
+            "sha256": "014f45daad95ae0fcdaf24480f898e55c786a4c4cfb0c6c0e29f7fd246baa37f",
+            "bytes": 16618,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "zhuang-zhou/head-256.webp",
+            "sha256": "0e9075506bc2fdb9f6c0be957e4be420a5c164cefcc9bd12c0f03ec0541ff38b",
+            "bytes": 57904,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
+    },
+    {
+      "id": "lu-ban",
+      "name": "鲁班",
+      "novel": "历史人物",
+      "bio": "春秋战国工匠祖师，传说改良墨斗与曲尺，出处《墨子》《事物纪原》等文献记载。",
+      "background": "#D2A878",
+      "files": {
+        "full": {
+          "path": "lu-ban/full.webp",
+          "sha256": "679830c281ebe0a3b9d48b1dc782bb67130d27328cc4db0d176cad4355474403",
+          "bytes": 1093426,
+          "width": 1024,
+          "height": 1536
+        },
+        "head": {
+          "64": {
+            "path": "lu-ban/head-64.webp",
+            "sha256": "c9b64f4a5bbe862cc3370aa9ab78d7fd6c145118ed89fa029269309e1a8374ec",
+            "bytes": 5830,
+            "width": 64,
+            "height": 64
+          },
+          "128": {
+            "path": "lu-ban/head-128.webp",
+            "sha256": "8d74dcccde70631ef862a0cd0d28cf261c1c006ae4bdaf7eadef2022c591fba8",
+            "bytes": 18772,
+            "width": 128,
+            "height": 128
+          },
+          "256": {
+            "path": "lu-ban/head-256.webp",
+            "sha256": "34393e54f0564dbf53bd216644cad89b4ae4a8d45ac0959c5194686f40416cba",
+            "bytes": 63010,
+            "width": 256,
+            "height": 256
+          }
+        }
+      }
     }
   ]
 }

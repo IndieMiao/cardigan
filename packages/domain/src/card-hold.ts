@@ -1,6 +1,8 @@
+import type { CommandState } from "./commands/core.js";
 import type { Assignment, Card, Event, Run, WorkItem } from "./entities.js";
 import { eventById } from "./event-index.js";
 import { queuedRun, runById, runsOf } from "./run-index.js";
+import { parkedPauseRepair } from "./shared-review-wake.js";
 
 type HoldState = {
   readonly cards: readonly Card[];
@@ -83,12 +85,15 @@ export function heldStandingRun(
 
 export function runnableQueuedRun(
   assignment: Assignment,
-  state: HoldState & { readonly runs: readonly Run[] },
+  state: CommandState,
 ): Run | undefined {
   const first = queuedRun(state.runs, assignment.id);
-  if (!first || !heldStandingRun(assignment, first, state)) return first;
+  const held = (r: Run) =>
+    heldStandingRun(assignment, r, state) ||
+    parkedPauseRepair(state, assignment, r);
+  if (!first || !held(first)) return first;
   return runsOf(state.runs, assignment.id).find(
-    (r) => r.status === "queued" && !heldStandingRun(assignment, r, state),
+    (r) => r.status === "queued" && !held(r),
   );
 }
 
