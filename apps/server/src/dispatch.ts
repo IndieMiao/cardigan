@@ -82,6 +82,7 @@ import {
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
+  type RuntimeTargets,
   recordRetirementDispatch,
   redactFailureLine,
   runCapacitySnapshot,
@@ -170,6 +171,7 @@ import { orderPmCandidates } from "./pm-notification-order.js";
 import { recoverPmSession } from "./pm-recovery.js";
 import { QueuedRunPatrol } from "./queued-run-patrol.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
+import { recordSessionEnvironment } from "./session-environment.js";
 import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
@@ -205,6 +207,7 @@ export interface DispatcherOptions {
   readonly baselineForWait?: (
     project: ProjectId,
   ) => Promise<{ branch: string; sha: string } | undefined>;
+  readonly mergeGateEnabled?: (project: ProjectId) => boolean;
   readonly frameworkWaitReminderMs?: number;
   /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
   readonly baselineConflictMaxResumes?: number;
@@ -212,7 +215,11 @@ export interface DispatcherOptions {
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
-  readonly runtime: Runtime & Partial<Pick<HerdrRuntime, "terminalActivity">>;
+  readonly runtime: Runtime &
+    Partial<Pick<HerdrRuntime, "terminalActivity">> &
+    Partial<
+      Pick<RuntimeTargets, "changedSessionEnvironment" | "canAdmitSession">
+    >;
   readonly clock?: Clock;
   readonly standing?: StandingResolver;
   readonly deliveryLeaseMs?: number;
@@ -276,6 +283,7 @@ const covered = (n: Notification, s: CommandState, owner: Assignment["id"]) =>
       c.acked_seq >= n.seq,
   );
 interface Job {
+  sessionEnvironment?: string;
   resourceAccess?: ResourceAccess;
   attempt: BellAttempt;
   run: Run;
@@ -890,6 +898,10 @@ export class Dispatcher {
     let guard: ReturnType<typeof idleWakeGuard>;
     let replacement: DispatchRunParams["replacement"];
     const retirementHeld = retirementOwnsSession(a);
+    const changedEnvironment = this.options.runtime.changedSessionEnvironment?.(
+      project,
+      a,
+    );
     const retirementWait = (observation: RetirementDispatchWait) => {
       if (queued)
         recordRetirementDispatch(
@@ -925,6 +937,28 @@ export class Dispatcher {
           r.role_version === a.role_version,
       )
       .sort((x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)))[0];
+    if (changedEnvironment && a.runtime_ref) {
+      if (!continuing && (!prior || unfinishedRun(prior)))
+        return skip("prior_run_unsettled");
+      if (
+        !continuing &&
+        !reminder &&
+        !(await this.options.runtime.canAdmitSession?.(
+          project,
+          a,
+          changedEnvironment,
+        ))
+      )
+        return skip("session_environment_not_ready");
+      const owner = await this.options.runtime
+        .observe_retirement?.(a.runtime_ref, {
+          project_id: project,
+          assignment_id: a.id,
+        })
+        .catch(() => undefined);
+      if (!owner?.ok || owner.value !== "alive")
+        return skip("session_owner_unconfirmed");
+    }
     let observation = "unavailable";
     const binding = keptPromptBinding(project, a, prior?.harness);
     if (binding && a.runtime_ref) {
@@ -1041,12 +1075,13 @@ export class Dispatcher {
         );
         return skip("awaiting_workspace_preservation");
       }
-      if (retirementHeld || guardedTurn) {
+      if (retirementHeld || guardedTurn || changedEnvironment) {
         guard ??= observed?.ok ? idleWakeGuard(observed.value) : undefined;
         // An explicit finish does not waive the idle check for a retirement-held session.
         if (
           !guard &&
           (retirementHeld ||
+            changedEnvironment ||
             continuing ||
             reminder ||
             !sessionLoss ||
@@ -1183,6 +1218,7 @@ export class Dispatcher {
       live = false;
       replacement = { previous: a.runtime_ref, reason: "tool_catalog_changed" };
     }
+    if (changedEnvironment && !live) return skip("session_replacement_pending");
     if (retirementHeld && !live) {
       retirementWait({ source: "replacement", status: "replacement_required" });
       return skip("retirement_replacement_required");
@@ -1234,6 +1270,8 @@ export class Dispatcher {
       throw error;
     }
     if (!job) return;
+    if (changedEnvironment && !continuing && !reminder)
+      job.sessionEnvironment = changedEnvironment;
     const leases = this.options.leases;
     const preflight =
       job.resourceAccess?.target && leases && !continuing
@@ -1308,6 +1346,9 @@ export class Dispatcher {
             [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
             {
               ...guard,
+              ...(runtimeRef.machine_id !== "local"
+                ? { session_run: { assignment_id: a.id, run_id: job.run.id } }
+                : {}),
               ...(retirementHeld && !guard?.prompt_binding
                 ? {
                     retirement_owner: {
@@ -2333,6 +2374,16 @@ export class Dispatcher {
             ),
           ),
         );
+      if (job.sessionEnvironment) {
+        recordSessionEnvironment(
+          tx,
+          project,
+          owner,
+          run.id,
+          job.sessionEnvironment,
+          this.clock.now(),
+        );
+      }
       return true;
     });
   }

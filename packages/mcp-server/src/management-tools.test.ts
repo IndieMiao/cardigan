@@ -1566,6 +1566,32 @@ test.each([0, 5, "3", "rush"])(
   },
 );
 
+test("update_card can set a deadline and remove it from the stored card and get_card", async () => {
+  const card_id = card.id;
+  const deadline = "2026-11-28";
+  expect(
+    await ok<Card>(office, "update_card", { card_id, deadline }),
+  ).toMatchObject({ deadline });
+  expect(await ok(office, "get_card", { card_id })).toMatchObject({
+    card: { deadline },
+  });
+  expect(
+    await ok<Card>(office, "update_card", { card_id, deadline: null }),
+  ).not.toHaveProperty("deadline");
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, card_id)),
+  ).not.toHaveProperty("deadline");
+  const detail = await ok<{ card: Card; timeline: { body: string }[] }>(
+    office,
+    "get_card",
+    { card_id },
+  );
+  expect(detail.card).not.toHaveProperty("deadline");
+  expect(
+    detail.timeline.filter((entry) => entry.body.includes("截止日期已清除")),
+  ).toHaveLength(1);
+});
+
 test("risk tags survive MCP update, storage and get_card; invalid values have no effects", async () => {
   expect(card.risk_tags).toBeUndefined();
   const risk_tags = ["security", "permission", "numeric_rule"];

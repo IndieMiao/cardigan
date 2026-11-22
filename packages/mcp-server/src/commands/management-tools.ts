@@ -605,6 +605,10 @@ const schemas = {
         "紧急",
       ])
       .optional(),
+    deadline: text
+      .nullable()
+      .optional()
+      .describe("卡片截止日期；传 null 清除，省略不改"),
     status: z.enum(states.card).optional(),
     risk_tags: z
       .array(z.enum(["security", "permission", "numeric_rule"]))

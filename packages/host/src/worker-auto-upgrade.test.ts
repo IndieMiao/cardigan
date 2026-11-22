@@ -2,8 +2,10 @@ import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, verify } from "node:crypto";
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -13,15 +15,18 @@ import { fileURLToPath } from "node:url";
 import type { Machine } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { parse } from "yaml";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { MachineCheckJournal } from "./machine-check-journal.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
+import { loadRuntimeWorkers } from "./runtime-workers-config.js";
 import { patrolHelperUpgrade } from "./worker-auto-upgrade.js";
 import {
   digestMismatch,
   helpers,
   workerHelperDigests,
 } from "./worker-helper-release.js";
+import { onboardWorker } from "./worker-onboarding.js";
 import {
   enrolledUpgradeIdentity,
   upgradeIdentity,
@@ -47,10 +52,11 @@ afterEach(() => {
   cleanup();
   cleanup = () => {};
 });
-function setup(
+async function setup(
   os = "linux",
   project = "sample",
   shared?: { root: string; store: Store },
+  appliedPath?: string,
 ) {
   const root = shared?.root ?? mkdtempSync(join(tmpdir(), "helper-upgrade-"));
   const store = shared?.store ?? Store.open({ dataDir: root });
@@ -76,14 +82,49 @@ function setup(
     JSON.stringify(form.raw),
     { mode: 0o600 },
   );
-  const target = runtimeTargetBinding(form.config.worker);
+  if (os === "macos")
+    writeFileSync(
+      join(root, "run-capacity.yaml"),
+      JSON.stringify({ machines: { [machine]: { limit: 1, max_limit: 1 } } }),
+      { mode: 0o600 },
+    );
+  expect(
+    await onboardWorker({
+      configRoot: root,
+      dataDir: root,
+      config: form.config,
+      mode: "add",
+      registration: async () => true,
+      probe: async () => true,
+      report() {},
+    }),
+  ).toBe(true);
+  const runtimeFile = join(root, "runtime-workers.yaml");
+  const runtime = existsSync(runtimeFile)
+    ? JSON.parse(readFileSync(runtimeFile, "utf8"))
+    : structuredClone(form.raw.runtime);
+  if (shared)
+    runtime.machines[0].projects.push(
+      form.raw.runtime.machines[0]?.projects[0],
+    );
+  const binding = runtime.machines[0].projects.find(
+    (p: { project_id: string }) => p.project_id === project,
+  );
+  if (appliedPath) binding.path = appliedPath;
+  binding.allow_remote_launch = true;
+  writeFileSync(runtimeFile, JSON.stringify(runtime), { mode: 0o600 });
+  const worker = loadRuntimeWorkers(root, runtimeFile).find(
+    (w) => w.project_id === project,
+  );
+  if (!worker) throw new Error("missing test binding");
+  const target = runtimeTargetBinding(worker);
   const isHeld = () => upgradeHeld(store, project, machine);
   const options = {
     store,
     project,
     machine,
     env: { CARDIGAN_CONFIG_DIR: root },
-    execution: { ...form.config.worker.execution, target },
+    execution: { ...worker.execution, target },
     bindingCurrent: vi.fn(() => true),
     check: vi.fn(async () => {
       expect(isHeld()).toBe(true);
@@ -95,7 +136,7 @@ function setup(
       expect(isHeld()).toBe(true);
       return { "worker-files.py": "0".repeat(64) };
     }),
-    workerCheck: vi.fn(async () => {
+    workerCheck: vi.fn<typeof onboardWorker>(async () => {
       expect(isHeld()).toBe(true);
       return true;
     }),
@@ -205,6 +246,7 @@ function setup(
     });
   return {
     root,
+    runtimeFile,
     run,
     manual,
     journal,
@@ -222,7 +264,7 @@ function setup(
 test.each(["linux", "macos"])(
   "%s: opt-in, install, both checks, audited release and drift fence",
   async (os) => {
-    const f = setup(os);
+    const f = await setup(os);
     expect(await f.run()).toEqual(mismatch);
     expect(f.adapters.install).not.toHaveBeenCalled();
     expect(f.stageUpgrade).toHaveBeenCalledOnce();
@@ -264,9 +306,97 @@ test.each(["linux", "macos"])(
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
   },
 );
+test("an idle enrolled worker upgrades and is released with only the applied PATH changed", async () => {
+  const path = "/new/tools:/usr/bin:/bin";
+  const f = await setup("linux", project, undefined, path);
+  f.enroll();
+  const probe = vi.fn(
+    async (_step, config) => config.worker.execution.path === path,
+  );
+  f.adapters.workerCheck.mockImplementationOnce((opts) =>
+    onboardWorker({ ...opts, probe }),
+  );
+  expect(await f.run()).toEqual(pass);
+  expect(probe).toHaveBeenCalled();
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
+  expect(f.options.check).toHaveBeenCalledOnce();
+  expect(f.isHeld()).toBe(false);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+  expect(f.actions()).toEqual([]);
+});
+
+test.each(["removed", "account", "trust", "generation", "enrollment", "saved"])(
+  "PATH does not authorize a changed binding (%s)",
+  async (change) => {
+    const f = await setup(
+      "linux",
+      project,
+      undefined,
+      "/new/tools:/usr/bin:/bin",
+    );
+    f.enroll();
+    const live = JSON.parse(readFileSync(f.runtimeFile, "utf8"));
+    const m = live.machines[0];
+    if (change === "enrollment") {
+      const file = join(f.root, `worker-${machine}-${project}.yaml`);
+      const edited = JSON.parse(readFileSync(file, "utf8"));
+      edited.uid += 1;
+      writeFileSync(file, JSON.stringify(edited));
+    }
+    if (change === "saved") {
+      const file = join(
+        f.root,
+        "worker-onboarding",
+        machine,
+        `${project}.runtime-workers.yaml`,
+      );
+      const edited = parse(readFileSync(file, "utf8"));
+      edited.machines[0].projects[0].generation = "other";
+      writeFileSync(file, JSON.stringify(edited));
+    }
+    if (change === "removed") live.machines = [];
+    if (change === "account") m.projects[0].user = "cg_other";
+    if (change === "trust") m.known_hosts_file += ".other";
+    if (change === "generation") m.projects[0].generation = "next";
+    writeFileSync(f.runtimeFile, JSON.stringify(live));
+    const current = loadRuntimeWorkers(f.root, f.runtimeFile)[0];
+    const binding = current
+      ? runtimeTargetBinding(current).fingerprint
+      : f.target.fingerprint;
+    expect((await f.run(mismatch, true, binding)).blockers).toEqual([
+      upgradeHold,
+    ]);
+    expect(f.adapters.install).not.toHaveBeenCalled();
+    expect(f.adapters.workerCheck).not.toHaveBeenCalled();
+    expect(f.options.check).not.toHaveBeenCalled();
+  },
+);
+
+test.each([false, true])(
+  "without a wizard journal only an unchanged enrolled target can be checked (PATH changed: %s)",
+  async (changed) => {
+    const f = await setup(
+      "linux",
+      project,
+      undefined,
+      changed ? "/new/tools:/usr/bin:/bin" : undefined,
+    );
+    f.enroll();
+    rmSync(join(f.root, "worker-onboarding"), { recursive: true });
+    f.adapters.workerCheck.mockImplementationOnce((opts) =>
+      onboardWorker({ ...opts, probe: async () => true }),
+    );
+    const r = await f.run();
+    expect(r.blockers).toEqual(changed ? [upgradeHold] : []);
+    expect(f.adapters.install).toHaveBeenCalledTimes(changed ? 0 : 1);
+  },
+);
+
 test("a second project on the same machine has its own maintenance and authorization", async () => {
-  const first = setup();
-  const second = setup("linux", "second", first);
+  const first = await setup();
+  const second = await setup("linux", "second", first);
   first.enroll();
   expect(await first.run(pass)).toEqual(pass);
   expect(await second.run()).toEqual(mismatch);
@@ -289,7 +419,7 @@ test("a second project on the same machine has its own maintenance and authoriza
   expect(second.adapters.install).toHaveBeenCalledOnce();
 });
 test("drained enrolled worker waits for patrol without offering a manual install", async () => {
-  const f = setup();
+  const f = await setup();
   f.enroll();
   const paused = {
     blockers: [digestMismatch, "machine_not_ready"],
@@ -305,7 +435,7 @@ test("drained enrolled worker waits for patrol without offering a manual install
 });
 
 test("enrollment during manual staging cannot publish its stale command", async () => {
-  const f = setup();
+  const f = await setup();
   f.stageUpgrade.mockImplementationOnce(async () => {
     f.enroll();
     return f.terminal;
@@ -319,7 +449,7 @@ test("enrollment during manual staging cannot publish its stale command", async 
 test.each(["install", "worker_check", "machine_check"])(
   "failure at %s remains held across patrols, manual recovery cannot skip either check",
   async (stage) => {
-    const f = setup();
+    const f = await setup();
     f.enroll();
     if (stage === "install")
       f.adapters.install.mockRejectedValueOnce(new Error("private-fixture"));
@@ -347,7 +477,7 @@ test.each(["install", "worker_check", "machine_check"])(
 test.each(["failed", "installing", "worker_checked"])(
   "revoked enrollment: %s is held until both checks on the new key",
   async (state) => {
-    const f = setup();
+    const f = await setup();
     f.enroll();
     f.adapters.install.mockRejectedValueOnce(new Error());
     await f.run();
@@ -375,7 +505,7 @@ test.each(["failed", "installing", "worker_checked"])(
   },
 );
 test("neither automatic nor manual recovery releases on a failed final observation", async () => {
-  const f = setup();
+  const f = await setup();
   f.enroll();
   await f.run(mismatch, false);
   expect(f.isHeld()).toBe(true);
@@ -392,7 +522,7 @@ test("neither automatic nor manual recovery releases on a failed final observati
   expect(f.isHeld()).toBe(false);
 });
 test("failed and interrupted worker checks supersede earlier success", async () => {
-  const f = setup();
+  const f = await setup();
   f.enroll();
   f.adapters.install.mockRejectedValueOnce(new Error());
   await f.run();
@@ -415,7 +545,7 @@ test("failed and interrupted worker checks supersede earlier success", async () 
   expect(f.isHeld()).toBe(true);
 });
 test("new release without positive mismatch evidence never writes helpers", async () => {
-  const f = setup();
+  const f = await setup();
   f.enroll();
   f.adapters.install.mockRejectedValueOnce(new Error());
   await f.run();
@@ -431,7 +561,7 @@ test("new release without positive mismatch evidence never writes helpers", asyn
   expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
 });
 test("changing binding before installation cannot use the enrolled key", async () => {
-  const f = setup();
+  const f = await setup();
   f.enroll();
   f.options.bindingCurrent.mockReturnValue(false);
   expect((await f.run()).blockers).toEqual([upgradeHold]);
@@ -451,7 +581,7 @@ test("root entry uses only a pinned signer, fixed files and unprivileged test fi
 });
 
 test("signs only the approved running deployment commit, not a changed worktree or pending release", async () => {
-  const f = setup(),
+  const f = await setup(),
     worker = f.options.execution,
     root = worker.dataDir;
   const central = join(root, "central"),

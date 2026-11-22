@@ -249,7 +249,11 @@ const clarification = z.object({
   body: text.optional(),
 });
 const action = z
-  .object({ text, attachments: z.array(text).optional() })
+  .object({
+    text,
+    conclusion: z.enum(["false_alarm", "exited", "unconfirmed"]).optional(),
+    attachments: z.array(text).optional(),
+  })
   .strict();
 const attachment = z.object({
   file: z.string().max(MAX_ATTACHMENT_BASE64),

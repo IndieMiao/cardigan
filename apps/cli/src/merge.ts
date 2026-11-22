@@ -36,6 +36,7 @@ import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
+  loadProjectMergeGate,
   resolveActor,
   resolveDataDir,
   resolveProject,
@@ -416,7 +417,7 @@ function describe(
             ["open", "snoozed"].includes(confirmation.status)
               ? confirmation.decider === "role:pm"
                 ? " decider=PM（可直接处理）"
-                : " decider=human"
+                : ` decider=${confirmation.decider}`
               : ""
           }`
     }`,
@@ -522,15 +523,12 @@ async function mergeConfirm(
       );
       return EXIT.ok;
     }
-    const config = await loadMergeGateConfig({
-      dataDir: resolveDataDir(io, optional(parsed.flags, "data-dir")),
-      baseBranches: Object.fromEntries(
-        store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
-      ),
-      projectIds: store.listProjects().map((p) => p.id),
-      env: io.env,
-    });
-    const gate = config.forProject(project_id);
+    const gate = await loadProjectMergeGate(
+      store,
+      project_id,
+      io,
+      optional(parsed.flags, "data-dir"),
+    );
     const holdReason = optional(parsed.flags, "reason");
     const holdUntil = optional(parsed.flags, "until");
     if (option === "hold" && !holdReason?.trim())
@@ -630,7 +628,10 @@ function mergePushAccept(args: readonly string[], io: CliIo): number {
   }
 }
 
-function mergeRequest(args: readonly string[], io: CliIo): number {
+async function mergeRequest(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
   const parsed = parseArgs(args);
   const id = cardId(parsed.positionals[0]);
   const store = open(io, parsed.flags);
@@ -641,13 +642,29 @@ function mergeRequest(args: readonly string[], io: CliIo): number {
       optional(parsed.flags, "project"),
     );
     requireMergeCard(store, project_id, id);
+    const gate = await loadProjectMergeGate(
+      store,
+      project_id,
+      io,
+      optional(parsed.flags, "data-dir"),
+    );
     const decision: Decision = runCommand(store, {
       operation: "请求合并",
       target: id,
       project_id,
       actor: resolveActor(io, project_id, store),
       reduce: (state, actor, ports) =>
-        requestMerge(state, actor, { card_id: id }, ports),
+        requestMerge(
+          {
+            ...state,
+            project_settings: {
+              merge_gate_enabled: gate.status !== "disabled",
+            },
+          },
+          actor,
+          { card_id: id },
+          ports,
+        ),
       clock: systemClock,
     });
     io.stdout(`已重新发起 ${id} 的合并确认：${decision.id}（等待确认）`);

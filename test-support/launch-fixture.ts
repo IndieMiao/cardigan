@@ -4,7 +4,7 @@ import { join } from "node:path";
 /** Give role-writing fixtures their own offline profile names, never host settings. */
 export function roleConfig(root: string, ...names: string[]) {
   const dir = join(root, "config");
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(
     join(dir, "launch.yaml"),
     JSON.stringify({

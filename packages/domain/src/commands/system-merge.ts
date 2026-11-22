@@ -30,6 +30,16 @@ export function systemConfirmMerge(
   return command(state, actor, "system_confirm_merge", ports, (d) => {
     const q = state.decisions.find((q) => q.id === p.decision_id);
     const card = state.cards.find((c) => c.id === q?.card_id);
+    if (
+      state.project_settings?.merge_gate_enabled === false &&
+      q?.trigger === "merge_confirmation" &&
+      q.decider === "system" &&
+      q.status === "open" &&
+      card
+    ) {
+      syncSystemMerge(d, card);
+      return d.get("decisions", q.id);
+    }
     ensure(
       q?.trigger === "merge_confirmation" &&
         (q.decider === "system" ||

@@ -257,7 +257,7 @@ export async function createHostWiring(options: {
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
       if (assignment.scope !== "work_item") return undefined;
-      const target = await runtime.forLaunch(project, assignment);
+      const target = await runtime.forSession(project, assignment);
       const worktree = await withPreparationQueue(
         target.execution.dataDir,
         project,
@@ -280,7 +280,7 @@ export async function createHostWiring(options: {
     },
     standing: standingResolver(options.store),
     snapshot: async (assignment, project) => {
-      const target = await runtime.forLaunch(project, assignment);
+      const target = await runtime.forSession(project, assignment);
       const role = options.store.uow.run((tx) =>
         getRoleVersion(
           tx,
