@@ -130,6 +130,15 @@ try {
         ),
         help: box(content?.querySelector("[aria-label$='说明']")),
         statusTag: box(content?.querySelector("[data-ui='badge']")),
+        groups: [
+          ...(content?.querySelectorAll("[data-settings-group]") ?? []),
+        ].map((g) => ({
+          title: box(g.querySelector("h3")),
+          toggle: box(g.querySelector("h3 button")),
+          rows: box(g.querySelector(":scope > div:last-child")),
+          firstRow: box(g.querySelector("[data-settings-row]")),
+          value: box(g.querySelector("[data-settings-row] > div:last-child")),
+        })),
         table: box(content?.querySelector("table")),
         tableHead: box(content?.querySelector("th")),
         tableCell: box(content?.querySelector("td")),
@@ -217,6 +226,23 @@ try {
           );
           await capture(`feishu-${state}`, width, theme);
         }
+        // C-563: the six groups with synthetic configuration; 高级 folded, then open.
+        await open(
+          "?feishu=connected&feishuConfig=1#/p/p-1/settings?tab=feishu",
+          "!!document.querySelector('[data-settings-content]:not([hidden]) [aria-expanded=false]') && [...document.querySelectorAll('[data-ui=\"badge\"]')].some(el => el.textContent.trim() === '未绑定')",
+        );
+        await capture("feishu-config", width, theme);
+        await run(() => {
+          document
+            .querySelector(
+              "[data-settings-content]:not([hidden]) h3 button[aria-expanded=false]",
+            )
+            .click();
+        });
+        await until(
+          "!!document.querySelector('[data-settings-content]:not([hidden]) h3 button[aria-expanded=true]')",
+        );
+        await capture("feishu-config-advanced", width, theme);
         continue;
       }
       if (cardPage) {
@@ -497,13 +523,18 @@ try {
             const scene = async (name, section) => {
               await run((section) => {
                 const d = document.querySelector("[role=dialog]");
-                const target = section
-                  ? [...d.querySelectorAll("h3, table")].find(
-                      (e) =>
-                        e.textContent.trim() === section ||
-                        e.getAttribute("aria-label") === section,
-                    )
-                  : undefined;
+                const target =
+                  section === "@top"
+                    ? d.querySelector("[data-feedback-host]")
+                    : section
+                      ? [...d.querySelectorAll("h3, table, label")].find(
+                          (e) =>
+                            (e.tagName === "LABEL"
+                              ? e.firstChild?.textContent?.trim()
+                              : e.textContent.trim()) === section ||
+                            e.getAttribute("aria-label") === section,
+                        )
+                      : undefined;
                 if (section && !target)
                   throw new Error(`Missing section: ${section}`);
                 if (target) target.scrollIntoView({ block: "start" });
@@ -579,6 +610,23 @@ try {
                   tableCell: box(d.querySelector("td")),
                   statusTag: box(d.querySelector("td [data-ui='badge']")),
                   longText: box(d.querySelector("pre")),
+                  // C-565: the step bar, its current step and a field hint.
+                  steps: box(d.querySelector("ol[aria-label]")),
+                  stepCurrent: box(d.querySelector("[aria-current='step']")),
+                  stepMarker: box(
+                    d.querySelector("[aria-current='step'] > span"),
+                  ),
+                  fieldHint: box(
+                    document.getElementById(
+                      d
+                        .querySelector("input[aria-describedby]")
+                        ?.getAttribute("aria-describedby")
+                        ?.split(" ")[0] ?? "",
+                    ),
+                  ),
+                  inputValues: [...d.querySelectorAll("form input")]
+                    .filter((i) => i.type !== "hidden" && !i.hidden)
+                    .map((i) => i.value),
                   outside,
                 };
               });
@@ -609,6 +657,11 @@ try {
             // The wizard: form, preview, a failed step, then remote launch.
             await press("添加 worker");
             await until("!!document.querySelector('[role=dialog] form')");
+            // C-565: the first screen, prefilled (port, account, MCP).
+            await until(
+              "[...document.querySelectorAll('[role=dialog] input')].some((i) => i.value.endsWith('/mcp'))",
+            );
+            await scene("wizard-start");
             await run(() => {
               const values = {
                 机器编号: "studio",
@@ -617,7 +670,7 @@ try {
                 专用账号: "cg_studio",
                 UID: "1501",
                 GID: "1501",
-                "MCP 地址": "https://control.invalid/mcp",
+                "MCP 地址": "https://control.example.ts.net/mcp",
               };
               const set = Object.getOwnPropertyDescriptor(
                 HTMLInputElement.prototype,
@@ -635,6 +688,7 @@ try {
               document.activeElement?.blur?.();
             });
             await scene("wizard-form");
+            await scene("wizard-form-ids", "UID");
             await press("预览配置");
             await until(has("工作室 配置差异"));
             await scene("wizard-preview");
@@ -644,6 +698,12 @@ try {
             await until(has("继续检查"));
             await scene("wizard-failed");
             await scene("wizard-commands", "目标机命令");
+            await press("继续检查");
+            // C-565: a stop the commands fix; the page will check again.
+            await until(
+              "document.querySelector('[role=dialog]').textContent.includes('自动复查中')",
+            );
+            await scene("wizard-recheck", "@top");
             await press("继续检查");
             await until(has("复查"));
             await press("预览开启");

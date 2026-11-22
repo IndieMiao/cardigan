@@ -7,7 +7,8 @@ import type {
 
 /**
  * C-511 evidence: a synthetic add-worker backend (no host, no SSH, no files).
- * The first check stops at SSH; the next one passes. Machine checks stay at
+ * The first check stops at SSH, the second (C-565) at the account, which the
+ * target-machine commands fix; the next one passes. Machine checks stay at
  * their SSH step so the progress can be photographed.
  */
 const STEPS = [
@@ -34,7 +35,10 @@ const steps = (blocked?: string): WorkerWizardStep[] => {
             state: "blocked",
             elapsed_ms: 15000,
             reason: `worker_${step}_blocked`,
-            next: "核对 worker-known-hosts 中的主机指纹与 SSH 公钥，确认目标机 22 端口可达后重试。",
+            next:
+              step === "account"
+                ? "按“目标机命令”的“账号”一步建好专用账号和主组，核对 UID/GID 未被占用后重试。"
+                : "核对 worker-known-hosts 中的主机指纹与 SSH 公钥，确认目标机 22 端口可达后重试。",
           }
         : { step, state: "pending", elapsed_ms: 0 },
   );
@@ -64,6 +68,10 @@ const job = (): MachineCheckJob => ({
   failed_steps: [],
 });
 export const workerWizardData: Partial<CardiganClient> = {
+  // C-565: the MCP address the host's workers already use.
+  workerWizardDefaults: async () => ({
+    defaults: { mcp_url: "https://control.example.ts.net/mcp" },
+  }),
   checkMachine: async () => ({ check: job() }),
   machineCheck: async () => ({ check: job() }),
   setMachineDrain: async (_p, id, drain) => ({
@@ -113,8 +121,9 @@ export const workerWizardData: Partial<CardiganClient> = {
     if (wizard.phase === "running" && ++polls >= 2)
       wizard = {
         ...wizard,
-        phase: runs === 1 ? "failed" : "passed",
-        steps: runs === 1 ? steps("ssh") : steps(),
+        phase: runs <= 2 ? "failed" : "passed",
+        steps:
+          runs === 1 ? steps("ssh") : runs === 2 ? steps("account") : steps(),
       };
     return { wizard };
   },
@@ -132,6 +141,7 @@ export const workerWizardData: Partial<CardiganClient> = {
       polls = 0;
       wizard = {
         ...rest,
+        check_id: `check-${runs}`,
         phase: "running",
         steps: wizard.steps.map((s) =>
           s.state === "blocked" ? { ...s, state: "running" } : s,

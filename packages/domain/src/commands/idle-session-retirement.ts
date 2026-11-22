@@ -72,9 +72,19 @@ export function beginIdleSessionRetirement(
       },
     };
     d.put("assignments", next);
-    d.emit("idle_session_retirement_started", d.work(a.work_item_id!).card_id, {
-      assignment_id: id,
-    });
+    if (
+      !(
+        next.idle_retirement?.observe_only &&
+        prior?.evidence?.reason === "kept_terminal"
+      )
+    )
+      d.emit(
+        "idle_session_retirement_started",
+        d.work(a.work_item_id!).card_id,
+        {
+          assignment_id: id,
+        },
+      );
     return next;
   });
 }
@@ -311,9 +321,18 @@ export function settleIdleSessionRetirement(
       result.outcome === "withdrawn" || result.outcome === "observing"
         ? "unavailable"
         : result.outcome;
-    const failures = pending.failures + 1;
+    // A known kept shell is not a failure. Subsequent observations still
+    // need ownership proof; three actual faults use the usual single notice.
+    const kept =
+      evidence.reason === "kept_terminal" &&
+      (result.outcome === "withdrawn" || evidence.observation === "alive");
+    const previouslyKept =
+      pending.evidence?.reason === "kept_terminal" &&
+      (!pending.evidence.observation ||
+        pending.evidence.observation === "alive");
+    const failures = !kept && previouslyKept ? 1 : pending.failures + 1;
     const notify =
-      failures >= 3 && !pending.notice_sent && !pending.dispatch_wait;
+      !kept && failures >= 3 && !pending.notice_sent && !pending.dispatch_wait;
     const next: Assignment = {
       ...a,
       idle_retirement: {

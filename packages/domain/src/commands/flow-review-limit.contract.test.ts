@@ -7,7 +7,10 @@ import {
   createWorkItem,
   finishRun,
   hasRunTarget,
+  issueInstruction,
   postComment,
+  queueRun,
+  refreshTestReviewLimits,
   releaseAssignment,
   replaceVerificationWorkItem,
   submitReview,
@@ -496,4 +499,103 @@ test("parallel plan decisions retain partial confirmation and issue exactly one 
   expect(authorInstructions()).toHaveLength(initial + 1);
   expect(authorInstructions().at(-1)?.body).toContain("修改并重新交付");
   expect((await f.deliver()).status).toBe("submitted");
+});
+
+test("provisional review: refuse initial before enqueue, dispatch only the directed discussion and preserve the formal wait", async () => {
+  const { f, resolve } = await intervention();
+  f.commit(resolve("pause"));
+  const owner = f.reviewer,
+    id = required(owner.work_item_id);
+  const first = {
+    assignment_id: owner.id,
+    model: "fixture",
+    agent_cli_version: "1",
+  };
+  expect(queueRun(f.state, human, first, f.io)).toMatchObject({
+    ok: false,
+    error: { message: "Review budget is waiting for a decision" },
+  });
+  const instruct = (work_item_id: typeof id) => {
+    f.commit(
+      issueInstruction(
+        f.state,
+        human,
+        { work_item_id, card_id: f.card.id, body: "请核对方案" },
+        f.io,
+      ),
+    );
+    return required(f.state.events.at(-1)).id;
+  };
+  const other = instruct(required(f.coder.work_item_id));
+  expect(
+    queueRun(f.state, human, { ...first, trigger_event_id: other }, f.io).ok,
+  ).toBe(false);
+  const trigger = instruct(id);
+  const run = f.commit(
+    queueRun(f.state, human, { ...first, trigger_event_id: trigger }, f.io),
+  );
+  f.start(owner);
+  f.commit(
+    refreshTestReviewLimits(
+      f.state,
+      { kind: "system", project_id: f.state.project_id },
+      f.io,
+    ),
+  );
+  expect(f.state.runs.find((r) => r.id === run.id)?.status).toBe("running");
+  expect(f.state.work_items.find((w) => w.id === id)?.status).toBe(
+    "waiting_decision",
+  );
+  const t = required(f.state.deliveries.at(-1));
+  expect(
+    submitReview(
+      f.state,
+      f.actor(owner),
+      {
+        delivery_id: t.id,
+        target_sha: t.subject.value,
+        kind: "code",
+        issues: [],
+        recheck_required: false,
+      },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  expect(f.state.decisions.at(-1)?.status).toBe("provisional");
+});
+
+test("settlement retires an old unstarted initial created inside this review wait", async () => {
+  const { f, resolve } = await intervention();
+  f.commit(resolve("pause"));
+  // Model the previous CLI's two-transaction start, without changing the real waiting item.
+  const former = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === f.reviewer.work_item_id ? { ...w, status: "ready" as const } : w,
+    ),
+  };
+  const run = f.commit(
+    queueRun(
+      former,
+      human,
+      {
+        assignment_id: f.reviewer.id,
+        model: "fixture",
+        agent_cli_version: "1",
+      },
+      f.io,
+    ),
+  );
+  f.commit(resolve("change_approach"));
+  expect(f.state.runs.find((r) => r.id === run.id)).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+  });
+  expect(
+    f.state.events.filter(
+      (e) =>
+        e.type === "run_dispatch_aborted" &&
+        (e.payload as { run_id?: string }).run_id === run.id,
+    ),
+  ).toHaveLength(1);
 });

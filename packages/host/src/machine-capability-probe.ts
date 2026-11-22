@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { parseWorkerEnvironment } from "@cardigan/roles";
 import {
   agentProcessCommand,
   type ExecutionConfig,
@@ -60,7 +61,7 @@ try:
     request = json.loads(sys.argv[1])
     if sys.platform != request['os']: raise ValueError()
     account = pwd.getpwuid(os.getuid())
-    env = dict(PATH=os.environ.get('PATH', '/usr/bin:/bin'), HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name, LC_ALL='C')
+    env = dict(request.get('env', {}), PATH=os.environ.get('PATH', '/usr/bin:/bin'), HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name, LC_ALL='C')
     timeout = request['timeout_ms'] / 1000
     deadline = time.monotonic() + timeout
     if isinstance(request['argv'], dict):
@@ -92,7 +93,14 @@ export const probeMachineCapability: CapabilityProbe = async (
       "-B",
       "-c",
       CAPABILITY_PROBE_SCRIPT,
-      JSON.stringify({ os, argv, timeout_ms: CAPABILITY_PROBE_TIMEOUT_MS }),
+      JSON.stringify({
+        os,
+        argv,
+        timeout_ms: CAPABILITY_PROBE_TIMEOUT_MS,
+        ...(execution.mode === "agent-ssh" && execution.env
+          ? { env: parseWorkerEnvironment(execution.env) }
+          : {}),
+      }),
     ];
     const command =
       execution.mode === "agent-ssh"

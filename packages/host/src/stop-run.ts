@@ -6,8 +6,8 @@ import type {
   RuntimeRef,
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
-
 import { idleRetirementPolicy } from "./idle-session-retirement.js";
+import { observeTurnOwner } from "./stall-evidence.js";
 
 const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
   result?.ok
@@ -57,15 +57,17 @@ export async function stopSystemTurn(
 ) {
   if (!ref) return "terminal_binding_changed";
   const confirmed = async () => {
-    const exact = await runtime
-      .observe_retirement?.(ref, owner)
-      .catch(() => undefined);
+    const exact = await observeTurnOwner(runtime, ref, owner);
     return exact?.ok
       ? exact.value === "exited"
       : exact?.error.code === "runtime_not_found";
   };
   if (alreadyStopping)
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
+  if (ref.local_process_receipt) {
+    const before = await observeTurnOwner(runtime, ref, owner);
+    if (before?.ok && before.value === "exited") return "exited";
+  }
   if (!runtime.retire_idle) return "unsupported";
   const { hangup_ms, terminate_ms } = idleRetirementPolicy();
   let workspaceReady = false;

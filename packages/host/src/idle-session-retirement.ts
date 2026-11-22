@@ -257,7 +257,9 @@ export async function retireIdleSessions(
       const unconfirmed = observeOnly ? "observing" : "uncertain";
       let result: RetirementSettlement = {
         outcome: unconfirmed,
-        evidence: pendingEvidence,
+        evidence: observeOnly
+          ? { ...pendingEvidence, observation: "unknown" }
+          : pendingEvidence,
       };
       const ref = pending.idle_retirement.runtime_ref;
       try {

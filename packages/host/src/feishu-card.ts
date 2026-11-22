@@ -40,9 +40,6 @@ export function feishuCard(
     header: { title: text(message.title) },
     body: {
       elements: [
-        ...("items" in message
-          ? message.items.map((i) => link(i.url, i.title))
-          : []),
         ...(options.length ? [form] : []),
         link(message.url, "在 Workbench 查看"),
       ],

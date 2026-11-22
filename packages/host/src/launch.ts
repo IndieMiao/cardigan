@@ -25,6 +25,7 @@ import {
   recoverPreparation,
   recoveryTargetCurrent,
   remainingResourceRatio,
+  reviewRunWakeDisposition,
   standingModeOf,
   standingRunDormant,
 } from "@cardigan/domain";
@@ -328,19 +329,23 @@ export async function launchRun(
   );
   if (!unlock) throw new RunPreparationDeferred();
   try {
-    const paused = settleTestReviewLimits(
-      host.store,
-      input.project,
-      host.clock,
-    );
-    const owner = host.store.uow.read((tx) =>
-      tx.assignments.get(input.project, input.assignment_id),
-    );
-    if (owner?.scope === "work_item" && paused.includes(owner.work_item_id))
-      throw new HostLaunchError(
-        "dispatch",
-        "Review budget is waiting for a decision",
-      );
+    settleTestReviewLimits(host.store, input.project, host.clock);
+    // Admission is shared with queued/reused-session dispatch. Settle limits
+    // first, then re-read the exact Run trigger before preparing resources.
+    host.store.uow.read((tx) => {
+      const state = loadCommandState(tx, input.project);
+      const owner = state.assignments.find((a) => a.id === input.assignment_id);
+      const run = state.runs.find((r) => r.id === input.run.id);
+      if (
+        owner &&
+        run &&
+        reviewRunWakeDisposition(state, owner, run) === "paused"
+      )
+        throw new HostLaunchError(
+          "dispatch",
+          "Review budget is waiting for a decision",
+        );
+    });
     return await launchWithClaim(host, input);
   } catch (error) {
     settleTestReviewLimits(host.store, input.project, host.clock);
@@ -1086,6 +1091,9 @@ async function launch(
       launch: host.launch.config,
       ...(input.resourceAccess
         ? { resource_bindings: input.resourceAccess.bindings }
+        : {}),
+      ...(execution.mode === "agent-ssh" && execution.env
+        ? { worker_env: execution.env }
         : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,

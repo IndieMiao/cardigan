@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import * as herdr from "@cardigan/runtime-herdr";
 import {
   readMachineObservations,
   recordAcceptedBrowserPath,
@@ -340,6 +341,45 @@ test("local probe uses its account HOME and never forwards controller credential
       "--version",
     ]),
   ).toEqual({ ok: false, output: "" });
+});
+
+test("only the bound worker variables reach the capability subprocess as literals", async () => {
+  vi.stubEnv("MCP_TOKEN", "fixture-only");
+  vi.stubEnv("UNBOUND", "controller-only");
+  // Stub just the SSH hop; execute both the real probe and its child.
+  using transport = vi
+    .spyOn(herdr, "agentProcessCommand")
+    .mockImplementation(async (_worker, [file, ...args]) => ({
+      file: file as string,
+      args,
+    }));
+  const env = {
+    ANDROID_HOME: "/SDK's $(false) tools",
+    ANDROID_ADB_SERVER_PORT: "15037",
+  };
+  const execution: ExecutionConfig = {
+    mode: "agent-ssh",
+    machine: "fixture",
+    agentRoot: "/worker",
+    dataDir: "/data",
+    gid: 2001,
+    identityFile: "/private/key",
+    knownHostsFile: "/private/known",
+    env,
+  };
+  const result = await probeMachineCapability(execution, process.platform, [
+    "python3",
+    "-c",
+    "import json,os; print(json.dumps([os.getenv(k) for k in ('ANDROID_HOME', 'ANDROID_ADB_SERVER_PORT', 'MCP_TOKEN', 'UNBOUND')]))",
+  ]);
+  expect(transport).toHaveBeenCalledOnce();
+  expect(result.ok).toBe(true);
+  expect(JSON.parse(result.output)).toEqual([
+    env.ANDROID_HOME,
+    env.ANDROID_ADB_SERVER_PORT,
+    null,
+    null,
+  ]);
 });
 
 test("a late initialization failure cannot overwrite a newer successful observation", async () => {

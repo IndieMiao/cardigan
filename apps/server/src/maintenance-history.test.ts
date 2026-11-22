@@ -1,5 +1,6 @@
 import type { Decision } from "@cardigan/domain";
 import { expect, test } from "vitest";
+import { measureHistoryTick } from "../../../packages/host/test-support/tick-work.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { MergeShadowObserver } from "./merge-shadow.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -124,36 +125,26 @@ test.each(["review", "stall", "shadow"] as const)(
       });
       f.advance(2 * 3600_000);
       for (const cold of [true, false]) {
-        const locks: number[] = [];
-        let compute = 0;
-        store.observe({
-          transaction(kind, ms) {
-            if (kind === "run") locks.push(ms);
-            else compute += ms;
-          },
+        const { writes, visits } = await measureHistoryTick(store, async () => {
+          if (kind === "review")
+            escalateReviewLimitWaits(store, project, clock.now());
+          else if (kind === "stall")
+            escalatePmMergeStalls(store, project, clock.now());
+          else
+            await new MergeShadowObserver(store, undefined, clock).tick(
+              project,
+            );
         });
-        const start = performance.now();
-        if (kind === "review")
-          escalateReviewLimitWaits(store, project, clock.now());
-        else if (kind === "stall")
-          escalatePmMergeStalls(store, project, clock.now());
-        else
-          await new MergeShadowObserver(store, undefined, clock).tick(project);
-        const tick = performance.now() - start,
-          lock = Math.max(0, ...locks);
-        store.observe(undefined);
         expect(
           store.database
             .prepare("SELECT COUNT(*) AS n FROM events WHERE type=?")
             .get(kinds[kind])?.n,
         ).toBe(candidates);
-        console.info(
-          `${kind} ${cold ? "cold" : "replay"}: compute ${compute.toFixed(1)}, tick ${tick.toFixed(1)}, max write ${lock.toFixed(1)} ms`,
-        );
-        expect(locks.length > 0).toBe(cold);
-        expect(compute).toBeLessThan(cold ? 2000 : 500);
-        expect(tick).toBeLessThan(cold ? 2500 : 600);
-        expect(lock).toBeLessThan(75);
+        // Index builds can visit the sample; none may rescan it per candidate.
+        expect(visits).toBeLessThanOrEqual(8);
+        expect(writes).toHaveLength(cold ? candidates / 16 : 0);
+        // Each batch appends at most 16 notices/audits, including index triggers.
+        expect(Math.max(0, ...writes)).toBeLessThanOrEqual(16 * 16);
       }
     } finally {
       f.close();

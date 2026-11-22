@@ -5,7 +5,7 @@ import {
   runnableQueuedRun,
   standingRunDormant,
 } from "../card-hold.js";
-import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
+import type { Actor, Assignment, Event, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { HARNESSES, isHarness } from "../harness.js";
 import {
@@ -17,7 +17,9 @@ import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { providerStarted } from "../provider-start.js";
 import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
+import { originalRunTrigger } from "../run-trigger.js";
 import {
+  reviewDiscussionInstruction,
   reviewRunWakeDisposition,
   reviewWakeBlocked,
 } from "../shared-review-wake.js";
@@ -114,9 +116,21 @@ function checkReviewWake(
       "审核已暂停返工或目标已变更，请等待当前任务",
     );
 }
-function requireTestReviewBudget(d: CommandDraft, assignment: Assignment) {
+function requireTestReviewBudget(
+  d: CommandDraft,
+  assignment: Assignment,
+  trigger?: Event,
+) {
   if (assignment.scope !== "work_item") return;
   const item = d.work(assignment.work_item_id);
+  if (item.kind === "verify" && item.status === "waiting_decision") {
+    ensure(
+      reviewDiscussionInstruction(item, trigger),
+      "illegal_transition",
+      "Review budget is waiting for a decision",
+    );
+    return; // A discussion does not open a review round.
+  }
   if (
     item.kind === "verify" &&
     currentReviewTarget(d, item)?.test_review?.verifier_id === item.id
@@ -273,7 +287,11 @@ export function queueRun(
   });
 }
 /** Shared queue transition, including ownership, snapshots and exclusivity checks. */
-export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
+export function queueRunInDraft(
+  d: CommandDraft,
+  p: QueueRunParams,
+  stallInstruction?: Event,
+) {
   const state = d.state;
   ensure(
     !(p.resume && p.restart_session),
@@ -299,7 +317,6 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "illegal_transition",
     "卡片已暂停，请先解除暂停",
   );
-  requireTestReviewBudget(d, assignment);
   ensure(
     hasRunTarget(assignment, d.state),
     "illegal_transition",
@@ -312,11 +329,17 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
       runs: d.list("runs"),
     });
     if (queued) {
+      requireTestReviewBudget(d, assignment, originalRunTrigger(state, queued));
       exclusive(d, assignment, queued.id);
       snapshot(queued, assignment);
       return queued;
     }
   }
+  requireTestReviewBudget(
+    d,
+    assignment,
+    stallInstruction ?? eventById(state.events, p.trigger_event_id),
+  );
   text(p.model, "model");
   text(p.agent_cli_version, "agent_cli_version");
   if (p.launch_profile_ref !== undefined)
@@ -711,7 +734,7 @@ export function dispatchRun(
             currentReviewTarget(d, d.work(assignment.work_item_id)),
           )
         : undefined;
-    requireTestReviewBudget(d, assignment);
+    requireTestReviewBudget(d, assignment, originalRunTrigger(state, run));
     ensure(
       p.expected_test_review === undefined ||
         JSON.stringify(p.expected_test_review) ===
@@ -762,7 +785,7 @@ export function acknowledgeRun(
       "illegal_transition",
       "审核已暂停返工或目标已变更，请等待当前任务",
     );
-    requireTestReviewBudget(d, assignment);
+    requireTestReviewBudget(d, assignment, originalRunTrigger(state, run));
     exclusive(d, assignment, run.id);
     if (run.test_review && assignment.scope === "work_item") {
       const item = d.work(assignment.work_item_id);
