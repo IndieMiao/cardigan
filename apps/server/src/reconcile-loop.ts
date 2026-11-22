@@ -1,9 +1,14 @@
-import type { Clock, ProjectId } from "@cardigan/domain";
-import type { ReconcileChecks, ReconcileFinding } from "@cardigan/git-service";
+import type { Clock, DeliveryId, Event, ProjectId } from "@cardigan/domain";
+import type {
+  CentralProject,
+  ReconcileChecks,
+  ReconcileFinding,
+} from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import { buildCheckoutFacts } from "./build-checkouts.js";
-import type { ReconcileGit } from "./git.js";
-import { startTimerLoop, type TimerLoop } from "./loop.js";
+import type { ReconcileGit, ReconcilePages } from "./git.js";
+import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
+import { projectCycle, visitMaintenancePage } from "./maintenance-batch.js";
 import { systemClock } from "./merge-loop.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
@@ -13,7 +18,7 @@ import { profileSpan, profileSpanSync } from "./tick-profile.js";
  * Reconciliation compares Git, the worktree directories and the database.
  * Findings go into the store with their first/last-seen times and
  * a new finding becomes a project-level `reconcile_finding` event, which the
- * Router hands to PM Ops. Each tick also refreshes existing local mirrors;
+ * Router hands to PM Ops. Each sweep also refreshes existing local mirrors;
  * a Git delivery missing its fixed ref is re-pinned from the candidate (§3.3).
  *
  * The backup loop fetches `agent/*` from the base clone into the central
@@ -33,11 +38,15 @@ export interface ReconcileOptions {
 
 export class ReconcileExecutor {
   private serial: Promise<void> = Promise.resolve();
+  private readonly scans = new Map<ProjectId, AsyncGenerator<void>>();
+  pending(project: ProjectId) {
+    return this.scans.has(project);
+  }
   // Process-local only: a restart replays durable events, never skips history.
   private readonly checkHistory = new Map<
     ProjectId,
     {
-      cursors: ReadonlyMap<string, number>;
+      through: number;
       attempts: ReadonlyMap<string, ReconcileChecks["attempts"][number]>;
     }
   >();
@@ -63,59 +72,44 @@ export class ReconcileExecutor {
   private readChecks(project_id: ProjectId): ReconcileChecks {
     const snapshot = this.options.store.uow.read((tx) => {
       const previous = this.checkHistory.get(project_id);
-      const cursors = new Map(previous?.cursors);
-      // Keep old attempts too, including superseded completions/closed cards.
+      // Same append-only watermark as Store.CommandEvents, but cold-start from the
+      // project/type index; no unrelated payloads (or entire streams) are decoded.
+      const db = this.options.store.database;
+      const through = Number(
+        db.prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM events").get()?.n,
+      );
       const latest = new Map(previous?.attempts);
-      for (const card of tx.cards.list(project_id))
-        for (const event of tx.events.listAfter(
-          project_id,
-          card.id,
-          cursors.get(card.id) ?? 0,
-        )) {
-          cursors.set(card.id, event.seq);
+      if (previous?.through !== through) {
+        const source = previous
+          ? "events NOT INDEXED"
+          : "events INDEXED BY events_by_type";
+        const rows = db
+          .prepare(`SELECT doc FROM ${source} WHERE project_id=? AND rowid>? AND rowid<=?
+          AND type IN ('merge_check_queued','merge_check_started','merge_check_finished','precheck_queued','precheck_started','precheck_finished',
+            'merge_batch_check_queued','merge_batch_check_started','merge_batch_check_finished') ORDER BY rowid`)
+          .iterate(project_id, previous?.through ?? 0, through);
+        for (const row of rows) {
+          const event = JSON.parse(String(row.doc)) as Event;
           if (
             event.actor.kind !== "system" ||
-            ![
-              "merge_check_queued",
-              "merge_check_started",
-              "merge_check_finished",
-              "precheck_queued",
-              "precheck_started",
-              "precheck_finished",
-            ].includes(event.type)
+            event.actor.project_id !== project_id
           )
             continue;
-          const check = event.payload as ReconcileChecks["attempts"][number];
-          latest.set(check.attempt_id, {
-            ...check,
-            updated_at: event.created_at,
-          });
+          const batch = event.type.startsWith("merge_batch_");
+          if (batch === Boolean(event.card_id)) continue;
+          type Check = ReconcileChecks["attempts"][number];
+          const check = batch
+            ? (event.payload as unknown as { check?: Check }).check
+            : (event.payload as Check);
+          if (check?.attempt_id)
+            latest.set(check.attempt_id, {
+              ...check,
+              updated_at: event.created_at,
+            });
         }
-      const streams = tx.events.listStreams?.(project_id);
-      const projectEvents = streams
-        ? (streams.get("") ?? [])
-        : tx.events.listAfter(project_id, undefined, cursors.get("") ?? 0);
-      for (const event of projectEvents) {
-        if (event.seq <= (previous?.cursors.get("") ?? 0)) continue;
-        cursors.set("", event.seq);
-        if (
-          event.actor.kind !== "system" ||
-          !/^merge_batch_check_(queued|started|finished)$/u.test(event.type)
-        )
-          continue;
-        const check = (
-          event.payload as unknown as {
-            check: ReconcileChecks["attempts"][number];
-          }
-        ).check;
-        if (check?.attempt_id)
-          latest.set(check.attempt_id, {
-            ...check,
-            updated_at: event.created_at,
-          });
       }
       return {
-        cursors,
+        through,
         attempts: latest,
         checks: {
           attempts: [...latest.values()],
@@ -130,13 +124,14 @@ export class ReconcileExecutor {
     return snapshot.checks;
   }
 
-  tick(project_id?: ProjectId): Promise<void> {
+  tick(project_id?: ProjectId, paged = false): Promise<void> {
     const next = this.serial.then(async () => {
       const projects = project_id
         ? [project_id]
         : this.options.store.listProjects().map((entry) => entry.id);
       // A failed filesystem/worker scan below must not starve other projects' mirrors.
       for (const id of projects) {
+        if (this.scans.has(id)) continue; // A resumed page is not a new sweep.
         const project = this.options.git.projectOf(id as ProjectId);
         if (!project) continue;
         try {
@@ -146,46 +141,52 @@ export class ReconcileExecutor {
           this.report(`Local mirror refresh failed for ${id}`);
         }
       }
-      for (const id of projects) await this.project(id as ProjectId);
+      for (const project of projects) {
+        const pages = this.scans.get(project) ?? this.project(project, paged);
+        this.scans.set(project, pages);
+        try {
+          do {
+            if ((await pages.next()).done) {
+              this.scans.delete(project);
+              break;
+            }
+          } while (!paged);
+        } catch (error) {
+          this.scans.delete(project);
+          throw error;
+        }
+      }
     });
     this.serial = next.catch(() => {});
     return next;
   }
 
   /** §3.3: a missing fixed ref is repaired from the candidate ref, once. */
-  private async repair(
-    project_id: ProjectId,
-    findings: readonly ReconcileFinding[],
-  ): Promise<boolean> {
+  private async repair(project_id: ProjectId, id: DeliveryId): Promise<void> {
     const project = this.options.git.projectOf(project_id);
-    if (project === undefined) return false;
-    const state = this.state(project_id);
-    let repaired = false;
-    for (const finding of findings) {
-      if (finding.kind !== "missing_delivery_ref" || !finding.delivery_id)
-        continue;
-      const delivery = state.deliveries.find(
-          (candidate) => candidate.id === finding.delivery_id,
-        ),
-        item = state.work_items.find(
-          (candidate) => candidate.id === delivery?.work_item_id,
-        ),
-        assignment = state.assignments.find(
-          (candidate) => candidate.id === item?.assignment_id,
-        );
-      if (delivery === undefined || assignment === undefined) continue;
-      try {
-        if (await this.options.git.repairPin(project, delivery, assignment))
-          repaired = true;
-      } catch (error) {
-        this.report(
-          `pinning ${delivery.id} failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    if (!project) return;
+    // Re-read the binding after a page break; no read transaction spans Git IO.
+    const target = this.options.store.uow.read((tx) => {
+      const delivery = tx.deliveries.get(project_id, id);
+      const item =
+        delivery && tx.work_items.get(project_id, delivery.work_item_id);
+      const assignment =
+        item?.assignment_id &&
+        tx.assignments.get(project_id, item.assignment_id);
+      return delivery && assignment ? { delivery, assignment } : undefined;
+    });
+    if (!target) return;
+    try {
+      await this.options.git.repairPin(
+        project,
+        target.delivery,
+        target.assignment,
+      );
+    } catch (error) {
+      this.report(
+        `pinning ${id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    return repaired;
   }
 
   private record(project_id: ProjectId, findings: readonly ReconcileFinding[]) {
@@ -239,36 +240,67 @@ export class ReconcileExecutor {
     });
   }
 
-  private async project(project_id: ProjectId) {
+  private async *scan(
+    project_id: ProjectId,
+    project: CentralProject,
+    paged: boolean,
+  ): ReconcilePages {
+    const state = profileSpanSync("reconcile.state", () =>
+      this.state(project_id),
+    );
+    const git = this.options.git;
+    const args: Parameters<ReconcileGit["reconcile"]> = [
+      project,
+      state.assignments,
+      state.deliveries,
+      () => this.checks(project_id),
+    ];
+    if (!paged || !git.reconcilePages)
+      return await profileSpan("reconcile.git", () => git.reconcile(...args));
+    const pages = git.reconcilePages(...args);
+    for (;;) {
+      const page = await profileSpan("reconcile.git", () => pages.next());
+      if (page.done) return page.value;
+      yield;
+    }
+  }
+
+  private async *project(project_id: ProjectId, paged: boolean) {
     const project = this.options.git.projectOf(project_id);
     if (project === undefined) return;
     // C-221: `reconcile.*` spans are timing only. `git` includes the
     // filesystem/Git scan and the nested `reconcile.checks` database replay.
     // C-231: after a repair the state re-read and the second scan add to the
     // same `state` and `git` spans, so `git` still contains every `checks`.
-    const scan = async () => {
-      const state = profileSpanSync("reconcile.state", () =>
-        this.state(project_id),
-      );
-      return profileSpan("reconcile.git", () =>
-        this.options.git.reconcile(
-          project,
-          state.assignments,
-          state.deliveries,
-          () => this.checks(project_id),
-        ),
-      );
-    };
-    let findings = await scan();
-    if (
-      await profileSpan("reconcile.repair", () =>
-        this.repair(project_id, findings),
-      )
-    )
-      findings = await scan();
-    profileSpanSync("reconcile.record", () =>
-      this.record(project_id, findings),
-    );
+    const attempted = new Set<DeliveryId>();
+    for (;;) {
+      const findings = yield* this.scan(project_id, project, paged);
+      const missing = new Set<DeliveryId>();
+      for (const finding of findings) {
+        if (finding.kind !== "missing_delivery_ref" || !finding.delivery_id)
+          continue;
+        const id = finding.delivery_id as DeliveryId;
+        if (!attempted.has(id)) missing.add(id);
+      }
+      if (!missing.size) {
+        profileSpanSync("reconcile.record", () =>
+          this.record(project_id, findings),
+        );
+        return;
+      }
+      // Finish this inventory's repair queue before rescanning. Only a full
+      // scan with no unattempted repairs may publish/resolve findings.
+      const queue = [...missing].reverse();
+      while (queue.length) {
+        await profileSpan("reconcile.repair", () =>
+          visitMaintenancePage(queue, async (id) => {
+            await this.repair(project_id, id);
+            attempted.add(id);
+          }),
+        );
+        if (paged) yield;
+      }
+    }
   }
 
   private report(message: string) {
@@ -322,6 +354,7 @@ export interface PhaseLoop<T> {
 export function startReconcileLoop(options: {
   readonly store: Store;
   readonly git: ReconcileGit;
+  readonly startup?: LoopStartup | undefined;
   readonly intervalMs?: number;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
@@ -336,8 +369,16 @@ export function startReconcileLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "reconcile",
-    tick: () => executor.tick(),
+    initialDelayMs: options.startup
+      ? Math.min(5000, options.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS)
+      : 0,
+    ...projectCycle(
+      () => options.store.listProjects().map((p) => p.id),
+      (p) => executor.tick(p, true),
+      (p) => executor.pending(p),
+    ),
     intervalMs: options.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -348,6 +389,7 @@ export function startReconcileLoop(options: {
 export function startBackupLoop(options: {
   readonly store: Store;
   readonly git: Pick<ReconcileGit, "projectOf" | "backup">;
+  readonly startup?: LoopStartup | undefined;
   readonly intervalMs?: number;
   readonly clock?: Clock;
   readonly onError?: (error: unknown) => void;
@@ -362,6 +404,7 @@ export function startBackupLoop(options: {
     ...(options.report === undefined ? {} : { report: options.report }),
   });
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "backup",
     // Let startup recovery and queued HEAD checks acquire the repository first.
     initialDelayMs: Math.min(

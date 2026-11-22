@@ -1,5 +1,5 @@
 import type { Dispatcher } from "./dispatch.js";
-import { DEFAULT_SLOW_TICK_MS } from "./loop.js";
+import { DEFAULT_SLOW_TICK_MS, type LoopStartup } from "./loop.js";
 import { profileSpan, profileTick } from "./tick-profile.js";
 
 export interface DispatchLoopOptions {
@@ -7,6 +7,7 @@ export interface DispatchLoopOptions {
   /** RuntimeMonitor implements this lifecycle; assembly remains in M3.5. */
   monitor?: { reconcile(): void; stop(): Promise<void> };
   intervalMs?: number;
+  startup?: LoopStartup | undefined;
   /** Report only elapsed time, never command, prompt or runtime contents. */
   slowTickMs?: number;
   onSlowTick?(durationMs: number): void;
@@ -47,6 +48,17 @@ export function startDispatchLoop(options: DispatchLoopOptions): DispatchLoop {
   options.signal?.addEventListener("abort", requestStop, { once: true });
   const done = (async () => {
     try {
+      if (
+        options.startup &&
+        !stopping &&
+        !(await Promise.race([
+          options.startup,
+          new Promise<boolean>((resolve) => {
+            wake = () => resolve(false);
+          }),
+        ]))
+      )
+        return;
       while (!stopping) {
         const started = performance.now();
         try {

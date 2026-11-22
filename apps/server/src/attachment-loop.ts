@@ -4,8 +4,8 @@ import { lstat, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Clock } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
-import { sweepArtifacts } from "./artifact-retention.js";
-import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { artifactPages } from "./artifact-retention.js";
+import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { systemClock } from "./merge-loop.js";
 
 /**
@@ -55,6 +55,17 @@ export interface AttachmentSweep {
 
 export class AttachmentGc {
   private serial: Promise<void> = Promise.resolve();
+
+  private page:
+    | {
+        entries: Dirent[];
+        referenced: Set<string>;
+        candidates: { digest: string; mtimeMs: number }[];
+      }
+    | undefined;
+  get pending() {
+    return !!this.page;
+  }
 
   constructor(private readonly options: AttachmentGcOptions) {}
 
@@ -137,13 +148,15 @@ export class AttachmentGc {
   }
 
   private async sweep(): Promise<AttachmentSweep> {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(this.directory, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT")
-        return { scanned: 0, candidates: 0, deleted: [], truncated: false };
-      throw error;
+    if (!this.page) {
+      try {
+        const entries = await readdir(this.directory, { withFileTypes: true });
+        this.page = { entries, referenced: this.referenced(), candidates: [] };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          return { scanned: 0, candidates: 0, deleted: [], truncated: false };
+        throw error;
+      }
     }
     const now = Date.parse(this.clock.now());
     const grace = this.options.graceMs ?? ATTACHMENT_GC_GRACE_MS;
@@ -153,10 +166,18 @@ export class AttachmentGc {
     if (!Number.isSafeInteger(limit) || limit < 1)
       throw new Error("Invalid attachment sweep limit");
 
-    const referenced = this.referenced();
-    const candidates: { readonly digest: string; readonly mtimeMs: number }[] =
-      [];
-    for (const entry of entries) {
+    const { entries, referenced, candidates } = this.page;
+    const until = performance.now() + 250;
+    let scanned = 0;
+    const scanPage = !candidates.length;
+    while (
+      scanPage &&
+      entries.length &&
+      scanned < 128 &&
+      (!scanned || performance.now() < until)
+    ) {
+      scanned++;
+      const entry = entries.pop() as Dirent;
       // Directories, symlinks (even to regular files) and odd names are
       // skipped: readdir does not follow links, so a symlink is not a file.
       if (!entry.isFile()) continue;
@@ -176,28 +197,33 @@ export class AttachmentGc {
       if (now - stats.mtimeMs < grace) continue;
       candidates.push({ digest: entry.name, mtimeMs: stats.mtimeMs });
     }
-    candidates.sort((left, right) => left.mtimeMs - right.mtimeMs);
+    candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
 
     const deleted: string[] = [];
-    for (const candidate of candidates.slice(0, limit)) {
+    const found = candidates.length;
+    for (
+      let n = 0;
+      candidates.length && n < limit && (!n || performance.now() < until);
+      n++
+    ) {
+      const candidate = candidates.pop() as { digest: string; mtimeMs: number };
       // Deletion re-checks type, age and references under a write lock (§9.3).
       const removed = await this.removeIfStillOrphaned(candidate.digest, grace);
       if (removed) deleted.push(candidate.digest);
     }
-    const truncated = candidates.length > limit;
-    if (deleted.length > 0 || truncated)
+    const truncated = entries.length > 0 || candidates.length > 0;
+    if (!truncated) this.page = undefined;
+    if (deleted.length > 0)
       this.report(
         `Attachment cleanup: removed ${deleted.length} orphaned blob(s)` +
           (deleted.length > 0
             ? ` (${deleted.map((digest) => digest.slice(0, 8)).join(", ")})`
             : "") +
-          (truncated
-            ? `; ${candidates.length - limit} more wait for the next round`
-            : ""),
+          (truncated ? `; continued next round` : ""),
       );
     return {
-      scanned: entries.length,
-      candidates: candidates.length,
+      scanned,
+      candidates: found,
       deleted,
       truncated,
     };
@@ -211,22 +237,39 @@ export interface AttachmentLoop {
 
 export function startAttachmentLoop(
   options: AttachmentGcOptions & {
+    readonly store: Store;
+    readonly startup?: LoopStartup | undefined;
     readonly intervalMs?: number;
     readonly signal?: AbortSignal;
     readonly onError?: (error: unknown) => void;
   },
 ): AttachmentLoop {
   const executor = new AttachmentGc(options);
+  let artifacts: ReturnType<typeof artifactPages> | undefined;
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "attachments",
+    initialDelayMs: options.startup
+      ? Math.min(8000, options.intervalMs ?? DEFAULT_ATTACHMENT_GC_INTERVAL_MS)
+      : 0,
     tick: async () => {
-      await executor.tick();
-      await sweepArtifacts(
-        options.store,
-        options.dataDir,
-        (options.clock ?? systemClock).now(),
-      );
+      if (!artifacts) {
+        await executor.tick();
+        if (executor.pending) return;
+        artifacts = artifactPages(
+          options.store,
+          options.dataDir,
+          (options.clock ?? systemClock).now(),
+        );
+      }
+      try {
+        if ((await artifacts.next()).done) artifacts = undefined;
+      } catch (error) {
+        artifacts = undefined;
+        throw error;
+      }
     },
+    continueSoon: () => executor.pending || !!artifacts,
     intervalMs: options.intervalMs ?? DEFAULT_ATTACHMENT_GC_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
     ...(options.signal === undefined ? {} : { signal: options.signal }),

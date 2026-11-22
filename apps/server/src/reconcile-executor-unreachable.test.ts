@@ -93,3 +93,40 @@ test("an SSH outage keeps open remote findings and their first-seen time; recove
   await executor.tick(f.project_id);
   expect(open()).toEqual({});
 });
+
+test("a partial worker inventory neither clears findings nor restarts earlier probes", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  f.store.recordReconcileFindings(f.project_id, [orphan]);
+  const observed: number[] = [];
+  const executor = new ReconcileExecutor({
+    store: f.store,
+    git: {
+      projectOf: () => ({
+        project_id: f.project_id,
+        source_repo: "/unused",
+        base_branch: "main",
+      }),
+      async *reconcilePages() {
+        observed.push(1);
+        yield;
+        observed.push(2);
+        yield;
+        return [];
+      },
+    } as unknown as ReconcileGit,
+  });
+  for (const n of [1, 2]) {
+    await executor.tick(f.project_id, true);
+    expect(observed.length).toBe(n);
+    expect(executor.pending(f.project_id)).toBe(true);
+    expect(
+      f.store.listReconcileFindings(f.project_id, { openOnly: true }),
+    ).toHaveLength(1);
+  }
+  await executor.tick(f.project_id, true);
+  expect(executor.pending(f.project_id)).toBe(false);
+  expect(
+    f.store.listReconcileFindings(f.project_id, { openOnly: true }),
+  ).toEqual([]);
+});

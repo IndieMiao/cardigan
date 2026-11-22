@@ -187,7 +187,7 @@ test("a done card releases its Assignments, revokes tokens and removes a clean w
   expect(worktreePath).toBe(worktree);
   expect(existsSync(worktree)).toBe(true);
 
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
 
   const after = assignment();
   expect(after.status).toBe("released");
@@ -208,8 +208,8 @@ test("a done card releases its Assignments, revokes tokens and removes a clean w
 test("a dirty worktree asks the human and is not deleted", async () => {
   await doneCard();
   writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
-  await cleanup().tick(f.project_id);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
+  await cleanup().sweep(f.project_id);
 
   const decisions = f
     .state()
@@ -228,13 +228,13 @@ test("a dirty worktree asks the human and is not deleted", async () => {
 test("force_clean backs up a patch and then removes the worktree", async () => {
   await doneCard();
   writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   const decision = f
     .state()
     .decisions.find((candidate) => candidate.trigger === "worktree_cleanup");
   expect(decision).toBeDefined();
   f.decide(decision as never, "force_clean");
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
 
   expect(existsSync(worktree)).toBe(false);
   const patches = readdirSync(join(f.dataDir, "cleanup", f.project_id));
@@ -245,13 +245,13 @@ test("force_clean backs up a patch and then removes the worktree", async () => {
 test("keep leaves the worktree in place and stops asking", async () => {
   await doneCard();
   writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   const decision = f
     .state()
     .decisions.find((candidate) => candidate.trigger === "worktree_cleanup");
   f.decide(decision as never, "keep");
-  await cleanup().tick(f.project_id);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
+  await cleanup().sweep(f.project_id);
 
   expect(existsSync(worktree)).toBe(true);
   expect(
@@ -266,7 +266,7 @@ test("keep leaves the worktree in place and stops asking", async () => {
 test("an unfinished card keeps its Assignments", async () => {
   scenario = m4Scenario(f, "auto");
   f.startRun(scenario.coder);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(assignment().status).toBe("active");
   expect(released).toEqual([]);
 });
@@ -282,12 +282,40 @@ test("S17 releases every terminal and token, including PM acceptance without a w
         role: { role_version: 1, allowed_tools: [] },
       }).token,
   );
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(released.map((r) => r.terminal_ref).sort()).toEqual(
     all.map((a) => a.runtime_ref?.terminal_ref).sort(),
   );
   for (const token of tokens)
     expect(f.store.verifyToken(token)).toBeUndefined();
+});
+
+test("S17 a slow release pages one tick, and the sweep still releases every terminal", async () => {
+  await doneCard();
+  const all = f.state().assignments.filter((a) => a.runtime_ref);
+  expect(all.length).toBeGreaterThan(1);
+  const executor = new CleanupExecutor({
+    store: f.store,
+    git: new ServerGit({ store: f.store, dataDir: f.dataDir }),
+    runtime: {
+      ...runtime,
+      // Past the 250 ms page budget, as on a loaded CI runner.
+      release: async (ref, options) => {
+        await new Promise((resolve) => setTimeout(resolve, 260));
+        return runtime.release(ref, options);
+      },
+    },
+    clock: f.clock,
+    onError: () => undefined,
+  });
+  await executor.tick(f.project_id);
+  expect(released).toHaveLength(1);
+  expect(executor.pending(f.project_id)).toBe(true);
+  await executor.sweep(f.project_id);
+  expect(executor.pending(f.project_id)).toBe(false);
+  expect(released.map((r) => r.terminal_ref).sort()).toEqual(
+    all.map((a) => a.runtime_ref?.terminal_ref).sort(),
+  );
 });
 
 test("S17 sweeps an already released terminal even in a project with no repository", async () => {
@@ -305,8 +333,8 @@ test("S17 sweeps an already released terminal even in a project with no reposito
       git: new ServerGit({ store: noGit.store, dataDir: noGit.dataDir }),
       runtime: { ...runtime, release: closed },
     });
-    await executor.tick();
-    await executor.tick();
+    await executor.sweep();
+    await executor.sweep();
     // The fake runtime still reports alive: a prior success must not suppress repair.
     expect(closed).toHaveBeenCalledTimes(2);
     expect(closed).toHaveBeenLastCalledWith(
@@ -344,10 +372,10 @@ test.each(["result", "throw"])(
       runtime: { ...runtime, release },
       report,
     });
-    await executor.tick();
+    await executor.sweep();
     expect(existsSync(worktree)).toBe(true);
     expect(report).toHaveBeenCalled();
-    await executor.tick();
+    await executor.sweep();
     expect(attempts).toBe(2);
     expect(existsSync(worktree)).toBe(false);
   },
@@ -367,11 +395,11 @@ test("worktree cleanup retries independently after its missing terminal referenc
     git: gitService,
     runtime: { ...runtime, status },
   });
-  await loop.tick();
+  await loop.sweep();
   expect(assignment().runtime_ref).toBeNull();
   expect(existsSync(worktree)).toBe(true);
   status.mockClear();
-  await loop.tick();
+  await loop.sweep();
   expect(status).not.toHaveBeenCalled();
   expect(existsSync(worktree)).toBe(false);
 });

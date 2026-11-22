@@ -2,10 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, test, vi } from "vitest";
 import { m4Fixture, m4Scenario } from "./m4-fixtures.js";
-import {
-  reconcileRunResources,
-  resourceExpiry,
-} from "./run-resource-cleanup.js";
+import { previewMachine, resourceExpiry } from "./run-resource-cleanup.js";
 
 test("process groups, detached descendants, session exit and replaced/occupied scratch in private fixtures", async () => {
   const result = await promisify(execFile)(
@@ -42,7 +39,7 @@ test("draining workers are previewed without starting work or scheduling a delet
       partial: true,
     }));
     const audit = vi.fn();
-    await reconcileRunResources(
+    await previewMachine(
       f.store,
       {
         resolve: () => ({
@@ -52,6 +49,7 @@ test("draining workers are previewed without starting work or scheduling a delet
         }),
       },
       f.project_id,
+      machine.id,
       audit,
       preview,
     );

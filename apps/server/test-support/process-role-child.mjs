@@ -65,6 +65,7 @@ try {
       ),
     },
     dispatcher: {
+      reconcileIntervalMs: 50,
       runtime,
       snapshot: async () => ({}),
       startRun: async () => {

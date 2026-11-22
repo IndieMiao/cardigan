@@ -225,7 +225,7 @@ test("the build checkout creates no branch, never touches the central repository
   const tampered = git(build, "rev-parse", "HEAD");
   expect(git(clone(), "for-each-ref", "refs/heads")).toBe(branchesBefore);
   f.endRun(s.reviewer);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(existsSync(build)).toBe(false);
   expect(git(clone(), "worktree", "list", "--porcelain")).not.toContain(build);
   // Removal neither backs the commit up nor moves any central ref.
@@ -239,13 +239,13 @@ test("the build checkout creates no branch, never touches the central repository
 test("cleanup keeps the checkout while the Run is unfinished and removes it after", async () => {
   await startReviewer();
   const build = buildPath();
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(existsSync(build)).toBe(true);
   f.endRun(s.reviewer);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(existsSync(build)).toBe(false);
   // Idempotent: a second round finds nothing to do.
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(existsSync(build)).toBe(false);
 });
 
@@ -524,7 +524,7 @@ test("a registration whose directory vanished is rebuilt and also cleaned up", a
     s.reviewer.id,
   ]);
   f.endRun(s.reviewer);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(git(clone(), "worktree", "list", "--porcelain")).not.toContain(build);
   expect(await serverGit().listBuildCheckouts(project)).toEqual([]);
 });
@@ -589,11 +589,11 @@ test("a released Assignment keeps its build until its terminal exit is confirmed
     clock: f.clock,
     report: (message) => reports.push(message),
   });
-  await executor.tick(f.project_id);
+  await executor.sweep(f.project_id);
   expect(existsSync(buildPath())).toBe(true);
   expect(reports.some((r) => r.includes("terminal release"))).toBe(true);
   release = true;
-  await executor.tick(f.project_id);
+  await executor.sweep(f.project_id);
   expect(existsSync(buildPath())).toBe(false);
 });
 
@@ -651,7 +651,7 @@ test("preparing and removing a build touches no other Assignment directory or sh
   mkdirSync(join(buildPath(), "node_modules", ".pnpm"), { recursive: true });
   writeFileSync(join(buildPath(), "node_modules", ".pnpm", "lock"), "x");
   f.endRun(s.reviewer);
-  await cleanup().tick(f.project_id);
+  await cleanup().sweep(f.project_id);
   expect(existsSync(buildPath())).toBe(false);
   expect(snapshot()).toBe(before);
 });
