@@ -64,6 +64,7 @@ import {
 } from "../components/StoryProposal.js";
 import { Button } from "../components/ui/button.js";
 import * as Dialog from "../components/ui/dialog.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { Textarea } from "../components/ui/textarea.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
@@ -1666,6 +1667,9 @@ function HumanAction({
   elapsed,
 }: Props & { item: NeedsAction; done: () => void; elapsed: number }) {
   const [text, setText] = useState("");
+  const [conclusion, setConclusion] = useState<"exited" | "false_alarm" | "">(
+    "",
+  );
   const action = useAction(done);
   if (item.completion_notice !== undefined)
     return (
@@ -1830,11 +1834,39 @@ function HumanAction({
         data-needs-focus=""
         onSubmit={(e) => {
           e.preventDefault();
-          void action.run([projectId, item.id, "complete", text], (key) =>
-            client.completeAction(projectId, item.id, text, key),
+          if (item.requires_loss_conclusion && !conclusion) return;
+          void action.run(
+            [projectId, item.id, "complete", text, conclusion],
+            (key) =>
+              conclusion
+                ? client.completeAction(
+                    projectId,
+                    item.id,
+                    text,
+                    key,
+                    conclusion,
+                  )
+                : client.completeAction(projectId, item.id, text, key),
           );
         }}
       >
+        {item.requires_loss_conclusion && (
+          <label>
+            失联结论
+            <SelectControl
+              required
+              aria-label="失联结论"
+              value={conclusion}
+              onValueChange={(v) =>
+                setConclusion(v === "exited" || v === "false_alarm" ? v : "")
+              }
+            >
+              <option value="">请选择</option>
+              <option value="exited">已退出</option>
+              <option value="false_alarm">误报</option>
+            </SelectControl>
+          </label>
+        )}
         <label>
           执行结果
           <Textarea

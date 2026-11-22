@@ -72,7 +72,11 @@ function setup() {
         completeHumanAction(
           current,
           human,
-          { human_action_id: action.id, text: "Machine powered off" },
+          {
+            human_action_id: action.id,
+            conclusion: "exited",
+            text: "Machine powered off",
+          },
           io,
         ),
       ),
@@ -152,7 +156,7 @@ test("Assignment tokens cannot confirm or delegate the remote exit, even through
       completeHumanAction(
         f.current,
         caller,
-        { human_action_id: f.action.id, text: "done" },
+        { human_action_id: f.action.id, conclusion: "exited", text: "done" },
         f.io,
       ).ok,
     ).toBe(false);
@@ -320,7 +324,7 @@ test("cancelled confirmation never releases; card cancellation retains the exit 
       completeHumanAction(
         closed,
         human,
-        { human_action_id: f.action.id, text: "exited" },
+        { human_action_id: f.action.id, conclusion: "exited", text: "exited" },
         f.io,
       ),
     ),
@@ -331,12 +335,17 @@ test("cancelled confirmation never releases; card cancellation retains the exit 
   ).toBe(true);
 });
 
-test("late alive never revives an old identity and asks the human again after release", () => {
+test("verified alive withdraws an open H; after release it fences the orphan without another H", () => {
   const f = setup();
   const observed = value(
     reportRemoteWorkerAlive(f.current, system, f.request.data.action_id, f.io),
   );
-  expect(observed.changes).toEqual([]);
+  const corrected = apply(f.current, observed);
+  expect(corrected.human_actions[0]?.status).toBe("cancelled");
+  expect(corrected.assignments.find((a) => a.id === owner)?.runtime_state).toBe(
+    "running",
+  );
+  expect(hostOpsPending(corrected.events, owner)).toBe(false);
   f.confirm();
   const released = f.release();
   const late = value(
@@ -345,7 +354,7 @@ test("late alive never revives an old identity and asks the human again after re
   expect(late.changes.every((c) => c.collection === "human_actions")).toBe(
     true,
   );
-  expect(late.changes).toHaveLength(1);
+  expect(late.changes).toHaveLength(0);
   expect(
     value(
       reportRemoteWorkerAlive(
@@ -443,7 +452,7 @@ test("no backup cannot authorize a backup restore; pending finish is discarded d
       completeHumanAction(
         state,
         human,
-        { human_action_id: action.id, text: "exited" },
+        { human_action_id: action.id, conclusion: "exited", text: "exited" },
         f.io,
       ),
     ),
@@ -472,40 +481,8 @@ test("no backup cannot authorize a backup restore; pending finish is discarded d
   ).toBe(false);
 });
 
-test("a cancelled late exit request can be renewed even after the old Assignment was released", () => {
-  const f = setup();
-  f.confirm();
-  const released = f.release();
-  const late = apply(
-    released,
-    value(
-      reportRemoteWorkerAlive(released, system, f.request.data.action_id, f.io),
-    ),
-  );
-  const action = late.human_actions.find((h) => h.status === "open");
-  if (!action) throw new Error("Missing late confirmation");
-  const cancelled = apply(
-    late,
-    value(
-      cancelHumanAction(
-        late,
-        human,
-        { human_action_id: action.id, reason: "later" },
-        f.io,
-      ),
-    ),
-  );
-  const renewed = value(
-    requestRemoteWorkerExit(cancelled, system, { assignment_id: owner }, f.io),
-  );
-  expect(renewed.events.map((e) => e.type)).toEqual(["human_action_requested"]);
-  expect(renewed.changes.every((c) => c.collection === "human_actions")).toBe(
-    true,
-  );
-});
-
 test.each(["main", "backup"] as const)(
-  "an earlier worker's pending exit blocks a third %s Assignment until the human confirms again",
+  "an earlier worker's pending exit blocks a third %s Assignment until the kernel confirms exit",
   (recovery_source) => {
     const f = setup();
     f.confirm();
@@ -562,7 +539,11 @@ test.each(["main", "backup"] as const)(
         completeHumanAction(
           state,
           human,
-          { human_action_id: confirmation.id, text: "Second worker stopped" },
+          {
+            human_action_id: confirmation.id,
+            conclusion: "exited",
+            text: "Second worker stopped",
+          },
           f.io,
         ),
       ),
@@ -588,39 +569,24 @@ test.each(["main", "backup"] as const)(
       ok: false,
       error: { code: "illegal_transition" },
     });
-    const reopened = state.human_actions.find((h) => h.status === "open");
-    if (!reopened) throw new Error("Missing earlier worker exit request");
-    state = apply(
-      state,
-      value(
-        cancelHumanAction(
-          state,
-          human,
-          { human_action_id: reopened.id, reason: "later" },
-          f.io,
-        ),
-      ),
-    );
-    expect(assign(state, human, params, f.io).ok).toBe(false);
-    state = apply(
-      state,
-      value(
-        requestRemoteWorkerExit(state, system, { assignment_id: owner }, f.io),
-      ),
-    );
-    const renewed = state.human_actions.find((h) => h.status === "open");
-    if (!renewed) throw new Error("Missing renewed exit request");
-    state = apply(
-      state,
-      value(
-        completeHumanAction(
-          state,
-          human,
-          { human_action_id: renewed.id, text: "Earlier worker stopped" },
-          f.io,
-        ),
-      ),
-    );
+    expect(state.human_actions.filter((h) => h.status === "open")).toEqual([]);
+    state = {
+      ...state,
+      events: [
+        ...state.events,
+        {
+          id: f.io.ids.nextEventId(),
+          seq: f.io.ids.nextEventSequence(state.project_id, undefined),
+          actor: system,
+          created_at: now,
+          type: "remote_worker_exit_observed",
+          payload: {
+            action_id: f.request.data.action_id,
+            assignment_id: owner,
+          },
+        },
+      ],
+    };
     const next = value(assign(state, human, params, f.io));
     expect(next.token_requests).toHaveLength(1);
     expect(next.data.recovery).toMatchObject({
@@ -721,4 +687,33 @@ test("a pre-launch failure after confirmed backup takeover retains the chosen co
       backup,
     },
   });
+});
+
+test("remote H requires an explicit conclusion; a false alarm never releases or replaces the owner", () => {
+  const f = setup();
+  const p = { human_action_id: f.action.id, text: "误报" };
+  expect(completeHumanAction(f.current, human, p, f.io).ok).toBe(false);
+  const state = apply(
+    f.current,
+    value(
+      completeHumanAction(
+        f.current,
+        human,
+        { ...p, conclusion: "false_alarm" },
+        f.io,
+      ),
+    ),
+  );
+  expect(state.human_actions[0]?.result?.conclusion).toBe("false_alarm");
+  expect(state.assignments.find((a) => a.id === owner)).toMatchObject({
+    status: "active",
+    runtime_state: "running",
+    runtime_ref: f.state.assignments.find((a) => a.id === owner)?.runtime_ref,
+  });
+  expect(state.runs.find((r) => r.assignment_id === owner)?.status).toBe(
+    "running",
+  );
+  expect(
+    releaseLostRemoteWorker(state, system, f.request.data.action_id, f.io).ok,
+  ).toBe(false);
 });

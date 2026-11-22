@@ -398,3 +398,7 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 撤销接入并遇到新部署或绑定变更时，下一轮巡检将旧停派记录转到当前版本，不执行安装，不沿用旧检查证据。按当前发行版人工修复后，在同一绑定依次运行 `worker check`、`machine check`；以两项检查正式完成的结果为准。新的 worker 检查一旦开始，之前的 worker 通过结果即失效。
 
 `machine check` 失败时查看 `health.blockers`：`invalid_launch` 旁的 `target_mismatch` 表示登记与执行目标不匹配，`target_changed` 表示检查期间绑定发生了变化，`worker_configuration_incomplete` 表示缺少远程启动配置。`target_invalid` 是没有可公开原因时的回退，不是进程退出证明。
+
+同一项目账号只改 `path` 时，已记录的会话继续按启动时的 PATH 核对；旧 Run 排空前，新派发等待 `worker_binding_draining`。排空后例行机器检查使用新配置。不应通过删除绑定或换代来应用 PATH：删绑、撤权、换账号、换 SSH 信任目标或显式换代都不会沿用旧通道。控制主机未记录过旧 PATH 时也不会猜测。
+
+失联宽限到期时，主机比对启动时记录的进程身份；连接失败不代表退出。若系统尚不能核实，失联待办须选“已退出”或“误报”。误报保留原 Run 和资格；再次核实原进程存活时自动撤销未结项待办。CLI 用 `--conclusion exited` 或 `--conclusion false_alarm` 指定结论。

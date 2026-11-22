@@ -119,7 +119,7 @@ const USAGE = [
   "    已是最新版本时不做改动。先用 cardigan role upgrade pm --from-default 追加新版本。",
   "  cardigan needs-you [--project <p>]                   看待你拍板、待你执行的事项和知会",
   "  cardigan needs-you read <知会编号...>|--all [--project <p>]  把知会标为已读",
-  "  cardigan human-action done <H-n> --text <结果> [--project <p>]",
+  "  cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm] [--project <p>]",
   "",
   "通用：--project 省略时取 CARDIGAN_PROJECT，再取数据库里唯一的项目；",
   "      --data-dir 省略时取 CARDIGAN_DATA_DIR，再取 ~/.local/share/cardigan。",
@@ -2164,13 +2164,16 @@ async function humanActionDone(
   const [sub, ...rest] = args;
   if (sub !== "done") {
     throw new CliError(
-      "用法：cardigan human-action done <H-n> --text <结果>",
+      "用法：cardigan human-action done <H-n> --text <结果> [--conclusion exited|false_alarm]",
       EXIT.usage,
       [USAGE],
     );
   }
   const parsed = parseArgs(rest, []);
   const humanActionId = parseHumanAction(parsed.positionals[0]);
+  const conclusion = optional(parsed.flags, "conclusion");
+  if (conclusion && conclusion !== "exited" && conclusion !== "false_alarm")
+    throw new CliError("--conclusion 须为 exited 或 false_alarm", EXIT.usage);
   const text = required(parsed.flags, "text");
 
   const store = await openPlacementStore(io, parsed.flags);
@@ -2189,7 +2192,13 @@ async function humanActionDone(
         completeHumanAction(
           state,
           actor,
-          { human_action_id: humanActionId, text },
+          {
+            human_action_id: humanActionId,
+            text,
+            ...(conclusion === "exited" || conclusion === "false_alarm"
+              ? { conclusion }
+              : {}),
+          },
           ports,
         ),
     });

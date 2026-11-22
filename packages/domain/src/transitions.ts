@@ -161,7 +161,11 @@ export const transitionTables: {
       declared_lost: "lost",
       release: "released",
     },
-    lost: { session_replaced: "idle", release: "released" },
+    lost: {
+      reconnected: "idle",
+      session_replaced: "idle",
+      release: "released",
+    },
   },
   run: {
     queued: { dispatch: "dispatched", cancel: "cancelled" },

@@ -233,7 +233,7 @@ test("remote target loss keeps the original five-minute deadline across reconnec
   expect(state()).toBe("unknown");
   f.advance(1);
   monitor.reconcile();
-  expect(state()).toBe("lost");
+  await expectState("lost");
   events.send({
     seq: 3,
     type: "snapshot",

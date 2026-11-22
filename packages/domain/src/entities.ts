@@ -1225,6 +1225,7 @@ export interface HumanAction {
   readonly follow_up_work_items?: readonly WorkItemId[];
   readonly status: HumanActionStatus;
   readonly result?: {
+    readonly conclusion?: "exited" | "false_alarm";
     readonly text: string;
     readonly attachments: readonly AttachmentId[];
     readonly at: Timestamp;

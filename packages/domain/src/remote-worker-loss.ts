@@ -1,4 +1,4 @@
-import type { Assignment, Event, RuntimeRef } from "./entities.js";
+import type { Assignment, Event, Run, RuntimeRef } from "./entities.js";
 import type {
   AssignmentId,
   EventId,
@@ -16,6 +16,8 @@ export type RemoteWorkerLoss = {
   readonly work_item_id: WorkItemId;
   readonly machine_id: string;
   readonly runtime_ref: RuntimeRef | null;
+  readonly process?: NonNullable<Run["launch_publication"]>["process"];
+  readonly run_ids?: readonly string[];
   readonly backup?: WorkerRecoveryBackup;
 };
 
@@ -25,9 +27,21 @@ export function remoteWorkerLosses(
 ): readonly RemoteWorkerLoss[] {
   let losses = lossCache.get(events);
   if (!losses) {
+    const corrected = new Set(
+      events
+        .filter(
+          (e) =>
+            e.type === "remote_worker_loss_corrected" &&
+            ["human", "system"].includes(e.actor.kind),
+        )
+        .map((e) => (e.payload as { action_id: string }).action_id),
+    );
     losses = events
       .filter(
-        (e) => e.type === "remote_worker_lost" && e.actor.kind === "system",
+        (e) =>
+          e.type === "remote_worker_lost" &&
+          e.actor.kind === "system" &&
+          !corrected.has(e.id),
       )
       .map((e) => ({
         ...(e.payload as unknown as RemoteWorkerLoss),
@@ -80,6 +94,17 @@ export function remoteWorkerExitPending(
   );
   const id = (request?.payload as { human_action_id?: string } | undefined)
     ?.human_action_id;
+  const last = events.findLast(
+    (e) =>
+      e.actor.kind === "system" &&
+      (e.payload as { action_id?: string }).action_id === loss.action_id &&
+      ["remote_worker_alive", "remote_worker_exit_observed"].includes(e.type),
+  );
+  if (
+    last?.type === "remote_worker_alive" &&
+    (last.payload as { after_release?: boolean }).after_release
+  )
+    return true;
   return (
     !id ||
     !events.some(

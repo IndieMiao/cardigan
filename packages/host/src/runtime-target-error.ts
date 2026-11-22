@@ -9,6 +9,7 @@ export class RuntimeTargetError extends Error {
       "mcp_gateway_error",
       "mcp_unreachable",
       "worker_unreachable",
+      "worker_binding_draining",
       "machine_check_runtime_timeout",
       "machine_check_runtime_queue_timeout",
       "machine_check_runtime_unavailable",
@@ -31,6 +32,7 @@ const reasons = new Set([
   "mcp_config_invalid",
   "machine_not_ready",
   "remote_launch_disabled",
+  "worker_binding_draining",
 ]);
 const safe = (value: unknown) =>
   typeof value === "string" && reasons.has(value) ? value : "target_invalid";

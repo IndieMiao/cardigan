@@ -52,6 +52,7 @@ import {
   type Result,
   ROLE_TOOL_ALLOWLISTS,
   type Role,
+  remoteExitAction,
   requiresUiStateAndSave,
   resolveReferences,
   roleKind,
@@ -1602,6 +1603,9 @@ export function needsYou(
           ? "当前升级命令不可用，请主机运维重新核对目标和发行材料。"
           : (action.handoff?.instructions ?? action.instructions),
       terminal,
+      ...(remoteExitAction(state, action.id)
+        ? { requires_loss_conclusion: true }
+        : {}),
       helper_checks: action.helper_checks,
       ...(action.handoff
         ? {

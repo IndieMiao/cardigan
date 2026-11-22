@@ -3,11 +3,12 @@ import { eventsOfType } from "../event-index.js";
 import type { HumanActionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { extractReferences } from "../references.js";
-import { remoteExitAction } from "../remote-worker-loss.js";
+import { remoteExitAction, remoteWorkerLosses } from "../remote-worker-loss.js";
 import { transition } from "../transitions.js";
 import { workerHelperAction } from "../worker-helper-action.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
 import { mergeContentDecisions } from "./human-decided-merge.js";
+import { correctRemoteLoss } from "./remote-loss-recovery.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 
 export function humanOnlyAction(d: CommandDraft, action: HumanAction) {
@@ -65,6 +66,7 @@ export function completeActionDraft(
   p: {
     human_action_id: HumanActionId;
     text: string;
+    conclusion?: "exited" | "false_alarm";
     attachments?: readonly string[];
   },
   helperVerified = false,
@@ -93,6 +95,30 @@ export function completeActionDraft(
     "unauthorized",
     "未分类主机待办须先核对原始请求，不能仅凭完成回帖结项",
   );
+  const remote = remoteExitAction(d.state, action.id);
+  ensure(
+    remote
+      ? ["exited", "false_alarm"].includes(p.conclusion ?? "")
+      : !p.conclusion,
+    "validation_failed",
+    "失联待办须选择已退出或误报，其他待办不适用",
+  );
+  if (p.conclusion === "false_alarm") {
+    const request = d.state.events.findLast(
+      (e) =>
+        e.type === "human_action_requested" &&
+        (e.payload as { human_action_id?: string }).human_action_id ===
+          action.id,
+    );
+    const loss = remoteWorkerLosses(d.state.events).find(
+      (l) =>
+        l.action_id ===
+        (request?.payload as { host_ops_action_id?: string })
+          ?.host_ops_action_id,
+    );
+    ensure(loss, "stale_target", "Loss has been superseded");
+    correctRemoteLoss(d, loss);
+  }
   text(p.text, "result");
   if (action.card_id)
     ensure(
@@ -110,7 +136,12 @@ export function completeActionDraft(
   const result: HumanAction = {
     ...action,
     status: unwrap(transition("human_action", action.status, "complete")),
-    result: { text: p.text, attachments: p.attachments ?? [], at: d.now },
+    result: {
+      ...(p.conclusion ? { conclusion: p.conclusion } : {}),
+      text: p.text,
+      attachments: p.attachments ?? [],
+      at: d.now,
+    },
   };
   d.put("human_actions", result);
   const resumed: WorkItem[] = [];
@@ -124,6 +155,7 @@ export function completeActionDraft(
     action.card_id,
     {
       human_action_id: action.id,
+      ...(p.conclusion ? { conclusion: p.conclusion } : {}),
       ...(d.tool === "complete_host_action" && d.assignment
         ? { completed_by_host_assignment_id: d.assignment.id }
         : {}),
