@@ -125,7 +125,7 @@ function requireTestReviewBudget(
   const item = d.work(assignment.work_item_id);
   if (item.kind === "verify" && item.status === "waiting_decision") {
     ensure(
-      reviewDiscussionInstruction(item, trigger),
+      reviewDiscussionInstruction(item, trigger, d.state.decisions),
       "illegal_transition",
       "Review budget is waiting for a decision",
     );
@@ -808,7 +808,13 @@ export function acknowledgeRun(
     d.put("runs", next);
     if (assignment.scope === "work_item") {
       const item = d.ownWork(assignment.work_item_id);
-      const active = activeWork(d, item);
+      // A directed pause discussion does not start the repair or spend a review round.
+      const trigger = originalRunTrigger(state, run);
+      const discussion =
+        trigger?.type === "instruction_issued" &&
+        (trigger.payload as { pause_recipient?: string })?.pause_recipient ===
+          assignment.id;
+      const active = discussion ? item : activeWork(d, item);
       if (active.status !== item.status) d.put("work_items", active);
     }
     providerStarted(d, run);

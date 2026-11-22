@@ -1,9 +1,11 @@
 import {
   type CommandState,
+  postComment,
   type ReviewIssue,
   type SubmitReviewParams,
   sharedMustFixes,
   submitReview,
+  type TimelineEntryId,
   updateWorkItem,
 } from "../../index.js";
 import {
@@ -98,6 +100,35 @@ export async function sharedReviewFixture(
     state = apply(state, result);
     return result.data;
   }
+  function comment(
+    n: number,
+    step: "propose" | "confirm",
+    reply_to?: TimelineEntryId,
+  ) {
+    const q = state.decisions[0];
+    if (!q?.card_id) throw Error("Missing pause");
+    const effect = value(
+      postComment(
+        state,
+        n === 1 ? actor() : who(n),
+        {
+          card_id: q.card_id,
+          body: n === 1 ? "提交状态与证据表" : "确认表中状态与证据",
+          review_plan: { decision_id: q.id, step },
+          ...(reply_to ? { reply_to } : {}),
+        },
+        io,
+      ),
+    );
+    state = apply(state, effect);
+    if (!effect.data) throw Error("Missing proposal comment");
+    return effect.data;
+  }
+  function confirmPause() {
+    const p = comment(1, "propose");
+    comment(2, "confirm", p.id);
+    comment(3, "confirm", p.id);
+  }
   function decide(n: number, option: "raise_limit" | "pause" | "escalate") {
     const q = state.decisions[0];
     if (!q) throw Error("Missing decision");
@@ -110,6 +141,15 @@ export async function sharedReviewFixture(
           decision_id: q.id,
           option,
           rationale: "已核对本次交付",
+          ...(option === "pause"
+            ? {
+                pause_plan: {
+                  owner: id("assignment", 1),
+                  confirmers: [id("assignment", 2), id("assignment", 3)],
+                  next_step: "提交状态与证据表",
+                },
+              }
+            : {}),
         },
       },
       io,
@@ -118,6 +158,8 @@ export async function sharedReviewFixture(
     return result;
   }
   return {
+    comment,
+    confirmPause,
     submit,
     review,
     decide,

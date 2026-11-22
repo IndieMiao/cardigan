@@ -552,6 +552,11 @@ function routeMentions(
 function routeInstruction(input: RouteInput, draft: Draft): void {
   const work_item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, work_item_id as WorkItemId | undefined);
+  if (
+    payloadString(input.event.payload, "pause_recipient") &&
+    (!item || reviewWakeBlocked(input.snapshot, input.event, item.id))
+  )
+    return;
   if (item === undefined) {
     note(
       input,
@@ -1815,6 +1820,33 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "comment_posted":
       routeComment(input, draft);
       break;
+    case "review_pause_notice": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        q?.card_id !== input.event.card_id ||
+        q?.status !== "provisional" ||
+        !q.review_pause ||
+        input.snapshot.cards.some(
+          (c) => c.id === q.card_id && ["done", "cancelled"].includes(c.status),
+        )
+      )
+        break;
+      note(
+        input,
+        draft,
+        payloadString(input.event.payload, "audience") === "pm_office"
+          ? recipient.pm_office()
+          : recipient.pm_ops(),
+        "decision",
+        "6.4/instruction",
+        payloadString(input.event.payload, "body") ?? "请跟进暂停决定",
+      );
+      break;
+    }
     case "instruction_issued":
     case "instruction":
       routeInstruction(input, draft);

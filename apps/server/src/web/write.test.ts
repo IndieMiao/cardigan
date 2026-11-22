@@ -1401,12 +1401,34 @@ test.each([false, true])(
         decision_id: q.id,
         option: "pause",
         rationale: "先核对上一轮结论",
+        pause_plan: {
+          owner: s.primary.owner.id,
+          confirmers: [s.primary.verifier.id],
+          next_step: "复核",
+        },
       },
     };
     await s.call(ops, "update_work_item", args);
     expect(s.state().decisions.find((d) => d.id === q.id)).toMatchObject({
       status: "provisional",
     });
+    if (!escalate) {
+      const plan = await s.call<{ id: string }>(
+        s.primary.owner,
+        "post_comment",
+        {
+          card_id: s.card.id,
+          body: "核对上一轮结论",
+          review_plan: { decision_id: q.id, step: "propose" },
+        },
+      );
+      await s.call(s.primary.verifier, "post_comment", {
+        card_id: s.card.id,
+        body: "已核对",
+        reply_to: plan.id,
+        review_plan: { decision_id: q.id, step: "confirm" },
+      });
+    }
     await s.call(ops, "update_work_item", {
       ...args,
       review_limit_decision: {

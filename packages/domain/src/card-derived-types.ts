@@ -13,6 +13,11 @@ export interface WaitingOnItem {
   readonly kind: "decision" | "human_action" | "review" | "blocked";
   /** The referenced entity: `Q-1`, `H-2`, `W-3`, `C-4#5`. */
   readonly ref: string;
+  readonly review_phase?:
+    | "待方案"
+    | "待确认"
+    | "待 PM 结案恢复"
+    | "已允许返工但未派发";
   /** Short human label, e.g. `等你拍板 Q-1`. */
   readonly label: string;
 }

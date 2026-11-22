@@ -41,6 +41,7 @@ test.each([2, 3])(
         .filter((w) => w.kind === "verify")
         .map((w) => w.status),
     ).toEqual(["waiting_decision", "waiting_decision"]);
+    f.confirmPause();
     expect(f.decide(other, "raise_limit").ok).toBe(true);
     expect(f.decide(n, "raise_limit").ok).toBe(false);
     expect(
@@ -258,6 +259,7 @@ test("continuing after a new delivery resumes its reviewers, not the old repair"
   f.review(2, [first]);
   f.review(3, [], f.refs());
   expect(f.decide(2, "pause").ok).toBe(true);
+  f.confirmPause();
   const newer = apply(f.state, await parallelDelivery(f.state, f.io));
   const q = newer.decisions[0];
   if (!q) throw Error("Missing shared pause");
@@ -329,6 +331,7 @@ test("invariant 11: only a host's exact withdrawn repair can resume on the same 
       run,
     );
   expect(canResume()).toBe(false);
+  f.confirmPause();
   expect(f.decide(3, "raise_limit").ok).toBe(true);
   expect(resumableReviewWithdrawal(f.state, producer, run)).toBe(false);
   expect(canResume()).toBe(true);

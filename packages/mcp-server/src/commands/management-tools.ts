@@ -41,6 +41,18 @@ import { executeCommand } from "./execute.js";
 import { entryId, id, idempotency_key, plainSummary } from "./schemas.js";
 
 const text = z.string().min(1);
+const pausePlan = z
+  .object({
+    owner: id("assignment"),
+    confirmers: z.array(id("assignment")).min(1),
+    next_step: text,
+    review_at: text.optional(),
+  })
+  .strict()
+  .optional()
+  .describe(
+    "轮限暂停必填：本卡当前负责人、待确认人、下一步动作；复查时间默认 30 分钟后",
+  );
 const terminal = z
   .object({
     target: text,
@@ -204,7 +216,7 @@ const schemas = {
       .strict()
       .optional()
       .describe(
-        "换做法：作者提交方案，指定审核员 reply_to 方案并确认方向，不等于审核通过",
+        "暂停或换做法：负责人提交方案，待确认人 reply_to 当前方案并确认方向，不等于审核通过",
       ),
     host_report_for: id("human_action")
       .optional()
@@ -286,6 +298,7 @@ const schemas = {
       ),
   },
   resolve_delegated_decision: {
+    pause_plan: pausePlan,
     source_unrelated: z
       .object({ decision_id: id("decision"), rationale: text })
       .strict()
@@ -433,6 +446,7 @@ const schemas = {
     expected_return: text.optional(),
   },
   record_decision: {
+    pause_plan: pausePlan,
     snooze_until: text
       .optional()
       .describe(
@@ -663,6 +677,7 @@ const schemas = {
     max_review_rounds: z.number().int().positive().optional(),
     review_limit_decision: z
       .object({
+        pause_plan: pausePlan,
         decision_id: id("decision"),
         option: z.enum([
           "raise_limit",

@@ -9,6 +9,7 @@ import type {
   WorkItem,
 } from "./entities.js";
 import { eventsForDecision, eventsOfType } from "./event-index.js";
+import { pauseOwners, pendingPause } from "./review-pause.js";
 import { originalRunTrigger } from "./run-trigger.js";
 import { verificationTarget } from "./verification-activity.js";
 
@@ -18,13 +19,17 @@ type State = {
   work_items: readonly WorkItem[];
 };
 
+export function repairTarget(q?: Decision) {
+  return q?.review_limit_group ?? q?.review_pause?.repair_target;
+}
+
 export function pendingSharedReview(
   decisions: readonly Decision[],
   deliveryId: string,
 ) {
   return decisions.some(
     (q) =>
-      q.review_limit_group?.delivery_id === deliveryId &&
+      repairTarget(q)?.delivery_id === deliveryId &&
       q.blocking &&
       ["open", "snoozed", "provisional"].includes(q.status),
   );
@@ -32,7 +37,7 @@ export function pendingSharedReview(
 
 /** The delivery, not just the SHA, must still be the one needing repair. */
 export function sharedReworkItem(state: State, q: Decision) {
-  const group = q.review_limit_group;
+  const group = repairTarget(q);
   if (!group || pendingSharedReview(state.decisions, group.delivery_id)) return;
   const target = state.deliveries.find((d) => d.id === group.delivery_id);
   if (
@@ -48,17 +53,33 @@ export function sharedReworkItem(state: State, q: Decision) {
 
 /** Only domain-issued, item-addressed instructions can start a discussion. A
  * proposal request must belong to the assigned strategy, not match prose. */
-export function reviewDiscussionInstruction(item: WorkItem, event?: Event) {
-  if (
-    item.kind !== "verify" ||
-    event?.type !== "instruction_issued" ||
-    event.card_id !== item.card_id
-  )
+export function reviewDiscussionInstruction(
+  item: WorkItem,
+  event?: Event,
+  decisions?: readonly Decision[],
+) {
+  if (event?.type !== "instruction_issued" || event.card_id !== item.card_id)
     return false;
   const p = event.payload as {
     work_item_id?: string;
     decision_id?: string;
+    pause_recipient?: string;
+    proposal?: string;
   };
+  if (p?.pause_recipient) {
+    const q = decisions?.find(
+      (q) => q.id === p.decision_id && q.card_id === item.card_id,
+    );
+    const pause = q && pendingPause(q);
+    return (
+      !!pause &&
+      p.work_item_id === item.id &&
+      p.pause_recipient === item.assignment_id &&
+      p.proposal === pause.proposal &&
+      pauseOwners(pause).some((id) => id === p.pause_recipient)
+    );
+  }
+  if (item.kind !== "verify") return false;
   return (
     p?.work_item_id === item.id &&
     (p.decision_id === undefined || p.decision_id === item.review_plan_target)
@@ -75,6 +96,14 @@ function reviewWakeDisposition(
   if (!itemId) return;
   const verifier = state.work_items.find((w) => w.id === itemId);
   if (
+    event?.type === "instruction_issued" &&
+    (event.payload as Record<string, unknown> | null)?.pause_recipient
+  )
+    return verifier &&
+      reviewDiscussionInstruction(verifier, event, state.decisions)
+      ? undefined
+      : "obsolete";
+  if (
     verifier?.kind === "verify" &&
     verifier.status === "waiting_decision" &&
     !reviewDiscussionInstruction(verifier, event)
@@ -87,7 +116,7 @@ function reviewWakeDisposition(
     if (typeof p?.delivery_id !== "string") return;
     const groups = state.decisions.filter(
       (q) =>
-        q.review_limit_group?.delivery_id === p.delivery_id &&
+        repairTarget(q)?.delivery_id === p.delivery_id &&
         q.status !== "withdrawn",
     );
     if (!groups.length) return;
@@ -97,7 +126,7 @@ function reviewWakeDisposition(
       target.work_item_id !== itemId ||
       target.status !== "rejected" ||
       groups.some(
-        (q) => q.review_limit_group?.target_sha !== target.subject.value,
+        (q) => repairTarget(q)?.target_sha !== target.subject.value,
       ) ||
       state.deliveries.some((d) => d.supersedes === target.id)
     )
@@ -119,12 +148,14 @@ function reviewWakeDisposition(
   }
   if (event.type !== "decision_resolved") return;
   const q = state.decisions.find((q) => q.id === p?.decision_id);
-  if (!q?.review_limit_group) return;
+  const target = repairTarget(q);
+  if (!q || !target) return;
   if (p?.rework_work_item_id === itemId) {
-    if (pendingSharedReview(state.decisions, q.review_limit_group.delivery_id))
+    if (pendingSharedReview(state.decisions, target.delivery_id))
       return "paused";
     return sharedReworkItem(state, q)?.id === itemId ? undefined : "obsolete";
   }
+  if (!q.review_limit_group) return;
   const item = state.work_items.find((w) => w.id === itemId);
   return item &&
     Array.isArray(p?.resume_work_items) &&
@@ -205,8 +236,8 @@ export function repairWakeTarget(state: CommandState, run: Run) {
     e?.type === "review_submitted"
       ? p?.delivery_id
       : e?.type === "decision_resolved" && p?.rework_work_item_id
-        ? state.decisions.find((q) => q.id === p.decision_id)
-            ?.review_limit_group?.delivery_id
+        ? repairTarget(state.decisions.find((q) => q.id === p.decision_id))
+            ?.delivery_id
         : undefined;
   return state.deliveries.find((d) => d.id === id);
 }
@@ -226,7 +257,7 @@ export function resumableReviewWithdrawal(
     target.work_item_id !== owner.work_item_id ||
     !state.decisions.some(
       (q) =>
-        q.review_limit_group?.delivery_id === target.id &&
+        repairTarget(q)?.delivery_id === target.id &&
         q.status === "resolved" &&
         q.resolution?.option === "raise_limit" &&
         sharedReworkItem(state, q)?.id === target.work_item_id,
@@ -273,7 +304,7 @@ export function dispatchedRepair(
       (e.type === "review_submitted" && p?.delivery_id === deliveryId) ||
       (e.type === "decision_resolved" &&
         p?.rework_work_item_id === producer.id &&
-        state.decisions.find((q) => q.id === p.decision_id)?.review_limit_group
+        repairTarget(state.decisions.find((q) => q.id === p.decision_id))
           ?.delivery_id === deliveryId)
     );
   });

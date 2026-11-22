@@ -250,6 +250,7 @@ export {
   type ReviewLimitAttention,
   reviewLimitAttention,
 } from "./review-limit-attention.js";
+export { pauseDiscussionFor } from "./review-pause.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./role-rule.js";

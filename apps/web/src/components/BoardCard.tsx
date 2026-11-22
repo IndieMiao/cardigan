@@ -88,9 +88,16 @@ export function BoardCard({
     event.preventDefault();
     onOpenCard(card.id, event.currentTarget);
   };
-  const reasons = new Set(card.waiting_on.map((item) => item.kind));
+  const reasons = new Set(
+    card.waiting_on
+      .filter((item) => !item.review_phase)
+      .map((item) => item.kind),
+  );
   const blocked = reasons.has("blocked");
-  const waiting = reasons.has("decision") || reasons.has("human_action");
+  const waiting =
+    card.waiting_on.some((item) => !!item.review_phase) ||
+    reasons.has("decision") ||
+    reasons.has("human_action");
   const complete =
     card.progress.total > 0 && card.progress.completed === card.progress.total;
   const queuedAhead = card.queued_runs?.length
@@ -192,6 +199,16 @@ export function BoardCard({
           </span>
         )}
         {display.waiting &&
+          card.waiting_on
+            .filter((item) => item.review_phase)
+            .map((item) =>
+              badge(
+                item.label,
+                <BoardCardIcon name="reason" />,
+                item.review_phase,
+              ),
+            )}
+        {display.waiting &&
           (["decision", "human_action", "blocked"] as const)
             .filter((kind) => reasons.has(kind))
             .map((kind) => {
@@ -202,7 +219,7 @@ export function BoardCard({
               }[kind];
               return badge(
                 `${label}：${card.waiting_on
-                  .filter((item) => item.kind === kind)
+                  .filter((item) => !item.review_phase && item.kind === kind)
                   .map((item) => item.label)
                   .join("；")}`,
                 kind === "human_action" ? (

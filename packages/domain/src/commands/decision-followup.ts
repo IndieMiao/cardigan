@@ -2,7 +2,9 @@ import type { Actor, Decision, Event, TimelineEntry } from "../entities.js";
 import { eventById } from "../event-index.js";
 import type { DecisionId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
+import { pauseLabel, pendingPause } from "../review-pause.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
+import { pauseNotice } from "./review-pause.js";
 import {
   suggestionProgressEvents,
   suggestionReminderDue,
@@ -190,6 +192,22 @@ export function decisionFollowupStatus(
   q: Decision,
   now: string,
 ): DecisionFollowupStatus {
+  const pause = pendingPause(q);
+  if (pause) {
+    if (
+      pause.office_reminded_at ||
+      state.cards.some(
+        (c) => c.id === q.card_id && ["done", "cancelled"].includes(c.status),
+      )
+    )
+      return { kind: "ineligible" };
+    const due_at = pause.ops_reminded_at
+      ? Date.parse(pause.ops_reminded_at) + pause.period_ms
+      : Date.parse(pause.review_at);
+    return Date.parse(now) >= due_at
+      ? { kind: "due" }
+      : { kind: "waiting", due_at };
+  }
   if (
     q.status !== "resolved" ||
     !q.resolution ||
@@ -260,6 +278,27 @@ export function remindDecisionFollowups(
         !q.resolution
       )
         continue;
+      const pause = pendingPause(q);
+      if (pause) {
+        const office = !!pause.ops_reminded_at;
+        d.put("decisions", {
+          ...q,
+          review_pause: {
+            ...pause,
+            ...(office
+              ? { office_reminded_at: d.now }
+              : { ops_reminded_at: d.now }),
+          },
+        });
+        pauseNotice(
+          d,
+          q,
+          office ? "pm_office" : "pm_ops",
+          `${q.id} 暂停复查逾期，${pauseLabel(pause)}，请 ${office ? "PM Office" : "PM Ops"} 跟进。`,
+        );
+        reminded.push(q.id);
+        continue;
+      }
       d.emit(
         "decision_followup_due",
         q.card_id,

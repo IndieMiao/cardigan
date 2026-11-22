@@ -212,7 +212,7 @@ export function dispatchStallCauses(
         w &&
         !(
           w.status === "waiting_decision" &&
-          reviewDiscussionInstruction(w, trigger)
+          reviewDiscussionInstruction(w, trigger, state.decisions)
         ) &&
         !["in_progress", "ready", "todo", "changes_requested"].includes(
           w.status,
@@ -241,7 +241,7 @@ export function dispatchStallCauses(
       ...(trigger &&
       (trigger.type === "review_submitted" ||
         trigger.type === "decision_resolved" ||
-        (w && reviewDiscussionInstruction(w, trigger)))
+        (w && reviewDiscussionInstruction(w, trigger, state.decisions)))
         ? { review_trigger_id: trigger.id }
         : {}),
       age_ms: age,

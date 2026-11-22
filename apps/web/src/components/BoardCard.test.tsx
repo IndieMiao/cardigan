@@ -412,3 +412,25 @@ test("C-370 board names unfinished prerequisites and distinguishes early work fr
     ),
   ).toBeDefined();
 });
+
+test.each(["待方案", "待确认", "已允许返工但未派发"] as const)(
+  "shows %s on the default board without a misleading decision badge",
+  (phase) => {
+    const label = `${phase} Q-1`;
+    renderCard({
+      ...example,
+      waiting_on: [
+        {
+          kind: phase === "已允许返工但未派发" ? "review" : "decision",
+          ref: "Q-1",
+          review_phase: phase,
+          label,
+        },
+      ],
+    });
+    expect(screen.getByRole("link", { name: label }).textContent).toContain(
+      phase,
+    );
+    expect(screen.queryByRole("link", { name: /等你拍板/ })).toBeNull();
+  },
+);
