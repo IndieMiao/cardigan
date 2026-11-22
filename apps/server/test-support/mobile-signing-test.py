@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import plistlib
 import sqlite3
-import string
 import struct
 import subprocess
 import sys
@@ -36,34 +35,20 @@ def save(path, data):
 AAPT2_SHORTENED = ('res/-8.xml', 'res/-B.png', 'res/-N.png', 'res/-p.png')
 # Shortened names differing only in case, from the same APK (C-593).
 CASE_ONLY = (('res/9n.9.png', 'res/9N.9.png'), ('res/Bt.png', 'res/BT.png'), ('res/bL.xml', 'res/Bl.xml'))
+# Member names only (no bytes) of the rejected Godot APK, sensen-godot attachment-62
+# (sha256 23751ada6f987c077a04be1206b0db9f5077f7dde8ce13c92da7749f62bbde37), exported by
+# the host with ZipFile.infolist() orig_filename in archive order and attached to C-593
+# as attachment-8919 (c593-member-names.json, sha256 35a6914f0e3759db...ce50dcb).
+# Stored one name per line; no name contains a line break.
+GODOT_APK_NAMES = Path(__file__).resolve().parent/'fixtures'/'mobile-signing'/'attachment-62-member-names.txt'
+GODOT_APK_NAMES_SHA256 = '4f3e9e304a47cf84c1d479542d74e84232798e12d94986d4d51e05ba08212471'
 GODOT_APK_MEMBERS, GODOT_APK_CASE_PAIRS = 6317, 19
 
 
 def godot_apk_names():
-    """Synthetic member names shaped like the rejected Godot APK: names only, no real bytes."""
-    names = ['AndroidManifest.xml', 'classes.dex', 'resources.arsc', 'lib/arm64-v8a/libgodot_android.so',
-             'assets/.godot/global_script_class_cache.cfg', 'assets/.godot/uid_cache.bin', 'assets/project.binary',
-             'META-INF/androidx.core_core.version', 'kotlin/kotlin.kotlin_builtins',
-             *AAPT2_SHORTENED, *(name for pair in CASE_ONLY for name in pair)]
-    folded = {name.lower() for name in names}
-    pairs = len(CASE_ONLY)
-    alphabet = string.digits + string.ascii_letters + '_-'
-    for a in alphabet:
-        for b in alphabet:
-            for ext in ('.png', '.xml', '.9.png'):
-                name = 'res/'+a+b+ext
-                if name.lower() in folded: continue
-                twin = 'res/'+a.swapcase()+b+ext
-                if pairs < GODOT_APK_CASE_PAIRS and twin != name and twin.lower() == name.lower():
-                    names += [name, twin]; pairs += 1
-                elif len(names) < 3800:
-                    names.append(name)
-                folded.add(name.lower())
-    imported = 0
-    while len(names) < GODOT_APK_MEMBERS:
-        names.append('assets/.godot/imported/item_%04d.png-%s.ctex' % (imported, hashlib.sha256(str(imported).encode()).hexdigest()[:32]))
-        imported += 1
-    return names
+    data = GODOT_APK_NAMES.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == GODOT_APK_NAMES_SHA256
+    return data.decode().splitlines()
 
 
 class Signing(unittest.TestCase):
@@ -400,7 +385,7 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
                 with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)
                 self.assertEqual(caught.exception.category, 'archive_member_name')
 
-    def test_full_godot_apk_name_list_passes_every_rule(self):
+    def test_real_godot_apk_name_list_passes_every_rule(self):
         names = godot_apk_names()
         self.assertEqual(len(names), GODOT_APK_MEMBERS)
         self.assertEqual(len(set(names)), GODOT_APK_MEMBERS)
