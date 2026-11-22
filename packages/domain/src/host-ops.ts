@@ -78,6 +78,11 @@ export interface HostOpsExecution {
   readonly context_usage?: ContextObservation;
   readonly automatic_context_restart?: boolean;
   readonly dispatch_stall_id?: string;
+  /**
+   * C-596 automatic standing-PM restart. Kept on the intent so execution
+   * never falls back to a human exit confirmation; host operations take over.
+   */
+  readonly standing_pm_stall?: boolean;
   readonly system_finished_run_id?: string;
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
