@@ -46,7 +46,9 @@ export async function stopRunRuntime(
 }
 
 /** System-ended bells never use address-based release, even for cleanup. A
- * previously started stop may only read exit evidence; no second signal. */
+ * previously started stop may only read exit evidence; no second signal.
+ * A local "exited" needs process evidence beyond the finished terminal row:
+ * the adapter's own post-signal group check or `processExited`. */
 export async function stopSystemTurn(
   runtime: Runtime,
   ref: RuntimeRef | null,
@@ -54,19 +56,22 @@ export async function stopSystemTurn(
   alreadyStopping: boolean,
   checkWorkspace: () => Promise<boolean>,
   beforeSignal: () => boolean,
+  processExited: () => Promise<boolean> = async () => false,
 ) {
   if (!ref) return "terminal_binding_changed";
-  const confirmed = async () => {
+  const confirmed = async (groupExited = false) => {
     const exact = await observeTurnOwner(runtime, ref, owner);
-    return exact?.ok
-      ? exact.value === "exited"
-      : exact?.error.code === "runtime_not_found";
+    if (exact?.ok !== true || exact.value !== "exited") return false;
+    // Remote callers prove the registered group's exit before calling.
+    return ref.machine_id !== "local" || groupExited || processExited();
   };
-  if (alreadyStopping)
+  // Remote stall recovery observes an exit; it never acquires new signal authority.
+  if (alreadyStopping || ref.machine_id !== "local")
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";
   if (ref.local_process_receipt) {
     const before = await observeTurnOwner(runtime, ref, owner);
-    if (before?.ok && before.value === "exited") return "exited";
+    if (before?.ok && before.value === "exited")
+      return (await processExited()) ? "exited" : "terminal_exit_unconfirmed";
   }
   if (!runtime.retire_idle) return "unsupported";
   const { hangup_ms, terminate_ms } = idleRetirementPolicy();
@@ -89,7 +94,11 @@ export async function stopSystemTurn(
     .catch(() => undefined);
   if (result?.ok && result.value.outcome === "withdrawn")
     return result.value.evidence.reason;
-  if (await confirmed()) return "exited";
+  const groupExited =
+    result?.ok === true &&
+    result.value.outcome === "exited" &&
+    result.value.process_group_exited === true;
+  if (await confirmed(groupExited)) return "exited";
   return "terminal_exit_unconfirmed";
 }
 

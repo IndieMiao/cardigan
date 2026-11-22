@@ -17,9 +17,9 @@ const exec = promisify(execFile);
 
 // Employee runs honor the standard local hc skip. Trusted remote checks exercise
 // the real core in an isolated socket/session, never the production service.
-test.skipIf(!available || process.platform !== "linux")(
-  "real hc retains files and confirms a gently retired terminal",
-  async () => {
+test.skipIf(!available || process.platform !== "linux").each([false, true])(
+  "real hc retains files and confirms a gently retired terminal (cold system-turn adapter: %s)",
+  async (cold) => {
     const dir = await mkdtemp(join(tmpdir(), "cg-idle-hc-"));
     const runtimeDir = createTestRuntime(join(dir, "runtime")),
       socketPath = join(runtimeDir, "hc.sock");
@@ -63,14 +63,57 @@ test.skipIf(!available || process.platform !== "linux")(
         async () => expect((await inspect()).status?.state).toBe("idle"),
         { timeout: 10000 },
       );
-      const result = await runtime.retire_idle(ref, {
+      const consumer = cold
+        ? value(await HerdrRuntime.create({ binary, session, socketPath, env }))
+        : runtime;
+      const { local_process_receipt: _receipt, ...current } = ref;
+      const owner = { project_id: "fixture", assignment_id: assignment.id };
+      const preflight = vi.fn(
+        async () =>
+          (await readFile(join(dir, "dirty.txt"), "utf8")) ===
+          "uncommitted fixture",
+      );
+      if (cold)
+        expect(
+          value(
+            await consumer.observe_retirement(current, {
+              ...owner,
+              system_finished_turn: true,
+            }),
+          ),
+        ).toBe("alive");
+      const result = await consumer.retire_idle(cold ? current : ref, {
+        ...(cold
+          ? {
+              system_finished_turn: true as const,
+              workspace_preflight: preflight,
+            }
+          : {}),
         project_id: "fixture",
         assignment_id: assignment.id,
         hangup_ms: 2000,
         terminate_ms: 2000,
         before_signal: () => true,
       });
-      expect(result).toEqual({ ok: true, value: { outcome: "exited" } });
+      if (cold) {
+        expect(preflight).toHaveBeenCalledOnce();
+        expect(
+          value(
+            await consumer.observe_retirement(current, {
+              ...owner,
+              system_finished_turn: true,
+            }),
+          ),
+        ).toBe("exited");
+      }
+      // A system-ended stop also asks the kernel whether the probed leader
+      // and its whole group are gone; plain idle retirement does not.
+      expect(result).toEqual({
+        ok: true,
+        value: cold
+          ? { outcome: "exited", process_group_exited: true }
+          : { outcome: "exited" },
+      });
       expect((await inspect()).state).toBe("finished");
       expect(await readFile(join(dir, "dirty.txt"), "utf8")).toBe(
         "uncommitted fixture",

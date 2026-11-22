@@ -1,4 +1,6 @@
+import { assignmentDependenciesAllowStart } from "../card-dependencies.js";
 import {
+  assignmentCardHeld,
   assignmentCardId,
   runnableQueuedRun,
   standingRunDormant,
@@ -9,7 +11,7 @@ import {
   contextUsageFresh,
   contextUsageLevel,
 } from "../context-usage.js";
-import type { Actor, Run } from "../entities.js";
+import type { Actor, Assignment, Run } from "../entities.js";
 import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HOST_OPS_TOOLS,
@@ -25,8 +27,16 @@ import type {
   HumanActionId,
   RunId,
 } from "../ids.js";
+import {
+  retirementOwnsSession,
+  retirementWaitReceipt,
+} from "../retirement-session.js";
+import { runById } from "../run-index.js";
 import { hasRunTarget } from "../run-target.js";
-import { reviewDiscussionInstruction } from "../shared-review-wake.js";
+import {
+  reviewDiscussionInstruction,
+  reviewWakeBlocked,
+} from "../shared-review-wake.js";
 import { transition } from "../transitions.js";
 import { lastUpstreamInactivity } from "../upstream-health.js";
 import {
@@ -38,12 +48,148 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { decisionFollowupBlocked } from "./decision-followup.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { stoppedByHuman } from "./stop.js";
 
 const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
+/** A queued successor is work to preserve, not the process we observed. Only
+ * a pristine, host-created queue can be reused by a fenced bell recovery. */
+export function untouchedStallSuccessor(
+  state: CommandState,
+  a: Assignment,
+  r: Run,
+) {
+  if (
+    r.assignment_id !== a.id ||
+    r.role_version !== a.role_version ||
+    r.status !== "queued" ||
+    r.started_at ||
+    r.finished_at ||
+    r.heartbeat_at ||
+    r.bell_delivery ||
+    r.recovery_runtime ||
+    r.launch_publication ||
+    r.pending_finish ||
+    r.dispatch_stop ||
+    r.inactivity_stop ||
+    r.preparation_retry ||
+    r.dispatch_target_wait ||
+    state.runs.some(
+      (other) =>
+        other.id !== r.id && other.assignment_id === a.id && unfinished(other),
+    )
+  )
+    return false;
+  const matches = (e: CommandState["events"][number]) => {
+    const p = e.payload as { run_id?: string; assignment_id?: string };
+    return p.run_id === r.id && p.assignment_id === a.id;
+  };
+  return (
+    eventsOfType(state.events, "run_queued").some(
+      (e) => e.actor.project_id === state.project_id && matches(e),
+    ) &&
+    !["run_dispatched", "run_started", "run_dispatch_aborted"].some((type) =>
+      eventsOfType(state.events, type).some(
+        (e) => (e.payload as { run_id?: string }).run_id === r.id,
+      ),
+    )
+  );
+}
+
+/** Host-derived claim: an explicit transfer, the unchanged session, and the
+ * original, still-actionable queue. Neither the address nor an old wait is a claim. */
+export function retirementStallHandoff(
+  state: CommandState,
+  a: Assignment,
+  causeId?: string,
+): HostOpsExecution["retirement_handoff"] {
+  const h = a.idle_retirement;
+  if (
+    !causeId ||
+    a.scope !== "work_item" ||
+    h?.handoff !== true ||
+    !a.runtime_ref ||
+    !retirementOwnsSession(a) ||
+    !h.started_at ||
+    !["waiting", "stopping"].includes(h.phase)
+  )
+    return;
+  const event = eventById(state.events, causeId);
+  if (
+    event?.type !== "run_queued" ||
+    event.actor.project_id !== state.project_id
+  )
+    return;
+  const payload = event.payload as { assignment_id?: string; run_id?: string };
+  const queue = runById(state.runs, payload.run_id);
+  if (
+    payload.assignment_id !== a.id ||
+    !queue ||
+    !untouchedStallSuccessor(state, a, queue)
+  )
+    return;
+  const trigger = eventById(state.events, queue.trigger_event_id);
+  if (
+    !trigger ||
+    state.cursors.some(
+      (c) =>
+        c.assignment_id === a.id &&
+        (c.card_id ?? "") === (trigger.card_id ?? "") &&
+        c.acked_seq >= trigger.seq,
+    )
+  )
+    return;
+  const item = state.work_items.find(
+    (w) => w.id === a.work_item_id && w.assignment_id === a.id,
+  );
+  if (
+    !item ||
+    a.status !== "active" ||
+    a.external ||
+    a.role_upgrade ||
+    a.machine_id !== a.runtime_ref.machine_id ||
+    sharedStallRegistration(state, a) ||
+    stoppedByHuman(state.events, a.id) ||
+    assignmentCardHeld(a, state, trigger.id) ||
+    !assignmentDependenciesAllowStart(state, a) ||
+    !hasRunTarget(a, state) ||
+    decisionFollowupBlocked(state, trigger.id, a.id) ||
+    reviewWakeBlocked(state, trigger, item.id) ||
+    (!(
+      item.status === "waiting_decision" &&
+      reviewDiscussionInstruction(item, trigger, state.decisions)
+    ) &&
+      !["in_progress", "ready", "todo", "changes_requested"].includes(
+        item.status,
+      ))
+  )
+    return;
+  return {
+    phase: h.phase,
+    started_at: h.started_at,
+    queue_id: queue.id,
+    ...(h.observe_only ? { observe_only: true } : {}),
+  };
+}
+
+export function sharedStallRegistration(state: CommandState, a: Assignment) {
+  const ref = a.runtime_ref;
+  return state.assignments.some(
+    (other) =>
+      other.id !== a.id &&
+      other.status !== "released" &&
+      other.machine_id === a.machine_id &&
+      ((!!a.worktree_path && other.worktree_path === a.worktree_path) ||
+        (!!ref &&
+          other.runtime_ref?.runtime_machine === ref.runtime_machine &&
+          (other.runtime_ref.terminal_ref === ref.terminal_ref ||
+            other.runtime_ref.agent_name === ref.agent_name))),
+  );
+}
+
 export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
   /** Internal system path only; never accepted by the MCP tool. */
@@ -88,8 +234,34 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "illegal_transition",
     "Assignment role upgrade is pending",
   );
+  const cause = eventById(d.state.events, p.dispatch_stall_id);
+  if (p.dispatch_stall_id)
+    ensure(
+      !sharedStallRegistration(d.state, a),
+      "invariant_violation",
+      "会话或工作区存在其它登记，不能接续",
+    );
   ensure(
-    !a.external && a.machine_id === "local" && a.runtime_state !== "released",
+    !a.idle_retirement?.handoff ||
+      (p.tool === "host_ops_restart_assignment" &&
+        !!retirementStallHandoff(d.state, a, p.dispatch_stall_id)),
+    "illegal_transition",
+    "回收已移交，必须核对原待办与退出证据",
+  );
+  const remoteExitOnly =
+    p.tool === "host_ops_restart_assignment" &&
+    a.scope === "work_item" &&
+    !!a.runtime_ref?.launch_generation &&
+    a.runtime_ref.target?.machine_id === a.machine_id &&
+    a.runtime_ref.target.project_id === d.state.project_id &&
+    ((cause?.type === "bell_turn_recovery_due" &&
+      cause.actor.kind === "system" &&
+      (cause.payload as { assignment_id?: string }).assignment_id === a.id) ||
+      !!retirementStallHandoff(d.state, a, p.dispatch_stall_id));
+  ensure(
+    !a.external &&
+      (a.machine_id === "local" || remoteExitOnly) &&
+      a.runtime_state !== "released",
     "illegal_transition",
     "Target must be a local managed Assignment",
   );
@@ -259,17 +431,46 @@ export function beginHostOpsActionInDraft(
     (cause.payload as { assignment_id: string }).assignment_id === a.id
       ? (cause.payload as { run_id: string }).run_id
       : undefined;
+  const handoff = retirementStallHandoff(state, a, p.dispatch_stall_id);
   if (p.dispatch_stall_id) {
     ensure(
       p.tool !== "host_ops_cancel_run" &&
-        !run &&
-        !a.idle_retirement &&
-        !d.state.runs.some((r) => r.assignment_id === a.id && unfinished(r)),
+        (!run ||
+          ((!!turn || !!handoff) && untouchedStallSuccessor(state, a, run))) &&
+        (!a.idle_retirement || (handoff && handoff.queue_id === run?.id)) &&
+        !d.state.runs.some(
+          (r) =>
+            r.assignment_id === a.id &&
+            unfinished(r) &&
+            ((!turn && !handoff) || !untouchedStallSuccessor(state, a, r)),
+        ),
       "illegal_transition",
       "派发积压已改变或指派不空闲",
     );
+    // A system attempt withdrawn before any signal does not consume the
+    // incident for Ops, who may recover it once the evidence is current.
+    // Nor does one whose successor launch refused the preserved checkout.
+    const withdrawnUnsignalled = new Set([
+      ...eventsOfType(state.events, "host_ops_action_finished")
+        .filter(
+          (e) =>
+            (e.payload as { result?: string }).result ===
+            "withdrawn_stall_changed",
+        )
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+      ...eventsOfType(state.events, "retained_writer_refused")
+        .filter((e) => e.actor.kind === "system")
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    ]);
     ensure(
       !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
+        // Only Ops may take it over; the system never retries its own attempt.
+        if (
+          d.actor.kind !== "system" &&
+          e.actor.kind === "system" &&
+          withdrawnUnsignalled.has(e.id)
+        )
+          return false;
         const prior = e.payload as {
           assignment_id?: string;
           dispatch_stall_id?: string;
@@ -330,6 +531,7 @@ export function beginHostOpsActionInDraft(
   const payload = {
     execution: true,
     ...(turn ? { system_finished_run_id: turn } : {}),
+    ...(handoff ? { retirement_handoff: handoff } : {}),
     ...(p.dispatch_stall_id ? { dispatch_stall_id: p.dispatch_stall_id } : {}),
     ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
     ...(p.standing_pm_stall ? { standing_pm_stall: true } : {}),
@@ -395,7 +597,36 @@ export function finishHostOpsAction(
       "Target runtime reference changed",
     );
     const previous = action.run_id ? d.get("runs", action.run_id) : undefined;
+    // The stored target is the queued successor in this case. It must still be
+    // the same untouched queue; do not cancel or settle a raced dispatch.
+    if (action.retirement_handoff) {
+      const fresh = retirementStallHandoff(state, a, action.dispatch_stall_id);
+      ensure(
+        stall &&
+          stall.cause_id === action.dispatch_stall_id &&
+          fresh &&
+          fresh.phase === action.retirement_handoff.phase &&
+          fresh.observe_only === action.retirement_handoff.observe_only &&
+          fresh.started_at === action.retirement_handoff.started_at &&
+          fresh.queue_id === action.run_id &&
+          !sharedStallRegistration(state, a) &&
+          !stoppedByHuman(state.events, a.id),
+        "stale_target",
+        "退役交接、待办或会话归属已改变",
+      );
+    }
     if (
+      previous &&
+      (action.system_finished_run_id || action.retirement_handoff)
+    )
+      ensure(
+        untouchedStallSuccessor(state, a, previous),
+        "stale_target",
+        "后继已开始派发",
+      );
+    if (
+      !action.system_finished_run_id &&
+      !action.retirement_handoff &&
       previous &&
       unfinished(previous) &&
       (action.tool === "host_ops_cancel_run" ||
@@ -409,7 +640,9 @@ export function finishHostOpsAction(
         status: unwrap(transition("human_action", "open", "cancel")),
       });
     a = d.get("assignments", a.id);
-    const { session_ref: _session, ...rest } = a;
+    const { session_ref: _session, ...sessionless } = a;
+    const { idle_retirement: _retirement, ...retired } = sessionless;
+    const rest = action.retirement_handoff ? retired : sessionless;
     const runtime_state = ["unknown", "lost"].includes(a.runtime_state)
       ? unwrap(transition("runtime", a.runtime_state, "session_replaced"))
       : a.runtime_state === "running"
@@ -466,7 +699,25 @@ export function finishHostOpsAction(
         trigger,
       );
     }
-    const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
+    if (action.retirement_handoff)
+      ensure(
+        run && run.id === action.retirement_handoff.queue_id,
+        "stale_target",
+        "原排队目标已改变",
+      );
+    const backup =
+      action.system_finished_run_id || action.retirement_handoff
+        ? (eventsOfType(state.events, "dispatch_stall_backup_verified").find(
+            (e) =>
+              e.actor.kind === "system" &&
+              (e.payload as { action_id?: string }).action_id === action_id,
+          )?.payload as { ref: string; sha: string } | undefined)
+        : undefined;
+    const body = action.retirement_handoff
+      ? `空闲回收交接：${a.id} 的原会话已确认退出，保留排队项 ${previous?.id} 和原触发。`
+      : action.system_finished_run_id
+        ? `空闲会话接续：${a.id} 的旧轮次 ${action.system_finished_run_id} 已确认退出；${backup ? `已验证备份 ${backup.ref}（${backup.sha}）；` : ""}${run ? `后继 ${run.id} 等待派发` : "工作目标已变化，不启动后继"}。`
+        : `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
       "host_ops_action_finished",
       run && state.runs.some((r) => r.id === run?.id)
@@ -490,6 +741,23 @@ export function finishHostOpsAction(
             }
           : {}),
         assignment_id: a.id,
+        ...(action.system_finished_run_id
+          ? {
+              old_run_id: action.system_finished_run_id,
+              ...(backup
+                ? { backup_ref: backup.ref, backup_sha: backup.sha }
+                : {}),
+            }
+          : {}),
+        ...(action.retirement_handoff
+          ? {
+              retirement_handoff: action.retirement_handoff,
+              ...retirementWaitReceipt(a),
+              ...(backup
+                ? { backup_ref: backup.ref, backup_sha: backup.sha }
+                : {}),
+            }
+          : {}),
         ...(run ? { run_id: run.id } : {}),
         ...(run && previous
           ? {
@@ -778,6 +1046,10 @@ export function withdrawUnstartedStallRestart(
   actionId: HostOpsExecution["action_id"],
   ports: CommandPorts,
   reason?: string,
+  /** Whether this attempt wrote its writer backup receipt before withdrawing.
+   * A later receipt can stand for the incident only after earlier attempts
+   * are positively known not to have written one. */
+  backupRecorded?: boolean,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -785,6 +1057,7 @@ export function withdrawUnstartedStallRestart(
     );
     if (
       !action?.dispatch_stall_id ||
+      action.retirement_handoff?.phase === "stopping" ||
       eventsOfType(state.events, "host_ops_action_deferred").some((e) => {
         const p = e.payload as { action_id: string; reason: string };
         return (
@@ -799,6 +1072,9 @@ export function withdrawUnstartedStallRestart(
       assignment_id: action.assignment_id,
       result: "withdrawn_stall_changed",
       ...(reason ? { reason } : {}),
+      ...(backupRecorded === undefined
+        ? {}
+        : { backup_recorded: backupRecorded }),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
   });

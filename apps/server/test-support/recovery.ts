@@ -133,8 +133,54 @@ export function recoveryFixture(machine_id = "local", migrationsDir?: string) {
       tx.assignments.put(f.project, a);
       return a;
     });
+  /** Opt in to owner-bound evidence: these terminals carry this Assignment's
+   * labels. Mirrors the adapter: a live terminal that is not idle/done is unknown. */
+  const ownTerminals = () => {
+    runtime.observe_retirement = vi.fn(async (ref) => {
+      const seen = await runtime.status(ref);
+      return {
+        ok: true as const,
+        value:
+          stopped.has(ref.terminal_ref) ||
+          (seen.ok && seen.value.process === "exited")
+            ? ("exited" as const)
+            : seen.ok &&
+                seen.value.process === "alive" &&
+                ["idle", "done"].includes(seen.value.agent)
+              ? ("alive" as const)
+              : ("unknown" as const),
+      };
+    });
+    // The gentle owner-bound stop used by stall recovery; exit is kernel-checked.
+    runtime.retire_idle = vi.fn<NonNullable<Runtime["retire_idle"]>>(
+      async (ref, options) => {
+        if (stopped.has(ref.terminal_ref))
+          return { ok: true, value: { outcome: "exited" } };
+        if (
+          working.has(ref.terminal_ref) ||
+          ("workspace_preflight" in options &&
+            options.workspace_preflight &&
+            !(await options.workspace_preflight())) ||
+          !options.before_signal()
+        )
+          return {
+            ok: true,
+            value: {
+              outcome: "withdrawn",
+              evidence: { stage: "TERM", reason: "guard_changed" },
+            },
+          };
+        stopped.add(ref.terminal_ref);
+        return {
+          ok: true,
+          value: { outcome: "exited", process_group_exited: true },
+        };
+      },
+    );
+  };
   return {
     ...f,
+    ownTerminals,
     target,
     working,
     runtime,

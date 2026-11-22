@@ -7,6 +7,19 @@ try:
     mode, raw_pid, terminal = sys.argv[1:4]
     pid = int(raw_pid)
     if pid <= 1: sys.exit(2)
+    if mode == 'gone':
+        # After the terminal finished: the probed leader and its whole group
+        # must be gone. Reuse, EPERM or a surviving member all fail closed.
+        expected = json.loads(sys.argv[4])
+        group = int(expected['group'])
+        if expected['pid'] != pid or group <= 1 or expected['uid'] != os.getuid():
+            sys.exit(2)
+        for target in (pid, -group):
+            try: os.kill(target, 0)
+            except ProcessLookupError: continue
+            sys.exit(25)
+        print('gone')
+        sys.exit(0)
     if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
         sys.exit(20)
     fd = os.pidfd_open(pid)

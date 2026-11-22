@@ -84,6 +84,12 @@ export interface HostOpsExecution {
    */
   readonly standing_pm_stall?: boolean;
   readonly system_finished_run_id?: string;
+  readonly retirement_handoff?: {
+    readonly observe_only?: true;
+    readonly phase: "waiting" | "stopping";
+    readonly started_at: string;
+    readonly queue_id: Run["id"];
+  };
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
@@ -94,6 +100,15 @@ export interface HostOpsExecution {
     Run,
     "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
   >;
+}
+/** This route may preserve a verified exit, never stop a terminal that has become live. */
+export function observedLocalExitCause(e: Event | undefined) {
+  return (
+    e?.actor.kind === "system" &&
+    e.type === "bell_turn_recovery_due" &&
+    (e.payload as { activity_source?: string }).activity_source ===
+      "observed_local_exit"
+  );
 }
 export function pendingHostOpsActions(
   events: readonly Event[],
@@ -214,10 +229,19 @@ export function automaticContextActionForRun(
       const action = intents.get(
         (e.payload as { action_id: Event["id"] }).action_id,
       );
-      if (action) indexed.set(e.id, action);
+      if (action) {
+        indexed.set(e.id, action);
+        const run = (e.payload as { run_id?: string }).run_id;
+        if (
+          run &&
+          (action.system_finished_run_id || action.retirement_handoff) &&
+          run === action.run_id
+        )
+          indexed.set(`queue/${run}`, action);
+      }
     }
     launches = indexed;
     automaticLaunches.set(events, launches);
   }
-  return launches.get(run.trigger_event_id);
+  return launches.get(run.trigger_event_id) ?? launches.get(`queue/${run.id}`);
 }
