@@ -48,18 +48,57 @@ with contextlib.ExitStack() as stack:
         print(observe())
         sys.exit(0)
     assert observe() == 'alive'
-    # Claude Code and Codex never self-report: hc keeps status null (or a
-    # status without a state). Only a reported busy state withdraws.
-    for status in (None, {}, {'state': 'unknown'}, {'state': 'done'}):
-        t['status'] = status
-        assert observe() == 'alive', status
-    for busy in ('working', 'blocked', 'error', 'other'):
-        t['status'] = {'state': busy}
-        assert observe() == 'unknown', busy
+    # Claude Code and Codex never self-report: hc keeps status null for the
+    # whole session. Only the client's own empty prompt on the same, unchanged
+    # terminal record proves idle; a turn still running keeps the session.
+    claude_idle = 'done\n' + '─' * 20 + '\n❯ \n' + '─' * 20 + '\n  ? for shortcuts\n'
+    codex_idle = '• done\n\n› \n\n  100% context left\n'
+    screens = {
+        claude_idle: 'alive',
+        codex_idle: 'alive',
+        '✻ Working… (3s · esc to interrupt)\n' + claude_idle: 'unknown',  # old turn still running
+        '• Working (5s • esc to interrupt)\n' + codex_idle: 'unknown',
+        claude_idle.replace('❯ ', '❯ fix it'): 'unknown',  # a draft is not an empty editor
+        codex_idle.replace('› ', '❯ '): 'unknown',  # prompt and footer of different clients
+        'Do you want to proceed?\n  press enter to confirm\n' + claude_idle: 'unknown',
+        '': 'unknown',
+        'x' * 70000 + claude_idle: 'unknown',
+    }
+    saved, quiet = rpc, dict(t, status=None, turn=3)
+    shown, record = [claude_idle], [quiet]
+    def core(method, params):
+        assert params['terminal'] == c['terminal']
+        if method == 'terminal.read':
+            assert params['lines'] == 0
+            return {'text': shown[0]}
+        return dict(record.pop(0) if len(record) > 1 else record[0])
+    rpc = Mock(side_effect=core)
+    for screen, expected in screens.items():
+        shown[0] = screen
+        assert observe() == expected, (screen[-60:], expected)
+    shown[0] = claude_idle
+    for changed in (dict(turn=4), dict(status={'state': 'working'}), dict(pid=43), dict(foreground={'pid': 43}),
+                    dict(created_ms=2)):
+        record[:] = [quiet, {**quiet, **changed}]
+        assert observe() == 'unknown', changed
+    record[:] = [quiet]
+    shown[0] = None
+    assert observe() == 'unknown'  # an invalid read never passes
     c['require_idle'] = False
+    rpc.reset_mock()
     assert observe() == 'alive'
+    assert all(call.args[0] == 'terminal.get' for call in rpc.call_args_list)
     c['require_idle'] = True
+    rpc = saved
+    # A reported status must be a well-formed idle report.
+    for status, expected in ((False, 'unknown'), ([], 'unknown'), ('idle', 'unknown'), ({}, 'unknown'),
+                             ({'state': 'unknown'}, 'unknown'), ({'state': 'done'}, 'alive'),
+                             ({'state': 'working'}, 'unknown'), ({'state': 'blocked'}, 'unknown'),
+                             ({'state': 'error'}, 'unknown')):
+        t['status'] = status
+        assert observe() == expected, status
     t['status'] = {'state': 'idle'}
+    rpc.reset_mock()
     c['agent_name'] = 'cli'
     t.update(pid=41, name='cli', rm=False, foreground={'pid':42})
     with patch.object(worker.subprocess, 'check_output', return_value=b' 41\n') as ps:

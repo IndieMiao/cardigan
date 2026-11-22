@@ -19,7 +19,10 @@ import { promisify } from "node:util";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterAll, afterEach, expect, test, vi } from "vitest";
 import { testHcBinary } from "../../../test-support/hc.js";
-import { createTestRuntime } from "../../../test-support/paths.js";
+import {
+  createPrivateTestRoot,
+  createTestRuntime,
+} from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
@@ -310,8 +313,17 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     expect(proc.exitCode).toBeNull();
     process.kill(pid, 0);
     // Claude Code and Codex never self-report: hc keeps their status null.
-    // The host's final guard, not hc, proves this session idle (C-602).
+    // Null alone is not idle: a turn still running on screen is never stopped.
     writeFileSync(join(root, "state"), "null");
+    writeFileSync(join(root, "screen"), "busy");
+    expect(await stop()).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    });
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // Back at its own empty prompt, the same null-status session may be stopped.
+    writeFileSync(join(root, "screen"), "idle");
     // A missing or replaced seed cannot serve this owner: refuse, never sign.
     const seed = join(dataDir, DARWIN_OWNER_SEED);
     renameSync(seed, `${seed}.saved`);
@@ -412,18 +424,20 @@ test("a generation without an owner is refused with no further worker command", 
   }
 });
 
-// C-602: the owner reads the terminal record from the real core, not a model.
-// Only the Darwin platform/account checks and native birth adapter are
-// substituted; the isolated session never touches a production socket.
+// C-602: the owner reads the terminal record and screen from the real core,
+// not a model. Only the Darwin platform/account checks and the native birth
+// adapter are substituted (on macOS the birth adapter is the native one); the
+// isolated session never touches a production socket or session.
 const hcBinary =
   process.env.CARDIGAN_TEST_HC ?? join(homedir(), ".local/bin/hc");
 const hcAvailable = testHcBinary({ binary: hcBinary });
-test.skipIf(!hcAvailable || process.platform !== "linux")(
-  "a real hc record for a non-reporting harness (status null) is stopped; a reported busy state is not",
+test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
+  "real hc: a null-status session at its empty prompt is stopped; one still in its turn or reporting busy is not",
   async () => {
     vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
-    const dir = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-hc-"));
-    const runtime = realpathSync(createTestRuntime(join(dir, "runtime")));
+    // Short, canonical paths: Darwin limits UNIX socket names to 104 bytes.
+    const dir = createPrivateTestRoot();
+    const runtime = realpathSync(createTestRuntime(join(dir, "rt")));
     const session = `own-${randomUUID().slice(0, 8)}`,
       socket = join(runtime, "hc.sock");
     const env = {
@@ -440,8 +454,12 @@ test.skipIf(!hcAvailable || process.platform !== "linux")(
       file: argv[0]!,
       args: argv.slice(1),
     });
-    const owned = async (report: "" | "working") => {
+    const owned = async (screen: "idle" | "busy", report?: "working") => {
       const w = await enrolledWorkspace(dir);
+      // Names are unique among live terminals; the owner checks its own.
+      w.config.agent_name = ["fixture", screen, report]
+        .filter(Boolean)
+        .join("-");
       const launched = JSON.parse(
         await hc(
           "run",
@@ -466,15 +484,24 @@ test.skipIf(!hcAvailable || process.platform !== "linux")(
           resolve("packages/runtime-herdr/test-support/darwin-idle-fixture.py"),
           resolve("deploy/darwin-idle-owner.py"),
           JSON.stringify(w.config),
-          report ? `real-${report}` : "real",
+          ["real", screen, ...(report ? [report] : [])].join(":"),
         ),
       );
-      await expect
-        .poll(() => existsSync(join(w.root, "child")), { timeout: 10000 })
-        .toBe(true);
       const terminal = launched.address as string;
       const record = async () =>
         JSON.parse(await hc("get", terminal, "--json"));
+      await expect
+        .poll(() => existsSync(join(w.root, "child")), { timeout: 10000 })
+        .toBe(true);
+      await expect
+        .poll(
+          async () =>
+            (await hc("read", terminal, "--lines", "0")).includes(
+              "? for shortcuts",
+            ) && (await record()).foreground?.pid,
+          { timeout: 10000 },
+        )
+        .toEqual(expect.any(Number));
       if (report)
         await expect
           .poll(async () => (await record()).status?.state, { timeout: 10000 })
@@ -496,24 +523,29 @@ test.skipIf(!hcAvailable || process.platform !== "linux")(
         );
       return { ...w, terminal, record, enrolled, stop };
     };
+    const refused = {
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "probe_invalid" },
+    };
     try {
-      // Codex and Claude Code never send OSC 7501: this is their exact record.
-      const quiet = await owned("");
-      await expect
-        .poll(async () => (await quiet.record()).foreground?.pid, {
-          timeout: 10000,
-        })
-        .toEqual(expect.any(Number));
+      // Codex and Claude Code never send OSC 7501: status stays null in both.
+      const running = await owned("busy");
+      const quiet = await owned("idle");
+      for (const s of [running, quiet])
+        expect(await s.record()).toMatchObject({
+          state: "live",
+          status: null,
+          cwd: s.tree,
+          name: s.config.agent_name,
+          rm: false,
+          keep: false,
+        });
+      // The old turn is still running on screen: never signed, never stopped.
+      expect(await running.stop()).toEqual(refused);
+      expect((await running.record()).state).toBe("live");
+      process.kill(running.enrolled.pid, 0);
+      // Back at its own empty prompt: signed, TERM to the direct child only.
       const before = await quiet.record();
-      expect(before).toMatchObject({
-        state: "live",
-        status: null,
-        pid: expect.any(Number),
-        cwd: quiet.tree,
-        name: quiet.config.agent_name,
-        rm: false,
-        keep: false,
-      });
       expect(before.foreground.pid).toBe(before.pid);
       expect(await quiet.stop()).toEqual({
         outcome: "uncertain",
@@ -525,16 +557,12 @@ test.skipIf(!hcAvailable || process.platform !== "linux")(
       expect((await quiet.record()).exit_code).toBe(143);
       expect(() => process.kill(quiet.enrolled.pid, 0)).toThrow();
       expect(existsSync(join(quiet.tree, ".git"))).toBe(true);
-
-      // A harness that reports itself busy keeps running and is never signed for.
-      const busy = await owned("working");
-      expect(await busy.stop()).toEqual({
-        outcome: "withdrawn",
-        evidence: { stage: "probe", reason: "probe_invalid" },
-      });
-      expect((await busy.record()).state).toBe("live");
-      process.kill(busy.enrolled.pid, 0);
-      await hc("kill", busy.terminal);
+      expect((await running.record()).state).toBe("live");
+      // A harness that reports itself busy is refused even at a prompt.
+      const working = await owned("idle", "working");
+      expect(await working.stop()).toEqual(refused);
+      process.kill(working.enrolled.pid, 0);
+      for (const s of [running, working]) await hc("kill", s.terminal);
     } finally {
       await stopCore({
         session,
@@ -545,5 +573,5 @@ test.skipIf(!hcAvailable || process.platform !== "linux")(
       rmSync(dir, { recursive: true, force: true });
     }
   },
-  40000,
+  60000,
 );
