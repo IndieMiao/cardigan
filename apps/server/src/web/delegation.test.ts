@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { createProcessIo, main } from "@cardigan/cli";
 import {
   type Decision,
@@ -629,14 +630,19 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
 
 async function humanAuthorizationAcross(
   phase:
+    | "ungated confirmation"
     | "idle"
     | "publication lock"
     | "Git preparation"
     | "ungated Git preparation"
     | "published",
 ) {
-  const f = await m5Cross();
+  // Consent is requested while the host gate is configured in all C-309 cases.
+  // The direct publisher case exercises loss of that gate *after* consent.
+  const mode = phase === "ungated confirmation" ? "disabled" : "enabled";
+  const f = await m5Cross({ mergeGate: mode });
   try {
+    expect(f.mergeGate.forProject(f.project.project_id).status).toBe(mode);
     await f.password(TEST_PASSWORD);
     await f.login();
     const set = (body: object, key: string, token?: string) =>
@@ -761,6 +767,36 @@ async function humanAuthorizationAcross(
       .state()
       .decisions.find((q) => q.trigger === "merge_confirmation");
     if (!confirmation) throw new Error("Missing confirmation");
+    if (phase === "ungated confirmation") {
+      expect(confirmation.decider).toBe("human");
+      expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+        pm_held_merges: [],
+        decisions: expect.arrayContaining([
+          expect.objectContaining({
+            id: confirmation.id,
+            merge_confirmation: expect.objectContaining({ blockers: [] }),
+          }),
+        ]),
+      });
+      expect(
+        (
+          await f.call(f.projectPath(`/decisions/${confirmation.id}/resolve`), {
+            method: "POST",
+            headers: { "idempotency-key": "ungated-human-merge" },
+            body: { option: "merge" },
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        f.state().decisions.find((q) => q.id === confirmation.id)?.resolution,
+      ).toMatchObject({
+        option: "merge",
+        resolved_by: "human",
+        via: "needs_you",
+      });
+      expect(mergePlan(f.state(), f.card.id).ok).toBe(true);
+      return;
+    }
     expect(confirmation.decider).toBe("role:pm");
     const preparedPlan = prepareMergePlan(
       { ...f.state(), project_settings: { merge_gate_enabled: true } },
@@ -862,15 +898,7 @@ async function humanAuthorizationAcross(
         git: f.binding(),
         clock: { now: () => new Date(f.now()).toISOString() },
         execution: { mode: "local", dataDir: f.dataDir },
-        configuration: {
-          errors: [],
-          forProject: () => ({
-            status: "enabled",
-            checks: [{ name: "unit", run: "true" }],
-            totalTimeoutMs: 1000,
-            env: {},
-          }),
-        },
+        configuration: f.mergeGate,
         sweep: async () => {},
         run: async () => {
           throw new Error("Exact tree already passed");
@@ -931,7 +959,17 @@ async function humanAuthorizationAcross(
       try {
         publication =
           phase === "ungated Git preparation"
-            ? new MergeExecutor({ store: f.store(), git: f.binding() }).tick()
+            ? new MergeExecutor({
+                store: f.store(),
+                git: f.binding(),
+                gate: {
+                  configuration: {
+                    errors: [],
+                    forProject: () => ({ status: "disabled" }),
+                  },
+                  execution: { mode: "local", dataDir: f.dataDir },
+                },
+              }).tick()
             : gate.tick([f.project.project_id]);
         if (phase === "published") {
           await publication;
@@ -1009,6 +1047,16 @@ async function humanAuthorizationAcross(
   }
 }
 
+test("C-309: the configured gate fixture has a private directory", async () => {
+  const f = await m5Cross({ mergeGate: "enabled" });
+  try {
+    expect((await stat(f.configDir)).mode & 0o077).toBe(0);
+    expect(f.mergeGate.forProject(f.project.project_id).status).toBe("enabled");
+  } finally {
+    await f.close();
+  }
+});
+
 test.each([
   "idle",
   "publication lock",
@@ -1018,5 +1066,11 @@ test.each([
 ] as const)(
   "C-309: current human authorization across %s",
   humanAuthorizationAcross,
+  30_000,
+);
+
+test(
+  "C-577: without a configured gate an otherwise delegable merge goes to Needs You",
+  () => humanAuthorizationAcross("ungated confirmation"),
   30_000,
 );

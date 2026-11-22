@@ -18,6 +18,7 @@ import {
   upgradeMaterials,
   WORKER_STEPS,
   type WorkerProbeRunner,
+  workerCheckConfig,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -212,10 +213,17 @@ export function machineHost(
       workerJournalId(project, machine); // Validate both path components before constructing the filename.
       if (process.platform !== "linux")
         return { status: "failed", failed_steps: ["controller_platform"] };
-      const config = parseWorkerOnboarding(
+      const draft = parseWorkerOnboarding(
         readOnboardingYaml(join(root, `worker-${machine}-${project}.yaml`)),
         dataDir,
       );
+      const workerCheck = workerCheckConfig(
+        draft,
+        root,
+        dataDir,
+        confirmation ? "bound" : "check",
+      );
+      const { config } = workerCheck;
       if (
         (confirmation &&
           runtimeTargetBinding(config.worker).fingerprint !==
@@ -226,7 +234,7 @@ export function machineHost(
         return { status: "failed", failed_steps: ["configuration"] };
       let failed = "configuration";
       const passed = await onboardWorker({
-        config,
+        ...workerCheck,
         configRoot: root,
         dataDir,
         mode: "check",

@@ -895,6 +895,11 @@ export interface NeedsAction
   extends Pick<HumanActionView, "id" | "instructions" | "expected_return">,
     AuthorView {
   readonly terminal?: import("@cardigan/domain").ActionCommand;
+  readonly requires_loss_conclusion?: boolean;
+  readonly last_loss_observation?: {
+    readonly conclusion: "unconfirmed";
+    readonly at: string;
+  };
   readonly helper_checks?: import("@cardigan/domain").HumanAction["helper_checks"];
   readonly card_id: string | null;
   readonly why: string;
@@ -2397,6 +2402,7 @@ export interface CardiganClient {
     id: string,
     text: string,
     idempotencyKey?: string,
+    conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void>;
   session(): Promise<SessionInfo>;
   login(password: string): Promise<void>;
@@ -3492,11 +3498,12 @@ export class HttpCardiganClient implements CardiganClient {
     id: string,
     text: string,
     idempotencyKey: string = crypto.randomUUID(),
+    conclusion?: "exited" | "false_alarm" | "unconfirmed",
   ): Promise<void> {
     await this.write(
       projectId,
       `human-actions/${encodeURIComponent(id)}/complete`,
-      { text },
+      { text, conclusion },
       idempotencyKey,
     );
   }

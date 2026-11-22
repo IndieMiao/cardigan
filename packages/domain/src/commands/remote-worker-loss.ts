@@ -1,6 +1,7 @@
 import type { Actor } from "../entities.js";
 import type { AssignmentId, EventId } from "../ids.js";
 import {
+  remoteWorkerExitPending,
   remoteWorkerLosses,
   remoteWorkerLossReleased,
   type WorkerRecoveryBackup,
@@ -18,6 +19,7 @@ import {
   requestExitConfirmationInDraft,
 } from "./host-ops-actions.js";
 import { cancelRunDispatch } from "./launch.js";
+import { correctRemoteLoss } from "./remote-loss-recovery.js";
 
 /** Persist the fence and Needs You request together, including after a host restart. */
 export function requestRemoteWorkerExit(
@@ -62,6 +64,19 @@ export function requestRemoteWorkerExit(
     const loss = previous ?? {
       assignment_id: a.id,
       work_item_id: item.id,
+      process:
+        state.runs.find(
+          (r) =>
+            r.id === a.runtime_ref?.launch_generation?.run_id &&
+            r.assignment_id === a.id,
+        )?.launch_publication?.process ?? null,
+      run_ids: state.runs
+        .filter(
+          (r) =>
+            r.assignment_id === a.id &&
+            !["queued", "cancelled", "completed", "failed"].includes(r.status),
+        )
+        .map((r) => r.id),
       machine_id: a.machine_id,
       runtime_ref: a.runtime_ref,
       ...(p.backup ? { backup: { ...p.backup } } : {}),
@@ -78,7 +93,7 @@ export function requestRemoteWorkerExit(
     requestExitConfirmationInDraft(d, {
       action_id,
       assignment_id: a.id,
-      instructions: `机器 ${a.machine_id} 的 ${a.id} 已失联。${backup}\n1. 确认旧机器已关机，或手动结束旧进程及其子进程。\n2. 确认旧进程已退出后，标记完成并回传退出情况。\n3. PM 再选择其它机器，从备份或基线重新指派。`,
+      instructions: `机器 ${a.machine_id} 的 ${a.id} 已失联。${backup}\n1. 确认旧机器已关机，或手动结束旧进程及其子进程。\n2. 确认旧进程已退出后，选择“已退出”并回传退出情况；若原会话并未失联，选择“误报”；证据不足时选择“无法确认”，此待办保持未结。\n3. PM 再选择其它机器，从备份或基线重新指派。`,
       why_human:
         "失联不能证明进程已退出；系统不会自动结束旧进程。未提交或最后备份之后的工作可能丢失。",
     });
@@ -154,7 +169,7 @@ export function releaseLostRemoteWorker(
   });
 }
 
-/** A late alive observation never revives or kills the old Assignment. */
+/** A birth-checked live process corrects an open loss; after release it only fences the orphan. */
 export function reportRemoteWorkerAlive(
   state: CommandState,
   actor: Actor,
@@ -168,45 +183,41 @@ export function reportRemoteWorkerAlive(
     ensure(loss, "not_found", "Remote loss was not recorded");
     const released = remoteWorkerLossReleased(state.events, action_id);
     const confirmation = hostOpsExitConfirmation(state, action_id);
+    if (!released) {
+      // A fresh kernel observation overrides a stale alarm/exit assertion,
+      // but can never undo an already committed release.
+      correctRemoteLoss(d, loss);
+      if (confirmation.status === "open") {
+        const action = d.get("human_actions", confirmation.human_action_id);
+        d.put("human_actions", {
+          ...action,
+          status: unwrap(transition("human_action", action.status, "cancel")),
+        });
+        d.emit("human_action_cancelled", action.card_id, {
+          human_action_id: action.id,
+          reason: "remote_process_alive",
+        });
+      }
+      return;
+    }
     if (
-      confirmation.status !== "confirmed" &&
-      confirmation.status !== "rejected" &&
+      remoteWorkerExitPending(state.events, loss) &&
       state.events.some(
         (e) =>
           e.type === "remote_worker_alive" &&
           (e.payload as { action_id?: string }).action_id === action_id &&
-          (e.payload as { after_release?: boolean }).after_release === released,
+          (e.payload as { after_release?: boolean }).after_release,
       )
     )
       return;
     d.emit(
       "remote_worker_alive",
       d.work(loss.work_item_id).card_id,
-      {
-        action_id,
-        assignment_id: loss.assignment_id,
-        after_release: released,
-        confirmation_status: confirmation.status,
-        ...(confirmation.status === "none"
-          ? {}
-          : { confirmation_id: confirmation.human_action_id }),
-      },
+      { action_id, assignment_id: loss.assignment_id, after_release: true },
       {
         type: "system",
-        body: `机器 ${loss.machine_id} 恢复连接，${loss.assignment_id} 的旧进程仍在运行，请人处理；系统不会自动结束进程。`,
+        body: `${loss.assignment_id} 结算后的原进程仍在，等待系统核对并清理。`,
       },
     );
-    if (
-      confirmation.status === "confirmed" ||
-      confirmation.status === "rejected"
-    )
-      requestExitConfirmationInDraft(d, {
-        action_id,
-        renew_confirmed: true,
-        assignment_id: loss.assignment_id,
-        instructions: `机器 ${loss.machine_id} 的 ${loss.assignment_id} 旧进程仍在运行。请手动结束旧进程及子进程，确认退出后回传结果。`,
-        why_human:
-          "新观察与退出确认不一致，需要重新确认；系统不自动结束旧进程。",
-      });
   });
 }
