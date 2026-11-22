@@ -84,6 +84,22 @@ const resolve = (state: CommandState, decision_id: DecisionId, option = "go") =>
       io,
     ),
   );
+// These legacy-budget resumption cases intentionally exercise a pause without
+// PM follow-up metadata. New PM-created pauses are covered by review-pause.
+const humanPause = (state: CommandState, decision_id: DecisionId) =>
+  value(
+    recordDecision(
+      state,
+      human,
+      {
+        decision_id,
+        option: "pause",
+        rationale: "Confirmed",
+        raw_quote: "pause",
+      },
+      io,
+    ),
+  );
 const activate = (state: CommandState): CommandState => ({
   ...state,
   runs: state.runs.map((r) =>
@@ -668,7 +684,7 @@ test("invariant 10: a nonblocking decision does not implicitly pause the request
 test("invariants 10, 11: review-limit pause remains pending even after Ops raises the limit, then can be confirmed", async () => {
   let { state, decision } = await exhausted();
   expect(decision.trigger).toBe("review_limit");
-  const paused = resolve(state, decision.id, "pause");
+  const paused = humanPause(state, decision.id);
   state = apply(state, paused);
   expect(paused.data).toMatchObject({
     status: "provisional",
@@ -958,7 +974,7 @@ test.each([human, office])(
   "invariants 10, 11: pause then raise_limit resumes atomically for $kind",
   async (caller) => {
     let { state, decision } = await exhausted();
-    state = apply(state, resolve(state, decision.id, "pause"));
+    state = apply(state, humanPause(state, decision.id));
     const params = {
       decision_id: decision.id,
       option: "raise_limit",
@@ -1008,7 +1024,7 @@ test("review-limit attention starts strictly after ten minutes and clears on rec
       .attention,
   ).toEqual(findings);
   expect(reviewLimitAttention(pending, atTime(600001))).toEqual([]);
-  const paused = apply(pending, resolve(pending, decision.id, "pause"));
+  const paused = apply(pending, humanPause(pending, decision.id));
   expect(reviewLimitAttention(paused, atTime(600001))).toEqual([]);
   const repaired = apply(
     state,

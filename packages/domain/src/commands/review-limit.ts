@@ -140,8 +140,8 @@ export function requestReviewLimit(
         },
         {
           key: "pause",
-          description: "暂停：保持停止，不安排返工",
-          impact: "保留当前阻塞，之后仍可选择增加审核轮数。",
+          description: "暂停返工，指定方案负责人和待确认人",
+          impact: "保留阻塞；跟进方案与确认，复查逾期提醒 PM。",
         },
         ...(repeated ? strategyOptions : []),
       ],
@@ -167,7 +167,11 @@ export function requestReviewLimit(
     for (const run of runs)
       if (
         item.status !== "waiting_decision" ||
-        !reviewDiscussionInstruction(item, originalRunTrigger(d.state, run))
+        !reviewDiscussionInstruction(
+          item,
+          originalRunTrigger(d.state, run),
+          d.state.decisions,
+        )
       )
         endRun(d, run, "blocked", decision.question, {
           reason: "review_limit",

@@ -4,6 +4,7 @@ import {
   type Assignment,
   listNeedsYou,
   pauseStandingAssignment,
+  postComment,
   recordDecision,
   releaseAssignment,
   requestHumanAction,
@@ -73,6 +74,11 @@ async function limited(
   if (!decision) throw new Error("Missing review limit");
   const work = f.state.work_items.find((w) => w.id === f.reviewer.work_item_id);
   if (!work) throw new Error("Missing reviewer");
+  const pause_plan = {
+    owner: f.coder.id,
+    confirmers: [f.reviewer.id],
+    next_step: "核对争议",
+  };
   const resolve = (
     option: "raise_limit" | "pause" | "escalate",
     rationale = "核对后继续处理",
@@ -82,11 +88,37 @@ async function limited(
       actor,
       {
         work_item_id: work.id,
-        review_limit_decision: { decision_id: decision.id, option, rationale },
+        review_limit_decision: {
+          decision_id: decision.id,
+          option,
+          rationale,
+          ...(option === "pause" ? { pause_plan } : {}),
+        },
       },
       f.io,
     );
-  return { f, ops, actor, decision, work, resolve };
+  const confirm = () => {
+    const comment = (
+      a: Assignment,
+      step: "propose" | "confirm",
+      reply_to?: import("../ids.js").TimelineEntryId,
+    ) =>
+      f.commit(
+        postComment(
+          f.state,
+          f.actor(a),
+          {
+            card_id: f.card.id,
+            body: "已核对",
+            review_plan: { decision_id: decision.id, step },
+            ...(reply_to ? { reply_to } : {}),
+          },
+          f.io,
+        ),
+      );
+    comment(f.reviewer, "confirm", comment(f.coder, "propose")?.id);
+  };
+  return { f, ops, actor, decision, work, resolve, pause_plan, confirm };
 }
 
 test.each([
@@ -192,7 +224,7 @@ test("another active PM Ops keeps delegated limits off Needs You until the last 
 test.each([false, true])(
   "PM Ops raises a delegated limit atomically and resumes once (paused=%s)",
   async (paused) => {
-    const { f, actor, decision, work, resolve } = await limited();
+    const { f, actor, decision, work, resolve, confirm } = await limited();
     expect(
       actor.kind === "assignment" &&
         actor.allowed_tools.includes("record_decision"),
@@ -211,6 +243,7 @@ test.each([false, true])(
       });
       expect(value(listNeedsYou(f.state, human)).data.decisions).toEqual([]);
     }
+    if (paused) confirm();
     expect(f.commit(resolve("raise_limit"))).toMatchObject({
       status: "ready",
       max_review_rounds: 2,
@@ -366,13 +399,18 @@ test("raising a delegated review limit does not bypass another blocker", async (
 test.each([false, true])(
   "PM Ops resolve_delegated_decision raises the review budget once and preserves authorization audit (paused=%s)",
   async (paused) => {
-    const { f, actor, decision, work } = await limited();
+    const { f, actor, decision, work, pause_plan, confirm } = await limited();
     const rationale = "按流程授权继续审核";
     const resolve = (option: string) =>
       resolveDelegatedDecision(
         f.state,
         actor,
-        { decision_id: decision.id, option, rationale },
+        {
+          decision_id: decision.id,
+          option,
+          rationale,
+          ...(option === "pause" ? { pause_plan } : {}),
+        },
         f.io,
       );
     if (paused) {
@@ -385,6 +423,7 @@ test.each([false, true])(
       });
       expect(f.state.runs.filter((r) => r.status === "queued")).toEqual([]);
     }
+    if (paused) confirm();
     const start = f.state.events.length;
     const result = f.commit(resolve("raise_limit"));
     const proxy_authority = `project:${f.state.project_id}/default-decision-delegation/general`;

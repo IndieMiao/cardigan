@@ -66,6 +66,7 @@ export interface ProjectSummary {
 }
 
 export interface WaitingOnItem {
+  readonly review_phase?: import("@cardigan/domain").WaitingOnItem["review_phase"];
   readonly kind: "decision" | "human_action" | "review" | "blocked";
   readonly ref: string;
   readonly label: string;
@@ -1691,6 +1692,26 @@ export interface LaunchProviderView {
   readonly base_url: string | null;
   /** C-515: environment variable → secrets.env key name (never the value). */
   readonly secret_env?: Readonly<Record<string, string>>;
+  /** C-549: `null` when launch.yaml leaves it to the profile (or `api`). */
+  readonly harness?: string | null;
+  readonly api?: string | null;
+  /** Plain variables; `value` is `null` when it may hold a credential. */
+  readonly env?: readonly {
+    readonly name: string;
+    readonly value: string | null;
+  }[];
+  /** Each secret variable, whether its key is set, and when the Web last wrote it. */
+  readonly secrets?: readonly LaunchProviderSecret[];
+  /** Profiles and model aliases that use this Provider. */
+  readonly profiles?: readonly string[];
+  readonly models?: readonly string[];
+  readonly last_check?: LaunchProfileCheck | null;
+}
+export interface LaunchProviderSecret {
+  readonly env: string;
+  readonly key: string;
+  readonly set: boolean;
+  readonly updated_at: string | null;
 }
 /** A model alias in launch.yaml: the concrete id it names, plus metadata. */
 export interface LaunchModelView extends LaunchModelMetadata {
@@ -1731,14 +1752,25 @@ export type LaunchChange =
   | { readonly op: "delete_profile"; readonly name: string }
   | { readonly op: "set_model"; readonly name: string; readonly id: string }
   | {
-      readonly op: "edit_provider";
+      readonly op: "create_provider" | "edit_provider";
       readonly name: string;
-      readonly fields: {
-        readonly name?: string;
-        readonly base_url?: string;
-        readonly secret_env?: Readonly<Record<string, string>>;
+      readonly fields: LaunchProviderFields;
+      /** C-549: key names only; values go with the confirmation. */
+      readonly secrets?: {
+        readonly set?: readonly string[];
+        readonly clear?: readonly string[];
       };
-    };
+    }
+  | { readonly op: "delete_provider"; readonly name: string };
+/** C-549 Provider fields; `null` removes an optional one (or one variable). */
+export interface LaunchProviderFields {
+  readonly name?: string;
+  readonly harness?: string | null;
+  readonly api?: string | null;
+  readonly base_url?: string | null;
+  readonly env?: Readonly<Record<string, string | null>>;
+  readonly secret_env?: Readonly<Record<string, string | null>>;
+}
 export interface LaunchPreview {
   readonly version: string;
   readonly preview_id: string;
@@ -1954,12 +1986,19 @@ export interface CardiganClient {
     version: string,
     previewId: string,
     idempotencyKey: string,
+    /** C-549: values for the keys the preview sets; only ever sent here. */
+    secrets?: Readonly<Record<string, string>>,
   ): Promise<void>;
   /** C-515: a person starts a local check or an online model listing. */
   startLaunchCheck(
     version: string,
     profile: string,
     mode: LaunchProfileCheck["mode"],
+  ): Promise<LaunchCheckStarted>;
+  /** C-549: list the Provider's models once (no profile, no inference). */
+  startProviderCheck(
+    version: string,
+    provider: string,
   ): Promise<LaunchCheckStarted>;
   createEmployee(
     projectId: string,
@@ -3040,11 +3079,21 @@ export class HttpCardiganClient implements CardiganClient {
     version: string,
     previewId: string,
     idempotencyKey: string,
+    secrets?: Readonly<Record<string, string>>,
   ): Promise<void> {
     await this.request("/api/launch-settings/confirm", {
       method: "POST",
-      body: JSON.stringify({ version, preview_id: previewId }),
+      body: JSON.stringify({ version, preview_id: previewId, secrets }),
       idempotencyKey,
+    });
+  }
+  startProviderCheck(
+    version: string,
+    provider: string,
+  ): Promise<LaunchCheckStarted> {
+    return this.request("/api/launch-settings/checks", {
+      method: "POST",
+      body: JSON.stringify({ version, provider, mode: "online" }),
     });
   }
   startLaunchCheck(

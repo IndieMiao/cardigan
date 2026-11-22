@@ -194,6 +194,13 @@ export function fakeClient(
       version,
       status: "running",
     }),
+    startProviderCheck: async (version, provider) => ({
+      id: "00000000-0000-4000-8000-000000000000",
+      profile: `provider:${provider}`,
+      mode: "online",
+      version,
+      status: "running",
+    }),
     createEmployee: async (_projectId, input) => ({
       id: "E-1",
       name: input.name,

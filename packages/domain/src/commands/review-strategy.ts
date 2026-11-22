@@ -2,6 +2,7 @@ import type { Decision, Review, TimelineEntry, WorkItem } from "../entities.js";
 import type { DecisionId, TimelineEntryId, WorkItemId } from "../ids.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
+import { recordPauseComment } from "./review-pause.js";
 
 export const strategyOptions = [
   {
@@ -174,6 +175,24 @@ export function checkPlanSupersession(
   entry: TimelineEntry,
   plan?: ReviewPlanComment,
 ) {
+  ensure(
+    !d
+      .list("decisions")
+      .some(
+        (q) =>
+          q.card_id === entry.card_id &&
+          (q.review_pause?.proposal === entry.id ||
+            q.review_pause?.confirmations.some((c) => c.entry === entry.id)) &&
+          !(
+            q.status === "provisional" &&
+            q.review_pause?.proposal === entry.id &&
+            plan?.decision_id === q.id &&
+            plan.step === "propose"
+          ),
+      ),
+    "illegal_transition",
+    "不能替换已绑定的暂停方案或确认；待确认方案可由负责人重新提案",
+  );
   const bound = d
     .list("decisions")
     .find(
@@ -212,6 +231,8 @@ export function recordReviewPlan(
   p: ReviewPlanComment,
 ) {
   const q = d.get("decisions", p.decision_id);
+  if (q.review_pause && q.status === "provisional")
+    return recordPauseComment(d, q, entry, p.step);
   const bound = q.review_intervention;
   const verifierId = q.affected_work_items[0];
   ensure(

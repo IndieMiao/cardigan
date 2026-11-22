@@ -12,6 +12,8 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
+import { eventById, eventsForDecision } from "./event-index.js";
+import { pauseLabel, pauseOwners, pendingPause } from "./review-pause.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
 import { type CardTemplate, cardTemplate } from "./templates.js";
 import {
@@ -165,6 +167,60 @@ function pendingHumanActions(input: CardDerivedInput): HumanAction[] {
     .sort(byId);
 }
 
+/** A durable release is not a dispatch. Match the actual repair trigger and
+ * delivery; an earlier discussion Run or a later superseding delivery is not evidence. */
+function undispatchedRepair(input: CardDerivedInput) {
+  const events = input.events ?? [];
+  for (const q of input.decisions) {
+    const target = q.review_pause?.repair_target;
+    if (
+      !target ||
+      q.card_id !== input.card.id ||
+      q.status !== "resolved" ||
+      q.resolution?.option !== "raise_limit"
+    )
+      continue;
+    const delivery = input.deliveries.find(
+      (d) => d.id === target.delivery_id && d.status === "rejected",
+    );
+    const work = input.work_items.find(
+      (w) =>
+        w.id === delivery?.work_item_id && w.status === "changes_requested",
+    );
+    if (!work || input.deliveries.some((d) => d.supersedes === delivery?.id))
+      continue;
+    const release = eventsForDecision(events, q.id).find(
+      (e) => e.type === "decision_resolved",
+    );
+    const payload = release?.payload as
+      | { rework_work_item_id?: string; rework_run_id?: string }
+      | undefined;
+    if (payload?.rework_work_item_id !== work.id) continue;
+    const dispatched = input.runs?.some((r) => {
+      if (
+        r.assignment_id !== work.assignment_id ||
+        r.kind !== "rework" ||
+        !(r.started_at || ["dispatched", "acked", "running"].includes(r.status))
+      )
+        return false;
+      const trigger = eventById(events, r.trigger_event_id);
+      return (
+        trigger?.id === release?.id ||
+        (trigger?.type === "review_submitted" &&
+          (trigger.payload as { delivery_id?: string }).delivery_id ===
+            target.delivery_id)
+      );
+    });
+    if (!dispatched)
+      return {
+        kind: "review",
+        ref: q.id,
+        review_phase: "已允许返工但未派发",
+        label: `已允许返工但未派发 ${work.id}`,
+      } as const;
+  }
+}
+
 /** What the card is waiting for, in the order the plan lists it. */
 export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
   const waiting: WaitingOnItem[] = [];
@@ -176,13 +232,19 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     });
 
   for (const decision of unresolvedBlockingDecisions(input)) {
+    const pause = pendingPause(decision);
     waiting.push({
       kind: "decision",
       ref: decision.id,
-      label: `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
+      ...(pause ? { review_phase: pauseLabel(pause, decision.decider) } : {}),
+      label: pause
+        ? `${pauseLabel(pause, decision.decider)} ${decision.id}`
+        : `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
     });
   }
 
+  const repair = undispatchedRepair(input);
+  if (repair) waiting.push(repair);
   for (const action of pendingHumanActions(input)) {
     waiting.push({
       kind: "human_action",
@@ -244,7 +306,10 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
   };
 
   for (const decision of unresolvedBlockingDecisions(input)) {
-    add(deciderOwner(decision.decider));
+    const pause = pendingPause(decision);
+    const ids = pause && pauseOwners(pause);
+    if (ids?.length) for (const ref of ids) add({ kind: "assignment", ref });
+    else add(deciderOwner(decision.decider));
   }
   for (const action of pendingHumanActions(input)) {
     add(
@@ -265,6 +330,8 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
     );
     return owners;
   }
+  if (unresolvedBlockingDecisions(input).some((q) => pendingPause(q)))
+    return owners;
   const assignments = new Map(
     (input.assignments ?? []).map((assignment) => [assignment.id, assignment]),
   );
@@ -317,6 +384,10 @@ export function deriveWhy(input: CardDerivedInput): string {
   const decisions = unresolvedBlockingDecisions(input);
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
+    const decision = decisions[0];
+    const pause = decision && pendingPause(decision);
+    if (decision && pause)
+      return clamp(`${pauseLabel(pause, decision.decider)} ${first}`);
     const who =
       decisions[0]?.decider === "system"
         ? "等待系统合并"
@@ -337,6 +408,8 @@ export function deriveWhy(input: CardDerivedInput): string {
     );
   }
 
+  const repair = undispatchedRepair(input);
+  if (repair) return clamp(repair.label);
   const rework = input.work_items.find(
     (item) => item.status === "changes_requested",
   );

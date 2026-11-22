@@ -6,6 +6,8 @@ import type { LaunchSettingsView } from "../api.js";
  * credential; secrets carry only key names and whether they are set.
  * C-516 adds what the forms read: 2 model aliases, each provider's secret key
  * reference and 4 secrets.env key names (never values).
+ * C-549 adds each Provider's harness, protocol, plain variables (one hidden),
+ * secret status and users, plus an unused fourth Provider "relay".
  */
 export const launchSettingsFixture: LaunchSettingsView = {
   version: "a".repeat(64),
@@ -15,18 +17,104 @@ export const launchSettingsFixture: LaunchSettingsView = {
       name: "Anthropic",
       base_url: "https://anthropic.example.test",
       secret_env: { ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY" },
+      harness: "claude-code",
+      api: "anthropic-messages",
+      env: [
+        {
+          name: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+          value: "claude-opus-fixture-1",
+        },
+        { name: "ANTHROPIC_CUSTOM_HEADERS_TOKEN", value: null },
+      ],
+      secrets: [
+        {
+          env: "ANTHROPIC_API_KEY",
+          key: "ANTHROPIC_API_KEY",
+          set: true,
+          updated_at: "2025-12-31T20:00:00.000Z",
+        },
+      ],
+      profiles: ["claude-opus"],
+      models: ["opus"],
+      last_check: {
+        id: "00000000-0000-4000-8000-000000000011",
+        version: "a".repeat(64),
+        mode: "online",
+        started_at: "2025-12-31T23:30:00.000Z",
+        finished_at: "2025-12-31T23:30:01.000Z",
+        status: "passed",
+        problems: [],
+        cli_version: null,
+      },
     },
     {
       id: "openai",
       name: "OpenAI",
       base_url: null,
       secret_env: { OPENAI_API_KEY: "OPENAI_API_KEY" },
+      harness: "codex",
+      api: null,
+      env: [],
+      secrets: [
+        {
+          env: "OPENAI_API_KEY",
+          key: "OPENAI_API_KEY",
+          set: false,
+          updated_at: null,
+        },
+      ],
+      profiles: ["codex-sol"],
+      models: [],
+      last_check: null,
     },
     {
       id: "deepseek",
       name: "DeepSeek",
       base_url: "https://deepseek.example.test/v1",
       secret_env: { DEEPSEEK_API_KEY: "DEEPSEEK_API_KEY" },
+      harness: "pi",
+      api: "openai-completions",
+      env: [],
+      secrets: [
+        {
+          env: "DEEPSEEK_API_KEY",
+          key: "DEEPSEEK_API_KEY",
+          set: true,
+          updated_at: null,
+        },
+      ],
+      profiles: ["pi-deepseek"],
+      models: ["deepseek-chat"],
+      last_check: {
+        id: "00000000-0000-4000-8000-000000000012",
+        version: "a".repeat(64),
+        mode: "online",
+        started_at: "2025-12-31T23:10:00.000Z",
+        finished_at: "2025-12-31T23:10:05.000Z",
+        status: "failed",
+        problems: ["online_failed"],
+        cli_version: null,
+      },
+    },
+    {
+      id: "relay",
+      name: "Relay",
+      base_url: "https://relay.example.test",
+      secret_env: { ANTHROPIC_AUTH_TOKEN: "RELAY_TOKEN" },
+      harness: "claude-code",
+      api: null,
+      env: [{ name: "ANTHROPIC_DEFAULT_SONNET_MODEL", value: "relay-sonnet" }],
+      secrets: [
+        {
+          env: "ANTHROPIC_AUTH_TOKEN",
+          key: "RELAY_TOKEN",
+          set: false,
+          updated_at: null,
+        },
+      ],
+      profiles: [],
+      models: [],
+      last_check: null,
     },
   ],
   models: {
