@@ -194,6 +194,13 @@ export function fakeClient(
       version,
       status: "running",
     }),
+    launchModels: async (version, provider) => ({
+      version,
+      provider,
+      catalog: { status: "not_listed", providers: [], fetched_at: null },
+      listing: { status: "no_endpoint" },
+      models: [],
+    }),
     startProviderCheck: async (version, provider) => ({
       id: "00000000-0000-4000-8000-000000000000",
       profile: `provider:${provider}`,

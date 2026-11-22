@@ -174,47 +174,7 @@ export class ProfileChecks {
    * checks under `provider:<id>`, a key no profile name can take.
    */
   startProvider(file: SettingsFile, id: string, actor: string) {
-    const definition = Object.hasOwn(file.config.providers, id)
-      ? file.config.providers[id]
-      : undefined;
-    if (!definition || publicFields(id, file.secrets) !== id)
-      throw invalid("provider");
-    const harness: Harness | undefined =
-      definition.harness ??
-      (definition.codex
-        ? "codex"
-        : definition.pi
-          ? "pi"
-          : definition.api === "anthropic-messages"
-            ? "claude-code"
-            : definition.api === "openai-responses"
-              ? "codex"
-              : definition.api
-                ? "pi"
-                : undefined);
-    const api =
-      definition.api ??
-      (harness === "claude-code"
-        ? "anthropic-messages"
-        : harness === "codex"
-          ? "openai-responses"
-          : undefined);
-    // V-2708: the same endpoint the detail shows (a safe legacy env URL counts).
-    const url = providerEndpoint(file.config, id);
-    if (
-      !harness ||
-      !api ||
-      !url ||
-      publicFields(url, file.secrets) !== url ||
-      publicFields(definition.name ?? id, file.secrets) !==
-        (definition.name ?? id)
-    )
-      throw invalid("base_url");
-    const resolved: ResolvedProfile = {
-      name: providerCheck(id),
-      profile: { harness },
-      provider: { name: id, definition: { ...definition, api, base_url: url } },
-    };
+    const { definition, resolved } = providerTarget(file, id);
     return this.run(
       file,
       providerCheck(id),
@@ -299,6 +259,57 @@ export class ProfileChecks {
       status: "running",
     };
   }
+}
+
+/**
+ * C-549 / C-564: a saved Provider as the online probe and the model listing
+ * reach it: its own endpoint (a safe legacy env URL counts) and protocol,
+ * with its own credential reference. Refused when it has none, or when the
+ * endpoint or name would show part of a secret.
+ */
+export function providerTarget(file: SettingsFile, id: string) {
+  const definition = Object.hasOwn(file.config.providers, id)
+    ? file.config.providers[id]
+    : undefined;
+  if (!definition || publicFields(id, file.secrets) !== id)
+    throw invalid("provider");
+  const harness: Harness | undefined =
+    definition.harness ??
+    (definition.codex
+      ? "codex"
+      : definition.pi
+        ? "pi"
+        : definition.api === "anthropic-messages"
+          ? "claude-code"
+          : definition.api === "openai-responses"
+            ? "codex"
+            : definition.api
+              ? "pi"
+              : undefined);
+  const api =
+    definition.api ??
+    (harness === "claude-code"
+      ? "anthropic-messages"
+      : harness === "codex"
+        ? "openai-responses"
+        : undefined);
+  // V-2708: the same endpoint the detail shows (a safe legacy env URL counts).
+  const url = providerEndpoint(file.config, id);
+  if (
+    !harness ||
+    !api ||
+    !url ||
+    publicFields(url, file.secrets) !== url ||
+    publicFields(definition.name ?? id, file.secrets) !==
+      (definition.name ?? id)
+  )
+    throw invalid("base_url");
+  const resolved: ResolvedProfile = {
+    name: providerCheck(id),
+    profile: { harness },
+    provider: { name: id, definition: { ...definition, api, base_url: url } },
+  };
+  return { definition, resolved };
 }
 
 /** The check key of a Provider; profile names cannot contain a colon. */

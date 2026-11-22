@@ -338,3 +338,40 @@ test("enforces exact cache bytes independently on projection, publication and bo
   await loadModelLaunchConfig(bounded(exact - 1), dir, { now, fetch: online });
   await expect(stat(cache)).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+test("C-564: the picker reads a fresh cache as is, refreshes a stale one without writing it, and falls back on failure", async () => {
+  const { readModelCatalog } = await import("./model-catalog.js");
+  const cacheFile = join(dir, "models-dev.json");
+  await writeFile(
+    cacheFile,
+    JSON.stringify({
+      fetched_at: now().toISOString(),
+      entries: [{ provider: "native", id: "old", context_window: 1 }],
+    }),
+  );
+  const network = vi.fn(async () => Response.json(fixture));
+  const fresh = await readModelCatalog(dir, {}, { fetch: network, now });
+  expect(fresh).toMatchObject({ fresh: true, entries: [{ id: "old" }] });
+  expect(network).not.toHaveBeenCalled();
+  const before = await readFile(cacheFile, "utf8");
+  const refreshed = await readModelCatalog(
+    dir,
+    {},
+    { fetch: network, now: stale },
+  );
+  expect(refreshed?.fresh).toBe(true);
+  expect(refreshed?.fetched_at).toBe(stale().toISOString());
+  expect(refreshed?.entries.map((e) => `${e.provider}/${e.id}`)).toEqual([
+    "native/v1",
+    "other/v1",
+  ]);
+  expect(await readFile(cacheFile, "utf8")).toBe(before);
+  const failing = vi.fn(async () => new Response("", { status: 503 }));
+  expect(
+    await readModelCatalog(dir, {}, { fetch: failing, now: stale }),
+  ).toMatchObject({ fresh: false, entries: [{ id: "old" }] });
+  await rm(cacheFile);
+  expect(
+    await readModelCatalog(dir, {}, { fetch: failing, now: stale }),
+  ).toBeUndefined();
+});

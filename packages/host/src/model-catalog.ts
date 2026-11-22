@@ -79,7 +79,7 @@ function projectCache(
   const text = `${prefix(at)}${rows.join(",")}]}`;
   if (Buffer.byteLength(text) > limit)
     throw new Error("catalog cache too large");
-  return { entries, text };
+  return { entries, text, fetched_at: at.toISOString() };
 }
 
 /** Read-only CLI views never contact the network. Legacy configs do no catalog IO. */
@@ -89,6 +89,38 @@ export function parseCachedLaunchConfig(config: unknown, dir: string) {
     parsed.catalogPolicy
       ? readCache(dir, parsed.catalogPolicy.cache_max_bytes)?.entries
       : undefined,
+  );
+}
+
+/** The bounded public models.dev download, projected to catalog rows. */
+async function fetchCatalog(
+  options: CatalogOptions,
+  now: Date,
+  cache: ReturnType<typeof readCache>,
+  limits: { timeout_ms: number; max_bytes: number; cache_max_bytes: number },
+) {
+  const response = await (options.fetch ?? fetch)(SOURCE, {
+    signal: AbortSignal.timeout(limits.timeout_ms),
+    redirect: "error",
+    credentials: "omit",
+  });
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error("catalog unavailable");
+  }
+  // Enforce the limit on decoded bytes, including chunked/compressed responses.
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for await (const chunk of response.body) {
+    bytes += chunk.byteLength;
+    if (bytes > limits.max_bytes) throw new Error("catalog too large");
+    chunks.push(chunk);
+  }
+  return projectCache(
+    JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")),
+    now,
+    limits.cache_max_bytes,
+    cache,
   );
 }
 
@@ -125,29 +157,11 @@ export async function stageModelLaunchConfig(
 
   let projection: ReturnType<typeof projectCache>;
   try {
-    const response = await (options.fetch ?? fetch)(SOURCE, {
-      signal: AbortSignal.timeout(timeout_ms),
-      redirect: "error",
-      credentials: "omit",
-    });
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new Error("catalog unavailable");
-    }
-    // Enforce the limit on decoded bytes, including chunked/compressed responses.
-    const chunks: Uint8Array[] = [];
-    let bytes = 0;
-    for await (const chunk of response.body) {
-      bytes += chunk.byteLength;
-      if (bytes > max_bytes) throw new Error("catalog too large");
-      chunks.push(chunk);
-    }
-    projection = projectCache(
-      JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")),
-      now,
+    projection = await fetchCatalog(options, now, cache, {
+      timeout_ms,
+      max_bytes,
       cache_max_bytes,
-      cache,
-    );
+    });
   } catch {
     return { config: parsed.resolve(cache?.entries) };
   }
@@ -155,4 +169,57 @@ export async function stageModelLaunchConfig(
   // A real removal or an unsupported effort is a configuration error, not a network failure.
   const resolved = parsed.resolve(projection.entries);
   return { config: resolved, catalog: projection.text };
+}
+
+export interface ModelCatalogSnapshot {
+  readonly entries: readonly CatalogEntry[];
+  readonly fetched_at: string;
+  /** False when a refresh failed and this is an older snapshot. */
+  readonly fresh: boolean;
+}
+
+/**
+ * C-564: the models.dev catalog for the launch settings model picker. A fresh
+ * shared cache is used as is; otherwise the public catalog is fetched within
+ * the same limits as staging (no credentials, no redirects). Read-only: the
+ * shared cache file is published only by the launch config installer. Falls
+ * back to the older cache when the download fails; `undefined` when neither
+ * is available.
+ */
+export async function readModelCatalog(
+  dir: string,
+  policy: LaunchConfig["model_catalog"] = {},
+  options: CatalogOptions = {},
+): Promise<ModelCatalogSnapshot | undefined> {
+  const {
+    max_age_ms = DAY_MS,
+    cache_max_bytes = DEFAULT_CACHE_BYTES,
+    timeout_ms = 5_000,
+    max_bytes = 32 * 1024 * 1024,
+  } = policy;
+  const cache = readCache(dir, cache_max_bytes);
+  const now = options.now?.() ?? new Date();
+  const age = now.getTime() - Date.parse(cache?.fetched_at ?? "");
+  if (cache && age >= 0 && age < max_age_ms)
+    return {
+      entries: cache.entries,
+      fetched_at: cache.fetched_at,
+      fresh: true,
+    };
+  try {
+    const projection = await fetchCatalog(options, now, cache, {
+      timeout_ms,
+      max_bytes,
+      cache_max_bytes,
+    });
+    return {
+      entries: projection.entries,
+      fetched_at: projection.fetched_at,
+      fresh: true,
+    };
+  } catch {
+    return cache
+      ? { entries: cache.entries, fetched_at: cache.fetched_at, fresh: false }
+      : undefined;
+  }
 }

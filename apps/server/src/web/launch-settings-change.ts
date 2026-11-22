@@ -1,4 +1,4 @@
-import { HARNESSES } from "@cardigan/roles";
+import { HARNESSES, PERMISSION_MODES } from "@cardigan/roles";
 import { isAlias, isMap, isScalar } from "yaml";
 import { z } from "zod";
 import { HttpRejection } from "./http.js";
@@ -155,9 +155,19 @@ export function candidate(
   );
   switch (change.op) {
     case "create_profile":
-    case "edit_profile":
+    case "edit_profile": {
+      // C-564: a permission mode is set only to a value the profile's
+      // harness offers. One left untouched is not sent, so it stays as is.
+      const mode = change.fields.permission_mode;
+      if (typeof mode === "string") {
+        const harness =
+          change.fields.harness ?? config.profiles[change.name]?.harness;
+        if (!harness || !PERMISSION_MODES[harness].includes(mode))
+          throw invalid("permission_mode");
+      }
       for (const [k, v] of Object.entries(change.fields)) set([k], v);
       break;
+    }
     case "copy_profile": {
       if (!Object.hasOwn(config.profiles, change.source))
         throw invalid("source");
