@@ -4,7 +4,9 @@ import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-sc
 import {
   CallToolRequestSchema,
   type CallToolResult,
+  ErrorCode,
   ListToolsRequestSchema,
+  McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
@@ -32,8 +34,12 @@ export interface ToolServerOptions {
    * Run look started.
    */
   readonly onToolCall?: () => void;
-  /** C-600: runs on `tools/list`; a native harness lists tools at startup. */
-  readonly onToolList?: () => void;
+  /**
+   * C-600: runs on `tools/list`; a native harness lists tools at startup. A
+   * failure answers the listing with a retryable error, never a list whose
+   * handshake was not recorded.
+   */
+  readonly onToolList?: () => void | Promise<void>;
   /**
    * C-600: refuses every tool call of a session that has no native Card
    * tools, before it can acknowledge its Run or act on the project.
@@ -108,9 +114,18 @@ export function createMcpServer(options: ToolServerOptions): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
-      options.onToolList?.();
+      await options.onToolList?.();
     } catch {
-      // Bookkeeping never fails the listing; the call gate re-reads it.
+      log({
+        event: "tool",
+        method: "tools/list",
+        assignment_id: identity.actor.assignment_id,
+        code: "handshake_unrecorded",
+      });
+      throw new McpError(
+        ErrorCode.InternalError,
+        "Card MCP is busy; retry tools/list",
+      );
     }
     return { tools: listedTools(visible) };
   });

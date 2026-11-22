@@ -20,6 +20,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Identity } from "./auth.js";
+import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
 import { loadCommandState, persistEffect } from "./commands/execute.js";
 import { type RunningServer, startMcpServer } from "./server.js";
@@ -418,7 +419,7 @@ describe("C-600 a verified session must list the Card tools natively", () => {
     );
     return client;
   };
-  const start = async (verify: boolean) => {
+  const start = async (verify: boolean, backend: McpBackend = store) => {
     const seeded = dispatchedRun("none", { verify });
     token = store.issueToken({
       project_id,
@@ -429,12 +430,30 @@ describe("C-600 a verified session must list the Card tools natively", () => {
       },
     }).token;
     running = await startMcpServer({
-      store,
+      store: backend,
       host: "127.0.0.1",
       port: 0,
       log: () => undefined,
     });
     return seeded;
+  };
+  /** The real store whose handshake write fails `failures` times. */
+  const busyStore = (failures: number) => {
+    let left = failures;
+    return new Proxy(store, {
+      get(target, property) {
+        if (property === "advanceMcpHandshake")
+          return (...args: Parameters<Store["advanceMcpHandshake"]>) => {
+            if (args[2] === "tools_listed" && left > 0) {
+              left--;
+              throw new Error("database is locked");
+            }
+            return target.advanceMcpHandshake(...args);
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as McpBackend;
   };
   const handshake = (id: Assignment["id"]) =>
     store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake;
@@ -488,6 +507,30 @@ describe("C-600 a verified session must list the Card tools natively", () => {
         ?.last_mcp_activity_at,
     ).toBeUndefined();
     for (const client of [wrapper, native]) await client.close();
+  });
+
+  test("a briefly busy database is retried before the listing is answered", async () => {
+    const { assignment, run_id } = await start(true, busyStore(2));
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(read(run_id)?.status).toBe("running");
+    await native.close();
+  });
+
+  test("an unrecorded listing is an error, and the same healthy session still starts afterwards", async () => {
+    const { assignment, run_id } = await start(true, busyStore(4));
+    const native = await connect(SESSION_KEY);
+    await expect(native.listTools()).rejects.toThrow(/retry tools\/list/u);
+    expect(handshake(assignment.id)).toBe("pending");
+    // The database recovers: the harness's next request still counts.
+    const who = await native.callTool({ name: "whoami", arguments: {} });
+    expect(who.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBe("listed");
+    expect(read(run_id)?.status).toBe("running");
+    await native.close();
   });
 
   test("sessions launched without verification keep the old behaviour", async () => {

@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   MCP_SESSION_FAILURE,
   MCP_SESSION_HEADER,
@@ -556,6 +557,10 @@ export async function startMcpServer(
   };
 }
 
+/** C-600: bounded retries of the handshake write before failing a listing. */
+const HANDSHAKE_WRITE_RETRIES = 3;
+const HANDSHAKE_RETRY_MS = 100;
+
 /**
  * C-600: digest of the per-launch key a verified harness sends from its own
  * MCP configuration; absent or malformed headers prove nothing.
@@ -597,13 +602,23 @@ async function serveMcp(
         acknowledgeDispatchedRun(options.store, identity);
       }
     },
-    onToolList: () => {
-      options.store.advanceMcpHandshake?.(
-        identity.actor.project_id,
-        identity.actor.assignment_id,
-        "tools_listed",
-        sessionKeyDigest(req),
-      );
+    // C-600: a native listing must be recorded before it is answered; a
+    // briefly busy database is retried, then the client gets an error.
+    onToolList: async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          options.store.advanceMcpHandshake?.(
+            identity.actor.project_id,
+            identity.actor.assignment_id,
+            "tools_listed",
+            sessionKeyDigest(req),
+          );
+          return;
+        } catch (error) {
+          if (attempt >= HANDSHAKE_WRITE_RETRIES) throw error;
+          await delay(HANDSHAKE_RETRY_MS * (attempt + 1));
+        }
+      }
     },
     refuseToolCall: () => {
       const handshake = options.store.advanceMcpHandshake?.(
