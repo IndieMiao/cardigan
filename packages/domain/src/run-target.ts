@@ -1,4 +1,5 @@
-import type { Assignment, Delivery, WorkItem } from "./entities.js";
+import type { Assignment, Decision, Delivery, WorkItem } from "./entities.js";
+import { pauseDiscussionFor } from "./review-pause.js";
 
 interface RunTargetIndex {
   /** First work item per id, matching `Array.prototype.find`. */
@@ -82,6 +83,7 @@ export function hasRunTarget(
   state: {
     readonly work_items: readonly WorkItem[];
     readonly deliveries: readonly Delivery[];
+    readonly decisions?: readonly Decision[];
   },
 ): boolean {
   if (assignment.scope !== "work_item") return true;
@@ -95,7 +97,14 @@ export function hasRunTarget(
     item.status !== "cancelled"
   )
     return true;
-  return item.target_work_item_id
+  const target = item.target_work_item_id
     ? index.targets.get(item.target_work_item_id)?.has(item.card_id) === true
     : index.completions.get(item.id)?.has(item.card_id) === true;
+  return (
+    target ||
+    (!!state.decisions &&
+      item.assignment_id === assignment.id &&
+      item.status !== "cancelled" &&
+      !!pauseDiscussionFor(state.decisions, assignment.id))
+  );
 }

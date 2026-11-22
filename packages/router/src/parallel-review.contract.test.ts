@@ -1,7 +1,9 @@
 import {
+  deriveCardFields,
   dispatchRun,
   dispatchRunKind,
   queueRun,
+  remindDecisionFollowups,
   submitReview,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
@@ -323,6 +325,7 @@ test.each([1, 2])(
       ok: false,
       error: { code: "illegal_transition" },
     });
+    f.confirmPause();
     expect(f.decide(3, "raise_limit").ok).toBe(true);
     const resumed = f.state.events.findLast(
       (e) => e.type === "decision_resolved",
@@ -359,5 +362,104 @@ test.each([1, 2])(
       ok: false,
       error: { code: "illegal_transition" },
     });
+  },
+);
+
+test("managed pause routes the owner, two reviewers, settlement and both reminder audiences; stale instructions never wake replacements", async () => {
+  const f = await sharedReviewFixture();
+  f.review(2, [sharedBug]);
+  f.review(3, [], f.refs());
+  expect(f.decide(3, "pause").ok).toBe(true);
+  const event = (type: string) => {
+    const e = f.state.events.findLast((e) => e.type === type);
+    if (!e) throw Error(type);
+    return e;
+  };
+  const recipients = (e: ReturnType<typeof event>, snapshot = f.state) =>
+    routeEvent({ event: e, snapshot }).notifications.map((n) => n.recipient);
+  const instruction = event("instruction_issued");
+  expect(recipients(instruction)).toEqual([
+    { kind: "assignment", assignment_id: id("assignment", 1) },
+  ]);
+  const current = f.state;
+  const tick = (s: typeof current, at: string) => {
+    const effect = value(
+      remindDecisionFollowups(
+        s,
+        { kind: "system", project_id: s.project_id },
+        { ...f.io, clock: { now: () => at } },
+      ),
+    );
+    const next = apply(s, effect);
+    const notice = effect.events[0];
+    if (!notice) throw Error("Missing reminder");
+    return { next, to: recipients(notice, next) };
+  };
+  const ops = tick(current, "2026-01-01T00:30:00Z");
+  expect(ops.to).toEqual([{ kind: "pm_ops" }]);
+  expect(tick(ops.next, "2026-01-01T01:00:00Z").to).toEqual([
+    { kind: "pm_office" },
+  ]);
+  const p = f.comment(1, "propose");
+  expect(recipients(instruction)).toEqual([]);
+  const confirm = f.state.events
+    .filter((e) => e.type === "instruction_issued")
+    .slice(-2);
+  expect(confirm.flatMap((e) => recipients(e))).toEqual(
+    [2, 3].map((n) => ({
+      kind: "assignment",
+      assignment_id: id("assignment", n),
+    })),
+  );
+  const toPeer = confirm[1];
+  if (!toPeer) throw Error("Missing peer instruction");
+  expect(
+    recipients(toPeer, {
+      ...f.state,
+      work_items: f.state.work_items.map((w) =>
+        w.id === id("work_item", 3)
+          ? { ...w, assignment_id: id("assignment", 90) }
+          : w,
+      ),
+    }),
+  ).toEqual([]);
+  f.comment(2, "confirm", p.id);
+  f.comment(3, "confirm", p.id);
+  const notice = event("review_pause_notice");
+  expect(recipients(notice)).toEqual([{ kind: "pm_ops" }]);
+  expect(f.decide(2, "raise_limit").ok).toBe(true);
+  expect(recipients(notice)).toEqual([]);
+});
+
+test.each(["before", "after"])(
+  "closure follows human escalation %s the last vote",
+  async (when) => {
+    const f = await sharedReviewFixture();
+    f.review(2, [sharedBug]);
+    f.review(3, [], f.refs());
+    expect(f.decide(3, "pause").ok).toBe(true);
+    if (when === "before") expect(f.decide(3, "escalate").ok).toBe(true);
+    f.confirmPause();
+    if (when === "after") expect(f.decide(3, "escalate").ok).toBe(true);
+    const notice = f.state.events.findLast(
+      (e) => e.type === "review_pause_notice",
+    );
+    const q = f.state.decisions[0];
+    const card = f.state.cards.find((c) => c.id === q?.card_id);
+    if (!notice || !card || !q) throw Error("missing closure notice");
+    expect(notice.payload).toMatchObject({
+      audience: when === "before" ? "human" : "pm_ops",
+    });
+    expect(
+      routeEvent({ event: notice, snapshot: f.state }).notifications.map(
+        (n) => n.recipient,
+      ),
+    ).toEqual([{ kind: "needs_you" }]);
+    expect(deriveCardFields({ ...f.state, card })).toMatchObject({
+      why: `待你结案恢复 ${q.id}`,
+      waiting_on: [{ review_phase: "待你结案恢复" }],
+      next_owners: [{ kind: "human", ref: "human" }],
+    });
+    expect(f.decide(3, "raise_limit").ok).toBe(false);
   },
 );

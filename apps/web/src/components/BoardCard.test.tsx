@@ -491,3 +491,52 @@ test("check marks follow the waiting-marks display switch", () => {
   );
   expect(screen.queryByRole("link", { name: "预检中" })).toBeNull();
 });
+
+test.each([
+  ["待方案", false],
+  ["待确认", false],
+  ["待 PM 结案恢复", true],
+  ["待你结案恢复", true],
+  ["已允许返工但未派发", false],
+] as const)(
+  "shows %s on the default board without a misleading decision badge",
+  (phase, needsDecision) => {
+    const label = `${phase} Q-1`;
+    const { container } = renderCard({
+      ...example,
+      waiting_on: [
+        {
+          kind: phase === "已允许返工但未派发" ? "review" : "decision",
+          ref: "Q-1",
+          review_phase: phase,
+          label,
+        },
+      ],
+    });
+    expect(screen.getByRole("link", { name: label }).textContent).toContain(
+      phase,
+    );
+    expect(!!container.querySelector(".card-tile-waiting")).toBe(needsDecision);
+    expect(screen.queryByRole("link", { name: /等你拍板/ })).toBeNull();
+  },
+);
+
+test("a precheck and a paused review keep their own badges on the same card", () => {
+  const checking = runningPrecheck("running");
+  const { container } = renderCard({
+    ...checking,
+    waiting_on: [
+      ...checking.waiting_on,
+      {
+        kind: "decision",
+        ref: "Q-1",
+        review_phase: "待确认",
+        label: "待确认 Q-1",
+      },
+    ],
+  });
+  expect(screen.getByRole("link", { name: "预检中" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "待确认 Q-1" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /等你拍板|^阻塞：/ })).toBeNull();
+  expect(container.querySelector(".card-tile-blocked")).toBeNull();
+});
