@@ -1,6 +1,10 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  missingPrecheckTargets,
+  readPrecheckAttempts,
+} from "./card-checking.js";
 import { readCardDependencies } from "./card-dependencies.js";
 import { cardSelectors } from "./card-selectors.js";
 import { HttpRejection } from "./http.js";
@@ -55,6 +59,7 @@ export function cardSummary(card: CardListView) {
     early_start,
     merge_stage,
     merge_solo,
+    checking,
   } = card;
   return {
     id,
@@ -84,6 +89,7 @@ export function cardSummary(card: CardListView) {
     ...(early_start ? { early_start } : {}),
     ...(merge_stage ? { merge_stage } : {}),
     ...(merge_solo !== undefined ? { merge_solo } : {}),
+    ...(checking ? { checking } : {}),
   };
 }
 export function readCardsPage(
@@ -316,6 +322,7 @@ export function readCardsPage(
         queue,
         readCardDependencies(store, tx, project),
         readMergeQueueState(tx, project),
+        readPrecheckAttempts(store, project, missingPrecheckTargets(state)),
       ).map((c) => [c.id, c]),
     );
     const cards = ids.flatMap((id) => {

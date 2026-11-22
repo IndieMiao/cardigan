@@ -309,6 +309,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
             ...(data.card.story_progress?.children ?? []).map(
               (card) => card.id,
             ),
+            // C-567: another card's precheck ending settles this card's wait.
+            ...(data.card.checking?.precheck?.cards ?? []),
           ]),
       ),
     ].sort();
@@ -643,6 +645,7 @@ function CardContent({
         )}
         <CardStatusLine
           detail={detail}
+          projectId={projectId}
           metadata={
             <>
               <span>

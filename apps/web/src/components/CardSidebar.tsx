@@ -6,6 +6,7 @@ import {
   describeWriteError,
   type WorkItemView,
 } from "../api.js";
+import { cardChecking, PRECHECK_LABEL } from "../card-checking.js";
 import { decisionTitle } from "../decision-labels.js";
 import {
   exclusionReason,
@@ -35,6 +36,7 @@ export function CardSidebar({
   cardId: string;
 }) {
   const { card, overview, work_items, relations } = detail;
+  const checks = cardChecking(card);
   const completed =
     overview?.completed_work_count ??
     work_items.filter((w) => ["accepted", "passed"].includes(w.status)).length;
@@ -75,7 +77,13 @@ export function CardSidebar({
               <dt>被什么阻塞</dt>
               <dd>
                 {card.waiting_on.length
-                  ? card.waiting_on.map((w) => w.label).join("；")
+                  ? card.waiting_on
+                      .map((w) =>
+                        checks.precheckWait(w)
+                          ? `${w.ref} ${PRECHECK_LABEL}`
+                          : w.label,
+                      )
+                      .join("；")
                   : "没有被阻塞"}
               </dd>
             </div>
