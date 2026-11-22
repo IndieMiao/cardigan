@@ -58,6 +58,7 @@ export function feishuInbox(
   clock = Date.now,
   limits = { bindingAttempts: 30, pending: 32 },
   bindingFailed?: (recipient: string) => void,
+  current = () => true,
 ) {
   const scope = appScope(c);
   let window = 0,
@@ -74,6 +75,7 @@ export function feishuInbox(
         feishuAudit(db, reason);
         return toast(stale ? expired : "未处理");
       };
+      if (!current()) return reject("stale_configuration", true);
       const tenant = kind === "action" ? op.tenant_key : sender.tenant_key;
       if (
         e.app_id !== c.app_id ||

@@ -15,6 +15,7 @@ import { parseAppCredential } from "./feishu-inbox.js";
 interface ExtChannel {
   enabled: boolean;
   credential?: string;
+  max_per_minute?: number;
   binding_ttl_ms?: number;
   action_ttl_ms?: number;
   binding_attempts_per_minute?: number;
@@ -35,13 +36,10 @@ export interface ExtMessageConfig {
 export type ExtMessageConfiguration =
   | { readonly status: "missing" | "invalid" }
   | { readonly status: "loaded"; readonly config: ExtMessageConfig };
-export const defaultExtMessagePath = () =>
+export const defaultExtMessagePath = (env: NodeJS.ProcessEnv = process.env) =>
   join(
-    process.env.CARDIGAN_CONFIG_DIR ??
-      join(
-        process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
-        "cardigan",
-      ),
+    env.CARDIGAN_CONFIG_DIR ??
+      join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "cardigan"),
     "ext-message.yaml",
   );
 const invalid = (): never => {
@@ -90,6 +88,7 @@ function privateText(path: string): string {
 }
 export function loadExtMessageConfig(
   path = defaultExtMessagePath(),
+  credentialDir = dirname(path),
 ): ExtMessageConfiguration {
   let text: string;
   try {
@@ -179,7 +178,7 @@ export function loadExtMessageConfig(
               return invalid();
             const file = channel.credential_file;
             credential = privateText(
-              isAbsolute(file) ? file : resolve(dirname(path), file),
+              isAbsolute(file) ? file : resolve(credentialDir, file),
             ).trim();
             if (!credential) return invalid();
           }
@@ -192,6 +191,14 @@ export function loadExtMessageConfig(
           credential = JSON.stringify(parseAppCredential(credential));
         channels[name] = {
           enabled: active,
+          ...(channel.max_per_minute === undefined
+            ? {}
+            : {
+                max_per_minute: integer(
+                  channel.max_per_minute,
+                  defaultMaxPerMinute,
+                ),
+              }),
           ...(name === "lark_app"
             ? {
                 binding_attempts_per_minute: integer(
@@ -269,4 +276,12 @@ export function extMessageQuiet(
   return q.start < q.end
     ? time >= q.start && time < q.end
     : time >= q.start || time < q.end;
+}
+
+export function extChannelLimit(config: ExtMessageConfig, channel: string) {
+  return (
+    config.channels[channel.split(":")[0]!]?.max_per_minute ??
+    config.policy.max_per_minute ??
+    defaultMaxPerMinute
+  );
 }

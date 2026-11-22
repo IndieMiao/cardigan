@@ -36,6 +36,7 @@ export interface WebHarness {
 }
 
 export interface HarnessOptions {
+  readonly feishuSettingsPath?: string;
   /** Integration fixtures with independent processes must share the real write lock. */
   readonly diskStore?: boolean;
   readonly launchSettings?: WebServerOptions["launchSettings"];
@@ -79,6 +80,9 @@ export async function webHarness(
     store.setWebPassword(options.password);
   }
   const server = await startWebServer({
+    ...(options.feishuSettingsPath
+      ? { feishuSettingsPath: options.feishuSettingsPath }
+      : {}),
     ...(options.launchSettings
       ? { launchSettings: options.launchSettings }
       : {}),

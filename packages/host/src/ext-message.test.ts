@@ -1928,3 +1928,52 @@ test.each([false, true])(
   },
   20000,
 );
+
+test("live config switch installs new rate and target; disabled-period facts are not replayed", async () => {
+  const { LiveExtMessageSender } = await import("./live-ext-message.js");
+  const path = join(dir, "ext-message.yaml");
+  const write = (enabled: boolean, target: string, limit: number) =>
+    writeFileSync(
+      path,
+      JSON.stringify({
+        enabled,
+        workbench_url: "https://example.invalid",
+        policy: { max_per_minute: 99 },
+        channels: {
+          fake: { enabled: true, credential: target, max_per_minute: limit },
+        },
+      }),
+      { mode: 0o600 },
+    );
+  const sent: string[] = [];
+  const live = new LiveExtMessageSender(path, {
+    store,
+    clock,
+    adapters: {
+      fake: (cred) => ({
+        send: async () => {
+          sent.push(cred!);
+          return "sent";
+        },
+      }),
+    },
+  });
+  write(true, "first", 1);
+  live.start();
+  addAction(1);
+  addAction(2);
+  await live.tick();
+  expect(sent).toEqual(["first"]);
+  write(false, "first", 1);
+  await live.tick();
+  addAction(3);
+  advance(65000);
+  write(true, "second", 2);
+  await live.tick();
+  expect(sent).toEqual(["first"]);
+  addAction(4);
+  addAction(5);
+  await live.tick();
+  expect(sent).toEqual(["first", "second", "second"]);
+  await live.stop();
+});
