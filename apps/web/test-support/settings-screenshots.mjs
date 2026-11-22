@@ -331,6 +331,39 @@ try {
       "!document.querySelector('[role=dialog]') && [...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent.includes('每分钟 30 条'))",
     );
     await capture("feishu-saved", width, theme);
+    // V-2857: an unconfirmed draft left behind is held and named once.
+    await feishuPress("编辑配置");
+    await until("!!document.querySelector('[role=dialog] form')");
+    await feishuFill({ "标题长度（字）": "77" });
+    await run(() => {
+      location.hash = "#/p/p-1/settings";
+    });
+    await until(
+      "!document.querySelector('[role=dialog]') && document.body.textContent.includes('飞书配置有未确认的修改')",
+    );
+    await capture("feishu-held", width, theme);
+    await run(() => {
+      location.hash = "#/p/p-1/activity";
+    });
+    await until(
+      "location.hash === '#/p/p-1/activity' && document.body.textContent.includes('飞书配置有未确认的修改')",
+    );
+    await settle();
+    report.scenes[`feishu-held-away-${width}-${theme}`] = {
+      scrollWidth: await evaluate("document.documentElement.scrollWidth"),
+    };
+    {
+      const { data } = await send("Page.captureScreenshot", { format: "png" });
+      await writeFile(
+        resolve(output, `feishu-held-away-${width}-${theme}.png`),
+        Buffer.from(data, "base64"),
+      );
+    }
+    await feishuPress("继续编辑");
+    await until(
+      "[...document.querySelectorAll('[role=dialog] label')].some((l) => l.firstChild?.textContent?.trim() === '标题长度（字）' && l.querySelector('input')?.value === '77')",
+    );
+    await feishuScene("feishu-held-restored", width, theme, "高级");
   };
   const click = (text) =>
     run((text) => {
