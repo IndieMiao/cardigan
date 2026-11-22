@@ -440,6 +440,13 @@ export class CentralGitTransport
         await rm(stage, { recursive: true, force: true });
       }
     }
+    await this.verifyBareSource(repository, local);
+  }
+  /** Read-only counterpart for consumers of an existing center: do not clone
+   * or require a particular branch to exist just to mirror its current heads. */
+  async verifyBareSource(repository: string, canonicalSource: string) {
+    if (dirname(repository) !== this.root)
+      throw new Error("Unexpected central repository path");
     const sourceRecord = await this.command(repository, [
       "config",
       "--local",
@@ -452,7 +459,7 @@ export class CentralGitTransport
         "--is-bare-repository",
       ])) !== "true" ||
       sourceRecord.code !== 0 ||
-      sourceRecord.stdout !== local
+      sourceRecord.stdout !== canonicalSource
     )
       throw new Error(
         "Central repository source changed; explicit rebuild required",
@@ -524,6 +531,23 @@ export class CentralGitTransport
     await (remote || executorRoot !== undefined
       ? this.workerEndpoint(push)
       : push(path));
+  }
+  /** Fetch-equivalent distribution: the sender is the verified private center,
+   * never a URL resolved by the mirror. Only remote-tracking refs are updated. */
+  async distributeMirrorHeads(repository: string, receivePack: string) {
+    await this.workerEndpoint((endpoint) =>
+      this.checked(repository, [
+        "push",
+        "--atomic",
+        "--prune",
+        "--no-follow-tags",
+        "--no-verify",
+        `--receive-pack=${receivePack}`,
+        "--",
+        endpoint,
+        "+refs/heads/*:refs/remotes/origin/*",
+      ]),
+    );
   }
   private async fetchSource(
     source: string | GitRepositoryAddress,
