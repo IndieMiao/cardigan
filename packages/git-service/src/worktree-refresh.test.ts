@@ -49,6 +49,7 @@ function fixture() {
   };
   const central = {
     ensureCentral: vi.fn(async () => "/fixture/central.git"),
+    ensureBranch: vi.fn(async () => "/fixture/central.git"),
     syncFromSource: vi.fn(),
   };
   const service = new GitWorktreeService(
@@ -120,6 +121,7 @@ test("an injected lock binds placement to the machine, project and base clone", 
     git as unknown as GitWorktreePort,
     {
       ensureCentral: vi.fn(async () => "/fixture/central.git"),
+      ensureBranch: vi.fn(async () => "/fixture/central.git"),
     } as unknown as CentralRepositoryService,
     { dataDir: "/fixture", worktreesRoot: "/fixture/worktrees", lock },
   );

@@ -55,7 +55,9 @@ function harness() {
   let time = "2035-01-01T00:00:00.000Z";
   const state = (): CommandState => ({
     ...required(f).state,
-    project_settings: { merge_push: destination },
+    project_settings: {
+      merge_push: [{ ...destination, base_branch: "main" }],
+    },
   });
   const io = () => required(f).io;
   /** Merge one fresh card; the loop recorded (previous, merge]. */

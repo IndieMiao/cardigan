@@ -863,3 +863,105 @@ test("legal culprit evidence and historical timeline copies honor current cross-
       ?.stage,
   ).not.toBe("culprit");
 });
+
+test("C-589: one batch never mixes baseline branches; each branch queues separately", async () => {
+  const f = await fixture(2);
+  const [first, second] = f.members;
+  if (!first || !second) throw new Error("Missing members");
+  const mixed: CommandState = {
+    ...f.state(),
+    cards: f
+      .state()
+      .cards.map((card) =>
+        card.id === second.card_id
+          ? { ...card, base_branch: "integration/farm" }
+          : card,
+      ),
+  };
+  expect(
+    mergeQueue(mixed).map((q) => [q.plan.card_id, q.plan.base_branch]),
+  ).toEqual([
+    [first.card_id, "main"],
+    [second.card_id, "integration/farm"],
+  ]);
+  expect(
+    formMergeBatch(
+      mixed,
+      system,
+      { base_sha: sha(1), members: f.members, solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  // Same-branch members still form a batch.
+  const farmBatch = formMergeBatch(
+    mixed,
+    system,
+    { base_sha: sha(1), members: [second], solo: false },
+    f.io,
+  );
+  expect(farmBatch).toMatchObject({ ok: true });
+  // Each branch owns one family: an active farm family does not block main,
+  // but a second farm family is refused.
+  const withFarm = apply(mixed, value(farmBatch));
+  expect(
+    formMergeBatch(
+      withFarm,
+      system,
+      { base_sha: sha(1), members: [first], solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: true });
+  expect(
+    formMergeBatch(
+      withFarm,
+      system,
+      { base_sha: sha(1), members: [second], solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+});
+
+test("C-589: a merge window protects files only on its own baseline branch", async () => {
+  const f = await fixture(3);
+  const [one, two, three] = f.members;
+  if (!one || !two || !three) throw new Error("Missing cards");
+  f.commit(
+    setMergeWindow(
+      f.state(),
+      human,
+      { card_id: one.card_id, open: true, reason: "Protect shared file" },
+      f.io,
+    ),
+  );
+  f.commit(
+    refreshMergeWindows(
+      f.state(),
+      system,
+      {
+        paths: f.members.map((m) => ({
+          card_id: m.card_id,
+          versions: mergeWindowVersions(f.state(), m.card_id),
+          files: ["src/shared.ts"],
+        })),
+      },
+      f.io,
+    ),
+  );
+  const branched = (): CommandState => ({
+    ...f.state(),
+    cards: f
+      .state()
+      .cards.map((card) =>
+        card.id === two.card_id
+          ? { ...card, base_branch: "integration/demo" }
+          : card,
+      ),
+  });
+  // Same file, other branch: not held. Same branch keeps the protection.
+  expect(heldByMergeWindow(branched(), two.card_id)).toBeUndefined();
+  expect(heldByMergeWindow(branched(), three.card_id)).toBe(one.card_id);
+  expect(mergeQueue(branched()).map((q) => q.plan.card_id)).toEqual([
+    one.card_id,
+    two.card_id,
+  ]);
+});

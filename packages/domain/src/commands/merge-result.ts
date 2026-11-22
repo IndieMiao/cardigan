@@ -202,6 +202,7 @@ export function recordMergeResult(
         card_id: card.id,
         completion_id: p.completion_id,
         sha: r.merge_sha,
+        base_branch: card.base_branch,
       });
     return next;
   });

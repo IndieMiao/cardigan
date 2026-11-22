@@ -7,6 +7,7 @@ import {
 } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
 import {
+  centralBranch,
   PrecheckMergeConflict,
   RepositoryLockTimeoutError,
 } from "@cardigan/git-service";
@@ -520,8 +521,13 @@ export class AuthorPrechecks {
         return;
       }
       const distribute = this.options.git.distribute;
-      const project = this.options.git.projectOf(projectId);
-      if (!project) throw new Error("Missing project");
+      const registered = this.options.git.projectOf(projectId);
+      if (!registered) throw new Error("Missing project");
+      // The candidate merges into the card's own baseline branch.
+      const branch = this.options.store.uow.read(
+        (tx) => tx.cards.get(projectId, check.card_id)?.base_branch,
+      );
+      const project = branch ? centralBranch(registered, branch) : registered;
       const journal = new GithubDispatchJournal(this.options.store);
       if (target.type === "github") {
         const admitted = journal.admitted();

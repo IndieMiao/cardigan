@@ -251,14 +251,18 @@ export function heldByMergeWindow(
         a.opened_at.localeCompare(b.opened_at) ||
         a.card_id.localeCompare(b.card_id),
     );
+  // Windows protect files of one baseline branch; other branches never collide.
+  const branch = (id: CardId) =>
+    state.cards.find((c) => c.id === id)?.base_branch;
   const active: MergeWindow[] = [];
   for (const window of windows) {
     if (
       !active.some(
         (old) =>
-          !old.versions.length ||
-          !window.versions.length ||
-          window.files.some((f) => old.files.includes(f)),
+          branch(old.card_id) === branch(window.card_id) &&
+          (!old.versions.length ||
+            !window.versions.length ||
+            window.files.some((f) => old.files.includes(f))),
       )
     )
       active.push(window);
@@ -269,6 +273,7 @@ export function heldByMergeWindow(
   return active.find(
     (w) =>
       w.card_id !== card &&
+      branch(w.card_id) === branch(card) &&
       (!paths ||
         !w.versions.length ||
         JSON.stringify(paths.versions) !==

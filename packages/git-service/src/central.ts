@@ -68,10 +68,45 @@ export const DEFAULT_MERGE_IDENTITY = {
   email: "cardigan@localhost",
 } as const;
 const fullSha = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
+/** A plain branch name below refs/heads; never a full ref, revision or pattern. */
+export function validCentralBranch(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    value !== "@" &&
+    !value.startsWith("-") &&
+    !value.startsWith("refs/") &&
+    !/[\s~^:?*[\\]/u.test(value) &&
+    ![...value].some((c) => c.charCodeAt(0) < 33 || c.charCodeAt(0) === 127) &&
+    !value.includes("..") &&
+    !value.includes("@{") &&
+    !value.endsWith(".") &&
+    value
+      .split("/")
+      .every((part) => part && !part.startsWith(".") && !part.endsWith(".lock"))
+  );
+}
+/**
+ * The same central repository seen through one baseline branch. Cards choose
+ * their own `base_branch`; merge candidates, checks and publication of that
+ * card use this view. Only the branch must exist in the central repository.
+ */
+export function centralBranch(
+  project: CentralProject,
+  branch: string,
+): CentralProject {
+  if (!validCentralBranch(branch))
+    throw new Error("Invalid card baseline branch name");
+  return branch === project.base_branch
+    ? project
+    : { ...project, base_branch: branch };
+}
 const projectSegment = /^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u;
 /** Ref policy lives here; filesystem and Git execution stay behind the domain port. */
 export class CentralRepositoryService {
   private readonly root: string;
+  /** Keyed by repository and baseline branch. */
   private readonly sourceClassifications = new Map<
     string,
     {
@@ -101,6 +136,15 @@ export class CentralRepositoryService {
     );
   }
   async ensureCentral(project: CentralProject): Promise<string> {
+    const repository = await this.ensureRepository(project);
+    if (
+      !(await this.git.readRef(repository, `refs/heads/${project.base_branch}`))
+    )
+      throw new Error("Central baseline branch is missing");
+    return repository;
+  }
+  /** The central repository; an existing one need not have this branch yet. */
+  private async ensureRepository(project: CentralProject): Promise<string> {
     if (!projectSegment.test(project.project_id))
       throw new Error("Invalid project path component");
     const repository = this.repositoryPath(project);
@@ -109,16 +153,22 @@ export class CentralRepositoryService {
       repository,
       `refs/heads/${project.base_branch}`,
     );
-    if (
-      !(await this.git.readRef(repository, `refs/heads/${project.base_branch}`))
-    )
-      throw new Error("Central baseline branch is missing");
     return repository;
   }
   /** Fetch the source snapshot and classify it without moving the baseline. */
   private async sourceSnapshot(
     project: CentralProject,
     polling = false,
+    repository?: string,
+  ) {
+    const snapshot = await this.sourceRefs(project, polling, repository);
+    if (!snapshot.old)
+      throw new Error("Baseline disappeared during synchronization");
+    return { ...snapshot, old: snapshot.old };
+  }
+  private async sourceRefs(
+    project: CentralProject,
+    polling: boolean,
     repository?: string,
   ) {
     const repo = repository ?? (await this.ensureCentral(project)),
@@ -133,8 +183,7 @@ export class CentralRepositoryService {
     );
     const old = await this.git.readRef(repo, base),
       next = await this.git.readRef(repo, source);
-    if (!old || !next)
-      throw new Error("Baseline disappeared during synchronization");
+    if (!next) throw new Error("Baseline disappeared during synchronization");
     return { repo, base, old, next };
   }
   private async classify(repo: string, old: string, next: string) {
@@ -143,23 +192,84 @@ export class CentralRepositoryService {
       return "fast_forwarded" as const;
     return (await this.git.isAncestor(repo, next, old)) ? "ahead" : "diverged";
   }
+  /**
+   * Bring one baseline branch up to date from the source. A branch created in
+   * the source after the central clone is created here like the initial
+   * clone; a central-only branch (merged here, absent from the source) has
+   * nothing to sync and is reported `ahead`. Missing on both sides, or any
+   * other I/O failure, is an error.
+   */
   async syncFromSource(project: CentralProject): Promise<SourceSync> {
-    const { repo, base, old, next } = await this.sourceSnapshot(project);
+    // The branch name becomes a fetch refspec: never a pattern or full ref.
+    if (!validCentralBranch(project.base_branch))
+      throw new Error("Invalid baseline branch name");
+    const repo = await this.ensureRepository(project),
+      base = `refs/heads/${project.base_branch}`;
+    let snapshot: Awaited<ReturnType<typeof this.sourceRefs>>;
+    try {
+      snapshot = await this.sourceRefs(project, false, repo);
+    } catch (error) {
+      if (await this.sourceLacks(repo, project, base)) {
+        if (await this.git.readRef(repo, base)) return "ahead";
+        throw new Error(
+          "Baseline branch is missing in both the central repository and the source",
+        );
+      }
+      throw error;
+    }
+    const { old, next } = snapshot;
+    if (!old) {
+      await this.createRef(repo, base, next);
+      return "fast_forwarded";
+    }
     const status = await this.classify(repo, old, next);
     if (status === "fast_forwarded")
       await this.git.compareAndSwapRef(repo, base, next, old);
     return status;
   }
+  /** Proven absence only: an unanswerable query is not treated as missing. */
+  private async sourceLacks(
+    repo: string,
+    project: CentralProject,
+    ref: string,
+  ): Promise<boolean> {
+    if (!this.git.sourceHasRef) return false;
+    try {
+      return !(await this.git.sourceHasRef(repo, project.source_repo, ref));
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * The central repository with this baseline branch present; a branch the
+   * source created after the central clone is created on first use.
+   */
+  async ensureBranch(project: CentralProject): Promise<string> {
+    if (!validCentralBranch(project.base_branch))
+      throw new Error("Invalid baseline branch name");
+    const repository = await this.ensureRepository(project);
+    if (
+      !(await this.git.readRef(repository, `refs/heads/${project.base_branch}`))
+    )
+      await this.syncFromSource(project);
+    return this.ensureCentral(project);
+  }
   /** Read-only view of §3.2 for reconciliation: never moves the baseline. */
   async sourceStatus(project: CentralProject): Promise<SourceSync> {
     const { repo, old, next } = await this.sourceSnapshot(project, true);
-    return this.classifySource(repo, old, next);
+    return this.classifySource(repo, project.base_branch, old, next);
   }
-  private async classifySource(repo: string, old: string, next: string) {
-    const previous = this.sourceClassifications.get(repo);
+  private async classifySource(
+    repo: string,
+    branch: string,
+    old: string,
+    next: string,
+  ) {
+    const key = `${repo}\n${branch}`;
+    const previous = this.sourceClassifications.get(key);
     if (previous?.old === old && previous.next === next) return previous.status;
     const status = await this.classify(repo, old, next);
-    this.sourceClassifications.set(repo, { old, next, status });
+    this.sourceClassifications.set(key, { old, next, status });
     return status;
   }
   /** One validation per scan; still observe refs on disk on every poll. */
@@ -171,7 +281,12 @@ export class CentralRepositoryService {
       repository,
     );
     return {
-      source_sync: await this.classifySource(repo, old, next),
+      source_sync: await this.classifySource(
+        repo,
+        project.base_branch,
+        old,
+        next,
+      ),
       pinned: await this.readPinned(repository),
     };
   }
@@ -224,8 +339,12 @@ export class CentralRepositoryService {
     project: CentralProject,
     plan: MergePlan,
   ): Promise<PreparedMerge> {
+    // Callers select the card's branch with `centralBranch`; this only
+    // guards against publishing a plan through another branch's view.
     if (plan.base_branch !== project.base_branch)
-      throw new Error("Merge plan targets a different baseline branch");
+      throw new Error(
+        "Merge plan baseline does not match the selected central branch",
+      );
     if (!parseId("delivery", plan.completion_id).ok)
       throw new Error("Invalid completion id in the merge plan");
     const repository = await this.ensureCentral(project),
@@ -297,7 +416,7 @@ export class CentralRepositoryService {
     const noops: MergePlan[] = [];
     for (const plan of plans) {
       if (plan.base_branch !== project.base_branch)
-        throw new Error("Batch baseline mismatch");
+        throw new Error("A merge batch must share one baseline branch");
       let next = head;
       let conflict:
         | { delivery_id: string; files: readonly string[] }

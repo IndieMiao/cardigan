@@ -173,7 +173,7 @@ test("A3b preserves version gate, checks and human-confirmed publication", async
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
   // Checks remain a separate gate; a pause cannot make a missing check pass.
   expect(pmMergeBlockers(f.state, q)).toContain(
-    "合并闸门检查尚无结果（未开启闸门的项目须交人确认）",
+    "项目未配置合并闸门，须交人确认合并",
   );
   expect(f.state.deliveries.find((d) => d.id === completion.id)?.status).toBe(
     "accepted",
