@@ -83,7 +83,11 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { incidentIdentity, writerPlacementSeal } from "./retained-writer.js";
+import {
+  incidentIdentity,
+  settlementIdentityHolds,
+  writerPlacementSeal,
+} from "./retained-writer.js";
 import {
   localTurnExitProof,
   remoteStallExit,
@@ -1876,12 +1880,14 @@ export class HostOpsService {
           )?.id !== lease
         )
           return;
-        // Settle only while the incident's first receipt still proves the
-        // directory: no cleared binding, revoked token or successor otherwise.
+        // Settle only on positive evidence: the incident's first receipt is
+        // readable and matches. "No first receipt yet" allows recording one
+        // before the backup, never settling after it: no cleared binding,
+        // revoked token or successor otherwise.
         if (
           preserve &&
           workspaceSeal &&
-          incidentIdentity(state, action, workspaceSeal) === null
+          !settlementIdentityHolds(state, action, workspaceSeal)
         ) {
           identityLost = true;
           return;

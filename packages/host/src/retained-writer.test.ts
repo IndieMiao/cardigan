@@ -5,6 +5,7 @@ import {
   incidentIdentity,
   RetainedWriterRefused,
   retainedWriterForRun,
+  settlementIdentityHolds,
 } from "./retained-writer.js";
 
 const system = { kind: "system", project_id: "p" } as const;
@@ -317,4 +318,35 @@ test("a re-claimed action whose earlier-lease receipt is unreadable cannot recor
   expect(
     incidentIdentity(state([action, firstLease]), asking(action), "original"),
   ).toBeUndefined();
+});
+
+test("settlement refuses when the takeover's first receipt is missing; readable control settles", () => {
+  // V-2989:1: the first attempt failed its backup and wrote nothing, so the
+  // takeover (on its first claim) records the incident's first receipt. At
+  // settlement that receipt must be readable and match.
+  const first = event("host_ops_action_taken", incident);
+  const takeover = event("host_ops_action_taken", incident, ops);
+  const beforeBackup = [
+    first,
+    withdrawn(first, false),
+    takeover,
+    claimed(takeover),
+  ];
+  // Before the backup: no first receipt yet, recording one is allowed...
+  expect(
+    incidentIdentity(state(beforeBackup), asking(takeover), "original"),
+  ).toBeUndefined();
+  // ...but that same "none yet" never settles.
+  expect(
+    settlementIdentityHolds(state(beforeBackup), asking(takeover), "original"),
+  ).toBe(false);
+  // Control: the takeover's receipt is readable and matches → settles.
+  const written = [...beforeBackup, receipt(takeover, "original")];
+  expect(
+    settlementIdentityHolds(state(written), asking(takeover), "original"),
+  ).toBe(true);
+  // A readable receipt with another seal never settles.
+  expect(
+    settlementIdentityHolds(state(written), asking(takeover), "replacement"),
+  ).toBe(false);
 });

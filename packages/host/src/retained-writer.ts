@@ -317,6 +317,18 @@ export function incidentIdentity(
   return incidentWriterRefused(state, action) ? null : undefined;
 }
 
+/** The writer settlement's verdict: true only when the incident's first
+ * receipt is readable and matches the seal. "No first receipt yet" (an
+ * `undefined` identity) allows recording one before the backup, never settling
+ * after it. */
+export function settlementIdentityHolds(
+  state: CommandState,
+  action: IncidentAction,
+  seal: string,
+) {
+  return !!incidentIdentity(state, action, seal);
+}
+
 /** No placement or repair is allowed on this path, including when a caller
  * supplied a worktree. A missing/mismatched receipt must never fall through. */
 export function retainedWriterForRun(
