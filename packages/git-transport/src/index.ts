@@ -101,6 +101,52 @@ export class LocalGitTransport implements GitWorktreePort {
         "Existing clone does not belong to this local source; rebuild it from the central repository",
       );
   }
+  /** Check an existing standalone mirror, without cloning or following its URL. */
+  async verifyMirror(repository: string, central: string) {
+    if (
+      (await this.git(repository, ["rev-parse", "--absolute-git-dir"])) !==
+        join(repository, ".git") ||
+      (await this.git(repository, [
+        "config",
+        "--local",
+        "--get",
+        "remote.origin.url",
+      ])) !== central
+    )
+      throw new Error("Local mirror does not belong to the project center");
+    // receive-pack dereferences symbolic tracking refs when updating/pruning.
+    // Only the standard alias is safe (the mirror receiver hides it).
+    const aliases = await this.git(repository, [
+      "for-each-ref",
+      "--format=%(if)%(symref)%(then)%(refname) %(symref)%(end)",
+      "refs/remotes/origin/",
+    ]);
+    if (
+      aliases
+        .split("\n")
+        .some(
+          (line) =>
+            line &&
+            !line.startsWith("refs/remotes/origin/HEAD refs/remotes/origin/"),
+        )
+    )
+      throw new Error("Unexpected symbolic reference in local mirror");
+  }
+  async fetchMirrorHeads(repository: string, central: string) {
+    await this.git(repository, [
+      "fetch",
+      "--atomic",
+      "--prune",
+      "--no-tags",
+      "--no-prune-tags",
+      "--no-recurse-submodules",
+      "--no-auto-maintenance",
+      "--no-write-fetch-head",
+      "--",
+      central,
+      "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+  }
   async fetch(repository: string, source: string): Promise<void> {
     const local = await this.source(source);
     await this.git(repository, [

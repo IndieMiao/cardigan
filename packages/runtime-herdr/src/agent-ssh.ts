@@ -248,13 +248,15 @@ export async function agentUploadPack(
 export async function agentReceivePack(
   config: AgentConfig,
   repository: string,
+  options?: { mirror: true },
 ): Promise<string> {
-  return agentPack(config, repository, "receive-pack");
+  return agentPack(config, repository, "receive-pack", options?.mirror);
 }
 async function agentPack(
   config: AgentConfig,
   repository: string,
   service: "upload-pack" | "receive-pack",
+  mirror = false,
 ): Promise<string> {
   // Validate agentRoot before it is used to bound the repository path.
   if (config.mode === "agent-ssh") validateSshConfig(config);
@@ -268,7 +270,11 @@ async function agentPack(
       "Git pack service requires a configured Agent base repository",
     );
   await checkAgentFiles(config);
-  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
+  // A pruning push must not delete origin/HEAD (which can dereference to main).
+  const receiverOptions = mirror
+    ? "-c receive.hideRefs=refs/remotes/origin/HEAD -c receive.autogc=false "
+    : "";
+  const remote = `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git ${receiverOptions}-c ${shellQuote(`safe.directory=${repository}`)} -c core.hooksPath=/dev/null -c transfer.fsckObjects=true ${service} -- ${shellQuote(repository)}`;
   // Ignore Git's appended path; the command is bound to the host-selected repository.
   return `sh -c ${shellQuote(`exec ${agentSshCommand(config)} ${shellQuote(remote)}`)} --`;
 }
