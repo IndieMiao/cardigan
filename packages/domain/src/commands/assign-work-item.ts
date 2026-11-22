@@ -34,6 +34,7 @@ export interface AssignWorkItemParams extends MachineRequirements {
   employee_id?: string;
   machine_id?: string;
   recovery_source?: "main" | "backup";
+  confirm_same_machine?: boolean;
 }
 
 /** Shared invariant checks; callers establish PM or system authority first. */
@@ -98,16 +99,40 @@ export function assignWorkItem(
         )
       : undefined;
   const recovery = confirmedLoss(previous);
+  const confirmSameMachine = p.confirm_same_machine === true;
+  if (confirmSameMachine) {
+    // A repeat may return the already-created successor, but cannot turn an ordinary assign into a recovery.
+    ensure(
+      recovery ||
+        (previous?.status === "active" &&
+          previous.recovery?.same_machine_confirmed_by &&
+          !hostOpsPending(d.state.events, previous.id)),
+      "validation_failed",
+      "同机恢复需要已确认旧进程退出并已释放的失联指派",
+    );
+    ensure(
+      p.machine_id !== undefined && p.machine_id === previous?.machine_id,
+      "validation_failed",
+      "确认同机恢复时必须显式指定原机器",
+    );
+  }
+  if (recovery || confirmSameMachine)
+    ensure(
+      !automaticTarget &&
+        (p.recovery_source === "main" || p.recovery_source === "backup"),
+      "validation_failed",
+      "失联恢复必须显式选择 main 或 backup 作为恢复来源",
+    );
   if (recovery || retry) {
     ensure(
       !existing.some((a) => hostOpsPending(d.state.events, a.id)),
       "illegal_transition",
-      "Work item has a pending exit confirmation or host operation",
+      "工作项仍有待处理的退出确认或主机运维操作",
     );
     ensure(
       existing.every((a) => a.status === "released"),
       "invariant_violation",
-      "Work item still has an active Assignment",
+      "工作项仍有未释放的指派，不能恢复",
     );
     if (retry) {
       ensure(
@@ -136,15 +161,14 @@ export function assignWorkItem(
       );
     } else if (recovery) {
       ensure(
-        !automaticTarget &&
-          (p.recovery_source === "main" || p.recovery_source === "backup"),
+        p.machine_id !== undefined,
         "validation_failed",
-        "PM must explicitly choose main or backup for recovery",
+        "失联恢复必须显式指定机器",
       );
       ensure(
-        p.machine_id !== undefined && p.machine_id !== previous?.machine_id,
+        p.machine_id !== previous?.machine_id || confirmSameMachine,
         "validation_failed",
-        "Recovery requires another explicit machine",
+        "请指定另一台机器，或显式确认同机恢复（CLI：--confirm-same-machine；MCP：confirm_same_machine=true）",
       );
     }
   } else if (existing.length || item.assignment_id) {
@@ -173,7 +197,7 @@ export function assignWorkItem(
     ensure(
       !p.recovery_source || current.recovery?.source === p.recovery_source,
       "stale_target",
-      "Recovery choice is already fixed",
+      "当前指派的恢复来源已固定，不能更改",
     );
     ensure(
       p.machine_id === undefined || p.machine_id === current.machine_id,
@@ -207,7 +231,7 @@ export function assignWorkItem(
   ensure(
     !p.recovery_source || recovery,
     "validation_failed",
-    "Recovery requires a released remote loss",
+    "失联恢复需要已确认旧进程退出并已释放的失联指派",
   );
   // A pre-launch retry changes the machine, not an already confirmed recovery source.
   const source = retry?.recovery?.source ?? p.recovery_source ?? "main";
@@ -215,7 +239,7 @@ export function assignWorkItem(
   ensure(
     source !== "backup" || backup,
     "validation_failed",
-    "No successful backup is available",
+    "没有可用的成功备份，不能从 backup 恢复",
   );
   const employee = selectEmployee(
     d,
@@ -270,6 +294,9 @@ export function assignWorkItem(
           recovery: {
             previous_assignment_id: previous.id,
             source,
+            ...(confirmSameMachine
+              ? { same_machine_confirmed_by: d.author }
+              : {}),
             ...(source === "backup" && backup ? { backup } : {}),
           },
         }
@@ -316,7 +343,9 @@ export function assignWorkItem(
       type: "status_change",
       body: automaticTarget
         ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（${automaticTarget === "first_producer" ? "首个产出项" : `交付 ${automaticTarget}`}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
-        : `Assigned ${item.id} to ${role.role_id}`,
+        : confirmSameMachine
+          ? `${d.author} 确认 ${item.id} 在原机器 ${machine_id} 从 ${source} 恢复：${previous?.id} → ${id}`
+          : `Assigned ${item.id} to ${role.role_id}`,
       work_item_id: item.id,
     },
   );

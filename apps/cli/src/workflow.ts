@@ -102,7 +102,7 @@ const USAGE = [
   "  cardigan card merge-shadow <C-n> [--project <p>]  查询分类确认、影子记录与实际决定对照",
   "  cardigan card update <C-n> --merge-classification <JSON>  对当前交付记录分类结论",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
-  "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--recovery-source main|backup] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
+  "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--recovery-source main|backup] [--confirm-same-machine] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
   "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
@@ -1081,8 +1081,17 @@ async function assignWorkItem(
     throw new CliError("Token 模式不能使用 assign --start。", EXIT.usage);
   const parsed = parseArgs(
     args.filter((argument) => argument !== "--start"),
-    [],
+    ["confirm-same-machine"],
   );
+  const confirmSameMachine = parsed.flags["confirm-same-machine"];
+  if (
+    confirmSameMachine !== undefined &&
+    (confirmSameMachine !== true || parsed.positionals.length !== 1)
+  )
+    throw new CliError(
+      "--confirm-same-machine 是无值开关，只接受一个工作项编号",
+      EXIT.usage,
+    );
   const workItemId = parseWorkItem(parsed.positionals[0]);
   const roleId = required(parsed.flags, "role");
   const machine = optional(parsed.flags, "machine");
@@ -1126,6 +1135,7 @@ async function assignWorkItem(
             role_id: roleId,
             ...(employee === undefined ? {} : { employee_id: employee }),
             ...(machine === undefined ? {} : { machine_id: machine }),
+            ...(confirmSameMachine ? { confirm_same_machine: true } : {}),
             ...(recoverySource
               ? { recovery_source: recoverySource as "main" | "backup" }
               : {}),
