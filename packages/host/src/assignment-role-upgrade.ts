@@ -89,7 +89,9 @@ async function upgradeRoles(
       .flatMap((p) => tx.assignments.list(p.id))
       .filter(
         (a) =>
-          (a.role_upgrade || a.idle_retirement?.phase === "stopping") &&
+          (a.role_upgrade ||
+            (a.idle_retirement?.phase === "stopping" &&
+              !a.idle_retirement.handoff)) &&
           a.status === "active",
       ).length;
   const candidates = store.uow.read((tx) => {

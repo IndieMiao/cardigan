@@ -253,7 +253,16 @@ test.each([
 ] as const)(
   "$os runtime methods, get probes and events select two machines with identical Assignment and terminal numbers",
   async (platform) => {
-    workers = workers.map((worker) => ({ ...worker, ...platform }));
+    workers = workers.map((worker) => ({
+      ...worker,
+      ...platform,
+      execution: {
+        ...worker.execution,
+        ...(platform.os === "darwin" && {
+          macosCore: { python: "/bin/python3", retiredLaunchdLabel: "fixture" },
+        }),
+      },
+    }));
     store.uow.run((tx) => {
       for (const worker of workers)
         tx.machines.put("fixture", {
@@ -277,13 +286,14 @@ test.each([
       value(await router.resume_or_replace(ref, launch));
       value(await router.human_entry(ref));
       value(await router.release(ref, { force: true }));
+      const eligible = vi.fn(() => true);
       value(
         await router.retire_idle(ref, {
           project_id: "fixture",
           assignment_id: "A-1",
           hangup_ms: 1,
           terminate_ms: 1,
-          before_signal: () => true,
+          before_signal: eligible,
         }),
       );
       value(
@@ -317,6 +327,16 @@ test.each([
       expect(
         (await router.forLaunch("fixture", assignment(id))).machine.id,
       ).toBe(id);
+      // The adapter holds this callback between its first probe and the signal.
+      const gate = calls.mock.calls.find(
+        (c) => c[0] === id && c[1] === "retire_idle",
+      )?.[3].before_signal;
+      expect(gate()).toBe(true);
+      workers = workers.map((w) =>
+        w.machine_id === id ? { ...w, allow_remote_launch: false } : w,
+      );
+      expect(gate()).toBe(false);
+      expect(eligible).toHaveBeenCalledTimes(1);
     }
   },
 );

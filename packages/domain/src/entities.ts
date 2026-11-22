@@ -496,6 +496,8 @@ interface AssignmentFields {
   };
   readonly idle_retirement?: {
     readonly phase: "stopping" | "waiting";
+    /** Idle patrol yielded this generation; stopping still fences every new launch. */
+    readonly handoff?: true;
     /** This claim cannot send signals. Absent on legacy or signal-capable claims. */
     readonly observe_only?: true;
     readonly runtime_ref: RuntimeRef;
