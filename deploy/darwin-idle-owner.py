@@ -109,6 +109,11 @@ def valid_signature(public_pem, message, signature):
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2).returncode == 0
 
 
+def key_id(public_pem):
+    der = ''.join(line for line in public_pem.splitlines() if not line.startswith('-----'))
+    return hashlib.sha256(base64.b64decode(der, validate=True)).hexdigest()
+
+
 def handle(conn, c, child, inspect, public_pem, spent):
     # Only this single-threaded parent reaps child. A dead, not-yet-reaped
     # child still reserves its PID; poll() returning an exit always withdraws.
@@ -128,7 +133,8 @@ def handle(conn, c, child, inspect, public_pem, spent):
         if not eligible():
             return
         nonce = secrets.token_hex(32)
-        conn.sendall((nonce+'\n').encode())
+        # The key id lets a restarted controller refuse to sign for an owner it cannot serve.
+        conn.sendall(f'{nonce} {key_id(public_pem)}\n'.encode())
         signature = stream.readline(256).rstrip(b'\n')
         if (not valid_signature(public_pem, nonce.encode()+b':'+hashlib.sha256(raw).hexdigest().encode(), signature)
                 or not eligible()):
