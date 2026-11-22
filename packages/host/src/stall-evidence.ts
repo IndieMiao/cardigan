@@ -50,10 +50,9 @@ verdict = 'clean'
 for tag in prefixes(['status','--porcelain=v1','-z','--untracked-files=normal','--ignored=matching','--ignore-submodules=none']):
     if tag not in (b'?? ', b'!! '): verdict = 'dirty'
     elif verdict == 'clean': verdict = 'local_only'
-if verdict != 'dirty':
-    # Skip-worktree / assume-unchanged can hide tracked edits from status.
-    for tag in prefixes(['ls-files','-v','-z']):
-        if not tag.startswith(b'H '): verdict = 'unknown'
+# Hidden edits and unmerged index entries are not ordinary retained changes.
+for tag in prefixes(['ls-files','-v','-z']):
+    if not tag.startswith(b'H '): verdict = 'unknown'
 print(verdict)`;
 
 /** No fallback from a remote Assignment to the controller or another registration. */
@@ -173,11 +172,11 @@ export async function stallWorkspace(
       )
         return "unknown";
       const status = (await git([], true)).trimEnd();
-      if (status === "local_only")
+      if (status === "local_only" || status === "dirty")
         return inPlace && role?.worktree === "write" && a.branch && a.base_sha
           ? "local_only"
           : "dirty";
-      if (status !== "clean") return status === "dirty" ? "dirty" : "unknown";
+      if (status !== "clean") return "unknown";
     }
     return "clean";
   } catch {

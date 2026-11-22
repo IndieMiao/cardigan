@@ -810,12 +810,14 @@ async function launch(
   const retained = host.store.uow.read((tx) =>
     retainedWriterForRun(loadCommandState(tx, project), current, assignment),
   );
+  const writerBinding = () =>
+    host.store.uow.read((tx) =>
+      retained?.binding(loadCommandState(tx, project)),
+    );
   const verifyWriter = async () => {
-    if (retained)
-      await retained.verify(
-        host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)),
-        execution,
-      );
+    if (!retained) return;
+    const current = writerBinding();
+    if (current) await retained.verify(current, execution);
   };
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
@@ -1214,6 +1216,7 @@ async function launch(
     const runtime: Pick<RuntimeTargets, "provision" | "resume_or_replace"> =
       host.runtime;
     const enterAdapter = () => {
+      if (retained) writerBinding();
       if (publication) requireTarget();
       publication?.assertCurrent();
       publication?.update("provisioning", { provision_attempted: true });
@@ -1221,7 +1224,7 @@ async function launch(
     // The router has asynchronous target checks of its own. Journal at the
     // actual adapter boundary; an opaque runtime must be fenced before entry.
     const boundary: [] | [() => void] =
-      publication && host.runtime instanceof RuntimeTargets
+      (publication || retained) && host.runtime instanceof RuntimeTargets
         ? [enterAdapter]
         : [];
     if (!boundary.length) enterAdapter();

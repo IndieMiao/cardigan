@@ -15,6 +15,7 @@ import {
   type Runtime,
   recordDecision,
   requestDecision,
+  stopWorkItemAssignment,
 } from "@cardigan/domain";
 import { HostOpsService } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
@@ -426,6 +427,9 @@ test.each([
   "replaced_at_launch",
   "changed_access_at_launch",
   "dirty",
+  "staged_and_unstaged",
+  "shared_at_launch",
+  "stopped_at_launch",
   "masked_edit",
   "skipped_edit",
   "replaced_during_backup",
@@ -436,9 +440,22 @@ test.each([
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
-    const keepsMaterial = mode === "local_only" || mode === "ignored_only";
+    const keepsMaterial = [
+      "local_only",
+      "ignored_only",
+      "local_only_with_tracked_edit",
+    ].includes(mode);
+    const trackedEdit = [
+      "dirty",
+      "staged_and_unstaged",
+      "local_only_with_tracked_edit",
+      "shared_at_launch",
+    ].includes(mode);
     const resumes =
-      mode === "clean" || mode === "monitor_refresh" || keepsMaterial;
+      mode === "clean" ||
+      mode === "monitor_refresh" ||
+      keepsMaterial ||
+      (trackedEdit && mode !== "shared_at_launch");
     const backedUp = resumes || mode.endsWith("_at_launch");
     const s = scenario(),
       a = s.target.assignment,
@@ -495,10 +512,13 @@ test.each([
         join(workspace, ".git", "info", "exclude"),
         "local-material*\n",
       );
-    if (keepsMaterial || mode === "local_only_with_tracked_edit")
+    if (keepsMaterial)
       writeFileSync(join(workspace, privateName), "retained fixture");
-    if (mode === "dirty" || mode === "local_only_with_tracked_edit")
-      writeFileSync(join(workspace, "source"), "tracked edit");
+    if (mode === "staged_and_unstaged") {
+      writeFileSync(join(workspace, "source"), "staged fixture");
+      git("add", "--", "source");
+    }
+    if (trackedEdit) writeFileSync(join(workspace, "source"), "tracked edit");
     const index = readFileSync(join(workspace, ".git", "index"));
     s.runtime.observe_retirement = vi.fn(async () => ({
       ok: false as const,
@@ -641,7 +661,15 @@ test.each([
           expect(readFileSync(join(workspace, privateName), "utf8")).toBe(
             "retained fixture",
           );
+        }
+        if (trackedEdit || keepsMaterial) {
           expect(readFileSync(join(workspace, ".git", "index"))).toEqual(index);
+          expect(readFileSync(join(workspace, "source"), "utf8")).toBe(
+            trackedEdit ? "tracked edit" : "initial",
+          );
+          expect(git("show", ":source")).toBe(
+            mode === "staged_and_unstaged" ? "staged fixture" : "initial",
+          );
           expect(git("rev-parse", "HEAD")).toBe(sha);
           expect(git("ls-tree", "-r", "--name-only", sha)).toBe("source");
           expect(JSON.stringify(f.state().events)).not.toContain(
@@ -674,7 +702,25 @@ test.each([
         expect(handoffs[0]?.body).not.toContain(workspace);
       } else if (backedUp) {
         const kept = `${workspace}-preserved`;
-        if (mode === "changed_access_at_launch") {
+        if (mode === "stopped_at_launch") {
+          f.apply((state, actor, ports) =>
+            stopWorkItemAssignment(
+              state,
+              actor,
+              { assignment_id: a.id, reason: "Fixture stop" },
+              ports,
+            ),
+          );
+        } else if (mode === "shared_at_launch") {
+          const other = f.create().assignment;
+          f.store.uow.run((tx) =>
+            tx.assignments.put(f.project, {
+              ...other,
+              machine_id: a.machine_id,
+              worktree_path: workspace,
+            }),
+          );
+        } else if (mode === "changed_access_at_launch") {
           // Make the mode differ even on hosts with a nonstandard umask.
           const original = statSync(workspace).mode;
           chmodSync(workspace, original ^ 0o010);
@@ -696,7 +742,17 @@ test.each([
         );
         if (mode === "missing_at_launch")
           expect(existsSync(workspace)).toBe(false);
-        if (mode !== "changed_access_at_launch")
+        if (mode === "shared_at_launch")
+          expect(readFileSync(join(workspace, "source"), "utf8")).toBe(
+            "tracked edit",
+          );
+        if (
+          ![
+            "changed_access_at_launch",
+            "shared_at_launch",
+            "stopped_at_launch",
+          ].includes(mode)
+        )
           expect(
             execFileSync("git", ["-C", kept, "rev-parse", "HEAD"], {
               encoding: "utf8",

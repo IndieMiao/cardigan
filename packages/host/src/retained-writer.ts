@@ -7,6 +7,8 @@ import {
   eventsOfType,
   type Run,
   type RuntimeRef,
+  sharedStallRegistration,
+  stoppedByHuman,
 } from "@cardigan/domain";
 import {
   agentProcessCommand,
@@ -156,15 +158,46 @@ export function retainedWriterForRun(
   )
     return reject();
   const sha = row.sha;
+  const binding = (fresh: CommandState) => {
+    const current = fresh.assignments.find((v) => v.id === a.id);
+    if (
+      current?.status !== "active" ||
+      current.runtime_ref ||
+      current.external ||
+      current.role_upgrade ||
+      current.idle_retirement ||
+      current.work_item_id !== a.work_item_id ||
+      current.employee_id !== a.employee_id ||
+      current.role_id !== a.role_id ||
+      current.role_version !== a.role_version ||
+      current.machine_id !== a.machine_id ||
+      current.worktree_path !== a.worktree_path ||
+      current.branch !== a.branch ||
+      current.base_sha !== a.base_sha ||
+      stoppedByHuman(fresh.events, a.id) ||
+      sharedStallRegistration(fresh, {
+        ...current,
+        runtime_ref: action.runtime_ref,
+      }) ||
+      !fresh.runs.some(
+        (r) =>
+          r.id === run.id && r.assignment_id === a.id && r.status === "queued",
+      ) ||
+      fresh.runs.some(
+        (r) =>
+          r.id !== run.id &&
+          r.assignment_id === a.id &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      )
+    )
+      return reject();
+    return current;
+  };
   return {
+    binding,
     tree: { path: a.worktree_path, branch: a.branch, base_sha: a.base_sha },
-    verify: async (
-      current: Assignment | undefined,
-      execution: ExecutionConfig,
-    ) => {
+    verify: async (current: Assignment, execution: ExecutionConfig) => {
       if (
-        current?.status !== "active" ||
-        current.runtime_ref ||
         (await writerPlacementSeal(
           state.project_id,
           current,
