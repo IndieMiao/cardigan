@@ -12,7 +12,6 @@ import {
 import {
   type LaunchConfig,
   LaunchConfigError,
-  PERMISSION_MODES,
   requiredSecretKeys,
   validateLaunchSecrets,
 } from "@cardigan/roles";
@@ -29,6 +28,7 @@ import {
   type Change,
   candidate,
   changeSchema,
+  PERMISSION_MODES,
   providerUsers,
 } from "./launch-settings-change.js";
 import { ProfileChecks, providerCheck } from "./launch-settings-check.js";

@@ -1,4 +1,4 @@
-import { HARNESSES, PERMISSION_MODES } from "@cardigan/roles";
+import { HARNESSES, type Harness } from "@cardigan/roles";
 import { isAlias, isMap, isScalar } from "yaml";
 import { z } from "zod";
 import { HttpRejection } from "./http.js";
@@ -10,6 +10,27 @@ import {
   type SettingsFile,
 } from "./launch-settings-file.js";
 import { planKeys, secretKey, secretPlan } from "./launch-settings-secrets.js";
+
+/**
+ * C-564: values the launch settings form offers for a profile's
+ * `permission_mode`, per harness. Only Claude Code takes the parameter
+ * (`--permission-mode`, choices of Claude Code 2.1.318); the other harnesses
+ * have none, so nothing is selectable there. launch.yaml itself is not
+ * restricted: a hand-written value outside the list stays as it is.
+ */
+export const PERMISSION_MODES: Readonly<Record<Harness, readonly string[]>> =
+  Object.freeze({
+    "claude-code": Object.freeze([
+      "plan",
+      "manual",
+      "acceptEdits",
+      "dontAsk",
+      "auto",
+      "bypassPermissions",
+    ]),
+    codex: Object.freeze([]),
+    pi: Object.freeze([]),
+  });
 
 /** Provider protocols the host accepts (`packages/roles` provider schema). */
 export const PROVIDER_APIS = [

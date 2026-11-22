@@ -51,7 +51,6 @@ export {
   HARNESSES,
   type Harness,
   isHarness,
-  PERMISSION_MODES,
 } from "./harness.js";
 export {
   type ImportClaudeSettingsInput,
