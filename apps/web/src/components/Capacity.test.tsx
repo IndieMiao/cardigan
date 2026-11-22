@@ -79,9 +79,10 @@ test.each([
   if (route === "settings") {
     fireEvent.click(screen.getByRole("button", { name: "员工" }));
     expect(screen.getByRole("button", { name: /Agent 4\/10/u })).toBeTruthy();
-    // C-511: the old entry leads to the machine page, where each machine's
-    // detail edits its limit; merge check targets stay listed, read only.
-    fireEvent.click(screen.getByRole("button", { name: "并发与容量" }));
+    // C-511: the machine page, where each machine's detail edits its
+    // limit; merge check targets stay listed, read only. C-576 removed the
+    // duplicate 并发与容量 entry.
+    fireEvent.click(screen.getByRole("button", { name: "机器" }));
     await screen.findByRole("heading", { name: "机器" });
     expect(window.location.hash).toContain("tab=machines");
     expect(screen.getByRole("heading", { name: "合并检查" })).toBeTruthy();
@@ -103,8 +104,12 @@ test("hover, keyboard and touch expose machine/CI details; Escape dismisses", as
   fireEvent.pointerEnter(button, { pointerType: "mouse" });
   let tooltip = await screen.findByRole("tooltip");
   expect(tooltip.textContent).toContain("第二台工作机 · Agent");
-  expect(tooltip.textContent).toContain("全部 5 · 非常驻 3 / 上限 6 / 排队 2");
-  expect(tooltip.textContent).toContain("全部 1 · 非常驻 1 / 上限 4 / 排队 0");
+  // C-576: 占用 adds this host's CI slots (3 + 2), as the scheduler does.
+  expect(tooltip.textContent).toContain("全部 5 · 占用 5 / 上限 6 / 排队 2");
+  expect(tooltip.textContent).toContain("全部 1 · 占用 1 / 上限 4 / 排队 0");
+  expect(tooltip.textContent).not.toContain("非常驻");
+  expect(tooltip.textContent).toContain("上限可在设置 → 机器的详情中修改。");
+  expect(tooltip.textContent).not.toContain("并发与容量”中");
   expect(tooltip.textContent).toContain("本机 CI 另占 2 个 Agent 名额");
   expect(tooltip.textContent).toContain(
     "常驻 PM（Office / Ops）和主机运维不占额度",

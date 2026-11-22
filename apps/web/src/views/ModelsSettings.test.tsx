@@ -58,7 +58,6 @@ test("settings navigation lists 模型 after the existing panels", async () => {
       .map((b) => b.textContent),
   ).toEqual([
     "偏好",
-    "并发与容量",
     "授权",
     "飞书绑定",
     "角色",
