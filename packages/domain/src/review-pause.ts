@@ -12,9 +12,10 @@ export function pauseOwners(p: ReviewPause) {
     ? p.confirmers.filter((id) => !p.confirmations.some((c) => c.by === id))
     : [p.owner];
 }
-export function pauseLabel(p: ReviewPause) {
+export function pauseLabel(p: ReviewPause, decider: Decision["decider"]) {
   if (!p.proposal) return "待方案";
-  return pauseOwners(p).length ? "待确认" : "待 PM 结案恢复";
+  if (pauseOwners(p).length) return "待确认";
+  return decider === "human" ? "待你结案恢复" : "待 PM 结案恢复";
 }
 
 const discussions = new WeakMap<readonly Decision[], Map<string, Decision>>();

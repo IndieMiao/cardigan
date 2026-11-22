@@ -1,4 +1,5 @@
 import {
+  deriveCardFields,
   dispatchRun,
   dispatchRunKind,
   queueRun,
@@ -429,3 +430,36 @@ test("managed pause routes the owner, two reviewers, settlement and both reminde
   expect(f.decide(2, "raise_limit").ok).toBe(true);
   expect(recipients(notice)).toEqual([]);
 });
+
+test.each(["before", "after"])(
+  "closure follows human escalation %s the last vote",
+  async (when) => {
+    const f = await sharedReviewFixture();
+    f.review(2, [sharedBug]);
+    f.review(3, [], f.refs());
+    expect(f.decide(3, "pause").ok).toBe(true);
+    if (when === "before") expect(f.decide(3, "escalate").ok).toBe(true);
+    f.confirmPause();
+    if (when === "after") expect(f.decide(3, "escalate").ok).toBe(true);
+    const notice = f.state.events.findLast(
+      (e) => e.type === "review_pause_notice",
+    );
+    const q = f.state.decisions[0];
+    const card = f.state.cards.find((c) => c.id === q?.card_id);
+    if (!notice || !card || !q) throw Error("missing closure notice");
+    expect(notice.payload).toMatchObject({
+      audience: when === "before" ? "human" : "pm_ops",
+    });
+    expect(
+      routeEvent({ event: notice, snapshot: f.state }).notifications.map(
+        (n) => n.recipient,
+      ),
+    ).toEqual([{ kind: "needs_you" }]);
+    expect(deriveCardFields({ ...f.state, card })).toMatchObject({
+      why: `待你结案恢复 ${q.id}`,
+      waiting_on: [{ review_phase: "待你结案恢复" }],
+      next_owners: [{ kind: "human", ref: "human" }],
+    });
+    expect(f.decide(3, "raise_limit").ok).toBe(false);
+  },
+);

@@ -16,6 +16,7 @@ export interface WaitingOnItem {
   readonly review_phase?:
     | "待方案"
     | "待确认"
+    | "待你结案恢复"
     | "待 PM 结案恢复"
     | "已允许返工但未派发";
   /** Short human label, e.g. `等你拍板 Q-1`. */

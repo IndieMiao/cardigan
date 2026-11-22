@@ -17,6 +17,8 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
+  parkedPauseRepair,
+  pauseDiscussionDecision,
   queuedRun,
   type Run,
   reviewWakeBlocked,
@@ -51,6 +53,29 @@ export function notificationBlocked(
 export type InboxTarget =
   | { mode: "continue" | "queued"; run: Run }
   | { mode: "inbox"; run?: undefined };
+
+/** While an old repair waits, its discussion must be the cause of a fresh
+ * turn even when bundled with an earlier, unrelated notification. */
+export function inboxCause(
+  state: CommandState,
+  owner: Assignment,
+  notes: readonly Notification[],
+) {
+  if (notes.length < 2) return notes[0];
+  return (
+    notes.find(
+      (n) =>
+        !n.run_id &&
+        pauseDiscussionDecision(
+          state,
+          owner,
+          eventById(state.events, n.event_id),
+        ),
+    ) ??
+    notes.find((n) => !n.run_id) ??
+    notes[0]
+  );
+}
 
 /** Select the Run the bell will address, before applying start-only gates. */
 export function inboxTarget(
@@ -88,8 +113,25 @@ export function inboxTarget(
   }
   if (running && notes.length && owner.runtime_ref && unreceivedBell(running))
     return { reason: "bell_unreceived" };
+  // A released repair must keep its own bell, even when the discussion turn
+  // has not called finish yet. Consuming the bell there would strand the queue.
+  if (running && owner.scope === "work_item" && queued?.kind === "rework")
+    return { reason: "unfinished_run" };
   if (canContinue) return { mode: "continue", run: running };
-  if (!queued) return { mode: "inbox" };
+  if (!queued) {
+    const first = queuedRun(state.runs, owner.id);
+    const parked = first && parkedPauseRepair(state, owner, first);
+    if (
+      parked &&
+      pauseDiscussionDecision(
+        state,
+        owner,
+        eventById(state.events, inboxCause(state, owner, notes)?.event_id),
+      ) !== parked.id
+    )
+      return { reason: "review_paused" };
+    return { mode: "inbox" };
+  }
   if (owner.scope === "standing" && notes.length) {
     if (!eventById(state.events, queued.trigger_event_id))
       return { reason: "trigger_missing" };
@@ -673,7 +715,7 @@ function candidateResult(
   const queued = target.mode === "queued" ? target.run : undefined;
   if (queued && unreadableCommentTrigger(state, queued))
     return omit("unreadable_trigger");
-  const cause = notes.find((n) => !n.run_id) ?? notes[0];
+  const cause = inboxCause(state, assignment, notes);
   const trigger = queued?.trigger_event_id ?? cause?.event_id;
   if (assignmentCardHeld(assignment, state, trigger)) return omit("card_held");
   const event = eventById(state.events, trigger);

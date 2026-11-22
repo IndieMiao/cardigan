@@ -254,13 +254,18 @@ test("legacy findings without an impact cannot enter a new verdict, directly or 
   expect(state.reviews[0]?.issues).toEqual([legacy]);
 });
 
-test("continuing after a new delivery resumes its reviewers, not the old repair", async () => {
+test("a historical unmanaged pause with a newer delivery resumes its reviewers, not the old repair", async () => {
   const f = await fixture();
   f.review(2, [first]);
   f.review(3, [], f.refs());
   expect(f.decide(2, "pause").ok).toBe(true);
-  f.confirmPause();
-  const newer = apply(f.state, await parallelDelivery(f.state, f.io));
+  // Reopen a pre-C-569 pause: it had no plan, so a replacement could
+  // already exist. New managed pauses reject the write until settlement.
+  const legacy = {
+    ...f.state,
+    decisions: f.state.decisions.map(({ review_pause: _plan, ...q }) => q),
+  };
+  const newer = apply(legacy, await parallelDelivery(legacy, f.io));
   const q = newer.decisions[0];
   if (!q) throw Error("Missing shared pause");
   const continued = value(

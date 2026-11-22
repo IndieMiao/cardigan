@@ -294,7 +294,7 @@ export function remindDecisionFollowups(
           d,
           q,
           office ? "pm_office" : "pm_ops",
-          `${q.id} 暂停复查逾期，${pauseLabel(pause)}，请 ${office ? "PM Office" : "PM Ops"} 跟进。`,
+          `${q.id} 暂停复查逾期，${pauseLabel(pause, q.decider)}，请 ${office ? "PM Office" : "PM Ops"} 跟进。`,
         );
         reminded.push(q.id);
         continue;

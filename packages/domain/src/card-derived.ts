@@ -236,9 +236,9 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "decision",
       ref: decision.id,
-      ...(pause ? { review_phase: pauseLabel(pause) } : {}),
+      ...(pause ? { review_phase: pauseLabel(pause, decision.decider) } : {}),
       label: pause
-        ? `${pauseLabel(pause)} ${decision.id}`
+        ? `${pauseLabel(pause, decision.decider)} ${decision.id}`
         : `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
     });
   }
@@ -384,8 +384,10 @@ export function deriveWhy(input: CardDerivedInput): string {
   const decisions = unresolvedBlockingDecisions(input);
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
-    const pause = decisions[0] && pendingPause(decisions[0]);
-    if (pause) return clamp(`${pauseLabel(pause)} ${first}`);
+    const decision = decisions[0];
+    const pause = decision && pendingPause(decision);
+    if (decision && pause)
+      return clamp(`${pauseLabel(pause, decision.decider)} ${first}`);
     const who =
       decisions[0]?.decider === "system"
         ? "等待系统合并"

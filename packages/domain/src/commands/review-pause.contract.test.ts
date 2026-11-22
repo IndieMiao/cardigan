@@ -3,12 +3,15 @@ import {
   type CommandState,
   deriveCardFields,
   postComment,
+  prepareDelivery,
   type ReviewPauseInput,
   remindDecisionFollowups,
   reviewWakeBlocked,
+  submitDelivery,
   type TimelineEntryId,
   updateWorkItem,
 } from "../index.js";
+import { parallelParams } from "./parallel-review/test-fixtures.js";
 import { first, sharedReviewFixture } from "./shared-review/test-fixtures.js";
 import { actor, apply, id, value } from "./test-fixtures.js";
 
@@ -247,4 +250,50 @@ test("C-555/Q-1108 replay: two confirmations, 09:49 explicit release; permission
   expect(f.view().why).not.toContain("未派发");
   f.time("10:16:19");
   expect(f.tick()).toEqual([]);
+});
+
+test("an unclosed pause blocks both delivery preparation and commit, even after the last vote", async () => {
+  const f = await sharedReviewFixture();
+  f.review(2, [first]);
+  f.review(3, [], f.refs());
+  const verifier = {
+    verify: async () => ({
+      ok: true as const,
+      value: [
+        {
+          kind: "commit" as const,
+          details: { sha: parallelParams.subject.value },
+        },
+      ],
+    }),
+  };
+  const prepare = () =>
+    prepareDelivery(f.state, actor(), parallelParams, verifier);
+  const preparedBeforePause = value(await prepare());
+  expect(f.decide(3, "pause").ok).toBe(true);
+  const denied = {
+    ok: false,
+    error: {
+      code: "illegal_transition",
+      message: expect.stringContaining("暂停尚未结案"),
+    },
+  };
+  for (const confirmed of [false, true]) {
+    if (confirmed) f.confirmPause();
+    expect(await prepare()).toMatchObject(denied);
+    expect(
+      submitDelivery(
+        f.state,
+        actor(),
+        parallelParams,
+        preparedBeforePause,
+        f.io,
+      ),
+    ).toMatchObject(denied);
+    expect(
+      f.state.deliveries.filter((d) => d.supersedes === f.target.id),
+    ).toEqual([]);
+  }
+  expect(f.decide(3, "raise_limit").ok).toBe(true);
+  expect((await prepare()).ok).toBe(true);
 });

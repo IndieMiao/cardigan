@@ -17,6 +17,7 @@ import type {
 import {
   abortDispatch,
   canDispatchRun,
+  canParkForDiscussion,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   idleWakeGuard,
@@ -737,15 +738,17 @@ async function launch(
     (input.actor.kind !== "system" ||
       JSON.stringify(assignment.runtime_ref) !==
         JSON.stringify(input.replacement.previous) ||
-      host.store.uow
-        .read((tx) => tx.runs.list(project))
-        .some(
+      host.store.uow.read((tx) => {
+        const state = loadCommandState(tx, project);
+        return state.runs.some(
           (r) =>
             r.assignment_id === assignment.id &&
             r.id !== current.id &&
             !standingRunDormant(assignment, r) &&
+            !canParkForDiscussion(state, assignment, r, current) &&
             !["completed", "failed", "cancelled"].includes(r.status),
-        ))
+        );
+      }))
   )
     throw new HostLaunchError(
       "directory preparation",

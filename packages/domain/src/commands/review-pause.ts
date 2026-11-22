@@ -3,9 +3,11 @@ import type {
   ReviewPause,
   ReviewPauseInput,
   TimelineEntry,
+  WorkItem,
 } from "../entities.js";
 import type { AssignmentId } from "../ids.js";
 import { pauseOwners, pendingPause } from "../review-pause.js";
+import { repairTarget } from "../shared-review-wake.js";
 import { type CommandDraft, ensure } from "./core.js";
 
 function participant(d: CommandDraft, q: Decision, id: AssignmentId) {
@@ -121,6 +123,23 @@ export function prepareReviewPause(
     confirmations: [],
   };
 }
+export function checkPauseDelivery(d: CommandDraft, item: WorkItem) {
+  const pause = d.list("decisions").find((q) => {
+    if (q.card_id !== item.card_id || !pendingPause(q)) return false;
+    const id = repairTarget(q)?.delivery_id;
+    return (
+      (id && d.get("deliveries", id).work_item_id === item.id) ||
+      q.affected_work_items.some((w) => {
+        const affected = d.work(w);
+        return (
+          affected.kind === "verify" && affected.target_work_item_id === item.id
+        );
+      })
+    );
+  });
+  ensure(!pause, "illegal_transition", `返工暂停尚未结案：${pause?.id}`);
+}
+
 export function instructPauseOwner(
   d: CommandDraft,
   q: Decision,
@@ -136,13 +155,14 @@ export function instructPauseOwner(
 export function pauseNotice(
   d: CommandDraft,
   q: Decision,
-  audience: "pm_ops" | "pm_office",
+  audience: "pm_ops" | "pm_office" | "human",
   body: string,
+  closure = false,
 ) {
   d.emit(
     "review_pause_notice",
     q.card_id,
-    { decision_id: q.id, audience, body },
+    { decision_id: q.id, audience, body, ...(closure ? { closure } : {}) },
     { type: "system", author: "system", decision_id: q.id, body },
     { kind: "system", project_id: d.state.project_id },
   );
@@ -208,8 +228,9 @@ export function recordPauseComment(
       pauseNotice(
         d,
         q,
-        "pm_ops",
+        q.decider === "human" ? "human" : "pm_ops",
         `${q.id} 方案 ${entry.reply_to} 已全部确认，请按原拍板权限结案并恢复返工。`,
+        true,
       );
   }
 }

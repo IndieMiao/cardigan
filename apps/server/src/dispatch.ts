@@ -35,6 +35,7 @@ import {
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
+  parkedPauseRepair,
   pendingPrecheckConflict,
   pmNotificationState,
   providerAdmission,
@@ -114,6 +115,7 @@ import {
   type Candidate,
   CandidateIndex,
   type InboxTarget,
+  inboxCause,
   inboxTarget,
   notificationBlocked,
   sameInboxTarget,
@@ -808,7 +810,8 @@ export class Dispatcher {
         (unfinishedRun(r) &&
           r.id !== continuing &&
           r.id !== queued?.id &&
-          !standingRunDormant(a, r)),
+          !standingRunDormant(a, r) &&
+          !parkedPauseRepair(state, a, r)),
     )
       ? "unfinished_run"
       : undefined;
@@ -1778,7 +1781,7 @@ export class Dispatcher {
               pmNotificationState(state, n) === "obsolete"
             ),
         );
-      if (a.scope === "standing") {
+      {
         const target = inboxTarget(state, a, ready);
         if ("reason" in target) return skip(target.reason);
         if (!sameInboxTarget(expectedTarget, target))
@@ -1809,7 +1812,7 @@ export class Dispatcher {
         )
       )
         return skip("bell_claimed");
-      const cause = ready.find((n) => !n.run_id) ?? ready[0];
+      const cause = inboxCause(state, a, ready);
       if (!cause && !waiting) return skip("no_pending_work");
       let run =
         continuing ??

@@ -19,6 +19,7 @@ import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { originalRunTrigger } from "../run-trigger.js";
 import {
+  canParkForDiscussion,
   reviewDiscussionInstruction,
   reviewRunWakeDisposition,
   reviewWakeBlocked,
@@ -144,8 +145,11 @@ function requireTestReviewBudget(
 function exclusive(
   d: CommandDraft,
   assignment: Assignment,
-  run_id?: RunId,
-  path = assignment.worktree_path,
+  {
+    run,
+    path = assignment.worktree_path,
+    discussion,
+  }: { run?: Run; path?: string | undefined; discussion?: Event | undefined },
 ) {
   ensure(
     !d
@@ -182,7 +186,7 @@ function exclusive(
   ensure(
     !d.list("runs").some((r) => {
       if (
-        r.id === run_id ||
+        r.id === run?.id ||
         (!unfinished(r) &&
           !r.dispatch_stop &&
           !r.inactivity_stop &&
@@ -194,8 +198,10 @@ function exclusive(
       if (
         owner.id === assignment.id &&
         standingRunDormant(assignment, r) &&
-        (run_id !== undefined || heldStandingRun(assignment, r, d.state))
+        (run !== undefined || heldStandingRun(assignment, r, d.state))
       )
+        return false;
+      if (canParkForDiscussion(d.state, assignment, r, run, discussion))
         return false;
       return (
         owner.id === assignment.id ||
@@ -330,7 +336,7 @@ export function queueRunInDraft(
     });
     if (queued) {
       requireTestReviewBudget(d, assignment, originalRunTrigger(state, queued));
-      exclusive(d, assignment, queued.id);
+      exclusive(d, assignment, { run: queued });
       snapshot(queued, assignment);
       return queued;
     }
@@ -358,7 +364,12 @@ export function queueRunInDraft(
       "A Run already exists for this trigger event",
     );
   }
-  exclusive(d, assignment);
+  exclusive(d, assignment, {
+    discussion:
+      p.kind === "followup"
+        ? eventById(state.events, p.trigger_event_id)
+        : undefined,
+  });
   return createQueuedRun(d, assignment, p);
 }
 
@@ -644,7 +655,7 @@ export function dispatchRun(
       "validation_failed",
       "A worktree requires a valid base SHA",
     );
-    exclusive(d, assignment, run.id, path);
+    exclusive(d, assignment, { run, path });
     if (p.replacement) {
       ensure(
         actor.kind === "system" && p.runtime_ref !== undefined,
@@ -786,7 +797,7 @@ export function acknowledgeRun(
       "审核已暂停返工或目标已变更，请等待当前任务",
     );
     requireTestReviewBudget(d, assignment, originalRunTrigger(state, run));
-    exclusive(d, assignment, run.id);
+    exclusive(d, assignment, { run });
     if (run.test_review && assignment.scope === "work_item") {
       const item = d.work(assignment.work_item_id);
       const fresh = incrementalTestReview(

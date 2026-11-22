@@ -1840,7 +1840,10 @@ export function routeEvent(input: RouteInput): RouteResult {
         draft,
         payloadString(input.event.payload, "audience") === "pm_office"
           ? recipient.pm_office()
-          : recipient.pm_ops(),
+          : (input.event.payload as { closure?: boolean }).closure &&
+              q.decider === "human"
+            ? recipient.needs_you()
+            : recipient.pm_ops(),
         "decision",
         "6.4/instruction",
         payloadString(input.event.payload, "body") ?? "请跟进暂停决定",

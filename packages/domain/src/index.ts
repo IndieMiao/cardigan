@@ -262,6 +262,9 @@ export * from "./runtime-port.js";
 export * from "./session-maintenance.js";
 export { sharedMustFixes } from "./shared-findings.js";
 export {
+  canParkForDiscussion,
+  parkedPauseRepair,
+  pauseDiscussionDecision,
   repairWakeTarget,
   resumableReviewWithdrawal,
   reviewDiscussionInstruction,

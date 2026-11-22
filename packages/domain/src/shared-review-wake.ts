@@ -51,6 +51,83 @@ export function sharedReworkItem(state: State, q: Decision) {
   );
 }
 
+/** An unclaimed repair queue entry is not an execution. Keep it intact while
+ * its exact target is in managed pause; never set aside a live or settling run. */
+export function parkedPauseRepair(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  if (
+    owner.scope !== "work_item" ||
+    owner.id !== run.assignment_id ||
+    run.kind !== "rework" ||
+    run.status !== "queued" ||
+    run.started_at ||
+    run.dispatch_stop ||
+    run.inactivity_stop ||
+    run.bell_delivery ||
+    run.preparation_retry ||
+    (run.launch_publication && run.launch_publication.phase !== "exited")
+  )
+    return;
+  const target = repairDelivery(state, run);
+  if (
+    target?.status !== "rejected" ||
+    target.work_item_id !== owner.work_item_id
+  )
+    return;
+  return state.decisions.find((q) => {
+    const bound = repairTarget(q);
+    return (
+      !!pendingPause(q) &&
+      bound?.delivery_id === target.id &&
+      bound.target_sha === target.subject.value
+    );
+  });
+}
+
+export function pauseDiscussionDecision(
+  state: CommandState,
+  owner: Assignment,
+  event?: Event,
+) {
+  if (
+    owner.scope !== "work_item" ||
+    event?.type !== "instruction_issued" ||
+    event.actor.kind !== "system" ||
+    event.actor.project_id !== state.project_id
+  )
+    return;
+  const p = event.payload as { pause_recipient?: string; decision_id?: string };
+  if (p?.pause_recipient !== owner.id) return;
+  const item = state.work_items.find((w) => w.id === owner.work_item_id);
+  if (item && reviewDiscussionInstruction(item, event, state.decisions))
+    return p.decision_id;
+}
+
+/** Only the separately validated discussion for this decision may coexist
+ * with the parked queue, including during host replacement and recovery. */
+export function canParkForDiscussion(
+  state: CommandState,
+  owner: Assignment,
+  queued: Run,
+  current?: Run,
+  newDiscussion?: Event,
+) {
+  const pause = parkedPauseRepair(state, owner, queued);
+  return (
+    !!pause &&
+    pauseDiscussionDecision(
+      state,
+      owner,
+      current?.kind === "followup"
+        ? originalRunTrigger(state, current)
+        : newDiscussion,
+    ) === pause.id
+  );
+}
+
 /** Only domain-issued, item-addressed instructions can start a discussion. A
  * proposal request must belong to the assigned strategy, not match prose. */
 export function reviewDiscussionInstruction(
@@ -230,6 +307,10 @@ function boundReceiptTargetCurrent(
 export function repairWakeTarget(state: CommandState, run: Run) {
   if (run.kind !== "rework" || run.status !== "dispatched" || run.started_at)
     return;
+  return repairDelivery(state, run);
+}
+
+function repairDelivery(state: CommandState, run: Run) {
   const e = originalRunTrigger(state, run);
   const p = e?.payload as Record<string, unknown> | null;
   const id =
