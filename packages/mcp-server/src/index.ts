@@ -36,7 +36,12 @@ export {
   deliveryTools,
   type PinDeliveryRequest,
 } from "./commands/delivery-tools.js";
-export { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
+export {
+  loadCommandState,
+  persistEffect,
+  projectRepositories,
+  unwrap,
+} from "./commands/execute.js";
 export {
   type HostOpsToolOptions,
   hostOpsTools,

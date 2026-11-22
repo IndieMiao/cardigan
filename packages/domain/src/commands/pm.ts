@@ -178,6 +178,129 @@ export function createCard(
   );
 }
 
+export interface CardCreationOptions {
+  /**
+   * Story children may name only a repository registered for this project
+   * (C-587); plain create_card keeps its explicit repo + branch semantics.
+   */
+  readonly registered_repo_only?: boolean;
+}
+
+/** Check the creation form without allocating IDs or changing the draft. */
+export function prepareCardCreation(
+  d: CommandDraft,
+  p: CreateCardParams,
+  options: CardCreationOptions = {},
+) {
+  const state = d.state;
+  d.pm();
+  d.projectAccess();
+  const acceptance = p.acceptance_criteria ?? [];
+  text(p.title, "title");
+  text(p.goal, "goal");
+  ensure(
+    !p.template || !p.template_id || p.template === p.template_id,
+    "validation_failed",
+    "template 与 template_id 不一致",
+  );
+  const templateId = p.template_id ?? p.template ?? "dev";
+  const template = creatableCardTemplate(d, templateId);
+  const story = isStoryTemplate(template);
+  validateCardTemplate(template, state.roles, { story });
+  ensure(
+    p.work_item_requirements === undefined ||
+      (p.work_item_requirements !== null &&
+        typeof p.work_item_requirements === "object" &&
+        !Array.isArray(p.work_item_requirements) &&
+        Object.keys(p.work_item_requirements).every((key) =>
+          template.work_items.some((w) => w.key === key),
+        )),
+    "validation_failed",
+    "work_item_requirements 必须按模板工作项 key 指定需求",
+  );
+  const registry = d.ports?.project_repositories;
+  const only = registry?.length === 1 ? registry[0] : undefined;
+  const repo =
+    p.repo ??
+    (template.requires_repo || p.base_branch !== undefined
+      ? only?.repo
+      : undefined);
+  // Only the registration naming this very repository may supply its branch.
+  const registration =
+    repo === undefined ? undefined : registry?.find((r) => r.repo === repo);
+  const base_branch = p.base_branch ?? registration?.base_branch ?? undefined;
+  if (template.requires_repo || repo !== undefined) text(repo, "repo");
+  ensure(
+    !options.registered_repo_only ||
+      registry === undefined ||
+      repo === undefined ||
+      registration !== undefined,
+    "validation_failed",
+    `仓库（repo）${repo} 不是当前项目登记的仓库`,
+  );
+  if (template.requires_repo || repo !== undefined || base_branch !== undefined)
+    text(base_branch, "base_branch");
+  ensure(
+    base_branch === undefined || repo !== undefined,
+    "validation_failed",
+    "基线分支需要仓库（repo）",
+  );
+  ensure(
+    Array.isArray(acceptance) &&
+      (!template.require_acceptance_criteria || acceptance.length > 0) &&
+      acceptance.every((s) => typeof s === "string" && s.trim()),
+    "validation_failed",
+    "Acceptance criteria are required",
+  );
+  ensure(
+    p.source &&
+      ((p.source.kind === "quote" &&
+        typeof p.source.text === "string" &&
+        p.source.text.trim()) ||
+        (p.source.kind === "decision" &&
+          d.get("decisions", p.source.decision_id))),
+    "validation_failed",
+    "Card source is required",
+  );
+  const priority = parseCardPriority(p.priority === undefined ? 0 : p.priority);
+  ensure(priority !== undefined, "validation_failed", "Invalid priority");
+  for (const id of p.related_cards ?? []) d.card(id);
+  const flow_version = projectFlowVersion(projectPreferences(state));
+  ensure(
+    validFlowVersion(flow_version),
+    "validation_failed",
+    "项目流程版本尚未开放",
+  );
+  validateTemplateFlow(template, flow_version);
+  const saveCriterion = stateAndSaveCriterion(
+    p.state_and_save,
+    requiresUiStateAndSave(template),
+  );
+  const parent =
+    p.parent_card_id === undefined ? undefined : d.card(p.parent_card_id);
+  if (parent) {
+    ensure(
+      !story &&
+        parent.story &&
+        !parent.parent_card_id &&
+        !storyTerminal(parent),
+      "validation_failed",
+      "父卡必须是同项目未结束的需求卡，需求卡不能作为子卡",
+    );
+  }
+  return {
+    acceptance,
+    template,
+    story,
+    flow_version,
+    priority,
+    saveCriterion,
+    parent,
+    repo,
+    base_branch,
+  };
+}
+
 /**
  * The whole of `create_card` inside an existing draft, so one command can open
  * several cards and roll every one of them back together (C-503).
@@ -185,89 +308,22 @@ export function createCard(
 export function createCardInDraft(
   d: CommandDraft,
   p: CreateCardParams & { readonly story_source?: Card["story_source"] },
+  options: CardCreationOptions = {},
 ): Card {
   const state = d.state;
   {
-    d.pm();
-    d.projectAccess();
-    const acceptance = p.acceptance_criteria ?? [];
-    text(p.title, "title");
-    text(p.goal, "goal");
-    ensure(
-      !p.template || !p.template_id || p.template === p.template_id,
-      "validation_failed",
-      "template 与 template_id 不一致",
-    );
-    const templateId = p.template_id ?? p.template ?? "dev";
-    const template = creatableCardTemplate(d, templateId);
-    const story = isStoryTemplate(template);
-    validateCardTemplate(template, state.roles, { story });
-    ensure(
-      p.work_item_requirements === undefined ||
-        (p.work_item_requirements !== null &&
-          typeof p.work_item_requirements === "object" &&
-          !Array.isArray(p.work_item_requirements) &&
-          Object.keys(p.work_item_requirements).every((key) =>
-            template.work_items.some((w) => w.key === key),
-          )),
-      "validation_failed",
-      "work_item_requirements 必须按模板工作项 key 指定需求",
-    );
-    if (template.requires_repo || p.repo !== undefined) text(p.repo, "repo");
-    if (
-      template.requires_repo ||
-      p.repo !== undefined ||
-      p.base_branch !== undefined
-    )
-      text(p.base_branch, "base_branch");
-    ensure(
-      p.base_branch === undefined || p.repo !== undefined,
-      "validation_failed",
-      "基线分支需要仓库",
-    );
-    ensure(
-      Array.isArray(acceptance) &&
-        (!template.require_acceptance_criteria || acceptance.length > 0) &&
-        acceptance.every((s) => typeof s === "string" && s.trim()),
-      "validation_failed",
-      "Acceptance criteria are required",
-    );
-    ensure(
-      p.source &&
-        ((p.source.kind === "quote" &&
-          typeof p.source.text === "string" &&
-          p.source.text.trim()) ||
-          (p.source.kind === "decision" &&
-            d.get("decisions", p.source.decision_id))),
-      "validation_failed",
-      "Card source is required",
-    );
-    const priority = parseCardPriority(
-      p.priority === undefined ? 0 : p.priority,
-    );
-    ensure(priority !== undefined, "validation_failed", "Invalid priority");
-    for (const id of p.related_cards ?? []) d.card(id);
-    const flow_version = projectFlowVersion(projectPreferences(state));
-    ensure(
-      validFlowVersion(flow_version),
-      "validation_failed",
-      "项目流程版本尚未开放",
-    );
-    validateTemplateFlow(template, flow_version);
-    const saveCriterion = stateAndSaveCriterion(
-      p.state_and_save,
-      requiresUiStateAndSave(template),
-    );
-    if (p.parent_card_id !== undefined) {
-      const parent = d.card(p.parent_card_id);
-      ensure(
-        !story &&
-          parent.story &&
-          !parent.parent_card_id &&
-          !storyTerminal(parent),
-        "validation_failed",
-        "父卡必须是同项目未结束的需求卡，需求卡不能作为子卡",
-      );
+    const {
+      acceptance,
+      template,
+      story,
+      flow_version,
+      priority,
+      saveCriterion,
+      parent,
+      repo,
+      base_branch,
+    } = prepareCardCreation(d, p, options);
+    if (parent?.story) {
       if (parent.story.summary_entry_id) {
         const { summary_entry_id: _old, ...story } = parent.story;
         d.put("cards", { ...parent, story });
@@ -297,8 +353,8 @@ export function createCardInDraft(
         : { state_and_save: p.state_and_save }),
       acceptance_criteria: [...acceptance],
       source: p.source,
-      ...(p.repo === undefined ? {} : { repo: p.repo }),
-      ...(p.base_branch === undefined ? {} : { base_branch: p.base_branch }),
+      ...(repo === undefined ? {} : { repo }),
+      ...(base_branch === undefined ? {} : { base_branch }),
       ...(story ? { story: {} } : {}),
       ...(p.parent_card_id ? { parent_card_id: p.parent_card_id } : {}),
       ...(p.story_source ? { story_source: p.story_source } : {}),

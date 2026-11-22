@@ -6,12 +6,20 @@ import {
   type StoryProposalChildInput,
 } from "../story-discussion.js";
 import { postComment } from "./coordination.js";
-import type { CommandEffect, CommandState } from "./core.js";
+import type { CommandEffect, CommandPorts, CommandState } from "./core.js";
 import { createCard, updateCard } from "./pm.js";
 import { listNeedsYou, listNeedsYouCounts } from "./queries.js";
 import { confirmStoryProposal } from "./story-proposal.js";
 import { markCardDone } from "./templates.js";
-import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
+import {
+  actor,
+  apply,
+  fixture,
+  human,
+  ports,
+  role,
+  value,
+} from "./test-fixtures.js";
 
 const office = actor(4, "pm");
 const clock = { now: () => "2026-01-01T00:00:00.000Z" };
@@ -27,7 +35,9 @@ const child = (
   ...extra,
 });
 
-function setup() {
+function setup(
+  project_repositories: CommandPorts["project_repositories"] = [],
+) {
   let state: CommandState = fixture();
   state = {
     ...state,
@@ -35,7 +45,7 @@ function setup() {
       a.scope === "standing" ? { ...a, standing_mode: "office" } : a,
     ),
   };
-  const p = ports();
+  const p = { ...ports(), project_repositories };
   const commit = <T>(result: Result<CommandEffect<T>>) => {
     const effect = value(result);
     state = apply(state, effect);
@@ -250,21 +260,245 @@ test("only the human may confirm; PM, Office, Ops and work-item agents are refus
   expect(f.children()).toEqual([]);
 });
 
-test("a child that cannot be opened rolls the whole confirmation back and names the child", () => {
-  const f = setup();
-  // dev needs a repository; the proposal shape is valid but create_card refuses.
-  f.commit(f.propose([child("A"), child("B", { template_id: "dev" })]));
-  const failed = f.confirm(1);
-  expect(failed).toMatchObject({
+const registered = { repo: "registered/repo", base_branch: "trunk" };
+
+test("a repository-less story can propose and confirm children using its project's only registration", () => {
+  const f = setup([registered]);
+  expect(f.story.repo).toBeUndefined();
+  f.commit(
+    f.propose([
+      child("A", { template_id: "dev", base_branch: "release" }),
+      child("B", { template_id: "dev" }),
+      child("C"),
+    ]),
+  );
+  expect(f.children()).toHaveLength(0);
+  expect(f.current().story?.proposals?.[0]?.children[0]?.repo).toBeUndefined();
+  f.commit(f.confirm(1));
+  expect(f.children()).toMatchObject([
+    { repo: registered.repo, base_branch: "release" },
+    registered,
+    { title: "C" },
+  ]);
+  expect(f.children()[2]?.repo).toBeUndefined();
+});
+
+test.each(
+  [[], [registered, { repo: "another/repo", base_branch: "main" }]].map(
+    (repos) => ({ repos }),
+  ),
+)(
+  "zero or ambiguous registrations reject the proposal before Needs You: $repos",
+  ({ repos }) => {
+    const f = setup(repos);
+    const ask = f.commit(
+      postComment(
+        f.state,
+        office,
+        {
+          card_id: f.story.id,
+          body: "问题",
+          story_discussion: {
+            action: "ask",
+            questions: [
+              { question: "哪种？", recommended: "A", impact: "实现" },
+            ],
+          },
+        },
+        f.p,
+      ),
+    );
+    const b = child("B", { template_id: "dev", base_branch: "release" });
+    expect(f.propose([child("A"), b])).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message: "第 2 张子卡「B」无法开出：缺少 repo",
+      },
+    });
+    expect(f.current().story?.proposals).toBeUndefined();
+    expect(f.current().story?.question_groups?.[0]).toMatchObject({
+      id: ask?.id,
+    });
+    expect(
+      f.current().story?.question_groups?.[0]?.questions[0]?.resolution,
+    ).toBeUndefined();
+    expect(
+      value(listNeedsYou(f.state, human, clock)).data.story_proposals,
+    ).toEqual([]);
+  },
+);
+
+test("with several registrations an explicit registered repo takes its own branch", () => {
+  const another = { repo: "another/repo", base_branch: "main" };
+  const f = setup([registered, another]);
+  f.commit(
+    f.propose([
+      child("A", { template_id: "dev", repo: another.repo }),
+      child("B", { template_id: "dev", repo: another.repo, base_branch: "x" }),
+    ]),
+  );
+  f.commit(f.confirm(1));
+  expect(f.children()).toMatchObject([
+    another,
+    { ...another, base_branch: "x" },
+  ]);
+});
+
+test.each([
+  { repos: [registered], base_branch: undefined },
+  { repos: [registered], base_branch: "trunk" },
+  { repos: [], base_branch: "release" },
+])(
+  "a repo this project has not registered is refused at submission: $repos $base_branch",
+  ({ repos, base_branch }) => {
+    const f = setup(repos);
+    const b = child("B", {
+      template_id: "dev",
+      repo: "other-project/repo",
+      ...(base_branch === undefined ? {} : { base_branch }),
+    });
+    expect(f.propose([child("A"), b])).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message:
+          "第 2 张子卡「B」无法开出：仓库（repo）other-project/repo 不是当前项目登记的仓库",
+        details: { child: 2 },
+      },
+    });
+    expect(f.current().story?.proposals).toBeUndefined();
+    expect(
+      value(listNeedsYou(f.state, human, clock)).data.story_proposals,
+    ).toEqual([]);
+  },
+);
+
+test("confirmation refuses the whole batch when a named repo is no longer registered", () => {
+  const f = setup([registered]);
+  f.commit(
+    f.propose([
+      child("A", { template_id: "dev" }),
+      child("B", { template_id: "dev", repo: registered.repo }),
+    ]),
+  );
+  const replaced = { repo: "replacement/repo", base_branch: "trunk" };
+  expect(
+    confirmStoryProposal(
+      f.state,
+      human,
+      { card_id: f.story.id, version: 1 },
+      { ...f.p, project_repositories: [replaced] },
+    ),
+  ).toMatchObject({
     ok: false,
-    error: { message: expect.stringContaining("第 2 张子卡「B」无法开出") },
+    error: {
+      message:
+        "第 2 张子卡「B」无法开出：仓库（repo）registered/repo 不是当前项目登记的仓库",
+      details: { child: 2 },
+    },
   });
   expect(f.children()).toEqual([]);
   expect(f.current().story?.proposals?.[0]?.confirmed).toBeUndefined();
-  // The Office revises; the new version confirms.
-  f.commit(f.propose([child("A"), child("B")]));
-  f.state = apply(f.state, value(f.confirm(2)));
-  expect(f.children()).toHaveLength(2);
+});
+
+test("plain create_card keeps an explicit unregistered repo with its explicit branch", () => {
+  const f = setup([registered]);
+  const card = f.commit(
+    createCard(
+      f.state,
+      human,
+      {
+        template_id: "dev",
+        title: "Direct",
+        goal: "Direct card",
+        acceptance_criteria: ["works"],
+        repo: "other/repo",
+        base_branch: "dev",
+        source: { kind: "quote", text: "Direct card" },
+      },
+      f.p,
+    ),
+  );
+  expect(card).toMatchObject({ repo: "other/repo", base_branch: "dev" });
+  expect(
+    createCard(
+      f.state,
+      human,
+      {
+        template_id: "dev",
+        title: "No branch",
+        goal: "Direct card",
+        acceptance_criteria: ["works"],
+        repo: "other/repo",
+        source: { kind: "quote", text: "Direct card" },
+      },
+      f.p,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
+
+test("submission identifies the child with an invalid template form or dependency", () => {
+  const f = setup([registered]);
+  f.state = {
+    ...f.state,
+    project_preferences: [
+      {
+        id: f.state.project_id,
+        flow_version: 5,
+        auto_merge_after_minutes: null,
+      },
+    ],
+    roles: [
+      ...f.state.roles,
+      role("frontend_engineer"),
+      role("design_director"),
+    ],
+  };
+  for (const [extra, message] of [
+    [{ template_id: "ui" }, "state_and_save"],
+    [{ template_id: "unknown" }, "模板不存在"],
+    [{ depends_on_cards: ["C-999" as Card["id"]] }, "前置卡 C-999"],
+  ] as const) {
+    const result = f.propose([child("A"), child("B", extra)]);
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        message: expect.stringContaining(`第 2 张子卡「B」无法开出：`),
+        details: { child: 2 },
+      },
+    });
+    expect(result).toMatchObject({
+      error: { message: expect.stringContaining(message) },
+    });
+  }
+  expect(f.current().story?.proposals).toBeUndefined();
+  expect(
+    value(listNeedsYou(f.state, human, clock)).data.story_proposals,
+  ).toEqual([]);
+});
+
+test("confirmation rechecks changed dependencies and rolls back the whole batch", () => {
+  const f = setup();
+  const before = f.state.cards[0];
+  if (!before) throw new Error("missing fixture card");
+  f.commit(
+    f.propose([child("A"), child("B", { depends_on_cards: [before.id] })]),
+  );
+  f.state = {
+    ...f.state,
+    cards: f.state.cards.filter((c) => c.id !== before.id),
+  };
+  expect(f.confirm(1)).toMatchObject({
+    ok: false,
+    error: {
+      message: expect.stringContaining(
+        `第 2 张子卡「B」无法开出：前置卡 ${before.id}`,
+      ),
+    },
+  });
+  expect(f.children()).toEqual([]);
+  expect(f.current().story?.proposals?.[0]?.confirmed).toBeUndefined();
 });
 
 test("paused, unscheduled or finished stories cannot be confirmed", () => {

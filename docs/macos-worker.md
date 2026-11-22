@@ -349,6 +349,8 @@ KIT=$(sudo mktemp -d /opt/cardigan-enroll.XXXXXXXX) &&
   sudo tar --no-same-owner -xf "$KIT/release.tar" -C "$KIT"
 ```
 
+macOS 的 tar 以 root 运行时同样沿用归档所有者和权限位；`--no-same-owner` 与打包要求的原因见 [Linux 受限接入](linux-worker.md#可选一次接入之后由后台升级-helper) 第 2 步。同机两个项目的一次性接入与撤权顺序见 [C-594](plans/C-594.md)。
+
 任一步失败即停；使用同一 `KIT`，不从历史目录挑选脚本。Mac 管理员运行下面第一条，粘贴 prepare 输出的 SSH 公钥和 PEM 公钥两段，以 Ctrl-D 结束；对照控制主机终端核实两个指纹。脚本创建无密码凭据的隐藏系统账号及独占组，不开启图形登录、不加入 admin、wheel 或 worker 组；HOME、公钥和入口由 root 持有。确认本机 SSH 策略只允许此受限公钥，没有其它登录入口。sudo 授权只应有一个固定的无参数命令；脚本拒绝已有账号、文件或已有 sudo 授权。异常时不要强行覆盖或激活。
 
 ```sh

@@ -398,6 +398,8 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
      sudo tar --no-same-owner -xf "$KIT/release.tar" -C "$KIT"
    ```
 
+   root 运行 tar 默认沿用归档里的所有者和权限位。包由 server 等非 root 账号打成时，不加 `--no-same-owner` 解出的文件归该账号；`git archive` 默认 `tar.umask=0002`，成员组可写。两种情况都会让接入脚本在授权前报 `unsafe bootstrap permissions` 退出。打包时带上 `deploy` 目录条目并去掉组和其它账号的写权限，例如在发行版根目录运行 `tar --owner=0 --group=0 --numeric-owner --mode=go-w --no-recursion -cf "$OUT/enroll.tar" deploy deploy/<各文件>`，或改用 `git -c tar.umask=0022 archive`。遇到该报错不要改解出文件的归属或权限，重新打包并在新的 `KIT` 解包。
+
    包内 `deploy/` 及其中的文件须为 root 持有、不可被其它账号写入，接入脚本在安装授权前还会检查祖先目录、扩展 ACL 和实际安装结果。执行下列命令，从控制主机终端粘贴上一步标准输出的**公钥两段**（SSH 一行及完整 PEM），按 Ctrl-D；核对两端显示的指纹。不要发送私钥。脚本创建无密码凭据的专用系统账号，root 持有 HOME、公钥和强制 SSH 命令；sudoers 仅允许固定入口、零参数，不授予 shell 和额外 sudo。
 
    ```sh
