@@ -13,8 +13,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadExtMessageConfig } from "@cardigan/host";
-import { extEventWatermark, Store } from "@cardigan/store";
+import {
+  ExtMessageSender,
+  extFingerprints,
+  loadExtMessageConfig,
+} from "@cardigan/host";
+import {
+  extChannelActivation,
+  extEventWatermark,
+  Store,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse } from "yaml";
 import { call, webHarness } from "../../test-support/web.js";
@@ -24,6 +32,7 @@ const mock = vi.hoisted(() => ({
   send: vi.fn(),
   appSend: vi.fn(),
   failRename: false,
+  failCleanup: false,
 }));
 vi.mock("@cardigan/host", async (orig) => ({
   ...(await orig<typeof import("@cardigan/host")>()),
@@ -34,6 +43,19 @@ vi.mock("node:fs", async (orig) => {
   const fs = await orig<typeof import("node:fs")>();
   return {
     ...fs,
+    rmSync: (...args: Parameters<typeof fs.rmSync>) => {
+      if (
+        mock.failCleanup &&
+        typeof args[0] === "string" &&
+        args[0].includes("/.feishu-")
+      ) {
+        mock.failCleanup = false;
+        throw Object.assign(new Error("fixture cleanup error"), {
+          code: "EIO",
+        });
+      }
+      return fs.rmSync(...args);
+    },
     renameSync: (src: string, dst: string) => {
       if (mock.failRename && dst.endsWith("/ext-message.yaml"))
         throw new Error("fixture rename error");
@@ -114,6 +136,7 @@ beforeEach(async () => {
   });
   cookie = await h.login("test-private-password");
   mock.failRename = false;
+  mock.failCleanup = false;
   mock.send.mockReset().mockResolvedValue("sent");
   mock.appSend.mockReset().mockResolvedValue("sent");
 });
@@ -219,37 +242,75 @@ test("read and previews are write-only; two secret files rotate with one YAML pu
     expect(exposed).not.toContain(secret);
   expect(audit()).not.toContain("workbench.invalid");
 });
-test("failure at rename preserves both live secret files and YAML, with no success audit", async () => {
-  const original = fixture();
-  const p = await preview({
-    secrets: { set: ["app_secret", "lark_sign_secret"] },
-  });
-  mock.failRename = true;
-  expect(
-    (
-      await confirm(
-        p,
-        { app_secret: "new-app", lark_sign_secret: "new-sign" },
-        "failed-rename",
-      )
-    ).status,
-  ).toBe(503);
-  mock.failRename = false;
-  const replay = await confirm(
-    p,
-    { app_secret: "new-app", lark_sign_secret: "new-sign" },
-    "failed-rename",
-  );
-  expect(replay.status).toBe(409);
-  expect(replay.body).toContain("not_applied");
-  expect(settings()).toBe(original);
-  expect(readFileSync(join(dir, "feishu-app.secrets"), "utf8")).toBe(app);
-  expect(readFileSync(join(dir, "ext-message.secrets"), "utf8")).toContain(
-    sign,
-  );
-  expect(JSON.parse(audit())).toMatchObject([{ result: "not_applied" }]);
-  expect(readdirSync(dir).filter((k) => k.startsWith("."))).toEqual([]);
-});
+test.each(["ordinary setting", "clear last credential"])(
+  "a cleanup error after saving %s does not change the first response or its replay",
+  async (kind) => {
+    fixture();
+    put("ext-message.secrets", JSON.stringify({ webhook }));
+    const clear = kind === "clear last credential";
+    const p = await preview(
+      clear
+        ? {
+            settings: { "channels.lark.enabled": false },
+            secrets: { clear: ["lark_webhook"] },
+          }
+        : { settings: { "policy.timeout_ms": 987 } },
+    );
+    mock.failCleanup = true;
+    const first = await confirm(p, {}, "cleanup"),
+      after = await state();
+    expect(mock.failCleanup).toBe(false);
+    expect(first.status).toBe(200);
+    expect(first.json).toEqual({ result: "applied" });
+    if (clear) {
+      expect(after.settings["channels.lark.enabled"]).toBe(false);
+      expect(after.secrets.lark_webhook.set).toBe(false);
+    } else expect(after.settings["policy.timeout_ms"]).toBe(987);
+    const retry = await confirm(p, {}, "cleanup");
+    expect(retry.status).toBe(200);
+    expect(retry.json).toEqual(first.json);
+    expect((await state()).version).toBe(after.version);
+    expect(JSON.parse(audit())).toMatchObject([{ result: "applied" }]);
+  },
+);
+test.each([false, true])(
+  "rename failure preserves both live secret files and YAML (cleanup also fails: %s)",
+  async (failCleanup) => {
+    const original = fixture();
+    const p = await preview({
+      secrets: { set: ["app_secret", "lark_sign_secret"] },
+    });
+    mock.failRename = true;
+    mock.failCleanup = failCleanup;
+    expect(
+      (
+        await confirm(
+          p,
+          { app_secret: "new-app", lark_sign_secret: "new-sign" },
+          "failed-rename",
+        )
+      ).status,
+    ).toBe(503);
+    mock.failRename = false;
+    const replay = await confirm(
+      p,
+      { app_secret: "new-app", lark_sign_secret: "new-sign" },
+      "failed-rename",
+    );
+    expect(replay.status).toBe(409);
+    expect(replay.body).toContain("not_applied");
+    expect(settings()).toBe(original);
+    expect(readFileSync(join(dir, "feishu-app.secrets"), "utf8")).toBe(app);
+    expect(readFileSync(join(dir, "ext-message.secrets"), "utf8")).toContain(
+      sign,
+    );
+    expect(JSON.parse(audit())).toMatchObject([{ result: "not_applied" }]);
+    expect(mock.failCleanup).toBe(false);
+    expect(
+      readdirSync(dir).filter((k) => k.startsWith(".feishu-")),
+    ).toHaveLength(failCleanup ? 1 : 0);
+  },
+);
 test("permission and symlink failures do not follow target, preview is session/version bound and never accepts credential paths", async () => {
   fixture();
   const p = await preview({ settings: { "policy.timeout_ms": 99 } });
@@ -369,58 +430,105 @@ test("a failed reservation COMMIT leaves the original file and preview retryable
   expect((await confirm(p, {}, "commit")).json).toEqual({ result: "applied" });
 });
 
-test("after rename, a failed outcome COMMIT is proved by the durable reservation and reconciled on restart", async () => {
-  fixture();
-  const db = h.store.database;
-  const p = await preview({ settings: { "policy.timeout_ms": 987 } });
-  db.exec(`CREATE TABLE abort_commit (id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
+test.each([
+  { first: "web", rotate: false },
+  { first: "web", rotate: true },
+  { first: "background", rotate: false },
+  { first: "background", rotate: true },
+])(
+  "a prepared publication is reconciled by $first after rename (credential rotated: $rotate)",
+  async ({ first, rotate }) => {
+    fixture();
+    const db = h.store.database;
+    const p = await preview({ settings: { "policy.timeout_ms": 987 } });
+    db.exec(`CREATE TABLE abort_commit (id TEXT REFERENCES members(id) DEFERRABLE INITIALLY DEFERRED);
     CREATE TRIGGER reject_outcome AFTER UPDATE OF result ON feishu_settings_requests WHEN NEW.result='applied' BEGIN INSERT INTO abort_commit VALUES('missing'); END;`);
-  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
-    result: "applied",
-  });
-  expect(parse(settings()).policy.timeout_ms).toBe(987);
-  expect(JSON.parse(audit())).toMatchObject([{ result: "prepared" }]);
-  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
-    result: "applied",
-  });
-  // An event committed after publication must remain beyond the recovered activation cutoff.
-  const cutoff = extEventWatermark(db);
-  h.store.createProject({ id: project_id, name: "fixture" });
-  h.store.uow.run((tx) =>
-    tx.events.append(project_id, {
-      id: tx.ids.nextEventId(),
-      seq: tx.ids.nextEventSequence(project_id),
-      type: "fixture_test",
-      actor: { kind: "system", project_id },
-      created_at: new Date().toISOString(),
-      payload: {},
-    }),
-  );
-  expect(extEventWatermark(db)).toBeGreaterThan(cutoff);
-  db.exec("DROP TRIGGER reject_outcome");
-  const { FeishuSettings } = await import("./feishu-settings.js");
-  const reopened = Store.open({ dataDir: h.dataDir });
-  try {
-    new FeishuSettings(reopened, path);
-  } finally {
-    reopened.close();
-  } // new connection, empty previews
-  expect(
-    db.prepare("SELECT DISTINCT watermark FROM ext_message_channels").all(),
-  ).toEqual([{ watermark: cutoff }]);
-  expect(JSON.parse(audit())).toMatchObject([
-    { result: "applied", keys: JSON.stringify(["policy.timeout_ms"]) },
-  ]);
-  expect(
-    db.prepare("SELECT * FROM feishu_settings_publications").all(),
-  ).toEqual([]);
-  expect(
-    db.prepare("SELECT name FROM ext_message_channels ORDER BY name").all(),
-  ).toEqual([{ name: "lark" }, { name: "lark_app" }]);
-  expect((await confirm(p, {}, "ambiguous")).json).toEqual({
-    result: "applied",
-  });
-});
+    expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+      result: "applied",
+    });
+    expect(parse(settings()).policy.timeout_ms).toBe(987);
+    expect(JSON.parse(audit())).toMatchObject([{ result: "prepared" }]);
+    const receipt = db
+      .prepare("SELECT fingerprints FROM feishu_settings_publications")
+      .get();
+    expect(JSON.parse(String(receipt?.fingerprints))).toEqual([
+      ...extFingerprints(loadExtMessageConfig(path), true),
+    ]);
+    expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+      result: "applied",
+    });
+    // An event committed after publication must remain beyond the recovered activation cutoff.
+    const cutoff = extEventWatermark(db);
+    h.store.createProject({ id: project_id, name: "fixture" });
+    h.store.uow.run((tx) =>
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id),
+        type: "fixture_test",
+        actor: { kind: "system", project_id },
+        created_at: new Date().toISOString(),
+        payload: {},
+      }),
+    );
+    expect(extEventWatermark(db)).toBeGreaterThan(cutoff);
+    const current = extEventWatermark(db);
+    if (rotate)
+      put(
+        "ext-message.secrets",
+        JSON.stringify({ webhook, secret: "rotated-fixture" }),
+      );
+    db.exec("DROP TRIGGER reject_outcome");
+    const { FeishuSettings } = await import("./feishu-settings.js");
+    const reopened = Store.open({ dataDir: h.dataDir });
+    try {
+      const configuration = loadExtMessageConfig(path);
+      const expected = {
+        fingerprint: extFingerprints(configuration, true).get("lark"),
+        watermark: rotate ? current : cutoff,
+      };
+      if (first === "background") {
+        const start = () =>
+          new ExtMessageSender({
+            store: reopened,
+            configuration: loadExtMessageConfig(path),
+            startApplication: () => undefined,
+          }).recordStatus();
+        start();
+        const channel = extChannelActivation(db, "lark");
+        expect(channel).toMatchObject(expected);
+        start(); // a second process must not restart the same recovered epoch
+        expect(extChannelActivation(db, "lark")).toEqual(channel);
+        if (rotate) {
+          put("ext-message.secrets", JSON.stringify({ webhook, secret: sign }));
+          start(); // A return to the prepared fingerprint is another rotation, not a rewind.
+          expect(extChannelActivation(db, "lark")?.watermark).toBe(current);
+        }
+      }
+      new FeishuSettings(reopened, path);
+      expect(extChannelActivation(db, "lark")?.watermark).toBe(
+        expected.watermark,
+      );
+      if (first === "web") {
+        expect(extChannelActivation(db, "lark")).toMatchObject(expected);
+        expect(extChannelActivation(db, "lark_app")?.watermark).toBe(cutoff);
+      }
+    } finally {
+      reopened.close();
+    } // new connection, empty previews
+    expect(JSON.parse(audit())).toMatchObject([
+      { result: "applied", keys: JSON.stringify(["policy.timeout_ms"]) },
+    ]);
+    expect(
+      db.prepare("SELECT * FROM feishu_settings_publications").all(),
+    ).toEqual([]);
+    expect(
+      db.prepare("SELECT name FROM ext_message_channels ORDER BY name").all(),
+    ).toEqual([{ name: "lark" }, { name: "lark_app" }]);
+    expect((await confirm(p, {}, "ambiguous")).json).toEqual({
+      result: "applied",
+    });
+  },
+);
 
 test("a settings-only save preserves legacy inline credential timestamps", async () => {
   fixture();

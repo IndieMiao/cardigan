@@ -17,6 +17,25 @@ export const extEventWatermark = (db: DatabaseSync) =>
     prepare(db, "SELECT COALESCE(MAX(rowid),0) AS n FROM events").get()!.n,
   );
 
+// YAML identity alone cannot prove the state of its separate credential files.
+// Consume the proof in the activation transaction so later rotations cannot rewind.
+function takePublicationCutoff(db: DatabaseSync, publication?: string) {
+  if (!publication) return;
+  const row = prepare(
+    db,
+    "SELECT watermark,fingerprints FROM feishu_settings_publications WHERE publication=? AND fingerprints IS NOT NULL",
+  ).get(publication);
+  if (!row) return;
+  prepare(
+    db,
+    "UPDATE feishu_settings_publications SET fingerprints=NULL WHERE publication=?",
+  ).run(publication);
+  return {
+    watermark: Number(row.watermark),
+    fingerprints: new Map<string, string>(JSON.parse(String(row.fingerprints))),
+  };
+}
+
 /** Caller owns the configuration activation transaction. No raw settings are persisted. */
 export function activateExtChannels(
   db: DatabaseSync,
@@ -25,14 +44,7 @@ export function activateExtChannels(
   now: string,
   publication?: string,
 ) {
-  // If Web died after publishing the inode, background and Web must both replay
-  // the actual cutover, not discard events appended between rename and recovery.
-  const pending =
-    publication &&
-    prepare(
-      db,
-      "SELECT watermark FROM feishu_settings_publications WHERE publication=?",
-    ).get(publication);
+  const receipt = takePublicationCutoff(db, publication);
   const active = new Map<string, ExtChannelActivation>();
   for (const { name } of prepare(
     db,
@@ -43,10 +55,12 @@ export function activateExtChannels(
   }
   for (const [name, fingerprint] of fingerprints) {
     let row = extChannelActivation(db, name);
-    if (row?.fingerprint !== fingerprint) {
-      const watermark = pending
-        ? Number(pending.watermark)
-        : extEventWatermark(db);
+    const matchesPublication = receipt?.fingerprints.get(name) === fingerprint;
+    if (row?.fingerprint !== fingerprint || (receipt && !matchesPublication)) {
+      const watermark =
+        receipt && matchesPublication
+          ? receipt.watermark
+          : extEventWatermark(db);
       row = { epoch: randomUUID(), watermark, fingerprint };
       prepare(
         db,

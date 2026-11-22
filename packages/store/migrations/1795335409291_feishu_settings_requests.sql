@@ -12,5 +12,6 @@ CREATE TABLE feishu_binding_windows (
 -- One fenced publication per configuration. No raw path, setting or credential.
 CREATE TABLE feishu_settings_publications (
   scope TEXT PRIMARY KEY, request_key TEXT NOT NULL UNIQUE REFERENCES feishu_settings_requests(request_key),
-  original TEXT NOT NULL, publication TEXT NOT NULL UNIQUE, watermark INTEGER NOT NULL
+  original TEXT NOT NULL, publication TEXT NOT NULL UNIQUE, watermark INTEGER NOT NULL,
+  fingerprints TEXT -- channel/digest pairs; NULL once activation has consumed the cutoff
 );

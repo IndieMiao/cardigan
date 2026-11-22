@@ -90,13 +90,14 @@ export class FeishuPublication {
     authorize: () => void,
     install: () => void,
   ) {
+    const fingerprints = extFingerprints(c, true);
     this.store.uow.run((tx) => {
       this.settle(tx, true);
       if (readSettings(this.path).version !== f.version) throw stale();
       reserve();
       this.store.database
         .prepare(
-          "INSERT INTO feishu_settings_publications(scope,request_key,original,publication,watermark) VALUES(?,?,?,?,?)",
+          "INSERT INTO feishu_settings_publications(scope,request_key,original,publication,watermark,fingerprints) VALUES(?,?,?,?,?,?)",
         )
         .run(
           this.scope,
@@ -104,6 +105,7 @@ export class FeishuPublication {
           f.version,
           publication,
           extEventWatermark(this.store.database),
+          JSON.stringify([...fingerprints]),
         );
     });
     try {
@@ -118,7 +120,7 @@ export class FeishuPublication {
         activateExtChannels(
           this.store.database,
           tx,
-          extFingerprints(c, true),
+          fingerprints,
           new Date().toISOString(),
           publication,
         );

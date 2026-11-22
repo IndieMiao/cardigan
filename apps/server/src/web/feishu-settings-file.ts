@@ -433,7 +433,13 @@ export function publish(
       installed = true;
     });
   } finally {
-    if (!installed || !hasSecrets)
-      rmSync(generation, { recursive: true, force: true });
+    if (!installed || !hasSecrets) {
+      try {
+        rmSync(generation, { recursive: true, force: true });
+      } catch {
+        // An unused private directory may remain. Cleanup must not replace the
+        // committed receipt or mask the original error from a failed publish.
+      }
+    }
   }
 }
