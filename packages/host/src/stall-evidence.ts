@@ -35,28 +35,26 @@ else: print("present")`;
 // Only the verdict leaves the worker. Git may report names of private material,
 // and a large listing must not be copied to the control host (even on failure).
 const inspectStatus = String.raw`import subprocess, sys
-def inspect(args, tags=False):
+def prefixes(args):
     with subprocess.Popen(sys.argv[1:] + args, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p:
-        clean, start = True, True
+        prefix = b''
         while block := p.stdout.read(65536):
-            if not tags:
-                clean = False
-                continue
-            # Only inspect the tag at the start of each NUL-terminated entry.
-            # Skip-worktree / assume-unchanged can hide real edits from status.
-            for part in block.split(b'\0')[:-1]:
-                if start and part[:1] != b'H': clean = False
-                start = True
-            tail = block.rsplit(b'\0', 1)[-1]
-            if tail:
-                if start and tail[:1] != b'H': clean = False
-                start = False
-        if p.wait(): sys.exit(1)
-        return clean
-if not inspect(['status','--porcelain=v1','-z','--untracked-files=normal','--ignored=matching','--ignore-submodules=none']): print('dirty')
-elif not inspect(['ls-files','-v','-z'], tags=True): print('unknown')
-else: print('clean')`;
+            parts = block.split(b'\0')
+            for piece in parts[:-1]:
+                yield prefix + piece[:3-len(prefix)]
+                prefix = b''
+            prefix += parts[-1][:3-len(prefix)]
+        if prefix or p.wait(): sys.exit(1)
+verdict = 'clean'
+for tag in prefixes(['status','--porcelain=v1','-z','--untracked-files=normal','--ignored=matching','--ignore-submodules=none']):
+    if tag not in (b'?? ', b'!! '): verdict = 'dirty'
+    elif verdict == 'clean': verdict = 'local_only'
+if verdict != 'dirty':
+    # Skip-worktree / assume-unchanged can hide tracked edits from status.
+    for tag in prefixes(['ls-files','-v','-z']):
+        if not tag.startswith(b'H '): verdict = 'unknown'
+print(verdict)`;
 
 /** No fallback from a remote Assignment to the controller or another registration. */
 function boundWorkspaceTarget(
@@ -81,7 +79,10 @@ function boundWorkspaceTarget(
   );
 }
 
-type Workspace = "clean" | "dirty" | "unknown" | "no_worktree";
+type Workspace = "clean" | "local_only" | "dirty" | "unknown" | "no_worktree";
+// local_only never means backed up: the caller must keep this exact checkout.
+export const writableInPlace = (workspace: Workspace) =>
+  workspace === "clean" || workspace === "local_only";
 /** Fixed placement only. Use the worker account for agent-ssh; never return paths, stderr or filenames. */
 export async function stallWorkspace(
   state: CommandState,
@@ -89,6 +90,7 @@ export async function stallWorkspace(
   execution?: ExecutionConfig,
   signal?: AbortSignal,
   expectedHead?: string,
+  inPlace = false,
 ): Promise<Workspace> {
   if (!boundWorkspaceTarget(state.project_id, a, execution)) return "unknown";
   if (
@@ -171,6 +173,10 @@ export async function stallWorkspace(
       )
         return "unknown";
       const status = (await git([], true)).trimEnd();
+      if (status === "local_only")
+        return inPlace && role?.worktree === "write" && a.branch && a.base_sha
+          ? "local_only"
+          : "dirty";
       if (status !== "clean") return status === "dirty" ? "dirty" : "unknown";
     }
     return "clean";
@@ -298,7 +304,16 @@ export async function stallEvidence(
     !sharedStallRegistration(state, a) &&
     boundWorkspaceTarget(state.project_id, a, execution);
   const [workspace, observed, owner] = await Promise.all([
-    bound ? stallWorkspace(state, a, execution, signal) : ("unknown" as const),
+    bound
+      ? stallWorkspace(
+          state,
+          a,
+          execution,
+          signal,
+          undefined,
+          !!(systemTurn || transfer),
+        )
+      : ("unknown" as const),
     a.runtime_ref && bound
       ? runtime.status(a.runtime_ref).catch(() => undefined)
       : undefined,
@@ -370,6 +385,6 @@ export async function stallEvidence(
             idleWakeGuard(observed.value)
         : (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
           (a.machine_id === "local" || !!remoteExited)) &&
-      (workspace === "clean" || workspace === "no_worktree"),
+      (writableInPlace(workspace) || workspace === "no_worktree"),
   };
 }

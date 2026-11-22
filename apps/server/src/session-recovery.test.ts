@@ -417,6 +417,11 @@ test("M5.6 failed replacement records failure, compensates and escalates once; c
 
 test.each([
   "clean",
+  "local_only",
+  "ignored_only",
+  "local_only_with_tracked_edit",
+  "monitor_refresh",
+  "changed_during_refresh",
   "missing_at_launch",
   "replaced_at_launch",
   "changed_access_at_launch",
@@ -431,7 +436,10 @@ test.each([
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
-    const backedUp = mode === "clean" || mode.endsWith("_at_launch");
+    const keepsMaterial = mode === "local_only" || mode === "ignored_only";
+    const resumes =
+      mode === "clean" || mode === "monitor_refresh" || keepsMaterial;
+    const backedUp = resumes || mode.endsWith("_at_launch");
     const s = scenario(),
       a = s.target.assignment,
       branch = "agent/test/writer";
@@ -481,7 +489,17 @@ test.each([
         base_sha: sha,
       });
     });
-    if (mode === "dirty") writeFileSync(join(workspace, "private"), "fixture");
+    const privateName = "local-material-with-newline\n M source";
+    if (mode === "ignored_only")
+      writeFileSync(
+        join(workspace, ".git", "info", "exclude"),
+        "local-material*\n",
+      );
+    if (keepsMaterial || mode === "local_only_with_tracked_edit")
+      writeFileSync(join(workspace, privateName), "retained fixture");
+    if (mode === "dirty" || mode === "local_only_with_tracked_edit")
+      writeFileSync(join(workspace, "source"), "tracked edit");
+    const index = readFileSync(join(workspace, ".git", "index"));
     s.runtime.observe_retirement = vi.fn(async () => ({
       ok: false as const,
       error: { code: "runtime_unavailable" as const, message: "core offline" },
@@ -503,6 +521,22 @@ test.each([
       });
     };
     const backup = vi.fn(async () => {
+      if (mode === "monitor_refresh")
+        f.store.uow.run((tx) => {
+          const current = tx.assignments.get(f.project, a.id);
+          if (!current) throw new Error("missing Assignment");
+          tx.assignments.put(f.project, {
+            ...current,
+            session_maintenance: {
+              candidate: false,
+              reason: "run_busy",
+              threshold_minutes: 60,
+              evaluated_at: f.clock.now(),
+              since: f.clock.now(),
+              basis: "observation",
+            },
+          });
+        });
       if (mode === "live_during_backup") revive();
       if (mode === "replaced_during_backup") {
         const original = `${workspace}-original`;
@@ -539,6 +573,25 @@ test.each([
         },
       ]);
       expect(startRun).not.toHaveBeenCalled();
+      if (mode === "monitor_refresh" || mode === "changed_during_refresh") {
+        let observations = 0;
+        s.runtime.confirm_local_exit = vi.fn(async () => {
+          if (++observations === 1) {
+            f.store.uow.run((tx) => {
+              const current = tx.assignments.get(f.project, a.id);
+              if (!current) throw new Error("missing Assignment");
+              tx.assignments.put(f.project, {
+                ...current,
+                runtime_state: "unknown",
+              });
+            });
+          }
+          return {
+            ok: true as const,
+            value: observations === 1 || mode === "monitor_refresh",
+          };
+        });
+      }
       if (mode === "lost_proof") gone = false;
       if (mode === "live_again") {
         revive();
@@ -579,8 +632,22 @@ test.each([
       expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual(
         [],
       );
-      if (mode === "clean") {
+      if (mode === "changed_during_refresh")
+        expect(backup).not.toHaveBeenCalled();
+      if (resumes) {
+        expect(events("dispatch_stall_attention")).toHaveLength(0);
         await d.tick();
+        if (keepsMaterial) {
+          expect(readFileSync(join(workspace, privateName), "utf8")).toBe(
+            "retained fixture",
+          );
+          expect(readFileSync(join(workspace, ".git", "index"))).toEqual(index);
+          expect(git("rev-parse", "HEAD")).toBe(sha);
+          expect(git("ls-tree", "-r", "--name-only", sha)).toBe("source");
+          expect(JSON.stringify(f.state().events)).not.toContain(
+            "local-material",
+          );
+        }
         expect(startRun).toHaveBeenCalledOnce();
         expect(s.runtime.provision).toHaveBeenCalledOnce();
         expect(vi.mocked(s.runtime.provision).mock.calls[0]?.[3].cwd).toBe(

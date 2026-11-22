@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   beginStalledPatrolRestart,
@@ -31,6 +32,23 @@ import { overdueStallHandoffs } from "./stall-handoff.js";
 
 function turnKey(s: DispatchStall) {
   return s.retirement_handoff ? s.cause_id : s.system_finished_run_id;
+}
+// Maintenance observations are a projection (not the retirement/upgrade fence).
+// Exclude only that projection from the CAS. A new runtime or activity sample
+// invalidates the observation; retry it only for the very same registration.
+export function recoveryBasis({
+  session_maintenance: _maintenance,
+  ...rest
+}: Assignment) {
+  return rest;
+}
+function registration({
+  runtime_state: _state,
+  last_mcp_activity_at: _activity,
+  context_patrol_cursor: _cursor,
+  ...rest
+}: ReturnType<typeof recoveryBasis>) {
+  return rest;
 }
 const turnNextStep =
   "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
@@ -249,7 +267,8 @@ export class StallPatrol {
       a: Assignment,
       p: ProjectId,
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
-  ) {
+    mayRefresh = true,
+  ): Promise<void> {
     const project = state.project_id;
     const a = state.assignments.find((a) => a.id === stall.assignment_id);
     // A failed observation did not acquire the stop fence. Remember the
@@ -280,7 +299,7 @@ export class StallPatrol {
       }
     }
     if (this.signal.aborted) return;
-    this.store.uow.run((tx) => {
+    const retry = this.store.uow.run((tx) => {
       const fresh = loadCommandState(tx, project);
       if (handled(fresh) || hostOpsPending(fresh.events, a.id)) return;
       const row = this.causes(fresh).find(
@@ -293,11 +312,19 @@ export class StallPatrol {
       reason = row.restart_blocked ?? reason;
       if (unfinishedBellAttempts(this.store.database, project, a.id).length)
         reason = "bell_in_flight";
-      if (
-        JSON.stringify(fresh.assignments.find((v) => v.id === a.id)) !==
-        JSON.stringify(a)
-      )
-        reason = "assignment_changed";
+      const current = fresh.assignments.find((v) => v.id === a.id);
+      const prior = recoveryBasis(a);
+      const next = current && recoveryBasis(current);
+      if (!isDeepStrictEqual(prior, next)) {
+        if (
+          mayRefresh &&
+          !reason &&
+          next &&
+          isDeepStrictEqual(registration(prior), registration(next))
+        )
+          return { state: fresh, stall: row };
+        reason ??= "assignment_changed";
+      }
       if (!reason && launch) {
         const effect = beginSystemTurnRestart(
           fresh,
@@ -375,6 +402,8 @@ export class StallPatrol {
         );
       }
     });
+    if (retry && !this.signal.aborted)
+      await this.recoverTurn(retry.state, retry.stall, snapshot, false);
   }
   async tick(
     project: ProjectId,

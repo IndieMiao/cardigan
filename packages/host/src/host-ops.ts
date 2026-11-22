@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type AssignmentId,
@@ -87,8 +88,9 @@ import {
   remoteStallExit,
   stallWorkspace,
   transferredSessionExited,
+  writableInPlace,
 } from "./stall-evidence.js";
-import { StallPatrol } from "./stall-patrol.js";
+import { recoveryBasis, StallPatrol } from "./stall-patrol.js";
 import {
   revokeStoppedRunTokens,
   stopRunRuntime,
@@ -603,7 +605,7 @@ export class HostOpsService {
       );
       if (!evidence.can_restart) {
         const unsafeWorkspace =
-          evidence.workspace !== "clean" &&
+          !writableInPlace(evidence.workspace) &&
           evidence.workspace !== "no_worktree";
         throw new ToolError(
           "stale_target",
@@ -1418,9 +1420,10 @@ export class HostOpsService {
               this.stallExecution(project, a.machine_id),
               this.contextAbort.signal,
               backup?.sha,
+              !!backup && !!workspaceSeal,
             )
           : "unknown";
-        if (workspace === "clean" || workspace === "no_worktree") {
+        if (writableInPlace(workspace) || workspace === "no_worktree") {
           if (
             !workspaceSeal ||
             (a &&
@@ -1605,13 +1608,13 @@ export class HostOpsService {
               const verified = { ...backup, workspace_seal: workspaceSeal };
               store.uow.run((tx) => {
                 const state = loadCommandState(tx, project);
+                const current = state.assignments.find((v) => v.id === a.id);
                 if (
                   !pendingHostOpsActions(state.events).some(
                     (v) => v.action_id === action.action_id,
                   ) ||
-                  JSON.stringify(
-                    state.assignments.find((v) => v.id === a.id),
-                  ) !== JSON.stringify(a)
+                  !current ||
+                  !isDeepStrictEqual(recoveryBasis(current), recoveryBasis(a))
                 )
                   throw new Error();
                 const prior = state.events.find(

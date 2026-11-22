@@ -15,7 +15,7 @@ import {
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 import { captureTranscript } from "./capture-transcript.js";
-import { stallWorkspace } from "./stall-evidence.js";
+import { stallWorkspace, writableInPlace } from "./stall-evidence.js";
 
 // Neither directory entries nor file content are returned. Do not create a
 // missing directory. Bind the checkout and its .git entry to the actual account.
@@ -171,13 +171,16 @@ export function retainedWriterForRun(
           action.runtime_ref,
           execution,
         )) !== row.workspace_seal ||
-        (await stallWorkspace(
-          state,
-          { ...current, runtime_ref: action.runtime_ref },
-          execution,
-          undefined,
-          sha,
-        )) !== "clean"
+        !writableInPlace(
+          await stallWorkspace(
+            state,
+            { ...current, runtime_ref: action.runtime_ref },
+            execution,
+            undefined,
+            sha,
+            true,
+          ),
+        )
       )
         reject();
     },
