@@ -409,6 +409,7 @@ async function assembleServer(
           return runtime.resolve(project, machine).execution;
         },
         snapshot: options.dispatcher.snapshot,
+        ...(git.stallBackup ? { stallBackup: git.stallBackup.bind(git) } : {}),
         get upstream() {
           return options.dispatcher?.upstream;
         },

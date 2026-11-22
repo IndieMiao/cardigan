@@ -12,6 +12,7 @@ import type { CommandState } from "./core.js";
 import {
   beginHostOpsAction,
   finishHostOpsAction,
+  untouchedStallSuccessor,
   withdrawUnstartedStallRestart,
 } from "./host-ops-actions.js";
 import {
@@ -388,7 +389,16 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   const state: CommandState = {
     ...f.state,
     assignments: f.state.assignments.map((v) =>
-      v.id === a.id ? { ...v, runtime_ref: ref } : v,
+      v.id === a.id
+        ? {
+            ...v,
+            runtime_ref: {
+              ...ref,
+              terminal_ref: "target",
+              agent_name: "target",
+            },
+          }
+        : v,
     ),
     runs: f.state.runs.map((r) =>
       r.id === prior.id
@@ -441,6 +451,51 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   expect(
     pendingHostOpsActions(apply(pending, withdraw(pending)).events),
   ).toHaveLength(0);
+  // The withdrawal reports whether this attempt wrote its writer receipt;
+  // omitted when the caller cannot say (later receipts then cannot stand).
+  expect(withdraw(pending).events[0]?.payload).not.toHaveProperty(
+    "backup_recorded",
+  );
+  for (const recorded of [false, true])
+    expect(
+      value(
+        withdrawUnstartedStallRestart(
+          pending,
+          system,
+          started.data.action_id,
+          f.io,
+          "workspace_backup_unconfirmed",
+          recorded,
+        ),
+      ).events[0]?.payload,
+    ).toMatchObject({
+      result: "withdrawn_stall_changed",
+      backup_recorded: recorded,
+    });
+  // A pre-signal withdrawal leaves the incident to Ops, never to a second
+  // automatic attempt; a signalled or in-flight attempt still consumes it.
+  const withdrawn = apply(pending, withdraw(pending));
+  const takeover = (s: CommandState) =>
+    beginHostOpsAction(
+      s,
+      actor(10, "host_ops"),
+      {
+        tool: "host_ops_restart_assignment",
+        target_id: a.id,
+        reason: "evidence recovered",
+        dispatch_stall_id: due.id,
+        snapshot,
+      },
+      f.io,
+    );
+  expect(begin(withdrawn).ok).toBe(false);
+  expect(takeover(pending).ok).toBe(false);
+  expect(value(takeover(withdrawn)).events).toMatchObject([
+    {
+      type: "host_ops_action_taken",
+      payload: { assignment_id: a.id, dispatch_stall_id: due.id },
+    },
+  ]);
   const stopping: CommandState = {
     ...pending,
     events: [
@@ -475,12 +530,60 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   expect(result.changes).toEqual([]);
   expect(pendingHostOpsActions(apply(pending, result).events)).toHaveLength(1);
   expect(begin(apply(pending, result)).ok).toBe(false);
+  expect(takeover(apply(pending, result)).ok).toBe(false);
   const stopped = value(
     finishHostOpsAction(pending, system, started.data.action_id, f.io, {
       cause_id: due.id,
       card_id: null,
     }),
   );
+  const preserved = apply(pending, stopped);
+  // A settled recovery whose successor launch refused the preserved checkout
+  // is left to Ops on the same incident; the system never retries it.
+  const refused: CommandState = {
+    ...preserved,
+    events: [
+      ...preserved.events,
+      {
+        ...due,
+        id: f.io.ids.nextEventId(),
+        seq: 99,
+        type: "retained_writer_refused",
+        payload: {
+          assignment_id: a.id,
+          run_id: required(stopped.data.run).id,
+          action_id: started.data.action_id,
+          system_finished_run_id: prior.id,
+        },
+      },
+    ],
+  };
+  expect(takeover(preserved).ok).toBe(false);
+  expect(begin(refused).ok).toBe(false);
+  expect(takeover(refused).ok).toBe(true);
+  const successor = required(stopped.data.run);
+  expect(stopped.timeline.filter((e) => e.type === "handoff")).toEqual([]);
+  const replacement = {
+    run_id: successor.id,
+    runtime_ref: { ...ref, terminal_ref: "new" },
+  };
+  const launched = value(dispatchRun(preserved, system, replacement, f.io));
+  expect(launched.events).toContainEqual(
+    expect.objectContaining({
+      type: "session_replaced",
+      payload: expect.objectContaining({
+        reason: "dispatch_stall",
+        last_run_id: prior.id,
+        last_outcome: "blocked",
+      }),
+    }),
+  );
+  expect(launched.timeline.filter((e) => e.type === "handoff")).toMatchObject([
+    { body: expect.stringContaining(`最近 Run：${prior.id}`) },
+  ]);
+  expect(
+    dispatchRun(apply(preserved, launched), system, replacement, f.io).ok,
+  ).toBe(false);
   const failed = value(
     recordAutomaticContextRestartResult(
       apply(pending, stopped),
@@ -647,3 +750,150 @@ test("a generationless loopback owner needs an unambiguous confirmed bell on the
   ])
     expect(owner(runs)).not.toHaveProperty("first_bell_run_id");
 });
+
+test("stall recovery distinguishes one pristine queue from dispatch evidence or a second executable Run", () => {
+  const f = setup(),
+    a = f.state.assignments[0]!;
+  const r = {
+    ...run(),
+    id: id("run", 77),
+    assignment_id: a.id,
+    role_version: a.role_version,
+    status: "queued" as const,
+    started_at: undefined,
+    finished_at: undefined,
+  };
+  const { started_at: _s, finished_at: _f, ...queued } = r;
+  const event: Event = {
+    id: f.io.ids.nextEventId(),
+    seq: 1,
+    type: "run_queued",
+    actor: system,
+    created_at: now,
+    payload: { run_id: r.id, assignment_id: a.id },
+  };
+  const state = { ...f.state, runs: [queued], events: [event] };
+  expect(untouchedStallSuccessor(state, a, queued)).toBe(true);
+  expect(untouchedStallSuccessor({ ...state, events: [] }, a, queued)).toBe(
+    false,
+  );
+  expect(
+    untouchedStallSuccessor(
+      { ...state, events: [event, { ...event, type: "run_dispatched" }] },
+      a,
+      queued,
+    ),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(
+      { ...state, runs: [queued, { ...queued, id: id("run", 78) }] },
+      a,
+      queued,
+    ),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(state, a, {
+      ...queued,
+      bell_delivery: { run_id: r.id },
+    }),
+  ).toBe(false);
+  expect(
+    untouchedStallSuccessor(state, a, { ...queued, recovery_runtime: ref }),
+  ).toBe(false);
+});
+
+test.each(["waiting", "stopping"] as const)(
+  "retirement %s transfer settles only the captured fence and reuses the untouched queue",
+  (phase) => {
+    const f = setup();
+    const original = required(f.state.assignments[0]);
+    const bound = { ...ref, agent_name: "retiring", terminal_ref: "retiring" };
+    const h = {
+      phase,
+      handoff: true as const,
+      started_at: now,
+      runtime_ref: bound,
+      failures: 3,
+      threshold_minutes: 60,
+    };
+    const a = { ...original, runtime_ref: bound, idle_retirement: h };
+    const cause: Event = {
+      id: f.io.ids.nextEventId(),
+      seq: 44,
+      type: "run_queued",
+      actor: system,
+      created_at: now,
+      card_id: id("card", 1),
+      payload: { assignment_id: a.id, run_id: id("run", 77) },
+    };
+    const queued = {
+      ...run(),
+      id: id("run", 77),
+      status: "queued" as const,
+      trigger_event_id: cause.id,
+    };
+    const state = {
+      ...f.state,
+      assignments: f.state.assignments.map((v) => (v.id === a.id ? a : v)),
+      runs: [queued],
+      events: [cause],
+    };
+    const begin = (s: CommandState) =>
+      beginSystemTurnRestart(
+        s,
+        system,
+        { assignment_id: a.id, cause_id: cause.id, snapshot },
+        f.io,
+      );
+    const intent = value(begin(state));
+    const pending = apply(state, intent);
+    expect(begin(pending).ok).toBe(false);
+    const finish = (s: CommandState) =>
+      finishHostOpsAction(s, system, intent.data.action_id, f.io, {
+        cause_id: cause.id,
+        card_id: cause.card_id ?? null,
+      });
+    const complete = value(finish(pending));
+    expect(complete.data.run).toEqual(queued);
+    const done = apply(pending, complete);
+    expect(done.assignments.find((v) => v.id === a.id)).toMatchObject({
+      runtime_ref: null,
+    });
+    expect(
+      done.assignments.find((v) => v.id === a.id)?.idle_retirement,
+    ).toBeUndefined();
+    expect(done.runs).toEqual([queued]);
+    for (const raced of [
+      { ...pending, runs: [{ ...queued, status: "dispatched" as const }] },
+      {
+        ...pending,
+        cursors: [
+          { assignment_id: a.id, card_id: id("card", 1), acked_seq: cause.seq },
+        ],
+      },
+      {
+        ...pending,
+        assignments: pending.assignments.map((v) =>
+          v.id === a.id
+            ? { ...a, idle_retirement: { ...h, started_at: "new-claim" } }
+            : v,
+        ),
+      },
+      {
+        ...pending,
+        assignments: pending.assignments.map((v) =>
+          v.id === a.id ? { ...a, runtime_ref: ref } : v,
+        ),
+      },
+      {
+        ...pending,
+        work_items: pending.work_items.map((w) =>
+          w.id === a.work_item_id
+            ? { ...w, status: "waiting_decision" as const }
+            : w,
+        ),
+      },
+    ])
+      expect(finish(raced).ok).toBe(false);
+  },
+);

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type AssignmentId,
@@ -15,6 +16,7 @@ import {
   contextUsageFresh,
   currentHarnessActivity,
   dispatchRecoveryQueuedAt,
+  eventById,
   finishHostOpsAction,
   guardReviewRestartStop,
   type HarnessActivity,
@@ -23,6 +25,7 @@ import {
   hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
   lastRunActivity,
+  observedLocalExitCause,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
@@ -33,6 +36,7 @@ import {
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  retirementStallHandoff,
   reviewRestartStopStarted,
   type SessionActivity,
   systemTurnOwner,
@@ -79,8 +83,19 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { stallWorkspace } from "./stall-evidence.js";
-import { StallPatrol } from "./stall-patrol.js";
+import {
+  incidentIdentity,
+  settlementIdentityHolds,
+  writerPlacementSeal,
+} from "./retained-writer.js";
+import {
+  localTurnExitProof,
+  remoteStallExit,
+  stallWorkspace,
+  transferredSessionExited,
+  writableInPlace,
+} from "./stall-evidence.js";
+import { recoveryBasis, StallPatrol } from "./stall-patrol.js";
 import {
   revokeStoppedRunTokens,
   stopRunRuntime,
@@ -91,6 +106,11 @@ import { UpstreamHealthMonitor } from "./upstream-health.js";
 import { inspectWorker } from "./worker-inspection.js";
 
 interface Options {
+  stallBackup?: (
+    project: ProjectId,
+    a: Assignment,
+    action: string,
+  ) => Promise<{ ref: string; sha: string }>;
   workerInspectionIntervalMs?: number;
   workerExecution?: (project: ProjectId, machine: string) => ExecutionConfig;
   upstream?: LaunchConfig | undefined;
@@ -162,18 +182,23 @@ export class HostOpsService {
       options.store,
       this.clock,
       options.runtime,
-      (project) => this.stallExecution(project),
+      (project, machine) => this.stallExecution(project, machine),
       this.contextAbort.signal,
       (ref) => options.ownsRuntimeRef?.(ref) !== false,
     );
   }
   /** A project-local worker may have a different account and workspace root
    * than the host default. Never fall back across a rejected registry binding. */
-  private stallExecution(project: ProjectId) {
+  private stallExecution(
+    project: ProjectId,
+    machine: Assignment["machine_id"],
+  ) {
     try {
       return this.options.workerExecution
-        ? this.options.workerExecution(project, "local")
-        : this.options.contextUsage?.execution;
+        ? this.options.workerExecution(project, machine)
+        : machine === "local"
+          ? this.options.contextUsage?.execution
+          : undefined;
     } catch {
       return undefined;
     }
@@ -586,7 +611,7 @@ export class HostOpsService {
       );
       if (!evidence.can_restart) {
         const unsafeWorkspace =
-          evidence.workspace !== "clean" &&
+          !writableInPlace(evidence.workspace) &&
           evidence.workspace !== "no_worktree";
         throw new ToolError(
           "stale_target",
@@ -1222,9 +1247,25 @@ export class HostOpsService {
   private async drainAction(project: ProjectId, action: HostOpsExecution) {
     const { store, runtime } = this.options;
     const read = () => store.uow.read((tx) => loadCommandState(tx, project));
+    const turnRecovery = !!(
+      action.system_finished_run_id || action.retirement_handoff
+    );
+    // Every stall recovery (turn or ordinary row) preserves a writer checkout
+    // and proves exit the same way before its successor is queued.
+    const preserve = turnRecovery || !!action.dispatch_stall_id;
     const unlock = await tryHostOpsLock(store, project, action.assignment_id);
     if (!unlock) return;
+    let unlockLaunch: Awaited<ReturnType<typeof tryHostOpsLock>>;
     try {
+      if (action.retirement_handoff) {
+        unlockLaunch = await tryHostOpsLock(
+          store,
+          project,
+          action.assignment_id,
+          "launch",
+        );
+        if (!unlockLaunch) return;
+      }
       if (this.closing) return;
       const lease = store.uow.run((tx) => {
         const effect = unwrap(
@@ -1239,6 +1280,27 @@ export class HostOpsService {
         return effect.data;
       });
       if (!lease) return;
+      // Whether this attempt has a writer backup receipt on record. Reported on
+      // withdrawal: a later receipt may stand for the incident only when no
+      // earlier attempt may have written one.
+      // A receipt that cannot be read now may still have been written by an
+      // earlier lease of this same action: unknown, never "not written".
+      const priorLease =
+        read().events.filter(
+          (e) =>
+            e.type === "host_ops_action_claimed" &&
+            (e.payload as { action_id?: string }).action_id ===
+              action.action_id,
+        ).length > 1;
+      let receiptRecorded: boolean | undefined = read().events.some(
+        (e) =>
+          e.type === "dispatch_stall_backup_verified" &&
+          (e.payload as { action_id?: string }).action_id === action.action_id,
+      )
+        ? true
+        : priorLease
+          ? undefined
+          : false;
       const fail = (reason: string) => {
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1249,6 +1311,7 @@ export class HostOpsService {
                 action.action_id,
                 { clock: this.clock, ids: tx.ids },
                 reason,
+                receiptRecorded,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1298,8 +1361,31 @@ export class HostOpsService {
             state.assignments.find((a) => a.id === action.assignment_id)
               ?.runtime_ref,
           ) === JSON.stringify(action.runtime_ref);
-        if (!bound && action.system_finished_run_id)
-          fail("terminal_binding_changed");
+        if (action.retirement_handoff) {
+          const owner = state.assignments.find(
+            (a) => a.id === action.assignment_id,
+          );
+          const fresh =
+            owner &&
+            retirementStallHandoff(state, owner, action.dispatch_stall_id);
+          if (
+            !fresh ||
+            fresh.phase !== action.retirement_handoff.phase ||
+            fresh.observe_only !== action.retirement_handoff.observe_only ||
+            fresh.started_at !== action.retirement_handoff.started_at ||
+            fresh.queue_id !== action.run_id ||
+            !action.dispatch_stall_id ||
+            !this.stallPatrol.current(
+              state,
+              action.assignment_id,
+              action.dispatch_stall_id,
+            )
+          ) {
+            fail("retirement_handoff_changed");
+            return false;
+          }
+        }
+        if (!bound && turnRecovery) fail("terminal_binding_changed");
         return bound;
       };
       // Do not revoke credentials or release the Run slot until exit is proven.
@@ -1353,6 +1439,9 @@ export class HostOpsService {
       };
       // Only inspect the fixed workspace here: the runtime already owns
       // its signal slot, so a nested runtime probe could wait on itself.
+      let workspaceSeal: string | undefined;
+      let placementChanged = false;
+      let backup: { ref: string; sha: string } | undefined;
       const checkWorkspace = async () => {
         const state = read();
         const a = state.assignments.find((a) => a.id === action.assignment_id);
@@ -1360,11 +1449,28 @@ export class HostOpsService {
           ? await stallWorkspace(
               state,
               a,
-              this.stallExecution(project),
+              this.stallExecution(project, a.machine_id),
               this.contextAbort.signal,
+              backup?.sha,
+              !!backup && !!workspaceSeal,
             )
           : "unknown";
-        if (workspace === "clean" || workspace === "no_worktree") return true;
+        if (writableInPlace(workspace) || workspace === "no_worktree") {
+          if (
+            !workspaceSeal ||
+            (a &&
+              (await writerPlacementSeal(
+                project,
+                a,
+                action.runtime_ref,
+                this.stallExecution(project, a.machine_id),
+                this.contextAbort.signal,
+              )) === workspaceSeal)
+          )
+            return true;
+          evidenceFailure = "workspace_placement_changed";
+          return false;
+        }
         evidenceFailure = `workspace=${workspace}`;
         return false;
       };
@@ -1463,7 +1569,11 @@ export class HostOpsService {
       const foreign =
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
+      const cause = eventById(read().events, action.dispatch_stall_id);
+      const exitOnly = observedLocalExitCause(cause);
       const stopStarted =
+        action.retirement_handoff?.phase === "stopping" ||
+        action.retirement_handoff?.observe_only ||
         (reviewRestart && reviewRestartStopStarted(read(), action.action_id)) ||
         ((action.automatic_context_restart === true ||
           !!action.dispatch_stall_id) &&
@@ -1477,7 +1587,7 @@ export class HostOpsService {
           ));
       // A started stop can only observe its exit. The original notice may
       // already be ACKed; settlement rechecks it before allowing a new Run.
-      if (!(action.system_finished_run_id && stopStarted) && !mayStop()) return;
+      if (!(turnRecovery && stopStarted) && !mayStop()) return;
       if (foreign) {
         // Automatic sources never ask the human to confirm the exit: a
         // C-596 restart stays pending (one executor) and the standing-PM
@@ -1504,24 +1614,219 @@ export class HostOpsService {
           return true;
         };
         let result: string;
-        if (action.system_finished_run_id) {
+        if (preserve) {
           if (!stopStarted) {
             await checkStall();
             if (!mayStop()) return;
           }
-          result = await stopSystemTurn(
-            runtime,
-            action.runtime_ref,
-            systemTurnOwner(
-              read(),
-              action.assignment_id,
-              action.runtime_ref,
-              action.system_finished_run_id,
-            ),
-            stopStarted,
-            checkWorkspace,
-            beforeSignal,
+          const a = read().assignments.find(
+            (v) => v.id === action.assignment_id,
           );
+          const write =
+            a &&
+            read().roles.find(
+              (r) =>
+                r.role_id === a.role_id && r.role_version === a.role_version,
+            )?.worktree === "write";
+          if (a && write && a.worktree_path) {
+            try {
+              workspaceSeal = await writerPlacementSeal(
+                project,
+                a,
+                action.runtime_ref,
+                this.stallExecution(project, a.machine_id),
+                this.contextAbort.signal,
+              );
+              if (!workspaceSeal) throw new Error();
+              // The incident's first backup record is the directory identity.
+              // Same path, branch and commit do not prove uncommitted work is
+              // there; a missing first record after a refusal is no proof either.
+              const seal = workspaceSeal;
+              const identity = (s: CommandState) =>
+                incidentIdentity(s, action, seal);
+              const first = identity(read());
+              if (first === null) {
+                placementChanged = true;
+                throw new Error();
+              }
+              backup = await this.options.stallBackup?.(
+                project,
+                a,
+                action.action_id,
+              );
+              if (first && backup && backup.sha !== first.sha) {
+                placementChanged = true;
+                throw new Error();
+              }
+              if (!backup || !(await checkWorkspace())) throw new Error();
+              const verified = { ...backup, workspace_seal: workspaceSeal };
+              store.uow.run((tx) => {
+                const state = loadCommandState(tx, project);
+                const current = state.assignments.find((v) => v.id === a.id);
+                const fresh = identity(state);
+                if (fresh === null || (fresh && fresh.sha !== verified.sha)) {
+                  placementChanged = true;
+                  throw new Error();
+                }
+                if (
+                  !pendingHostOpsActions(state.events).some(
+                    (v) => v.action_id === action.action_id,
+                  ) ||
+                  !current ||
+                  !isDeepStrictEqual(recoveryBasis(current), recoveryBasis(a))
+                )
+                  throw new Error();
+                const prior = state.events.find(
+                  (e) =>
+                    e.type === "dispatch_stall_backup_verified" &&
+                    (e.payload as { action_id?: string }).action_id ===
+                      action.action_id,
+                );
+                if (prior) {
+                  const p = prior.payload as {
+                    workspace_seal?: string;
+                    sha?: string;
+                    ref?: string;
+                  };
+                  if (
+                    p.workspace_seal !== workspaceSeal ||
+                    p.sha !== verified.sha ||
+                    p.ref !== verified.ref
+                  )
+                    throw new Error();
+                } else {
+                  const card = state.work_items.find(
+                    (w) => w.id === a.work_item_id,
+                  )?.card_id;
+                  tx.events.append(project, {
+                    id: tx.ids.nextEventId(),
+                    seq: tx.ids.nextEventSequence(project, card),
+                    ...(card ? { card_id: card } : {}),
+                    actor: { kind: "system", project_id: project },
+                    type: "dispatch_stall_backup_verified",
+                    created_at: this.clock.now(),
+                    payload: {
+                      action_id: action.action_id,
+                      assignment_id: a.id,
+                      system_finished_run_id:
+                        action.system_finished_run_id ?? null,
+                      ...verified,
+                    },
+                  });
+                }
+              });
+              receiptRecorded = true;
+            } catch {
+              fail(
+                placementChanged
+                  ? "workspace_placement_changed"
+                  : "workspace_backup_unconfirmed",
+              );
+              return;
+            }
+          }
+          const remote = a && a.machine_id !== "local";
+          if (action.retirement_handoff) {
+            // Observe first. Only a still-waiting, locally registered launch can
+            // reach the existing graceful stop. A transferred stop is never retried.
+            const exited = () =>
+              a &&
+              transferredSessionExited(
+                read(),
+                a,
+                runtime,
+                this.stallExecution(project, a.machine_id),
+              );
+            if (await exited()) result = "exited";
+            else if (
+              remote ||
+              stopStarted ||
+              !a?.runtime_ref?.local_process_receipt
+            )
+              result = "terminal_exit_unconfirmed";
+            else {
+              result = await stopSystemTurn(
+                runtime,
+                action.runtime_ref,
+                { project_id: project, assignment_id: a.id },
+                false,
+                checkWorkspace,
+                beforeSignal,
+                async () => !!(await exited()),
+              );
+              if (result === "exited" && !(await exited()))
+                result = "terminal_exit_unconfirmed";
+            }
+          } else if (
+            action.system_finished_run_id &&
+            !action.runtime_ref &&
+            a &&
+            !a.runtime_ref &&
+            !a.session_ref &&
+            !remote
+          ) {
+            // Settled by an earlier recovery: no session left to stop.
+            result = "exited";
+          } else if (action.system_finished_run_id) {
+            result =
+              remote &&
+              !(await remoteStallExit(
+                read(),
+                a,
+                this.stallExecution(project, a.machine_id),
+              ))
+                ? "terminal_exit_unconfirmed"
+                : await stopSystemTurn(
+                    runtime,
+                    action.runtime_ref,
+                    systemTurnOwner(
+                      read(),
+                      action.assignment_id,
+                      action.runtime_ref,
+                      action.system_finished_run_id,
+                    ),
+                    !!remote || stopStarted || exitOnly,
+                    checkWorkspace,
+                    beforeSignal,
+                    async () =>
+                      !!a &&
+                      !!action.runtime_ref &&
+                      (await localTurnExitProof(
+                        read(),
+                        a,
+                        runtime,
+                        action.runtime_ref,
+                        this.stallExecution(project, a.machine_id),
+                      )),
+                  );
+          } else {
+            // Ordinary stall rows use the same guards: the evidence recheck and
+            // writer backup above, one owner-bound idle stop and kernel exit
+            // proof. Never force-release by address; without proof go to Ops.
+            result = !action.runtime_ref
+              ? a && !a.runtime_ref
+                ? "exited" // Never provisioned: no session to stop.
+                : "terminal_exit_unconfirmed"
+              : !a || remote
+                ? "terminal_exit_unconfirmed"
+                : await stopSystemTurn(
+                    runtime,
+                    action.runtime_ref,
+                    { project_id: project, assignment_id: a.id },
+                    stopStarted,
+                    checkWorkspace,
+                    beforeSignal,
+                    async () =>
+                      !!action.runtime_ref &&
+                      (await localTurnExitProof(
+                        read(),
+                        a,
+                        runtime,
+                        action.runtime_ref,
+                        this.stallExecution(project, a.machine_id),
+                      )),
+                  );
+          }
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.
           if (result === "exited" && !(await checkWorkspace()))
@@ -1534,7 +1839,6 @@ export class HostOpsService {
             beforeSignal,
             stopStarted,
             !stopStarted,
-            action.dispatch_stall_id ? checkStall : undefined,
           );
           if (result !== "exited") result = "terminal_exit_unconfirmed";
         }
@@ -1557,13 +1861,14 @@ export class HostOpsService {
       // Credential scrubbing can wait on worker IO. Do not queue from a
       // workspace observation made before that wait.
       if (
-        action.system_finished_run_id &&
+        preserve &&
         this.options.scrubCredentials &&
         !(await checkWorkspace())
       ) {
         if (!this.closing) fail(evidenceFailure ?? "workspace=unknown");
         return;
       }
+      let identityLost = false;
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
         if (
@@ -1575,6 +1880,18 @@ export class HostOpsService {
           )?.id !== lease
         )
           return;
+        // Settle only on positive evidence: the incident's first receipt is
+        // readable and matches. "No first receipt yet" allows recording one
+        // before the backup, never settling after it: no cleared binding,
+        // revoked token or successor otherwise.
+        if (
+          preserve &&
+          workspaceSeal &&
+          !settlementIdentityHolds(state, action, workspaceSeal)
+        ) {
+          identityLost = true;
+          return;
+        }
         const effect = unwrap(
           finishHostOpsAction(
             state,
@@ -1607,8 +1924,13 @@ export class HostOpsService {
             ...(event.card_id ? { card_id: event.card_id } : {}),
           });
       });
+      if (identityLost && !this.closing) fail("workspace_placement_changed");
     } finally {
-      await unlock();
+      try {
+        await unlockLaunch?.();
+      } finally {
+        await unlock();
+      }
     }
   }
 }

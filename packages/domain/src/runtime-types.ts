@@ -57,7 +57,12 @@ export type RetirementEvidence = {
   readonly observation?: "alive" | "exited" | "unknown" | RuntimeErrorCode;
 };
 export type IdleRetirementResult =
-  | { readonly outcome: "exited" }
+  | {
+      readonly outcome: "exited";
+      /** System-turn stops only: the probed process and its group are gone,
+       * checked by the kernel after the terminal finished. */
+      readonly process_group_exited?: true;
+    }
   | {
       readonly outcome: "withdrawn" | "timeout" | "uncertain";
       readonly evidence: RetirementEvidence;
