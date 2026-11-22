@@ -271,6 +271,13 @@ test.runIf(process.platform === "linux")(
         expect.objectContaining({ step: "account", state: "running" }),
       );
       expect((await run()).status).toBe(409);
+      // C-565: a late automatic recheck meeting a running check is told the
+      // session moved on (not a preview error), and starts nothing.
+      const whileRunning = await f.post(`${path}/run`, {
+        resume_check_id: (await status()).check_id,
+      });
+      expect(whileRunning.status).toBe(409);
+      expect(whileRunning.text).toContain("worker_check_changed");
       gate.resolve();
       await vi.waitFor(async () =>
         expect((await status()).phase).toBe("failed"),

@@ -23,7 +23,7 @@ import { CapacityProvider } from "../components/Capacity.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { MachinesSettings } from "./MachinesSettings.js";
-import { WorkerWizardDrawer } from "./WorkerWizard.js";
+import { storedWizard, WorkerWizardDrawer } from "./WorkerWizard.js";
 
 afterEach(() => {
   cleanup();
@@ -1277,4 +1277,36 @@ test("C-565: while rechecking, the status is short and counts the rechecks", asy
   const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
   await toBlocked(dialog);
   expect(await dialog.findByText("自动复查中（0/20）")).toBeTruthy();
+});
+
+test("C-565: the commands-step mark never touches another project's session, even one named <project>.commands", async () => {
+  // Project "demo.commands" holds a session; project "demo" stops at a
+  // target-machine step, then finishes.
+  window.localStorage.setItem(
+    "cardigan.worker-wizard.demo.commands",
+    "6f1c2a7e-0000-4000-8000-0000000000aa",
+  );
+  const fake = backend(["account", "passed"]);
+  render(
+    <WorkerWizardDrawer
+      client={fakeClient(fake.client)}
+      projectId="demo"
+      pollMs={5}
+      autoRecheckMs={60_000}
+      onChanged={() => {}}
+      onClose={() => {}}
+    />,
+  );
+  const dialog = within(screen.getByRole("dialog"));
+  await toBlocked(dialog);
+  await dialog.findByText(/自动复查中/u);
+  expect(storedWizard("demo.commands")).toBe(
+    "6f1c2a7e-0000-4000-8000-0000000000aa",
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "完成" }));
+  await waitFor(() => expect(storedWizard("demo")).toBeUndefined());
+  expect(storedWizard("demo.commands")).toBe(
+    "6f1c2a7e-0000-4000-8000-0000000000aa",
+  );
 });

@@ -264,6 +264,18 @@ export class WorkerWizards {
         ("resume_check_id" in body && typeof body.resume_check_id !== "string")
       )
         throw invalid();
+      // An automatic recheck only continues the failed check it saw; if the
+      // session moved on (another page continued, is checking or passed it),
+      // it must read the current state instead of starting a new check.
+      if (
+        "resume_check_id" in body &&
+        (s.phase !== "failed" || s.check_id !== body.resume_check_id)
+      )
+        throw new HttpRejection(
+          409,
+          "worker_check_changed",
+          "向导状态已改变，请重新读取。",
+        );
       if (s.phase === "running") throw stale();
       if (action === "cancel") {
         audit("cancelled", s);
@@ -330,18 +342,6 @@ export class WorkerWizards {
         s.phase = action === "enable" ? "enabled" : "ready";
       } else if (action === "run") {
         if (!["ready", "failed", "passed"].includes(s.phase)) throw stale();
-        // An automatic recheck only continues the failed check it saw; if
-        // the session moved on (another page continued or passed it), it
-        // must read the current state instead of starting a new check.
-        if (
-          "resume_check_id" in body &&
-          (s.phase !== "failed" || s.check_id !== body.resume_check_id)
-        )
-          throw new HttpRejection(
-            409,
-            "worker_check_changed",
-            "向导状态已改变，请重新读取。",
-          );
         const steps = s.phase === "passed" ? initialSteps() : s.steps;
         const check = checkWizard({
           store: this.store,

@@ -84,8 +84,10 @@ function rememberWizard(projectId: string, id: string | undefined) {
  * step bar shows “目标机命令” as done only when it was really needed (also
  * after coming back); a session that passed straight through skips it.
  */
+// A separate prefix: `cardigan.worker-wizard.<project>` is the session key,
+// and a project id may itself end in `.commands`, so no suffix scheme is safe.
 const commandsKey = (projectId: string) =>
-  `cardigan.worker-wizard.${projectId}.commands`;
+  `cardigan.worker-wizard-commands.${projectId}`;
 function commandsNeeded(projectId: string): string | undefined {
   try {
     return window.localStorage.getItem(commandsKey(projectId)) ?? undefined;
