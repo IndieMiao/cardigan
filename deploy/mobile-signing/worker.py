@@ -8,8 +8,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (canonical, config, database, digest, directory, json, line, manifest,
-                    persist, private_dir, require, send, transfer)
+from common import (SigningFailure, canonical, config, database, digest, directory, json, line,
+                    manifest, persist, private_dir, read_failure, require, save_failure, send,
+                    transaction, transfer)
 from platforms import android, ios, lock_keychain
 
 
@@ -22,13 +23,14 @@ def signing_session(c, root):
             lock_keychain(c, root)
 
 
-def receipt(root, spec):
+def receipt(root, spec, *, failure_details=True):
     # Metadata only: no signing policy/key access, no output bytes, no journal mutation.
     with closing(sqlite3.connect((root/'audit.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
         row = db.execute('SELECT state,sha FROM receipts WHERE id=? AND spec=?',
                          (spec['id'], canonical(spec))).fetchone()
         require(row)
-        return {'state': row[0], 'sha256': row[1]}
+        details = read_failure(db, spec['id']) if failure_details and row[0] == 'failed' else {}
+        return {'state': row[0], 'sha256': row[1], **details}
 
 
 def serve(root, src, dst, adapters=None):
@@ -38,7 +40,7 @@ def serve(root, src, dst, adapters=None):
     require(s['worker_uid'] != os.getuid() and os.getuid() != 0)
     if mode == 'receipt':
         require(req['size'] == 0)
-        send(dst, canonical(receipt(root, s)).encode())
+        send(dst, canonical(receipt(root, s, failure_details=req.get('failure_details') is True)).encode())
         return
     require(mode in ('sign', 'lookup'))
     with (root/'serial.lock').open('ab') as lock:
@@ -71,15 +73,20 @@ def serve(root, src, dst, adapters=None):
                         (adapters or {'android':android,'ios':ios})[s['platform']](c,candidate,signed,tmp)
                         sha = digest(signed)
                         persist(signed, output)
-                    except Exception:
-                        db.execute("UPDATE receipts SET state='failed' WHERE id=?", (rid,))
+                    except Exception as exc:
+                        category = exc.category if isinstance(exc, SigningFailure) else 'signing_failed'
+                        with transaction(db):
+                            db.execute("UPDATE receipts SET state='failed' WHERE id=?", (rid,))
+                            save_failure(db, rid, category)
                         sha = None
         if mode == 'sign' and sha is not None:
             db.execute("UPDATE receipts SET state='signed',sha=? WHERE id=?", (sha,rid))
         row = db.execute('SELECT state,sha FROM receipts WHERE id=? AND spec=?',(rid,spec)).fetchone()
         require(row)
         if row[0]=='failed':
-            send(dst,b'{"status":"failed"}')
+            # Old control hosts compare the whole header to {"status":"failed"}.
+            details = read_failure(db, rid) if req.get('failure_details') is True else {}
+            send(dst, canonical({'status': 'failed', **details}).encode())
             return
         require(row[0]=='signed' and digest(output)==row[1])
         size=output.stat().st_size
