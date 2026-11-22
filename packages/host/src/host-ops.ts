@@ -1279,11 +1279,24 @@ export class HostOpsService {
       // Whether this attempt has a writer backup receipt on record. Reported on
       // withdrawal: a later receipt may stand for the incident only when no
       // earlier attempt may have written one.
-      let receiptRecorded = read().events.some(
+      // A receipt that cannot be read now may still have been written by an
+      // earlier lease of this same action: unknown, never "not written".
+      const priorLease =
+        read().events.filter(
+          (e) =>
+            e.type === "host_ops_action_claimed" &&
+            (e.payload as { action_id?: string }).action_id ===
+              action.action_id,
+        ).length > 1;
+      let receiptRecorded: boolean | undefined = read().events.some(
         (e) =>
           e.type === "dispatch_stall_backup_verified" &&
           (e.payload as { action_id?: string }).action_id === action.action_id,
-      );
+      )
+        ? true
+        : priorLease
+          ? undefined
+          : false;
       const fail = (reason: string) => {
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1851,6 +1864,7 @@ export class HostOpsService {
         if (!this.closing) fail(evidenceFailure ?? "workspace=unknown");
         return;
       }
+      let identityLost = false;
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
         if (
@@ -1862,6 +1876,16 @@ export class HostOpsService {
           )?.id !== lease
         )
           return;
+        // Settle only while the incident's first receipt still proves the
+        // directory: no cleared binding, revoked token or successor otherwise.
+        if (
+          preserve &&
+          workspaceSeal &&
+          incidentIdentity(state, action, workspaceSeal) === null
+        ) {
+          identityLost = true;
+          return;
+        }
         const effect = unwrap(
           finishHostOpsAction(
             state,
@@ -1894,6 +1918,7 @@ export class HostOpsService {
             ...(event.card_id ? { card_id: event.card_id } : {}),
           });
       });
+      if (identityLost && !this.closing) fail("workspace_placement_changed");
     } finally {
       try {
         await unlockLaunch?.();

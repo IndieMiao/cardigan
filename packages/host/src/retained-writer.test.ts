@@ -265,3 +265,56 @@ test("the launch check refuses when only the first receipt is unreadable", () =>
     RetainedWriterRefused,
   );
 });
+
+const claimed = (action: Event) =>
+  event("host_ops_action_claimed", {
+    action_id: action.id,
+    assignment_id: "A-1",
+  });
+
+test("settlement refuses once the first receipt became unreadable after the takeover recorded its own", () => {
+  // V-2977:1 ①: the takeover checked the first receipt and wrote its own with
+  // the same seal; by the settling transaction only the takeover's remains.
+  const first = event("host_ops_action_taken", incident);
+  const firstReceipt = receipt(first, "original");
+  const takeover = event("host_ops_action_taken", incident, ops);
+  const atTakeover = [
+    first,
+    firstReceipt,
+    withdrawn(first, true),
+    takeover,
+    claimed(takeover),
+    receipt(takeover, "original"),
+  ];
+  expect(
+    incidentIdentity(state(atTakeover), asking(takeover), "original"),
+  ).toMatchObject({ action_id: first.id });
+  const atSettlement = atTakeover.filter((e) => e !== firstReceipt);
+  expect(
+    incidentIdentity(state(atSettlement), asking(takeover), "original"),
+  ).toBeNull();
+});
+
+test("a re-claimed action whose earlier-lease receipt is unreadable cannot record a fresh first", () => {
+  // V-2977:1 ②: the first lease of this action wrote its receipt; the lease
+  // expired and a second claim of the same action cannot read it.
+  const action = event("host_ops_action_taken", incident);
+  const firstLease = claimed(action);
+  const ownReceipt = receipt(action, "original");
+  const secondLease = claimed(action);
+  const full = [action, firstLease, ownReceipt, secondLease];
+  expect(
+    incidentIdentity(state(full), asking(action), "original"),
+  ).toMatchObject({ action_id: action.id });
+  const unreadable = full.filter((e) => e !== ownReceipt);
+  expect(
+    incidentIdentity(state(unreadable), asking(action), "other"),
+  ).toBeNull();
+  expect(
+    incidentIdentity(state(unreadable), asking(action), "original"),
+  ).toBeNull();
+  // A first lease that truly wrote nothing still records the first receipt.
+  expect(
+    incidentIdentity(state([action, firstLease]), asking(action), "original"),
+  ).toBeUndefined();
+});

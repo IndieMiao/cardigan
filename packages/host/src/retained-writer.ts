@@ -242,11 +242,19 @@ function incidentHistory(state: CommandState, action: IncidentAction) {
     if (p.run_id && (settled === undefined || at < settled)) settled = at;
     if (!p.run_id && p.backup_recorded === false) noReceipt.add(p.action_id);
   }
-  /** An attempt before `limit` (other than the asking one) that may have
-   * written a receipt now unreadable. */
+  // The asking action is excluded only on its first lease: a re-claimed action
+  // may have written a receipt in an earlier lease that is unreadable now.
+  const claims = eventsOfType(state.events, "host_ops_action_claimed").filter(
+    (e) => (e.payload as { action_id?: string }).action_id === action.action_id,
+  ).length;
+  const askingExcluded = !!action.action_id && claims <= 1;
+  /** An attempt before `limit` that may have written a receipt now unreadable. */
   const unaccounted = (limit: number) =>
     [...order].some(
-      ([id, at]) => at < limit && id !== action.action_id && !noReceipt.has(id),
+      ([id, at]) =>
+        at < limit &&
+        !(askingExcluded && id === action.action_id) &&
+        !noReceipt.has(id),
     );
   return { order, settled, unaccounted };
 }
