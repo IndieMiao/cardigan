@@ -11,9 +11,14 @@ import {
   rmSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { EXT_MESSAGE_DEFAULTS } from "@cardigan/domain";
+import {
+  EXT_MESSAGE_DEFAULTS,
+  EXT_MESSAGE_FILTER_DEFAULTS,
+} from "@cardigan/domain";
 import {
   defaultMaxPerMinute,
+  extMaxExcludedProjects,
+  extProjectIdPattern,
   loadExtMessageConfig,
   parseAppCredential,
   parseFeishuCredential,
@@ -59,6 +64,11 @@ const url = z
       !u.pathname.includes("/bot/v2/hook/")
     );
   });
+// C-580: the same project identifiers the background loader accepts.
+const projects = z
+  .array(z.string().max(64).regex(extProjectIdPattern))
+  .max(extMaxExcludedProjects)
+  .refine((ids) => new Set(ids).size === ids.length);
 // Only these paths can ever reach a diff, an audit row, or setIn(). Never serialize raw YAML.
 const fields = {
   enabled: bool,
@@ -81,6 +91,11 @@ const fields = {
   "channels.lark_app.action_ttl_ms": number,
   "channels.lark_app.binding_attempts_per_minute": number,
   "channels.lark_app.pending_limit": number,
+  "filter.decision": bool,
+  "filter.human_action": bool,
+  "filter.merge_confirmation": bool,
+  "filter.notice": bool,
+  "filter.excluded_projects": projects,
 };
 const defaults = {
   enabled: false,
@@ -99,6 +114,13 @@ const defaults = {
   "channels.lark_app.action_ttl_ms": 86400000,
   "channels.lark_app.binding_attempts_per_minute": 30,
   "channels.lark_app.pending_limit": 32,
+  ...Object.fromEntries(
+    Object.entries(EXT_MESSAGE_FILTER_DEFAULTS.kinds).map(([k, v]) => [
+      `filter.${k}`,
+      v,
+    ]),
+  ),
+  "filter.excluded_projects": EXT_MESSAGE_FILTER_DEFAULTS.excluded_projects,
 } as Record<string, unknown>;
 export const channelNames = ["lark", "lark_app"] as const;
 export type Channel = (typeof channelNames)[number];

@@ -131,6 +131,33 @@ export function projectExtMessage(
   );
 }
 
+/**
+ * C-580: an item the push filter excludes is settled as skipped without ever
+ * being pending, so enabling its kind or project later never sends it.
+ */
+export function skipFilteredExtMessage(
+  db: DatabaseSync,
+  item: ExtMessageItem,
+  channel: string,
+  now: string,
+): void {
+  prepare(
+    db,
+    `INSERT OR IGNORE INTO ext_message_outbox
+    (project_id,item_kind,item_id,channel,event_id,card_id,status,next_attempt_at,updated_at,digest_id)
+    VALUES (?,?,?,?,?,?,'skipped',?,?,NULL)`,
+  ).run(
+    item.project_id,
+    item.kind,
+    item.item_id,
+    channel,
+    item.event_id,
+    item.card_id ?? null,
+    now,
+    now,
+  );
+}
+
 /** Monotone downgrade, including unsettled or leased single attempts. A retry
  * remains its own frozen group, keeping its existing attempt count and due time. */
 export function markExtQuiet(db: DatabaseSync, row: ExtMessageRow) {

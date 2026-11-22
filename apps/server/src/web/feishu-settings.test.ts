@@ -584,3 +584,79 @@ test("a masked link cannot be sent or unmasked by rotating or clearing the crede
   );
   expect(JSON.stringify(await state())).not.toContain(sign);
 });
+test("C-580 push filter reads its defaults, saves through preview and confirm, and keeps channel epochs", async () => {
+  fixture();
+  const s = await state();
+  expect(
+    Object.fromEntries(
+      Object.entries(s.settings).filter(([k]) => k.startsWith("filter.")),
+    ),
+  ).toEqual({
+    "filter.decision": true,
+    "filter.human_action": true,
+    "filter.merge_confirmation": true,
+    "filter.notice": false,
+    "filter.excluded_projects": [],
+  });
+  const before = loadExtMessageConfig(path);
+  const change = {
+    settings: {
+      "filter.notice": true,
+      "filter.decision": false,
+      "filter.excluded_projects": ["sensen-godot"],
+    },
+  };
+  const p = await preview(change);
+  expect(p.diff).toEqual([
+    { key: "filter.decision", before: true, after: false },
+    { key: "filter.notice", before: false, after: true },
+    {
+      key: "filter.excluded_projects",
+      before: [],
+      after: ["sensen-godot"],
+    },
+  ]);
+  expect((await confirm(p)).status).toBe(200);
+  expect(parse(settings()).filter).toEqual({
+    notice: true,
+    decision: false,
+    excluded_projects: ["sensen-godot"],
+  });
+  const after = loadExtMessageConfig(path);
+  expect(after).toMatchObject({
+    status: "loaded",
+    config: {
+      filter: {
+        kinds: {
+          decision: false,
+          human_action: true,
+          merge_confirmation: true,
+          notice: true,
+        },
+        excluded_projects: ["sensen-godot"],
+      },
+    },
+  });
+  // The filter is not a channel rotation: pending retries keep their epoch.
+  expect(extFingerprints(after, true)).toEqual(extFingerprints(before, true));
+  const reread = await state();
+  expect(reread.settings["filter.notice"]).toBe(true);
+  expect(reread.settings["filter.excluded_projects"]).toEqual(["sensen-godot"]);
+});
+test.each([
+  { "filter.notice": "yes" },
+  { "filter.excluded_projects": "cardigan" },
+  { "filter.excluded_projects": ["Cardigan"] },
+  { "filter.excluded_projects": ["../escape"] },
+  { "filter.excluded_projects": ["cardigan", "cardigan"] },
+  { "filter.projects": ["cardigan"] },
+])(
+  "C-580 an invalid push filter change is refused before any write: %j",
+  async (settings) => {
+    const original = fixture();
+    const { version } = await state();
+    const r = await post("preview", { version, change: { settings } });
+    expect(r.status).toBe(400);
+    expect(readFileSync(path, "utf8")).toBe(original);
+  },
+);

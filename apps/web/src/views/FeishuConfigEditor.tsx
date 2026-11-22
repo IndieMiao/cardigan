@@ -6,6 +6,7 @@ import {
   type FeishuSettingsChange,
   type FeishuSettingsPreview,
   type FeishuSettingsView,
+  type ProjectSummary,
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { StatusTag, Time } from "../components/Foundation.js";
@@ -23,6 +24,7 @@ import {
   useDiscardGuard,
 } from "../components/layout/SettingsLayout.js";
 import { Button } from "../components/ui/button.js";
+import { Checkbox } from "../components/ui/checkbox.js";
 import { Input } from "../components/ui/input.js";
 import { Switch } from "../components/ui/switch.js";
 import {
@@ -37,6 +39,9 @@ import {
   formatValue,
   maskedFields,
   netEdits,
+  PROJECTS_EDIT,
+  PUSH_KINDS,
+  PUSH_LABELS,
   provedNotWritten,
   SECRET_LABELS,
   STALE,
@@ -51,7 +56,7 @@ import {
 import { SettingPlaceContext } from "./useSettingWrite.js";
 
 type SecretValues = Partial<Record<FeishuSecretKey, string>>;
-type Edited = DraftField | DraftSwitch;
+type Edited = DraftField | DraftSwitch | typeof PROJECTS_EDIT;
 
 /** A confirmation whose outcome could not be verified. */
 const UNSETTLED =
@@ -72,9 +77,12 @@ export function FeishuConfigEditor({
   onClose,
   hidden = false,
   initial,
+  projects,
 }: {
   client: CardiganClient;
   view: FeishuSettingsView;
+  /** C-580: the projects to choose from (undefined while reading). */
+  projects: readonly ProjectSummary[] | undefined;
   /**
    * The Feishu panel is not shown (another settings tab, e.g. after the
    * browser went back): the drawer steps aside and keeps the draft until the
@@ -210,6 +218,7 @@ export function FeishuConfigEditor({
           mine.has(f) ? draft.fields[f] : fresh.fields[f],
         ]),
       ) as FeishuDraft["fields"],
+      excluded: mine.has(PROJECTS_EDIT) ? draft.excluded : fresh.excluded,
       retyped: new Set(
         [...draft.retyped].filter((f) => maskedFields(next).includes(f)),
       ),
@@ -327,6 +336,15 @@ export function FeishuConfigEditor({
     setEdited((old) => new Set(old).add(k));
     setDraft((old) => ({ ...old, switches: { ...old.switches, [k]: on } }));
   };
+  const setPushed = (project: string, pushed: boolean) => {
+    setEdited((old) => new Set(old).add(PROJECTS_EDIT));
+    setDraft((old) => ({
+      ...old,
+      excluded: pushed
+        ? old.excluded.filter((id) => id !== project)
+        : [...new Set([...old.excluded, project])].sort(),
+    }));
+  };
   const setField = (f: DraftField, text: string) => {
     setEdited((old) => new Set(old).add(f));
     setDraft((old) => ({
@@ -414,6 +432,14 @@ export function FeishuConfigEditor({
     </label>
   );
 
+  // Excluded projects no longer listed stay choosable by their identifier.
+  const choices = [
+    ...(projects ?? []).map((p) => ({ id: p.id, name: p.name })),
+    ...draft.excluded
+      .filter((id) => !projects?.some((p) => p.id === id))
+      .map((id) => ({ id, name: id })),
+  ];
+
   let body: ReactNode;
   if (preview) {
     body = (
@@ -493,6 +519,41 @@ export function FeishuConfigEditor({
             {toggle("lark", "群机器人")}
             {toggle("lark_app", "应用机器人")}
             {field("workbench_url", "Workbench 链接", "url")}
+          </SettingsDialogFields>
+        </SettingsSection>
+        <SettingsSection title="推送哪些消息">
+          <SettingsDialogFields>
+            {PUSH_KINDS.map((k) => (
+              <SettingsField
+                key={k}
+                label={PUSH_LABELS[k].label}
+                hint={PUSH_LABELS[k].description}
+              >
+                {(props) => (
+                  <Switch
+                    checked={draft.switches[k]}
+                    disabled={busy}
+                    aria-describedby={props.describedBy}
+                    onCheckedChange={(on) => setSwitch(k, on)}
+                  />
+                )}
+              </SettingsField>
+            ))}
+            <fieldset>
+              <legend>推送的项目</legend>
+              <div data-choices="">
+                {choices.map((p) => (
+                  <label key={p.id}>
+                    <Checkbox
+                      checked={!draft.excluded.includes(p.id)}
+                      disabled={busy}
+                      onCheckedChange={(on) => setPushed(p.id, on === true)}
+                    />
+                    {p.name}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
           </SettingsDialogFields>
         </SettingsSection>
         <SettingsSection title="免打扰">

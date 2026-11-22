@@ -36,6 +36,11 @@ export function syntheticFeishuView(): FeishuSettingsView {
       "channels.lark_app.action_ttl_ms": 86400000,
       "channels.lark_app.binding_attempts_per_minute": 30,
       "channels.lark_app.pending_limit": 32,
+      "filter.decision": true,
+      "filter.human_action": true,
+      "filter.merge_confirmation": true,
+      "filter.notice": false,
+      "filter.excluded_projects": [],
     },
     secrets: {
       lark_webhook: { set: true, updated_at: "2025-12-30T02:15:00Z" },

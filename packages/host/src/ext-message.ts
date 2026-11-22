@@ -5,10 +5,12 @@ import {
   type CardId,
   type Clock,
   type CommandState,
+  EXT_MESSAGE_FILTER_DEFAULTS,
   type ExtMessage,
   type ExtMessageItem,
   type ExtMessagePort,
   extInteraction,
+  extMessageAllowed,
   extMessageItems,
   type ProjectId,
 } from "@cardigan/domain";
@@ -45,6 +47,7 @@ import {
   type StoreTransactionContext,
   saveExtQuietOverflow,
   settleExtMessage,
+  skipFilteredExtMessage,
 } from "@cardigan/store";
 import {
   type ExtMessageConfig,
@@ -133,6 +136,7 @@ function planChannel(
   through: number | null,
   slots: number,
   now: string,
+  filtered: ReadonlySet<string> = new Set(),
 ) {
   const previous = extQuietOverflow(store.database, project, channel);
   const remembered = new Set<string>(
@@ -167,7 +171,23 @@ function planChannel(
     assignedRate: boolean;
   }[] = [];
   let newRows = 0;
+  // C-580: filtered items never enter the queue; a skipped row keeps them out
+  // even after their kind or project is switched on again.
+  const skips: ExtMessageItem[] = [];
+  let skipsIncomplete = false;
   for (const item of items) {
+    if (filtered.has(itemKey(item.kind, item.item_id))) {
+      // Bounded like new rows; the rest follow on the next projection.
+      if (
+        !item.handled &&
+        afterExtWatermark(store.database, project, item.event_id, watermark) &&
+        !hasExtMessage(store.database, item, channel)
+      ) {
+        if (skips.length < projectionBatch) skips.push(item);
+        else skipsIncomplete = true;
+      }
+      continue;
+    }
     if (
       item.handled ||
       !afterExtWatermark(store.database, project, item.event_id, watermark)
@@ -292,11 +312,12 @@ function planChannel(
     return {
       channel,
       writes,
+      skips,
       admissions,
       collecting,
       singles,
       hasRate,
-      complete: complete && next === null,
+      complete: complete && !skipsIncomplete && next === null,
       incompleteDigest,
       incompleteOrdinary,
       previous,
@@ -666,7 +687,16 @@ export class ExtMessageSender {
       )
         return;
       const state = loadCommandState(tx, projectId);
-      const items = extMessageItems(state, projectId);
+      const filter = config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
+      const filtered = new Set<string>();
+      // Pending and retrying rows of a filtered item settle as skipped, like
+      // a handled item: no further attempt and no failure notice.
+      const sourceItems = extMessageItems(state, projectId);
+      const items = sourceItems.map((item) => {
+        if (extMessageAllowed(filter, item)) return item;
+        filtered.add(itemKey(item.kind, item.item_id));
+        return { ...item, handled: true };
+      });
       const quiet = extMessageQuiet(config, now);
       const plans =
         projected && !config.quiet_hours
@@ -676,13 +706,14 @@ export class ExtMessageSender {
                 store,
                 projectId,
                 channel,
-                items,
+                sourceItems,
                 config,
                 quiet,
                 watermarks.get(channel)!,
                 rateBatches.get(channel)!,
                 available(channel, now),
                 now,
+                filtered,
               ),
             );
       return {
@@ -698,6 +729,7 @@ export class ExtMessageSender {
       plan.plans.some(
         (p) =>
           p.writes.length ||
+          p.skips.length ||
           p.admissions.length ||
           p.previous !== p.next ||
           (p.singles.size &&
@@ -741,6 +773,8 @@ export class ExtMessageSender {
             deferExtRateBatch(store.database, p.channel);
           for (const { item, channel, group } of p.writes)
             projectExtMessage(store.database, item, channel, enqueueAt, group);
+          for (const item of p.skips)
+            skipFilteredExtMessage(store.database, item, p.channel, enqueueAt);
           for (const { row, group } of p.admissions)
             if (group === "queued") markExtQuiet(store.database, row);
             else groupExtMessage(store.database, row, group);

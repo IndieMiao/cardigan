@@ -60,7 +60,17 @@ const feishu = new URLSearchParams(location.search).has("feishuConfig")
       test: (channel) => (channel === "lark" ? "sent" : "timeout"),
     }).client
   : undefined;
+// C-580: a second synthetic project for the push filter scenes (?feishuProjects=1).
+const projects = new URLSearchParams(location.search).has("feishuProjects")
+  ? {
+      projects: async () => [
+        { id: "p-1", name: "Cardigan 自己", created_at: NOW },
+        { id: "p-2", name: "合成项目二", created_at: NOW },
+      ],
+    }
+  : {};
 const client = fakeClient({
+  ...projects,
   ...(feishu && {
     ...feishu,
     previewFeishuSettings: (version, change) => {

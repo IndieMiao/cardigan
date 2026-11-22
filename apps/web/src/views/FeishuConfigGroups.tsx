@@ -3,6 +3,7 @@ import type {
   FeishuChannel,
   FeishuSecretKey,
   FeishuSettingsView,
+  ProjectSummary,
 } from "../api.js";
 import { formatTime, StatusTag } from "../components/Foundation.js";
 import {
@@ -12,7 +13,12 @@ import {
 } from "../components/layout/SettingsLayout.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { Button } from "../components/ui/button.js";
-import { formatValue, SECRET_LABELS } from "./feishu-config.js";
+import {
+  excludedFrom,
+  formatValue,
+  PUSH_LABELS,
+  SECRET_LABELS,
+} from "./feishu-config.js";
 
 /** Status group rows that come from the configuration (before the binding row). */
 export function FeishuStatusRows({ config }: { config: FeishuSettingsView }) {
@@ -35,14 +41,16 @@ function Value({
   label,
   setting,
   help,
+  description,
 }: {
   config: FeishuSettingsView;
   label: string;
   setting: string;
   help?: string;
+  description?: string;
 }) {
   return (
-    <SettingsRow label={label} help={help}>
+    <SettingsRow label={label} help={help} description={description}>
       <SettingsValue>
         {formatValue(setting, config.settings[setting])}
       </SettingsValue>
@@ -129,13 +137,29 @@ function TestRow({
 }
 
 /** Channels, quiet hours, rate limits, credentials and the folded advanced group. */
+/** C-580: the pushed projects by name; "全部" when none is excluded. */
+function pushedProjects(
+  config: FeishuSettingsView,
+  projects: readonly ProjectSummary[] | undefined,
+) {
+  const excluded = excludedFrom(config);
+  if (!projects)
+    return excluded.length ? `除 ${excluded.join("、")} 外全部` : "全部";
+  const pushed = projects.filter((p) => !excluded.includes(p.id));
+  if (pushed.length === projects.length) return "全部";
+  return pushed.length ? pushed.map((p) => p.name).join("、") : "无";
+}
+
 export function FeishuConfigGroups({
   config,
   bound,
   tests,
   onTest,
+  projects,
 }: {
   config: FeishuSettingsView;
+  /** C-580: names for the pushed projects (undefined while reading). */
+  projects: readonly ProjectSummary[] | undefined;
   /** Whether this person has bound the app's private chat. */
   bound: boolean | undefined;
   tests: Partial<Record<FeishuChannel, FeishuTestState>>;
@@ -178,6 +202,27 @@ export function FeishuConfigGroups({
           }
           onSend={() => onTest("lark_app")}
         />
+      </SettingsGroup>
+      <SettingsGroup title="推送哪些消息">
+        {(
+          [
+            ["push_decision", "filter.decision"],
+            ["push_human_action", "filter.human_action"],
+            ["push_merge_confirmation", "filter.merge_confirmation"],
+            ["push_notice", "filter.notice"],
+          ] as const
+        ).map(([kind, setting]) => (
+          <Value
+            key={kind}
+            config={config}
+            label={PUSH_LABELS[kind].label}
+            description={PUSH_LABELS[kind].description}
+            setting={setting}
+          />
+        ))}
+        <SettingsRow label="项目">
+          <SettingsValue>{pushedProjects(config, projects)}</SettingsValue>
+        </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title="免打扰">
         <Value config={config} label="免打扰" setting="quiet_hours.enabled" />
