@@ -224,7 +224,7 @@ try {
         title: box(d.querySelector("h2")),
         section: box(d.querySelector("section h3")),
         label: box(d.querySelector("form label")),
-        input: box(d.querySelector("form input")),
+        input: box(d.querySelector("form input:not([aria-hidden=true])")),
         switch: box(d.querySelector("form [role=switch]")),
         button: box(d.querySelector("form [data-ui='button']")),
         fact: box(d.querySelector("dt")),
@@ -233,11 +233,17 @@ try {
         passwordInputs: [...d.querySelectorAll("input[type=password]")].map(
           (i) => ({ autocomplete: i.autocomplete, length: i.value.length }),
         ),
+        // Radix switches keep an invisible aria-hidden input beside them.
         outside: [...d.querySelectorAll("*")]
           .filter((e) => {
             const b = e.getBoundingClientRect();
             return (
-              b.width > 0 && (b.right > r.right + 0.5 || b.left < r.left - 0.5)
+              b.width > 0 &&
+              !(
+                e.matches("input[aria-hidden=true]") &&
+                getComputedStyle(e).opacity === "0"
+              ) &&
+              (b.right > r.right + 0.5 || b.left < r.left - 0.5)
             );
           })
           .slice(0, 5)
