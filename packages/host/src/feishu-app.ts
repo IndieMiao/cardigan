@@ -43,6 +43,7 @@ export interface AppTransport {
     uuid: string,
     content: string,
   ): Promise<string | undefined>;
+  text(to: string, uuid: string, text: string): Promise<boolean>;
   bindingFailure(to: string): Promise<void>;
   patch(id: string, content: string): Promise<boolean>;
 }
@@ -61,6 +62,18 @@ function transport(c: AppCredential, timeout: number): AppTransport {
         data: { receive_id: to, msg_type: "interactive", content, uuid },
       });
       return r.code === 0 ? r.data?.message_id : undefined;
+    },
+    async text(to, uuid, text) {
+      const r = await client.im.message.create({
+        params: { receive_id_type: "open_id" },
+        data: {
+          receive_id: to,
+          uuid,
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        },
+      });
+      return r.code === 0 && !!r.data?.message_id;
     },
     async bindingFailure(to) {
       await client.im.message.create({

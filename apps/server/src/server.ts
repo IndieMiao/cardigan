@@ -9,6 +9,7 @@ import {
   CpuProfileController,
   configureMachinePlacement,
   defaultExtMessagePath,
+  enqueueOwnerMessage,
   executorExecution,
   HostOpsService,
   LiveExtMessageSender,
@@ -513,6 +514,8 @@ async function assembleServer(
                       requestMobileSignature(config.dataDir, scope, current),
                   }
                 : {}),
+              enqueueOwnerMessage: (actor, input, revalidate) =>
+                enqueueOwnerMessage(store, actor, input, revalidate),
               reserveResource: (actor, input, revalidate) =>
                 leases.reserve(
                   actor,

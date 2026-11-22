@@ -247,6 +247,7 @@ describe("tool and worktree boundaries", () => {
       for (const tool of toolNames) {
         // V12b: the template/role catalog is standing-only.
         const standingOnly = [
+          "send_owner_message",
           "publish_artifact",
           "set_merge_solo",
           "set_merge_window",

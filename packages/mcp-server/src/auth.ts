@@ -9,6 +9,7 @@ import {
   holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
+  managedPmOffice,
 } from "@cardigan/domain";
 import type { McpBackend, McpToken } from "./backend.js";
 
@@ -108,6 +109,8 @@ export function recordIdentity(
                 lookup.assignment.role_id === "pm" &&
                 lookup.assignment.standing_mode === "office" &&
                 lookup.assignment.external === true)) &&
+            (tool !== "send_owner_message" ||
+              managedPmOffice(lookup.assignment)) &&
             (tool !== "publish_artifact" ||
               holdsPublicationTool(lookup.assignment)) &&
             (!isStandingOnlyTool(tool) ||

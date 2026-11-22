@@ -63,8 +63,8 @@ import {
   currentExtGeneration,
   type ExtGeneration,
 } from "./ext-message-generation.js";
-
 import { type FeishuApp, startFeishu } from "./feishu-app.js";
+import { drainOwnerMessage } from "./owner-message.js";
 
 export type ExtMessageAdapters = Readonly<
   Record<string, (credential: string | undefined) => ExtMessagePort>
@@ -460,6 +460,25 @@ export class ExtMessageSender {
     const { configuration: c, store } = this.options;
     if (this.stopped) return;
     this.activate();
+    // Start the existing projection synchronously. Neither a slow owner DM nor
+    // its queued content participates in Needs You projection or fan-out.
+    const results = await Promise.allSettled([
+      this.runNeedsYou(),
+      drainOwnerMessage(
+        store,
+        this.app,
+        c.status === "loaded" ? c.config : undefined,
+        this.clock,
+        () =>
+          !this.stopped &&
+          currentExtGeneration(this.options.generation) &&
+          (!this.app || this.current("lark_app")),
+      ),
+    ]);
+    for (const r of results) if (r.status === "rejected") throw r.reason;
+  }
+  private async runNeedsYou(): Promise<void> {
+    const { configuration: c, store } = this.options;
     if (c.status !== "loaded" || !c.config.enabled) return;
     const config = c.config;
     const binding = this.app?.binding;

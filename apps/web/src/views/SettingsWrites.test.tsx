@@ -338,6 +338,29 @@ test("PM merge confirmation reports success and stays focusable while saving", a
   expect(await screen.findByText("已关闭 PM 代确认")).toBeTruthy();
 });
 
+test("owner messaging is opt-in and saves only this project switch", async () => {
+  const s = server(base);
+  const setSystemRules = vi.fn(async (_p: string, input: object) =>
+    s.patch(input),
+  );
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({ preferences: s.preferences, setSystemRules })}
+    />,
+  );
+  const toggle = await screen.findByRole("switch", {
+    name: "允许 PM Office 向我发飞书私聊",
+  });
+  expect(on(toggle)).toBe(false);
+  fireEvent.click(toggle);
+  await settle();
+  expect(setSystemRules.mock.calls).toEqual([
+    ["p-1", { pm_owner_messages: true }, expect.any(String)],
+  ]);
+  expect(on(toggle)).toBe(true);
+});
+
 test("cross-card read sits in the caution group with automatic merging", async () => {
   render(<SettingsPage projectId="p-1" client={fakeClient()} />);
   const caution = await screen.findByRole("region", { name: "需谨慎" });

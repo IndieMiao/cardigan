@@ -88,6 +88,7 @@ export function setProjectPreferences(
     system_merge_shadow_policy?: MergeShadowPolicy | null;
     system_auto_assign_verifiers?: boolean;
     system_reminders?: boolean;
+    pm_owner_messages?: boolean;
     system_reminder_policy?: SystemReminderPolicy | null;
     auto_merge_after_minutes?: number | null;
     context_handoff_remaining_pct?: number;
@@ -210,6 +211,7 @@ export function setProjectPreferences(
       "pm_confirm_human_decided_merges",
       "system_auto_assign_verifiers",
       "system_reminders",
+      "pm_owner_messages",
       "independent_review_limit_delegation",
     ] as const)
       ensure(
@@ -300,6 +302,7 @@ export function setProjectPreferences(
         input.system_merge_shadow_policy !== undefined ||
         input.system_auto_assign_verifiers !== undefined ||
         input.system_reminders !== undefined ||
+        input.pm_owner_messages !== undefined ||
         input.system_reminder_policy !== undefined ||
         input.context_handoff_remaining_pct !== undefined ||
         input.context_restart_remaining_pct !== undefined ||
@@ -417,6 +420,9 @@ export function setProjectPreferences(
       ...(input.system_auto_assign_verifiers !== undefined
         ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
         : {}),
+      ...(input.pm_owner_messages !== undefined
+        ? { pm_owner_messages: input.pm_owner_messages }
+        : {}),
       ...(input.system_reminders !== undefined
         ? { system_reminders: input.system_reminders }
         : {}),
@@ -511,6 +517,7 @@ export function setProjectPreferences(
       "system_review_limit_raise",
       "system_auto_assign_verifiers",
       "system_reminders",
+      "pm_owner_messages",
       "system_reminder_policy",
       "system_review_limit_max_raises",
       "role_rule_paths",

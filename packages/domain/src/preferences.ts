@@ -77,6 +77,7 @@ export interface ProjectPreferences {
   readonly system_merge_shadow_policy?: MergeShadowPolicy | null;
   readonly system_auto_assign_verifiers?: boolean;
   readonly system_reminders?: boolean;
+  readonly pm_owner_messages?: boolean;
   readonly system_reminder_policy?: SystemReminderPolicy | null;
   readonly id: ProjectId;
   readonly auto_merge_after_minutes: number | null;

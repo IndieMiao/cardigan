@@ -25,16 +25,16 @@ import {
   type MaintenanceRetry,
   nextMaintenanceRetry,
 } from "./github-rate-limit.js";
+import {
+  GITHUB_CHECK_NAMES,
+  GITHUB_COMPLETE_STEP,
+  GITHUB_SETUP_STEP,
+  type GithubStepContract,
+  matchesGithubStepContract,
+} from "./github-step-contract.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
-export const GITHUB_CHECK_NAMES = [
-  "install",
-  "build",
-  "test",
-  "lint",
-  "deps",
-  "e2e",
-] as const;
+export { GITHUB_CHECK_NAMES };
 /** Names supplied by the baseline workflow, independent of candidate code/config. */
 export const GITHUB_WORKFLOW_STEPS = [
   "Validate object inputs",
@@ -64,6 +64,20 @@ export const CASE_WORKFLOW_STEPS = GITHUB_WORKFLOW_STEPS.flatMap(
         ? [CASE_RUN_STEP, ...checkFlakeIds.map((id) => `Recovered ${id}`), step]
         : [step],
 );
+// GitHub registers post steps for these trusted actions, even when skipped.
+const CARDIGAN_POST_STEPS = [
+  { name: "Post Setup Node" },
+  { name: "Post Checkout candidate" },
+];
+/** Cardigan's own workflow, used when an executor configures no contract. */
+const CARDIGAN_CONTRACT: GithubStepContract = {
+  steps: GITHUB_WORKFLOW_STEPS.map((name) => ({ name })),
+  postSteps: CARDIGAN_POST_STEPS,
+};
+const CARDIGAN_CASE_CONTRACT: GithubStepContract = {
+  steps: CASE_WORKFLOW_STEPS.map((name) => ({ name })),
+  postSteps: CARDIGAN_POST_STEPS,
+};
 interface Pending {
   identity: GithubRun;
   external: ExternalGithubRun;
@@ -118,6 +132,8 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       waitForLogRetry?: (ms: number, signal?: AbortSignal) => Promise<void>;
       pollIntervalMs?: number;
       queueWaitMs?: number;
+      /** C-592: the executor's configured job shape; absent keeps Cardigan's. */
+      stepContract?: GithubStepContract | undefined;
     },
   ) {}
   private now() {
@@ -435,7 +451,12 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     }
     const jobs = await this.options.client.jobs(run.id, signal);
     if (signal.aborted || state.revision !== revision) return;
-    const result = mapGithubCheckResult(state.request, run, jobs);
+    const result = mapGithubCheckResult(
+      state.request,
+      run,
+      jobs,
+      this.options.stepContract,
+    );
     state.failedJob = result.logSource?.jobId;
     if (state.failedJob && result.checks.length && jobs[0])
       state.logSteps = jobs[0].steps;
@@ -540,6 +561,7 @@ function mapGithubCheckResult(
   request: CheckRequest,
   run: GithubRun,
   jobs: readonly GithubJob[],
+  contract?: GithubStepContract,
 ): CheckoutResult {
   if (run.conclusion === "cancelled")
     return { status: "interrupted", checks: [], cleanup_errors: [] };
@@ -557,7 +579,7 @@ function mapGithubCheckResult(
     job.id < 1
   )
     return { ...rejected(), logSource: { url: run.html_url } };
-  const result = mapGithubCheckSteps(request, run, job);
+  const result = mapGithubCheckSteps(request, run, job, contract);
   return result.status === "passed"
     ? result
     : {
@@ -572,27 +594,32 @@ function mapGithubCheckSteps(
   request: CheckRequest,
   run: GithubRun,
   job: GithubJob,
+  configured?: GithubStepContract,
 ): CheckoutResult {
   if (!Array.isArray(job.steps)) return rejected();
 
   const steps = [...job.steps];
-  if (steps[0]?.name === "Set up job") steps.shift();
-  if (steps.at(-1)?.name === "Complete job") steps.pop();
-  // GitHub registers post steps for these trusted actions, even when skipped.
-  for (const name of ["Post Checkout candidate", "Post Setup Node"])
-    if (steps.at(-1)?.name === name) steps.pop();
-  // Accept exactly the complete old contract or the complete new one; never
-  // treat arbitrary missing/extra business steps as optional.
-  const receipts = checkFlakeIds.map((id) => `Recovered ${id}`);
-  const caseContract = steps.some((step) => step?.name === CASE_SCOPE_STEP);
-  const expected: readonly string[] = caseContract
-    ? CASE_WORKFLOW_STEPS
-    : GITHUB_WORKFLOW_STEPS;
+  if (steps[0]?.name === GITHUB_SETUP_STEP) steps.shift();
+  if (steps.at(-1)?.name === GITHUB_COMPLETE_STEP) steps.pop();
+  // Without a configured contract, accept exactly the complete old Cardigan
+  // contract or the complete case contract. Never treat arbitrary
+  // missing/extra business steps as optional. Receipts and isolated case
+  // retries belong to Cardigan's workflow only.
+  const receipts = configured
+    ? []
+    : checkFlakeIds.map((id) => `Recovered ${id}`);
+  const caseContract =
+    !configured && steps.some((step) => step?.name === CASE_SCOPE_STEP);
+  const contract =
+    configured ?? (caseContract ? CARDIGAN_CASE_CONTRACT : CARDIGAN_CONTRACT);
   const mainStepCount =
-    expected.length + (job.steps[0]?.name === "Set up job" ? 1 : 0);
+    contract.steps.length + (job.steps[0]?.name === GITHUB_SETUP_STEP ? 1 : 0);
   if (
-    steps.length !== expected.length ||
-    steps.some((step, index) => !step || step.name !== expected[index]) ||
+    steps.some((step) => !step) ||
+    !matchesGithubStepContract(
+      steps.map((step) => step.name),
+      contract,
+    ) ||
     job.steps.some(
       (step, index) =>
         !step ||
@@ -655,13 +682,17 @@ function mapGithubCheckSteps(
     checks.every(
       (step) => step.status === "passed" || step.status === "skipped",
     );
-  const recovered = checkFlakeIds.filter((id) =>
-    steps.some(
-      (step) =>
-        step.name === `Recovered ${id}` && step.conclusion === "success",
-    ),
+  const recovered = checkFlakeIds.filter(
+    (id) =>
+      !configured &&
+      steps.some(
+        (step) =>
+          step.name === `Recovered ${id}` && step.conclusion === "success",
+      ),
   );
-  const isolated = steps.find((s) => s.name === CASE_RUN_STEP);
+  const isolated = caseContract
+    ? steps.find((s) => s.name === CASE_RUN_STEP)
+    : undefined;
   if (
     recovered.length &&
     (!["success", "failure"].includes(isolated?.conclusion ?? "") ||
@@ -717,6 +748,7 @@ export async function inspectGithubCheckRun(options: {
   expectedRun: GithubRun;
   boundByDispatchId?: boolean;
   request: CheckRequest;
+  stepContract?: GithubStepContract | undefined;
 }): Promise<CheckoutResult> {
   const { client, runId, expectedRun, request } = options;
   if (
@@ -733,5 +765,10 @@ export async function inspectGithubCheckRun(options: {
     return { ...unavailable(), reason: "GitHub 检查尚未结束，无法核对终态" };
   if (run.conclusion === "cancelled")
     return { status: "interrupted", checks: [], cleanup_errors: [] };
-  return mapGithubCheckResult(request, run, await client.jobs(runId));
+  return mapGithubCheckResult(
+    request,
+    run,
+    await client.jobs(runId),
+    options.stepContract,
+  );
 }

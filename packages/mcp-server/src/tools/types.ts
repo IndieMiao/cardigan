@@ -3,6 +3,7 @@ import {
   holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
+  managedPmOffice,
   type ProjectId,
   type ToolName,
 } from "@cardigan/domain";
@@ -98,6 +99,7 @@ export function visibleTools(
           assignment.role_id === "pm" &&
           assignment.standing_mode === "office" &&
           assignment.external === true)) &&
+      (tool.name !== "send_owner_message" || managedPmOffice(assignment)) &&
       (tool.name !== "publish_artifact" || holdsPublicationTool(assignment)) &&
       (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );

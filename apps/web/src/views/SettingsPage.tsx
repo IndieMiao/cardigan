@@ -341,6 +341,11 @@ export function SettingsPage({
                 tone="caution"
                 description="只有你能修改；跨卡只读会扩大卡片读取范围，自动合并会让系统在无人确认时合并代码。"
               >
+                <OwnerMessageSetting
+                  key={`owner-messages:${projectId}`}
+                  enabled={data.pm_owner_messages === true}
+                  {...common}
+                />
                 <CrossCardReadSetting
                   key={`cross-card-read:${projectId}`}
                   enabled={data.cross_card_read !== false}
@@ -956,6 +961,44 @@ function AutoMergeSetting({
         interactive
         pending={setting.saving}
         pendingMessage={pause ? "正在保存暂停偏好…" : "正在保存自动合并偏好…"}
+        error={setting.error}
+        message={setting.message}
+      />
+    </SettingsRow>
+  );
+}
+
+function OwnerMessageSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+  source,
+}: SettingProps & { enabled: boolean }) {
+  const id = useId();
+  const name = "允许 PM Office 向我发飞书私聊";
+  const setting = useSettingWrite({
+    name,
+    failure: toggleFailure(name),
+    server: enabled,
+    source,
+    write: (next, key) =>
+      client.setSystemRules(projectId, { pm_owner_messages: next }, key),
+    saved,
+    success: (next) => (next ? "已允许飞书私聊" : "已关闭飞书私聊"),
+  });
+  return (
+    <SettingsRow label={name} labelId={id}>
+      <Switch
+        checked={setting.value}
+        aria-disabled={setting.busy}
+        aria-labelledby={id}
+        onCheckedChange={setting.save}
+      />
+      <RequestFeedback
+        interactive
+        pending={setting.saving}
+        pendingMessage="正在保存…"
         error={setting.error}
         message={setting.message}
       />
