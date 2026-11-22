@@ -917,10 +917,22 @@ export class RuntimeTargets implements Runtime {
               evidence: { stage: "target", reason: "unsupported" },
             },
           });
-        return runtime.retire_idle(
-          ref,
-          this.withEnrollment(ref, options, target.execution),
-        );
+        const bound = this.withEnrollment(ref, options, target.execution);
+        if (
+          target.execution.mode !== "agent-ssh" ||
+          !target.execution.macosCore
+        )
+          return runtime.retire_idle(ref, bound);
+        return runtime.retire_idle(ref, {
+          ...bound,
+          before_signal: () => {
+            const current = this.targetForRef(ref, options.project_id);
+            return (
+              current.execution.target?.fingerprint ===
+                ref.target?.fingerprint && options.before_signal()
+            );
+          },
+        });
       },
       retirementRefusal,
     );

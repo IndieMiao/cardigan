@@ -164,7 +164,7 @@ def core_rpc(home, session, system):
             yield rpc
 
 
-def darwin_retirement(c):
+def darwin_retirement(c, terminal_owner=None):
     # Both facts are read on the pinned SSH account. The native receipt comes
     # from the original host launch journal, never from this terminal listing.
     import runpy
@@ -184,13 +184,17 @@ def darwin_retirement(c):
         if (t['address'] != c['terminal'] or type(t.get('created_ms')) != int or
                 not all(t['labels'].get(k) == v for k, v in labels.items())):
             raise ValueError()
+        if terminal_owner is not None and (t.get('name') != c['agent_name'] or t.get('cwd') != c['cwd']
+                or t.get('rm') is not False or t.get('pid') != terminal_owner
+                or (t.get('foreground') or {}).get('pid') not in (terminal_owner, p['pid'])):
+            return 'unknown'
         observed = darwin_execution(p, runpy.run_path(c['primitive'])['darwin_identity'])
         if t['state'] == 'finished' and observed == 'exited':
             return 'exited'
         if t['state'] == 'live' and t.get('keep') is True:
             return 'kept'
         idle = (t.get('status') or {}).get('state') in ('idle', 'done')
-        if (t['state'] == 'live' and observed == 'alive' and p['pid'] == t.get('pid')
+        if (t['state'] == 'live' and observed == 'alive' and (terminal_owner or p['pid']) == t.get('pid')
                 and t.get('keep') is False and (idle or not c['require_idle'])):
             return 'alive'
         return 'unknown'

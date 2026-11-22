@@ -18,6 +18,7 @@ import { loopbackTerminal, managedLoopback } from "./loopback-terminal.js";
 
 export { managedLoopback } from "./loopback-terminal.js";
 
+import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import { darwinRetirementObservation } from "./darwin-retirement.js";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
@@ -511,7 +512,12 @@ export class HerdrRuntime implements Runtime {
         fail("invalid_launch", "Launch identity or labels do not match");
       const terminal_ref = await this.launch(
         {
-          ...launch,
+          ...(await enrollDarwinOwner(
+            this.execution,
+            assignment,
+            role,
+            launch,
+          )),
           labels: {
             ...launch.labels,
             cardigan: "1",
@@ -1127,17 +1133,29 @@ export class HerdrRuntime implements Runtime {
           options,
         );
         if (observed === "exited") return exited;
-        // The address persists when a kept terminal's program is replaced;
-        // terminal.kill cannot compare process generation or activity at use.
-        return failure(
-          "withdrawn",
-          observed === "kept"
-            ? "kept_terminal"
-            : observed === "alive"
-              ? "conditional_close_unavailable"
-              : "probe_invalid",
-          { observation: observed === "kept" ? "unknown" : observed },
-        );
+        if (observed === "kept") return failure("withdrawn", "kept_terminal");
+        const stop = await stopDarwinOwner(this.execution, ref, options);
+        if (stop.outcome === "uncertain") {
+          // SSH receipt (or loss of it) is never exit. On timeout the next
+          // patrol observes only, retaining the stop fence without resending.
+          stage = "confirm";
+          attempted = true;
+          this.invalidateStatus(ref);
+          const deadline = Date.now() + options.terminate_ms;
+          do {
+            if (
+              (await darwinRetirementObservation(
+                this.execution,
+                ref,
+                options,
+              )) === "exited"
+            )
+              return exited;
+            if (Date.now() >= deadline) break;
+            await delay(Math.min(250, deadline - Date.now()));
+          } while (Date.now() <= deadline);
+        }
+        return { ok: true, value: stop };
       }
       stage = "get";
       const readTerminal = () =>

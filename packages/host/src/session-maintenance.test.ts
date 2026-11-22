@@ -933,3 +933,52 @@ test.each(["pidfd_unavailable", "kept_terminal"] as const)(
     }
   },
 );
+
+test.each(["notice", "shared-terminal"] as const)(
+  "Darwin final authority does not sign after %s arrives",
+  async (change) => {
+    const f = setup(":memory:", 2, false, "fixture-worker");
+    const checks: boolean[] = [];
+    const retire: NonNullable<Runtime["retire_idle"]> = async (_ref, opt) => {
+      checks.push(opt.before_signal());
+      if (change === "notice")
+        f.store.recordNotification({
+          project_id: f.project,
+          event_id: f.state().events.at(-1)!.id,
+          seq: 1,
+          recipient: { kind: "assignment", assignment_id: f.a.id },
+          kind: "mention",
+        });
+      else
+        f.store.uow.run((tx) =>
+          tx.assignments.put(f.project, { ...f.a, id: "A-2" as never }),
+        );
+      checks.push(opt.before_signal());
+      return {
+        ok: true,
+        value: {
+          outcome: "withdrawn",
+          evidence: { stage: "probe", reason: "guard_changed" },
+        },
+      };
+    };
+    const counted = vi.fn(retire);
+    Object.assign(f.runtime, { retire_idle: counted });
+    try {
+      await f.tick();
+      expect(counted).toHaveBeenCalledOnce();
+      expect(checks).toEqual([true, false]);
+      expect(f.state().assignments[0]?.runtime_ref).toEqual(f.a.runtime_ref);
+      if (change === "notice")
+        expect(
+          f.store.listNotifications({
+            project_id: f.project,
+            assignment_id: f.a.id,
+            status: "pending",
+          }),
+        ).toHaveLength(1);
+    } finally {
+      f.store.close();
+    }
+  },
+);

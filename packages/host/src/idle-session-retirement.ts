@@ -5,6 +5,7 @@ import {
   type Clock,
   type CommandEffect,
   confirmWaitingRetirementExit,
+  darwinWorker,
   handoffIdleSessionRetirement,
   needsRetirementHandoff,
   type ProjectId,
@@ -23,6 +24,7 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
+  LIVE_NOTIFICATION_STATUSES,
   recordNotification,
   type Store,
   type StoreTransactionContext,
@@ -324,6 +326,24 @@ export async function retireIdleSessions(
                   JSON.stringify(current.runtime_ref) !== JSON.stringify(ref) ||
                   current.last_mcp_activity_at !==
                     pending.idle_retirement?.activity_at
+                )
+                  return false;
+                if (
+                  darwinWorker(state, current) &&
+                  (store.listNotifications({
+                    project_id: project,
+                    assignment_id: a.id,
+                    statuses: LIVE_NOTIFICATION_STATUSES,
+                  }).length > 0 ||
+                    state.assignments.some(
+                      (other) =>
+                        other.id !== current.id &&
+                        other.status === "active" &&
+                        other.machine_id === current.machine_id &&
+                        (other.runtime_ref?.terminal_ref === ref.terminal_ref ||
+                          (current.worktree_path &&
+                            other.worktree_path === current.worktree_path)),
+                    ))
                 )
                   return false;
                 const { idle_retirement: _pending, ...identity } = current;
