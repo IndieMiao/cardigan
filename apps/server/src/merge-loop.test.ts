@@ -428,6 +428,75 @@ test("a broken card does not stop the other cards of the same project", async ()
   ).toContain(`Merge ${healthy.card.id}/${healthy.development.id} delivery`);
 }, 30_000);
 
+test("C-589: cards on main and on another baseline branch merge into their own branches", async () => {
+  const farm = "integration/farm";
+  git(repos.source, "checkout", "-q", "-b", farm);
+  const farmBase = commit(repos.source, "farm.txt", "farm\n");
+  git(repos.source, "checkout", "-q", "main");
+  const onMain = m4Scenario(f, "auto"),
+    onFarm = m4Scenario(f, "auto", farm);
+  const mainSha = agentCommit("agent/C-1/W-1", "main.txt", "main\n");
+  git(repos.agent, "fetch", "-q", "origin");
+  git(repos.agent, "checkout", "-q", "-B", "agent/C-3/W-4", `origin/${farm}`);
+  const farmSha = commit(repos.agent, "feature.txt", "feature\n");
+  git(repos.agent, "checkout", "-q", "main");
+  const mainDelivery = await acceptThroughMergeGate(f, onMain, mainSha);
+  await pin(mainDelivery.product.id, mainSha);
+  const farmDelivery = await acceptThroughMergeGate(f, onFarm, farmSha);
+  await pin(farmDelivery.product.id, farmSha);
+  await executor().tick(f.project_id);
+
+  expect(f.card(onMain.card.id).status).toBe("done");
+  expect(f.card(onFarm.card.id).status).toBe("done");
+  expect(
+    f.state().events.filter((event) => event.type === "merge_failed"),
+  ).toEqual([]);
+  const repository = await central.ensureCentral(project);
+  const farmTip = git(repository, "rev-parse", `refs/heads/${farm}`),
+    mainTip = (await baseline()) as string;
+  expect(git(repository, "rev-parse", `${farmTip}^1`)).toBe(farmBase);
+  expect(git(repository, "rev-parse", `${farmTip}^2`)).toBe(farmSha);
+  expect(git(repository, "rev-parse", `${mainTip}^1`)).toBe(repos.base);
+  expect(git(repository, "rev-parse", `${mainTip}^2`)).toBe(mainSha);
+  const merged = f
+    .state()
+    .events.filter((event) => event.type === "card_merged")
+    .map((event) => [
+      event.card_id,
+      (event.payload as { result: { previous_sha: string } }).result
+        .previous_sha,
+    ]);
+  expect(merged).toEqual(
+    expect.arrayContaining([
+      [onMain.card.id, repos.base],
+      [onFarm.card.id, farmBase],
+    ]),
+  );
+  // Central-only merges never write the registered source.
+  expect(git(repos.source, "rev-parse", farm)).toBe(farmBase);
+  expect(git(repos.source, "rev-parse", "main")).toBe(repos.base);
+}, 30_000);
+
+test("C-589: a missing card branch records the failing step and a redacted reason", async () => {
+  const scenario = m4Scenario(f, "auto", "integration/missing");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  await executor().tick(f.project_id);
+  expect(f.card().status).toBe("awaiting_merge");
+  const failed = f
+    .state()
+    .events.filter((event) => event.type === "merge_failed");
+  expect(failed).toHaveLength(1);
+  const reason = (
+    failed[0]?.payload as { result?: { reason?: string } } | undefined
+  )?.result?.reason;
+  expect(reason).toContain(`合并 ${scenario.card.id} 在「同步源仓库」环节失败`);
+  expect(reason).not.toContain(f.dataDir);
+  expect(reason).not.toContain(repos.root);
+  expect(await baseline()).toBe(repos.base);
+}, 30_000);
+
 test("a delivery whose pinned ref does not match is reported, not merged", async () => {
   const scenario = m4Scenario(f, "auto");
   const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n"),
@@ -767,6 +836,44 @@ test("real checks fail, CLI requeues, and a restart publishes the checked tree a
   expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
     1,
   );
+  expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("C-589: the merge gate checks and publishes a card on another baseline branch", async () => {
+  const farm = "integration/farm";
+  git(repos.source, "checkout", "-q", "-b", farm);
+  const farmBase = commit(repos.source, "farm.txt", "farm\n");
+  git(repos.source, "checkout", "-q", "main");
+  const scenario = m4Scenario(f, "auto", farm);
+  git(repos.agent, "fetch", "-q", "origin");
+  git(repos.agent, "checkout", "-q", "-B", "agent/C-1/W-1", `origin/${farm}`);
+  const sha = commit(repos.agent, "feature.txt", "checked feature\n");
+  git(repos.agent, "checkout", "-q", "main");
+  const { product, completion } = await acceptThroughMergeGate(
+    f,
+    scenario,
+    sha,
+  );
+  await pin(product.id, sha);
+  // The checked tree contains the farm baseline, not only main.
+  const c = await gated(
+    `test "$(cat farm.txt)" = 'farm' && test "$(cat feature.txt)" = 'checked feature'`,
+  );
+  await new MergeExecutor(c.options).tick();
+  const check = latestMergeCheck(
+    f.state().events,
+    scenario.card.id,
+    completion.id,
+  );
+  expect(check).toMatchObject({ status: "passed", base_sha: farmBase });
+  await new MergeExecutor(c.options).tick();
+  expect(f.card().status).toBe("done");
+  const repository = await central.ensureCentral(project);
+  const tip = git(repository, "rev-parse", `refs/heads/${farm}`);
+  expect(git(repository, "rev-parse", `${tip}^{tree}`)).toBe(check?.tree_sha);
+  expect(git(repository, "rev-parse", `${tip}^1`)).toBe(farmBase);
+  expect(await baseline()).toBe(repos.base);
+  expect(f.state().events.filter((e) => e.type === "merge_failed")).toEqual([]);
   expect(c.errors).toEqual([]);
 }, 30_000);
 

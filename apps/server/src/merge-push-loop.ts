@@ -12,9 +12,10 @@ import {
   type Result,
   recordMergePushResult,
 } from "@cardigan/domain";
+import { type CentralProject, centralBranch } from "@cardigan/git-service";
 import type { PushResult } from "@cardigan/git-transport";
 import { withMergeTransferBudget } from "@cardigan/git-transport";
-import type { MergeGateConfiguration } from "@cardigan/host";
+import type { MergeGateConfiguration, MergePushConfig } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
@@ -38,12 +39,13 @@ export function mergeProjectSettings(
               },
             }
           : {}),
-        ...(config.push
+        ...(config.push?.length
           ? {
-              merge_push: {
-                target: config.push.target,
-                branch: config.push.branch,
-              },
+              merge_push: config.push.map((route) => ({
+                target: route.target,
+                branch: route.branch,
+                base_branch: route.baseBranch,
+              })),
             }
           : {}),
       }
@@ -107,9 +109,26 @@ export class MergePushExecutor {
   private async project(id: ProjectId): Promise<void> {
     if (this.abort.signal.aborted) return;
     const config = this.options.configuration.forProject(id),
-      project = this.options.git.projectOf(id);
-    if (config.status !== "enabled" || !config.push || !project) return;
-    const push = config.push;
+      registered = this.options.git.projectOf(id);
+    if (config.status !== "enabled" || !config.push || !registered) return;
+    // Each route publishes one central branch; routes have independent queues.
+    for (const push of config.push) {
+      if (this.abort.signal.aborted) return;
+      let project: CentralProject;
+      try {
+        project = centralBranch(registered, push.baseBranch);
+      } catch {
+        this.options.onError?.(new Error("推送路由的中心分支名无效"));
+        continue;
+      }
+      await this.route(id, project, push);
+    }
+  }
+  private async route(
+    id: ProjectId,
+    project: CentralProject,
+    push: MergePushConfig,
+  ): Promise<void> {
     try {
       const attempt = this.command(id, (s, a, ports) =>
         beginMergePush(
@@ -172,7 +191,7 @@ export class MergePushExecutor {
           ? await this.options.git.push(
               project,
               { sha: attempt.sha, included },
-              config.push,
+              push,
               this.abort.signal,
             )
           : { status: "failed", reason: "other" };

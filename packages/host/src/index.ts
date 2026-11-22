@@ -220,6 +220,7 @@ export {
 export {
   type MergePushConfig,
   parseMergePushConfig,
+  parseMergePushRoutes,
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {

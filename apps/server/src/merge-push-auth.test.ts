@@ -27,6 +27,7 @@ function fixture() {
   const config = {
     target: "f".repeat(64),
     branch: "main",
+    baseBranch: "main",
     remote: "file:///unused",
   };
   let time = Date.parse("2035-01-01T00:00:00.000Z");
@@ -118,7 +119,7 @@ function fixture() {
           checks: [],
           env: {},
           totalTimeoutMs: 1000,
-          push: config,
+          push: [config],
         }),
       },
     });

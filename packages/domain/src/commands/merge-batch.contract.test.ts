@@ -863,3 +863,42 @@ test("legal culprit evidence and historical timeline copies honor current cross-
       ?.stage,
   ).not.toBe("culprit");
 });
+
+test("C-589: one batch never mixes baseline branches; each branch queues separately", async () => {
+  const f = await fixture(2);
+  const [first, second] = f.members;
+  if (!first || !second) throw new Error("Missing members");
+  const mixed: CommandState = {
+    ...f.state(),
+    cards: f
+      .state()
+      .cards.map((card) =>
+        card.id === second.card_id
+          ? { ...card, base_branch: "integration/farm" }
+          : card,
+      ),
+  };
+  expect(
+    mergeQueue(mixed).map((q) => [q.plan.card_id, q.plan.base_branch]),
+  ).toEqual([
+    [first.card_id, "main"],
+    [second.card_id, "integration/farm"],
+  ]);
+  expect(
+    formMergeBatch(
+      mixed,
+      system,
+      { base_sha: sha(1), members: f.members, solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  // Same-branch members still form a batch.
+  expect(
+    formMergeBatch(
+      mixed,
+      system,
+      { base_sha: sha(1), members: [second], solo: false },
+      f.io,
+    ),
+  ).toMatchObject({ ok: true });
+});

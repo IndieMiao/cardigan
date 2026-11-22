@@ -46,10 +46,12 @@ export {
   type CentralOptions,
   type CentralProject,
   CentralRepositoryService,
+  centralBranch,
   type MergeOutcome,
   PrecheckMergeConflict,
   type PreparedMerge,
   type SourceSync,
+  validCentralBranch,
 } from "./central.js";
 export {
   defaultRepositoryLock,

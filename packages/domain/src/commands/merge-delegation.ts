@@ -22,6 +22,7 @@ import {
   latestMergeCheck,
   timeoutOnly,
 } from "./merge-check.js";
+import { mergeFailureReason } from "./merge-failure-view.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
@@ -142,7 +143,12 @@ export function humanMergeBlockers(
       executor_unreachable: "执行机不可达",
       passed: "已通过",
     };
-    blockers.push(`合并检查：${check ? labels[check.status] : "尚无结果"}`);
+    const failure = check
+      ? undefined
+      : mergeFailureReason(state.events, card.id, completion.id);
+    blockers.push(
+      `合并检查：${check ? labels[check.status] : failure ? `候选准备失败，检查未排队（${failure.slice(0, 300)}）` : "尚无结果"}`,
+    );
   }
   for (const v of [...current, completion])
     for (const r of latestReviews(state, v).values())

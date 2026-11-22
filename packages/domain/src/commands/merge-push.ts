@@ -178,7 +178,20 @@ export function foreignMergePushCommits(
   return { foreign, broken };
 }
 
-/** Called only inside recordMergeResult's successful transaction. */
+/** The push route of one central baseline branch, if that branch is pushed at all. */
+export function mergePushRoute(
+  state: CommandState,
+  base_branch: string | undefined,
+): MergePushDestination | undefined {
+  const routes = state.project_settings?.merge_push ?? [];
+  const route = routes.find((r) => r.base_branch === base_branch);
+  return route && { target: route.target, branch: route.branch };
+}
+
+/**
+ * Called only inside a successful merge transaction. Only the route of the
+ * card's own baseline branch is queued; an unrouted branch stays central-only.
+ */
 export function queueMergedPush(
   d: CommandDraft,
   p: {
@@ -186,16 +199,22 @@ export function queueMergedPush(
     card_id: CardId;
     completion_id: DeliveryId;
     sha: string;
+    base_branch: string | undefined;
   },
 ) {
-  const destination = d.state.project_settings?.merge_push;
+  const { base_branch, ...queued } = p;
+  const destination = mergePushRoute(d.state, base_branch);
   if (!destination) return;
   ensure(
     validDestination(destination),
     "validation_failed",
     "Invalid trusted push destination",
   );
-  d.emit("merge_push_queued", undefined, { ...p, ...destination });
+  d.emit("merge_push_queued", undefined, {
+    ...queued,
+    ...destination,
+    ...(base_branch === undefined ? {} : { base_branch }),
+  });
 }
 
 /** Select once before IO; recovering a started attempt retries that same SHA. */
@@ -213,8 +232,9 @@ export function beginMergePush(
       "Invalid push identity",
     );
     ensure(
-      state.project_settings?.merge_push?.target === p.target &&
-        state.project_settings.merge_push.branch === p.branch,
+      (state.project_settings?.merge_push ?? []).some(
+        (r) => r.target === p.target && r.branch === p.branch,
+      ),
       "illegal_transition",
       "Push destination is not enabled",
     );

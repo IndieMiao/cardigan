@@ -211,6 +211,12 @@ export function formMergeBatch(
       "illegal_transition",
       "Solo cards require a separate batch",
     );
+    // One candidate chain is built on one central branch.
+    ensure(
+      new Set(members.map((m) => m.plan.base_branch)).size === 1,
+      "illegal_transition",
+      "A merge batch must share one baseline branch",
+    );
     const last = p.members[p.members.length - 1] as MergeBatchMember;
     const batch: MergeBatch = {
       id: d.ids.next(state.project_id, "merge_batch"),
@@ -610,6 +616,7 @@ export function recordMergeBatchResult(
         card_id: card.id,
         completion_id: member.completion_id,
         sha: member.merge_sha,
+        base_branch: card.base_branch,
       });
       previous = member.merge_sha;
     }

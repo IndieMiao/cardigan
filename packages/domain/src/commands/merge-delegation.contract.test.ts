@@ -217,7 +217,7 @@ test("merge confirmation defaults to PM Ops with recorded authority", async () =
   const queue = value(listNeedsYou(f.state, opsActor)).data.pm_queue;
   expect(queue?.decisions.map((q) => q.id)).toEqual([confirmation().id]);
   expect(queue?.merge_blockers?.[confirmation().id]).toEqual([
-    expect.stringContaining("合并闸门检查尚无结果"),
+    expect.stringContaining("项目未配置合并闸门"),
   ]);
   // Not shown to the human as a blocking Needs You decision.
   expect(

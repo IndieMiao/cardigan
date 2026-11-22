@@ -33,6 +33,7 @@ import {
   reconcile,
   reconcileExecutorChecks,
   type SourceSync,
+  validCentralBranch,
   type WorktreeDiff,
 } from "@cardigan/git-service";
 import {
@@ -424,7 +425,7 @@ export class ServerGit implements GitBinding {
             },
             baseline: async (id, branch) => {
               const p = this.projectOf(id as ProjectId);
-              return p && p.base_branch === branch
+              return p && validCentralBranch(branch)
                 ? centralTransport.readRef(
                     this.central.repositoryPath(p),
                     `refs/heads/${branch}`,
@@ -433,7 +434,7 @@ export class ServerGit implements GitBinding {
             },
             baselineNow: (id, branch) => {
               const p = this.projectOf(id as ProjectId);
-              return p && p.base_branch === branch
+              return p && validCentralBranch(branch)
                 ? centralTransport.readRefSync(
                     this.central.repositoryPath(p),
                     `refs/heads/${branch}`,
@@ -578,10 +579,12 @@ export class ServerGit implements GitBinding {
       if (!project) return null;
       const repository = await this.central.ensureCentral(project);
       stage = "proof";
+      // The card's own baseline branch; an unusable name proves nothing.
+      if (!validCentralBranch(candidate.base_branch)) return null;
       return await proveSystemReviewLimit(
         this.transport,
         repository,
-        project.base_branch,
+        candidate.base_branch,
         candidate,
       );
     } catch (error) {

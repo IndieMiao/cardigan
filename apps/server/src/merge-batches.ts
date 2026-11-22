@@ -28,7 +28,7 @@ import {
   startMergeBatchBisect,
   validateMergeBatchMembers,
 } from "@cardigan/domain";
-import type { CentralProject } from "@cardigan/git-service";
+import { type CentralProject, centralBranch } from "@cardigan/git-service";
 import type { ProjectMergeGate } from "@cardigan/host";
 import type { MergeGit } from "./git.js";
 import { tryPublication } from "./publication-lock.js";
@@ -54,16 +54,23 @@ export class MergeBatches {
     },
   ) {}
 
-  async tick(project: CentralProject, settings: Settings) {
+  async tick(registered: CentralProject, settings: Settings) {
     const { git, state, command, fenced } = this.options,
-      id = project.project_id;
+      id = registered.project_id;
     if (fenced(id)) return;
+    // Batches are built per baseline branch: each card's own `base_branch`.
+    const branchOf = (card: string) =>
+      state(id).cards.find((c) => c.id === card)?.base_branch ??
+      registered.base_branch;
+    const view = (branch: string) => centralBranch(registered, branch);
+    const viewOf = (batch: MergeBatch) =>
+      view(branchOf(batch.members[0]?.card_id ?? ""));
     command(id, (s, a, p) => recordMergeQueueConfiguration(s, a, {}, p));
     // Complete an already durable publication even if the queue was disabled.
     for (const batch of mergeBatches(state(id).events).filter(
       (b) => b.status === "publishing",
     ))
-      if (!(await this.publish(project, batch))) return;
+      if (!(await this.publish(viewOf(batch), batch))) return;
     if (!settings.queue) {
       for (const batch of activeMergeFamilies(state(id).events))
         command(id, (s, a, p) =>
@@ -83,8 +90,20 @@ export class MergeBatches {
       !git.baseline
     )
       throw new Error("合并队列缺少可信批次 Git 入口");
-    await git.sync(project);
-    const baseline = await git.baseline(project);
+    const baselines = new Map<string, Promise<string>>();
+    const baselineOf = (branch: string) => {
+      let read = baselines.get(branch);
+      if (!read) {
+        const project = view(branch);
+        read = git.sync(project).then(() => {
+          if (!git.baseline) throw new Error("合并队列缺少可信批次 Git 入口");
+          return git.baseline(project);
+        });
+        baselines.set(branch, read);
+      }
+      return read;
+    };
+    await baselineOf(registered.base_branch);
     if (git.deliveryChangedPaths) {
       const snapshot = state(id),
         windows = mergeWindows(snapshot.events).filter((w) => w.open);
@@ -99,12 +118,13 @@ export class MergeBatches {
         )) {
           const versions = mergeWindowVersions(snapshot, card.id);
           const files = new Set<string>();
+          const branch = card.base_branch ?? registered.base_branch;
           for (const delivery of snapshot.deliveries.filter((v) =>
             versions.includes(v.id),
           ))
             for (const file of await git.deliveryChangedPaths(
-              project,
-              baseline,
+              view(branch),
+              await baselineOf(branch),
               delivery.subject.value,
             ))
               files.add(file);
@@ -134,7 +154,9 @@ export class MergeBatches {
         }
       }
       let reason: "stale" | "member_left" | undefined;
-      if (baseline !== batch.base_sha) reason = "stale";
+      const project = viewOf(batch);
+      if ((await baselineOf(project.base_branch)) !== batch.base_sha)
+        reason = "stale";
       else {
         try {
           // The failed member has already returned for fixes. Only the proven
@@ -224,8 +246,11 @@ export class MergeBatches {
       );
     if (activeMergeFamilies(state(id).events).length || fenced(id)) return;
     const queue = mergeQueue(state(id));
+    const branch = queue[0]?.plan.base_branch;
     const chosen: typeof queue = [];
     for (const item of queue) {
+      // The head of the queue chooses the branch; other branches wait their turn.
+      if (item.plan.base_branch !== branch) continue;
       if (
         chosen.length >= settings.queue.maxBatchSize ||
         (chosen.length && item.solo)
@@ -234,7 +259,9 @@ export class MergeBatches {
       chosen.push(item);
       if (item.solo) break;
     }
-    if (!chosen.length) return;
+    if (!chosen.length || !branch) return;
+    const project = view(branch);
+    await baselineOf(branch);
     const prepared = await git.prepareBatch(
       project,
       chosen.map((q) => q.plan),
