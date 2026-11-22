@@ -495,6 +495,8 @@ interface AssignmentFields {
     };
   };
   readonly idle_retirement?: {
+    /** Bounded idle retirement surrendered retries, not its exit fence. */
+    readonly handoff?: true;
     readonly phase: "stopping" | "waiting";
     /** This claim cannot send signals. Absent on legacy or signal-capable claims. */
     readonly observe_only?: true;

@@ -9,9 +9,11 @@ import {
   type Event,
   eventById,
   eventsOfType,
+  type HostOpsExecution,
   hasRunTarget,
   type Notification,
   pmNotificationState,
+  retirementStallHandoff,
   reviewDiscussionInstruction,
   reviewWakeBlocked,
   runById,
@@ -50,6 +52,7 @@ export interface DispatchStall {
   review_trigger_id?: Event["id"];
   handoff_event_id?: Event["id"];
   system_finished_run_id?: string;
+  retirement_handoff?: NonNullable<HostOpsExecution["retirement_handoff"]>;
   age_ms: number;
   runtime_state: Assignment["runtime_state"];
   machine_id: string;
@@ -153,6 +156,7 @@ export function dispatchStallCauses(
     trigger = eventById(state.events, source.id),
     handoff?: Event,
     auditOnly?: string,
+    transfer?: HostOpsExecution["retirement_handoff"],
   ) {
     const { id: cause, created_at: at, card_id: sourceCard, seq } = source;
     const age = Date.parse(now) - Date.parse(at);
@@ -162,7 +166,7 @@ export function dispatchStallCauses(
       | { run_id: string; session_key: string }
       | undefined;
     if (
-      (!auditOnly && !due && !(age >= threshold)) ||
+      (!auditOnly && !due && !transfer && !(age >= threshold)) ||
       !a ||
       at < a.created_at ||
       a.status !== "active" ||
@@ -193,8 +197,9 @@ export function dispatchStallCauses(
         r.inactivity_stop,
     );
     const onlySuccessor =
-      !!binding && runs.some((r) => untouchedStallSuccessor(state, a, r));
-    if (unfinished && !due && !auditOnly) return;
+      (!!binding || !!transfer) &&
+      runs.some((r) => untouchedStallSuccessor(state, a, r));
+    if (unfinished && !due && !auditOnly && !transfer) return;
     const blocked = (() => {
       if (auditOnly) return auditOnly;
       if (sharedStallRegistration(state, a)) return "shared_registration";
@@ -206,7 +211,8 @@ export function dispatchStallCauses(
       )
         return "turn_binding_changed";
       if (stoppedByHuman(state.events, a.id)) return "human_stopped";
-      if (a.role_upgrade || a.idle_retirement) return "session_maintenance";
+      if (a.role_upgrade || (a.idle_retirement && !transfer))
+        return "session_maintenance";
       const parent = card && cards.get(card);
       if (parent && ["done", "cancelled"].includes(parent.status))
         return "closed_card";
@@ -250,6 +256,7 @@ export function dispatchStallCauses(
       card_id: card ?? null,
       cause_id: due?.id ?? cause,
       ...(binding ? { system_finished_run_id: binding.run_id } : {}),
+      ...(transfer ? { retirement_handoff: transfer } : {}),
       ...(handoff ? { handoff_event_id: handoff.id } : {}),
       ...(trigger &&
       (trigger.type === "review_submitted" ||
@@ -323,6 +330,23 @@ export function dispatchStallCauses(
   }
   // Expose existing supervisor incidents, without treating their age as stop
   // authority. Do not turn ordinary comments on a working Run into incidents.
+  for (const e of eventsOfType(state.events, "run_queued")) {
+    const p = e.payload as { assignment_id: Assignment["id"]; run_id: string };
+    const a = assignments.get(p.assignment_id);
+    if (!a?.idle_retirement?.handoff) continue;
+    const queue = runById(state.runs, p.run_id);
+    if (queue?.status !== "queued") continue;
+    const handoff = retirementStallHandoff(state, a, e.id);
+    add(
+      "retirement_wait",
+      a,
+      e,
+      eventById(state.events, queue.trigger_event_id),
+      undefined,
+      handoff ? undefined : "retirement_handoff_changed",
+      handoff,
+    );
+  }
   for (const a of state.assignments) {
     const wait = a.idle_retirement?.dispatch_wait;
     const event = wait && eventById(state.events, wait.event_id);
@@ -330,6 +354,7 @@ export function dispatchStallCauses(
       event &&
       runById(state.runs, (event.payload as { run_id: string }).run_id);
     if (
+      !a.idle_retirement?.handoff &&
       event?.type === "session_maintenance_attention" &&
       event.actor.kind === "system" &&
       queue?.assignment_id === a.id &&

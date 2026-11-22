@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   type Assignment,
   type CommandState,
+  type HostOpsExecution,
   idleWakeGuard,
   type RetirementIdentity,
   type Runtime,
@@ -250,6 +251,33 @@ export async function remoteStallExit(
     return false;
   }
 }
+/** A retirement transfer is not exit evidence. Probe the captured generation
+ * and the terminal independently; neither a retained shell nor ENOENT suffices. */
+export async function transferredSessionExited(
+  state: CommandState,
+  a: Assignment,
+  runtime: Runtime,
+  execution?: ExecutionConfig,
+) {
+  const ref = a.runtime_ref;
+  if (
+    !ref ||
+    !boundWorkspaceTarget(state.project_id, a, execution) ||
+    sharedStallRegistration(state, a)
+  )
+    return false;
+  const owner = { project_id: state.project_id, assignment_id: a.id };
+  const observed = await runtime
+    .observe_retirement?.(ref, owner)
+    .catch(() => undefined);
+  if (!observed?.ok || observed.value !== "exited") return false;
+  if (a.machine_id !== "local") return remoteStallExit(state, a, execution);
+  if (!ref.local_process_receipt) return false;
+  const process = await runtime
+    .confirm_local_exit?.(ref, owner)
+    .catch(() => undefined);
+  return !!process?.ok && process.value;
+}
 export async function stallEvidence(
   state: CommandState,
   a: Assignment,
@@ -257,6 +285,7 @@ export async function stallEvidence(
   execution?: ExecutionConfig,
   signal?: AbortSignal,
   systemTurn?: string,
+  transfer?: HostOpsExecution["retirement_handoff"],
 ) {
   // Conflicting live registrations invalidate ownership, even when hc has a
   // matching address/name. No filesystem or process access on their behalf.
@@ -268,11 +297,16 @@ export async function stallEvidence(
     a.runtime_ref && bound
       ? runtime.status(a.runtime_ref).catch(() => undefined)
       : undefined,
-    systemTurn && a.runtime_ref?.machine_id === a.machine_id && bound
+    (systemTurn || transfer) &&
+    a.runtime_ref?.machine_id === a.machine_id &&
+    bound
       ? observeTurnOwner(
           runtime,
           a.runtime_ref,
-          systemTurnOwner(state, a.id, a.runtime_ref, systemTurn),
+          systemTurn
+            ? systemTurnOwner(state, a.id, a.runtime_ref, systemTurn)
+            : { project_id: state.project_id, assignment_id: a.id },
+          !transfer,
         )
       : undefined,
   ]);
@@ -302,7 +336,7 @@ export async function stallEvidence(
       (["unknown", "idle", "done"].includes(observed.value.agent) ||
         observed.value.process === "exited"));
   return {
-    ...(systemTurn
+    ...(systemTurn || transfer
       ? { terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed" }
       : {}),
     workspace,
@@ -314,8 +348,19 @@ export async function stallEvidence(
         : null,
     can_restart:
       bound &&
-      (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
-      (a.machine_id === "local" || !!remoteExited) &&
+      (transfer
+        ? owner?.ok && owner.value === "exited"
+          ? await transferredSessionExited(state, a, runtime, execution)
+          : transfer.phase === "waiting" &&
+            !transfer.observe_only &&
+            a.machine_id === "local" &&
+            !!a.runtime_ref?.local_process_receipt &&
+            owner?.ok === true &&
+            owner.value === "alive" &&
+            !!observed?.ok &&
+            idleWakeGuard(observed.value)
+        : (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
+          (a.machine_id === "local" || !!remoteExited)) &&
       (workspace === "clean" || workspace === "no_worktree"),
   };
 }

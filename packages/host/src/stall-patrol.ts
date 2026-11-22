@@ -28,6 +28,9 @@ import {
 import { stallEvidence } from "./stall-evidence.js";
 import { overdueStallHandoffs } from "./stall-handoff.js";
 
+function turnKey(s: DispatchStall) {
+  return s.retirement_handoff ? s.cause_id : s.system_finished_run_id;
+}
 const turnNextStep =
   "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
 
@@ -74,12 +77,12 @@ export class StallPatrol {
   }
   private survey(state: CommandState) {
     const all = this.causes(state);
-    const turns = all.filter((s) => s.system_finished_run_id);
+    const turns = all.filter(turnKey);
     // Don't let a generic backlog row mask the exact expired bell or issue
     // a second recovery for a related resume instruction.
     const owners = new Set(turns.map((s) => s.assignment_id));
     const causes = all.filter(
-      (s) => s.system_finished_run_id || !owners.has(s.assignment_id),
+      (s) => turnKey(s) || !owners.has(s.assignment_id),
     );
     const consumed = new Set(
       eventsOfType(state.events, "host_ops_action_taken").map(
@@ -105,12 +108,10 @@ export class StallPatrol {
       return;
     // An in-flight action must recheck its exact cause, even after it is marked consumed.
     const causes = this.causes(state).filter((s) => s.assignment_id === id);
-    const hasTurn = causes.some((s) => s.system_finished_run_id);
+    const hasTurn = causes.some(turnKey);
     return causes.find(
       (s) =>
-        (!hasTurn || s.system_finished_run_id) &&
-        s.cause_id === cause &&
-        !s.restart_blocked,
+        (!hasTurn || turnKey(s)) && s.cause_id === cause && !s.restart_blocked,
     );
   }
   async evidence(state: CommandState, a: Assignment, stall?: DispatchStall) {
@@ -121,6 +122,7 @@ export class StallPatrol {
       this.execution(state.project_id, a.machine_id),
       this.signal,
       stall?.system_finished_run_id,
+      stall?.retirement_handoff,
     );
   }
   async diagnostics(project: ProjectId) {
@@ -207,7 +209,7 @@ export class StallPatrol {
         });
       }
       for (const stall of rows) {
-        if (stall.system_finished_run_id || sent.has(key(stall))) continue;
+        if (turnKey(stall) || sent.has(key(stall))) continue;
         const event = {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(project),
@@ -251,11 +253,17 @@ export class StallPatrol {
     // A failed observation did not acquire the stop fence. Remember the
     // alert separately so fresh evidence can still recover the original bell.
     const recorded = (s: CommandState, type: string) =>
-      eventsOfType(s.events, type).some(
-        (e) =>
-          (e.payload as { system_finished_run_id?: string })
-            .system_finished_run_id === stall.system_finished_run_id,
-      );
+      eventsOfType(s.events, type).some((e) => {
+        const p = e.payload as {
+          system_finished_run_id?: string;
+          cause_id?: string;
+          dispatch_stall_id?: string;
+        };
+        return stall.retirement_handoff
+          ? (p.cause_id ?? p.dispatch_stall_id) === stall.cause_id
+          : !!stall.system_finished_run_id &&
+              p.system_finished_run_id === stall.system_finished_run_id;
+      });
     const handled = (s: CommandState) => recorded(s, "host_ops_action_taken");
     if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
     const view = await this.evidence(state, a, stall);
@@ -378,13 +386,9 @@ export class StallPatrol {
     for (const stall of turns.sort(
       (a, b) => Number(!!a.restart_blocked) - Number(!!b.restart_blocked),
     )) {
-      if (
-        !stall.system_finished_run_id ||
-        seen.has(stall.system_finished_run_id) ||
-        this.signal.aborted
-      )
-        continue;
-      seen.add(stall.system_finished_run_id);
+      const key = turnKey(stall);
+      if (!key || seen.has(key) || this.signal.aborted) continue;
+      seen.add(key);
       await this.recoverTurn(state, stall, snapshot);
     }
     if (!patrol || hostOpsPending(state.events, patrol.id)) return;

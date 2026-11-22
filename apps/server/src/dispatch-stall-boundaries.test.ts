@@ -1782,3 +1782,92 @@ test("A-1800 replay: retained reviewer receives its original instruction after a
     await dispatcher.close();
   }
 });
+
+test.each(["waiting", "stopping"] as const)(
+  "C-575 %s handoff keeps one queue; incomplete exit never releases the terminal",
+  async (phase) => {
+    const { f, a } = reviewerFixture();
+    const queue = f.apply((s, actor, p) =>
+      queueRun(
+        s,
+        actor,
+        { assignment_id: a.id, model: "fixture", agent_cli_version: "fixture" },
+        p,
+      ),
+    );
+    const receipt = "c".repeat(32);
+    f.store.uow.run((tx) => {
+      const current = tx.assignments.get(f.project, a.id)!;
+      const ref = { ...f.refFor(a), local_process_receipt: receipt };
+      tx.assignments.put(f.project, {
+        ...current,
+        runtime_ref: ref,
+        idle_retirement: {
+          phase,
+          started_at: f.clock.now(),
+          runtime_ref: ref,
+          handoff: true,
+          threshold_minutes: 60,
+          failures: 3,
+        },
+      });
+    });
+    let kernelExit = false;
+    let terminalExit = phase === "stopping";
+    f.runtime.observe_retirement = vi.fn(async () => ({
+      ok: true as const,
+      value: terminalExit ? ("exited" as const) : ("alive" as const),
+    }));
+    f.runtime.confirm_local_exit = vi.fn(async () => ({
+      ok: true as const,
+      value: kernelExit,
+    }));
+    vi.mocked(f.runtime.status).mockImplementation(async () => ({
+      ok: true as const,
+      value: {
+        agent: "idle" as const,
+        process: terminalExit ? ("exited" as const) : ("alive" as const),
+        observed_seq: 1,
+      },
+    }));
+    const signal = vi.fn();
+    f.runtime.retire_idle = vi.fn(async (_r, opts) => {
+      if (!(await opts.workspace_preflight()) || !opts.before_signal())
+        throw new Error("unexpected refusal");
+      signal();
+      terminalExit = true;
+      kernelExit = true;
+      return { ok: true as const, value: { outcome: "exited" as const } };
+    });
+    if (phase === "stopping") {
+      await f.service.tick();
+      await f.service.tick();
+      expect(
+        f.state().assignments.find((o) => o.id === a.id)?.idle_retirement
+          ?.phase,
+      ).toBe("stopping");
+      expect(f.runtime.retire_idle).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(
+          f.state().events.filter((e) => e.type === "dispatch_stall_attention"),
+        ).toHaveLength(1),
+      );
+      kernelExit = true;
+      f.advance(60_000);
+    }
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().assignments.find((o) => o.id === a.id)?.idle_retirement,
+      ).toBeUndefined();
+    });
+    expect(f.state().runs.filter((r) => r.assignment_id === a.id)).toEqual([
+      queue,
+    ]);
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(1);
+    expect(signal).toHaveBeenCalledTimes(phase === "waiting" ? 1 : 0);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+  },
+);

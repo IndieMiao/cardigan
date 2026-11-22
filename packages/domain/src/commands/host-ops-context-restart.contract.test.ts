@@ -708,3 +708,99 @@ test("stall recovery distinguishes one pristine queue from dispatch evidence or 
     untouchedStallSuccessor(state, a, { ...queued, recovery_runtime: ref }),
   ).toBe(false);
 });
+
+test.each(["waiting", "stopping"] as const)(
+  "retirement %s transfer settles only the captured fence and reuses the untouched queue",
+  (phase) => {
+    const f = setup();
+    const original = required(f.state.assignments[0]);
+    const bound = { ...ref, agent_name: "retiring", terminal_ref: "retiring" };
+    const h = {
+      phase,
+      handoff: true as const,
+      started_at: now,
+      runtime_ref: bound,
+      failures: 3,
+      threshold_minutes: 60,
+    };
+    const a = { ...original, runtime_ref: bound, idle_retirement: h };
+    const cause: Event = {
+      id: f.io.ids.nextEventId(),
+      seq: 44,
+      type: "run_queued",
+      actor: system,
+      created_at: now,
+      card_id: id("card", 1),
+      payload: { assignment_id: a.id, run_id: id("run", 77) },
+    };
+    const queued = {
+      ...run(),
+      id: id("run", 77),
+      status: "queued" as const,
+      trigger_event_id: cause.id,
+    };
+    const state = {
+      ...f.state,
+      assignments: f.state.assignments.map((v) => (v.id === a.id ? a : v)),
+      runs: [queued],
+      events: [cause],
+    };
+    const begin = (s: CommandState) =>
+      beginSystemTurnRestart(
+        s,
+        system,
+        { assignment_id: a.id, cause_id: cause.id, snapshot },
+        f.io,
+      );
+    const intent = value(begin(state));
+    const pending = apply(state, intent);
+    expect(begin(pending).ok).toBe(false);
+    const finish = (s: CommandState) =>
+      finishHostOpsAction(s, system, intent.data.action_id, f.io, {
+        cause_id: cause.id,
+        card_id: cause.card_id ?? null,
+      });
+    const complete = value(finish(pending));
+    expect(complete.data.run).toEqual(queued);
+    const done = apply(pending, complete);
+    expect(done.assignments.find((v) => v.id === a.id)).toMatchObject({
+      runtime_ref: null,
+    });
+    expect(
+      done.assignments.find((v) => v.id === a.id)?.idle_retirement,
+    ).toBeUndefined();
+    expect(done.runs).toEqual([queued]);
+    for (const raced of [
+      { ...pending, runs: [{ ...queued, status: "dispatched" as const }] },
+      {
+        ...pending,
+        cursors: [
+          { assignment_id: a.id, card_id: id("card", 1), acked_seq: cause.seq },
+        ],
+      },
+      {
+        ...pending,
+        assignments: pending.assignments.map((v) =>
+          v.id === a.id
+            ? { ...a, idle_retirement: { ...h, started_at: "new-claim" } }
+            : v,
+        ),
+      },
+      {
+        ...pending,
+        assignments: pending.assignments.map((v) =>
+          v.id === a.id ? { ...a, runtime_ref: ref } : v,
+        ),
+      },
+      {
+        ...pending,
+        work_items: pending.work_items.map((w) =>
+          w.id === a.work_item_id
+            ? { ...w, status: "waiting_decision" as const }
+            : w,
+        ),
+      },
+    ])
+      expect(finish(raced).ok).toBe(false);
+  },
+);

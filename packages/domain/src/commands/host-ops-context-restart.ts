@@ -23,7 +23,10 @@ import {
   ensure,
   text,
 } from "./core.js";
-import { beginHostOpsActionInDraft } from "./host-ops-actions.js";
+import {
+  beginHostOpsActionInDraft,
+  retirementStallHandoff,
+} from "./host-ops-actions.js";
 import { settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
 import { stoppedByHuman } from "./stop.js";
@@ -212,13 +215,15 @@ export function beginSystemTurnRestart(
     const payload = due?.payload as
       | { run_id?: string; assignment_id?: string }
       | undefined;
+    const handoff = retirementStallHandoff(state, a, p.cause_id);
     ensure(
-      turn &&
-        a.runtime_ref &&
-        due?.actor.kind === "system" &&
-        due.type === "bell_turn_recovery_due" &&
-        payload?.run_id === turn.id &&
-        payload.assignment_id === a.id,
+      handoff ||
+        (turn &&
+          a.runtime_ref &&
+          due?.actor.kind === "system" &&
+          due.type === "bell_turn_recovery_due" &&
+          payload?.run_id === turn.id &&
+          payload.assignment_id === a.id),
       "illegal_transition",
       "门铃恢复原因或原会话已改变",
     );
@@ -236,7 +241,9 @@ export function beginSystemTurnRestart(
           ? "host_ops_restart_standing_pm"
           : "host_ops_restart_assignment",
       target_id: a.id,
-      reason: "系统代结束的轮次门铃超期，核对归属后换会话。",
+      reason: handoff
+        ? "空闲回收已交接，核对原会话与原待办。"
+        : "系统代结束的轮次门铃超期，核对归属后换会话。",
       dispatch_stall_id: p.cause_id,
       ...(p.review_trigger_id
         ? { review_trigger_id: p.review_trigger_id }

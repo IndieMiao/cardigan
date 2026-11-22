@@ -33,6 +33,7 @@ import {
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  retirementStallHandoff,
   reviewRestartStopStarted,
   type SessionActivity,
   systemTurnOwner,
@@ -79,7 +80,11 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { remoteStallExit, stallWorkspace } from "./stall-evidence.js";
+import {
+  remoteStallExit,
+  stallWorkspace,
+  transferredSessionExited,
+} from "./stall-evidence.js";
 import { StallPatrol } from "./stall-patrol.js";
 import {
   revokeStoppedRunTokens,
@@ -1231,9 +1236,22 @@ export class HostOpsService {
   private async drainAction(project: ProjectId, action: HostOpsExecution) {
     const { store, runtime } = this.options;
     const read = () => store.uow.read((tx) => loadCommandState(tx, project));
+    const turnRecovery = !!(
+      action.system_finished_run_id || action.retirement_handoff
+    );
     const unlock = await tryHostOpsLock(store, project, action.assignment_id);
     if (!unlock) return;
+    let unlockLaunch: Awaited<ReturnType<typeof tryHostOpsLock>>;
     try {
+      if (action.retirement_handoff) {
+        unlockLaunch = await tryHostOpsLock(
+          store,
+          project,
+          action.assignment_id,
+          "launch",
+        );
+        if (!unlockLaunch) return;
+      }
       if (this.closing) return;
       const lease = store.uow.run((tx) => {
         const effect = unwrap(
@@ -1307,8 +1325,31 @@ export class HostOpsService {
             state.assignments.find((a) => a.id === action.assignment_id)
               ?.runtime_ref,
           ) === JSON.stringify(action.runtime_ref);
-        if (!bound && action.system_finished_run_id)
-          fail("terminal_binding_changed");
+        if (action.retirement_handoff) {
+          const owner = state.assignments.find(
+            (a) => a.id === action.assignment_id,
+          );
+          const fresh =
+            owner &&
+            retirementStallHandoff(state, owner, action.dispatch_stall_id);
+          if (
+            !fresh ||
+            fresh.phase !== action.retirement_handoff.phase ||
+            fresh.observe_only !== action.retirement_handoff.observe_only ||
+            fresh.started_at !== action.retirement_handoff.started_at ||
+            fresh.queue_id !== action.run_id ||
+            !action.dispatch_stall_id ||
+            !this.stallPatrol.current(
+              state,
+              action.assignment_id,
+              action.dispatch_stall_id,
+            )
+          ) {
+            fail("retirement_handoff_changed");
+            return false;
+          }
+        }
+        if (!bound && turnRecovery) fail("terminal_binding_changed");
         return bound;
       };
       // Do not revoke credentials or release the Run slot until exit is proven.
@@ -1475,6 +1516,8 @@ export class HostOpsService {
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
       const stopStarted =
+        action.retirement_handoff?.phase === "stopping" ||
+        action.retirement_handoff?.observe_only ||
         (reviewRestart && reviewRestartStopStarted(read(), action.action_id)) ||
         ((action.automatic_context_restart === true ||
           !!action.dispatch_stall_id) &&
@@ -1488,7 +1531,7 @@ export class HostOpsService {
           ));
       // A started stop can only observe its exit. The original notice may
       // already be ACKed; settlement rechecks it before allowing a new Run.
-      if (!(action.system_finished_run_id && stopStarted) && !mayStop()) return;
+      if (!(turnRecovery && stopStarted) && !mayStop()) return;
       if (foreign) {
         if (action.automatic_context_restart || action.dispatch_stall_id) {
           fail("当前主机无法确认旧会话退出");
@@ -1508,7 +1551,7 @@ export class HostOpsService {
           return true;
         };
         let result: string;
-        if (action.system_finished_run_id) {
+        if (turnRecovery) {
           if (!stopStarted) {
             await checkStall();
             if (!mayStop()) return;
@@ -1576,27 +1619,59 @@ export class HostOpsService {
             }
           }
           const remote = a && a.machine_id !== "local";
-          result =
-            remote &&
-            !(await remoteStallExit(
-              read(),
-              a,
-              this.stallExecution(project, a.machine_id),
-            ))
-              ? "terminal_exit_unconfirmed"
-              : await stopSystemTurn(
-                  runtime,
-                  action.runtime_ref,
-                  systemTurnOwner(
-                    read(),
-                    action.assignment_id,
+          if (action.retirement_handoff) {
+            // Observe first. Only a still-waiting, locally registered launch can
+            // reach the existing graceful stop. A transferred stop is never retried.
+            const exited = () =>
+              a &&
+              transferredSessionExited(
+                read(),
+                a,
+                runtime,
+                this.stallExecution(project, a.machine_id),
+              );
+            if (await exited()) result = "exited";
+            else if (
+              remote ||
+              stopStarted ||
+              !a?.runtime_ref?.local_process_receipt
+            )
+              result = "terminal_exit_unconfirmed";
+            else {
+              result = await stopSystemTurn(
+                runtime,
+                action.runtime_ref,
+                { project_id: project, assignment_id: a.id },
+                false,
+                checkWorkspace,
+                beforeSignal,
+              );
+              if (result === "exited" && !(await exited()))
+                result = "terminal_exit_unconfirmed";
+            }
+          } else if (action.system_finished_run_id) {
+            result =
+              remote &&
+              !(await remoteStallExit(
+                read(),
+                a,
+                this.stallExecution(project, a.machine_id),
+              ))
+                ? "terminal_exit_unconfirmed"
+                : await stopSystemTurn(
+                    runtime,
                     action.runtime_ref,
-                    action.system_finished_run_id,
-                  ),
-                  !!remote || stopStarted,
-                  checkWorkspace,
-                  beforeSignal,
-                );
+                    systemTurnOwner(
+                      read(),
+                      action.assignment_id,
+                      action.runtime_ref,
+                      action.system_finished_run_id,
+                    ),
+                    !!remote || stopStarted,
+                    checkWorkspace,
+                    beforeSignal,
+                  );
+          } else return;
           // Exit can also be observed without sending anything. Exit alone
           // does not authorize clearing the session and queuing its successor.
           if (result === "exited" && !(await checkWorkspace()))
@@ -1632,7 +1707,7 @@ export class HostOpsService {
       // Credential scrubbing can wait on worker IO. Do not queue from a
       // workspace observation made before that wait.
       if (
-        action.system_finished_run_id &&
+        turnRecovery &&
         this.options.scrubCredentials &&
         !(await checkWorkspace())
       ) {
@@ -1683,7 +1758,11 @@ export class HostOpsService {
           });
       });
     } finally {
-      await unlock();
+      try {
+        await unlockLaunch?.();
+      } finally {
+        await unlock();
+      }
     }
   }
 }

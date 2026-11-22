@@ -807,7 +807,8 @@ export class Dispatcher {
   }
   private busy(state: CommandState, a: Assignment, continuing?: RunId) {
     if (a.role_upgrade) return "role_upgrade";
-    if (a.idle_retirement?.phase === "stopping") return "idle_retirement";
+    if (a.idle_retirement?.handoff || a.idle_retirement?.phase === "stopping")
+      return "idle_retirement";
     if (hostOpsPending(state.events, a.id)) return "host_operation";
     // C-211: a stopped Assignment waits for the human's start; its bells stay
     // pending and no session is woken, replaced or started for it.

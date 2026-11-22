@@ -139,6 +139,7 @@ export function confirmWaitingRetirementExit(
     const a = d.get("assignments", id);
     ensure(
       a.idle_retirement?.phase === "waiting" &&
+        !a.idle_retirement.handoff &&
         retirementOwnsSession(a) &&
         JSON.stringify(a.runtime_ref) === JSON.stringify(observedRef),
       "illegal_transition",

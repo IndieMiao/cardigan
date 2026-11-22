@@ -79,6 +79,12 @@ export interface HostOpsExecution {
   readonly automatic_context_restart?: boolean;
   readonly dispatch_stall_id?: string;
   readonly system_finished_run_id?: string;
+  readonly retirement_handoff?: {
+    readonly observe_only?: true;
+    readonly phase: "waiting" | "stopping";
+    readonly started_at: string;
+    readonly queue_id: Run["id"];
+  };
   readonly tool: HostOpsExecutionTool;
   readonly target_id: AssignmentId | RunId;
   readonly assignment_id: AssignmentId;
@@ -212,7 +218,11 @@ export function automaticContextActionForRun(
       if (action) {
         indexed.set(e.id, action);
         const run = (e.payload as { run_id?: string }).run_id;
-        if (run && action.system_finished_run_id && run === action.run_id)
+        if (
+          run &&
+          (action.system_finished_run_id || action.retirement_handoff) &&
+          run === action.run_id
+        )
           indexed.set(`queue/${run}`, action);
       }
     }
