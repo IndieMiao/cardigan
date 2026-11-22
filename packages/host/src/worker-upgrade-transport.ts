@@ -46,6 +46,18 @@ function deployed(dataDir: string) {
     return invalid();
   return String(state.current.sha);
 }
+export function upgradePrincipal(project: string, identity: string) {
+  const tag = createHash("sha256").update(project).digest("hex").slice(0, 20);
+  return identity.endsWith(".key.bound")
+    ? {
+        user: `cgu_${tag}`,
+        entry: `/opt/cardigan-helper-upgrade-${tag}/upgrade`,
+      }
+    : {
+        user: "cardigan_updater",
+        entry: "/opt/cardigan-helper-upgrade/upgrade",
+      };
+}
 export async function signedHelperBundle(
   worker: Worker,
   project: string,
@@ -94,6 +106,7 @@ export async function signedHelperBundle(
     !key ||
     !readWorkerPrivateFile(identity) ||
     worker.user === "cardigan_updater" ||
+    worker.user === upgradePrincipal(project, identity).user ||
     identity === worker.identityFile
   )
     return invalid();
@@ -115,14 +128,15 @@ export async function installRelease(
   identity: string,
   signal?: AbortSignal,
 ) {
+  const { user, entry } = upgradePrincipal(project, identity);
   const command = await agentProcessCommand(
     {
       ...worker,
-      user: "cardigan_updater",
+      user,
       identityFile: identity,
       path: "/usr/bin:/bin",
     },
-    ["/usr/bin/sudo", "-n", "--", "/opt/cardigan-helper-upgrade/upgrade"],
+    ["/usr/bin/sudo", "-n", "--", entry],
   );
   const bundle = await signedHelperBundle(worker, project, identity, signal);
   const result = await new Promise<string>((resolve, reject) => {

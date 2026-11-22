@@ -8,10 +8,10 @@ import {
   acquireRepositoryFlock,
   CpuProfileController,
   configureMachinePlacement,
-  ExtMessageSender,
+  defaultExtMessagePath,
   executorExecution,
   HostOpsService,
-  loadExtMessageConfig,
+  LiveExtMessageSender,
   loadMachineCapabilityCatalog,
   loadMergeGateConfig,
   loadRunCapacityConfig,
@@ -643,6 +643,7 @@ async function assembleServer(
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,
           config: webOptions.config,
+          feishuSettingsPath: defaultExtMessagePath({ ...runtimeEnv }),
           ...(webOptions.launchSettings
             ? { launchSettings: webOptions.launchSettings }
             : {}),
@@ -695,7 +696,7 @@ async function assembleServer(
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
-  let extSender: ExtMessageSender | undefined;
+  let extSender: LiveExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
       probeLoop = startTimerLoop({
@@ -843,16 +844,18 @@ async function assembleServer(
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
       });
-      extSender = new ExtMessageSender({
-        store,
-        configuration: loadExtMessageConfig(),
-        gate: (project) => ({
-          ...mergeProjectSettings(mergeGate, project),
-          merge_gate_enabled:
-            mergeGate.forProject(project).status !== "disabled",
-        }),
-      });
-      extSender.recordStatus();
+      extSender = new LiveExtMessageSender(
+        defaultExtMessagePath({ ...runtimeEnv }),
+        {
+          store,
+          gate: (project) => ({
+            ...mergeProjectSettings(mergeGate, project),
+            merge_gate_enabled:
+              mergeGate.forProject(project).status !== "disabled",
+          }),
+        },
+      );
+      extSender.start();
       const notificationSender = extSender;
       extLoop = startTimerLoop({
         name: "ext-message",

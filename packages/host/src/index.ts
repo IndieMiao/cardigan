@@ -93,6 +93,9 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export { parseFeishuCredential } from "./ext-message-feishu.js";
+export { boundTestAdapter } from "./feishu-app.js";
+export { parseAppCredential } from "./feishu-inbox.js";
 export * from "./github-branch-cleaner.js";
 export * from "./github-budget-journal.js";
 export {
@@ -164,6 +167,7 @@ export { probeModel } from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
 export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
+export * from "./live-ext-message.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";

@@ -22,14 +22,20 @@ import {
   helpers,
   workerHelperDigests,
 } from "./worker-helper-release.js";
-import { upgradeIdentity } from "./worker-upgrade-enrollment.js";
+import {
+  enrolledUpgradeIdentity,
+  upgradeIdentity,
+} from "./worker-upgrade-enrollment.js";
 import {
   upgradeHeld,
   upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
-import { signedHelperBundle } from "./worker-upgrade-transport.js";
+import {
+  signedHelperBundle,
+  upgradePrincipal,
+} from "./worker-upgrade-transport.js";
 import { workerWizardForm } from "./worker-wizard-form.js";
 
 const project = "sample",
@@ -41,13 +47,18 @@ afterEach(() => {
   cleanup();
   cleanup = () => {};
 });
-function setup(os = "linux") {
-  const root = mkdtempSync(join(tmpdir(), "helper-upgrade-"));
-  const store = Store.open({ dataDir: root });
-  cleanup = () => {
-    store.close();
-    rmSync(root, { recursive: true, force: true });
-  };
+function setup(
+  os = "linux",
+  project = "sample",
+  shared?: { root: string; store: Store },
+) {
+  const root = shared?.root ?? mkdtempSync(join(tmpdir(), "helper-upgrade-"));
+  const store = shared?.store ?? Store.open({ dataDir: root });
+  if (!shared)
+    cleanup = () => {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    };
   store.createProject({ id: project });
   const form = workerWizardForm(root, root, project, {
     os,
@@ -55,9 +66,9 @@ function setup(os = "linux") {
     machine_id: machine,
     label: "test",
     host: "worker.invalid",
-    account: "cg_sample",
-    uid: 2201,
-    gid: 2201,
+    account: `cg_${project}`,
+    uid: project === "sample" ? 2201 : 2202,
+    gid: project === "sample" ? 2201 : 2202,
     mcp_url: "https://control.example.ts.net/mcp",
   });
   writeFileSync(
@@ -193,6 +204,7 @@ function setup(os = "linux") {
       mode: 0o600,
     });
   return {
+    root,
     run,
     manual,
     journal,
@@ -252,6 +264,30 @@ test.each(["linux", "macos"])(
     expect(f.adapters.install).toHaveBeenCalledTimes(1);
   },
 );
+test("a second project on the same machine has its own maintenance and authorization", async () => {
+  const first = setup();
+  const second = setup("linux", "second", first);
+  first.enroll();
+  expect(await first.run(pass)).toEqual(pass);
+  expect(await second.run()).toEqual(mismatch);
+  expect(first.actions()).toEqual([]);
+  expect(second.actions()[0]?.instructions).toContain(
+    `项目 second 的机器 ${machine}`,
+  );
+  const key = `${upgradeIdentity(first.root, "second", machine)}.bound`;
+  writeFileSync(key, "synthetic", { mode: 0o600 });
+  expect(enrolledUpgradeIdentity(first.root, "second", machine)).toBe(key);
+  expect(upgradePrincipal("second", key).user).toBe(
+    `cgu_${createHash("sha256").update("second").digest("hex").slice(0, 20)}`,
+  );
+  second.adapters.install.mockRejectedValueOnce(new Error("binding_failed"));
+  expect((await second.run()).blockers).toEqual([upgradeHold]);
+  expect(await first.run()).toEqual(pass);
+  expect(first.isHeld()).toBe(false);
+  expect(second.isHeld()).toBe(true);
+  expect(first.adapters.install).toHaveBeenCalledOnce();
+  expect(second.adapters.install).toHaveBeenCalledOnce();
+});
 test("drained enrolled worker waits for patrol without offering a manual install", async () => {
   const f = setup();
   f.enroll();

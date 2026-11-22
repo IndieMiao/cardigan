@@ -66,7 +66,7 @@ export function notifyHelperMismatch(
     project,
     clock,
     manualUpgradeKey(machine),
-    `机器 ${machine}：${reason}。${fields.terminal ? "暂存已就绪。请先暂停派发、确认无活跃任务，再登录目标机执行下方命令。" : "发行材料暂存失败，没有可执行命令。请主机运维核对 worker 连接；下次巡检会重试。"}\n${Object.entries(
+    `项目 ${project} 的机器 ${machine}：${reason}。${fields.terminal ? "暂存已就绪。请先暂停派发、确认无活跃任务，再登录目标机执行下方命令。" : "发行材料暂存失败，没有可执行命令。请主机运维核对 worker 连接；下次巡检会重试。"}\n${Object.entries(
       digests,
     )
       .map(([name, sha]) => `${sha}  ${name}`)

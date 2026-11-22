@@ -15,6 +15,7 @@ import { parseAppCredential } from "./feishu-inbox.js";
 interface ExtChannel {
   enabled: boolean;
   credential?: string;
+  max_per_minute?: number;
   binding_ttl_ms?: number;
   action_ttl_ms?: number;
   binding_attempts_per_minute?: number;
@@ -34,14 +35,15 @@ export interface ExtMessageConfig {
 }
 export type ExtMessageConfiguration =
   | { readonly status: "missing" | "invalid" }
-  | { readonly status: "loaded"; readonly config: ExtMessageConfig };
-export const defaultExtMessagePath = () =>
+  | {
+      readonly status: "loaded";
+      readonly publication?: string;
+      readonly config: ExtMessageConfig;
+    };
+export const defaultExtMessagePath = (env: NodeJS.ProcessEnv = process.env) =>
   join(
-    process.env.CARDIGAN_CONFIG_DIR ??
-      join(
-        process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
-        "cardigan",
-      ),
+    env.CARDIGAN_CONFIG_DIR ??
+      join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "cardigan"),
     "ext-message.yaml",
   );
 const invalid = (): never => {
@@ -70,7 +72,10 @@ const integer = (value: unknown, fallback: number): number => {
   return n;
 };
 /** Check the opened file, not a path stat before an attacker could swap it. */
-function privateText(path: string): string {
+function privateText(
+  path: string,
+  identify?: (identity: string) => void,
+): string {
   const fd = openSync(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -83,6 +88,10 @@ function privateText(path: string): string {
       (process.getuid && stat.uid !== process.getuid())
     )
       return invalid();
+    if (identify) {
+      const st = fstatSync(fd, { bigint: true });
+      identify(`${st.dev}:${st.ino}:${st.mtimeNs}`);
+    }
     return readFileSync(fd, "utf8");
   } finally {
     closeSync(fd);
@@ -90,10 +99,13 @@ function privateText(path: string): string {
 }
 export function loadExtMessageConfig(
   path = defaultExtMessagePath(),
+  credentialDir = dirname(path),
 ): ExtMessageConfiguration {
-  let text: string;
+  let text: string, identity: string | undefined;
   try {
-    text = privateText(path);
+    text = privateText(path, (id) => {
+      identity = id;
+    });
   } catch (error) {
     return {
       status:
@@ -179,7 +191,7 @@ export function loadExtMessageConfig(
               return invalid();
             const file = channel.credential_file;
             credential = privateText(
-              isAbsolute(file) ? file : resolve(dirname(path), file),
+              isAbsolute(file) ? file : resolve(credentialDir, file),
             ).trim();
             if (!credential) return invalid();
           }
@@ -192,6 +204,14 @@ export function loadExtMessageConfig(
           credential = JSON.stringify(parseAppCredential(credential));
         channels[name] = {
           enabled: active,
+          ...(channel.max_per_minute === undefined
+            ? {}
+            : {
+                max_per_minute: integer(
+                  channel.max_per_minute,
+                  defaultMaxPerMinute,
+                ),
+              }),
           ...(name === "lark_app"
             ? {
                 binding_attempts_per_minute: integer(
@@ -233,6 +253,10 @@ export function loadExtMessageConfig(
     }
     return {
       status: "loaded",
+      ...(typeof raw.settings_publication === "string" &&
+      /^[0-9a-f-]{36}$/u.test(raw.settings_publication)
+        ? { publication: `${raw.settings_publication}:${identity}` }
+        : {}),
       config: {
         enabled,
         workbench_url: base,
@@ -269,4 +293,12 @@ export function extMessageQuiet(
   return q.start < q.end
     ? time >= q.start && time < q.end
     : time >= q.start || time < q.end;
+}
+
+export function extChannelLimit(config: ExtMessageConfig, channel: string) {
+  return (
+    config.channels[channel.split(":")[0]!]?.max_per_minute ??
+    config.policy.max_per_minute ??
+    defaultMaxPerMinute
+  );
 }

@@ -1928,3 +1928,76 @@ test.each([false, true])(
   },
   20000,
 );
+
+test("live config switch installs new rate and target; disabled-period facts are not replayed", async () => {
+  const { LiveExtMessageSender } = await import("./live-ext-message.js");
+  const path = join(dir, "ext-message.yaml");
+  const write = (enabled: boolean, target: string, limit: number) =>
+    writeFileSync(
+      path,
+      JSON.stringify({
+        enabled,
+        workbench_url: "https://example.invalid",
+        policy: { max_per_minute: 99 },
+        channels: {
+          fake: { enabled: true, credential: target, max_per_minute: limit },
+        },
+      }),
+      { mode: 0o600 },
+    );
+  const sent: string[] = [];
+  const live = new LiveExtMessageSender(path, {
+    store,
+    clock,
+    adapters: {
+      fake: (cred) => ({
+        send: async () => {
+          sent.push(cred!);
+          return "sent";
+        },
+      }),
+    },
+  });
+  write(true, "first", 1);
+  live.start();
+  addAction(1);
+  addAction(2);
+  await live.tick();
+  expect(sent).toEqual(["first"]);
+  write(false, "first", 1);
+  await live.tick();
+  addAction(3);
+  advance(65000);
+  write(true, "second", 2);
+  await live.tick();
+  expect(sent).toEqual(["first"]);
+  addAction(4);
+  addAction(5);
+  await live.tick();
+  expect(sent).toEqual(["first", "second", "second"]);
+  await live.stop();
+});
+
+test("inheriting or overriding the same effective budget preserves the epoch and pending retries", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 3 } };
+  startChannel();
+  fake.result = "retryable";
+  await sender().tick();
+  const epoch = () => outbox.extChannelActivation(store.database, "fake");
+  const initial = epoch();
+  expect(initial).toBeDefined();
+  for (const global of [3, 8]) {
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: global },
+      channels: { fake: { ...config.channels.fake!, max_per_minute: 3 } },
+    };
+    sender().recordStatus();
+    expect(epoch()).toEqual(initial);
+    expect(rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
+  }
+  fake.result = "sent";
+  advance(30000);
+  await sender().tick();
+  expect(rows()[0]?.status).toBe("sent");
+});

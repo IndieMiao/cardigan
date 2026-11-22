@@ -7,6 +7,14 @@ config=${CARDIGAN_CONFIG_DIR:-$HOME/.config/cardigan}
 project=${2:?project} machine=${3:?machine}
 case "$machine:$project" in *[!a-zA-Z0-9._:-]*|*:*:*|local:*) exit 1;; esac
 key="upgrade-${#machine}-$machine-$project.key"
+# The suffix records which zero-argument SSH/sudo principal to use. Existing
+# active (legacy) identities remain byte-for-byte unchanged.
+other=$key.bound
+case $# in
+ 3) ;;
+ 4) [ "$4" = --project-config ] || exit 1; other=$key; key=$key.bound;;
+ *) exit 1;;
+esac
 # The controller is Linux. Check the entire namespace before cd, key generation,
 # reuse, printing either public key, or activating a pending identity.
 /usr/bin/python3 -IB - "$config" "$key" <<'PY'
@@ -31,6 +39,7 @@ for suffix in ('', '.pending', '.pending.pub', '.signer.pem'):
             or stat.S_IMODE(s.st_mode) not in modes or not safe_acl(p)): sys.exit('unsafe existing key')
 PY
 cd "$config"
+test ! -e "$other" && test ! -L "$other" || exit 1
 case $1 in
  prepare)
   # Run sequentially for multiple workers. Never replace existing credentials.
