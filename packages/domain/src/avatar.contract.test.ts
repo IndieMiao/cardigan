@@ -1,9 +1,11 @@
 import { expect, test } from "vitest";
 import { AVATAR_LIBRARY, parseAvatarReference } from "./avatar.js";
 
-test("the library has 60 unique identities and every reference resolves exactly", () => {
-  expect(AVATAR_LIBRARY).toHaveLength(60);
-  expect(new Set(AVATAR_LIBRARY.map(([id]) => id)).size).toBe(60);
+test("the library has unique identities and every reference resolves exactly", () => {
+  expect(AVATAR_LIBRARY).toHaveLength(69);
+  expect(new Set(AVATAR_LIBRARY.map(([id]) => id)).size).toBe(
+    AVATAR_LIBRARY.length,
+  );
   for (const [id] of AVATAR_LIBRARY) {
     expect(id).toMatch(/^[a-z0-9-]+$/);
     expect(parseAvatarReference(`library:${id}`)).toEqual({

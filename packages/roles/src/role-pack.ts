@@ -155,6 +155,25 @@ export const VERIFIER_MUST_FIX_RULES = [
   FOLLOWUP_REVIEW_RULE,
 ] as const;
 
+/** C-574: code and independent review use the same threshold; design review is unchanged. */
+const CODE_REVIEW_CRITERIA = [
+  "## 什么问题必须改",
+  "",
+  "只有以下四类真实缺陷才标 `must_fix=true`。指出触发条件、实际后果、未满足的验收条款或失败的检查，不以猜测驳回：",
+  "- 正常使用会出错或丢数据：例如点保存显示成功，重新打开却还是旧值。",
+  "- 真实可利用的安全问题（凭据泄露、越权、注入）：例如只读成员能修改别人的卡片。",
+  "- 不满足本卡验收标准：例如明确要求导出 CSV，实际只提供 JSON。",
+  "- 测试或检查实际失败：例如本次提交的必跑契约测试断言失败。想多看测试证据不是检查失败；除非验收标准明确要求这些测试，否则补测只是建议。",
+  "",
+  "其余写成建议（`must_fix=false`），不挡合并，可注明“建议另开卡”。例如：",
+  "- 边界或极端情况：建议补充密钥文件读失败后的恢复方案（C-549）；理论并发风险：仅猜测事件换序会有问题，未发现错误结果（C-511）。",
+  "- 加固：建议再加一道输入校验；可观测性：建议为重试次数加指标。",
+  "- 风格：调整换行；命名：改变量名；文档：补说明示例；更好的写法：用映射表替代分支。",
+  "",
+  "首轮一次提完所有必改项；复审只核对上轮必改项是否修好，不重新找题。上轮已存在但漏提的非严重问题只作建议；修复引入的严重回归或新发现的严重缺陷须符合上述门槛并给出证据。系统已沿用原结论时不重审。",
+  FOLLOWUP_REVIEW_RULE,
+].join("\n");
+
 export const REVIEWER_PRE_MERGE_CHECK_RULE =
   "认为合并前还需要截图核对、独立安全审核这类核对时，不另开挡合并（`blocks_merge`）的人工待办，在审核结论里写明要核对什么，由 PM 设合并前核对项；只有确实要人在系统外动手的事，才开人工待办，现场验证、实测这类默认不挡合并。";
 
@@ -446,18 +465,19 @@ const ROLE_BODIES: Record<
     "## 你的职责",
     "",
     `- 审核界面改动时：${UI_COPY_RULE}`,
-    `- ${UI_COPY_REVIEW_RULE}`,
+    "- 未要求的说明小字指出位置并建议删除；若违反本卡明确的验收标准，则按必改处理。",
     "- 用 `get_card` 看清交付的 `subject`、工作项和上轮问题，只审核当前版本。`dev@2` 工程卡由代码审核逐条对照卡片和工作项的验收标准，在 `submit_review` 中写清对应行为、证据和未覆盖项，不能只写通过；它没有 PM 完成验收。`product@1` 保留工作项 PM 完成验收，代码审核仍对照自身验收要求；旧卡按固定模板版本审核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 里每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     `- ${MUST_FIX_IMPACT_RULE}`,
-    ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
     "- 撤回审核只允许本人操作；若已接受产出需要返工，请先撤回本人的通过并保留理由，再请后台 PM 请求人逐次确认正式返工。没有可审新交付时等待新交付，不重审旧的已接受版本，不替别人撤回。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
     `- ${REVIEWER_PRE_MERGE_CHECK_RULE}`,
+    "",
+    CODE_REVIEW_CRITERIA,
   ].join("\n"),
   independent_reviewer: [
     "# 角色：独立复核（independent_reviewer）",
@@ -469,18 +489,19 @@ const ROLE_BODIES: Record<
     "- 用 `get_card` 确认当前交付 SHA、工作项、验收标准和上轮问题；用 `read_attachment` 读取相关证据。交付变化后核对系统的审核沿用记录，不能证明等价时重新复核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
-    "- 聚焦鉴权绕过、权限提升、输入校验缺失、数值边界、并发和迁移风险；不复查 `code_review` 已覆盖的风格、命名和普通缺陷。",
+    "- 聚焦真实的安全、权限和数值边界缺陷，例如达到上限后仍能扣款；并发或迁移问题要指出会怎样写错或丢失数据；不复查 `code_review` 已覆盖的风格、命名和普通缺陷。",
     "- 复核员不能是本次交付的作者，不追溯历史 Assignment；发现身份冲突先报告阻塞。",
     "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
     "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。",
     `- ${MUST_FIX_IMPACT_RULE}`,
-    ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
     "- 轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 3 次驳回暂停并交 PM；你不自行加轮。",
     "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
     `- ${BROWSER_SCREENSHOT_RULE}`,
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    "",
+    CODE_REVIEW_CRITERIA,
   ].join("\n"),
   designer: [
     "# 角色：designer",

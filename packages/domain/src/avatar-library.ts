@@ -60,4 +60,13 @@ export const AVATAR_LIBRARY = [
   ["jia-mu", "贾母", "红楼梦"],
   ["liu-laolao", "刘姥姥", "红楼梦"],
   ["zhang-liang", "张良", "史记·留侯世家"],
+  ["xiao-he", "萧何", "历史人物"],
+  ["liu-bang", "刘邦", "历史人物"],
+  ["hou-yi", "后裔", "历史人物"],
+  ["zhang-heng", "张衡", "历史人物"],
+  ["li-yuanfang", "李元芳", "历史人物"],
+  ["meng-tian", "蒙恬", "历史人物"],
+  ["di-renjie", "狄仁杰", "历史人物"],
+  ["zhuang-zhou", "庄周", "历史人物"],
+  ["lu-ban", "鲁班", "历史人物"],
 ] as const;

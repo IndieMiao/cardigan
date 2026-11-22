@@ -146,7 +146,7 @@ test("owner creates audited global employees; options include all characters and
       role_change_blocked: null,
     },
   ]);
-  expect(library).toHaveLength(60);
+  expect(library).toHaveLength(69);
   expect(library).toContainEqual({
     id: "guan-yu",
     name: "关羽",
