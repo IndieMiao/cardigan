@@ -263,6 +263,7 @@ test.each([0, 251])(
   "local directory probes resume within count and time budgets (%i ms/probe)",
   async (cost) => {
     const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+    const refresh = vi.spyOn(binding, "refreshLocalMirror");
     const paths = Array.from({ length: 48 }, (_, i) => {
       const group = i < 16 ? "worktrees" : i < 32 ? "checks" : "builds";
       const path = join(
@@ -310,6 +311,7 @@ test.each([0, 251])(
         expect(open()).toEqual([]);
       }
     } while (executor.pending(f.project_id));
+    expect(refresh).toHaveBeenCalledTimes(1);
     expect(peak).toBe(1);
     expect(probe.mock.calls.map(([path]) => path).sort()).toEqual(paths.sort());
     expect(

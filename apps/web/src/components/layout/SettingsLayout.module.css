@@ -170,8 +170,9 @@
     gap: var(--ui-space-1);
     min-height: var(--ui-control);
     margin: calc((var(--ui-leading) - var(--ui-control)) / 2) 0;
-    margin-inline-start: calc(-1 * var(--ui-space-1));
-    padding: 0 var(--ui-space-1);
+    /* C-561: the hit area starts at the content column edge, not outside it. */
+    padding: 0;
+    padding-inline-end: var(--ui-space-1);
     border: 0;
     border-radius: var(--ui-radius);
     background: transparent;

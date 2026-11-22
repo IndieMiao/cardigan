@@ -1,3 +1,4 @@
+import { lstat, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   Assignment,
@@ -69,6 +70,8 @@ import {
   agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
+  matchesAgentBundleOrigin,
+  mirrorReceivePack,
   workerGit,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
@@ -247,6 +250,7 @@ export interface ReconcileGit {
   reconcilePages?(
     ...args: Parameters<ReconcileGit["reconcile"]>
   ): ReconcilePages;
+  refreshLocalMirror?(project: CentralProject): Promise<void>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   reconcile(
     project: CentralProject,
@@ -1028,6 +1032,82 @@ export class ServerGit implements GitBinding {
       delivery.subject.value,
     );
     return true;
+  }
+  async refreshLocalMirror(project: CentralProject): Promise<void> {
+    const source = this.central.repositoryPath(project); // validates project_id
+    const execution = this.options.execution ?? {
+      mode: "local",
+      dataDir: this.options.dataDir,
+    };
+    if (
+      execution.mode === "agent-ssh" &&
+      ((execution.target && execution.target.machine_id !== "local") ||
+        (execution.host &&
+          !["localhost", "127.0.0.1", "::1"].includes(execution.host)))
+    )
+      throw new Error(
+        "Mirror refresh requires the control host's local execution",
+      );
+    const repository = join(
+      gitRoots(execution, this.options.dataDir).repositoriesRoot,
+      project.project_id,
+    );
+    await this.lock(
+      { project_id: project.project_id, repository },
+      async () => {
+        const leaf = await lstat(repository).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT")
+            return undefined;
+          throw error;
+        });
+        if (!leaf) return; // Fetch only. Never create a clone or worktree here.
+        if (
+          !leaf.isDirectory() ||
+          (await realpath(repository)) !== repository ||
+          !(await lstat(join(repository, ".git"))).isDirectory()
+        )
+          throw new Error("Unexpected local mirror directory");
+        await this.transport.verifyBareSource(
+          source,
+          await realpath(project.source_repo),
+        );
+        const workspace =
+          execution.mode === "agent-ssh" && this.options.captureAgent
+            ? agentWorkspace(this.options.captureAgent)
+            : undefined;
+        const local = new LocalGitTransport("git", {}, workspace);
+        await local.verifyMirror(
+          repository,
+          source,
+          execution.mode === "agent-ssh"
+            ? (origin) =>
+                matchesAgentBundleOrigin(
+                  execution,
+                  project.project_id,
+                  origin,
+                  source,
+                )
+            : undefined,
+        );
+        const receiver = await mirrorReceivePack(execution, repository);
+        const transfer = () =>
+          this.transport.distributeMirrorHeads(source, receiver);
+        try {
+          await transfer();
+        } catch (error) {
+          // Only retry if there is a concrete directory/file conflict to clear.
+          const heads = await this.transport.listRefs(source, "refs/heads/");
+          if (
+            !(await local.clearMirrorNameConflicts(
+              repository,
+              heads.map(({ ref }) => ref.slice("refs/heads/".length)),
+            ))
+          )
+            throw error;
+          await transfer();
+        }
+      },
+    );
   }
   async reconcile(
     ...args: Parameters<ReconcileGit["reconcile"]>

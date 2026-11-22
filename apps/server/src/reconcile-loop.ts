@@ -15,11 +15,11 @@ import { profileSpan, profileSpanSync } from "./tick-profile.js";
 /**
  * M4.4 reconciliation and backup loops (plan §3.6, §3.7; development plan §12.6).
  *
- * Reconciliation compares Git, the worktree directories and the database. It
- * only reports: findings go into the store with their first/last-seen times and
+ * Reconciliation compares Git, the worktree directories and the database.
+ * Findings go into the store with their first/last-seen times and
  * a new finding becomes a project-level `reconcile_finding` event, which the
- * Router hands to PM Ops. The one repair it performs is §3.3's: a Git delivery
- * without its fixed ref is re-pinned from the candidate ref.
+ * Router hands to PM Ops. Each sweep also refreshes existing local mirrors;
+ * a Git delivery missing its fixed ref is re-pinned from the candidate (§3.3).
  *
  * The backup loop fetches `agent/*` from the base clone into the central
  * repository; a failure is logged and changes nothing.
@@ -126,9 +126,22 @@ export class ReconcileExecutor {
 
   tick(project_id?: ProjectId, paged = false): Promise<void> {
     const next = this.serial.then(async () => {
-      for (const project of project_id
+      const projects = project_id
         ? [project_id]
-        : this.options.store.listProjects().map((entry) => entry.id)) {
+        : this.options.store.listProjects().map((entry) => entry.id);
+      // A failed filesystem/worker scan below must not starve other projects' mirrors.
+      for (const id of projects) {
+        if (this.scans.has(id)) continue; // A resumed page is not a new sweep.
+        const project = this.options.git.projectOf(id as ProjectId);
+        if (!project) continue;
+        try {
+          await this.options.git.refreshLocalMirror?.(project);
+        } catch {
+          // Do not log stderr or configuration from the Agent-owned clone.
+          this.report(`Local mirror refresh failed for ${id}`);
+        }
+      }
+      for (const project of projects) {
         const pages = this.scans.get(project) ?? this.project(project, paged);
         this.scans.set(project, pages);
         try {

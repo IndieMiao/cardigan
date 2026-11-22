@@ -39,6 +39,7 @@ import { useNeedsResource } from "./useNeedsResource.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { CardListPage } from "./views/CardListPage.js";
+import { FeishuDraftNotice } from "./views/feishu-draft.js";
 import { LoginPage } from "./views/LoginPage.js";
 import { SettingsSaveNotice } from "./views/useSettingWrite.js";
 
@@ -278,6 +279,7 @@ function Workbench({
         pendingMessage="登出中…"
       />
       <SettingsSaveNotice />
+      <FeishuDraftNotice />
     </>
   );
   const navProps = {
