@@ -248,6 +248,30 @@ test("rejects invalid content, recipient overrides, attachments and sensitive ca
   expect((await send()).error.message).toContain("敏感卡");
   expect(statuses()).toEqual([]);
 });
+test("the same release note is delivered with an HTTPS download and refused before admission with a blob address", async () => {
+  prefer();
+  bind();
+  const note = (download: string) =>
+    sample
+      .replace("https://example.invalid/app.apk（18 MB）", download)
+      .replace("SHA-256：", "SHA-256:");
+  const blob = note(
+    "blob:https://example.invalid/08a31081-73b5-4400-a25e-9190e9c40320",
+  );
+  expect((await send({ text: blob })).error.message).toBe(
+    "正文链接仅支持 http 或 https",
+  );
+  expect(statuses()).toEqual([]);
+  const https = note("Download:https://example.invalid/app.apk"),
+    result = await send({ text: https });
+  expect(result.status).toBe("queued");
+  now += 8 * 3_600_000;
+  await sender.tick();
+  expect(remote.text.mock.calls).toEqual([
+    ["owner-private", result.message_id, https],
+  ]);
+  expect(statuses()).toEqual(["sent"]);
+});
 test.each(["unbind", "rebind", "sensitive", "opt-out"])(
   "never dispatches queued text after %s",
   async (change) => {

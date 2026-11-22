@@ -78,9 +78,30 @@ test("release-note fields are plain text; only HTTP(S) links are allowed", () =>
     "javascript:(0)",
     "_javascript:alert(1)",
     "https://example.invalid/(javascript:alert(1))",
+    "blob:https://example.invalid/08a31081-73b5-4400-a25e-9190e9c40320",
+    "Download:blob:https://example.invalid/08a31081",
+    "下载:blob:https://example.invalid/08a31081",
   ]) {
     expect(ownerTextError(`${notes}\n备用：${link}`)).toBe(
       "正文链接仅支持 http 或 https",
     );
   }
+});
+
+test("the outermost scheme of the Download link decides, next to a half-width SHA-256 field", () => {
+  const note = (download: string) =>
+    [
+      "Android 0.4.3",
+      "Download",
+      download,
+      `SHA-256:${"3f2a9c0d".repeat(8)}`,
+    ].join("\n");
+  expect(
+    ownerTextError(note("https://example.invalid/app-release.apk")),
+  ).toBeUndefined();
+  expect(
+    ownerTextError(
+      note("blob:https://example.invalid/08a31081-73b5-4400-a25e-9190e9c40320"),
+    ),
+  ).toBe("正文链接仅支持 http 或 https");
 });
