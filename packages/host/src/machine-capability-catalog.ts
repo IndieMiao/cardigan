@@ -15,6 +15,8 @@ export interface CapabilityDefinition {
   readonly version?: CapabilityCommand;
   readonly parseVersion: (output: string) => string | null;
   readonly acceptsOutput?: (output: string) => boolean;
+  /** Readable reason kept with the observation; output is undefined when the command failed. */
+  readonly failureReason?: (output: string | undefined) => string | undefined;
 }
 const versionRegex = new RegExp(VERSION_PATTERN, "u");
 /** Never persist a banner, account name, credential, or arbitrary command output. */

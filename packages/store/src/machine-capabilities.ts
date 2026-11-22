@@ -55,6 +55,8 @@ export interface MachineHealth {
     readonly key: string;
     readonly search_locations: readonly string[];
     readonly search_incomplete?: true;
+    /** Fixed controller text for a failed built-in check; never command output. */
+    readonly reason?: string;
   }[];
 }
 function systemOnly(actor: Actor, project: string): void {

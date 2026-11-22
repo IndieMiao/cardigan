@@ -14,6 +14,7 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { agentToolsCapability } from "./agent-tools.js";
 import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
@@ -111,8 +112,10 @@ export async function refreshMachineObservations(
     }
     const catalog = checked.blockers.length
       ? []
-      : (options.catalog?.() ??
-        loadMachineCapabilityCatalog(options.env, root, target.machine.os));
+      : (options.catalog?.() ?? [
+          ...loadMachineCapabilityCatalog(options.env, root, target.machine.os),
+          agentToolsCapability(target.execution, machine),
+        ]);
     const failures: NonNullable<
       MachineHealth["capability_failures"]
     >[number][] = [];
@@ -148,8 +151,14 @@ export async function refreshMachineObservations(
       if (
         !result.ok ||
         (entry.acceptsOutput && !entry.acceptsOutput(result.output))
-      )
+      ) {
+        const reason = entry.failureReason?.(
+          result.ok ? result.output : undefined,
+        );
+        if (reason)
+          failures.push({ key: entry.key, search_locations: [], reason });
         continue;
+      }
       const versionResult = entry.version
         ? JSON.stringify(entry.version) === JSON.stringify(entry.check)
           ? result

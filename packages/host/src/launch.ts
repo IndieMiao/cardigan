@@ -72,6 +72,7 @@ import {
   withdrawBellAttempt,
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
+import { agentToolsDirectoryFor } from "./agent-tools.js";
 import {
   applyCommand,
   issueAssignmentToken,
@@ -1019,6 +1020,7 @@ async function launch(
     }
     if (execution.mode === "agent-ssh" && !remote)
       await prepareAgentProject(execution, project, assignment.id);
+    const agentTools = await agentToolsDirectoryFor(execution, remote);
 
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
@@ -1111,6 +1113,7 @@ async function launch(
         : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
+      ...(agentTools ? { agent_tools_dir: agentTools } : {}),
       run_resources: resourceEntry(
         project,
         assignment.machine_id,

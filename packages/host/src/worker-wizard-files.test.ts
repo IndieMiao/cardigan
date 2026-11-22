@@ -55,6 +55,18 @@ test.each(["linux", "macos"])(
     expect(d.commands.account).toContain(os === "macos" ? "dscl" : "useradd");
     expect(d.commands.directories).toContain(`install-${os}-worker.py`);
     expect(d.commands.helpers).toContain("worker-files.py");
+    // C-595: matching bytes never skip ownership and mode for the agent tools.
+    for (const tool of ["download-attachment.mjs", "upload-evidence.mjs"]) {
+      expect(d.commands.helpers).toMatch(
+        new RegExp(
+          `sudo install -o root -g \\S+ -m 0750 /opt/cardigan/deploy/agent-tools/${tool} \\S+/libexec/agent-tools/${tool}`,
+          "u",
+        ),
+      );
+      expect(d.commands.helpers).not.toContain(
+        `cmp -s /opt/cardigan/deploy/agent-tools/${tool}`,
+      );
+    }
     expect(d.commands.tools).toContain(os === "macos" ? "codesign" : "payload");
     expect(JSON.stringify(d.commands)).not.toMatch(
       /private\.invalid|private\.example|worker-key|worker-known-hosts|free-form text|ssh |token/i,

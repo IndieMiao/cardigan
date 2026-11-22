@@ -136,6 +136,8 @@ export interface CompileAssignmentInput {
   readonly test_max_workers?: number;
   /** Employee self-tests must not start real hc or end-to-end scenarios. */
   readonly agent_local_tests?: boolean;
+  /** Read-only directory of the prebuilt attachment tools on this machine. */
+  readonly agent_tools_dir?: string;
   readonly run_resources?: { source: string; target: string };
   /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
   readonly worker_test_lock?: { path: string; python: string; helper: string };

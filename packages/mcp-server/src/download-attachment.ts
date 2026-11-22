@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type FileHandle, link, open, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 import { MAX_ARTIFACT_BYTES } from "./artifact-files.js";
 import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
+import { isCliEntry } from "./cli-entry.js";
 
 const messages = {
   arguments:
-    "Provide the configured Card MCP URL, attachment ID and new local file.",
+    "Usage: download-attachment <configured Card MCP URL> <attachment ID> <new local file> (MCP_TOKEN from the environment).",
   credential: "The current session MCP_TOKEN is required.",
   endpoint:
     "Use the configured HTTP(S) Card MCP URL without credentials, query or fragment.",
@@ -126,10 +126,8 @@ async function main() {
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
+/** Runs the command line tool; also the entry of the prebuilt agent tool. */
+export function runDownloadAttachmentCli() {
   main().catch((error: unknown) => {
     process.stderr.write(
       `${error instanceof AttachmentDownloadError ? error.message : new AttachmentDownloadError("download").message}\n`,
@@ -137,3 +135,4 @@ if (
     process.exitCode = 1;
   });
 }
+if (isCliEntry(import.meta.url)) runDownloadAttachmentCli();

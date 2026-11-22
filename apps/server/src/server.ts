@@ -57,6 +57,7 @@ import { startCheckControl } from "./check-handoff-control.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_GRACE_MS,
   resolveServerConfig,
   type ServerConfig,
   type ServerEnv,
@@ -69,6 +70,7 @@ import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import {
+  drainMobileSigning,
   openMobileArtifact,
   requestMobileSignature,
 } from "./mobile-signing.js";
@@ -91,6 +93,14 @@ import {
   startWebServer,
   type WebServerOptions,
 } from "./web/server.js";
+
+/**
+ * Signing helpers get the shutdown grace minus this margin to finish on their
+ * own, then SIGTERM and `MOBILE_SIGNING_TERM_MS` to record `interrupted`; the
+ * process exit deadline is the grace plus `SHUTDOWN_EXIT_MARGIN_MS` (C-601).
+ */
+const MOBILE_SIGNING_DRAIN_MARGIN_MS = 3_000;
+const MOBILE_SIGNING_TERM_MS = 2_000;
 
 export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
@@ -484,6 +494,10 @@ async function assembleServer(
     timeoutMs: config.listenRetryTimeoutMs ?? DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
     warn: options.warn ?? ((line) => process.stderr.write(`${line}\n`)),
   });
+  const mobileSigning =
+    options.role !== "background" &&
+    execution.mode === "agent-ssh" &&
+    runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1";
   let mcp: RunningServer;
   try {
     mcp =
@@ -505,8 +519,7 @@ async function assembleServer(
               runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
                 ? { publishArtifact: apkPublisher(config.dataDir) }
                 : {}),
-              ...(execution.mode === "agent-ssh" &&
-              runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1"
+              ...(mobileSigning
                 ? {
                     openMobileArtifact: (scope, id, current) =>
                       openMobileArtifact(config.dataDir, scope, id, current),
@@ -1000,6 +1013,16 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
         probeLoop?.stop(),
+        // C-601: in-flight signing helpers end inside the shutdown grace (a
+        // margin before the forced exit), never as orphans of this process.
+        mobileSigning
+          ? drainMobileSigning({
+              waitMs:
+                (config.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS) -
+                MOBILE_SIGNING_DRAIN_MARGIN_MS,
+              killMs: MOBILE_SIGNING_TERM_MS,
+            })
+          : undefined,
       ]);
       await diagnostics?.close();
       await hostOps?.close();

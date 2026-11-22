@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { basename, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename } from "node:path";
 import { type ErrorCode, errorCodes } from "@cardigan/domain";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { MAX_ATTACHMENT_BYTES } from "./attachments.js";
+import { isCliEntry } from "./cli-entry.js";
 
 interface EvidenceInput {
   readonly file: string;
@@ -18,7 +18,7 @@ interface EvidenceInput {
 
 const FAILURE_MESSAGES = {
   arguments:
-    "Provide the configured MCP URL, card, delivery, file and optional MIME type.",
+    "Usage: upload-evidence <configured Card MCP URL> <card ID> <delivery ID> <file> [MIME type] (MCP_TOKEN from the environment).",
   credential: "A session credential is required.",
   endpoint: "Invalid Card MCP URL; use HTTP(S) without URL credentials.",
   file: "Evidence must be a readable, stable regular file up to 10 MiB (no symlinks).",
@@ -162,10 +162,8 @@ async function main() {
   process.stdout.write(`${id}\n`);
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
+/** Runs the command line tool; also the entry of the prebuilt agent tool. */
+export function runUploadEvidenceCli() {
   main().catch((error: unknown) => {
     // SDK/network errors can contain request details; never echo them or argv.
     process.stderr.write(
@@ -174,3 +172,4 @@ if (
     process.exitCode = 1;
   });
 }
+if (isCliEntry(import.meta.url)) runUploadEvidenceCli();

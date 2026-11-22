@@ -599,6 +599,12 @@ test("a browser path change fences an in-flight result in either commit order wi
         search_locations: ["launch.yaml:browser.browsers_path"],
         search_incomplete: true,
       },
+      // C-595: an unfinished built-in tool check keeps only fixed text.
+      {
+        key: "agent.attachment_tools",
+        search_locations: [],
+        reason: "附件助手检查未完成",
+      },
     ]);
   } finally {
     publisher.close();
