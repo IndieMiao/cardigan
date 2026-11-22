@@ -17,6 +17,8 @@ export interface CapabilityDefinition {
   readonly acceptsOutput?: (output: string) => boolean;
   /** Readable reason kept with the observation; output is undefined when the command failed. */
   readonly failureReason?: (output: string | undefined) => string | undefined;
+  /** Directly executable operator command for a failure reason, when one exists. */
+  readonly failureRemedy?: (reason: string) => string | undefined;
 }
 const versionRegex = new RegExp(VERSION_PATTERN, "u");
 /** Never persist a banner, account name, credential, or arbitrary command output. */

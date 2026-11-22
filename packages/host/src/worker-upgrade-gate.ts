@@ -3,7 +3,6 @@ import {
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
-import { agentToolsRelease } from "./agent-tools.js";
 import type { MachineCheckJob } from "./machine-check-types.js";
 import {
   observationFingerprint,
@@ -15,12 +14,8 @@ import {
 } from "./worker-maintenance.js";
 
 export const upgradeHold = "worker_helper_upgrade_unverified";
-// C-595: the attachment tools are part of a release; a tools-only change is a new key.
 export const upgradeKey = (fingerprint: string | undefined) =>
-  `${fingerprint}:${[
-    ...Object.values(workerHelperDigests()),
-    ...Object.values(agentToolsRelease()?.digests ?? {}),
-  ].join(":")}`;
+  `${fingerprint}:${Object.values(workerHelperDigests()).join(":")}`;
 export function upgradeState(store: Store, project: string, machine: string) {
   return store.database
     .prepare(

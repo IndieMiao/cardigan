@@ -331,64 +331,6 @@ test("an idle enrolled worker upgrades and is released with only the applied PAT
   expect(f.actions()).toEqual([]);
 });
 
-test("C-595: current helpers with stale attachment tools install once per release", async () => {
-  const f = await setup("linux");
-  f.enroll();
-  const toolsStale = vi.fn(async () => true);
-  const requestMigration = vi.fn(async () => {});
-  Object.assign(f.adapters, { toolsStale, requestMigration });
-  f.adapters.install.mockResolvedValueOnce({
-    "worker-files.py": "0".repeat(64),
-    "agent-tools/download-attachment.mjs": "none",
-    "agent-tools/upload-evidence.mjs": "none",
-  });
-  expect(await f.run(pass)).toEqual(pass);
-  expect(toolsStale).toHaveBeenCalledOnce();
-  expect(f.adapters.install).toHaveBeenCalledOnce();
-  expect(f.adapters.workerCheck).toHaveBeenCalledOnce();
-  // A v2 entry installed the tools: no administrator migration.
-  expect(requestMigration).not.toHaveBeenCalled();
-  expect(f.isHeld()).toBe(false);
-  // The same release key is never probed or installed again.
-  expect(await f.run(pass)).toEqual(pass);
-  expect(toolsStale).toHaveBeenCalledOnce();
-  expect(f.adapters.install).toHaveBeenCalledOnce();
-});
-
-test("C-595: a v1 entry's helper-only result asks an administrator to migrate", async () => {
-  const f = await setup("linux");
-  f.enroll();
-  const requestMigration = vi.fn(async () => {});
-  Object.assign(f.adapters, {
-    toolsStale: vi.fn(async () => true),
-    requestMigration,
-  });
-  expect(await f.run(pass)).toEqual(pass);
-  expect(f.adapters.install).toHaveBeenCalledOnce();
-  expect(requestMigration).toHaveBeenCalledWith(
-    f.store,
-    project,
-    machine,
-    expect.objectContaining({ mode: "agent-ssh" }),
-    "linux",
-    expect.stringContaining("v1"),
-    undefined,
-  );
-});
-
-test("C-595: tools that are current, unknown or blocked never start an install", async () => {
-  const f = await setup("linux");
-  f.enroll();
-  const toolsStale = vi.fn(async () => false);
-  Object.assign(f.adapters, { toolsStale });
-  expect(await f.run(pass)).toEqual(pass);
-  expect(toolsStale).toHaveBeenCalledOnce();
-  const blocked = { blockers: ["hc_version"], launch_enabled: false };
-  expect(await f.run(blocked)).toEqual(blocked);
-  expect(toolsStale).toHaveBeenCalledOnce();
-  expect(f.adapters.install).not.toHaveBeenCalled();
-});
-
 test.each(["removed", "account", "trust", "generation", "enrollment", "saved"])(
   "PATH does not authorize a changed binding (%s)",
   async (change) => {

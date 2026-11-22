@@ -21,6 +21,7 @@ import {
   AGENT_TOOLS_CAPABILITY,
   agentToolsCapability,
   agentToolsDirectoryFor,
+  agentToolsInstallCommand,
   agentToolsProblem,
   agentToolsRelease,
   installLocalAgentTools,
@@ -301,6 +302,107 @@ test("machine check records current tools and a readable reason otherwise", asyn
         reason: "附件助手 download-attachment.mjs 与当前发布的 SHA-256 不一致",
       },
     ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("a remote failure carries a digest-checked manual install command", () => {
+  const root = temp();
+  const release = currentRelease();
+  const command = agentToolsInstallCommand(
+    sshExecution(root),
+    "linux",
+    release,
+  );
+  const target = join(root, "libexec", "agent-tools");
+  expect(command).toContain(
+    `sudo install -d -o root -g ${gid} -m 0750 ${target}`,
+  );
+  expect(command).toContain(
+    `sudo install -o root -g ${gid} -m 0750 download-attachment.mjs upload-evidence.mjs ${target}/`,
+  );
+  expect(
+    agentToolsInstallCommand(sshExecution(root), "darwin", release),
+  ).toContain("/usr/bin/shasum -a 256 -c -");
+  // The verification half runs as-is against the committed release copies.
+  const verify = command.split(" && ").slice(1, 2).join(" && ");
+  expect(
+    execFileSync("/bin/sh", ["-c", verify], { cwd: deployTools }).toString(),
+  ).toContain("download-attachment.mjs: OK");
+  const remote = agentToolsCapability(
+    sshExecution(root),
+    "mac-mini",
+    release,
+    "linux",
+  );
+  expect(remote.failureRemedy?.("附件助手 download-attachment.mjs 缺失")).toBe(
+    command,
+  );
+  expect(remote.failureRemedy?.(RELEASE_UNAVAILABLE)).toBeUndefined();
+  expect(
+    agentToolsCapability(
+      sshExecution(root),
+      "local",
+      release,
+      "linux",
+    ).failureRemedy?.("附件助手 download-attachment.mjs 缺失"),
+  ).toBeUndefined();
+});
+
+test("machine check reports the manual install command for a remote worker", async () => {
+  const root = temp();
+  const store = Store.open({ dataDir: root });
+  try {
+    store.createProject({ id: "a" });
+    const registered = {
+      id: "worker-a",
+      herdr_machine: "worker-a",
+      label: "fixture",
+      os: "linux",
+      arch: "x64",
+      tags: [],
+      max_assignments: 1,
+      status: "online",
+      last_seen: new Date().toISOString(),
+    } as const;
+    store.uow.run((tx) => tx.machines.put("a", registered));
+    const execution = {
+      ...sshExecution(root),
+      target: {
+        project_id: "a",
+        machine_id: "worker-a",
+        session: "s",
+        generation: "g",
+        fingerprint: "f".repeat(64),
+      },
+    } as const;
+    const observed = await refreshMachineObservations({
+      store,
+      project: "a",
+      machine: "worker-a",
+      env: { CARDIGAN_CONFIG_DIR: root },
+      stageUpgrade: async () => {
+        throw new Error("no helper mismatch expected");
+      },
+      target: () => ({ machine: registered, execution }),
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      probe: async (_execution, _os, command) =>
+        Array.isArray(command) && command[1] === "-e"
+          ? { ok: true, output: "agent-tools missing:upload-evidence.mjs\n" }
+          : { ok: false, output: "" },
+    });
+    expect(observed.health?.available).toBe(true);
+    expect(
+      observed.health?.capability_failures?.find(
+        (f) => f.key === AGENT_TOOLS_CAPABILITY,
+      ),
+    ).toEqual({
+      key: AGENT_TOOLS_CAPABILITY,
+      search_locations: [],
+      reason: "附件助手 upload-evidence.mjs 缺失",
+      remedy: agentToolsInstallCommand(execution, "linux", currentRelease()),
+    });
   } finally {
     store.close();
   }

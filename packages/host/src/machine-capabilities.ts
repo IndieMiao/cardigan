@@ -14,12 +14,7 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
-import {
-  AGENT_TOOLS_CAPABILITY,
-  agentToolsCapability,
-  agentToolsReinstallable,
-} from "./agent-tools.js";
-import { requestAgentToolsMigration } from "./agent-tools-maintenance.js";
+import { agentToolsCapability } from "./agent-tools.js";
 import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
@@ -119,7 +114,12 @@ export async function refreshMachineObservations(
       ? []
       : (options.catalog?.() ?? [
           ...loadMachineCapabilityCatalog(options.env, root, target.machine.os),
-          agentToolsCapability(target.execution, machine),
+          agentToolsCapability(
+            target.execution,
+            machine,
+            undefined,
+            target.machine.os,
+          ),
         ]);
     const failures: NonNullable<
       MachineHealth["capability_failures"]
@@ -160,8 +160,14 @@ export async function refreshMachineObservations(
         const reason = entry.failureReason?.(
           result.ok ? result.output : undefined,
         );
+        const remedy = reason && entry.failureRemedy?.(reason);
         if (reason)
-          failures.push({ key: entry.key, search_locations: [], reason });
+          failures.push({
+            key: entry.key,
+            search_locations: [],
+            reason,
+            ...(remedy ? { remedy } : {}),
+          });
         continue;
       }
       const versionResult = entry.version
@@ -288,32 +294,5 @@ export async function refreshMachineObservations(
         notifyHelperMismatch(tx, project, machine, { now }, mismatch, fields);
     });
   }
-  // C-595: helpers current but tools missing/stale on a manually maintained
-  // worker. Enrolled bindings are handled by the patrol's signed upgrade.
-  const tools = health.capability_failures?.find(
-    (f) => f.key === AGENT_TOOLS_CAPABILITY,
-  )?.reason;
-  const execution = checkedTarget?.execution;
-  if (
-    recorded &&
-    machine !== "local" &&
-    !mismatch &&
-    tools &&
-    agentToolsReinstallable(tools) &&
-    execution?.mode === "agent-ssh" &&
-    execution.target?.machine_id === machine &&
-    execution.target.project_id === project &&
-    manualAllowed()
-  )
-    await requestAgentToolsMigration(
-      store,
-      project,
-      machine,
-      execution,
-      checkedTarget?.machine.os ?? "",
-      tools,
-      options.signal,
-      options.stageUpgrade,
-    );
   return readMachineObservations(store, project, machine, now());
 }

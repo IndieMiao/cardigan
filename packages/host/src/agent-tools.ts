@@ -220,10 +220,6 @@ const PROBLEM_TEXT = {
   not_executable: "无法执行",
 } as const;
 
-/** A fixed per-file reason that installing the current release can fix. */
-export const agentToolsReinstallable = (reason: string) =>
-  reason.startsWith("附件助手 ");
-
 /** Readable reason for a failed check; undefined means installed and current. */
 export function agentToolsProblem(output: string): string | undefined {
   const status = RESULT.exec(output)?.[1];
@@ -244,10 +240,34 @@ export function agentToolsProblem(output: string): string | undefined {
 }
 
 /** Version records the release commit the matching tools were verified against. */
+/**
+ * Operator command for a remote worker: verify the copies in the installed deploy
+ * release against this controller's digests, then install them root-owned and
+ * group read-only. A digest failure means /opt/cardigan/deploy must be upgraded first.
+ */
+export function agentToolsInstallCommand(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+  os: string,
+  current: AgentToolsRelease,
+) {
+  const target = remoteAgentToolsDirectory(execution.agentRoot);
+  const sums = AGENT_TOOLS.map(
+    (name) => `'${current.digests[name]}  ${name}'`,
+  ).join(" ");
+  return [
+    "cd /opt/cardigan/deploy/agent-tools",
+    `printf '%s\\n' ${sums} | ${os === "darwin" ? "/usr/bin/shasum -a 256" : "/usr/bin/sha256sum"} -c -`,
+    `sudo test ! -L ${target}`,
+    `sudo install -d -o root -g ${execution.gid} -m 0750 ${target}`,
+    `sudo install -o root -g ${execution.gid} -m 0750 ${AGENT_TOOLS.join(" ")} ${target}/`,
+  ].join(" && ");
+}
+
 export function agentToolsCapability(
   execution: ExecutionConfig,
   machine: string,
   current: AgentToolsRelease | null = agentToolsRelease() ?? null,
+  os?: string,
 ): CapabilityDefinition {
   const command = [
     "node",
@@ -270,5 +290,13 @@ export function agentToolsCapability(
           ? "附件助手检查未完成"
           : agentToolsProblem(output),
     parseVersion: () => current?.source.slice(0, 12) ?? null,
+    failureRemedy: (reason) =>
+      current !== null &&
+      os !== undefined &&
+      machine !== "local" &&
+      execution.mode === "agent-ssh" &&
+      reason.startsWith("附件助手 ")
+        ? agentToolsInstallCommand(execution, os, current)
+        : undefined,
   };
 }

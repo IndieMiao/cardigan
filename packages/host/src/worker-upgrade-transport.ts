@@ -196,20 +196,12 @@ async function sendRelease(
     )
   )
     return invalid();
-  // Tool entries are present only when a v2 entry installed them ("none": first install).
-  return Object.fromEntries([
-    ...helpers.map((n) => [n, String(old[n])]),
-    ...tools.map((n) => [n, old[n] === null ? "none" : String(old[n])]),
-  ]) as Record<string, string>;
+  return Object.fromEntries(helpers.map((n) => [n, String(old[n])]));
 }
-/** True when the release installed the attachment tools (a v2 entry). */
-export const installedAgentTools = (before: Record<string, string>) =>
-  toolEntries.every((n) => typeof before[n] === "string");
 /**
  * Entries enrolled before C-595 refuse a v2 bundle while verifying it, before
  * any write or replay record, so only then retry the unchanged v1 bundle.
- * Their helpers stay current; the caller asks an administrator to migrate them
- * because a v1 result never carries the attachment tools.
+ * Their helpers stay current; machine check reports the tools they cannot take.
  */
 export async function installRelease(
   worker: Worker,
