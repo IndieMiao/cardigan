@@ -283,3 +283,6 @@ export function pmMergeCheckDelegationAllowed(
 /** Policy evidence recorded when PM Ops handles a failed merge check. */
 export const pmMergeCheckFailureAuthority = (project_id: string) =>
   `project:${project_id}/pm-ops-merge-check-failure`;
+/** C-591: policy evidence when PM holds or returns a system-held merge confirmation. */
+export const pmSystemMergeReturnAuthority = (project_id: string) =>
+  `project:${project_id}/pm-system-merge-return`;
