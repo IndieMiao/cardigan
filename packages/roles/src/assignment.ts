@@ -33,6 +33,8 @@ import {
   launchProxyBypassShell,
   MCP_PROXY_BYPASS_KEYS,
   mcpProxyBypassHost,
+  type ProxyBypassValues,
+  pickProxyBypass,
 } from "./mcp-proxy.js";
 import { composeRolePrompt } from "./prompt.js";
 import type {
@@ -202,6 +204,7 @@ export function compileAssignmentLaunch(
   }
   // Claude Code keeps provider settings in its settings file instead of the
   // process environment, so collect those credentials from the file too.
+  const settingsProxy: ProxyBypassValues = {};
   for (const file of base.files) {
     let parsed: { env?: Record<string, string> };
     try {
@@ -214,6 +217,9 @@ export function compileAssignmentLaunch(
         secretEnv[name] = value;
       }
     }
+    // C-600: settings env overrides the process environment inside Claude.
+    if (parsed.env && typeof parsed.env === "object")
+      Object.assign(settingsProxy, pickProxyBypass(parsed.env));
   }
   const strippedBaseFiles = base.files.map((file) => {
     if (secretKeys.size === 0 && !adapter.assignmentSettings) return file;
@@ -300,13 +306,35 @@ export function compileAssignmentLaunch(
       "NO_PROXY/no_proxy cannot be a provider secret; set it in provider env",
     );
   const mcpHost = mcpProxyBypassHost(input.mcp.url);
-  // Without profile values, a local launch merges the account's own lists
-  // when launch.sh runs; everything else carries the merged values here.
-  const inheritBypass =
-    mcpHost !== undefined &&
-    !input.worker_launch &&
-    MCP_PROXY_BYPASS_KEYS.every((key) => !Object.hasOwn(env, key));
-  Object.assign(env, launchProxyBypass(input.mcp.url, env));
+  // Layers the launch sets (Claude settings over profile env). The account's
+  // inherited lists are only known where the harness starts, so local and
+  // worker material merge at run time; settings files carry merged values
+  // for the spellings they set, since those override the process.
+  const fixedProxy = { ...pickProxyBypass(env), ...settingsProxy };
+  const mergedProxy = launchProxyBypass(input.mcp.url, fixedProxy);
+  const proxyShell = mcpHost
+    ? launchProxyBypassShell(mcpHost, fixedProxy, shellQuote)
+    : undefined;
+  if (proxyShell) for (const key of MCP_PROXY_BYPASS_KEYS) delete env[key];
+  const bypassedBaseFiles = strippedBaseFiles.map((file) => {
+    if (!mcpHost) return file;
+    try {
+      const parsed = JSON.parse(file.content) as {
+        env?: Record<string, string>;
+      };
+      if (!parsed.env || !MCP_PROXY_BYPASS_KEYS.some((k) => k in parsed.env!))
+        return file;
+      const env = { ...parsed.env };
+      for (const key of MCP_PROXY_BYPASS_KEYS)
+        if (Object.hasOwn(env, key)) env[key] = mergedProxy[key] as string;
+      return {
+        ...file,
+        content: `${JSON.stringify({ ...parsed, env }, null, 2)}\n`,
+      };
+    } catch {
+      return file;
+    }
+  });
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0
@@ -328,7 +356,8 @@ export function compileAssignmentLaunch(
     profile: base.profile,
     command,
     args,
-    env,
+    // What the harness sees when the account inherits no bypass lists.
+    env: proxyShell ? { ...env, ...mergedProxy } : env,
     secret_env: secretEnv,
     files: [
       {
@@ -341,7 +370,7 @@ export function compileAssignmentLaunch(
         content: withTrailingNewline(firstPrompt),
         mode: 0o600,
       },
-      ...strippedBaseFiles,
+      ...bypassedBaseFiles,
       ...harnessFiles,
       ...(testLimit ? [testLimit.file] : []),
       ...resourceFiles,
@@ -352,8 +381,20 @@ export function compileAssignmentLaunch(
               path: join(input.run_dir, "launch.json"),
               content: JSON.stringify({
                 harness,
-                command,
-                args,
+                // C-600: the worker helper overlays env on the inherited
+                // environment; a POSIX sh step merges the bypass lists there
+                // and execs the CLI in place (same process).
+                ...(proxyShell
+                  ? {
+                      command: "/bin/sh",
+                      args: [
+                        "-c",
+                        `${proxyShell}exec "$0" "$@"\n`,
+                        command,
+                        ...args,
+                      ],
+                    }
+                  : { command, args }),
                 env,
                 nice: agentNice,
                 cwd: input.work_dir,
@@ -380,9 +421,7 @@ export function compileAssignmentLaunch(
               command,
               args,
               env,
-              ...(inheritBypass && mcpHost
-                ? { proxyBypass: launchProxyBypassShell(mcpHost, shellQuote) }
-                : {}),
+              ...(proxyShell ? { proxyBypass: proxyShell } : {}),
               localSetup: adapter.localSetup?.(input, shellQuote) ?? "",
             }),
         mode: 0o700,

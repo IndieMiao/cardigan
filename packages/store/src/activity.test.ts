@@ -104,9 +104,26 @@ test("C-600 only the launch's own key advances a pending session; anything else 
           ...assignment(),
           mcp_handshake: "pending",
           mcp_session_key_sha256: own,
+          mcp_session_token_id: "token-new",
         }),
       );
     pending();
+    // A late call on the replaced launch's Token says nothing about this one.
+    expect(
+      store.advanceMcpHandshake(
+        project_id,
+        id,
+        "tool_called",
+        undefined,
+        "token-old",
+      ),
+    ).toBeUndefined();
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tools_listed", own, "token-old"),
+    ).toBeUndefined();
+    expect(
+      store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake,
+    ).toBe("pending");
     // Another client of the same Token listing tools proves nothing.
     expect(store.advanceMcpHandshake(project_id, id, "tools_listed")).toBe(
       "pending",

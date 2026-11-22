@@ -176,7 +176,12 @@ function dispatchedRun(
           agent_name: "coder-abcdef12-c-1-w-1-a-1",
         },
         ...(options.verify
-          ? { verify_mcp_session: { key_sha256: SESSION_DIGEST } }
+          ? {
+              verify_mcp_session: {
+                key_sha256: SESSION_DIGEST,
+                token_id: "issued-at-launch",
+              },
+            }
           : {}),
       },
       p,
@@ -405,13 +410,15 @@ describe("C-600 a verified session must list the Card tools natively", () => {
   let running: RunningServer;
   const tools = ["whoami", "get_card", "get_updates"];
   let token: string;
-  const connect = async (key?: string) => {
+  /** A Token of the previous launch of the same Assignment, still valid. */
+  let oldToken: string;
+  const connect = async (key?: string, bearer = token) => {
     const client = new Client({ name: "fictional-client", version: "0.0.0" });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(running.url), {
         requestInit: {
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization: `Bearer ${bearer}`,
             ...(key ? { "X-Cardigan-Session": key } : {}),
           },
         },
@@ -421,14 +428,28 @@ describe("C-600 a verified session must list the Card tools natively", () => {
   };
   const start = async (verify: boolean, backend: McpBackend = store) => {
     const seeded = dispatchedRun("none", { verify });
-    token = store.issueToken({
-      project_id,
-      assignment_id: seeded.assignment.id,
-      role: {
-        role_version: seeded.assignment.role_version,
-        allowed_tools: tools,
-      },
-    }).token;
+    const issue = () =>
+      store.issueToken({
+        project_id,
+        assignment_id: seeded.assignment.id,
+        role: {
+          role_version: seeded.assignment.role_version,
+          allowed_tools: tools,
+        },
+      });
+    oldToken = issue().token;
+    const issued = issue();
+    token = issued.token;
+    // The host binds the verified session to the Token it issued for it.
+    if (verify)
+      store.uow.run((tx) => {
+        const a = tx.assignments.get(project_id, seeded.assignment.id);
+        if (a)
+          tx.assignments.put(project_id, {
+            ...a,
+            mcp_session_token_id: issued.record.id,
+          });
+      });
     running = await startMcpServer({
       store: backend,
       host: "127.0.0.1",
@@ -507,6 +528,23 @@ describe("C-600 a verified session must list the Card tools natively", () => {
         ?.last_mcp_activity_at,
     ).toBeUndefined();
     for (const client of [wrapper, native]) await client.close();
+  });
+
+  test("calls on the previous launch's Token never decide the new session's handshake", async () => {
+    const { assignment, run_id } = await start(true);
+    const late = await connect(undefined, oldToken);
+    await late.listTools();
+    const call = await late.callTool({ name: "whoami", arguments: {} });
+    expect(call.isError).not.toBe(true);
+    expect(handshake(assignment.id)).toBe("pending");
+    // Nor can it start the new session's Run.
+    expect(read(run_id)?.status).toBe("dispatched");
+    const native = await connect(SESSION_KEY);
+    await native.listTools();
+    expect(handshake(assignment.id)).toBe("listed");
+    await native.callTool({ name: "whoami", arguments: {} });
+    expect(read(run_id)?.status).toBe("running");
+    for (const client of [late, native]) await client.close();
   });
 
   test("a briefly busy database is retried before the listing is answered", async () => {

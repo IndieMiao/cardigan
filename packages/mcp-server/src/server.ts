@@ -612,6 +612,7 @@ async function serveMcp(
             identity.actor.assignment_id,
             "tools_listed",
             sessionKeyDigest(req),
+            identity.token.id,
           );
           return;
         } catch (error) {
@@ -626,6 +627,7 @@ async function serveMcp(
         identity.actor.assignment_id,
         "tool_called",
         sessionKeyDigest(req),
+        identity.token.id,
       );
       return handshake === "missing"
         ? {

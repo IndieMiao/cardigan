@@ -562,6 +562,8 @@ interface AssignmentFields {
   readonly mcp_handshake?: McpHandshake;
   /** C-600: SHA-256 (hex) of the current verified session's key. */
   readonly mcp_session_key_sha256?: string;
+  /** C-600: Token issued to that session; requests on older Tokens are ignored. */
+  readonly mcp_session_token_id?: string;
   /** Immutable scheduling flag; true only for standing Office assignments. */
   readonly external?: boolean;
 }

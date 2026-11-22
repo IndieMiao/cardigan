@@ -556,7 +556,12 @@ export async function retryDispatchedRuns(
         Date.parse(now) -
           Date.parse(since) -
           dispatchTargetWaitMs(candidate, now) >=
-          (options.mcpHandshakeTimeoutMs ?? DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS)
+          // Never later than the ordinary dispatch timeout, which would
+          // otherwise rebuild the session first for an unnamed reason.
+          Math.min(
+            options.mcpHandshakeTimeoutMs ?? DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS,
+            policy.timeoutMs,
+          )
       )
         store.advanceMcpHandshake(
           project,

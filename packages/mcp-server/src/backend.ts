@@ -184,6 +184,7 @@ export interface McpBackend {
     assignment_id: AssignmentId,
     observed: "tools_listed" | "tool_called",
     key_sha256?: string,
+    token_id?: string,
   ): string | undefined;
   /**
    * Transactions. Read-only paths use `read` (`BEGIN DEFERRED`), so they do not

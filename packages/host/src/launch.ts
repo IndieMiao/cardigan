@@ -1325,6 +1325,7 @@ async function launch(
                     key_sha256: createHash("sha256")
                       .update(mcpSessionKey)
                       .digest("hex"),
+                    token_id: issued.record.id,
                   },
                 }
               : {}),

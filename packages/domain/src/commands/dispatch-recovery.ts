@@ -484,6 +484,17 @@ export function recoverDispatch(
       }
     }
     const body = `${context}；${mcp ? `${MCP_SESSION_FAILURE}，${stopped && !p.stop_failed ? "已确认终端退出并记为启动失败，" : ""}` : ""}${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查${mcp ? "该机器到 Card MCP 的网络路径（可运行机器检查，含系统代理）、" : ""}终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
+    // C-600: settling a session without Card tools after an earlier report
+    // for this Run (e.g. an unconfirmed stop) reports nothing twice.
+    if (
+      mcp &&
+      state.events.some(
+        (e) =>
+          e.type === "run_dispatch_stalled" &&
+          field(e.payload, "run_id") === run.id,
+      )
+    )
+      return;
     const ops = state.assignments.find(
       (candidate) =>
         candidate.status === "active" &&

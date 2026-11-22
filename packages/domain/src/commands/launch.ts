@@ -456,7 +456,11 @@ export interface DispatchRunParams {
    * C-600: with a new `runtime_ref`, require the session's harness to list the
    * Card MCP tools before its first tool call (`mcp_handshake: pending`).
    */
-  readonly verify_mcp_session?: { readonly key_sha256: string };
+  readonly verify_mcp_session?: {
+    readonly key_sha256: string;
+    /** Token issued to this launch; other Tokens never move its handshake. */
+    readonly token_id: string;
+  };
   readonly base_sha?: string;
   /** Host-only D5 replacement, committed together with dispatch and its handoff. */
   readonly replacement?: {
@@ -738,11 +742,14 @@ export function dispatchRun(
     if (p.runtime_ref !== undefined) {
       delete nextAssignment.mcp_handshake;
       delete nextAssignment.mcp_session_key_sha256;
+      delete nextAssignment.mcp_session_token_id;
     }
     ensure(
       p.verify_mcp_session === undefined ||
         (p.runtime_ref !== undefined &&
-          /^[0-9a-f]{64}$/u.test(p.verify_mcp_session.key_sha256)),
+          /^[0-9a-f]{64}$/u.test(p.verify_mcp_session.key_sha256) &&
+          typeof p.verify_mcp_session.token_id === "string" &&
+          p.verify_mcp_session.token_id.length > 0),
       "validation_failed",
       "MCP session verification needs a new session and its key digest",
     );
@@ -758,6 +765,7 @@ export function dispatchRun(
         ? {
             mcp_handshake: "pending" as const,
             mcp_session_key_sha256: p.verify_mcp_session.key_sha256,
+            mcp_session_token_id: p.verify_mcp_session.token_id,
           }
         : {}),
     });

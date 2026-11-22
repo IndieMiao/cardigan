@@ -1137,6 +1137,7 @@ export class Store {
     assignment_id: AssignmentId,
     observed: "tools_listed" | "tool_called" | "deadline",
     key_sha256?: string,
+    token_id?: string,
   ): Assignment["mcp_handshake"] {
     const read = () => {
       const row = this.#db
@@ -1151,8 +1152,15 @@ export class Store {
       if (own) return "listed";
       return observed === "tool_called" ? "missing" : "pending";
     };
+    // A request on another launch's Token (e.g. a late call of the replaced
+    // session) says nothing about this session.
+    const foreign = (a: Assignment) =>
+      token_id !== undefined &&
+      a.mcp_session_token_id !== undefined &&
+      token_id !== a.mcp_session_token_id;
     // Every request passes here: only a changing pending session writes.
     const seen = read();
+    if (seen && foreign(seen)) return undefined;
     if (
       seen?.status !== "active" ||
       seen.mcp_handshake !== "pending" ||
@@ -1161,7 +1169,7 @@ export class Store {
       return seen?.mcp_handshake;
     return this.#run(() => {
       const assignment = read();
-      if (assignment === undefined) return undefined;
+      if (assignment === undefined || foreign(assignment)) return undefined;
       if (
         assignment.status !== "active" ||
         assignment.mcp_handshake !== "pending"

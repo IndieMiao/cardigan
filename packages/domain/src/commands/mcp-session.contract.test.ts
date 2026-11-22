@@ -38,7 +38,12 @@ const launch = (r: Run, verify = true, terminal = "t1") =>
         run_id: r.id,
         runtime_ref: { ...ref, terminal_ref: terminal },
         ...(verify
-          ? { verify_mcp_session: { key_sha256: KEY(Number(r.id.slice(2))) } }
+          ? {
+              verify_mcp_session: {
+                key_sha256: KEY(Number(r.id.slice(2))),
+                token_id: `token-${r.id}`,
+              },
+            }
           : {}),
         base_sha: "a".repeat(40),
       },
@@ -134,6 +139,7 @@ test("C-600 only a verified new session waits for this launch's tool listing; a 
   expect(coder()).toMatchObject({
     mcp_handshake: "pending",
     mcp_session_key_sha256: KEY(Number(second.id.slice(2))),
+    mcp_session_token_id: `token-${second.id}`,
   });
 
   // A Run on the same terminal belongs to the same session.
@@ -154,13 +160,18 @@ test("C-600 only a verified new session waits for this launch's tool listing; a 
   launch(third, false, "t3");
   expect(coder()).not.toHaveProperty("mcp_handshake");
   expect(coder()).not.toHaveProperty("mcp_session_key_sha256");
+  expect(coder()).not.toHaveProperty("mcp_session_token_id");
 });
 
 test("C-600 verification needs a new session and a SHA-256 key digest", () => {
   const r = commit(queue());
   for (const p of [
-    { runtime_ref: ref, verify_mcp_session: { key_sha256: "not-a-digest" } },
-    { verify_mcp_session: { key_sha256: KEY(1) } },
+    {
+      runtime_ref: ref,
+      verify_mcp_session: { key_sha256: "not-a-digest", token_id: "t" },
+    },
+    { runtime_ref: ref, verify_mcp_session: { key_sha256: KEY(1), token_id: "" } },
+    { verify_mcp_session: { key_sha256: KEY(1), token_id: "t" } },
   ])
     expect(
       dispatchRun(
@@ -326,4 +337,26 @@ test("C-600 an unconfirmed stop of the rebuilt session keeps its fence and never
     reason: "mcp_unavailable",
     body: expect.stringContaining("无法确认旧终端已停止"),
   });
+});
+
+test("C-600 a confirmed stop after an earlier report settles the rebuilt session without reporting twice", () => {
+  const { replacement } = firstFailure();
+  launch(replacement, true, "t2");
+  observe("missing");
+  stop(replacement);
+  commit(recover(replacement, true));
+  expect(
+    f.state.events.filter((e) => e.type === "run_dispatch_stalled"),
+  ).toHaveLength(1);
+  // The host retries the same fence and now proves the exit.
+  commit(recover(replacement));
+  expect(f.state.runs.find((x) => x.id === replacement.id)).toMatchObject({
+    status: "cancelled",
+    failure_reason: "mcp_unavailable",
+  });
+  expect(coder().runtime_ref).toBeNull();
+  expect(
+    f.state.events.filter((e) => e.type === "run_dispatch_stalled"),
+  ).toHaveLength(1);
+  expect(f.state.runs.filter((r) => r.status === "queued")).toEqual([]);
 });

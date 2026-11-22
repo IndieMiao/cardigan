@@ -35,7 +35,10 @@ function verifiedOptions(extra: Partial<DispatcherOptions> = {}) {
           {
             run_id: run.id,
             runtime_ref: ref,
-            verify_mcp_session: { key_sha256: digest(generation) },
+            verify_mcp_session: {
+              key_sha256: digest(generation),
+              token_id: `token-${generation}`,
+            },
           },
           p,
         ),
@@ -172,4 +175,20 @@ test("C-600 a session whose harness listed its tools is never stopped for MCP", 
   expect(
     f.state().events.some((e) => e.type === "run_dispatch_stop_requested"),
   ).toBe(false);
+});
+
+test("C-600 a dispatch timeout shorter than the handshake deadline still names the MCP failure, once", async () => {
+  const { t, runs } = start();
+  const options = verifiedOptions({ dispatchTimeoutMs: 60_000 });
+  const d = new Dispatcher(options);
+  await d.tick();
+  f.advance(60_000);
+  for (let i = 0; i < 3 && runs().length < 2; i++) await d.tick();
+  expect(
+    f.state().events.find((e) => e.type === "run_dispatch_recovered")?.payload,
+  ).toMatchObject({ reason: "mcp_unavailable" });
+  await untilDispatched(d, runs, runs()[0]?.id);
+  f.advance(60_000);
+  for (let i = 0; i < 4; i++) await d.tick();
+  expectSettledAndReported(runs, t.assignment.id);
 });

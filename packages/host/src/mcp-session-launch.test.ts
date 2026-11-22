@@ -137,6 +137,11 @@ test.each([
         tx.assignments.get(project, assignment.id),
       )?.mcp_session_key_sha256;
       if (expected) {
+        // Bound to the Token issued for this very launch.
+        expect(
+          store.uow.read((tx) => tx.assignments.get(project, assignment.id))
+            ?.mcp_session_token_id,
+        ).toBe(launched.token_id);
         expect(key).toMatch(/^[A-Za-z0-9_-]{32}$/u);
         expect(digest).toBe(
           createHash("sha256")
