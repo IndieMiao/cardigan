@@ -26,15 +26,20 @@ export function ownerTextError(text: string): string | undefined {
   if (/[@＠]|<\s*at\b/i.test(text)) return "私聊正文不支持 @ 提及";
   if (/\p{Cc}/u.test(text.replace(/[\r\n\t]/g, "")))
     return "正文含非文字控制字符";
-  // A heading such as "File: app.apk" or "iPhone:暂不支持" has no ASCII URI
-  // payload right after the colon. Consume each link as a unit: a port or
-  // another colon in an HTTPS path is not the start of a second scheme.
-  for (const [, scheme] of text.matchAll(
-    /\b([a-z][a-z\d+.-]*):[!-~][^\s<>"'()，。；、（）]*/gi,
-  )) {
-    if (!/^https?$/i.test(scheme ?? "")) return "正文链接仅支持 http 或 https";
-  }
+  // HTTP(S) links are consumed as whole tokens first, so a port or a colon in
+  // their path is not mistaken for another scheme. What remains is release-note
+  // text such as "SHA-256:3f2a…" or "Size:18MB"; only "://" or a scheme that
+  // clients open without "//" counts as a link there.
+  const rest = text.replace(
+    /(?<![a-z\d+.-])https?:\/\/[^\s<>"'()，。；、（）]*/gi,
+    " ",
+  );
+  if (rest.includes("://") || OPAQUE_SCHEME.test(rest))
+    return "正文链接仅支持 http 或 https";
 }
+
+const OPAQUE_SCHEME =
+  /(?<![a-z])(?:blob|callto|data|facetime|file|geo|itms-services|javascript|magnet|mailto|sips?|skype|sms|tel|vbscript|webcal):\S/i;
 
 export interface OwnerMessageInput {
   readonly card_id: CardId;
