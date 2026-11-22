@@ -129,6 +129,24 @@ test("independent review conclusions cannot be injected through CLI card updates
     }
 });
 
+test("--deadline sets a calendar date or clears it with none", async () => {
+  const update = (date: string) =>
+    run(["card", "update", "C-1", "--deadline", date]);
+  expect(await update("2028-02-29")).toBe(0);
+  expect(snapshot().cards[0]?.deadline).toBe("2028-02-29");
+  for (const invalid of ["", "2026-02-29", "tomorrow"]) {
+    expect(await update(invalid)).toBe(2);
+    expect(snapshot().cards[0]?.deadline).toBe("2028-02-29");
+  }
+  expect(await update("none")).toBe(0);
+  const after = snapshot();
+  expect(after.cards[0]).not.toHaveProperty("deadline");
+  expect(after.timeline.at(-1)).toMatchObject({
+    author: "human",
+    body: expect.stringContaining("截止日期已清除"),
+  });
+});
+
 test("updates named priority and planning states including none", async () => {
   for (const [status, priority, rank] of [
     ["backlog", "urgent", 4],
