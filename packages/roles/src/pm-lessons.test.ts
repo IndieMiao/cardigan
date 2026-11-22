@@ -609,19 +609,10 @@ test("C-268 PM Ops checks design-director implementation reviews before UI-card 
   expect(prompt).not.toContain("按其当前员工名提及");
 });
 
-test("C-86 and Flow Lite: verifiers block only on correctness, security and missing tests", () => {
-  for (const role of [
-    "reviewer",
-    "independent_reviewer",
-    "design_director",
-  ] as const) {
-    const body = corePromptFor(role);
-    for (const rule of VERIFIER_MUST_FIX_RULES)
-      expect(body.split(`- ${rule}`).length - 1, role).toBe(1);
-    expect(body, role).not.toContain(
-      "第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof",
-    );
-  }
+test("Flow Lite: design review retains its original must-fix criteria", () => {
+  const body = corePromptFor("design_director");
+  for (const rule of VERIFIER_MUST_FIX_RULES)
+    expect(body.split(`- ${rule}`).length - 1).toBe(1);
   const rules = VERIFIER_MUST_FIX_RULES.join("\n");
   for (const phrase of [
     "只有正确性缺陷（含错误被吞）、安全漏洞、新增行为缺测试可以标 `must_fix`",
@@ -630,7 +621,12 @@ test("C-86 and Flow Lite: verifiers block only on correctness, security and miss
     "重交时只看增量和上轮问题是否修好",
   ])
     expect(rules).toContain(phrase);
-  for (const role of ["pm", "coder"] as const)
+  for (const role of [
+    "pm",
+    "coder",
+    "reviewer",
+    "independent_reviewer",
+  ] as const)
     expect(corePromptFor(role), role).not.toContain(VERIFIER_MUST_FIX_RULES[0]);
 });
 
