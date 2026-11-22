@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { stripVTControlCharacters } from "node:util";
+import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import {
   type Assignment,
   type Clock,
@@ -223,9 +223,24 @@ export class LaunchPublication {
   update(phase: Publication["phase"], patch: Partial<Publication> = {}) {
     return this.save({ ...this.current(), ...patch, phase });
   }
+  private authorizedExecution() {
+    const target =
+      this.host.runtime instanceof RuntimeTargets
+        ? this.host.runtime.publicationTarget(
+            this.project,
+            this.assignment,
+            this.run.id,
+            this.generation,
+          ).execution
+        : this.execution;
+    if (
+      target.mode !== "agent-ssh" ||
+      !isDeepStrictEqual(target.target, this.execution.target)
+    )
+      throw new Error("Launch target changed");
+    return target;
+  }
   assertCurrent() {
-    if (this.host.runtime instanceof RuntimeTargets)
-      this.host.runtime.assertLaunchAllowed(this.project, this.assignment);
     const current = this.current();
     const assignment = this.host.store.uow.read((tx) =>
       tx.assignments.get(this.project, this.assignment.id),
@@ -233,11 +248,7 @@ export class LaunchPublication {
     const machine = this.host.store.uow.read((tx) =>
       tx.machines.get(this.project, this.assignment.machine_id),
     );
-    const target =
-      this.host.runtime instanceof RuntimeTargets
-        ? this.host.runtime.resolve(this.project, this.assignment.machine_id)
-            .execution.target
-        : this.execution.target;
+    const target = this.authorizedExecution().target;
     if (
       current.lease_until <= this.clock.now() ||
       assignment?.status !== "active" ||
@@ -264,14 +275,20 @@ export class LaunchPublication {
   }
   async worktree(path: string) {
     return (
-      await workerFiles(this.execution, this.identity, "inspect", [], path)
+      await workerFiles(
+        this.authorizedExecution(),
+        this.identity,
+        "inspect",
+        [],
+        path,
+      )
     ).worktree;
   }
   async publish(files: readonly LaunchFile[], token: string) {
     // Compilation can await worker inspection after MCP preflight. Fence the
     // credential publication itself against changes during either operation.
     this.assertCurrent();
-    await workerFiles(this.execution, this.identity, "publish", [
+    await workerFiles(this.authorizedExecution(), this.identity, "publish", [
       ...files,
       {
         path: posix.join(this.runDir, "token"),
@@ -293,7 +310,11 @@ export class LaunchPublication {
     });
   }
   async observeProcess() {
-    const observed = await workerFiles(this.execution, this.identity, "status");
+    const observed = await workerFiles(
+      this.authorizedExecution(),
+      this.identity,
+      "status",
+    );
     this.update("provisioned", { process: observed.process });
   }
   description(): RuntimeLaunch {
@@ -320,7 +341,7 @@ export class LaunchPublication {
   }
   async commit() {
     this.assertCurrent();
-    await workerFiles(this.execution, this.identity, "commit");
+    await workerFiles(this.authorizedExecution(), this.identity, "commit");
     this.update("started");
   }
   /** Revocation and durable reservation precede every worker call or terminal stop. */
@@ -343,7 +364,11 @@ export class LaunchPublication {
       { workerFailure: failure?.worker === true },
     );
     this.recoveryOperation = "worker_clear";
-    const cleared = await workerFiles(this.execution, this.identity, "clear");
+    const cleared = await workerFiles(
+      this.authorizedExecution(),
+      this.identity,
+      "clear",
+    );
     this.recoveryOperation = "journal";
     current = this.update("stopping", { process: cleared.process });
     let ref = current.runtime_ref;
@@ -370,7 +395,7 @@ export class LaunchPublication {
         : false);
     if (!exited) return false;
     this.recoveryOperation = "worker_clear";
-    await workerFiles(this.execution, this.identity, "clear");
+    await workerFiles(this.authorizedExecution(), this.identity, "clear");
     this.recoveryOperation = "journal";
     this.update("exited");
     return true;
@@ -428,7 +453,12 @@ export async function recoverLaunchPublications(
     try {
       const execution =
         host.runtime instanceof RuntimeTargets
-          ? host.runtime.resolve(project, assignment.machine_id).execution
+          ? host.runtime.publicationTarget(
+              project,
+              assignment,
+              run.id,
+              value.generation,
+            ).execution
           : host.execution;
       if (
         execution?.mode !== "agent-ssh" ||

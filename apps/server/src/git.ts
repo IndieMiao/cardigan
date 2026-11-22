@@ -69,6 +69,7 @@ import {
   agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
+  workerGit,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
 import type {
@@ -76,8 +77,8 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
-
 import { backupBranches, backupWriter } from "./git-backup.js";
+import type { SnapshotOrphan } from "./orphan-cleanup.js";
 
 /**
  * M4.4: the server's Git assembly.
@@ -331,7 +332,10 @@ function agentWorkspace(
 }
 
 /** What the control plane's phase loops need: merge plus cleanup/reconcile. */
-export type GitPhases = MergeGit & ReconcileGit;
+export type GitPhases = MergeGit &
+  ReconcileGit & {
+    snapshotOrphan?: SnapshotOrphan;
+  };
 
 /**
  * Everything apps/server needs from Git in one object. Tests that only exercise
@@ -899,6 +903,66 @@ export class ServerGit implements GitBinding {
     }
     const truncated = Boolean(tip && tip !== base && chain.length >= limit);
     return { head, chain, truncated };
+  }
+  async snapshotOrphan(
+    id: ProjectId,
+    assignment: Assignment,
+    verification?: Parameters<SnapshotOrphan>[2],
+  ) {
+    const project = this.projectOf(id);
+    const ref = assignment.runtime_ref;
+    const generation = ref?.launch_generation?.generation;
+    if (
+      !project ||
+      !ref ||
+      !generation ||
+      !assignment.branch ||
+      assignment.worktree_path !== ref.worktree_path ||
+      assignment.branch !== ref.branch
+    )
+      throw new Error("Orphan workspace not bound");
+    const execution = this.options.targets?.executionForRef(ref, id);
+    if (execution?.mode !== "agent-ssh" || !assignment.worktree_path)
+      throw new Error("Worker unavailable");
+    const { central, validateTarget } = this.workspaceServices(
+      project,
+      assignment,
+    );
+    const backup = `refs/cardigan/backups/orphans/${assignment.id}/${generation}`;
+    const sha = await workerGit<string | null>(execution, {
+      project: id,
+      assignment: assignment.id,
+      operation: verification ? "verify-sealed-snapshot" : "snapshot",
+      ...(verification
+        ? { process: verification.process, expected: verification.sha }
+        : {}),
+      timeout_ms: 60_000,
+      repository: assignment.worktree_path,
+      branch: assignment.branch,
+      generation,
+    });
+    validateTarget?.();
+    if (!sha) return null;
+    if (verification && sha !== verification.sha)
+      throw new Error("Workspace changed");
+    const repository = await central.ensureCentral(project);
+    if (!verification) {
+      const source = await central.agentSource(project, assignment.machine_id);
+      validateTarget?.();
+      await central.git.fetchRefs(
+        repository,
+        source.address,
+        [`${backup}:${backup}`],
+        source.uploadPack,
+      );
+    }
+    if (
+      (await central.git.readRef(repository, backup)) !== sha ||
+      (await central.git.objectType(repository, sha)) !== "commit"
+    )
+      throw new Error("Snapshot verification failed");
+    validateTarget?.();
+    return sha;
   }
   async backup(project: CentralProject): Promise<void> {
     const projectId = project.project_id as ProjectId;

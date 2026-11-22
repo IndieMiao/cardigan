@@ -24,7 +24,7 @@ import { MergeLockBusy, withPublication } from "./publication-lock.js";
 export function mergeProjectSettings(
   configuration: MergeGateConfiguration,
   project: string,
-): CommandState["project_settings"] {
+): NonNullable<CommandState["project_settings"]> {
   const config = configuration.forProject(project);
   return config.status === "enabled"
     ? {
@@ -47,7 +47,7 @@ export function mergeProjectSettings(
             }
           : {}),
       }
-    : undefined;
+    : { merge_gate_enabled: config.status !== "disabled" };
 }
 export interface MergePushOptions {
   readonly store: Store;

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Project-account Git entry. Pack stdin/stdout remain binary streams."""
 import ctypes
+import array
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -9,6 +12,7 @@ import re
 import signal
 import selectors
 import time
+import tempfile
 import stat
 import subprocess
 import sys
@@ -183,6 +187,13 @@ class Workspace:
     def operate(self):
         r, op = self.request, self.request['operation']
         path = r.get('repository', self.repo)
+        if op in ('snapshot', 'verify-sealed-snapshot'):
+            require(path == self.leaves[0])
+            if op == 'verify-sealed-snapshot' and not durable_writer_fence(self, path):
+                return None
+            sha = workspace_snapshot(self, path, r['branch'], r['generation'])
+            require(op == 'snapshot' or sha == r['expected'])
+            return sha
         if op == 'check':
             return True  # __init__ has checked the same paths used by Git operations.
         if op == 'directories':
@@ -286,6 +297,227 @@ class Workspace:
             os.rmdir(path)
             return None
         raise ValueError('unsupported_operation')
+
+
+# The storage owner may have retired a dedicated workspace in place. We only
+# *inspect* Linux ext4 seals; no chmod, SETFLAGS, mount, or privileged helper.
+# fs-verity excludes existing writable fds/mappings as well as future opens.
+# IMMUTABLE also protects modes, directory entries and rename. The project has
+# no authority to thaw these inodes. No host/SSH lifetime controls the fence.
+def inode_flags(fd):
+    flags = array.array('l', [0])
+    fcntl.ioctl(fd, 0x80006601 | (flags.itemsize << 16), flags, True)  # FS_IOC_GETFLAGS
+    return flags[0]
+
+
+def mount_id(fd):
+    return re.search(r'^mnt_id:\s*(\d+)$', Path(f'/proc/self/fdinfo/{fd}').read_text(), re.M)[1]
+
+
+def sealed_tree(fd, mount, remaining, writable=(), prefix=''):
+    info = os.fstat(fd)
+    require(mount_id(fd) == mount and remaining[0] > 0)
+    remaining[0] -= 1
+    flags = inode_flags(fd)
+    require(flags & 0x10)  # FS_IMMUTABLE_FL, including the root of the walk
+    if not stat.S_ISDIR(info.st_mode):
+        require(stat.S_ISREG(info.st_mode) and flags & 0x00100000)  # FS_VERITY_FL
+        return
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            name = prefix + entry.name
+            if name in writable:
+                # Only Git's content-addressed object cache and the replicated
+                # backup namespace. Neither is a source of uncommitted files.
+                child = os.open(entry.name, DIRECTORY, dir_fd=fd)
+                os.close(child)
+                continue
+            mode = entry.stat(follow_symlinks=False).st_mode
+            require(stat.S_ISDIR(mode) or stat.S_ISREG(mode))
+            child = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                sealed_tree(child, mount, remaining, writable, name + '/')
+            finally:
+                os.close(child)
+
+
+def retained_for_process(workspace, path, process):
+    # Storage-owner receipt: this in-place seal is retained until this exact
+    # identity exits, including across controller failure. Never created or
+    # removed by the project. The receipt alone is NOT filesystem evidence.
+    r = workspace.request
+    require(re.fullmatch(r'[a-f0-9]{32}', r['generation']))
+    locks = native.directory(workspace.root + '/locks', 0)
+    try:
+        name = 'retired-' + workspace.project + '-' + r['assignment'] + '-' + r['generation'] + '.json'
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=locks)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and
+                    not info.st_mode & 0o022 and native.acl_safe(fd) and 0 < info.st_size <= 4096)
+            def location(target):
+                st = os.stat(target, follow_symlinks=False)
+                return [st.st_dev, st.st_ino]
+            require(json.loads(os.read(fd, 4097)) == dict(policy='ext4-verity-until-exit-v1',
+                    project=workspace.project, assignment=r['assignment'], process=process,
+                    worktree=location(path), gitdir=location(workspace.repo + '/.git')))
+        finally:
+            os.close(fd)
+    finally:
+        os.close(locks)
+
+
+def verify_storage_seals(workspace, path, mounts):
+    remaining = [100000]  # oversized or irregular trees remain observe-only
+    for root, is_repo in ((path, False), (workspace.repo, True)):
+        fd = workspace.directory(root)
+        try:
+            if is_repo:
+                gitdir = os.open('.git', DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = gitdir
+            mount = mount_id(fd)
+            require(mounts.get(mount) == 'ext4')
+            sealed_tree(fd, mount, remaining, ('objects', 'refs/cardigan/backups') if is_repo else ())
+        finally:
+            os.close(fd)
+
+
+def durable_writer_fence(workspace, path):
+    if sys.platform != 'linux' or os.geteuid() == 0:
+        return False
+    try:
+        r = workspace.request
+        process = r['process']
+        pid = process['pid']
+        require(type(pid) is int and pid > 1 and process['uid'] == os.getuid()
+                and process['terminal'] == r['generation'] and
+                native.identity(process['machine'], pid, r['generation'], process['process_group']) == process)
+        retained_for_process(workspace, path, process)
+        # We must inspect the same namespace and directory as the old process,
+        # not a read-only replacement mounted over its still-writable cwd.
+        proc = Path('/proc') / str(pid)
+        require(os.path.samefile(proc / 'ns/mnt', '/proc/self/ns/mnt') and
+                os.path.samefile(proc / 'root', '/') and os.path.samefile(proc / 'cwd', path))
+        for status in (proc / 'status', Path('/proc/self/status')):
+            require(int(re.search(r'^CapPrm:\s*([0-9a-f]+)$', status.read_text(), re.M)[1], 16) == 0)
+        verify_storage_seals(workspace, path, {line.split()[0]: line.split(' - ')[1].split()[0]
+                    for line in Path('/proc/self/mountinfo').read_text().splitlines()})
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return False
+
+
+def verify_working_bytes(path, entries, sha):
+    # Filters, local excludes and Git stat caches must not make an apparently
+    # identical tree stand in for bytes absent from the controller backup.
+    blobs = {}
+    for entry in entries.split('\0'):
+        if entry:
+            meta, name = entry.split('\t', 1)
+            mode, kind, oid = meta.split(' ')
+            require(kind == 'blob' and mode in ('100644', '100755'))
+            blobs[name] = (mode, oid)
+    # Walk only after the whole source is sealed. Refuse empty directories and
+    # special entries rather than claim that Git can restore them.
+    def visit(directory, prefix=''):
+        if prefix:
+            require(os.listdir(directory))
+        with os.scandir(directory) as children:
+            for child in children:
+                name = prefix + child.name
+                if name == '.git':
+                    continue
+                info = child.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    visit(child.path, name + '/')
+                    continue
+                require(stat.S_ISREG(info.st_mode) and name in blobs)
+                mode, oid = blobs.pop(name)
+                require((mode == '100755') == bool(info.st_mode & stat.S_IXUSR))
+                digest = hashlib.new('sha1' if len(sha) == 40 else 'sha256')
+                digest.update(f'blob {info.st_size}\0'.encode())
+                with open(child.path, 'rb') as contents:
+                    for block in iter(lambda: contents.read(131072), b''):
+                        digest.update(block)
+                require(digest.hexdigest() == oid)
+    visit(path)
+    require(not blobs)
+
+
+def copy_worktree_index(workspace, gitdir, destination):
+    # No project-controlled symlinks or devices during the *initial*, still
+    # unfenced backup. A linked worktree index must live in this clone.
+    directory = workspace.directory(workspace.repo)
+    try:
+        for part in ('.git', 'worktrees', Path(gitdir).name):
+            child = os.open(part, DIRECTORY, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open('index', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+        with os.fdopen(fd, 'rb') as src, open(destination, 'wb') as dest:
+            info = os.fstat(src.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid())
+            remaining = 64 * 1024 * 1024
+            while True:
+                chunk = src.read(min(remaining + 1, 131072))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                require(remaining >= 0)
+                dest.write(chunk)
+    finally:
+        os.close(directory)
+
+
+def workspace_snapshot(workspace, path, branch, generation):
+    """Preserve HEAD, index and working tree without stashing or modifying either.
+    A second capture compares trees to the immutable first snapshot, not timestamps.
+    """
+    require(re.fullmatch(r'agent/[A-Za-z0-9._/-]+', branch) and re.fullmatch(r'[a-f0-9]{32}', generation))
+    def git(*args):
+        return workspace.git(path, list(args)).rstrip('\n')
+    require(git('rev-parse', '--show-toplevel') == path and git('symbolic-ref', 'HEAD') == 'refs/heads/' + branch)
+    require(git('rev-parse', '--path-format=absolute', '--git-common-dir') == workspace.repo + '/.git')
+    # Ignored user files cannot be assumed disposable or safe to send to the controller.
+    require(not git('ls-files', '--others', '--ignored', '--exclude-standard', '-z'))
+    # Do not claim that a gitlink or sparse checkout contains the underlying files.
+    require(all(entry.startswith('H ') for entry in git('ls-files', '-v', '-z').split('\0') if entry))
+    head = git('rev-parse', '--verify', 'HEAD^{commit}')
+    index_path = git('rev-parse', '--path-format=absolute', '--git-path', 'index')
+    gitdir = git('rev-parse', '--absolute-git-dir')
+    require(Path(gitdir).parent == Path(workspace.repo, '.git/worktrees') and index_path == gitdir + '/index')
+    with tempfile.TemporaryDirectory() as scratch:
+        copy_worktree_index(workspace, gitdir, scratch + '/index')
+        workspace.env['GIT_INDEX_FILE'] = scratch + '/index'
+        try:
+            index = git('write-tree')
+            os.unlink(scratch + '/index')
+            git('read-tree', index)
+            git('add', '-A', '--', '.')
+            tree = git('write-tree')
+            copy_worktree_index(workspace, gitdir, scratch + '/index')
+            require(index == git('write-tree'))
+        finally:
+            del workspace.env['GIT_INDEX_FILE']
+    for candidate in (head, index, tree):
+        require(all(not entry.startswith('160000 ') for entry in git('ls-tree', '-r', '-z', candidate).split('\0') if entry))
+    require(head == git('rev-parse', 'HEAD'))
+    ref = 'refs/cardigan/backups/orphans/' + workspace.request['assignment'] + '/' + generation
+    sha = git('for-each-ref', '--format=%(objectname)', ref)
+    if workspace.request['operation'] == 'verify-sealed-snapshot':
+        require(sha and sha == workspace.request['expected'])
+        verify_working_bytes(path, git('ls-tree', '-rz', sha), sha)
+    if not sha:
+        def commit(tree, *parents):
+            return git('-c', 'user.name=Cardigan', '-c', 'user.email=backup@cardigan.invalid',
+                       'commit-tree', tree, *parents, '-m', 'Orphan workspace backup')
+        staged = commit(index, '-p', head)
+        sha = commit(tree, '-p', head, '-p', staged)
+        git('update-ref', ref, sha, '0' * len(sha))
+    require(git('rev-parse', ref) == sha and git('rev-parse', ref + '^{tree}') == tree
+            and git('rev-parse', ref + '^1') == head and git('rev-parse', ref + '^2^{tree}') == index)
+    return sha
 
 
 def main():

@@ -47,6 +47,7 @@ import { reopenMerge } from "./merge-rework.js";
 import { roleRuleConfirmationRequired } from "./role-rule-implementation.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
 import {
+  DISABLED_MERGE_GATE_REASON,
   systemMergeAuthority,
   systemMergeEnabled,
   systemMergeHumanReason,
@@ -880,6 +881,14 @@ export function syncSystemMerge(d: CommandDraft, card: Card) {
   const target = attempt(() => completion(state, card));
   if (!target.ok) return;
   const q = confirmation(state.decisions, card, target.value);
+  if (
+    state.project_settings?.merge_gate_enabled === false &&
+    q?.status === "open" &&
+    q.decider === "system"
+  ) {
+    handoffDecision(d, q, DISABLED_MERGE_GATE_REASON);
+    return;
+  }
   if (
     systemMergeEnabled(state, card) &&
     q &&

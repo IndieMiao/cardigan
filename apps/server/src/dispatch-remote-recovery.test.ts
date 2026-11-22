@@ -32,9 +32,13 @@ function setup() {
   const target = f.create("worker-a");
   f.session(target.assignment, false);
   const events = runtimeEvents();
+  const processes = new Map<Assignment["id"], "alive" | "exited">();
   const monitor = new RuntimeMonitor({
     store: f.store,
-    runtime: events.source,
+    runtime: {
+      ...events.source,
+      probeRemoteProcess: async (_, id) => processes.get(id) ?? "unreachable",
+    },
     clock: f.clock,
   });
   monitor.reconcile();
@@ -64,7 +68,7 @@ function setup() {
     await expect.poll(() => owner(a).runtime_state).toBe("unknown");
     f.advance(300000);
     monitor.reconcile();
-    expect(owner(a).runtime_state).toBe("lost");
+    await expect.poll(() => owner(a).runtime_state).toBe("lost");
   }
   function confirm() {
     const action = f.state().human_actions.findLast((h) => h.status === "open");
@@ -73,7 +77,11 @@ function setup() {
       completeHumanAction(
         s,
         a,
-        { human_action_id: action.id, text: "Fixture human confirms exit" },
+        {
+          human_action_id: action.id,
+          conclusion: "exited",
+          text: "Fixture human confirms exit",
+        },
         p,
       ),
     );
@@ -110,6 +118,7 @@ function setup() {
     );
   }
   return {
+    processes,
     f,
     target,
     events,
@@ -144,11 +153,12 @@ test("earlier recovered worker still blocks creating another successor while its
     expect(t.owner(old).status).toBe("released");
     expect(t.owner(middle).status).toBe("released");
     // The oldest machine comes back before the next reassignment.
+    t.processes.set(old.id, "alive");
     t.alive(old, 10);
     await setImmediate();
     expect(
       t.f.state().human_actions.filter((h) => h.status === "open"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(hostOpsPending(t.f.state().events, middle.id)).toBe(true);
     const before = t.f.state().assignments.length;
     expect.soft(() => t.recover("local")).toThrow();
@@ -173,7 +183,9 @@ test("earlier recovered worker still blocks creating another successor while its
         ),
       ),
     ).toThrow();
-    t.confirm();
+    t.processes.set(old.id, "exited");
+    t.monitor.reconcile();
+    await setImmediate();
     const next = t.recover("local");
     expect(next.id).not.toBe(middle.id);
     expect(t.f.state().assignments).toHaveLength(before + 1);
@@ -257,22 +269,20 @@ test("wrong terminal, old generation, lower and duplicate sequences cannot close
       t.f.state().events.some((e) => e.type === "remote_worker_exit_observed"),
     ).toBe(false);
     expect(t.subscription(old)).toBeGreaterThanOrEqual(0);
+    t.processes.set(old.id, "alive");
     t.alive(old, 12, 2);
     await setImmediate();
-    expect(
-      t.f.state().human_actions.filter((h) => h.status === "open"),
-    ).toHaveLength(1);
-    t.confirm();
-    t.alive(old, 12, 2);
+    expect(hostOpsPending(t.f.state().events, old.id)).toBe(true);
+    t.processes.set(old.id, "exited");
+    t.send(old, 12, "finished", 2); // duplicate: not a fresh observation
     await setImmediate();
+    expect(hostOpsPending(t.f.state().events, old.id)).toBe(true);
+    t.send(old, 13, "finished", 2);
+    await setImmediate();
+    expect(hostOpsPending(t.f.state().events, old.id)).toBe(false);
     expect(
       t.f.state().human_actions.filter((h) => h.status === "open"),
     ).toHaveLength(0);
-    t.alive(old, 13, 2);
-    await setImmediate();
-    expect(
-      t.f.state().human_actions.filter((h) => h.status === "open"),
-    ).toHaveLength(1);
   } finally {
     await t.close();
   }

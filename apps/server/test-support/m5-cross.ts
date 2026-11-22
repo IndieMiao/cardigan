@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { createProcessIo, main } from "@cardigan/cli";
 import type { Attachment, TimelineEntry } from "@cardigan/domain";
+import { loadMergeGateConfig } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { resolveWebConfig } from "../src/web/config.js";
 import { LoginLimiter } from "../src/web/login-limiter.js";
@@ -26,9 +27,15 @@ export async function m5Cross(
     | "launchSettings"
     | "resourceLimits"
     | "roleLaunchConfig"
-  > = {},
+  > & { mergeGate?: "enabled" | "disabled" } = {},
 ) {
-  const f = await m4Cross();
+  const { mergeGate, ...webOptions } = options;
+  const f = await m4Cross(mergeGate ? { mergeGate } : {});
+  const configuration = await loadMergeGateConfig({
+    projectIds: [f.project.project_id],
+    configDir: f.configDir,
+    dataDir: f.dataDir,
+  });
   let now = Date.now(),
     cookie = "";
   const clock = { now: () => new Date(now).toISOString() };
@@ -50,7 +57,8 @@ export async function m5Cross(
   })();
   const web = await startWebServer({
     launchProfiles: () => ["fixture", "codex-agent"],
-    ...options,
+    ...webOptions,
+    ...(mergeGate ? { mergeGate: configuration } : {}),
     store,
     dataDir: f.dataDir,
     clock,
@@ -159,6 +167,7 @@ export async function m5Cross(
   }
   return {
     ...f,
+    mergeGate: configuration,
     store: () => store,
     web,
     staticDir,
