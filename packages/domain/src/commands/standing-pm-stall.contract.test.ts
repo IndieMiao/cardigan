@@ -475,24 +475,52 @@ test("foreign runtime, an overdue restart and missing host_ops escalate without 
       f.io,
     ).ok,
   ).toBe(false);
-  // The restart was due but never begun (e.g. no launch snapshot).
-  f.time = 24 * MIN;
-  expect(f.plan(notes)?.stage).toBe("restart");
-  f.time = 25 * MIN;
-  expect(f.plan(notes)).toMatchObject({
+  // A late patrol is not a failure: the due restart is attempted first.
+  f.time = 60 * MIN;
+  const due = f.plan(notes);
+  expect(due?.stage).toBe("restart");
+  // Only an actual failure to begin it counts, for one grace from the first.
+  const failed = {
+    restart_failed: { episode_id: due?.episode_id ?? "", since: at(60 * MIN) },
+  };
+  const plan = (context: object) =>
+    planStandingPmStall(
+      f.state,
+      f.owner,
+      notes,
+      at(f.time),
+      undefined,
+      context,
+    );
+  f.time = 65 * MIN - 1;
+  expect(plan(failed)?.stage).toBe("restart");
+  f.time = 65 * MIN;
+  expect(plan(failed)).toMatchObject({
     stage: "escalate",
     reason: "restart_unavailable",
   });
+  // A failure recorded for another episode does not carry over.
+  expect(
+    plan({ restart_failed: { ...failed.restart_failed, episode_id: "E-x" } })
+      ?.stage,
+  ).toBe("restart");
   // A recipient must be this project's active host_ops, not the PM itself.
   expect(
     escalateStandingPmStall(
       f.state,
       system,
-      { ...params, host_ops_id: f.owner.id },
+      { ...params, context: failed, host_ops_id: f.owner.id },
       f.io,
     ).ok,
   ).toBe(false);
-  const waiting = value(escalateStandingPmStall(f.state, system, params, f.io));
+  const waiting = value(
+    escalateStandingPmStall(
+      f.state,
+      system,
+      { ...params, context: failed },
+      f.io,
+    ),
+  );
   f.state = apply(f.state, waiting);
   expect(waiting.data.event.payload).toMatchObject({
     handoff: "waiting_host_ops",
@@ -560,3 +588,52 @@ function operatorRestart(
   );
   return { ...effect, changes: [] };
 }
+
+test("the automatic restart intent carries its source; operators cannot set it", () => {
+  const f = setup();
+  const ops = {
+    ...f.owner,
+    id: id("assignment", 10),
+    role_id: "host_ops",
+    standing_mode: undefined,
+    runtime_ref: null,
+  } as unknown as Assignment;
+  const withOps: CommandState = {
+    ...f.state,
+    assignments: [...f.state.assignments, ops],
+    roles: [...f.state.roles, role("host_ops")],
+  };
+  const forged = beginHostOpsAction(
+    withOps,
+    actor(10, "host_ops"),
+    {
+      tool: "host_ops_restart_standing_pm",
+      target_id: f.owner.id,
+      reason: "operator",
+      snapshot,
+      standing_pm_stall: true,
+    },
+    f.io,
+  );
+  expect(forged.ok).toBe(false);
+  const notes = [f.note(1, 0)];
+  const params = { assignment_id: f.owner.id, notes };
+  f.time = 15 * MIN;
+  f.state = apply(
+    f.state,
+    value(recordStandingPmStallRedelivery(f.state, system, params, f.io)),
+  );
+  f.time = 20 * MIN;
+  const begun = value(
+    beginStandingPmStallRestart(f.state, system, { ...params, snapshot }, f.io),
+  );
+  f.state = apply(f.state, begun);
+  expect(
+    pendingHostOpsActions(f.state.events).find(
+      (x) => x.action_id === begun.data.action_id,
+    ),
+  ).toMatchObject({
+    tool: "host_ops_restart_standing_pm",
+    standing_pm_stall: true,
+  });
+});

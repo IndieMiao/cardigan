@@ -54,6 +54,15 @@ export type StandingPmStallEscalation =
 export interface StandingPmStallContext {
   /** The bound terminal belongs to another runtime: this host cannot stop it. */
   readonly foreign_runtime?: boolean;
+  /**
+   * First actual failure to begin this episode's due restart (e.g. no launch
+   * snapshot, or the intent was refused). A restart that was never attempted
+   * (a late or delayed patrol) is not a failure and is attempted first.
+   */
+  readonly restart_failed?: {
+    readonly episode_id: string;
+    readonly since: string;
+  };
 }
 interface StallBase {
   readonly assignment_id: Assignment["id"];
@@ -207,9 +216,10 @@ export function planStandingPmStall(
           ? "session_maintenance"
           : a.machine_id !== "local" || context.foreign_runtime
             ? "not_local"
-            : // The restart was due a grace ago but could not be begun
-              // (e.g. no launch snapshot): stop retrying silently.
-              waited >= 2 * policy.grace_ms
+            : // Attempts have kept failing for a full grace: stop retrying
+              // silently. A late patrol alone never counts as a failure.
+              context.restart_failed?.episode_id === episode &&
+                elapsed(context.restart_failed.since) >= policy.grace_ms
               ? "restart_unavailable"
               : undefined;
     return reason
@@ -355,6 +365,7 @@ export function beginStandingPmStallRestart(
       target_id: a.id,
       reason: "常驻 PM 通知长时间未投递，重投后仍没有新 Run，系统重开会话。",
       snapshot: p.snapshot,
+      standing_pm_stall: true,
     });
     const event = record(
       d,

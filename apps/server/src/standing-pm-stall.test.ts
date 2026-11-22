@@ -5,11 +5,16 @@ import {
   requestDecision,
   STANDING_PM_STALL_EVENTS,
 } from "@cardigan/domain";
-import { StandingPmRecovery, standingPmStallPolicy } from "@cardigan/host";
+import {
+  HostOpsService,
+  StandingPmRecovery,
+  standingPmStallPolicy,
+} from "@cardigan/host";
 import { moveNotification, standingResolver } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
+import { acknowledgeInbox, routeStreamEvents } from "./dispatch-inbox.js";
 
 const MIN = 60_000;
 function required<T>(value: T | undefined): T {
@@ -348,16 +353,22 @@ function idlePm(owns: (ref: RuntimeRef) => boolean = () => true) {
     pm,
     f.target.card.id,
   );
-  const recovery = new StandingPmRecovery(
-    f.store,
-    f.clock,
-    f.runtime,
-    new AbortController().signal,
-    undefined,
-    owns,
-  );
+  const patrol = () =>
+    new StandingPmRecovery(
+      f.store,
+      f.clock,
+      f.runtime,
+      new AbortController().signal,
+      standingPmStallPolicy(),
+      owns,
+    );
+  let recovery = patrol();
   const tick = (snapshot = f.options.snapshot) =>
     recovery.tick(f.project, snapshot);
+  /** A host restart: in-memory patrol state is gone. */
+  const reboot = () => {
+    recovery = patrol();
+  };
   const events = (type: string) =>
     f.state().events.filter((e) => e.type === type);
   const note = () =>
@@ -371,7 +382,7 @@ function idlePm(owns: (ref: RuntimeRef) => boolean = () => true) {
       .listNotifications({ project_id: f.project })
       .filter((n) => n.event_id === id)
       .map((n) => n.recipient);
-  return { f, pm, tick, events, note, recipients };
+  return { f, pm, tick, events, note, recipients, reboot };
 }
 
 test("V-2944: a terminal on another runtime is escalated to host ops; no restart, no human action", async () => {
@@ -482,7 +493,8 @@ test("V-2944: without an active host_ops the escalation waits, then reaches one 
   f.advance(MIN);
   await tick();
   await tick();
-  expect(events("standing_pm_stall_handoff_delivered")).toMatchObject([
+  const handoffs = events("standing_pm_stall_handoff_delivered");
+  expect(handoffs).toMatchObject([
     {
       payload: {
         escalation_id: escalated?.id,
@@ -490,8 +502,121 @@ test("V-2944: without an active host_ops the escalation waits, then reaches one 
       },
     },
   ]);
-  expect(recipients(escalated?.id)).toEqual([
+  // The notice is bound to the new handoff, not the earlier waiting event.
+  expect(recipients(handoffs[0]?.id)).toEqual([
     { kind: "assignment", assignment_id: f.ops.id },
   ]);
+  expect(recipients(escalated?.id)).toEqual([]);
   expect(f.state().human_actions).toEqual([]);
+});
+
+test("V-2959: a runtime change between intent and execution goes to host ops, never to the human", async () => {
+  let owns = true;
+  const { f, tick, events, recipients } = idlePm(() => owns);
+  f.advance(15 * MIN);
+  await tick();
+  f.advance(5 * MIN);
+  await tick();
+  const [restart] = events(STANDING_PM_STALL_EVENTS.restart);
+  expect(restart).toBeDefined();
+  // The host now runs on another runtime and executes the persisted intent.
+  owns = false;
+  const svc = new HostOpsService({ ...f.options, ownsRuntimeRef: () => owns });
+  try {
+    await svc.tick();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.state().human_actions).toEqual([]);
+    expect(
+      events("host_ops_action_deferred").map(
+        (e) => (e.payload as { reason?: string }).reason,
+      ),
+    ).toContain("当前主机无法确认旧会话退出");
+    f.advance(5 * MIN);
+    await tick();
+    await svc.tick();
+    const [escalated] = events(STANDING_PM_STALL_EVENTS.escalate);
+    expect(escalated?.payload).toMatchObject({
+      reason: "restart_unconfirmed",
+      handoff: "host_ops",
+    });
+    expect(recipients(escalated?.id)).toEqual([
+      { kind: "assignment", assignment_id: f.ops.id },
+    ]);
+    expect(f.state().human_actions).toEqual([]);
+    expect(
+      f.state().runs.filter((r) => r.trigger_event_id === restart?.id),
+    ).toEqual([]);
+  } finally {
+    await svc.close();
+  }
+});
+
+test("V-2959: a late first patrol after a reboot attempts the restart instead of escalating", async () => {
+  const { f, tick, events, reboot } = idlePm();
+  const ready = vi.fn(f.options.snapshot);
+  f.advance(15 * MIN);
+  await tick(ready);
+  expect(events(STANDING_PM_STALL_EVENTS.redeliver)).toHaveLength(1);
+  reboot();
+  f.advance(11 * MIN);
+  await tick(ready);
+  expect(ready).toHaveBeenCalledTimes(1);
+  expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(1);
+  expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(0);
+});
+
+test("V-2959: a short valid grace with regular 30-second patrols still attempts the restart", async () => {
+  vi.stubEnv("CARDIGAN_STANDING_PM_STALL_GRACE_MS", "10000");
+  try {
+    const { f, tick, events } = idlePm();
+    const ready = vi.fn(f.options.snapshot);
+    f.advance(15 * MIN);
+    await tick(ready);
+    f.advance(30_000);
+    await tick(ready);
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(1);
+    expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(0);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+test("V-2959: host ops that read the waiting notice still get a bell for the later handoff", async () => {
+  const { f, tick, events } = idlePm(() => false);
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...f.ops, status: "suspended" }),
+  );
+  f.advance(15 * MIN);
+  await tick();
+  f.advance(5 * MIN);
+  await tick();
+  const [wait] = events(STANDING_PM_STALL_EVENTS.escalate);
+  expect(wait?.payload).toMatchObject({ handoff: "waiting_host_ops" });
+  const card = required(wait?.card_id);
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...f.ops, status: "active" }),
+  );
+  // The returning operator reads the card first and acknowledges it.
+  const read = f.store.getUpdates({ project_id: f.project, card_id: card });
+  expect(
+    f.store.ackEvents({
+      project_id: f.project,
+      card_id: card,
+      assignment_id: f.ops.id,
+      up_to_seq: read.latest_seq,
+    }).ok,
+  ).toBe(true);
+  f.advance(MIN);
+  await tick();
+  const [sent] = events("standing_pm_stall_handoff_delivered");
+  expect(sent?.seq).toBeGreaterThan(read.latest_seq);
+  routeStreamEvents(f.store, f.project, card, { clock: f.clock });
+  acknowledgeInbox(f.store, f.project, undefined, f.clock);
+  const forOps = f.store
+    .listNotifications({ project_id: f.project, assignment_id: f.ops.id })
+    .filter((n) => n.event_id === sent?.id);
+  expect(forOps.map((n) => n.status)).toEqual(["pending"]);
+  await tick();
+  expect(events("standing_pm_stall_handoff_delivered")).toHaveLength(1);
 });

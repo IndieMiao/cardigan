@@ -77,13 +77,40 @@ export class StandingPmRecovery {
     /** False only when this host cannot stop the bound terminal (C-152). */
     private owns: (ref: RuntimeRef) => boolean = () => true,
   ) {}
-  /** Last restart preparation failure, kept for the escalation's audit only. */
-  private readonly failures = new Map<Assignment["id"], string>();
+  /**
+   * First actual failure to begin the due restart of an episode. Only a real
+   * attempt records one; the planner escalates once it is a grace old.
+   */
+  private readonly failures = new Map<
+    Assignment["id"],
+    { episode_id: string; since: string; reason: string }
+  >();
 
   private context(a: Assignment): StandingPmStallContext {
-    return a.runtime_ref && !this.owns(a.runtime_ref)
-      ? { foreign_runtime: true }
-      : {};
+    const failed = this.failures.get(a.id);
+    return {
+      ...(a.runtime_ref && !this.owns(a.runtime_ref)
+        ? { foreign_runtime: true }
+        : {}),
+      ...(failed
+        ? {
+            restart_failed: {
+              episode_id: failed.episode_id,
+              since: failed.since,
+            },
+          }
+        : {}),
+    };
+  }
+
+  private failed(a: Assignment, plan: StandingPmStallPlan, reason: string) {
+    const prior = this.failures.get(a.id);
+    const episode_id = plan.episode_id ?? "";
+    this.failures.set(a.id, {
+      episode_id,
+      since: prior?.episode_id === episode_id ? prior.since : this.clock.now(),
+      reason,
+    });
   }
 
   /** The PM's own undelivered rows, resolved like the dispatcher's inbox. */
@@ -176,19 +203,16 @@ export class StandingPmRecovery {
       if (plan.stage === "restart") {
         try {
           launch = await snapshot(a, project);
-          this.failures.delete(a.id);
         } catch {
           // Retried on the next patrol; the planner escalates once the
-          // restart is a full grace overdue.
-          this.failures.set(a.id, "launch_snapshot_unavailable");
+          // first actual failure is a full grace old.
+          this.failed(a, plan, "launch_snapshot_unavailable");
           continue;
         }
       }
       const failure = this.failures.get(a.id);
-      if (plan.stage === "escalate" && failure) {
-        observation = `${observation}; ${failure}`;
-        this.failures.delete(a.id);
-      }
+      if (plan.stage === "escalate" && failure)
+        observation = `${observation}; ${failure.reason}`;
       if (this.signal.aborted) return;
       this.apply(project, a, plan, observation, launch);
     }
@@ -243,7 +267,9 @@ export class StandingPmRecovery {
         );
         if (!effect.ok) continue;
         persistEffect(tx, project, effect.value);
-        this.notify(project, escalation, {
+        // Bound to the new handoff (it references the escalation): reading
+        // the earlier waiting notice does not acknowledge this assignment.
+        this.notify(project, effect.value.data, {
           kind: "assignment",
           assignment_id: ops.id,
         });
@@ -326,7 +352,12 @@ export class StandingPmRecovery {
           { ...params, snapshot: launch },
           ports,
         );
-        if (effect.ok) persistEffect(tx, project, effect.value);
+        if (effect.ok) {
+          persistEffect(tx, project, effect.value);
+          this.failures.delete(a.id);
+        } else if (effect.error.code !== "stale_target")
+          // The intent itself was refused: an actual failure to begin.
+          this.failed(owner, plan, `restart_refused:${effect.error.code}`);
         return;
       }
       const ops = this.hostOps(fresh, owner);
@@ -338,6 +369,7 @@ export class StandingPmRecovery {
       );
       if (!effect.ok) return;
       persistEffect(tx, project, effect.value);
+      this.failures.delete(a.id);
       const event = effect.value.data.event;
       // Host operations own the follow-up. Without one the escalation stays
       // waiting (delivered when one comes on duty); an existing other PM
