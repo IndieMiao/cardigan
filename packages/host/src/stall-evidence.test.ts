@@ -145,6 +145,29 @@ test("remote recovery needs both the bound generation's OS exit and its finished
     target: identity.machine,
   };
   const status = vi.spyOn(worker, "workerFiles").mockResolvedValue(reply);
+  let groupAlive = false;
+  const group = vi
+    .spyOn(worker, "agentProcessCommand")
+    .mockImplementation(async (config, argv) => {
+      expect(config).toBe(execution);
+      expect(argv.slice(-3)).toEqual(["42", "42", "1000"]);
+      // Run the actual worker probe, substituting only the OS observations.
+      const fixture = `import os, sys
+calls = []
+def query(pid, sig):
+    assert sig == 0
+    calls.append(pid)
+    if pid == -42 and ${groupAlive ? "True" : "False"}: return
+    raise ProcessLookupError()
+os.kill = query
+os.geteuid = lambda: 1000
+${argv[3]}
+assert calls == [42, -42]`;
+      return {
+        file: "python3",
+        args: ["-IB", "-c", fixture, ...argv.slice(-3)],
+      };
+    });
   const runtime = {
     status: vi.fn(async () => ({
       ok: true,
@@ -158,6 +181,11 @@ test("remote recovery needs both the bound generation's OS exit and its finished
     expect(
       await stallEvidence(s, a, runtime, execution, undefined, "R-1"),
     ).toMatchObject({ can_restart: true });
+    groupAlive = true;
+    expect(
+      await stallEvidence(s, a, runtime, execution, undefined, "R-1"),
+    ).toMatchObject({ can_restart: false });
+    groupAlive = false;
     status.mockResolvedValue({
       ...reply,
       process: { ...identity, start: "other" },
@@ -183,5 +211,6 @@ test("remote recovery needs both the bound generation's OS exit and its finished
     expect(runtime.release).not.toHaveBeenCalled();
   } finally {
     status.mockRestore();
+    group.mockRestore();
   }
 });

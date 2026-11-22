@@ -211,6 +211,17 @@ export async function observeTurnOwner(
   }
   return exact;
 }
+// A worker marker only observes the leader. A surviving process group can
+// still write to the checkout after that leader (and its terminal) exited.
+// Signal zero queries existence only; permission errors and PID reuse block.
+const groupGone = `import os, sys
+pid, group, uid = map(int, sys.argv[1:])
+if min(pid, group) <= 1 or os.geteuid() != uid: sys.exit(1)
+for process in (pid, -group):
+    try: os.kill(process, 0)
+    except ProcessLookupError: continue
+    sys.exit(1)
+print("gone")`;
 /** Remote recovery only settles an already exited registered launch. The
  * worker journal and terminal observations are independent; a missing row,
  * PID reuse alone, or an unbound status response cannot authorize release. */
@@ -252,10 +263,29 @@ export async function remoteStallExit(
       },
       "status",
     );
-    return (
-      evidence.observed === "exited" &&
-      isDeepStrictEqual(launch.process, evidence.process)
-    );
+    const registered = launch.process;
+    if (
+      evidence.observed !== "exited" ||
+      !isDeepStrictEqual(registered, evidence.process) ||
+      registered.machine !== execution.target.fingerprint ||
+      registered.terminal !== gen.generation ||
+      ![registered.pid, registered.process_group].every(
+        (id) => Number.isSafeInteger(id) && id > 1,
+      ) ||
+      !Number.isSafeInteger(registered.uid) ||
+      registered.uid <= 0
+    )
+      return false;
+    const cmd = await agentProcessCommand(execution, [
+      "/usr/bin/python3",
+      "-IB",
+      "-c",
+      groupGone,
+      String(registered.pid),
+      String(registered.process_group),
+      String(registered.uid),
+    ]);
+    return (await captureTranscript(cmd.file, cmd.args)).trimEnd() === "gone";
   } catch {
     return false;
   }
