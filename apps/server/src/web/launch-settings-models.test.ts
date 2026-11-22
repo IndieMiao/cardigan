@@ -589,3 +589,40 @@ test("a refresh that keeps older fields is reported stale and is not downloaded 
   await lists.list(settingsFile(), "anthropic");
   expect(downloads).toHaveBeenCalledOnce();
 });
+
+test("a fresh catalog is reused only until its configured age limit, not the retry interval", async () => {
+  writeFileSync(
+    join(dir, "launch.yaml"),
+    `${config}model_catalog: { max_age_ms: 2000 }\n`,
+  );
+  let clock = Date.parse("2026-11-22T00:00:00.000Z");
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({ ...catalog, fetched_at: new Date(clock).toISOString() }),
+  );
+  const downloads = vi.fn(async () =>
+    Response.json({
+      anthropic: {
+        models: { "claude-fixture-next": { limit: { context: 1000 } } },
+      },
+    }),
+  );
+  const lists = new ModelLists(h.dataDir, {
+    fetch: (async (url: string | URL, init?: RequestInit) =>
+      String(url) === "https://models.dev/api.json"
+        ? downloads()
+        : network(url, init)) as typeof fetch,
+    now: () => clock,
+  });
+  const first = await lists.list(settingsFile(), "anthropic");
+  expect(first.catalog.status).toBe("ok");
+  clock += 1000;
+  await lists.list(settingsFile(), "anthropic");
+  expect(downloads).not.toHaveBeenCalled();
+  // Past max_age_ms (but well inside the 60-second retry interval).
+  clock += 2000;
+  const later = await lists.list(settingsFile(), "anthropic");
+  expect(downloads).toHaveBeenCalledOnce();
+  expect(later.catalog.status).toBe("ok");
+  expect(later.models.map((m) => m.id)).toContain("claude-fixture-next");
+});

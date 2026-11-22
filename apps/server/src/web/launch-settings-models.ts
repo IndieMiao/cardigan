@@ -129,15 +129,13 @@ export class ModelLists {
       }).catch(() => undefined),
     };
     this.catalog = entry;
-    // A fresh snapshot is reused for the catalog's own age limit; anything
-    // else waits at least the retry interval before downloading again.
+    // A fresh snapshot is reused until the catalog's own age limit; anything
+    // else waits the retry interval before downloading again.
     void entry.value.then((snapshot) => {
       if (snapshot?.fresh && this.catalog === entry)
-        entry.until = Math.max(
-          entry.until,
+        entry.until =
           Date.parse(snapshot.fetched_at) +
-            (file.config.model_catalog?.max_age_ms ?? DAY_MS),
-        );
+          (file.config.model_catalog?.max_age_ms ?? DAY_MS);
     });
     return entry.value;
   }

@@ -343,6 +343,56 @@ test("a typed ID can be checked online before saving; editing it drops the resul
   expect(api.previewLaunchChange).not.toHaveBeenCalled();
 });
 
+test("editing the ID while a check runs drops it: A→B→A can be checked again, and the late reply is ignored (V-2827:1)", async () => {
+  const pending: ((status: "listed" | "not_listed") => void)[] = [];
+  const checkLaunchModel = vi.fn(
+    (_version: string, provider: string, model: string) =>
+      new Promise<{
+        provider: string;
+        model: string;
+        status: "listed" | "not_listed";
+      }>((resolve) => {
+        pending.push((status) => resolve({ provider, model, status }));
+      }),
+  ) as CardiganClient["checkLaunchModel"] & ReturnType<typeof vi.fn>;
+  const api = harness({ checkLaunchModel });
+  const form = await editProfile(api.client, "claude-opus");
+  const input = modelField(form);
+  await waitFor(() => expect(hintOf(input)).toContain("别名"));
+  const button = () => within(form).getByRole("button", { name: /核对/ });
+  // ① Check A; it stays in flight.
+  fireEvent.change(input, { target: { value: "gateway-a" } });
+  fireEvent.click(button());
+  expect(button().textContent).toBe("正在核对…");
+  // ② Edit to B without checking: nothing runs for B.
+  fireEvent.change(input, { target: { value: "gateway-b" } });
+  expect(button().textContent).toBe("在线核对");
+  // ③ A's reply arrives while B is shown: dropped.
+  pending[0]?.("not_listed");
+  await Promise.resolve();
+  expect(hintOf(input)).not.toContain("Provider 未列出这个模型");
+  // ④ Back to A: no stale "正在核对…", and it can be checked again.
+  fireEvent.change(input, { target: { value: "gateway-a" } });
+  expect(button().textContent).toBe("在线核对");
+  expect(button().getAttribute("aria-disabled")).toBeNull();
+  fireEvent.click(button());
+  expect(checkLaunchModel).toHaveBeenCalledTimes(2);
+  expect(button().textContent).toBe("正在核对…");
+  // A late reply of an edited-away request never lands on the new one.
+  fireEvent.change(input, { target: { value: "gateway-b" } });
+  fireEvent.change(input, { target: { value: "gateway-a" } });
+  fireEvent.click(button());
+  expect(checkLaunchModel).toHaveBeenCalledTimes(3);
+  pending[1]?.("not_listed");
+  await Promise.resolve();
+  expect(button().textContent).toBe("正在核对…");
+  expect(hintOf(input)).not.toContain("Provider 未列出这个模型");
+  pending[2]?.("listed");
+  await waitFor(() => expect(hintOf(input)).toContain("已核对"));
+  expect(hintOf(input)).toContain("Provider 列出了这个模型");
+  expect(api.previewLaunchChange).not.toHaveBeenCalled();
+});
+
 test("a profile keeping an unsupported permission mode cannot be copied (V-2818:3)", async () => {
   const settings: LaunchSettingsView = {
     ...launchSettingsFixture,

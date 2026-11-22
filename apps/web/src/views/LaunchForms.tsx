@@ -874,8 +874,9 @@ const CHECK_RESULT: Record<LaunchModelCheck["status"], string> = {
 
 /**
  * C-564: check a typed model ID against the saved Provider's list, before
- * saving. A result belongs to one version, Provider and ID; editing any of
- * them drops it. A late reply for another ID is ignored.
+ * saving. A result belongs to one request for one version, Provider and ID;
+ * editing any of them drops it, including a request still running, so the
+ * same ID can be checked again later. A reply only lands on its own request.
  */
 function useModelCheck(
   client: CardiganClient,
@@ -886,31 +887,35 @@ function useModelCheck(
   const key = `${version}\n${provider}\n${model}`;
   const [result, setResult] = useState<{
     key: string;
+    request: number;
     state: "running" | LaunchModelCheck["status"] | { error: string };
   }>();
-  const latest = useRef(key);
-  latest.current = key;
+  const requests = useRef(0);
+  useEffect(() => {
+    setResult((prev) => (prev && prev.key !== key ? undefined : prev));
+  }, [key]);
   const start = () => {
     if (result?.key === key && result.state === "running") return;
-    setResult({ key, state: "running" });
+    requests.current += 1;
+    const request = requests.current;
+    const settle = (
+      state: "running" | LaunchModelCheck["status"] | { error: string },
+    ) =>
+      setResult((prev) =>
+        prev?.request === request ? { key, request, state } : prev,
+      );
+    setResult({ key, request, state: "running" });
     client.checkLaunchModel(version, provider, model).then(
-      (answer) => {
-        if (latest.current === key) setResult({ key, state: answer.status });
-      },
-      (error: unknown) => {
-        if (latest.current === key)
-          setResult({
-            key,
-            state: {
-              error:
-                error instanceof ApiError && error.code === "stale_snapshot"
-                  ? "启动配置已在别处修改，刷新后可重新核对"
-                  : error instanceof Error && error.message
-                    ? error.message
-                    : "核对失败",
-            },
-          });
-      },
+      (answer) => settle(answer.status),
+      (error: unknown) =>
+        settle({
+          error:
+            error instanceof ApiError && error.code === "stale_snapshot"
+              ? "启动配置已在别处修改，刷新后可重新核对"
+              : error instanceof Error && error.message
+                ? error.message
+                : "核对失败",
+        }),
     );
   };
   return { state: result?.key === key ? result.state : undefined, start };
