@@ -236,6 +236,58 @@ test("CLI and Workbench checks use only the dispatch owner's accepted browser di
   }
 });
 
+test("apply-config checks the applied environment without modifying or trusting a changed enrollment", async () => {
+  await bootstrap();
+  expect(await runWorkerCommand(["add", ...args], io, async () => true)).toBe(
+    0,
+  );
+  const draft = join(
+    configRoot,
+    "worker-onboarding/worker-a/example.runtime-workers.yaml",
+  );
+  const enrolled = readFileSync(draft, "utf8");
+  const effective = parse(enrolled);
+  const binding = effective.machines[0].projects[0];
+  binding.path = `/new/tool/bin:${binding.path}`;
+  binding.env = { ANDROID_HOME: "/new/sdk" };
+  const applied = join(configRoot, "runtime-workers.yaml");
+  writeFileSync(applied, stringify(effective), { mode: 0o600 });
+  const probe = vi.fn(
+    async (_step: string, config: ReturnType<typeof parseWorkerOnboarding>) => {
+      expect(config.worker.execution).toMatchObject({
+        path: binding.path,
+        env: binding.env,
+      });
+      return true;
+    },
+  );
+  const machine = vi
+    .spyOn(RuntimeTargets.prototype, "check")
+    .mockResolvedValue({
+      ok: true,
+      value: { machine_id: "worker-a", blockers: [], launch_enabled: false },
+    });
+  try {
+    expect(await runWorkerCommand(["apply-config", ...args], io, probe)).toBe(
+      0,
+    );
+    expect(probe).toHaveBeenCalledTimes(WORKER_PROBES.length);
+    expect(machine).toHaveBeenCalledTimes(1);
+    expect(readFileSync(draft, "utf8")).toBe(enrolled);
+    probe.mockClear();
+    machine.mockClear();
+    binding.user = "different";
+    writeFileSync(applied, stringify(effective));
+    await expect(
+      runWorkerCommand(["apply-config", ...args], io, probe),
+    ).rejects.toThrow();
+    expect(probe).not.toHaveBeenCalled();
+    expect(machine).not.toHaveBeenCalled();
+  } finally {
+    machine.mockRestore();
+  }
+});
+
 test("a changed session offers exact-digest confirmation and preserves CLI config selection", async () => {
   await bootstrap();
   const probe = vi.fn(async () => true);

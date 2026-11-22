@@ -274,7 +274,9 @@ export class RuntimeTargets implements Runtime {
         const a = tx.assignments.get(project, r.assignment_id);
         if (a?.machine_id !== machine || a.status !== "active") return false;
         const old =
-          r.launch_publication?.target ??
+          (r.launch_publication?.phase !== "exited"
+            ? r.launch_publication?.target
+            : undefined) ??
           (r.status !== "queued" ? a.runtime_ref?.target : undefined);
         return (
           old &&

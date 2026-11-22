@@ -301,6 +301,8 @@ def workspace_snapshot(workspace, path, branch, generation):
         return workspace.git(path, list(args)).rstrip('\n')
     require(git('rev-parse', '--show-toplevel') == path and git('symbolic-ref', 'HEAD') == 'refs/heads/' + branch)
     require(git('rev-parse', '--path-format=absolute', '--git-common-dir') == workspace.repo + '/.git')
+    # Ignored user files cannot be assumed disposable or safe to send to the controller.
+    require(not git('ls-files', '--others', '--ignored', '--exclude-standard', '-z'))
     # Do not claim that a gitlink or sparse checkout contains the underlying files.
     require(all(entry.startswith('H ') for entry in git('ls-files', '-v', '-z').split('\0') if entry))
     head = git('rev-parse', '--verify', 'HEAD^{commit}')

@@ -269,11 +269,10 @@ export async function workerFiles(
                   ? "reply_too_large"
                   : "unknown (stderr omitted)";
           const Failure =
-            (code === 255 &&
-              /(?:connection refused|connection timed out|no route to host|network is unreachable)/iu.test(
-                text,
-              )) ||
-            summary === "timeout"
+            code === 255 &&
+            /(?:connection refused|connection timed out|no route to host|network is unreachable)/iu.test(
+              text,
+            )
               ? WorkerTransportUnavailable
               : WorkerPreparationFailure;
           reject(

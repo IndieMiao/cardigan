@@ -1,6 +1,7 @@
 import type { Actor } from "../entities.js";
 import type { AssignmentId, EventId } from "../ids.js";
 import {
+  remoteWorkerExitPending,
   remoteWorkerLosses,
   remoteWorkerLossReleased,
   type WorkerRecoveryBackup,
@@ -200,6 +201,7 @@ export function reportRemoteWorkerAlive(
       return;
     }
     if (
+      remoteWorkerExitPending(state.events, loss) &&
       state.events.some(
         (e) =>
           e.type === "remote_worker_alive" &&

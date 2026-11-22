@@ -896,6 +896,10 @@ export interface NeedsAction
     AuthorView {
   readonly terminal?: import("@cardigan/domain").ActionCommand;
   readonly requires_loss_conclusion?: boolean;
+  readonly last_loss_observation?: {
+    readonly conclusion: "unconfirmed";
+    readonly at: string;
+  };
   readonly helper_checks?: import("@cardigan/domain").HumanAction["helper_checks"];
   readonly card_id: string | null;
   readonly why: string;

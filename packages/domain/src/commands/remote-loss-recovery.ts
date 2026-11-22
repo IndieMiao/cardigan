@@ -1,5 +1,5 @@
 import type { RemoteWorkerLoss } from "../remote-worker-loss.js";
-import { transition } from "../transitions.js";
+import { reconnectRun, transition } from "../transitions.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
 
 /** A correction removes just this loss fence. Never re-issue a token, change
@@ -35,7 +35,7 @@ export function correctRemoteLoss(d: CommandDraft, loss: RemoteWorkerLoss) {
     if (r.status === "unknown")
       d.put("runs", {
         ...r,
-        status: unwrap(transition("run", r.status, "reconnected")),
+        status: unwrap(reconnectRun(r)),
       });
   d.emit(
     "remote_worker_loss_corrected",

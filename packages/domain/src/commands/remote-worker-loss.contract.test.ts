@@ -30,7 +30,7 @@ import {
 const system = { kind: "system" as const, project_id: human.project_id };
 const owner = id("assignment", 1);
 const backup = { sha: "a".repeat(40), at: now, branch: "agent/C-1/W-1" };
-function setup() {
+function setup(started = true) {
   const original = fixture();
   const state = {
     ...original,
@@ -52,7 +52,13 @@ function setup() {
         : a,
     ),
     runs: original.runs.map((r) =>
-      r.assignment_id === owner ? { ...r, status: "unknown" as const } : r,
+      r.assignment_id === owner
+        ? {
+            ...r,
+            status: "unknown" as const,
+            ...(started ? { started_at: now } : {}),
+          }
+        : r,
     ),
   };
   const io = ports();
@@ -542,6 +548,72 @@ test("alive arriving after human confirmation invalidates it before release or a
   ).toBe(false);
 });
 
+test("a later legacy human exit confirmation resolves only its matching post-release sighting", () => {
+  const f = setup();
+  f.confirm();
+  const released = f.release();
+  const next = value(
+    assign(
+      released,
+      human,
+      {
+        work_item_id: id("work_item", 1),
+        role_id: "coder",
+        machine_id: "local",
+        recovery_source: "main",
+      },
+      f.io,
+    ),
+  );
+  const state = apply(released, next);
+  const alive = apply(
+    state,
+    value(
+      reportRemoteWorkerAlive(state, system, f.request.data.action_id, f.io),
+    ),
+  );
+  const opened = alive.events.find((e) => e.type === "human_action_requested");
+  const done = alive.events.find((e) => e.type === "human_action_completed");
+  if (!opened || !done) throw new Error("Missing exit confirmation");
+  const H = id("human_action", 999);
+  const legacy = [
+    ...alive.events,
+    {
+      ...opened,
+      id: f.io.ids.nextEventId(),
+      payload: {
+        host_ops_action_id: f.request.data.action_id,
+        human_action_id: H,
+        assignment_id: owner,
+      },
+    },
+  ];
+  const completed = {
+    ...done,
+    id: f.io.ids.nextEventId(),
+    payload: { human_action_id: H },
+  };
+  expect(
+    hostOpsPending([...legacy, { ...completed, actor: system }], next.data.id),
+  ).toBe(true);
+  expect(hostOpsPending([...legacy, done], next.data.id)).toBe(true);
+  const confirmed = { ...alive, events: [...legacy, completed] };
+  expect(hostOpsPending(confirmed.events, next.data.id)).toBe(false);
+  const again = apply(
+    confirmed,
+    value(
+      reportRemoteWorkerAlive(
+        confirmed,
+        system,
+        f.request.data.action_id,
+        f.io,
+      ),
+    ),
+  );
+  expect(hostOpsPending(again.events, next.data.id)).toBe(true);
+  expect(again.assignments).toEqual(confirmed.assignments);
+});
+
 test("no backup cannot authorize a backup restore; pending finish is discarded during confirmed failure settlement", () => {
   const f = setup();
   const requested = value(
@@ -840,6 +912,62 @@ test("remote H requires an explicit conclusion; a false alarm never releases or 
   ).toBe(false);
 });
 
+test.each(["observer", "human"])(
+  "a %s correction before first acknowledgement restores dispatch, not a start",
+  (source) => {
+    const f = setup(false);
+    const before = {
+      ...f.current,
+      work_items: f.current.work_items.map((w) =>
+        w.id === id("work_item", 1) ? { ...w, status: "ready" as const } : w,
+      ),
+    };
+    const state =
+      source === "observer"
+        ? apply(
+            before,
+            value(
+              reportRemoteWorkerAlive(
+                before,
+                system,
+                f.request.data.action_id,
+                f.io,
+              ),
+            ),
+          )
+        : apply(
+            before,
+            value(
+              completeHumanAction(
+                before,
+                human,
+                {
+                  human_action_id: f.action.id,
+                  conclusion: "false_alarm",
+                  text: "核实仍在运行",
+                },
+                f.io,
+              ),
+            ),
+          );
+    const run = state.runs.find((r) => r.assignment_id === owner);
+    if (!run) throw new Error("Missing Run");
+    expect(run.status).toBe("dispatched");
+    expect(run.started_at).toBeUndefined();
+    const start = value(
+      acknowledgeRun(state, actor(), { run_id: run.id }, f.io),
+    );
+    expect(start.data).toMatchObject({ status: "running", started_at: now });
+    expect(
+      apply(state, start).work_items.find((w) => w.id === id("work_item", 1))
+        ?.status,
+    ).toBe("in_progress");
+    expect(start.events.filter((e) => e.type === "run_started")).toHaveLength(
+      1,
+    );
+  },
+);
+
 test("an inconclusive human observation retains the same open fence until a definite answer", () => {
   const f = setup(),
     p = { human_action_id: f.action.id, text: "无法联系机器" };
@@ -857,6 +985,48 @@ test("an inconclusive human observation retains the same open fence until a defi
   expect(
     state.human_actions.find((h) => h.id === p.human_action_id),
   ).toMatchObject({ status: "open", result: { conclusion: "unconfirmed" } });
+  const later = { ...f.io, clock: { now: () => "2026-01-02T00:00:00.000Z" } };
+  const repeat = value(
+    completeHumanAction(
+      state,
+      human,
+      { ...p, conclusion: "unconfirmed", attachments: [] },
+      later,
+    ),
+  );
+  expect(repeat).toMatchObject({
+    changes: [],
+    events: [],
+    timeline: [],
+    data: { result: { at: now } },
+  });
+  const updated = value(
+    completeHumanAction(
+      state,
+      human,
+      { ...p, conclusion: "unconfirmed", text: "复核仍无法联系" },
+      later,
+    ),
+  );
+  expect(
+    updated.events.filter((e) => e.type === "remote_worker_exit_unconfirmed"),
+  ).toHaveLength(1);
+  expect(updated.data).toMatchObject({
+    status: "open",
+    result: { at: later.clock.now() },
+  });
+  for (const conclusion of ["false_alarm", "exited"] as const) {
+    expect(
+      value(
+        completeHumanAction(
+          apply(state, updated),
+          human,
+          { ...p, conclusion },
+          later,
+        ),
+      ).data.status,
+    ).toBe("done");
+  }
   expect(state.runs).toEqual(f.current.runs);
   expect(hostOpsPending(state.events, owner)).toBe(true);
   expect(

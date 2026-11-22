@@ -15,6 +15,9 @@ import { runtimeEvents } from "../test-support/runtime-events.js";
 import { startControlPlane } from "./assembly.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 
+import { readNeedsState } from "./web/needs-state.js";
+import { needsYou } from "./web/read.js";
+
 let f: ReturnType<typeof dispatchFixture>;
 let target: ReturnType<typeof f.create>;
 let events: ReturnType<typeof runtimeEvents>;
@@ -354,6 +357,43 @@ test("remote lost persists one confirmation, fences dispatch and atomically revo
   expect(f.state().runs).toHaveLength(1);
 });
 
+test("Needs You rereads the last inconclusive observation without closing the exit request", async () => {
+  await lose();
+  const action = f.state().human_actions[0];
+  if (!action) throw new Error("Missing exit request");
+  const read = () =>
+    needsYou(
+      readNeedsState(f.store, f.project),
+      f.clock.now(),
+    ).human_actions.find((h) => h.id === action.id);
+  expect(read()).toMatchObject({ requires_loss_conclusion: true });
+  expect(read()).not.toHaveProperty("last_loss_observation");
+  const observe = () =>
+    f.apply((s, a, p) =>
+      completeHumanAction(
+        s,
+        a,
+        {
+          human_action_id: action.id,
+          conclusion: "unconfirmed",
+          text: "No new evidence",
+        },
+        p,
+      ),
+    );
+  const at = f.clock.now();
+  observe();
+  f.advance(60_000);
+  observe();
+  expect(read()?.last_loss_observation).toEqual({
+    conclusion: "unconfirmed",
+    at,
+  });
+  expect(
+    f.state().events.filter((e) => e.type === "remote_worker_exit_unconfirmed"),
+  ).toHaveLength(1);
+});
+
 test("same identity reappearing after an unavailable probe withdraws the H and keeps the token", async () => {
   await lose();
   evidence = "alive";
@@ -362,6 +402,26 @@ test("same identity reappearing after an unavailable probe withdraws the H and k
   expect(owner()?.status).toBe("active");
   expect(currentRun()?.status).toBe("running");
   expect(f.store.verifyToken(token.token)).toBeDefined();
+});
+
+test("a live observation in the grace period does not start an unacknowledged dispatch", async () => {
+  const original = currentRun();
+  if (!original) throw new Error("Missing Run");
+  const { started_at: _, ...run } = original;
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, { ...run, status: "dispatched" }),
+  );
+  events.send({
+    seq: 1,
+    type: "lost",
+    terminal_ref: f.refFor(target.assignment).terminal_ref,
+  });
+  await expect.poll(() => currentRun()?.status).toBe("unknown");
+  evidence = "alive";
+  alive(2);
+  await expect.poll(() => currentRun()?.status).toBe("dispatched");
+  expect(currentRun()?.started_at).toBeUndefined();
+  expect(f.state().human_actions).toHaveLength(0);
 });
 
 test.each(["alive", "exited", "unreachable", "unknown"] as const)(

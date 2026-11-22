@@ -1472,8 +1472,42 @@ test.each([
     await expect(
       restarted.forLaunch("fixture", assignment("worker-a")),
     ).rejects.toThrow("worker_binding_draining");
-    run = { ...run, status: "completed" };
-    store.uow.run((tx) => tx.runs.put("fixture", run));
+    // A publication may outlive its process: waiting work must not drain itself.
+    if (!ref.target) throw new Error("Missing target");
+    const oldPublication = {
+      generation: "old",
+      target: ref.target,
+      phase: "preparing" as const,
+      lease_until: "2030-01-01T00:00:00.000Z",
+      agent_name: "fixture",
+      work_dir: "fixture",
+      sha: null,
+      token_id: null,
+      runtime_ref: null,
+      process: null,
+      log_offset: 0,
+      artifacts: [],
+      wait: true,
+      provision_attempted: true,
+    };
+    run = {
+      ...run,
+      status: "queued",
+      queue_reason: "awaiting_dispatch",
+      launch_publication: oldPublication,
+    };
+    store.uow.run((tx) => {
+      tx.assignments.put("fixture", { ...a, runtime_ref: null });
+      tx.runs.put("fixture", run);
+    });
+    expect(restarted.bindingState("fixture", "worker-a").pending).toBe(true);
+    store.uow.run((tx) =>
+      tx.runs.put("fixture", {
+        ...run,
+        launch_publication: { ...oldPublication, phase: "exited" },
+      }),
+    );
+    expect(restarted.bindingState("fixture", "worker-a").pending).toBe(false);
     expect(value(await restarted.check("fixture", "worker-a"))).toMatchObject({
       launch_enabled: true,
       blockers: [],

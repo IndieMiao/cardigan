@@ -9,10 +9,12 @@ import {
   RuntimeTargets,
   readOnboardingYaml,
   refreshWorkerObservations,
+  runtimeTargetBinding,
   runtimeWorkersPath,
   WORKER_STEPS,
   WorkerOnboardingError,
   type WorkerProbeRunner,
+  withWorkerEnvironment,
   workerJournalId,
   workerOnboardingStatus,
 } from "@cardigan/host";
@@ -117,6 +119,8 @@ export async function runWorkerCommand(
     const dataDir = resolveDataDir(io, flags["data-dir"]);
     const store = openStore({ dataDir });
     try {
+      let pinned: string | undefined;
+      let checkCurrent: (() => void) | undefined;
       if (mode === "apply-config") {
         const connection = await terminalExecution(io, dataDir, null, machine);
         const created = await RuntimeTargets.create({
@@ -137,23 +141,11 @@ export async function runWorkerCommand(
           return next;
         };
         while (current().pending) await delay(1000);
-        if ((await runWorkerCommand(["check", ...args], io, probe)) !== EXIT.ok)
-          return EXIT.failure;
-        current();
-        const status = await runWorkflowCommand(
-          [
-            "machine",
-            "check",
-            machine,
-            "--project",
-            project,
-            "--data-dir",
-            dataDir,
-          ],
-          io,
-        );
-        current();
-        return status;
+        pinned = pin;
+        checkCurrent = () => {
+          if (current().pending)
+            throw new CliError("绑定仍在排空", EXIT.failure);
+        };
       }
       const journal = new MachineCheckJournal(store);
       const { job, joined } = journal.claim(project, machine, "worker", "cli");
@@ -163,13 +155,27 @@ export async function runWorkerCommand(
         job,
         async (progress) => {
           progress("configuration");
-          const config = parseWorkerOnboarding(
+          const draft = parseWorkerOnboarding(
             readOnboardingYaml(
               flags.config ??
                 join(configRoot, `worker-${machine}-${project}.yaml`),
             ),
             dataDir,
           );
+          const config =
+            mode === "apply-config"
+              ? withWorkerEnvironment(
+                  draft,
+                  readOnboardingYaml(runtimeWorkersPath(io.env)),
+                  dataDir,
+                )
+              : draft;
+          if (
+            pinned &&
+            runtimeTargetBinding(config.worker).fingerprint !== pinned
+          )
+            throw new CliError("绑定已再次变更，请重新检查", EXIT.failure);
+          checkCurrent?.();
           digest = config.digest;
           if (
             config.worker.project_id !== project ||
@@ -223,7 +229,8 @@ export async function runWorkerCommand(
             config,
             configRoot,
             dataDir,
-            mode,
+            mode: mode === "apply-config" ? "check" : mode,
+            ...(mode === "apply-config" ? { appliedEnvironment: true } : {}),
             ...(flags["confirm-config"]
               ? { confirmConfig: flags["confirm-config"] }
               : {}),
@@ -237,6 +244,7 @@ export async function runWorkerCommand(
               );
             },
           });
+          checkCurrent?.();
           if (passed) progress("capabilities");
           await refreshWorkerObservations(
             store,
@@ -244,7 +252,9 @@ export async function runWorkerCommand(
             passed,
             io.env,
             {
-              ...(mode === "check" ? { fullWorkerCheckId: job.id } : {}),
+              ...(mode === "check" || mode === "apply-config"
+                ? { fullWorkerCheckId: job.id }
+                : {}),
               browsersPath: () =>
                 loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
                   ?.browsers_path,
@@ -257,6 +267,23 @@ export async function runWorkerCommand(
           failed_steps: ok ? [] : [failed],
         }),
       );
+      if (passed && mode === "apply-config") {
+        checkCurrent?.();
+        const status = await runWorkflowCommand(
+          [
+            "machine",
+            "check",
+            machine,
+            "--project",
+            project,
+            "--data-dir",
+            dataDir,
+          ],
+          io,
+        );
+        checkCurrent?.();
+        return status;
+      }
       if (passed)
         io.stdout(
           "接入检查通过；未启用远程派发。MCP 已验证 HTTPS 可达和未鉴权拒绝，启动鉴权由运行目标检查负责。",

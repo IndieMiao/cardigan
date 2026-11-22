@@ -284,6 +284,41 @@ export function parseWorkerOnboarding(
   }
 }
 
+/** Replace only PATH and the validated tool environment for this exact binding.
+ * Keep every enrollment/identity field for the ordinary digest and conflict checks. */
+export function withWorkerEnvironment(
+  config: WorkerOnboardingConfig,
+  source: unknown,
+  dataDir: string,
+) {
+  const { worker, runtime, digest: _digest, ...metadata } = config;
+  const raw = onboardingObject(source);
+  const machine =
+    Array.isArray(raw.machines) &&
+    raw.machines.find((m) => m?.id === worker.machine_id);
+  const binding =
+    machine &&
+    Array.isArray(machine.projects) &&
+    machine.projects.find(
+      (p: Record<string, unknown>) => p?.project_id === worker.project_id,
+    );
+  if (!binding) return onboardingFail("worker_config_conflict");
+  const machines = runtime.machines.map((m) => ({
+    ...m,
+    projects: (m.projects as Record<string, unknown>[]).map(
+      ({ path: _path, env: _env, ...p }) => ({
+        ...p,
+        path: binding.path,
+        ...(binding.env === undefined ? {} : { env: binding.env }),
+      }),
+    ),
+  }));
+  return parseWorkerOnboarding(
+    { version: 1, ...metadata, runtime: { ...runtime, machines } },
+    dataDir,
+  );
+}
+
 type BindingSource = "applied" | "draft";
 
 function onboardingBindingDigest(

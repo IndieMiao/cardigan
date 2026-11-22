@@ -139,12 +139,21 @@ export function completeActionDraft(
       "illegal_transition",
       "只能记录未结待办的核对结果",
     );
+    const previous = action.result;
+    const attachments = p.attachments ?? [];
+    if (
+      previous?.conclusion === "unconfirmed" &&
+      previous.text === p.text &&
+      previous.attachments.length === attachments.length &&
+      previous.attachments.every((id, i) => id === attachments[i])
+    )
+      return action;
     const pending: HumanAction = {
       ...action,
       result: {
         conclusion: p.conclusion,
         text: p.text,
-        attachments: p.attachments ?? [],
+        attachments,
         at: d.now,
       },
     };

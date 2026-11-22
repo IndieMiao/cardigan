@@ -86,31 +86,42 @@ export function remoteWorkerExitPending(
   events: readonly Event[],
   loss: RemoteWorkerLoss,
 ) {
-  const request = events.findLast(
+  const request = events.findLastIndex(
     (e) =>
       e.type === "human_action_requested" &&
+      e.actor.kind === "system" &&
       (e.payload as { host_ops_action_id?: string }).host_ops_action_id ===
         loss.action_id,
   );
-  const id = (request?.payload as { human_action_id?: string } | undefined)
-    ?.human_action_id;
-  const last = events.findLast(
+  if (request < 0) return true;
+  const id = (
+    events[request]?.payload as { human_action_id?: string } | undefined
+  )?.human_action_id;
+  const last = events.findLastIndex(
     (e) =>
       e.actor.kind === "system" &&
       (e.payload as { action_id?: string }).action_id === loss.action_id &&
       ["remote_worker_alive", "remote_worker_exit_observed"].includes(e.type),
   );
+  const observation = events[last];
+  // Before structured conclusions, an after-release sighting could open a new H.
+  // Only that later request and its own human completion settle that observation.
   if (
-    last?.type === "remote_worker_alive" &&
-    (last.payload as { after_release?: boolean }).after_release
+    observation?.type === "remote_worker_alive" &&
+    (observation.payload as { after_release?: boolean }).after_release &&
+    last >= request
   )
     return true;
   return (
     !id ||
     !events.some(
-      (e) =>
+      (e, i) =>
+        i > request &&
         e.type === "human_action_completed" &&
         e.actor.kind === "human" &&
+        [undefined, "exited"].includes(
+          (e.payload as { conclusion?: string }).conclusion,
+        ) &&
         (e.payload as { human_action_id?: string }).human_action_id === id,
     )
   );

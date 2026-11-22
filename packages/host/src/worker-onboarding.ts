@@ -13,6 +13,7 @@ import {
   readOnboardingYaml,
   type WorkerOnboardingConfig,
   WorkerOnboardingError,
+  withWorkerEnvironment,
 } from "./worker-onboarding-config.js";
 import {
   probeWorker,
@@ -235,6 +236,8 @@ export interface WorkerOnboardingOptions {
   readonly configRoot: string;
   readonly dataDir: string;
   readonly mode: "add" | "resume" | "check";
+  /** In check mode only, compare the effective environment against the durable enrollment. */
+  readonly appliedEnvironment?: true;
   /** Explicit acknowledgement of the exact newly parsed configuration. */
   readonly confirmConfig?: string;
   /** Only the interactive session can vouch for a completed prefix. CLI checks stay fresh. */
@@ -276,7 +279,18 @@ export async function onboardWorker(
       return onboardingFail("worker_config_confirmation_invalid");
     if (mode === "resume" && !old)
       return onboardingFail("worker_journal_missing");
-    if (old && old.digest !== config.digest && !confirmed)
+    const enrolled = options.appliedEnvironment
+      ? mode === "check" && old
+        ? withWorkerEnvironment(
+            config,
+            readOnboardingYaml(
+              join(dir.path, `${project}.runtime-workers.yaml`),
+            ),
+            dataDir,
+          )
+        : onboardingFail("worker_journal_missing")
+      : config;
+    if (old && old.digest !== enrolled.digest && !confirmed)
       return onboardingFail("worker_config_changed");
     checkWorkerDraft(
       config,
@@ -284,7 +298,7 @@ export async function onboardWorker(
       dataDir,
       "applied",
     );
-    const binding = checkReservedBindings(root, config, dataDir, confirmed);
+    const binding = checkReservedBindings(root, enrolled, dataDir, confirmed);
     // Bind before registration too: a crash before draft publication must not
     // allow a different project/ID to claim the same physical endpoint.
     if (mode !== "check" && dir.read("machine.binding") === undefined)
@@ -304,7 +318,7 @@ export async function onboardWorker(
       version: 1,
       project,
       machine,
-      digest: config.digest,
+      digest: enrolled.digest,
       operation: confirmed ? randomUUID() : (old?.operation ?? randomUUID()),
       updated_at: new Date().toISOString(),
       steps: Object.fromEntries(
@@ -342,7 +356,7 @@ export async function onboardWorker(
           const previous = readOnboardingYaml(join(dir.path, name));
           if (
             previous !== undefined &&
-            onboardingDigest(previous) !== onboardingDigest(config.runtime) &&
+            onboardingDigest(previous) !== onboardingDigest(enrolled.runtime) &&
             !confirmed
           )
             onboardingFail("worker_config_conflict");

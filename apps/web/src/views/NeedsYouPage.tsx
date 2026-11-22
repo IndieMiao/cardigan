@@ -1708,6 +1708,13 @@ function HumanAction({
       }
       time={
         <>
+          {item.last_loss_observation && (
+            <>
+              最近核对：
+              <Time value={item.last_loss_observation.at} />
+              {" · "}
+            </>
+          )}
           {waitLabel(item.waited_ms, elapsed)}
           {item.due && (
             <>
@@ -1721,11 +1728,13 @@ function HumanAction({
         <StatusTag
           status="todo"
           label={
-            item.triage === "host"
-              ? item.host_operator === "external"
-                ? "待外接操作员"
-                : "待主机操作"
-              : "待你执行"
+            item.last_loss_observation
+              ? "已记录：无法确认"
+              : item.triage === "host"
+                ? item.host_operator === "external"
+                  ? "待外接操作员"
+                  : "待主机操作"
+                : "待你执行"
           }
         />
       }
@@ -1837,16 +1846,20 @@ function HumanAction({
           if (item.requires_loss_conclusion && !conclusion) return;
           void action.run(
             [projectId, item.id, "complete", text, conclusion],
-            (key) =>
-              conclusion
-                ? client.completeAction(
-                    projectId,
-                    item.id,
-                    text,
-                    key,
-                    conclusion,
-                  )
-                : client.completeAction(projectId, item.id, text, key),
+            async (key) => {
+              if (!conclusion)
+                return client.completeAction(projectId, item.id, text, key);
+              await client.completeAction(
+                projectId,
+                item.id,
+                text,
+                key,
+                conclusion,
+              );
+              if (conclusion === "unconfirmed") {
+                setText((draft) => (draft === text ? "" : draft));
+              }
+            },
           );
         }}
       >
@@ -1855,7 +1868,7 @@ function HumanAction({
             失联结论
             <SelectControl
               required
-              aria-label="失联结论"
+              aria-label={`${item.id} 失联结论`}
               value={conclusion}
               onValueChange={(v) =>
                 setConclusion(

@@ -16,6 +16,7 @@ import {
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   type RuntimeDisconnectCause,
+  reconnectRun,
   releaseLostRemoteWorker,
   remoteWorkerLosses,
   remoteWorkerLossReleased,
@@ -431,7 +432,11 @@ export class RuntimeMonitor {
           if (alive && r.status !== "unknown") continue;
           tx.runs.put(project, {
             ...r,
-            status: unwrap(transition("run", r.status, event)),
+            status: unwrap(
+              alive
+                ? reconnectRun(r)
+                : transition("run", r.status, "connection_lost"),
+            ),
           });
         }
       }

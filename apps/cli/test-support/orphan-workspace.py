@@ -59,6 +59,20 @@ with tempfile.TemporaryDirectory() as tmp:
             assert git(central, 'show', sha + ':link') == 'mixed'
             assert subprocess.check_output(['git', '-C', central, 'show', sha + ':new']) == b'\x00\xff'
             git(central, 'fsck', '--full')
+            with (repo / '.git/info/exclude').open('a') as exclude:
+                exclude.write('\nlocal-notes/\n')
+            notes = tree / 'local-notes'
+            notes.mkdir()
+            (notes / 'draft.txt').write_text('private draft')
+            try:
+                w.operate()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('ignored user file considered backed up')
+            assert (notes / 'draft.txt').read_text() == 'private draft'
+            (notes / 'draft.txt').unlink()
+            notes.rmdir()
             (tree / 'mixed').write_text('new work')
             try:
                 w.operate()
