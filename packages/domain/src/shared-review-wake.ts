@@ -8,7 +8,7 @@ import type {
   Run,
   WorkItem,
 } from "./entities.js";
-import { eventsForDecision, eventsOfType } from "./event-index.js";
+import { eventById, eventsForDecision, eventsOfType } from "./event-index.js";
 import { pauseOwners, pendingPause } from "./review-pause.js";
 import { originalRunTrigger } from "./run-trigger.js";
 import { verificationTarget } from "./verification-activity.js";
@@ -58,19 +58,34 @@ export function parkedPauseRepair(
   owner: Assignment,
   run: Run,
 ) {
+  return run.status === "queued"
+    ? dormantRepairPause(state, owner, run)
+    : undefined;
+}
+
+function dormantRepairPause(state: CommandState, owner: Assignment, run: Run) {
   if (
     owner.scope !== "work_item" ||
     owner.id !== run.assignment_id ||
     run.kind !== "rework" ||
-    run.status !== "queued" ||
     run.started_at ||
     run.dispatch_stop ||
     run.inactivity_stop ||
-    run.bell_delivery ||
-    run.preparation_retry ||
+    (run.status === "queued" && run.bell_delivery) ||
     (run.launch_publication && run.launch_publication.phase !== "exited")
   )
     return;
+  if (run.preparation_retry) {
+    // Only the successor minted after cleanup is an idle preparation retry.
+    // repairDelivery verifies its original trigger chain below.
+    const recovery = eventById(state.events, run.trigger_event_id);
+    if (
+      recovery?.type !== "run_preparation_recovered" ||
+      (recovery.payload as { run_id?: string } | null)?.run_id !==
+        run.preparation_retry.source_run_id
+    )
+      return;
+  }
   const target = repairDelivery(state, run);
   if (
     target?.status !== "rejected" ||
@@ -346,9 +361,50 @@ export function resumableReviewWithdrawal(
     reviewRunWakeDisposition(state, owner, run)
   )
     return false;
-  return eventsOfType(state.events, "run_dispatch_deferred").some((e) => {
+  return !!withdrawalReceipt(state, owner, run, target);
+}
+
+/** For live-session reuse only. The host additionally proves that there is
+ * no remaining transport attempt in the same write transaction. */
+export function discussionWithdrawal(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+) {
+  if (run.status !== "dispatched" || !owner.runtime_ref) return;
+  // The dispatcher can pre-fill only the address before doing IO. A runtime
+  // binding, receipt, retry or any other transport fact must not be discarded.
+  const bell = run.bell_delivery;
+  if (
+    bell &&
+    (bell.run_id !== run.id ||
+      Object.keys(bell).some((k) => k !== "run_id" && k !== "card_id"))
+  )
+    return;
+  const q = dormantRepairPause(state, owner, run);
+  if (!q?.review_pause || !pauseOwners(q.review_pause).includes(owner.id))
+    return;
+  const target = repairWakeTarget(state, run);
+  return target && withdrawalReceipt(state, owner, run, target, true);
+}
+
+function withdrawalReceipt(
+  state: CommandState,
+  owner: Assignment,
+  run: Run,
+  target: Delivery,
+  requireDispatch = false,
+) {
+  // A previous admission of the same Run cannot prove this dispatch was unsent.
+  const lastDispatch = eventsOfType(state.events, "run_dispatched").findLast(
+    (e) => (e.payload as { run_id?: string } | null)?.run_id === run.id,
+  );
+  if (!lastDispatch && requireDispatch) return;
+  return eventsOfType(state.events, "run_dispatch_deferred").findLast((e) => {
     const p = e.payload as Record<string, unknown> | null;
     return (
+      (!lastDispatch ||
+        (e.card_id === lastDispatch.card_id && e.seq > lastDispatch.seq)) &&
       e.actor.kind === "system" &&
       e.actor.project_id === state.project_id &&
       p?.reason === "shared_review_paused" &&

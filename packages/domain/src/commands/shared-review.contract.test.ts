@@ -329,6 +329,71 @@ test("invariant 11: only a host's exact withdrawn repair can resume on the same 
     target_sha: f.target.subject.value,
   };
   expect(receipt.payload).toMatchObject(expected);
+  const admission = {
+    ...receipt,
+    id: f.io.ids.nextEventId(),
+    type: "run_dispatched",
+    seq: receipt.seq - 1,
+    payload: { run_id: run.id, assignment_id: producer.id },
+  };
+  const canPark = (
+    evidence: typeof s.events,
+    transportChecked = true,
+    bell_delivery?: Run["bell_delivery"],
+  ) =>
+    value(
+      refreshRunTargetWait(
+        {
+          ...s,
+          events: [...s.events, ...evidence],
+          assignments: s.assignments.map((a) =>
+            a.id !== producer.id
+              ? a
+              : {
+                  ...a,
+                  runtime_ref: {
+                    machine_id: a.machine_id,
+                    runtime_machine: "local",
+                    terminal_ref: "fixture",
+                    agent_name: "fixture",
+                  },
+                },
+          ),
+          runs: s.runs.map((r) =>
+            r.id === run.id && bell_delivery ? { ...r, bell_delivery } : r,
+          ),
+        },
+        { kind: "system", project_id: s.project_id },
+        {
+          run_id: run.id,
+          ...(transportChecked ? { no_transport_attempts: true } : {}),
+        },
+        f.io,
+      ),
+    ).events.some((e) => e.type === "run_pause_repair_requeued");
+  expect(canPark([admission, receipt])).toBe(true);
+  expect(canPark([admission, receipt], false)).toBe(false);
+  expect(canPark([receipt])).toBe(false);
+  expect(canPark([admission])).toBe(false);
+  expect(canPark([admission, { ...receipt, actor: actor() }])).toBe(false);
+  expect(
+    canPark([
+      admission,
+      {
+        ...receipt,
+        payload: { ...admission.payload, ...expected, delivery_id: "other" },
+      },
+    ]),
+  ).toBe(false);
+  expect(canPark([receipt, { ...admission, seq: receipt.seq + 1 }])).toBe(
+    false,
+  );
+  expect(
+    canPark([admission, receipt], true, {
+      run_id: run.id,
+      received_at: receipt.created_at,
+    }),
+  ).toBe(false);
   const canResume = (event = receipt) =>
     resumableReviewWithdrawal(
       { ...f.state, events: [...f.state.events, event] },

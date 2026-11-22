@@ -4,12 +4,15 @@ import {
   type ProjectId,
   type RunId,
   refreshRunTargetWait,
+  runById,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
+  listBellAttempts,
   type Store,
   type StoreTransactionContext,
+  unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
 
@@ -29,11 +32,22 @@ export function refreshTargetWait(
 ): boolean {
   return store.uow.run((tx) => {
     const state = loadCommandState(tx, project);
+    const run = runById(state.runs, run_id);
+    // Neither absence of send history nor a timeout proves non-delivery.
+    // Domain also checks for a withdrawal receipt from this dispatch.
+    const noAttempts =
+      !attempt &&
+      run?.status === "dispatched" &&
+      run.kind === "rework" &&
+      run.dispatch_target_wait?.since &&
+      !listBellAttempts(store.database, project, run_id).length &&
+      !unfinishedBellAttempts(store.database, project, run.assignment_id)
+        .length;
     const effect = unwrap(
       refreshRunTargetWait(
         state,
         { kind: "system", project_id: project },
-        { run_id },
+        { run_id, ...(noAttempts ? { no_transport_attempts: true } : {}) },
         { clock, ids: tx.ids },
       ),
     );
