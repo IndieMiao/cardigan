@@ -104,7 +104,7 @@ export function mobileSigningTool(options: MobileSigningOptions) {
   return defineTool({
     name: "request_mobile_signature",
     description:
-      "Request the one human-approved APK or iOS archive for the current Run. Returns a verified receipt and a read-only download for this Run; never publishes.",
+      "Request the one human-approved APK or iOS archive for the current Run. The first call accepts the request and returns status=pending with request_id and phase; keep this Run open and call again with the same platform (about every poll_after_seconds) to poll. Repeated calls never resend or re-sign: they return progress, or status=signed with a verified receipt and a read-only download for this Run. Never publishes.",
     input: z.object({ platform: z.enum(["android", "ios"]) }).strict(),
     handler: async ({ platform }, ctx) => {
       if (!options.signMobile)

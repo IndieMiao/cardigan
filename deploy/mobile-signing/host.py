@@ -1,6 +1,7 @@
 """Trusted control host only. No caller-supplied command, path, key reference or target."""
 import os
 from pathlib import Path
+import signal
 import subprocess
 import stat
 import sys
@@ -24,6 +25,35 @@ def ledger(root):
 
 def event(db, ctx, rid, action):
     db.execute('INSERT INTO events VALUES(?,?,?,?)', (int(time.time()), ctx, rid, action))
+
+
+class Stopped(Exception):
+    # Ends a request with a recognizable audit action instead of a silent kill.
+    def __init__(self, action):
+        super().__init__('refused')
+        self.action = action
+
+
+def stop(action):
+    def handler(_signum, _frame):
+        raise Stopped(action)
+    return handler
+
+
+# A slow link must not cut a request short: budget both directions at a
+# conservative rate. The private limits.json may override either value.
+LIMITS = {'base_seconds': (600, 60, 86400), 'bytes_per_second': (512 * 1024, 16 * 1024, 1 << 30)}
+
+
+def budget(root, size):
+    path = root / 'limits.json'
+    custom = config(path) if os.path.lexists(path) else {}
+    require(type(custom) is dict and set(custom) <= set(LIMITS))
+    values = {}
+    for k, (default, low, high) in LIMITS.items():
+        values[k] = custom.get(k, default)
+        require(type(values[k]) is int and low <= values[k] <= high)
+    return values['base_seconds'] + -(-2 * size // values['bytes_per_second'])
 
 
 def route(root, s):
@@ -91,7 +121,7 @@ def observe(db, rid, state, sha, category=None):
     return {'state': state, 'sha256': sha}
 
 
-def request(root, db, identity, fence, dial=connect):
+def request(root, db, identity, fence, dial=connect, accepted=lambda rid, seconds, mode: None):
     ctx = scope(identity)
     require(set(identity) == set(SCOPE))
     rid = None
@@ -109,12 +139,17 @@ def request(root, db, identity, fence, dial=connect):
             require(route(root,s) == peer)
             manifest(s)
 
+        # A stored output is only hashed locally; anything else may move the input and output.
+        seconds = budget(root, 0 if state == 'signed' else (directory(root,'inputs') / rid).stat().st_size)
+        signal.signal(signal.SIGALRM, stop('timed_out'))
+        signal.setitimer(signal.ITIMER_REAL, seconds)
         # A durable claim before contacting the peer. A lost reply permits lookup only.
         with transaction(db):
             fresh = db.execute("UPDATE grants SET state='pending' WHERE id=? AND NOT revoked AND state='approved'", (rid,)).rowcount == 1
             if fresh:
                 db.execute('INSERT INTO dispatch_peer VALUES(?,?)', (rid,peer))
             event(db, ctx, rid, 'request' if fresh else 'lookup')
+        accepted(rid, seconds, 'sign' if fresh else 'stored' if state == 'signed' else 'lookup')
         output = directory(root,'outputs') / rid
         if state == 'signed':
             fence()
@@ -173,9 +208,14 @@ def request(root, db, identity, fence, dial=connect):
                 pass
             finally:
                 p.stdout.close()
-    except Exception:
-        event(db,ctx,rid,'not_released')
+    except Exception as exc:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if db.in_transaction:
+            db.rollback()
+        event(db,ctx,rid,exc.action if isinstance(exc, Stopped) else 'not_released')
         raise
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def checked_output(db,rid,output):
@@ -244,7 +284,11 @@ def main():
         send(sys.stdout.buffer,b'ready')
         require(line(sys.stdin.buffer)==b'commit')
     if cmd == 'request':
-        rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence)
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, stop('interrupted'))
+        def accepted(rid, seconds, mode):
+            send(sys.stdout.buffer, f'accepted {rid} {seconds} {mode}'.encode())
+        rid, sha = request(root,db,json.loads(line(sys.stdin.buffer)),fence,accepted=accepted)
         print(rid,sha)
     elif cmd == 'permit':
         rid=sys.argv[3]
