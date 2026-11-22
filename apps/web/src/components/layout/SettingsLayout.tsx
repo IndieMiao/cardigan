@@ -1,4 +1,4 @@
-import { CircleHelp, TriangleAlert } from "lucide-react";
+import { Check, CircleHelp, TriangleAlert } from "lucide-react";
 import {
   type ComponentProps,
   type ReactNode,
@@ -565,28 +565,120 @@ export function SettingsDiff({
 export function SettingsField({
   label,
   error,
+  hint,
   children,
 }: {
   label: ReactNode;
   error?: string | undefined;
+  /**
+   * C-565: what the value is and where to find it, below the control and
+   * tied to it with `aria-describedby` (only where a card asks for it).
+   */
+  hint?: ReactNode;
   children: (field: {
     invalid: true | undefined;
     describedBy: string | undefined;
   }) => ReactNode;
 }) {
   const id = useId();
-  return (
+  const hintId = `${id}-hint`;
+  const describedBy =
+    [hint ? hintId : "", error ? id : ""].filter(Boolean).join(" ") ||
+    undefined;
+  const field = (
     <>
       {/* biome-ignore lint/a11y/noLabelWithoutControl: the control comes from `children`. */}
       <label>
         {label}
-        {children({
-          invalid: error ? true : undefined,
-          describedBy: error ? id : undefined,
-        })}
+        {children({ invalid: error ? true : undefined, describedBy })}
       </label>
+      {/* The note to correct comes first, right under the control. */}
       {error && <SettingsWarning id={id}>{error}</SettingsWarning>}
+      {hint && <SettingsFieldHint id={hintId}>{hint}</SettingsFieldHint>}
     </>
+  );
+  // A hinted field keeps its label, hint and note together (4px apart).
+  return hint ? <div className={styles.field}>{field}</div> : field;
+}
+
+/** C-565: a field's hint for controls outside `SettingsField` (a legend). */
+export function SettingsFieldHint({
+  id,
+  children,
+}: {
+  id: string;
+  children: ReactNode;
+}) {
+  return (
+    <div id={id} className={styles.fieldHint}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * C-565: the whole path of a multi-step drawer, shown from its first screen.
+ * Steps before `current` are done; `current` equal to the number of steps
+ * means all are done. A `failed` step (e.g. checks that did not pass) is
+ * never shown as done, also when the reader has moved on to the step that
+ * fixes it; an optional step that was not needed is `skipped`, not done.
+ */
+export function SettingsSteps({
+  label,
+  steps,
+  current,
+  failed,
+  skipped,
+}: {
+  label: string;
+  steps: readonly string[];
+  current: number;
+  failed?: number | undefined;
+  skipped?: number | undefined;
+}) {
+  return (
+    <ol aria-label={label} className={styles.steps}>
+      {steps.map((step, i) => {
+        const state =
+          i === failed && i !== current
+            ? "failed"
+            : i === skipped && i < current
+              ? "skipped"
+              : i < current
+                ? "done"
+                : i === current
+                  ? "current"
+                  : "todo";
+        return (
+          <li
+            key={step}
+            data-state={state}
+            data-failed={i === failed || undefined}
+            aria-current={state === "current" ? "step" : undefined}
+          >
+            <span className={styles.stepMarker} aria-hidden="true">
+              {i === failed ? (
+                <TriangleAlert />
+              ) : state === "done" ? (
+                <Check />
+              ) : (
+                i + 1
+              )}
+            </span>
+            {step}
+            {(state === "done" || state === "skipped" || i === failed) && (
+              <span className={styles.visuallyHidden}>
+                {i === failed
+                  ? "（未通过）"
+                  : state === "skipped"
+                    ? "（未用到）"
+                    : "（已完成）"}
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

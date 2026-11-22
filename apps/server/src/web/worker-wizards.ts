@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { activeOwner, type Clock } from "@cardigan/domain";
 import {
   commitWorkerFile,
   effectiveRunLimit,
+  explicitMcpUrl,
+  loadRuntimeWorkers,
   type MachineCheckJournal,
   planWorkerFile,
   type WizardFilePlan,
   WorkerOnboardingError,
+  workerMcpConfig,
   workerWizardForm,
 } from "@cardigan/host";
 import type { ReadRepositories, Store, WebSession } from "@cardigan/store";
@@ -58,6 +62,46 @@ const preview = (plan: WizardFilePlan, now: number) => ({
   expires: now + 15 * 60_000,
   plan,
 });
+/**
+ * C-565: the HTTPS `/mcp` address to prefill the form with, from validated
+ * host configuration only: this project's remote bindings first, else one
+ * address all bindings share, else an explicit `CARDIGAN_MCP_URL` that
+ * passes the same remote-worker check (a loopback listener address never
+ * does). Nothing when the file is invalid or the bindings disagree.
+ */
+function knownMcpUrl(
+  host: WizardHost,
+  project: string,
+): { mcp_url: string; mcp_source: "workers" | "host" } | undefined {
+  let workers: ReturnType<typeof loadRuntimeWorkers>;
+  try {
+    workers = loadRuntimeWorkers(
+      host.dataDir,
+      join(host.root, "runtime-workers.yaml"),
+    );
+  } catch {
+    return undefined;
+  }
+  const urls = (list: typeof workers) => [
+    ...new Set(
+      list.flatMap((w) => (w.execution.mcp ? [w.execution.mcp.url] : [])),
+    ),
+  ];
+  const own = urls(workers.filter((w) => w.project_id === project));
+  const all = urls(workers);
+  const bound = own.length > 0 ? own : all;
+  if (bound.length === 1 && bound[0])
+    return { mcp_url: bound[0], mcp_source: "workers" };
+  if (bound.length > 1) return undefined;
+  try {
+    const explicit = explicitMcpUrl(host.env);
+    return explicit
+      ? { mcp_url: workerMcpConfig(explicit).url, mcp_source: "host" }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 function view(s: Session) {
   return {
     id: s.id,
@@ -129,6 +173,12 @@ export class WorkerWizards {
     const host = this.host;
     if (!host || this.signal.aborted)
       throw new HttpRejection(503, "unavailable", "向导服务不可用");
+    if (rest === "/worker-wizards/defaults") {
+      if (req.method !== "GET") methodNotAllowed(["GET"]);
+      return sendJson(res, 200, {
+        defaults: knownMcpUrl(host, project) ?? {},
+      });
+    }
     const match =
       /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
         rest,
@@ -204,11 +254,28 @@ export class WorkerWizards {
           : action === "confirm"
             ? ["preview_id"]
             : [];
+      // C-565: an automatic recheck names the failed check it continues.
+      const optional = action === "run" ? ["resume_check_id"] : [];
       if (
-        Object.keys(body).some((k) => !keys.includes(k)) ||
-        keys.some((k) => !(k in body))
+        Object.keys(body).some(
+          (k) => !keys.includes(k) && !optional.includes(k),
+        ) ||
+        keys.some((k) => !(k in body)) ||
+        ("resume_check_id" in body && typeof body.resume_check_id !== "string")
       )
         throw invalid();
+      // An automatic recheck only continues the failed check it saw; if the
+      // session moved on (another page continued, is checking or passed it),
+      // it must read the current state instead of starting a new check.
+      if (
+        "resume_check_id" in body &&
+        (s.phase !== "failed" || s.check_id !== body.resume_check_id)
+      )
+        throw new HttpRejection(
+          409,
+          "worker_check_changed",
+          "向导状态已改变，请重新读取。",
+        );
       if (s.phase === "running") throw stale();
       if (action === "cancel") {
         audit("cancelled", s);
