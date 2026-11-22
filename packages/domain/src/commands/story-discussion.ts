@@ -10,10 +10,12 @@ import {
   type StoryProposalChildInput,
   type StoryQuestionGroup,
 } from "../story-discussion.js";
-import { isStoryTemplate } from "../templates.js";
-import { requireCardDependencyStart } from "./card-dependencies.js";
-import { type CommandDraft, ensure, text } from "./core.js";
-import { creatableCardTemplate } from "./pm.js";
+import {
+  requireCardDependencyStart,
+  validateCardDependencyRefs,
+} from "./card-dependencies.js";
+import { attempt, type CommandDraft, ensure, text } from "./core.js";
+import { type CreateCardParams, prepareCardCreation } from "./pm.js";
 
 /** Called inside the proposal transaction. Human answers are never overwritten. */
 export function settleStoryQuestionDefaults(
@@ -31,12 +33,56 @@ export function settleStoryQuestionDefaults(
   };
 }
 
-/**
- * Shape checks a proposal can pass without opening cards. Template forms such as
- * the repository or the UI save plan are rechecked by `create_card` on confirm.
- */
+/** The fields create_card validates; only confirmation adds real sibling IDs and provenance. */
+export function storyChildForm(
+  parent_card_id: CardId,
+  child: StoryProposalChildInput,
+  sourceText = child.goal,
+): CreateCardParams {
+  return {
+    parent_card_id,
+    title: child.title,
+    goal: child.goal,
+    template_id: child.template_id,
+    acceptance_criteria: child.acceptance_criteria,
+    source: { kind: "quote", text: sourceText },
+    ...(child.priority === undefined ? {} : { priority: child.priority }),
+    ...(child.state_and_save === undefined
+      ? {}
+      : {
+          state_and_save: child.state_and_save as NonNullable<
+            Card["state_and_save"]
+          >,
+        }),
+    ...(child.repo === undefined ? {} : { repo: child.repo }),
+    ...(child.base_branch === undefined
+      ? {}
+      : { base_branch: child.base_branch }),
+  };
+}
+
+export function checkStoryChild<T>(
+  number: number,
+  title: string,
+  operation: () => T,
+): T {
+  const result = attempt(operation);
+  if (result.ok) return result.value;
+  const message = result.error.message.replace(
+    /^(.+) is required$/u,
+    "缺少 $1",
+  );
+  ensure(
+    false,
+    result.error.code,
+    `第 ${number} 张子卡「${title}」无法开出：${message}`,
+    { child: number },
+  );
+}
+
 function proposalChildren(
   d: CommandDraft,
+  story: Card,
   inputs: readonly StoryProposalChildInput[],
 ): StoryProposalChild[] {
   ensure(
@@ -52,12 +98,6 @@ function proposalChildren(
     text(c.goal, `第 ${n} 张子卡的目标`);
     text(c.template_id, `第 ${n} 张子卡的模板`);
     text(c.owner_role, `第 ${n} 张子卡的负责角色`);
-    const template = creatableCardTemplate(d, c.template_id);
-    ensure(
-      !isStoryTemplate(template),
-      "validation_failed",
-      `第 ${n} 张子卡不能是需求卡`,
-    );
     ensure(
       d.state.roles.some((r) => r.role_id === c.owner_role),
       "validation_failed",
@@ -88,7 +128,10 @@ function proposalChildren(
       `第 ${n} 张子卡的依赖须为方案内其它子卡的序号`,
     );
     const cards = [...new Set<CardId>(c.depends_on_cards ?? [])];
-    for (const id of cards) d.card(id);
+    checkStoryChild(n, c.title, () => {
+      prepareCardCreation(d, storyChildForm(story.id, c));
+      if (cards.length) validateCardDependencyRefs(d, cards);
+    });
     return {
       title: c.title,
       template_id: c.template_id,
@@ -105,11 +148,16 @@ function proposalChildren(
       ...(c.base_branch === undefined ? {} : { base_branch: c.base_branch }),
     };
   });
-  ensure(
-    storyProposalOrder(children).length === children.length,
-    "validation_failed",
-    "拆解方案的子卡依赖不能成环",
-  );
+  const order = storyProposalOrder(children);
+  if (order.length !== children.length) {
+    const blocked = children.findIndex((_, i) => !order.includes(i)) + 1;
+    ensure(
+      false,
+      "validation_failed",
+      `第 ${blocked} 张子卡的依赖无法满足：拆解方案的子卡依赖不能成环`,
+      { child: blocked },
+    );
+  }
   return children;
 }
 
@@ -194,7 +242,7 @@ export function storyDiscussionChange(
     const children =
       action.children === undefined
         ? undefined
-        : proposalChildren(d, action.children);
+        : proposalChildren(d, card, action.children);
     const proposals = story.proposals ?? [];
     const version = (proposals.at(-1)?.version ?? 0) + 1;
     return {

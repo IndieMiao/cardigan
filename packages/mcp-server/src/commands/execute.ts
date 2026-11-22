@@ -11,7 +11,7 @@ import type {
   ToolName,
   TransactionContext,
 } from "@cardigan/domain";
-import type { McpReadContext } from "../backend.js";
+import type { McpBackend, McpReadContext } from "../backend.js";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
@@ -41,6 +41,17 @@ function eventHistory(
 export function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw result.error;
   return result.value;
+}
+
+/** Read the registration on the command transaction's connection, never from card history. */
+export function projectRepositories(
+  store: Pick<McpBackend, "getProject">,
+  project_id: ProjectId,
+) {
+  const project = store.getProject?.(project_id);
+  return project?.repo_path
+    ? [{ repo: project.repo_path, base_branch: project.base_branch }]
+    : [];
 }
 
 /** Every list and event stream belongs to this transaction's project snapshot. */

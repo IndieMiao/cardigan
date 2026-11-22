@@ -1956,7 +1956,10 @@ test("Web confirms the current story proposal once: every child opens in one tra
     (await fetch(web.url + path("/needs-you"), { headers: { cookie } })).json();
 
   // A child that create_card refuses rolls every child back.
-  putStory([child("A"), child("B", { template_id: "dev" })]);
+  putStory([
+    child("A"),
+    child("B", { template_id: "dev", state_and_save: "无写入" }),
+  ]);
   const before = snapshot();
   const refused = await confirm({ version: 1 }, "refused");
   expect(refused).toMatchObject({
@@ -1967,7 +1970,9 @@ test("Web confirms the current story proposal once: every child opens in one tra
   });
   expect(snapshot()).toBe(before);
 
-  putStory([child("A"), child("B", { depends_on: [1] })]);
+  const project = s.store().getProject(s.project.project_id);
+  expect(project?.repo_path).toBeTruthy();
+  putStory([child("A"), child("B", { template_id: "dev", depends_on: [1] })]);
   expect((await readNeeds()).story_proposals).toMatchObject([
     { card_id: s.card.id, version: 1, entry_id, children: [{}, {}] },
   ]);
@@ -1989,6 +1994,8 @@ test("Web confirms the current story proposal once: every child opens in one tra
   expect(childrenOf().map((c) => c.id)).toEqual([a, b]);
   expect(childrenOf()[1]).toMatchObject({
     depends_on_cards: [a],
+    repo: project?.repo_path,
+    base_branch: project?.base_branch,
     story_source: { card_id: s.card.id, version: 1, entry_id, number: 2 },
   });
   expect(await confirm({ version: 1 }, "confirm-once")).toEqual(first);

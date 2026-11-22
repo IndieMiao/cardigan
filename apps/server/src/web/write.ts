@@ -69,6 +69,7 @@ import {
   MAX_MCP_BODY_BYTES,
   persistEffect,
   prepareAttachmentFile,
+  projectRepositories,
   ToolError,
 } from "@cardigan/mcp-server";
 import {
@@ -1234,7 +1235,15 @@ export async function serveWrite(
         "请提交所确认的拆解方案版本号。",
       );
       output = run(context, (s, a, ports) =>
-        confirmStoryProposal(s, a, { card_id, version: input.version }, ports),
+        confirmStoryProposal(
+          s,
+          a,
+          { card_id, version: input.version },
+          {
+            ...ports,
+            project_repositories: projectRepositories(c.store, a.project_id),
+          },
+        ),
       );
     } else if (operation === "recheck-merge") {
       const input = parsed(
