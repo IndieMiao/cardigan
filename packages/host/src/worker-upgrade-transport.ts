@@ -8,6 +8,7 @@ import {
   agentProcessCommand,
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
+import { AGENT_TOOLS, agentToolsRelease } from "./agent-tools.js";
 import {
   deploymentDirectory,
   requireHostDirectory,
@@ -58,18 +59,35 @@ export function upgradePrincipal(project: string, identity: string) {
         entry: "/opt/cardigan-helper-upgrade/upgrade",
       };
 }
+/** v2 entries (enrolled since C-595) also install the agent tools; v1 entries refuse them. */
+export type HelperProtocol = "v1" | "v2";
+const toolEntries = AGENT_TOOLS.map((name) => `agent-tools/${name}` as const);
 export async function signedHelperBundle(
   worker: Worker,
   project: string,
   identity: string,
   signal?: AbortSignal,
+  protocol: HelperProtocol = "v2",
 ) {
   const sha = deployed(worker.dataDir);
   const repo = join(worker.dataDir, "central", "cardigan.git");
   await requireHostDirectory(repo);
   const files: Record<string, string> = {};
+  const tools = protocol === "v2" ? agentToolsRelease() : undefined;
+  if (protocol === "v2" && !tools) return invalid();
+  const expected: Record<string, string> = {
+    ...workerHelperDigests(),
+    ...(tools
+      ? Object.fromEntries(
+          AGENT_TOOLS.map((name) => [
+            `agent-tools/${name}`,
+            tools.digests[name],
+          ]),
+        )
+      : {}),
+  };
   // Read committed blobs by the supervisor's active immutable SHA, never by cwd, ref name or worktree.
-  for (const name of helpers) {
+  for (const name of [...helpers, ...(tools ? toolEntries : [])]) {
     const { stdout } = await promisify(execFile)(
       "/usr/bin/git",
       [
@@ -90,14 +108,11 @@ export async function signedHelperBundle(
         },
         cwd: "/",
         timeout: 5000,
-        maxBuffer: 200000,
+        maxBuffer: 1024 * 1024,
         signal,
       },
     );
-    if (
-      createHash("sha256").update(stdout).digest("hex") !==
-      workerHelperDigests()[name]
-    )
+    if (createHash("sha256").update(stdout).digest("hex") !== expected[name])
       return invalid();
     files[name] = stdout.toString("base64");
   }
@@ -112,20 +127,21 @@ export async function signedHelperBundle(
     return invalid();
   if (deployed(worker.dataDir) !== sha) return invalid();
   const manifest = JSON.stringify({
-    kind: "cardigan-helper-v1",
+    kind: `cardigan-helper-${protocol}`,
     project,
     issued: Date.now(),
-    digests: workerHelperDigests(),
+    digests: expected,
   });
   const signature = sign("RSA-SHA256", Buffer.from(manifest), key).toString(
     "base64",
   );
   return { manifest, signature, files };
 }
-export async function installRelease(
+async function sendRelease(
   worker: Worker,
   project: string,
   identity: string,
+  protocol: HelperProtocol,
   signal?: AbortSignal,
 ) {
   const { user, entry } = upgradePrincipal(project, identity);
@@ -138,7 +154,13 @@ export async function installRelease(
     },
     ["/usr/bin/sudo", "-n", "--", entry],
   );
-  const bundle = await signedHelperBundle(worker, project, identity, signal);
+  const bundle = await signedHelperBundle(
+    worker,
+    project,
+    identity,
+    signal,
+    protocol,
+  );
   const result = await new Promise<string>((resolve, reject) => {
     const ssh = execFile(
       "/usr/bin/ssh",
@@ -160,13 +182,43 @@ export async function installRelease(
     ssh.stdin?.end(JSON.stringify(bundle));
   });
   const old = JSON.parse(result);
+  const tools = protocol === "v2" ? toolEntries : [];
   if (
     !old ||
-    Object.keys(old).length !== helpers.length ||
+    Object.keys(old).length !== helpers.length + tools.length ||
     helpers.some(
       (n) => typeof old[n] !== "string" || !/^[a-f0-9]{64}$/u.test(old[n]),
+    ) ||
+    tools.some(
+      (n) =>
+        old[n] !== null &&
+        (typeof old[n] !== "string" || !/^[a-f0-9]{64}$/u.test(old[n])),
     )
   )
     return invalid();
   return Object.fromEntries(helpers.map((n) => [n, String(old[n])]));
+}
+/**
+ * Entries enrolled before C-595 refuse a v2 bundle while verifying it, before
+ * any write or replay record, so only then retry the unchanged v1 bundle.
+ * Their helpers stay current; machine check reports the tools they cannot take.
+ */
+export async function installRelease(
+  worker: Worker,
+  project: string,
+  identity: string,
+  signal?: AbortSignal,
+  send = sendRelease,
+) {
+  try {
+    return await send(worker, project, identity, "v2", signal);
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      error.message !== "worker_upgrade_install_failed"
+    )
+      throw error;
+    signal?.throwIfAborted();
+    return await send(worker, project, identity, "v1", signal);
+  }
 }

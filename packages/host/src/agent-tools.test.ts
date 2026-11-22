@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test } from "vitest";
 import {
@@ -23,8 +24,10 @@ import {
   agentToolsProblem,
   agentToolsRelease,
   installLocalAgentTools,
-  REMOTE_AGENT_TOOLS_DIRECTORY,
+  RELEASE_UNAVAILABLE,
+  readAgentToolsRelease,
   releaseAgentToolsDirectory,
+  remoteAgentToolsDirectory,
 } from "./agent-tools.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 
@@ -55,8 +58,15 @@ const sshExecution = (agentRoot: string) =>
     knownHostsFile: "/fixture/known_hosts",
   }) as const;
 
-test("the release digests are the committed deploy files", () => {
+const currentRelease = () => {
   const release = agentToolsRelease();
+  if (!release) throw new Error("release checkout unavailable");
+  return release;
+};
+
+test("the release digests are the committed deploy files", () => {
+  const release = currentRelease();
+  expect(release.source).toMatch(/^[0-9a-f]{40}$/u);
   for (const name of AGENT_TOOLS) {
     const bytes = readFileSync(join(deployTools, name));
     expect(release.files[name]).toEqual(bytes);
@@ -70,7 +80,7 @@ test("local install leaves host-owned, read-only tools and a release record", as
   const directory = await installLocalAgentTools(root, gid);
   expect(directory).toBe(join(root, "agent-tools"));
   expect(statSync(directory).mode & 0o7777).toBe(0o750);
-  const release = agentToolsRelease();
+  const release = currentRelease();
   for (const name of AGENT_TOOLS) {
     const info = statSync(join(directory, name));
     expect(info.mode & 0o7777).toBe(0o750);
@@ -82,7 +92,7 @@ test("local install leaves host-owned, read-only tools and a release record", as
   expect(
     JSON.parse(readFileSync(join(directory, "release.json"), "utf8")),
   ).toEqual({
-    source_commit: release.source ?? null,
+    source_commit: release.source,
     sha256: release.digests,
   });
   // Current files are kept; tampered or loosened files are replaced atomically.
@@ -113,7 +123,7 @@ test("launch exposes the machine's fixed tool directory and never fails on a loc
     await agentToolsDirectoryFor({ mode: "local", dataDir: root }, false),
   ).toBe(deployTools);
   expect(await agentToolsDirectoryFor(sshExecution(root), true)).toBe(
-    REMOTE_AGENT_TOOLS_DIRECTORY,
+    join(root, "libexec", "agent-tools"),
   );
   expect(await agentToolsDirectoryFor(sshExecution(root), false)).toBe(
     join(root, "agent-tools"),
@@ -171,7 +181,72 @@ test("the check directory follows the machine's install location", () => {
   const directory = (machine: string) =>
     (agentToolsCapability(sshExecution(root), machine).check as string[])[3];
   expect(directory("local")).toBe(join(root, "agent-tools"));
-  expect(directory("mac-mini")).toBe(REMOTE_AGENT_TOOLS_DIRECTORY);
+  expect(directory("mac-mini")).toBe(remoteAgentToolsDirectory(root));
+  expect(remoteAgentToolsDirectory(root)).toBe(
+    join(root, "libexec", "agent-tools"),
+  );
+});
+
+test("expected digests come from the release commit, not the checked working file", () => {
+  const root = temp();
+  mkdirSync(join(root, "deploy", "agent-tools"), { recursive: true });
+  for (const name of AGENT_TOOLS)
+    writeFileSync(
+      join(root, "deploy", "agent-tools", name),
+      readFileSync(join(deployTools, name)),
+    );
+  const git = (...args: string[]) =>
+    execFileSync("/usr/bin/git", args, {
+      cwd: root,
+      env: {
+        PATH: "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    })
+      .toString()
+      .trim();
+  git("init", "-q");
+  git("add", "deploy");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-qm",
+    "fixture",
+  );
+  const url = pathToFileURL(`${root}/`);
+  expect(readAgentToolsRelease(url)).toMatchObject({
+    source: git("rev-parse", "HEAD"),
+    digests: currentRelease().digests,
+  });
+  const changed = join(root, "deploy", "agent-tools", AGENT_TOOLS[0]);
+  writeFileSync(changed, `${readFileSync(changed, "utf8")}\n`);
+  expect(readAgentToolsRelease(url)).toBeUndefined();
+  git("checkout", "--", "deploy");
+  rmSync(join(root, "deploy", "agent-tools", AGENT_TOOLS[1]));
+  expect(readAgentToolsRelease(url)).toBeUndefined();
+});
+
+test("an unverifiable controller release is a tool failure, never an expectation", async () => {
+  // Expected bytes are the committed blobs; a changed or missing working file is refused.
+  const before = readAgentToolsRelease();
+  expect(before?.digests).toEqual(currentRelease().digests);
+  const capability = agentToolsCapability(
+    { mode: "local", dataDir: temp() },
+    "local",
+    null,
+  );
+  expect(capability.acceptsOutput?.("agent-tools ok\n")).toBe(false);
+  expect(capability.failureReason?.("agent-tools ok\n")).toBe(
+    RELEASE_UNAVAILABLE,
+  );
+  expect(capability.parseVersion("agent-tools ok")).toBeNull();
+  await expect(installLocalAgentTools(temp(), gid, null)).rejects.toThrow(
+    "agent_tools_release_unavailable",
+  );
 });
 
 test("machine check records current tools and a readable reason otherwise", async () => {

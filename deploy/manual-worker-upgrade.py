@@ -19,6 +19,8 @@ import tempfile
 
 DEPLOY_OWNER = (0, 0)  # root:root (Linux), root:wheel (Darwin)
 HELPERS = ('worker-primitives.py', 'worker-files.py', 'worker-git.py')
+# C-595: prebuilt attachment tools, installed beside the helpers for the Run account.
+TOOLS = ('agent-tools/download-attachment.mjs', 'agent-tools/upload-evidence.mjs')
 
 
 def require(ok, message):
@@ -62,6 +64,17 @@ def installed_digest(path, gid, acl_safe):
                 s.st_gid == gid and stat.S_IMODE(s.st_mode) == 0o750 and acl_safe(fd),
                 'unsafe_installed_helper: ' + path.name)
         return hashlib.sha256(f.read()).hexdigest()
+
+
+def tool_directory(lib, gid):
+    path = lib / 'agent-tools'
+    if not os.path.lexists(path):
+        path.mkdir(mode=0o700)
+        os.chown(path, 0, gid)
+        path.chmod(0o750)
+    s = path.lstat()
+    require(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and s.st_gid == gid and stat.S_IMODE(s.st_mode) == 0o750,
+            'unsafe_agent_tools_directory')
 
 
 def install(source, target, gid):
@@ -157,7 +170,11 @@ def upgrade_files(work, release, live, lib, gid, b, installed, run_installer, ac
             install(live / name, lib / name, gid)
     if mac:
         run_installer('--check')
-    for name in HELPERS:
+    tool_directory(lib, gid)
+    for name in TOOLS:
+        if installed(lib / name) != manifest[name]:
+            install(live / name, lib / name, gid)
+    for name in HELPERS + TOOLS:
         require(installed(lib / name) == manifest[name], 'installed_helper_mismatch: ' + name)
     print('升级完成')
 

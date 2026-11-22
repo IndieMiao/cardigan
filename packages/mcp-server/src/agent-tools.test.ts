@@ -1,4 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { AGENT_TOOLS, generateAgentTools } from "../scripts/agent-tools.mjs";
@@ -16,7 +18,16 @@ test("committed agent tools are the current build of the package sources", async
     const path = join(agentToolsDirectory, file);
     // Rebuild with `pnpm --filter @cardigan/mcp-server build:agent-tools`.
     expect(await readFile(path, "utf8"), file).toBe(code);
-    expect((await stat(path)).mode & 0o111, file).toBe(0o111);
+    // The release records 100755; a restricted checkout only needs this account to run it.
+    expect(
+      execFileSync("git", ["ls-files", "-s", "--", path], {
+        cwd: agentToolsDirectory,
+      })
+        .toString()
+        .split(" ")[0],
+      file,
+    ).toBe("100755");
+    await access(path, constants.R_OK | constants.X_OK);
   }
 });
 

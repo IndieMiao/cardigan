@@ -15,59 +15,78 @@ export const AGENT_TOOLS = [
 ] as const;
 export type AgentTool = (typeof AGENT_TOOLS)[number];
 export const AGENT_TOOLS_CAPABILITY = "agent.attachment_tools";
-/** Every managed worker installs the reviewed deploy release root-owned here. */
-export const REMOTE_AGENT_TOOLS_DIRECTORY = "/opt/cardigan/deploy/agent-tools";
+/** Remote: root-owned, group read-only beside the worker helpers (signed v2 / manual upgrade). */
+export const remoteAgentToolsDirectory = (agentRoot: string) =>
+  join(agentRoot, "libexec", "agent-tools");
+export const RELEASE_UNAVAILABLE = "控制端当前发布的附件助手无法核验";
 const releaseRoot = new URL("../../../", import.meta.url);
 const releaseTools = new URL("deploy/agent-tools/", releaseRoot);
 
 export interface AgentToolsRelease {
   readonly files: Readonly<Record<AgentTool, Buffer>>;
   readonly digests: Readonly<Record<AgentTool, string>>;
-  /** Commit of this controller's release; absent outside a release checkout. */
-  readonly source?: string;
+  /** Commit of this controller's release checkout the bytes were verified against. */
+  readonly source: string;
 }
 const sha256 = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
-function releaseCommit() {
+const git = (root: URL, ...args: string[]) =>
+  execFileSync(
+    "/usr/bin/git",
+    [...gitSafetyArguments, "--git-dir=.git", ...args],
+    {
+      cwd: fileURLToPath(root),
+      env: gitEnvironment(),
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  );
+/**
+ * Expected bytes come from the committed release, never from the checked file
+ * alone: a working file that differs from its blob (or a missing one) makes the
+ * release unverifiable instead of redefining "current".
+ */
+export function readAgentToolsRelease(
+  root: URL = releaseRoot,
+): AgentToolsRelease | undefined {
   try {
-    const rev = execFileSync(
-      "/usr/bin/git",
-      [...gitSafetyArguments, "--git-dir=.git", "rev-parse", "HEAD^{commit}"],
-      {
-        cwd: fileURLToPath(releaseRoot),
-        env: gitEnvironment(),
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 5000,
-      },
-    )
+    const source = git(root, "rev-parse", "--verify", "HEAD^{commit}")
       .toString()
       .trim();
-    return /^[0-9a-f]{40}$/u.test(rev) ? rev : undefined;
+    if (!/^[0-9a-f]{40}$/u.test(source)) return undefined;
+    const files = {} as Record<AgentTool, Buffer>;
+    for (const name of AGENT_TOOLS) {
+      const blob = git(
+        root,
+        "cat-file",
+        "blob",
+        `${source}:deploy/agent-tools/${name}`,
+      );
+      if (
+        !blob.equals(readFileSync(new URL(`deploy/agent-tools/${name}`, root)))
+      )
+        return undefined;
+      files[name] = blob;
+    }
+    return Object.freeze({
+      files,
+      digests: Object.freeze(
+        Object.fromEntries(
+          AGENT_TOOLS.map((name) => [name, sha256(files[name])]),
+        ) as Record<AgentTool, string>,
+      ),
+      source,
+    });
   } catch {
     return undefined;
   }
 }
 // A release is immutable for the lifetime of the controller process.
-let release: AgentToolsRelease | undefined;
-export function agentToolsRelease(): AgentToolsRelease {
-  if (release) return release;
-  const files = Object.fromEntries(
-    AGENT_TOOLS.map((name) => [
-      name,
-      readFileSync(new URL(name, releaseTools)),
-    ]),
-  ) as Record<AgentTool, Buffer>;
-  const source = releaseCommit();
-  release = Object.freeze({
-    files,
-    digests: Object.freeze(
-      Object.fromEntries(
-        AGENT_TOOLS.map((name) => [name, sha256(files[name])]),
-      ) as Record<AgentTool, string>,
-    ),
-    ...(source ? { source } : {}),
-  });
-  return release;
+let release: { value: AgentToolsRelease | undefined } | undefined;
+export function agentToolsRelease(): AgentToolsRelease | undefined {
+  release ??= { value: readAgentToolsRelease() };
+  return release.value;
 }
 
 /** The controller's own release, for the unisolated local development mode. */
@@ -119,8 +138,9 @@ async function replaceFile(
 export async function installLocalAgentTools(
   agentRoot: string,
   gid: number,
-  current: AgentToolsRelease = agentToolsRelease(),
+  current: AgentToolsRelease | null = agentToolsRelease() ?? null,
 ) {
+  if (!current) throw new Error("agent_tools_release_unavailable");
   const directory = localAgentToolsDirectory(agentRoot);
   await mkdir(directory, { mode: 0o750 }).catch((error: { code?: string }) => {
     if (error.code !== "EEXIST") throw error;
@@ -137,7 +157,7 @@ export async function installLocalAgentTools(
     directory,
     "release.json",
     Buffer.from(
-      `${JSON.stringify({ source_commit: current.source ?? null, sha256: current.digests })}\n`,
+      `${JSON.stringify({ source_commit: current.source, sha256: current.digests })}\n`,
     ),
     gid,
     0o640,
@@ -147,7 +167,7 @@ export async function installLocalAgentTools(
 
 /**
  * Directory exposed to an Agent as CARDIGAN_AGENT_TOOLS. Remote workers use the
- * installed deploy release; local isolated launches refresh the host copy.
+ * copy installed with their helpers; local isolated launches refresh the host copy.
  * Undefined when the local copy cannot be refreshed (never blocks a launch).
  */
 export async function agentToolsDirectoryFor(
@@ -156,7 +176,7 @@ export async function agentToolsDirectoryFor(
   install = installLocalAgentTools,
 ): Promise<string | undefined> {
   if (execution.mode === "local") return releaseAgentToolsDirectory();
-  if (remote) return REMOTE_AGENT_TOOLS_DIRECTORY;
+  if (remote) return remoteAgentToolsDirectory(execution.agentRoot);
   try {
     return await install(execution.agentRoot, execution.gid);
   } catch {
@@ -171,7 +191,7 @@ export function agentToolsCheckDirectory(
   if (execution.mode === "local") return releaseAgentToolsDirectory();
   return machine === "local"
     ? localAgentToolsDirectory(execution.agentRoot)
-    : REMOTE_AGENT_TOOLS_DIRECTORY;
+    : remoteAgentToolsDirectory(execution.agentRoot);
 }
 
 // Runs as the Run account with its own node: hash and dry-run each tool without
@@ -219,29 +239,32 @@ export function agentToolsProblem(output: string): string | undefined {
     .join("；");
 }
 
-/** Version records the release the matching tools came from. */
+/** Version records the release commit the matching tools were verified against. */
 export function agentToolsCapability(
   execution: ExecutionConfig,
   machine: string,
-  current: AgentToolsRelease = agentToolsRelease(),
+  current: AgentToolsRelease | null = agentToolsRelease() ?? null,
 ): CapabilityDefinition {
   const command = [
     "node",
     "-e",
     AGENT_TOOLS_CHECK_SCRIPT,
     agentToolsCheckDirectory(execution, machine),
-    JSON.stringify(current.digests),
+    JSON.stringify(current?.digests ?? {}),
   ];
   return {
     key: AGENT_TOOLS_CAPABILITY,
     os: ["linux", "darwin"],
     check: command,
     version: command,
-    acceptsOutput: (output) => agentToolsProblem(output) === undefined,
+    acceptsOutput: (output) =>
+      current !== null && agentToolsProblem(output) === undefined,
     failureReason: (output) =>
-      output === undefined ? "附件助手检查未完成" : agentToolsProblem(output),
-    parseVersion: () =>
-      current.source?.slice(0, 12) ??
-      sha256(Buffer.from(JSON.stringify(current.digests))).slice(0, 12),
+      current === null
+        ? RELEASE_UNAVAILABLE
+        : output === undefined
+          ? "附件助手检查未完成"
+          : agentToolsProblem(output),
+    parseVersion: () => current?.source.slice(0, 12) ?? null,
   };
 }
