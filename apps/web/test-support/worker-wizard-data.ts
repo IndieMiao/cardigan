@@ -138,6 +138,7 @@ export const workerWizardData: Partial<CardiganClient> = {
       polls = 0;
       wizard = {
         ...rest,
+        check_id: `check-${runs}`,
         phase: "running",
         steps: wizard.steps.map((s) =>
           s.state === "blocked" ? { ...s, state: "running" } : s,
