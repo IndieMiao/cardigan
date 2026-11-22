@@ -8,7 +8,7 @@ import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import { buildCheckoutFacts } from "./build-checkouts.js";
 import type { ReconcileGit, ReconcilePages } from "./git.js";
 import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
-import { MaintenanceBatch, projectCycle } from "./maintenance-batch.js";
+import { projectCycle, visitMaintenancePage } from "./maintenance-batch.js";
 import { systemClock } from "./merge-loop.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
@@ -40,9 +40,8 @@ export class ReconcileExecutor {
   private serial: Promise<void> = Promise.resolve();
   private readonly scans = new Map<ProjectId, AsyncGenerator<void>>();
   pending(project: ProjectId) {
-    return this.repairs.has(project) || this.scans.has(project);
+    return this.scans.has(project);
   }
-  private readonly repairs = new MaintenanceBatch<ProjectId, DeliveryId>();
   // Process-local only: a restart replays durable events, never skips history.
   private readonly checkHistory = new Map<
     ProjectId,
@@ -150,49 +149,31 @@ export class ReconcileExecutor {
   }
 
   /** §3.3: a missing fixed ref is repaired from the candidate ref, once. */
-  private async repair(
-    project_id: ProjectId,
-    findings: readonly ReconcileFinding[],
-  ): Promise<boolean> {
+  private async repair(project_id: ProjectId, id: DeliveryId): Promise<void> {
     const project = this.options.git.projectOf(project_id);
-    if (project === undefined) return false;
-    const missing = new Set(
-      findings.flatMap((f) =>
-        f.kind === "missing_delivery_ref" && f.delivery_id
-          ? [f.delivery_id as DeliveryId]
-          : [],
-      ),
-    );
-    const state = this.state(project_id);
-    let repaired = false;
-    await this.repairs.run(
-      project_id,
-      () => [...missing],
-      async (id) => {
-        if (!missing.has(id)) return;
-        const delivery = state.deliveries.find(
-            (candidate) => candidate.id === id,
-          ),
-          item = state.work_items.find(
-            (candidate) => candidate.id === delivery?.work_item_id,
-          ),
-          assignment = state.assignments.find(
-            (candidate) => candidate.id === item?.assignment_id,
-          );
-        if (delivery === undefined || assignment === undefined) return;
-        try {
-          if (await this.options.git.repairPin(project, delivery, assignment))
-            repaired = true;
-        } catch (error) {
-          this.report(
-            `pinning ${delivery.id} failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      },
-    );
-    return repaired;
+    if (!project) return;
+    // Re-read the binding after a page break; no read transaction spans Git IO.
+    const target = this.options.store.uow.read((tx) => {
+      const delivery = tx.deliveries.get(project_id, id);
+      const item =
+        delivery && tx.work_items.get(project_id, delivery.work_item_id);
+      const assignment =
+        item?.assignment_id &&
+        tx.assignments.get(project_id, item.assignment_id);
+      return delivery && assignment ? { delivery, assignment } : undefined;
+    });
+    if (!target) return;
+    try {
+      await this.options.git.repairPin(
+        project,
+        target.delivery,
+        target.assignment,
+      );
+    } catch (error) {
+      this.report(
+        `pinning ${id} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private record(project_id: ProjectId, findings: readonly ReconcileFinding[]) {
@@ -278,16 +259,35 @@ export class ReconcileExecutor {
     // filesystem/Git scan and the nested `reconcile.checks` database replay.
     // C-231: after a repair the state re-read and the second scan add to the
     // same `state` and `git` spans, so `git` still contains every `checks`.
-    let findings = yield* this.scan(project_id, project, paged);
-    if (
-      await profileSpan("reconcile.repair", () =>
-        this.repair(project_id, findings),
-      )
-    )
-      findings = yield* this.scan(project_id, project, paged);
-    profileSpanSync("reconcile.record", () =>
-      this.record(project_id, findings),
-    );
+    const attempted = new Set<DeliveryId>();
+    for (;;) {
+      const findings = yield* this.scan(project_id, project, paged);
+      const missing = new Set<DeliveryId>();
+      for (const finding of findings) {
+        if (finding.kind !== "missing_delivery_ref" || !finding.delivery_id)
+          continue;
+        const id = finding.delivery_id as DeliveryId;
+        if (!attempted.has(id)) missing.add(id);
+      }
+      if (!missing.size) {
+        profileSpanSync("reconcile.record", () =>
+          this.record(project_id, findings),
+        );
+        return;
+      }
+      // Finish this inventory's repair queue before rescanning. Only a full
+      // scan with no unattempted repairs may publish/resolve findings.
+      const queue = [...missing].reverse();
+      while (queue.length) {
+        await profileSpan("reconcile.repair", () =>
+          visitMaintenancePage(queue, async (id) => {
+            await this.repair(project_id, id);
+            attempted.add(id);
+          }),
+        );
+        if (paged) yield;
+      }
+    }
   }
 
   private report(message: string) {

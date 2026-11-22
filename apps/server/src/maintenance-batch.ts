@@ -9,15 +9,23 @@ export class MaintenanceBatch<K, T> {
   async run(key: K, list: () => T[], visit: (id: T) => Promise<void>) {
     const page = this.pages.get(key) ?? list().reverse();
     this.pages.set(key, page);
-    const until = performance.now() + 250;
     try {
-      for (let n = 0; page.length && n < 16; n++) {
-        await visit(page.pop() as T);
-        if (performance.now() >= until) break;
-      }
+      await visitMaintenancePage(page, visit);
     } finally {
       if (!page.length) this.pages.delete(key);
     }
+  }
+}
+
+/** Consume one bounded page from a sweep-owned stack of pending identifiers. */
+export async function visitMaintenancePage<T>(
+  page: T[],
+  visit: (id: T) => Promise<void>,
+) {
+  const until = performance.now() + 250;
+  for (let n = 0; page.length && n < 16; n++) {
+    await visit(page.pop() as T);
+    if (performance.now() >= until) break;
   }
 }
 

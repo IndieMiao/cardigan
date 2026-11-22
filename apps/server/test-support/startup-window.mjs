@@ -233,6 +233,12 @@ try {
       join(dir, "attachments", i.toString(16).padStart(64, "0")),
       "x",
     );
+  // Include real directory observations across three reconcile pages, not
+  // just historical rows whose paths no longer exist on this host.
+  for (let i = 0; i < 48; i++)
+    mkdirSync(join(dir, "agent", "worktrees", project, `leftover-${i}`), {
+      recursive: true,
+    });
   const counts = Object.fromEntries(
     [...Object.keys(size), "assignments"].map((t) => [
       t,

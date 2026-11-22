@@ -1045,7 +1045,7 @@ export class ServerGit implements GitBinding {
     readChecks?: () => ReconcileChecks,
   ): ReconcilePages {
     // The local scan (readdir) always runs: it covers the default execution.
-    const state = await this.worktrees.listWorktreeState(project);
+    const state = yield* this.worktrees.listWorktreeStatePages(project);
     const workers: ReconcileFinding[] = [];
     for (const assignment of assignments) {
       if (

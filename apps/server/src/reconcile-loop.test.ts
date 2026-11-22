@@ -18,7 +18,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CardId, MergeCheckView } from "@cardigan/domain";
+import type {
+  CardId,
+  DeliveryId,
+  GitWorkspaceFiles,
+  MergeCheckView,
+} from "@cardigan/domain";
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -254,6 +259,67 @@ test("reconcile and backup Git IO yields to the event loop outside database tran
   expect(calls).toBe(3);
 });
 
+test.each([0, 251])(
+  "local directory probes resume within count and time budgets (%i ms/probe)",
+  async (cost) => {
+    const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+    const paths = Array.from({ length: 48 }, (_, i) => {
+      const group = i < 16 ? "worktrees" : i < 32 ? "checks" : "builds";
+      const path = join(
+        f.dataDir,
+        "agent",
+        group,
+        f.project_id,
+        `leftover-${i}`,
+        group === "checks" ? "worktree" : "",
+      );
+      mkdirSync(path, { recursive: true });
+      return path;
+    });
+    let clock = 0,
+      outstanding = 0,
+      peak = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    // Instrument the real bound file port; do not substitute fake listings.
+    const { files } = (
+      binding as unknown as { worktrees: { files: GitWorkspaceFiles } }
+    ).worktrees;
+    const observe = files.isDirectory.bind(files);
+    const probe = vi
+      .spyOn(files, "isDirectory")
+      .mockImplementation(async (path) => {
+        peak = Math.max(peak, ++outstanding);
+        try {
+          return await observe(path);
+        } finally {
+          outstanding--;
+          clock += cost;
+        }
+      });
+    const executor = new ReconcileExecutor({ store: f.store, git: binding });
+    const open = () =>
+      f.store.listReconcileFindings(f.project_id, { openOnly: true });
+    let count = 0;
+    do {
+      await executor.tick(f.project_id, true);
+      const n = probe.mock.calls.length;
+      expect(n - count).toBe(cost ? 1 : 16);
+      count = n;
+      if (count < paths.length) {
+        expect(executor.pending(f.project_id)).toBe(true);
+        expect(open()).toEqual([]);
+      }
+    } while (executor.pending(f.project_id));
+    expect(peak).toBe(1);
+    expect(probe.mock.calls.map(([path]) => path).sort()).toEqual(paths.sort());
+    expect(
+      open()
+        .map((fact) => fact.path)
+        .sort(),
+    ).toEqual(paths);
+  },
+);
+
 test("an orphan directory and a manual project directory are reported", async () => {
   await centralWithBaseClone();
   // A directory nobody owns, plus one left behind in the clone root.
@@ -375,15 +441,15 @@ test.each(["local", "agent-ssh"] as const)(
     });
     const open = () =>
       f.store.listReconcileFindings(f.project_id, { openOnly: true });
-    const scan = GitWorktreeService.prototype.listWorktreeState;
+    const scan = GitWorktreeService.prototype.listWorktreeStatePages;
     vi.spyOn(
       GitWorktreeService.prototype,
-      "listWorktreeState",
-    ).mockImplementationOnce(async function (
+      "listWorktreeStatePages",
+    ).mockImplementationOnce(async function* (
       this: GitWorktreeService,
       project,
     ) {
-      const snapshot = await scan.call(this, project);
+      const snapshot = yield* scan.call(this, project);
       // A check can be queued while filesystem IO is in flight. Its new
       // ownership must be read from the loop's Store after that IO completes.
       update("queued");
@@ -447,6 +513,80 @@ test("a Git delivery without a fixed ref is repaired from its candidate", async 
   ).toBe(false);
 });
 
+test.each([true, false])(
+  "repair pages never announce an unattempted delivery (last pin succeeds: %s)",
+  async (allRepairable) => {
+    scenario = m4Scenario(f, "auto");
+    f.startRun(scenario.coder);
+    const product = await f.deliver(scenario.coder, scenario.development.id, {
+      subject: git(source, "rev-parse", "HEAD"),
+      verifiers: [scenario.codeReview.id],
+    });
+    const put = (i: number) => {
+      const id = `D-${100 + i}` as DeliveryId;
+      f.store.uow.run((tx) =>
+        tx.deliveries.put(f.project_id, { ...product, id }),
+      );
+      return id;
+    };
+    const failed = put(15);
+    const ids = [
+      product.id,
+      ...Array.from({ length: 15 }, (_, i) => put(i)),
+      failed,
+    ];
+    const pinned = new Set<DeliveryId>();
+    const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+    vi.spyOn(binding, "reconcilePages").mockImplementation(
+      async function* (_project, _assignments, deliveries) {
+        return deliveries
+          .filter((d) => !pinned.has(d.id))
+          .map((d) => ({
+            kind: "missing_delivery_ref" as const,
+            delivery_id: d.id,
+            detail: "test pin",
+          }));
+      },
+    );
+    const repair = vi
+      .spyOn(binding, "repairPin")
+      .mockImplementation(async (_, d) => {
+        if (!allRepairable && d.id === failed) return false;
+        pinned.add(d.id);
+        return true;
+      });
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    const executor = new ReconcileExecutor({ store: f.store, git: binding });
+    const events = () =>
+      f.store.uow.read((tx) =>
+        tx.events
+          .listAfter(f.project_id, undefined, 0)
+          .filter((e) => e.type === "reconcile_finding")
+          .map((e) => (e.payload as { delivery_id: string }).delivery_id),
+      );
+    const open = () =>
+      f.store
+        .listReconcileFindings(f.project_id, { openOnly: true })
+        .map((f) => f.delivery_id);
+    await executor.tick(f.project_id, true);
+    expect(repair).toHaveBeenCalledTimes(16);
+    expect(executor.pending(f.project_id)).toBe(true);
+    expect(open()).toEqual([]);
+    expect(events()).toEqual([]);
+    // A delivery added between pages first appears on the rescan. It too must
+    // receive its repair attempt before this sweep is allowed to notify PM Ops.
+    ids.push(put(20));
+    for (let i = 0; i < 5 && executor.pending(f.project_id); i++) {
+      expect(events()).toEqual([]);
+      await executor.tick(f.project_id, true);
+    }
+    expect(executor.pending(f.project_id)).toBe(false);
+    expect(repair.mock.calls.map(([, d]) => d.id).sort()).toEqual(ids.sort());
+    expect(open()).toEqual(allRepairable ? [] : [failed]);
+    expect(events()).toEqual(allRepairable ? [] : [failed]);
+  },
+);
+
 test("C-231: a repair's state re-read and second scan are timed in reconcile.state and reconcile.git", async () => {
   const repository = await centralWithBaseClone();
   const agent = join(root, "agent-clone");
@@ -491,8 +631,7 @@ test("C-231: a repair's state re-read and second scan are timed in reconcile.sta
     },
     report: (message) => errors.push(message),
   });
-  // Each database state read costs 1: two land in reconcile.state, the
-  // repair's own read lands in reconcile.repair.
+  // Each inventory state read costs 1; both scans land in reconcile.state.
   const internals = executor as unknown as {
     state: (project_id: typeof f.project_id) => unknown;
   };
