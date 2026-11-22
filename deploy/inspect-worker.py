@@ -195,7 +195,10 @@ def darwin_retirement(c, terminal_owner=None):
         if t['state'] == 'live' and t.get('keep') is True:
             return 'kept'
         def live(t):
-            idle = (t.get('status') or {}).get('state') in ('idle', 'done')
+            # hc reports only OSC 7501 self-reports. Claude Code and Codex send
+            # none, so their status stays null for the whole session; the host's
+            # final business guard proves idleness. A reported busy state refuses.
+            idle = (t.get('status') or {}).get('state') in (None, 'unknown', 'idle', 'done')
             return t.get('state') == 'live' and t.get('keep') is False and (idle or not c['require_idle'])
         if observed != 'alive' or not live(t):
             return 'unknown'

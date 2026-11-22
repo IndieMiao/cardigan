@@ -48,6 +48,18 @@ with contextlib.ExitStack() as stack:
         print(observe())
         sys.exit(0)
     assert observe() == 'alive'
+    # Claude Code and Codex never self-report: hc keeps status null (or a
+    # status without a state). Only a reported busy state withdraws.
+    for status in (None, {}, {'state': 'unknown'}, {'state': 'done'}):
+        t['status'] = status
+        assert observe() == 'alive', status
+    for busy in ('working', 'blocked', 'error', 'other'):
+        t['status'] = {'state': busy}
+        assert observe() == 'unknown', busy
+    c['require_idle'] = False
+    assert observe() == 'alive'
+    c['require_idle'] = True
+    t['status'] = {'state': 'idle'}
     c['agent_name'] = 'cli'
     t.update(pid=41, name='cli', rm=False, foreground={'pid':42})
     with patch.object(worker.subprocess, 'check_output', return_value=b' 41\n') as ps:

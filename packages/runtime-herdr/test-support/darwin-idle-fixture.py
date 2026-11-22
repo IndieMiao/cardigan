@@ -1,4 +1,8 @@
-"""Isolated terminal manager; signing, workspace, native birth, child and TERM are real."""
+"""Isolated terminal manager; signing, workspace, native birth, child and TERM are real.
+
+With a third argument `real` (or `real-<state>`) the owner runs inside an isolated
+real hc terminal and reads that core's own terminal record; `<state>` makes the
+child self-report it over OSC 7501 the way only status-reporting harnesses do."""
 import contextlib
 import importlib.util
 import json
@@ -23,14 +27,31 @@ def rpc(method, params):
     state = (root/'state').read_text()
     return dict(address='t1', created_ms=1, pid=os.getpid(), name=c['agent_name'], cwd=c['cwd'],
                 foreground=dict(pid=json.loads((root/'child').read_text())['pid']), rm=False, keep=False, state='live',
-                status={'state':state}, labels=dict(cardigan='1',project=c['project'],assignment=c['assignment'],
+                # 'null': hc's record for Claude Code and Codex, which never self-report.
+                status=None if state == 'null' else {'state':state}, labels=dict(cardigan='1',project=c['project'],assignment=c['assignment'],
                     run=c['launch_run'],generation=('next' if state=='replaced' else c['generation'])))
 
 # Same identity primitive as the shipped worker launcher. Only the core and the
 # platform selection are substituted on Linux; there is no production socket.
-script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); time.sleep(20)"
+script = "import os,sys,runpy,json,time; from pathlib import Path; p=runpy.run_path(sys.argv[1])['identity'](sys.argv[2],os.getpid(),sys.argv[3],os.getpgrp()); p['uid']=int(sys.argv[5]);Path(sys.argv[4]).write_text(json.dumps(p)); sys.argv[6:] and print(f'\\x1b]7501;state={sys.argv[6]}\\x07', end='', flush=True); time.sleep(20)"
+mode = sys.argv[3] if len(sys.argv) > 3 else ''
+report = mode.split('-', 1)[1:] if mode.startswith('real-') else []
+real_uid, real_rpc = os.getuid(), probe.core_rpc
+
+@contextlib.contextmanager
+def core(home, session, system):
+    # The real core of this isolated hc session; its socket is passed to the terminal.
+    with patch.object(probe, 'socket_path', return_value=Path(os.environ['HC_TERMINAL_SOCKET'])), \
+            patch.object(os, 'getuid', return_value=real_uid):
+        opened = real_rpc(home, session, system)
+        rpc = opened.__enter__()
+    try:
+        yield rpc
+    finally:
+        opened.__exit__(None, None, None)
+
 with patch.object(sys, 'platform', 'darwin'), patch.object(probe.platform, 'system', return_value='Darwin'), \
-        patch.object(probe, 'core_rpc', side_effect=lambda *_: contextlib.nullcontext(rpc)), \
+        patch.object(probe, 'core_rpc', side_effect=core if mode.startswith('real') else lambda *_: contextlib.nullcontext(rpc)), \
         patch.object(os,'getuid',return_value=uid), patch.object(os,'geteuid',return_value=uid), \
         patch.object(os,'getegid',return_value=1234), patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_name='fixture',pw_gid=1234,pw_dir=str(root))):
-    sys.exit(owner['supervise'](c, [sys.executable,'-IB','-c',script,str(native),c['target'],c['generation'],str(root/'child'),str(uid)],probe.darwin_retirement))
+    sys.exit(owner['supervise'](c, [sys.executable,'-IB','-c',script,str(native),c['target'],c['generation'],str(root/'child'),str(uid),*report],probe.darwin_retirement))

@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
@@ -13,15 +13,21 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterAll, afterEach, expect, test, vi } from "vitest";
+import { testHcBinary } from "../../../test-support/hc.js";
+import { createTestRuntime } from "../../../test-support/paths.js";
+import { corePid, stopCore } from "../test-support/hc-core.js";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import { DARWIN_OWNER_SEED, darwinOwnerKey } from "./darwin-owner-key.js";
 import type { ExecutionConfig } from "./execution.js";
 import { assignment, launch, role } from "./test-support.js";
 import { workerFileRequest } from "./worker-files.js";
+
+const execFileAsync = promisify(execFile);
 
 const generation = "a".repeat(32),
   fingerprint = "b".repeat(64),
@@ -128,8 +134,9 @@ test("registration excludes legacy, Linux, standing, external and disabled launc
   expect(await enrollDarwinOwner(missing, assignment, role, l)).toBe(l);
 });
 
-async function ownerFixture(publicPem?: string) {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-")),
+/** The registered clone, branch worktree and build checkout one owner guards. */
+async function enrolledWorkspace(parent = realpathSync(tmpdir())) {
+  const root = mkdtempSync(join(parent, "darwin-owner-")),
     tree = join(root, "worktrees/fixture/A-1"),
     build = join(root, "builds/fixture/A-1"),
     repo = join(root, "repos/fixture"),
@@ -158,9 +165,15 @@ async function ownerFixture(publicPem?: string) {
     cwd: tree,
   });
   const config = JSON.parse(launched.args[4]!);
+  mkdirSync(config.directory, { recursive: true });
+  return { root, tree, build, git, config, execution };
+}
+
+async function ownerFixture(publicPem?: string) {
+  const { root, tree, build, git, config, execution } =
+    await enrolledWorkspace();
   // A legacy owner holds a key that only the previous controller process had.
   if (publicPem) config.public_pem = publicPem;
-  mkdirSync(config.directory, { recursive: true });
   const proc = spawn(
     "python3",
     [
@@ -286,7 +299,19 @@ test("signed normal stop binds the direct child; dirty, stale, busy and withdraw
     process.kill(pid, 0);
     writeFileSync(join(root, "state"), "replaced");
     expect((await stop()).outcome).toBe("withdrawn");
-    writeFileSync(join(root, "state"), "idle");
+    // A harness that self-reports a busy state is never stopped.
+    for (const busy of ["working", "blocked", "error"]) {
+      writeFileSync(join(root, "state"), busy);
+      expect(await stop()).toEqual({
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason: "probe_invalid" },
+      });
+    }
+    expect(proc.exitCode).toBeNull();
+    process.kill(pid, 0);
+    // Claude Code and Codex never self-report: hc keeps their status null.
+    // The host's final guard, not hc, proves this session idle (C-602).
+    writeFileSync(join(root, "state"), "null");
     // A missing or replaced seed cannot serve this owner: refuse, never sign.
     const seed = join(dataDir, DARWIN_OWNER_SEED);
     renameSync(seed, `${seed}.saved`);
@@ -386,3 +411,139 @@ test("a generation without an owner is refused with no further worker command", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// C-602: the owner reads the terminal record from the real core, not a model.
+// Only the Darwin platform/account checks and native birth adapter are
+// substituted; the isolated session never touches a production socket.
+const hcBinary =
+  process.env.CARDIGAN_TEST_HC ?? join(homedir(), ".local/bin/hc");
+const hcAvailable = testHcBinary({ binary: hcBinary });
+test.skipIf(!hcAvailable || process.platform !== "linux")(
+  "a real hc record for a non-reporting harness (status null) is stopped; a reported busy state is not",
+  async () => {
+    vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "darwin-owner-hc-"));
+    const runtime = realpathSync(createTestRuntime(join(dir, "runtime")));
+    const session = `own-${randomUUID().slice(0, 8)}`,
+      socket = join(runtime, "hc.sock");
+    const env = {
+      ...process.env,
+      HC_SESSION: session,
+      HC_SOCKET: socket,
+      XDG_RUNTIME_DIR: runtime,
+      XDG_STATE_HOME: join(dir, "state"),
+      XDG_CONFIG_HOME: join(dir, "config"),
+    };
+    const hc = async (...args: string[]) =>
+      (await execFileAsync(hcBinary, args, { env, timeout: 10000 })).stdout;
+    const transport = async (_: unknown, argv: readonly string[]) => ({
+      file: argv[0]!,
+      args: argv.slice(1),
+    });
+    const owned = async (report: "" | "working") => {
+      const w = await enrolledWorkspace(dir);
+      const launched = JSON.parse(
+        await hc(
+          "run",
+          "--bg",
+          "--json",
+          "--no-parent",
+          "--no-notify",
+          "--name",
+          w.config.agent_name,
+          "--cwd",
+          w.tree,
+          ...Object.entries({
+            cardigan: "1",
+            project: "fixture",
+            assignment: "A-1",
+            run: "R-1",
+            generation,
+          }).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
+          "--",
+          "python3",
+          "-IB",
+          resolve("packages/runtime-herdr/test-support/darwin-idle-fixture.py"),
+          resolve("deploy/darwin-idle-owner.py"),
+          JSON.stringify(w.config),
+          report ? `real-${report}` : "real",
+        ),
+      );
+      await expect
+        .poll(() => existsSync(join(w.root, "child")), { timeout: 10000 })
+        .toBe(true);
+      const terminal = launched.address as string;
+      const record = async () =>
+        JSON.parse(await hc("get", terminal, "--json"));
+      if (report)
+        await expect
+          .poll(async () => (await record()).status?.state, { timeout: 10000 })
+          .toBe(report);
+      const enrolled = JSON.parse(readFileSync(join(w.root, "child"), "utf8"));
+      const stop = () =>
+        stopDarwinOwner(
+          w.execution,
+          { ...ref, terminal_ref: `fixture/${terminal}` },
+          {
+            project_id: "fixture",
+            assignment_id: "A-1",
+            hangup_ms: 100,
+            terminate_ms: 500,
+            before_signal: () => true,
+            enrolled_process: enrolled,
+          },
+          transport,
+        );
+      return { ...w, terminal, record, enrolled, stop };
+    };
+    try {
+      // Codex and Claude Code never send OSC 7501: this is their exact record.
+      const quiet = await owned("");
+      await expect
+        .poll(async () => (await quiet.record()).foreground?.pid, {
+          timeout: 10000,
+        })
+        .toEqual(expect.any(Number));
+      const before = await quiet.record();
+      expect(before).toMatchObject({
+        state: "live",
+        status: null,
+        pid: expect.any(Number),
+        cwd: quiet.tree,
+        name: quiet.config.agent_name,
+        rm: false,
+        keep: false,
+      });
+      expect(before.foreground.pid).toBe(before.pid);
+      expect(await quiet.stop()).toEqual({
+        outcome: "uncertain",
+        evidence: { stage: "confirm", reason: "confirmation_pending" },
+      });
+      await expect
+        .poll(async () => (await quiet.record()).state, { timeout: 10000 })
+        .toBe("finished");
+      expect((await quiet.record()).exit_code).toBe(143);
+      expect(() => process.kill(quiet.enrolled.pid, 0)).toThrow();
+      expect(existsSync(join(quiet.tree, ".git"))).toBe(true);
+
+      // A harness that reports itself busy keeps running and is never signed for.
+      const busy = await owned("working");
+      expect(await busy.stop()).toEqual({
+        outcome: "withdrawn",
+        evidence: { stage: "probe", reason: "probe_invalid" },
+      });
+      expect((await busy.record()).state).toBe("live");
+      process.kill(busy.enrolled.pid, 0);
+      await hc("kill", busy.terminal);
+    } finally {
+      await stopCore({
+        session,
+        socket,
+        env,
+        pid: corePid({ session, socket, env }),
+      });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+  40000,
+);
