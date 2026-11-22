@@ -72,6 +72,60 @@ export function requireCardDependencies(d: CommandDraft, card: Card) {
   );
 }
 
+/** With no `from`, the root is a proposed card without an allocated ID yet. */
+export function validateCardDependencyRefs(
+  d: CommandDraft,
+  references: readonly CardId[],
+  from?: CardId,
+) {
+  ensure(
+    Array.isArray(references),
+    "validation_failed",
+    "依赖须为卡号数组，清空请传 []",
+  );
+  const ids = [...new Set<CardId>(references)];
+  for (const id of ids) {
+    const before = d.list("cards").find((c) => c.id === id);
+    ensure(id !== from, "validation_failed", `依赖成环：${from} → ${from}`);
+    ensure(
+      before && before.project_id === d.state.project_id,
+      "validation_failed",
+      `前置卡 ${id} 不存在或不属于当前项目`,
+    );
+  }
+  const graph = new Map<CardId | undefined, readonly CardId[]>(
+    d.list("cards").map((c) => [c.id, c.depends_on_cards ?? []]),
+  );
+  graph.set(from, ids);
+  const path: (CardId | undefined)[] = [from];
+  const positions = new Map<CardId | undefined, number>([[from, 0]]);
+  const done = new Set<CardId | undefined>();
+  const stack = [{ id: from, next: 0 }];
+  while (stack.length) {
+    const frame = stack[stack.length - 1];
+    if (!frame) break;
+    const next = graph.get(frame.id)?.[frame.next++];
+    if (!next) {
+      done.add(frame.id);
+      positions.delete(frame.id);
+      stack.pop();
+      path.pop();
+      continue;
+    }
+    const at = positions.get(next);
+    ensure(
+      at === undefined,
+      "validation_failed",
+      `依赖成环：${[...path.slice(at ?? 0), next].join(" → ")}`,
+    );
+    if (done.has(next)) continue;
+    positions.set(next, path.length);
+    path.push(next);
+    stack.push({ id: next, next: 0 });
+  }
+  return ids;
+}
+
 /** Called inside the same write transaction as creation/update; never from a stale read. */
 export function applyCardDependencies(
   d: CommandDraft,
@@ -115,56 +169,14 @@ export function applyCardDependencies(
     result = { ...result, is_ui_framework: p.is_ui_framework };
   }
   if (p.depends_on_cards !== undefined) {
-    ensure(
-      Array.isArray(p.depends_on_cards),
-      "validation_failed",
-      "依赖须为卡号数组，清空请传 []",
-    );
-    const ids = [...new Set(p.depends_on_cards)];
-    for (const id of ids) {
-      const before = d.list("cards").find((c) => c.id === id);
-      ensure(
-        id !== card.id,
-        "validation_failed",
-        `依赖成环：${card.id} → ${card.id}`,
-      );
-      ensure(
-        before && before.project_id === card.project_id,
-        "validation_failed",
-        `前置卡 ${id} 不存在或不属于当前项目`,
-      );
-    }
-    result = { ...result, depends_on_cards: ids };
-    const graph = new Map(
-      d.list("cards").map((c) => [c.id, c.depends_on_cards ?? []]),
-    );
-    graph.set(card.id, ids);
-    const path: CardId[] = [card.id];
-    const positions = new Map<CardId, number>([[card.id, 0]]);
-    const done = new Set<CardId>();
-    const stack = [{ id: card.id, next: 0 }];
-    while (stack.length) {
-      const frame = stack[stack.length - 1];
-      if (!frame) break;
-      const next = graph.get(frame.id)?.[frame.next++];
-      if (!next) {
-        done.add(frame.id);
-        positions.delete(frame.id);
-        stack.pop();
-        path.pop();
-        continue;
-      }
-      const at = positions.get(next);
-      ensure(
-        at === undefined,
-        "validation_failed",
-        `依赖成环：${[...path.slice(at ?? 0), next].join(" → ")}`,
-      );
-      if (done.has(next)) continue;
-      positions.set(next, path.length);
-      path.push(next);
-      stack.push({ id: next, next: 0 });
-    }
+    result = {
+      ...result,
+      depends_on_cards: validateCardDependencyRefs(
+        d,
+        p.depends_on_cards,
+        card.id,
+      ),
+    };
   }
   if (p.wait_for_dependencies !== undefined)
     result = { ...result, wait_for_dependencies: p.wait_for_dependencies };

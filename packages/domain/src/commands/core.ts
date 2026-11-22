@@ -81,6 +81,11 @@ export interface CommandPorts {
   readonly human_confirmation?: "workbench";
   readonly clock: Clock;
   readonly ids: IdAllocator;
+  /** Registered repositories of this project, supplied by the host, not the proposal. */
+  readonly project_repositories?: readonly {
+    readonly repo: string;
+    readonly base_branch: string | null;
+  }[];
   /** Host-provided template configuration, never MCP parameters. */
   readonly templates?: readonly CardTemplate[];
   /** Host-only token row: authenticated request token, or its current row at settlement. Never MCP parameters. */
