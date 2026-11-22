@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   acknowledgeRun,
@@ -409,7 +417,13 @@ test("M5.6 failed replacement records failure, compensates and escalates once; c
 
 test.each([
   "clean",
+  "missing_at_launch",
+  "replaced_at_launch",
+  "changed_access_at_launch",
   "dirty",
+  "masked_edit",
+  "skipped_edit",
+  "replaced_during_backup",
   "backup_failure",
   "lost_proof",
   "live_again",
@@ -417,6 +431,7 @@ test.each([
 ] as const)(
   "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
   async (mode) => {
+    const backedUp = mode === "clean" || mode.endsWith("_at_launch");
     const s = scenario(),
       a = s.target.assignment,
       branch = "agent/test/writer";
@@ -427,6 +442,8 @@ test.each([
         encoding: "utf8",
       }).trim();
     git("init", "-q", "-b", branch);
+    writeFileSync(join(workspace, "source"), "initial");
+    git("add", "--", "source");
     git(
       "-c",
       "user.name=fixture",
@@ -438,6 +455,15 @@ test.each([
       "--allow-empty",
     );
     const sha = git("rev-parse", "HEAD");
+    if (mode === "masked_edit" || mode === "skipped_edit") {
+      git(
+        "update-index",
+        mode === "masked_edit" ? "--assume-unchanged" : "--skip-worktree",
+        "--",
+        "source",
+      );
+      writeFileSync(join(workspace, "source"), "uncommitted");
+    }
     const ref = { ...f.refFor(a), local_process_receipt: "fixture-launch" };
     f.store.uow.run((tx) => {
       const current = tx.assignments.get(f.project, a.id);
@@ -478,6 +504,17 @@ test.each([
     };
     const backup = vi.fn(async () => {
       if (mode === "live_during_backup") revive();
+      if (mode === "replaced_during_backup") {
+        const original = `${workspace}-original`;
+        renameSync(workspace, original);
+        execFileSync("git", [
+          "clone",
+          "--quiet",
+          "--local",
+          original,
+          workspace,
+        ]);
+      }
       if (mode === "backup_failure") throw new Error("unavailable");
       return { sha, ref: "refs/cardigan/stall-backups/test" };
     });
@@ -486,25 +523,7 @@ test.each([
       contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
       stallBackup: backup,
     });
-    // This fixture supplies the prepared checkout above; exercise the real dispatch
-    // and acknowledgement commands, not a second checkout provisioner.
-    const startRun = vi.fn(
-      async ({ run, assignment }: Parameters<typeof startQueuedRun>[1]) => {
-        expect(assignment.worktree_path).toBe(workspace);
-        expect(git("rev-parse", "HEAD")).toBe(sha);
-        f.apply((state, actor, ports) =>
-          dispatchRun(
-            state,
-            actor,
-            {
-              run_id: run.id,
-              runtime_ref: { ...f.refFor(a), terminal_ref: "new" },
-            },
-            ports,
-          ),
-        );
-      },
-    );
+    const startRun = vi.fn(s.options.startRun);
     const d = new Dispatcher({ ...s.options, startRun });
     const events = (type: string) =>
       f.state().events.filter((e) => e.type === type);
@@ -524,33 +543,49 @@ test.each([
       if (mode === "live_again") {
         revive();
       }
-      await vi.waitFor(async () => {
-        await service.tick();
-        if (mode === "clean")
-          expect(events("host_ops_action_finished")).toMatchObject([
-            { payload: { run_id: s.run.id, backup_sha: sha } },
-          ]);
-        else if (mode === "backup_failure")
-          expect(events("host_ops_action_finished")).toMatchObject([
-            { payload: { reason: "workspace_backup_unconfirmed" } },
-          ]);
-        else if (mode === "live_during_backup")
-          expect(events("host_ops_action_finished")).toMatchObject([
-            { payload: { reason: "terminal_exit_unconfirmed" } },
-          ]);
-        else expect(events("dispatch_stall_attention")).toHaveLength(1);
-      });
+      await vi.waitFor(
+        async () => {
+          await service.tick();
+          if (backedUp)
+            expect(events("host_ops_action_finished")).toMatchObject([
+              { payload: { run_id: s.run.id, backup_sha: sha } },
+            ]);
+          else if (
+            mode === "backup_failure" ||
+            mode === "replaced_during_backup"
+          )
+            expect(events("host_ops_action_finished")).toMatchObject([
+              { payload: { reason: "workspace_backup_unconfirmed" } },
+            ]);
+          else if (mode === "live_during_backup")
+            expect(events("host_ops_action_finished")).toMatchObject([
+              { payload: { reason: "terminal_exit_unconfirmed" } },
+            ]);
+          else expect(events("dispatch_stall_attention")).toHaveLength(1);
+        },
+        { timeout: 10_000 },
+      );
       expect(f.state().runs.find((r) => r.id === s.run.id)).toEqual(s.run);
       const current = f.state().assignments.find((o) => o.id === a.id);
-      expect(current?.runtime_ref).toEqual(mode === "clean" ? null : ref);
+      expect(current?.runtime_ref).toEqual(backedUp ? null : ref);
       expect(s.runtime.retire_idle).not.toHaveBeenCalled();
       expect(s.runtime.release).not.toHaveBeenCalled();
+      if (mode === "masked_edit" || mode === "skipped_edit") {
+        expect(backup).not.toHaveBeenCalled();
+        expect(readFileSync(join(workspace, "source"), "utf8")).toBe(
+          "uncommitted",
+        );
+      }
       expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual(
         [],
       );
       if (mode === "clean") {
         await d.tick();
         expect(startRun).toHaveBeenCalledOnce();
+        expect(s.runtime.provision).toHaveBeenCalledOnce();
+        expect(vi.mocked(s.runtime.provision).mock.calls[0]?.[3].cwd).toBe(
+          workspace,
+        );
         f.apply(
           (state, actor, ports) =>
             acknowledgeRun(state, actor, { run_id: s.run.id }, ports),
@@ -570,6 +605,36 @@ test.each([
         ])
           expect(handoffs[0]?.body).toContain(detail);
         expect(handoffs[0]?.body).not.toContain(workspace);
+      } else if (backedUp) {
+        const kept = `${workspace}-preserved`;
+        if (mode === "changed_access_at_launch") {
+          // Make the mode differ even on hosts with a nonstandard umask.
+          const original = statSync(workspace).mode;
+          chmodSync(workspace, original ^ 0o010);
+        } else {
+          renameSync(workspace, kept);
+          if (mode === "replaced_at_launch")
+            execFileSync("git", [
+              "clone",
+              "--quiet",
+              "--local",
+              kept,
+              workspace,
+            ]);
+        }
+        await d.tick();
+        expect(s.runtime.provision).not.toHaveBeenCalled();
+        expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual(
+          [],
+        );
+        if (mode === "missing_at_launch")
+          expect(existsSync(workspace)).toBe(false);
+        if (mode !== "changed_access_at_launch")
+          expect(
+            execFileSync("git", ["-C", kept, "rev-parse", "HEAD"], {
+              encoding: "utf8",
+            }).trim(),
+          ).toBe(sha);
       } else {
         // The refusal belongs to the patrol; a newly live idle terminal has its
         // own wake path and is not a replacement Session.
@@ -582,4 +647,5 @@ test.each([
       await service.close();
     }
   },
+  15_000,
 );

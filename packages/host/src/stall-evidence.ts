@@ -34,13 +34,29 @@ else: print("present")`;
 
 // Only the verdict leaves the worker. Git may report names of private material,
 // and a large listing must not be copied to the control host (even on failure).
-const inspectStatus = `import subprocess, sys
-with subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                      stderr=subprocess.DEVNULL) as p:
-    dirty = False
-    while p.stdout.read(65536): dirty = True
-    if p.wait(): sys.exit(1)
-    print('dirty' if dirty else 'clean')`;
+const inspectStatus = String.raw`import subprocess, sys
+def inspect(args, tags=False):
+    with subprocess.Popen(sys.argv[1:] + args, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as p:
+        clean, start = True, True
+        while block := p.stdout.read(65536):
+            if not tags:
+                clean = False
+                continue
+            # Only inspect the tag at the start of each NUL-terminated entry.
+            # Skip-worktree / assume-unchanged can hide real edits from status.
+            for part in block.split(b'\0')[:-1]:
+                if start and part[:1] != b'H': clean = False
+                start = True
+            tail = block.rsplit(b'\0', 1)[-1]
+            if tail:
+                if start and tail[:1] != b'H': clean = False
+                start = False
+        if p.wait(): sys.exit(1)
+        return clean
+if not inspect(['status','--porcelain=v1','-z','--untracked-files=normal','--ignored=matching','--ignore-submodules=none']): print('dirty')
+elif not inspect(['ls-files','-v','-z'], tags=True): print('unknown')
+else: print('clean')`;
 
 /** No fallback from a remote Assignment to the controller or another registration. */
 function boundWorkspaceTarget(
@@ -154,19 +170,7 @@ export async function stallWorkspace(
             expectedHead)
       )
         return "unknown";
-      const status = (
-        await git(
-          [
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=normal",
-            "--ignored=matching",
-            "--ignore-submodules=none",
-          ],
-          true,
-        )
-      ).trimEnd();
+      const status = (await git([], true)).trimEnd();
       if (status !== "clean") return status === "dirty" ? "dirty" : "unknown";
     }
     return "clean";

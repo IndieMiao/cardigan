@@ -89,6 +89,7 @@ import {
 } from "./preparation-queue.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
 import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
+import { retainedWriterForRun } from "./retained-writer.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
@@ -806,6 +807,16 @@ async function launch(
       !card?.repo)
       ? preparation()
       : withPreparationQueue(execution.dataDir, project, preparation);
+  const retained = host.store.uow.read((tx) =>
+    retainedWriterForRun(loadCommandState(tx, project), current, assignment),
+  );
+  const verifyWriter = async () => {
+    if (retained)
+      await retained.verify(
+        host.store.uow.read((tx) => tx.assignments.get(project, assignment.id)),
+        execution,
+      );
+  };
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
@@ -998,6 +1009,11 @@ async function launch(
   let launchToken: string | undefined;
   let provisionRefusal: ProvisionTargetRefusal | undefined;
   try {
+    if (retained) {
+      await verifyWriter();
+      worktree = retained.tree;
+      workDir = worktree.path;
+    }
     if (remote && execution.mode === "agent-ssh") {
       publication = LaunchPublication.begin(
         host,
@@ -1182,6 +1198,7 @@ async function launch(
 
     if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
+    await verifyWriter();
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
       ...verifiedLocalLaunch(compiled),
       cwd: workDir,

@@ -82,6 +82,7 @@ import {
 } from "./context-usage.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { writerPlacementSeal } from "./retained-writer.js";
 import {
   remoteStallExit,
   stallWorkspace,
@@ -1405,6 +1406,7 @@ export class HostOpsService {
       };
       // Only inspect the fixed workspace here: the runtime already owns
       // its signal slot, so a nested runtime probe could wait on itself.
+      let workspaceSeal: string | undefined;
       let backup: { ref: string; sha: string } | undefined;
       const checkWorkspace = async () => {
         const state = read();
@@ -1418,7 +1420,22 @@ export class HostOpsService {
               backup?.sha,
             )
           : "unknown";
-        if (workspace === "clean" || workspace === "no_worktree") return true;
+        if (workspace === "clean" || workspace === "no_worktree") {
+          if (
+            !workspaceSeal ||
+            (a &&
+              (await writerPlacementSeal(
+                project,
+                a,
+                action.runtime_ref,
+                this.stallExecution(project, a.machine_id),
+                this.contextAbort.signal,
+              )) === workspaceSeal)
+          )
+            return true;
+          evidenceFailure = "workspace_placement_changed";
+          return false;
+        }
         evidenceFailure = `workspace=${workspace}`;
         return false;
       };
@@ -1571,13 +1588,21 @@ export class HostOpsService {
             )?.worktree === "write";
           if (a && write && a.worktree_path) {
             try {
+              workspaceSeal = await writerPlacementSeal(
+                project,
+                a,
+                action.runtime_ref,
+                this.stallExecution(project, a.machine_id),
+                this.contextAbort.signal,
+              );
+              if (!workspaceSeal) throw new Error();
               backup = await this.options.stallBackup?.(
                 project,
                 a,
                 action.action_id,
               );
               if (!backup || !(await checkWorkspace())) throw new Error();
-              const verified = backup;
+              const verified = { ...backup, workspace_seal: workspaceSeal };
               store.uow.run((tx) => {
                 const state = loadCommandState(tx, project);
                 if (
@@ -1589,14 +1614,25 @@ export class HostOpsService {
                   ) !== JSON.stringify(a)
                 )
                   throw new Error();
-                if (
-                  !state.events.some(
-                    (e) =>
-                      e.type === "dispatch_stall_backup_verified" &&
-                      (e.payload as { action_id?: string }).action_id ===
-                        action.action_id,
+                const prior = state.events.find(
+                  (e) =>
+                    e.type === "dispatch_stall_backup_verified" &&
+                    (e.payload as { action_id?: string }).action_id ===
+                      action.action_id,
+                );
+                if (prior) {
+                  const p = prior.payload as {
+                    workspace_seal?: string;
+                    sha?: string;
+                    ref?: string;
+                  };
+                  if (
+                    p.workspace_seal !== workspaceSeal ||
+                    p.sha !== verified.sha ||
+                    p.ref !== verified.ref
                   )
-                ) {
+                    throw new Error();
+                } else {
                   const card = state.work_items.find(
                     (w) => w.id === a.work_item_id,
                   )?.card_id;
