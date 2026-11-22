@@ -28,6 +28,7 @@ import {
   type Change,
   candidate,
   changeSchema,
+  PERMISSION_MODES,
   providerUsers,
 } from "./launch-settings-change.js";
 import { ProfileChecks, providerCheck } from "./launch-settings-check.js";
@@ -43,6 +44,7 @@ import {
   snapshot,
   stale,
 } from "./launch-settings-file.js";
+import { ModelLists } from "./launch-settings-models.js";
 import {
   addSecrets,
   clearSecrets,
@@ -71,6 +73,17 @@ const confirmBody = z.strictObject({
   preview_id: z.uuid(),
   /** C-549: values for exactly the keys the preview set; never stored or echoed. */
   secrets: secretValues.optional(),
+});
+const modelsBody = z.strictObject({
+  version: versionSchema,
+  provider: z.string().min(1).max(64),
+});
+const modelCheckBody = modelsBody.extend({
+  model: z
+    .string()
+    .min(1)
+    .max(256)
+    .regex(/^[^\p{Cc}]+$/u),
 });
 const checkBody = z.union([
   z.strictObject({
@@ -122,6 +135,8 @@ export class LaunchSettings {
     { change: Change; version: string; owner: string; after: string }
   >();
   readonly checks: ProfileChecks;
+  /** C-564: model choices per saved Provider (catalog + its own listing). */
+  readonly models: ModelLists;
   constructor(
     private readonly store: Store,
     private readonly dir: string,
@@ -130,6 +145,7 @@ export class LaunchSettings {
     private readonly adopt: (generation: LaunchGeneration) => void,
   ) {
     this.checks = new ProfileChecks(store, () => this.snapshot());
+    this.models = new ModelLists(dataDir);
     // V-2713: settle what an interrupted confirmation left behind before
     // anything reads it. Bookkeeping only (the files are not touched); a
     // failure here is retried by the next settings read.
@@ -233,6 +249,8 @@ export class LaunchSettings {
       profiles,
       providers,
       models: publicFields(config.models ?? {}, secrets, true),
+      // C-564: what the form offers for `permission_mode`, per harness.
+      permission_modes: PERMISSION_MODES,
       // Keys a pending write is adding cannot be chosen yet (V-2719).
       secret_keys: publicFields(
         Object.keys(secrets).filter((k) => !pendingKeys(this.store).has(k)),
@@ -604,12 +622,41 @@ export class LaunchSettings {
       }
       return;
     }
-    if (!["/preview", "/confirm", "/checks"].includes(rest))
+    if (
+      !["/preview", "/confirm", "/checks", "/models", "/model-check"].includes(
+        rest,
+      )
+    )
       throw new HttpRejection(404, "not_found", "接口不存在");
     if (req.method !== "POST") methodNotAllowed(["POST"]);
     const body = await readJsonBody(req);
     const actor = authorize().member_id ?? "human";
-    if (rest === "/preview") sendJson(res, 200, this.preview(body, owner));
+    if (rest === "/models" || rest === "/model-check") {
+      // C-564: read-only; only a saved Provider of the snapshot the person
+      // sees. Like the settings read, the session is checked again after
+      // the (slow) upstream answer and before anything is sent.
+      let answer: unknown;
+      if (rest === "/models") {
+        const input = modelsBody.safeParse(body);
+        if (!input.success) throw invalid();
+        const f = this.file();
+        if (input.data.version !== f.version) throw stale();
+        answer = await this.models.list(f, input.data.provider);
+      } else {
+        const input = modelCheckBody.safeParse(body);
+        if (!input.success) throw invalid();
+        const f = this.file();
+        if (input.data.version !== f.version) throw stale();
+        answer = await this.models.check(
+          f,
+          input.data.provider,
+          input.data.model,
+        );
+      }
+      authorize();
+      sendJson(res, 200, answer);
+    } else if (rest === "/preview")
+      sendJson(res, 200, this.preview(body, owner));
     else if (rest === "/confirm")
       sendJson(
         res,

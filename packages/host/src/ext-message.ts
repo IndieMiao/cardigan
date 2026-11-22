@@ -47,13 +47,16 @@ import {
   settleExtMessage,
 } from "@cardigan/store";
 import {
-  defaultMaxPerMinute,
   type ExtMessageConfig,
   type ExtMessageConfiguration,
+  extChannelLimit,
   extMessageQuiet,
 } from "./ext-message-config.js";
-
 import { createFeishuAdapter } from "./ext-message-feishu.js";
+import {
+  currentExtGeneration,
+  type ExtGeneration,
+} from "./ext-message-generation.js";
 
 import { type FeishuApp, startFeishu } from "./feishu-app.js";
 
@@ -93,6 +96,7 @@ export async function sendExtMessage(
   }
 }
 export interface ExtMessageOptions {
+  readonly generation?: ExtGeneration;
   readonly store: Store;
   readonly configuration: ExtMessageConfiguration;
   readonly gate?: (project: ProjectId) => CommandState["project_settings"];
@@ -302,6 +306,37 @@ function planChannel(
   return { ...classify(slots), classify };
 }
 
+export function extFingerprints(
+  c: ExtMessageConfiguration,
+  applicationActive: boolean,
+) {
+  const fingerprints = new Map<string, string>();
+  if (c.status === "loaded" && c.config.enabled) {
+    for (const [name, channel] of Object.entries(c.config.channels)) {
+      if (channel.enabled && (name !== "lark_app" || applicationActive)) {
+        // Keep the pre-override fingerprint format, using only the effective budget.
+        const { max_per_minute: _override, ...effectiveChannel } = channel;
+        fingerprints.set(
+          name,
+          createHash("sha256")
+            .update(
+              JSON.stringify([
+                c.config.workbench_url,
+                {
+                  ...c.config.policy,
+                  max_per_minute: extChannelLimit(c.config, name),
+                },
+                c.config.quiet_hours,
+                effectiveChannel,
+              ]),
+            )
+            .digest("hex"),
+        );
+      }
+    }
+  }
+  return fingerprints;
+}
 export class ExtMessageSender {
   private running: Promise<void> | undefined;
   private receipts: Promise<void> | undefined;
@@ -314,51 +349,42 @@ export class ExtMessageSender {
   }
   private activations?: Map<string, ExtChannelActivation>;
   private observedBinding?: string;
-  private activate(): void {
+  private activate(tx?: StoreTransactionContext): void {
     if (this.activations) return;
     const { configuration: c, store } = this.options;
-    const fingerprints = new Map<string, string>();
-    if (c.status === "loaded" && c.config.enabled) {
-      for (const [name, channel] of Object.entries(c.config.channels)) {
-        if (channel.enabled && (name !== "lark_app" || this.app))
-          fingerprints.set(
-            name,
-            createHash("sha256")
-              .update(
-                JSON.stringify([
-                  c.config.workbench_url,
-                  c.config.policy,
-                  c.config.quiet_hours,
-                  channel,
-                ]),
-              )
-              .digest("hex"),
-          );
-      }
-    }
-    this.activations = store.uow.run((tx) =>
-      activateExtChannels(store.database, tx, fingerprints, this.clock.now()),
-    );
+    const fingerprints = extFingerprints(c, !!this.app);
+    const activate = (tx: StoreTransactionContext) =>
+      activateExtChannels(
+        store.database,
+        tx,
+        fingerprints,
+        this.clock.now(),
+        c.status === "loaded" ? c.publication : undefined,
+      );
+    this.activations = tx ? activate(tx) : store.uow.run(activate);
   }
   private current(channel: string) {
     const name = channel.split(":")[0]!;
     const expected = this.activations?.get(name);
     return (
       !!expected &&
+      currentExtGeneration(this.options.generation) &&
       extChannelActivation(this.options.store.database, name)?.epoch ===
         expected.epoch
     );
   }
   /** Persist safe startup metadata for human status; no secrets or URL are written. */
-  recordStatus(): void {
+  recordStatus(tx?: StoreTransactionContext): void {
     const c = this.options.configuration;
     this.app = (this.options.startApplication ?? startFeishu)(
       this.options.store,
       c,
       this.options.gate,
+      tx,
+      this.options.generation,
     );
-    this.activate();
-    this.options.store.uow.run(() =>
+    this.activate(tx);
+    const record = () =>
       this.options.store.database
         .prepare(
           "INSERT OR REPLACE INTO ext_message_host_status(id,doc) VALUES(1,?)",
@@ -378,8 +404,9 @@ export class ExtMessageSender {
                 : {},
             loaded_at: this.clock.now(),
           }),
-        ),
-    );
+        );
+    if (tx) record();
+    else this.options.store.uow.run(record);
   }
   tick(): Promise<void> {
     if (this.running) return this.running;
@@ -507,7 +534,7 @@ export class ExtMessageSender {
       this.options.store.database,
       channel.split(":")[0]!,
       Date.parse(at),
-      config.policy.max_per_minute ?? defaultMaxPerMinute,
+      extChannelLimit(config, channel),
     );
   }
   private async drain(
@@ -616,7 +643,7 @@ export class ExtMessageSender {
               store.database,
               channel.split(":")[0]!,
               Date.parse(at),
-              config.policy.max_per_minute ?? defaultMaxPerMinute,
+              extChannelLimit(config, channel),
             ) - (prefixSlots.get(channel) ?? 0),
           )
         : 0;
@@ -898,7 +925,7 @@ export class ExtMessageSender {
             store.database,
             candidate.channel.split(":")[0]!,
             Date.parse(claimAt),
-            config.policy.max_per_minute ?? defaultMaxPerMinute,
+            extChannelLimit(config, candidate.channel),
             lease,
             sendBy,
           )
@@ -975,6 +1002,7 @@ export class ExtMessageSender {
       const activation = this.activations?.get(name);
       if (
         !activation ||
+        !currentExtGeneration(this.options.generation) ||
         nowQuiet ||
         Date.parse(dispatchAt) >= claimed.sendBy ||
         (digest === null &&

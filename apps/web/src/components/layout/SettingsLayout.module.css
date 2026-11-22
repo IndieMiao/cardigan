@@ -527,6 +527,11 @@
   .fieldHint :where(p) {
     margin: 0;
   }
+  /* C-564: a status tag sits centred in the hint's line, not on its baseline. */
+  .fieldHint [data-ui="badge"] {
+    vertical-align: top;
+    margin-block-start: calc((var(--ui-leading) - var(--ui-leading-xs)) / 2);
+  }
   /* A command moves to the next line whole rather than breaking inside. */
   .fieldHint code {
     display: inline-block;

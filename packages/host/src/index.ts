@@ -93,6 +93,9 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export { parseFeishuCredential } from "./ext-message-feishu.js";
+export { boundTestAdapter } from "./feishu-app.js";
+export { parseAppCredential } from "./feishu-inbox.js";
 export * from "./github-branch-cleaner.js";
 export * from "./github-budget-journal.js";
 export {
@@ -160,10 +163,16 @@ export {
   publishModelFile,
   withLaunchSnapshot,
 } from "./launch-model-intent.js";
-export { probeModel } from "./launch-model-probe.js";
+export {
+  findProviderModel,
+  listProviderModels,
+  MAX_LISTED_MODELS,
+  probeModel,
+} from "./launch-model-probe.js";
 export { recordLaunchNotice } from "./launch-notice.js";
 export { selectableLaunchConfig } from "./launch-profile-choices.js";
 export { recoverLaunchPublications } from "./launch-publish.js";
+export * from "./live-ext-message.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
@@ -213,7 +222,9 @@ export {
   validateMergePushConfig,
 } from "./merge-push-config.js";
 export {
+  type ModelCatalogSnapshot,
   parseCachedLaunchConfig,
+  readModelCatalog,
   stageModelLaunchConfig,
 } from "./model-catalog.js";
 export {

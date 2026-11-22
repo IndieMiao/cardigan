@@ -58,6 +58,7 @@ test.each(["linux", "darwin"])(
       args: [...args.slice(1, -1), stage],
     }));
     const terminal = await stageWorkerUpgrade(worker, os);
+    expect(terminal.target).toBe("remote（项目 sample）");
     const { dir } = upgradeMaterials(worker, os);
     expect(terminal.command).toContain(
       os === "linux" ? "sha256sum" : "shasum -a 256",

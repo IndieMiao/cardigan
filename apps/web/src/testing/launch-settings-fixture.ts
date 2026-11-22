@@ -132,6 +132,19 @@ export const launchSettingsFixture: LaunchSettingsView = {
       context_window: 64000,
     },
   },
+  // C-564: as the host reads them (Claude Code only).
+  permission_modes: {
+    "claude-code": [
+      "plan",
+      "manual",
+      "acceptEdits",
+      "dontAsk",
+      "auto",
+      "bypassPermissions",
+    ],
+    codex: [],
+    pi: [],
+  },
   secret_keys: [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_API_KEY_SPARE",

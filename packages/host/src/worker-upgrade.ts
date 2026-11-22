@@ -117,7 +117,7 @@ export function upgradeMaterials(worker: Worker, os: string) {
     "/usr/bin/python3 -IB upgrade.py",
   ].join("; ");
   const terminal: ActionCommand = {
-    target: target.machine_id,
+    target: `${target.machine_id}（项目 ${target.project_id}）`,
     login: "用管理员账号登录目标机器，在该机终端执行（需要 sudo）。",
     command: `/usr/bin/sudo /bin/sh -c ${quote(shell)}`,
     expected_output:

@@ -532,6 +532,11 @@ export function serialSecrets<T>(dir: string, run: () => Promise<T>) {
 /** The outcome is not proved yet; a later settle decides (or keeps it). */
 export class SecretsUnsettled extends Error {}
 
+/** Only within a host-owned private staging directory; never opens an existing file. */
+export function writeNewPrivateFile(path: string, text: string) {
+  writeFileSync(path, text, { flag: "wx", mode: 0o600, flush: true });
+}
+
 export interface Step {
   readonly operation: string;
   readonly original: string | null;
@@ -616,10 +621,9 @@ function stageAndRename(
         )
         .run(stagingId, step.operation);
     });
-    const opts = { flag: "wx", mode: 0o600 } as const;
-    writeFileSync(stagedTemp(staging), text, opts);
+    writeNewPrivateFile(stagedTemp(staging), text);
     if (step.original !== null)
-      writeFileSync(stagedBackup(staging), step.original, opts);
+      writeNewPrivateFile(stagedBackup(staging), step.original);
     const tempId = fileId(stagedTemp(staging));
     store.uow.run(() => {
       own();

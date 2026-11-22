@@ -100,6 +100,10 @@ machines:
 
 ## 2. worker：专用账号和安装布局
 
+**同机第二个项目**沿用机器编号，不复用第一个项目的账号、UID、主组、HOME、工作根或认领标记。逐项替换下例的 `example`、`cg_example` 和 UID/GID，在 `/Library/Cardigan/worker-<项目>.json` 建 root 所有、0600 的新文件；文件名中的项目必须和正文、两份认领标记一致。同机已有 `worker.json` 的绑定原样保留，不复制为同项目的新文件，不覆盖它的内容。
+
+安装前可用 `sudo /usr/bin/python3 -IB /opt/cardigan/deploy/install-macos-worker.py --check` 逐项只读检查：每个配置单独输出，任一失败总退出码非零。修复时用 `--project <项目> --check` 和 `--project <项目> --apply` 明确选中一项；同名冲突拒绝操作，其它绑定仍可检查。旧 `--config` 命令继续有效。控制主机为每个（项目、机器）保留各自的向导配置，在同一机器登记下添加项目绑定，不替换其它项目。
+
 管理员先安装 Apple Command Line Tools（提供 Git/lipo）、原生 arm64 Python 3.12 或更新版本、Node 24、pnpm 11，开启系统设置中的远程登录并授权专用账号。先核实示例 UID/GID 和账号名空闲；以下只创建新账号，已有账号不要照抄修改：
 
 ```sh
@@ -143,15 +147,15 @@ create('/Users/cg_example/.cardigan-project', {'project': 'example', 'uid': 2201
 create(root + '/.cardigan-worker', {'project': 'example', 'uid': 2201, 'home': '/Users/cg_example'}, 0o600)
 # APFS 的 /Users 位于 Data 卷；mount 填实际挂载点，volume 取该挂载点的 f_fsid。
 mount = '/System/Volumes/Data'
-create('/Library/Cardigan/worker.json', {
+create('/Library/Cardigan/worker-example.json', {
     'account': 'cg_example', 'uid': 2201, 'project': 'example', 'root': root,
     'mount': mount, 'volume': str(os.statvfs(mount).f_fsid),
     'minimum_free_bytes': {'root': 1073741824, 'work': 1073741824},
     'timeout_ms': 15000
 }, 0o600)
 PY
-sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --config /Library/Cardigan/worker.json --check
-sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --config /Library/Cardigan/worker.json --apply
+sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --project example --check
+sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --project example --apply
 ```
 
 安装器核对挂载/卷、空间、账号、认领标记及文件冲突，创建项目目录、锁和基础 helper，重复执行不替换锁 inode。示例使用 Git 所见的 `/Users/...` 规范目录名，避免 `/var`、`/etc` 符号链接及 `/Users/Shared` 的可写 sticky 父链；实际卷布局不同则同步调整 HOME、root、mount 和认领标记，不更改系统共享目录权限。
@@ -326,10 +330,14 @@ Godot 项目可在私有任务流程中用 `deploy/godot-import.py` 替代**新�
 
 ### 可选：为已登记的 Mac 接入受限 helper 升级
 
-默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对接入包来自已部署的已审发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
+旧安装器只可用向导维护唯一且能核实的 `worker.json`。出现命名配置时先核验并更新安装器，不要手改命令指向旧绑定。人工升级复用已匹配的共享发行目录；不同版本只作原子交换，不支持则停止。若有中断留下的备份或暂存目录，保留现场，按 `docs/plans/C-551.md` 核对。
+
+**每个新项目分别接入。** 下例针对命名配置。先在控制主机 prepare，再在 worker 安装专属零参数入口及公钥，核对指纹和唯一 sudo 规则后才 activate。不要用某个项目的接入材料替另一个项目授权。已有 `worker.json` 的旧接入不用重跑、不迁移密钥；若该旧绑定尚未接入，两端沿用无 `--project-config`、无 `--project` 的旧命令，账号为 `cardigan_updater`，入口和备份仍在 `/opt/cardigan-helper-upgrade`。旧版 bootstrap 不会自动更新。
+
+默认仍是人工升级。仅管理员在维护窗口、没有活跃使用时接入；先核对本机是已登记的 Apple Silicon worker，`/Library/Cardigan/worker-example.json` 指向正确项目，三个 helper 均在其 `libexec`，并核对接入包来自已部署的已审发行版。不得从项目工作树或临时上传目录 sudo 运行。控制主机用 server 账号，在该发行版根目录执行（用实际项目、机器替换示例）：
 
 ```sh
-sh deploy/enroll-helper-controller.sh prepare example worker-a
+sh deploy/enroll-helper-controller.sh prepare example worker-a --project-config
 ```
 
 Mac 管理员使用本次新建、受 root 保护的发行目录（不更新或使用旧 `/opt/cardigan/deploy`）。`BUNDLE` 为管理员收到的包，`EXPECTED` 为经独立通道核对的整包 SHA-256；包内保留 `deploy/` 层级。先执行：
@@ -344,14 +352,15 @@ KIT=$(sudo mktemp -d /opt/cardigan-enroll.XXXXXXXX) &&
 任一步失败即停；使用同一 `KIT`，不从历史目录挑选脚本。Mac 管理员运行下面第一条，粘贴 prepare 输出的 SSH 公钥和 PEM 公钥两段，以 Ctrl-D 结束；对照控制主机终端核实两个指纹。脚本创建无密码凭据的隐藏系统账号及独占组，不开启图形登录、不加入 admin、wheel 或 worker 组；HOME、公钥和入口由 root 持有。确认本机 SSH 策略只允许此受限公钥，没有其它登录入口。sudo 授权只应有一个固定的无参数命令；脚本拒绝已有账号、文件或已有 sudo 授权。异常时不要强行覆盖或激活。
 
 ```sh
-sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh"
-sudo -n -l -U cardigan_updater
+sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh" --project example
+tag=$(/usr/bin/python3 -IB -c 'import hashlib; print(hashlib.sha256(b"example").hexdigest()[:20])')
+sudo -n -l -U "cgu_$tag"
 ```
 
 两端校验一致后，回到控制主机发行版根目录：
 
 ```sh
-sh deploy/enroll-helper-controller.sh activate example worker-a
+sh deploy/enroll-helper-controller.sh activate example worker-a --project-config
 cardigan worker check --project example --machine worker-a
 cardigan machine check worker-a --project example
 ```

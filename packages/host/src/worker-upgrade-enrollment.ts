@@ -22,7 +22,11 @@ export function enrolledUpgradeIdentity(
   machine: string,
 ) {
   const identity = upgradeIdentity(root, project, machine);
-  return lstatSync(identity, { throwIfNoEntry: false }) ? identity : undefined;
+  const active = [identity, `${identity}.bound`].filter((path) =>
+    lstatSync(path, { throwIfNoEntry: false }),
+  );
+  if (active.length > 1) throw new Error("worker_upgrade_enrollment_conflict");
+  return active[0];
 }
 
 // Only a confirmed absence selects the manual route. Presence (even a broken

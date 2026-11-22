@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import pwd
+import re
 import runpy
 import signal
 import stat
@@ -15,7 +16,8 @@ import tempfile
 import time
 from pathlib import Path
 
-BOOT = Path('/opt/cardigan-helper-upgrade')
+BOOT = Path(__file__).parent
+LEGACY = Path('/opt/cardigan-helper-upgrade')
 NAMES = ('worker-files.py', 'worker-git.py', 'worker-primitives.py')
 LIMIT = 1024 * 1024
 USER = 'cardigan_updater'
@@ -104,8 +106,22 @@ def timed_out(_signal, _frame):
     raise TimeoutError('upgrade_timeout')
 
 
+def enrollment(boot, project):
+    if boot == LEGACY:
+        return USER
+    tag = digest(project.encode())[:20]
+    require(boot == LEGACY.with_name(LEGACY.name + '-' + tag))
+    return 'cgu_' + tag
+
+
 def main():
-    require(len(sys.argv) == 1 and os.geteuid() == 0 and os.environ.get('SUDO_USER') == USER)
+    require(len(sys.argv) == 1 and os.geteuid() == 0)
+    require(BOOT == LEGACY or (BOOT.parent == LEGACY.parent and
+            re.fullmatch(r'cardigan-helper-upgrade-[0-9a-f]{20}', BOOT.name)))
+    # Both the script and its binding pin live inside the administrator's 0700 bootstrap.
+    project = (BOOT / 'project').read_text().rstrip('\n')
+    user = enrollment(BOOT, project)
+    require(os.environ.get('SUDO_USER') == user)
     os.chdir('/')
     os.umask(0o077)
     signal.signal(signal.SIGALRM, timed_out)
@@ -113,12 +129,12 @@ def main():
     native = runpy.run_path(str(BOOT / 'worker-primitives.py'))
     installer = runpy.run_path(str(BOOT / 'install-macos-worker.py'))
     system = platform.system()
-    config_file = {'Darwin': '/Library/Cardigan/worker.json', 'Linux': '/etc/cardigan/worker.json'}[system]
-    config = installer['trusted_json'](Path(config_file))
+    path, config = installer['select_binding'](installer['binding_inventory'](system), project)
+    require(path.name == ('worker.json' if BOOT == LEGACY else f'worker-{project}.json'))
     account = pwd.getpwnam(config['account'])
-    updater = pwd.getpwnam(USER)
+    updater = pwd.getpwnam(user)
     require(account.pw_uid == config['uid'] and int(os.environ['SUDO_UID']) == updater.pw_uid > 0
-            and updater.pw_uid != account.pw_uid and account.pw_gid not in os.getgrouplist(USER, updater.pw_gid))
+            and updater.pw_uid != account.pw_uid and account.pw_gid not in os.getgrouplist(user, updater.pw_gid))
     target = Path(config['root']) / 'libexec'
     os.close(native['isolation_directory'](str(target), 0, account.pw_gid, 0o750, True))
     state = BOOT / 'state'

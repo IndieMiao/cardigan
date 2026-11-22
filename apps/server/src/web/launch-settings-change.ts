@@ -1,4 +1,4 @@
-import { HARNESSES } from "@cardigan/roles";
+import { HARNESSES, type Harness } from "@cardigan/roles";
 import { isAlias, isMap, isScalar } from "yaml";
 import { z } from "zod";
 import { HttpRejection } from "./http.js";
@@ -10,6 +10,27 @@ import {
   type SettingsFile,
 } from "./launch-settings-file.js";
 import { planKeys, secretKey, secretPlan } from "./launch-settings-secrets.js";
+
+/**
+ * C-564: values the launch settings form offers for a profile's
+ * `permission_mode`, per harness. Only Claude Code takes the parameter
+ * (`--permission-mode`, choices of Claude Code 2.1.318); the other harnesses
+ * have none, so nothing is selectable there. launch.yaml itself is not
+ * restricted: a hand-written value outside the list stays as it is.
+ */
+export const PERMISSION_MODES: Readonly<Record<Harness, readonly string[]>> =
+  Object.freeze({
+    "claude-code": Object.freeze([
+      "plan",
+      "manual",
+      "acceptEdits",
+      "dontAsk",
+      "auto",
+      "bypassPermissions",
+    ]),
+    codex: Object.freeze([]),
+    pi: Object.freeze([]),
+  });
 
 /** Provider protocols the host accepts (`packages/roles` provider schema). */
 export const PROVIDER_APIS = [
@@ -155,12 +176,32 @@ export function candidate(
   );
   switch (change.op) {
     case "create_profile":
-    case "edit_profile":
+    case "edit_profile": {
+      // C-564: a permission mode is set only to a value the profile's
+      // harness offers. One left untouched is not sent, so it stays as is.
+      const mode = change.fields.permission_mode;
+      if (typeof mode === "string") {
+        const harness =
+          change.fields.harness ?? config.profiles[change.name]?.harness;
+        if (!harness || !PERMISSION_MODES[harness].includes(mode))
+          throw invalid("permission_mode");
+      }
       for (const [k, v] of Object.entries(change.fields)) set([k], v);
       break;
+    }
     case "copy_profile": {
       if (!Object.hasOwn(config.profiles, change.source))
         throw invalid("source");
+      // C-564: a copy is a new profile; a kept hand-written permission mode
+      // outside the harness's options is not carried into it.
+      const source = config.profiles[change.source];
+      const mode = source?.permission_mode;
+      if (
+        source &&
+        mode !== undefined &&
+        !PERMISSION_MODES[source.harness].includes(mode)
+      )
+        throw invalid("permission_mode");
       doc.setIn(path, doc.createNode(file.raw.profiles[change.source]));
       diff.push({
         field: path.join("."),
