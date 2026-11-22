@@ -1256,6 +1256,7 @@ export class MergeChecks {
           ? { pollIntervalMs: config.pollIntervalMs }
           : {}),
         ...(config.queueWaitMs ? { queueWaitMs: config.queueWaitMs } : {}),
+        ...(config.stepContract ? { stepContract: config.stepContract } : {}),
       });
       shared = { client, poller, retryAt: 0 };
       this.github.set(config.name, shared);

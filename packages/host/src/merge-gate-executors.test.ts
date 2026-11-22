@@ -566,6 +566,9 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     { branch_retention_ms: 0 },
     { branch_retention_ms: 1.5 },
     { branch_retention_ms: "604800000" },
+    { step_contract: { steps: ["install"] } },
+    { step_contract: { steps: [], post_steps: [] } },
+    { step_contract: "Run actions/checkout" },
   ]) {
     const invalid = await load(override);
     expect(invalid.forExecutor?.("github")).toBeUndefined();
@@ -592,6 +595,34 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       queueWaitMs: 7_200_000,
       failureExcerptBytes: 1024,
       branchRetentionMs: 86400000,
+    },
+  });
+  expect(config.forExecutor?.("github")).not.toHaveProperty("stepContract");
+  expect(
+    (
+      await load({
+        step_contract: {
+          steps: [
+            "Initialize containers",
+            { uses: "actions/checkout" },
+            "install",
+            "build",
+            "test",
+            "lint",
+            "deps",
+            "e2e",
+          ],
+          post_steps: [{ uses: "actions/checkout" }, "Stop containers"],
+        },
+      })
+    ).forProject("p"),
+  ).toMatchObject({
+    status: "enabled",
+    executor: {
+      stepContract: {
+        steps: expect.arrayContaining([{ uses: "actions/checkout" }]),
+        postSteps: [{ uses: "actions/checkout" }, { name: "Stop containers" }],
+      },
     },
   });
   await chmod(join(f.ssh, "ci.key"), 0o644);
