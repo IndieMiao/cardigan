@@ -241,7 +241,11 @@ export interface MergeGit {
     readonly truncated: boolean;
   }>;
 }
+export type ReconcilePages = AsyncGenerator<void, readonly ReconcileFinding[]>;
 export interface ReconcileGit {
+  reconcilePages?(
+    ...args: Parameters<ReconcileGit["reconcile"]>
+  ): ReconcilePages;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   reconcile(
     project: CentralProject,
@@ -962,11 +966,20 @@ export class ServerGit implements GitBinding {
     return true;
   }
   async reconcile(
+    ...args: Parameters<ReconcileGit["reconcile"]>
+  ): Promise<readonly ReconcileFinding[]> {
+    const pages = this.reconcilePages(...args);
+    for (;;) {
+      const page = await pages.next();
+      if (page.done) return page.value;
+    }
+  }
+  async *reconcilePages(
     project: CentralProject,
     assignments: readonly Assignment[],
     deliveries: readonly Delivery[],
     readChecks?: () => ReconcileChecks,
-  ): Promise<readonly ReconcileFinding[]> {
+  ): ReconcilePages {
     // The local scan (readdir) always runs: it covers the default execution.
     const state = await this.worktrees.listWorktreeState(project);
     const workers: ReconcileFinding[] = [];
@@ -977,6 +990,9 @@ export class ServerGit implements GitBinding {
         !assignment.worktree_path
       )
         continue;
+      // Resume at most one targeted worker observation per timer page. No
+      // partial inventory is published and no lock survives this yield.
+      yield;
       const subject = {
         assignment_id: assignment.id,
         path: `${assignment.machine_id}:${assignment.worktree_path}`,

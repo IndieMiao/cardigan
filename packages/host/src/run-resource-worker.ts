@@ -111,7 +111,8 @@ export async function previewRunResources(
       {
         cwd: "/",
         env: { PATH: "/usr/bin:/bin" },
-        timeout: 15000,
+        // Read-only patrol: retain everything on timeout and retry next cycle.
+        timeout: 3000,
         killSignal: "SIGKILL",
         maxBuffer: 1024 * 1024,
       },

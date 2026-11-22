@@ -26,7 +26,7 @@ import { withMergeTransferBudget } from "@cardigan/git-transport";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
-import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { type LoopStartup, startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -475,6 +475,7 @@ export interface MergeLoop {
 export function startMergeLoop(
   options: MergeLoopOptions & {
     readonly watchdogMs?: number;
+    readonly startup?: LoopStartup | undefined;
     readonly intervalMs?: number;
     readonly clock?: Clock;
     readonly onError?: (error: unknown) => void;
@@ -486,7 +487,11 @@ export function startMergeLoop(
   options.signal?.addEventListener("abort", cancel, { once: true });
   if (options.signal?.aborted) cancel();
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "merge",
+    initialDelayMs: options.startup
+      ? Math.min(300, options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS)
+      : 0,
     tick: async () => {
       const disarm = watchMergePass(
         options.store,

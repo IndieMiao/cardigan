@@ -18,7 +18,7 @@ import type { MergeGateConfiguration } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
-import { startTimerLoop } from "./loop.js";
+import { type LoopStartup, startTimerLoop } from "./loop.js";
 import { MergeLockBusy, withPublication } from "./publication-lock.js";
 
 export function mergeProjectSettings(
@@ -204,11 +204,18 @@ export class MergePushExecutor {
   }
 }
 export function startMergePushLoop(
-  options: MergePushOptions & { readonly intervalMs?: number },
+  options: MergePushOptions & {
+    readonly startup?: LoopStartup | undefined;
+    readonly intervalMs?: number;
+  },
 ) {
   const executor = new MergePushExecutor(options);
   const loop = startTimerLoop({
+    startup: options.startup,
     name: "merge-push",
+    initialDelayMs: options.startup
+      ? Math.min(600, options.intervalMs ?? 5000)
+      : 0,
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? 5_000,
     onError: options.onError ?? (() => {}),

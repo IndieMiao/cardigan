@@ -94,6 +94,7 @@ export interface StartServerOptions {
   /** Explicit production role. Omitted only for embedded single-process callers. */
   readonly role?: "web" | "background";
   /** Activate the launch publisher only while this process owns the dispatch lock. */
+  readonly backgroundReady?: Promise<void>;
   readonly onBackgroundOwner?: () => () => void;
   readonly env?: ServerEnv;
   readonly config?: ServerConfig;
@@ -692,6 +693,7 @@ async function assembleServer(
   // Start background work only after every listener is bound. A Web port
   // timeout must not have to drain a merge, dispatch or reconciliation that
   // started during the retry window.
+  const startup = Promise.withResolvers<boolean>();
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let probeLoop: TimerLoop | undefined;
@@ -700,6 +702,8 @@ async function assembleServer(
     try {
       probeLoop = startTimerLoop({
         name: "probes",
+        startup: startup.promise,
+        initialDelayMs: 1500,
         intervalMs: 5000,
         slowTickMs: 60000,
         tick: () => probes.tick(),
@@ -757,6 +761,7 @@ async function assembleServer(
           ? { providerCooldownMs: config.providerCooldownMs }
           : {}),
         ...options.dispatcher,
+        startup: startup.promise,
         ...((options.dispatcher.runtimeFailureLimit ??
           config.runtimeFailureLimit) === undefined
           ? {}
@@ -858,12 +863,15 @@ async function assembleServer(
       const notificationSender = extSender;
       extLoop = startTimerLoop({
         name: "ext-message",
+        startup: startup.promise,
+        initialDelayMs: 1000,
         intervalMs:
           options.dispatcher.intervalMs ?? config.dispatchIntervalMs ?? 1000,
         tick: () => notificationSender.tick(),
         onError: () => options.warn?.("外部通知循环失败，将在下一轮恢复"),
       });
     } catch (error) {
+      startup.resolve(false);
       await Promise.allSettled([
         extSender?.stop(),
         extLoop?.stop(),
@@ -923,6 +931,7 @@ async function assembleServer(
     if (options.role !== "background")
       await writeRegisteredRuntime(config.dataDir, execution, session);
   } catch (error) {
+    startup.resolve(false);
     await checkControl?.close();
     await web?.close();
     await Promise.allSettled([
@@ -953,6 +962,11 @@ async function assembleServer(
       warnLine("cpu_profile_unavailable");
     }
   }
+  // runServer releases this only after handlers are installed and stdout reports ready.
+  // Embedded servers without a supervisor use completion of their own initialization.
+  if (options.backgroundReady)
+    void options.backgroundReady.then(() => startup.resolve(true));
+  else startup.resolve(true);
   return {
     url: mcp.url,
     host: mcp.host,

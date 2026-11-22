@@ -16,6 +16,7 @@ import {
   type RuntimeMonitorOptions,
 } from "./dispatch-monitor.js";
 import type { GitPhases } from "./git.js";
+import type { LoopStartup } from "./loop.js";
 import { startMachineCapabilityLoop } from "./machine-capability-loop.js";
 import type { MergeCheckOptions } from "./merge-checks.js";
 import { type MergeExecutor, startMergeLoop } from "./merge-loop.js";
@@ -30,6 +31,7 @@ import {
   startBackupLoop,
   startReconcileLoop,
 } from "./reconcile-loop.js";
+import { startRunResourceLoop } from "./run-resource-cleanup.js";
 
 /**
  * M3.5: the control plane the server runs beside the MCP endpoint.
@@ -39,6 +41,7 @@ import {
  * `stop()` (loop + monitor drain) → close the MCP endpoint → close the Store.
  */
 export interface ControlPlaneOptions {
+  readonly startup?: LoopStartup;
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
   readonly harnessActivity?: DispatcherOptions["harnessActivity"];
@@ -240,6 +243,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   });
   const loopOptions: DispatchLoopOptions = {
     dispatcher,
+    startup: options.startup,
     monitor,
     onSlowTick: (durationMs) =>
       options.onError?.(
@@ -257,6 +261,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const machineCapabilities =
     options.runtime instanceof RuntimeTargets
       ? startMachineCapabilityLoop({
+          startup: options.startup,
           store: options.store,
           runtime: options.runtime,
           onError: report,
@@ -266,6 +271,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     options.git === undefined
       ? undefined
       : startMergeLoop({
+          startup: options.startup,
           store: options.store,
           git: options.git,
           clock,
@@ -285,6 +291,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const push =
     options.git && options.mergeGate
       ? startMergePushLoop({
+          startup: options.startup,
           store: options.store,
           git: options.git,
           configuration: options.mergeGate.configuration,
@@ -299,6 +306,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     options.git === undefined
       ? undefined
       : startCleanupLoop({
+          startup: options.startup,
           store: options.store,
           git: options.git,
           runtime: options.runtime,
@@ -309,10 +317,21 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           onError: report,
           report: (message) => options.onError?.(new Error(message)),
         });
+  const resources =
+    options.git && options.runtime instanceof RuntimeTargets
+      ? startRunResourceLoop(
+          options.store,
+          options.runtime,
+          (line) => report(new Error(line)),
+          options.startup,
+          options.cleanupIntervalMs,
+        )
+      : undefined;
   const reconcile =
     options.git === undefined
       ? undefined
       : startReconcileLoop({
+          startup: options.startup,
           store: options.store,
           git: options.git,
           clock,
@@ -326,6 +345,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     options.git === undefined
       ? undefined
       : startBackupLoop({
+          startup: options.startup,
           store: options.store,
           git: options.git,
           clock,
@@ -341,6 +361,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     options.dataDir === undefined
       ? undefined
       : startAttachmentLoop({
+          startup: options.startup,
           dataDir: options.dataDir,
           store: options.store,
           ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -354,6 +375,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
     merge?.loop.done,
     push?.loop.done,
     cleanup?.loop.done,
+    resources?.done,
     reconcile?.loop.done,
     backup?.loop.done,
     attachments?.loop.done,
@@ -371,6 +393,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       // Cancel checks promptly; wait below before closing the shared Store.
       merge?.executor.stop();
       push?.executor.stop();
+      const stopResources = resources?.stop();
       const stopMachineCapabilities = machineCapabilities?.stop();
       // Dispatcher first (no new work), then the phases in a fixed order; each
       // stop waits for its current tick, so SIGTERM never cuts a merge or a
@@ -384,6 +407,7 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       // The blob sweep last: it only touches files no record references.
       await attachments?.loop.stop();
       await stopMachineCapabilities;
+      await stopResources;
     },
   };
 }

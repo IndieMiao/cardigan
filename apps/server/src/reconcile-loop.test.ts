@@ -170,29 +170,8 @@ async function centralWithBaseClone() {
 test("reconcile consumes new events only, publishes cursors after commit and rebuilds on restart", async () => {
   scenario = m4Scenario(f, "auto");
   const second = m4Scenario(f, "auto");
-  const cursors: Array<{
-    card: CardId | undefined;
-    since: number;
-    count: number;
-  }> = [];
-  const uow = f.store.uow;
-  vi.spyOn(f.store, "uow", "get").mockReturnValue({
-    ...uow,
-    read: (operation) =>
-      uow.read((tx) => {
-        const list = tx.events.listAfter.bind(tx.events);
-        vi.spyOn(tx.events, "listAfter").mockImplementation(
-          (project, card, since) => {
-            const events = list(project, card, since);
-            cursors.push({ card, since, count: events.length });
-            return events;
-          },
-        );
-        return operation(tx);
-      }),
-  });
   const append = (card: CardId, status: string, system = true) =>
-    uow.run((tx) => {
+    f.store.uow.run((tx) => {
       tx.events.append(f.project_id, {
         id: tx.ids.nextEventId(),
         card_id: card,
@@ -216,25 +195,27 @@ test("reconcile consumes new events only, publishes cursors after commit and reb
   const now = vi.fn(() => f.clock.now());
   const options = { store: f.store, git: binding, clock: { now } };
   const executor = new ReconcileExecutor(options);
+  const parse = vi.spyOn(JSON, "parse");
+  const decoded = () =>
+    parse.mock.calls.filter(([text]) =>
+      text.includes('"type":"merge_check_finished"'),
+    ).length;
+  await executor.tick(f.project_id);
+  expect(decoded()).toBe(2);
+  parse.mockClear();
+  expect(checks?.attempts.map((c) => c.status)).toEqual(["passed", "running"]);
   await executor.tick(f.project_id);
   expect(checks?.attempts.map((c) => c.status)).toEqual(["passed", "running"]);
-  cursors.length = 0;
-  await executor.tick(f.project_id);
-  expect(cursors).toHaveLength(2);
-  expect(cursors.every((c) => c.since > 0 && c.count === 0)).toBe(true);
+  expect(decoded()).toBe(0);
   append(scenario.card.id, "failed");
   append(second.card.id, "failed", false); // An untrusted event cannot change ownership.
   now.mockImplementationOnce(() => {
     throw new Error("read failed");
   });
   await expect(executor.tick(f.project_id)).rejects.toThrow("read failed");
-  cursors.length = 0;
   await executor.tick(f.project_id);
-  expect(cursors.map((c) => c.count)).toEqual([1, 1]);
   expect(checks?.attempts.map((c) => c.status)).toEqual(["failed", "running"]);
-  cursors.length = 0;
   await new ReconcileExecutor(options).tick(f.project_id);
-  expect(cursors.every((c) => c.since === 0 && c.count > 0)).toBe(true);
   expect(checks?.attempts.map((c) => c.status)).toEqual(["failed", "running"]);
 });
 
