@@ -17,7 +17,7 @@ import type {
   Result,
   RoleReference,
 } from "@cardigan/domain";
-import { issueTokenInTransaction } from "@cardigan/host";
+import { issueTokenInTransaction, loadMergeGateConfig } from "@cardigan/host";
 import {
   authenticate,
   loadCommandState,
@@ -162,6 +162,24 @@ export function authorizeCliInvocation(
   } finally {
     store.close();
   }
+}
+
+export async function loadProjectMergeGate(
+  store: Store,
+  project_id: ProjectId,
+  io: CliIo,
+  dataDir?: string,
+) {
+  const projects = store.listProjects();
+  const config = await loadMergeGateConfig({
+    dataDir: resolveDataDir(io, dataDir),
+    baseBranches: Object.fromEntries(
+      projects.map((p) => [p.id, p.base_branch ?? "main"]),
+    ),
+    projectIds: projects.map((p) => p.id),
+    env: io.env,
+  });
+  return config.forProject(project_id);
 }
 
 export function resolveDataDir(io: CliIo, override?: string): string {

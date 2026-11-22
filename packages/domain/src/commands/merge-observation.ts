@@ -25,7 +25,11 @@ export function automaticMergeReasons(
   card: Card,
   q: Decision,
 ) {
-  if (card.status !== "awaiting_merge" || !systemMergeEnabled(state, card))
+  if (
+    state.project_settings?.merge_gate_enabled === false ||
+    card.status !== "awaiting_merge" ||
+    !systemMergeEnabled(state, card)
+  )
     return [];
   // Personal consent already granted is not an automatic-confirmation wait.
   if (q.status === "resolved" && q.resolution?.resolved_by === "human")

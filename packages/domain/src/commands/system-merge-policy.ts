@@ -64,12 +64,17 @@ export function systemMergeAuthority(state: CommandState): string | undefined {
   });
 }
 
+export const DISABLED_MERGE_GATE_REASON =
+  "项目未启用合并检查，须由人确认合并。";
+
 /** Derive personal consent requirements; ordinary readiness belongs to merge blockers. */
 export function systemMergeHumanReason(
   state: CommandState,
   q: Decision,
 ): string | undefined {
   const card = state.cards.find((c) => c.id === q.card_id);
+  if (state.project_settings?.merge_gate_enabled === false)
+    return DISABLED_MERGE_GATE_REASON;
   if (!card) return "缺少当前卡片，合并须交人确认。";
   if (q.source_unrelated_human_required)
     return (

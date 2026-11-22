@@ -26,7 +26,10 @@ export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
 export * from "./worker-files.js";
 export * from "./worker-preflight.js";
-export { WorkerPreparationFailure } from "./worker-preparation-failure.js";
+export {
+  WorkerPreparationFailure,
+  WorkerTransportUnavailable,
+} from "./worker-preparation-failure.js";
 export * from "./worker-primitives.js";
 
 import { join } from "node:path";
@@ -1169,6 +1172,18 @@ export class HerdrRuntime implements Runtime {
         !Number.isSafeInteger(identity.uid)
       )
         return failure("withdrawn", "probe_invalid");
+      const expected = options.system_finished_turn && options.expected_process;
+      if (
+        expected &&
+        (identity.pid !== expected.pid ||
+          identity.boot !== expected.boot ||
+          identity.start !== expected.start ||
+          identity.uid !== expected.uid ||
+          identity.group !== expected.process_group ||
+          expected.machine !== ref.target?.fingerprint ||
+          expected.terminal !== ref.launch_generation?.generation)
+      )
+        return failure("withdrawn", "identity_changed");
       reason = "hc_failed";
       const hasExited = (terminal: Terminal) => {
         check(terminal);

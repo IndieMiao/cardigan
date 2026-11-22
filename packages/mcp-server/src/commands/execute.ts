@@ -173,7 +173,11 @@ export function executeCommand<P, T>(
           store.runIdempotent(invocation(context, tool, key, params), (tx) => {
             context.revalidateToken?.();
             const state = timed(context, "command_state", () =>
-              loadCommandState(tx, actor.project_id),
+              loadCommandState(
+                tx,
+                actor.project_id,
+                context.projectSettings?.(actor.project_id),
+              ),
             );
             const effect = timed(context, "command_reduce", () =>
               unwrap(
@@ -232,7 +236,13 @@ export async function executePreparedCommand<P, Prepared, T>(
     if (error !== needsPreparation) throw error;
   }
   const snapshot = timed(context, "prepare_state", () =>
-    store.uow.read((tx) => loadCommandState(tx, actor.project_id)),
+    store.uow.read((tx) =>
+      loadCommandState(
+        tx,
+        actor.project_id,
+        context.projectSettings?.(actor.project_id),
+      ),
+    ),
   );
   const started = performance.now();
   let prepared: Prepared;
