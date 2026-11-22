@@ -48,6 +48,10 @@ import {
 } from "./tools/mobile-signing.js";
 import { ownerMessageTool } from "./tools/owner-message.js";
 import {
+  type PublicationOptions,
+  publicationTool,
+} from "./tools/publish-artifact.js";
+import {
   type ReservationOptions,
   reservationTool,
 } from "./tools/resource-reservation.js";
@@ -62,6 +66,7 @@ export interface McpServerOptions
     OwnerMessagePort,
     ReservationOptions,
     MobileSigningOptions,
+    PublicationOptions,
     ProbeToolOptions {
   readonly store: McpBackend;
   /** Ordinary body deadline; for admitted artifacts, maximum gap between chunks. */
@@ -122,6 +127,7 @@ export function serverTools(
     OwnerMessagePort &
     ReservationOptions &
     MobileSigningOptions &
+    PublicationOptions &
     ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
@@ -129,6 +135,7 @@ export function serverTools(
     getCheckLogTool(options),
     runProbeTool(options),
     mobileSigningTool(options),
+    publicationTool(options),
     reservationTool(options),
     ownerMessageTool(options),
     ...deliveryTools(options),

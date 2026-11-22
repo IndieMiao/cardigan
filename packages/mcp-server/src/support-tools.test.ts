@@ -426,6 +426,7 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           "replace_verification_work_item",
           "complete_host_action",
           "send_owner_message",
+          "publish_artifact",
         ].includes(name),
     ).sort(),
   );

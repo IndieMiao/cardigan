@@ -6,6 +6,7 @@ import type {
   RoleReference,
 } from "@cardigan/domain";
 import {
+  holdsPublicationTool,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
   managedPmOffice,
@@ -110,6 +111,8 @@ export function recordIdentity(
                 lookup.assignment.external === true)) &&
             (tool !== "send_owner_message" ||
               managedPmOffice(lookup.assignment)) &&
+            (tool !== "publish_artifact" ||
+              holdsPublicationTool(lookup.assignment)) &&
             (!isStandingOnlyTool(tool) ||
               holdsStandingOnlyTools(lookup.assignment)),
         ),

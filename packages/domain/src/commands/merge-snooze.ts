@@ -14,7 +14,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { mergeContext } from "./merge.js";
+import { mergeContext, syncSystemMerge } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 
 /** C-180: query shared by the stall detector and its callers. */
@@ -36,6 +36,8 @@ export function snoozeMergeConfirmation(
     snooze_until?: string;
     raw_quote: string;
     taken_over_from?: "role:pm" | "system";
+    /** C-591: PM holding a system-held confirmation; shown as a notice. */
+    delegated?: { readonly notice: string; readonly proxy_authority: string };
   },
 ): Decision {
   text(p.rationale, "暂缓原因");
@@ -117,6 +119,13 @@ export function snoozeMergeConfirmation(
       until,
       raw_quote: p.raw_quote,
       ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
+      ...(p.delegated
+        ? {
+            via: "delegated",
+            notice: p.delegated.notice,
+            proxy_authority: p.delegated.proxy_authority,
+          }
+        : {}),
     },
     {
       type: "system",
@@ -159,6 +168,13 @@ export function expireMergeSnoozes(
         ),
       };
       d.put("decisions", next);
+      // C-591: a system-held confirmation PM held is rechecked on expiry, so a
+      // policy or sensitivity change during the hold is handed to the human.
+      const card = d.list("cards").find((c) => c.id === cardId);
+      if (current && next.decider === "system" && card) {
+        syncSystemMerge(d, card);
+        if (d.get("decisions", q.id).status !== "open") continue;
+      }
       if (!current) {
         d.emit("decision_superseded", q.card_id, {
           decision_id: q.id,

@@ -33,7 +33,8 @@ export function standingTools(
         ].includes(tool)
       : tool !== "send_owner_message" &&
         tool !== OFFICE_ONLY_TOOL &&
-        tool !== "complete_host_action",
+        tool !== "complete_host_action" &&
+        tool !== "publish_artifact",
   );
 }
 
