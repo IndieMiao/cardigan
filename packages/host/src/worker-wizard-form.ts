@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { workerDirectoryCommand } from "./worker-directory-command.js";
 import { workerJournalId } from "./worker-onboarding.js";
 import {
   onboardingDigest,
@@ -129,6 +130,7 @@ export function workerWizardForm(
       Number(gid),
       home,
       work,
+      project,
     ),
   };
 }
@@ -140,9 +142,8 @@ function targetCommands(
   gid: number,
   home: string,
   work: string,
+  project: string,
 ) {
-  const py = mac ? "/opt/homebrew/bin/python3" : "/usr/bin/python3";
-  const install = `sudo ${py} /opt/cardigan/deploy/install-${mac ? "macos" : "linux"}-worker.py --config ${mac ? "/Library/Cardigan" : "/etc/cardigan"}/worker.json`;
   return {
     account: mac
       ? [
@@ -158,7 +159,7 @@ function targetCommands(
           `sudo dscl . -create /Users/${user} UserShell /bin/sh`,
         ].join(" && ")
       : `sudo groupadd --gid ${gid} ${user} && sudo useradd --uid ${uid} --gid ${gid} --home-dir ${home} --no-create-home --shell /bin/sh ${user}`,
-    directories: `${install} --check && ${install} --apply`,
+    directories: workerDirectoryCommand(mac, project, user, work),
     helpers: ["worker-files.py", "worker-git.py"]
       .map(
         (file) =>

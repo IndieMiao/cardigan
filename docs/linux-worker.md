@@ -102,6 +102,10 @@ machines:
 
 ## 2. worker：专用账号和安装布局
 
+**同机第二个项目**沿用机器编号，不复用第一个项目的账号、UID、主组、HOME、工作根或认领标记。逐项替换下例的 `example`、`cg_example` 和 UID/GID，在 `/etc/cardigan/worker-<项目>.json` 建 root 所有、0600 的新文件；文件名中的项目必须和正文、两份认领标记一致。同机已有 `worker.json` 的绑定原样保留，不复制为同项目的新文件，不覆盖它的内容。
+
+安装前可用 `sudo /usr/bin/python3 -IB /opt/cardigan/deploy/install-linux-worker.py --check` 逐项只读检查：每个配置单独输出，任一失败总退出码非零。修复时用 `--project <项目> --check` 和 `--project <项目> --apply` 明确选中一项；同名冲突拒绝操作，其它绑定仍可检查。旧 `--config` 命令继续有效。控制主机为每个（项目、机器）保留各自的向导配置，在同一机器登记下添加项目绑定，不替换其它项目。
+
 先核实示例 UID/GID 空闲、实际磁盘和资源预算。以下只适用于新建账号和新工作根；存在冲突时停下核对，不接管旧账号或递归修改旧数据。
 
 ```sh
@@ -155,15 +159,15 @@ def create(path, value, mode):
         json.dump(value, out)
 create('/home/cg_example/.cardigan-project', {'project': 'example', 'uid': 2201}, 0o644)
 create(root + '/.cardigan-worker', {'project': 'example', 'uid': 2201, 'home': '/home/cg_example'}, 0o600)
-create('/etc/cardigan/worker.json', {
+create('/etc/cardigan/worker-example.json', {
     'account': 'cg_example', 'uid': 2201, 'project': 'example', 'root': root,
     'mount': '/', 'volume': str(os.statvfs('/').f_fsid),
     'minimum_free_bytes': {'root': 1073741824, 'work': 1073741824},
     'timeout_ms': 15000
 }, 0o600)
 PY
-sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --check
-sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --apply
+sudo python3 /opt/cardigan/deploy/install-linux-worker.py --project example --check
+sudo python3 /opt/cardigan/deploy/install-linux-worker.py --project example --apply
 ```
 
 示例假设工作根位于根文件系统；若使用独立挂载，将 `mount` 和 `volume` 改为实际挂载点及其 `os.statvfs(...).f_fsid`。空间下限应按工作量配置。安装器检查账号、组、sudo 拒绝、ACL、挂载及现有文件冲突，再创建项目目录、锁及基础 helper；重复执行不会替换已有锁 inode。不要使用旧 `install-agent.py` 的整机安装入口来接管每项目账号。
@@ -226,14 +230,14 @@ backup=$(sudo mktemp -d /root/cardigan-helper.XXXXXXXX) &&
 用原安装配置先检查，通过后再安装基础 helper：
 
 ```sh
-sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --check &&
-  sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --apply
+sudo python3 /opt/cardigan/deploy/install-linux-worker.py --project example --check &&
+  sudo python3 /opt/cardigan/deploy/install-linux-worker.py --project example --apply
 ```
 
 若安装器只打印 `worker_preflight_failed`，可在 worker 上直接运行同一 Linux 检查入口，查看异常栈定位失败的检查；此命令不执行安装：
 
 ```sh
-sudo python3 -I -c 'import runpy, sys; p="/opt/cardigan/deploy/install-macos-worker.py"; sys.argv=[p,"--config","/etc/cardigan/worker.json","--check"]; runpy.run_path(p)["main"]("Linux")'
+sudo python3 -I -c 'import runpy, sys; p="/opt/cardigan/deploy/install-macos-worker.py"; sys.argv=[p,"--project","example","--check"]; runpy.run_path(p)["main"]("Linux")'
 ```
 
 `--apply` 成功后，执行上方两条 `sudo install` 命令更新 `worker-files.py` 和 `worker-git.py`。最后在**控制主机**重新检查，确认检查通过（其中 `helpers` 为 `passed`）后再恢复派发；失败时保留备份，先排查再重试。
@@ -373,15 +377,19 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 
 ### 可选：一次接入，之后由后台升级 helper
 
+旧安装器只可用向导维护唯一且能核实的 `worker.json`。出现命名配置时先核验并更新安装器，不要手改命令指向旧绑定。人工升级复用已匹配的共享发行目录；不同版本只作原子交换，不支持则停止。若有中断留下的备份或暂存目录，保留现场，按 `docs/plans/C-551.md` 核对。
+
+**每个新项目分别接入。** 下例针对命名配置。先在控制主机 prepare，再在 worker 安装专属零参数入口及公钥，核对指纹和唯一 sudo 规则后才 activate。不要用某个项目的接入材料替另一个项目授权。已有 `worker.json` 的旧接入不用重跑、不迁移密钥；若该旧绑定尚未接入，两端沿用无 `--project-config`、无 `--project` 的旧命令，账号为 `cardigan_updater`，入口和备份仍在 `/opt/cardigan-helper-upgrade`。旧版 bootstrap 不会自动更新。
+
 默认关闭，未接入时仍走上面的人工流程。前置：标准的三个 `libexec` 路径、已登记且一致的向导配置、已有独立 worker 账号、开启主机自部署。以下在维护窗口运行；先确认没有活跃任务、备份私有配置，不停旧会话、不改调度开关。控制主机用 **server 服务账号**，worker 用自己的管理员终端；两端都从管理员已核验的发行版运行，不能从项目工作树或上传的临时目录运行脚本。
 
 1. 在控制主机已部署发行版根目录准备本绑定专用的 SSH 身份和**独立的发行签名密钥**；下例将机器、项目替换为实际登记值。私钥留在 0700 的 `CARDIGAN_CONFIG_DIR` 中（文件 0600），不进入 Run、Agent、MCP 或仓库。
 
    ```sh
-   sh deploy/enroll-helper-controller.sh prepare example worker-a
+   sh deploy/enroll-helper-controller.sh prepare example worker-a --project-config
    ```
 
-2. worker 管理员确认 `/etc/cardigan/worker.json` 属于本项目。使用本轮新建的 root 私有发行目录，不更新或执行旧 `/opt/cardigan/deploy`。管理员从控制主机**实际部署并已审核**的提交打包 `deploy` 下的接入脚本、两台的入口和固定检查器，包内保留 `deploy/` 层级；通过独立可信通道核对包的 SHA-256。以 `BUNDLE` 指向收到的包，`EXPECTED` 为独立核对的整包 SHA-256。每条以 `&&` 相连，失败停止；`KIT` 始终使用本次创建的确切目录，不用通配符。不要对已存在的安装路径覆盖或补权限。
+2. worker 管理员确认 `/etc/cardigan/worker-example.json` 属于本项目。使用本轮新建的 root 私有发行目录，不更新或执行旧 `/opt/cardigan/deploy`。管理员从控制主机**实际部署并已审核**的提交打包 `deploy` 下的接入脚本、两台的入口和固定检查器，包内保留 `deploy/` 层级；通过独立可信通道核对包的 SHA-256。以 `BUNDLE` 指向收到的包，`EXPECTED` 为独立核对的整包 SHA-256。每条以 `&&` 相连，失败停止；`KIT` 始终使用本次创建的确切目录，不用通配符。不要对已存在的安装路径覆盖或补权限。
 
    ```sh
    KIT=$(sudo mktemp -d /opt/cardigan-enroll.XXXXXXXX) &&
@@ -393,19 +401,20 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
    包内 `deploy/` 及其中的文件须为 root 持有、不可被其它账号写入，接入脚本在安装授权前还会检查祖先目录、扩展 ACL 和实际安装结果。执行下列命令，从控制主机终端粘贴上一步标准输出的**公钥两段**（SSH 一行及完整 PEM），按 Ctrl-D；核对两端显示的指纹。不要发送私钥。脚本创建无密码凭据的专用系统账号，root 持有 HOME、公钥和强制 SSH 命令；sudoers 仅允许固定入口、零参数，不授予 shell 和额外 sudo。
 
    ```sh
-   sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh"
-   sudo -n -l -U cardigan_updater
+   sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh" --project example
+   tag=$(/usr/bin/python3 -IB -c 'import hashlib; print(hashlib.sha256(b"example").hexdigest()[:20])')
+   sudo -n -l -U "cgu_$tag"
    ```
 
-3. 确认输出中只有 `/opt/cardigan-helper-upgrade/upgrade ""`，系统 SSH 只允许该账号用已安装受限公钥认证（无其它可信 CA、键或认证入口）。核对 worker 账号与升级账号不共组，不额外授予图形登录。若不符，保持未激活，不通过修改权限绕过检查。在控制主机原目录激活：
+3. 确认输出中只有 `/opt/cardigan-helper-upgrade-<tag>/upgrade ""`，系统 SSH 只允许该账号用已安装受限公钥认证（无其它可信 CA、键或认证入口）。核对 worker 账号与升级账号不共组，不额外授予图形登录。若不符，保持未激活，不通过修改权限绕过检查。在控制主机原目录激活：
 
    ```sh
-   sh deploy/enroll-helper-controller.sh activate example worker-a
+   sh deploy/enroll-helper-controller.sh activate example worker-a --project-config
    cardigan worker check --project example --machine worker-a
    cardigan machine check worker-a --project example
    ```
 
-   激活本身不重启机器、不使检查变绿。已有摘要不符时，等下一次后台巡检，再执行这两条只读复查。首次和后续巡检均不从工作树取文件：只签发当前进程与部署记录一致的已部署提交中的三个 blob；root 只接收限长的标准输入，独立验签、核对文件名与 SHA-256，并拒绝旧请求。旧文件保存在 root 私有的 `/opt/cardigan-helper-upgrade/state/backup-<毫秒时间戳>`。安装器检查代码与基础实现固定在首次安装的 root 目录中，绝不执行上传的代码。bootstrap 本身的升级仍须管理员审核安装。
+   激活本身不重启机器、不使检查变绿。已有摘要不符时，等下一次后台巡检，再执行这两条只读复查。首次和后续巡检均不从工作树取文件：只签发当前进程与部署记录一致的已部署提交中的三个 blob；root 只接收限长的标准输入，独立验签、核对文件名与 SHA-256，并拒绝旧请求。旧文件保存在 root 私有的 `/opt/cardigan-helper-upgrade-<tag>/state/backup-<毫秒时间戳>`。安装器检查代码与基础实现固定在首次安装的 root 目录中，绝不执行上传的代码。bootstrap 本身的升级仍须管理员审核安装。
 
 升级失败会保持停派：同一绑定、同一组摘要不会再自动安装。按运维待办查出失败阶段；部分替换时按备份整体还原或人工安装当前可信版本，然后顺序执行上面两条检查。仅 worker check 成功不能解锁；同一绑定的 machine check 也须通过，且不覆盖人工 drain 或关闭派发。未完成的初始化不原地重跑：保留已有账号、文件和备份，让管理员检查冲突。撤销接入时先停用该专用身份，再由管理员移除对应受限授权，勿改 worker 的既有连接。
 
