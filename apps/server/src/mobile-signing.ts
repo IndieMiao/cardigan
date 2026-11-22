@@ -36,9 +36,13 @@ function helper(
   scope: SigningScope,
   current: () => void,
   timing: MobileSigningTiming,
-  run: { artifact: { id: string; fd: number } } | { progress: Progress },
+  run:
+    | { artifact: { id: string; fd: number } }
+    | { progress: Progress }
+    | { check: string },
 ): Promise<{ request_id: string; sha256: string }> {
   const artifact = "artifact" in run ? run.artifact : undefined;
+  const check = "check" in run ? run.check : undefined;
   const [file = "/usr/bin/python3", ...prefix] = timing.program ?? [
     "/usr/bin/python3",
     "-IB",
@@ -50,7 +54,11 @@ function helper(
       [
         ...prefix,
         join(dataDir, "mobile-signing"),
-        ...(artifact ? ["permit", artifact.id] : ["request"]),
+        ...(artifact
+          ? ["permit", artifact.id]
+          : check
+            ? ["check", check]
+            : ["request"]),
       ],
       {
         cwd: dataDir,
@@ -61,7 +69,8 @@ function helper(
     const input = child.stdin,
       output = child.stdout;
     let text = "",
-      stage: "start" | "accepted" | "committed" = "start",
+      // A ledger check has no fence: its only line is the result.
+      stage: "start" | "accepted" | "committed" = check ? "committed" : "start",
       accepted: string | undefined,
       receipt: { request_id: string; sha256: string } | undefined,
       failed = false,
@@ -98,7 +107,7 @@ function helper(
         );
       if (
         stage === "start" &&
-        !artifact &&
+        "progress" in run &&
         start?.[1] &&
         start[2] &&
         start[3]
@@ -148,7 +157,8 @@ function helper(
         text !== "" ||
         !receipt ||
         (accepted !== undefined && receipt.request_id !== accepted) ||
-        (artifact && receipt.request_id !== artifact.id)
+        (artifact && receipt.request_id !== artifact.id) ||
+        (check && receipt.request_id !== check)
       )
         return fail();
       resolve(receipt);
@@ -157,9 +167,10 @@ function helper(
   });
 }
 
-type Receipt = Awaited<ReturnType<typeof receiptFor>>;
+type Receipt = ReturnType<typeof receiptFor>;
 interface Job {
   phase: "queued" | "transferring" | "signing";
+  /** Set once the helper has durably claimed the grant (its `accepted` line). */
   request_id: string | null;
   mode: Mode | null;
   deadline_seconds: number | null;
@@ -168,8 +179,9 @@ interface Job {
   readonly done: Promise<void>;
 }
 // One in-flight helper per Run and platform. A repeated call never starts a
-// second dispatch: it reports progress, and after the job settles a fresh
-// helper only performs the ledger's existing lookup for the same grant.
+// second dispatch: it reports progress. Once a claimed request has ended
+// without a result, the next call runs the ledger's existing read-only lookup
+// for the same request number; the ledger never dispatches a claimed grant.
 const jobs = new Map<string, Job>();
 const RETAIN_SETTLED_MS = 3_600_000;
 
@@ -228,13 +240,19 @@ function startJob(
       if (jobs.get(key) === job) jobs.delete(key);
     }, RETAIN_SETTLED_MS).unref();
   });
+  jobs.set(key, job);
   return job;
 }
 
 /**
- * Accept quickly, then poll. The first call starts the helper and waits at
- * most `acceptWaitMs`; until the helper settles, every call of the same Run
- * returns `status: "pending"` with the request number and phase.
+ * Accept quickly, then poll. Each call that starts a helper waits at most
+ * `acceptWaitMs`. Results:
+ * - `queued`: the helper has not claimed the grant yet; no request number.
+ * - `pending`: claimed under `request_id`; transfer or signing in progress.
+ * - `unconfirmed`: claimed, but the attempt ended without a result; the next
+ *   call looks the same request number up again (never a new signature).
+ * - `signed`: receipt re-validated against the ledger at the time of return.
+ * A refusal before any claim throws.
  */
 export async function requestMobileSignature(
   dataDir: string,
@@ -252,20 +270,51 @@ export async function requestMobileSignature(
     scope.platform,
     scope.worker_uid,
   ]);
-  let job = jobs.get(key);
-  if (!job) {
-    job = startJob(key, dataDir, scope, current, timing);
-    jobs.set(key, job);
-    await Promise.race([
+  const wait = (job: Job) =>
+    Promise.race([
       job.done,
       delay(timing.acceptWaitMs ?? 2_000, undefined, { ref: false }),
     ]);
+  let job = jobs.get(key);
+  if (!job) {
+    job = startJob(key, dataDir, scope, current, timing);
+    await wait(job);
+  } else if (job.outcome && "error" in job.outcome && job.request_id) {
+    // The previous attempt ended after its claim without a result (e.g. the
+    // helper was interrupted after the signer finished). Look it up again.
+    jobs.delete(key);
+    job = startJob(key, dataDir, scope, current, timing);
+    await wait(job);
   }
+  const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);
   if (job.outcome) {
-    if (jobs.get(key) === job) jobs.delete(key);
-    if ("error" in job.outcome) throw new Error("Signing unavailable");
-    return job.outcome.receipt;
+    if (jobs.get(key) === job && !("error" in job.outcome && job.request_id))
+      jobs.delete(key);
+    if ("error" in job.outcome) {
+      if (!job.request_id) throw new Error("Signing unavailable");
+      return {
+        status: "unconfirmed" as const,
+        request_id: job.request_id,
+        platform: scope.platform,
+        poll_after_seconds: 60,
+      };
+    }
+    // A remembered success is only reported while the ledger still releases it.
+    const receipt = job.outcome.receipt;
+    const now = await helper(dataDir, scope, current, timing, {
+      check: receipt.request_id,
+    });
+    if (now.sha256 !== receipt.sha256) throw new Error("Signing unavailable");
+    return receipt;
   }
+  if (!job.request_id)
+    return {
+      status: "queued" as const,
+      request_id: null,
+      platform: scope.platform,
+      elapsed_seconds,
+      poll_after_seconds: 5,
+    };
   return {
     status: "pending" as const,
     request_id: job.request_id,
@@ -273,7 +322,7 @@ export async function requestMobileSignature(
     phase: job.phase,
     mode: job.mode,
     deadline_seconds: job.deadline_seconds,
-    elapsed_seconds: Math.floor((Date.now() - job.started) / 1000),
+    elapsed_seconds,
     poll_after_seconds: 30,
   };
 }

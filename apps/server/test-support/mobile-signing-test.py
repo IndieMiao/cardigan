@@ -349,13 +349,15 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertFalse((self.host/'outputs'/rid).exists())
         self.assertEqual(host.reconcile(self.db,self.host,rid,self.dial)['state'], 'signed')
         self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(), ('peer_signed',))
+        # A lookup never reads the local input copy; without it the budget is the largest output.
+        (self.host/'inputs'/rid).unlink()
         reported = []
         result = host.request(self.host, self.db, self.ctx, lambda: None, self.dial,
                               accepted=lambda *a: reported.append(a))
         out = self.host/'outputs'/rid
         self.assertEqual(result, (rid, digest(out)))
         self.assertEqual(digest(out), digest(self.worker/'outputs'/rid))
-        self.assertEqual(reported[0][::2], (rid, 'lookup'))
+        self.assertEqual(reported[0], (rid, host.budget(self.host, host.LIMIT), 'lookup'))
         self.assertEqual(self.actions()[-4:], ['receipt_signed','lookup','reconcile','signed'])
         self.assertEqual((self.worker/'uses').read_text(), 'used\n')
         self.assertEqual(host.request(self.host, self.db, self.ctx, lambda: None, self.dial,
@@ -375,6 +377,27 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
             proc.stdin.write(b'commit\n'); proc.stdin.close()
             self.assertEqual(proc.stdout.read(), f'{self.spec["id"]} {digest(out)}\n'.encode())
         self.assertEqual(proc.returncode, 0)
+
+    def test_check_revalidates_a_remembered_receipt(self):
+        rid = self.spec['id']
+        out = directory(self.host,'outputs')/rid
+        save(out, 'signed-fixture')
+        def check(identity=self.ctx):
+            return subprocess.run([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'check', rid],
+                                  input=canonical(identity).encode()+b'\n', capture_output=True)
+        self.assertNotEqual(check().returncode, 0)  # approved, not signed
+        self.db.execute("UPDATE grants SET state='signed',output=?", (digest(out),))
+        done = check()
+        self.assertEqual((done.returncode, done.stdout), (0, f'{rid} {digest(out)}\n'.encode()))
+        self.assertNotEqual(check({**self.ctx, 'run': 'R-2'}).returncode, 0)
+        events = self.actions()
+        self.db.execute('UPDATE grants SET revoked=1')
+        self.assertNotEqual(check().returncode, 0)
+        self.db.execute('UPDATE grants SET revoked=0')
+        with sqlite3.connect(self.host/'audit.sqlite') as db:
+            db.execute('UPDATE grants SET spec=?', (canonical({**self.spec, 'expires': 1}),))
+        self.assertNotEqual(check().returncode, 0)
+        self.assertEqual(self.actions(), events)  # read-only: no audit rows, no bytes
 
     @unittest.skipUnless(os.path.exists('/usr/bin/ssh'), 'helper dials the fixed OpenSSH client')
     def test_terminated_helper_records_interrupted(self):

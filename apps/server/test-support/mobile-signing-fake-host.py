@@ -1,15 +1,17 @@
-"""Stand-in for host.py's request protocol in server job tests; never signs."""
+"""Stand-in for host.py's request and check protocol in server job tests; never signs."""
 from pathlib import Path
 import signal
 import sys
 import time
 
 ctl = Path(sys.argv[1])
-require_args = sys.argv[3:] == ['request'] and sys.argv[2].endswith('mobile-signing')
-kind = (ctl / 'kind').read_text() if require_args else 'invalid'
+rid = '1' * 32
+if not sys.argv[2].endswith('mobile-signing'):
+    sys.exit(1)
+command = sys.argv[3:]
+kind = (ctl / 'kind').read_text() if command == ['request'] else 'check' if command == ['check', rid] else 'invalid'
 with (ctl / 'spawns').open('a') as f:
     f.write(kind + '\n')
-rid = '1' * 32
 
 
 def term(*_):
@@ -27,11 +29,22 @@ def wait(name):
 
 if kind == 'invalid' or not sys.stdin.readline().endswith('}\n'):
     sys.exit(1)
+if kind == 'check':
+    # The ledger no longer releases a revoked or expired grant.
+    if (ctl / 'revoked').exists():
+        sys.exit(1)
+    print(rid, 'a' * 64, flush=True)
+    sys.exit(0)
+if kind == 'refused':
+    sys.exit(1)
+if kind == 'unclaimed':
+    wait('claim')
 if kind == 'hang':
     print(f'accepted {rid} 1 sign', flush=True)
     time.sleep(60)
     sys.exit(1)
-print(f'accepted {rid} {600 if kind == "stored" else 900} {"stored" if kind == "stored" else "sign"}', flush=True)
+mode = 'stored' if kind == 'stored' else 'lookup' if kind == 'lookup' else 'sign'
+print(f'accepted {rid} {600 if kind == "stored" else 900} {mode}', flush=True)
 if kind == 'slow':
     wait('ready')
 print('ready', flush=True)
@@ -40,4 +53,7 @@ if sys.stdin.readline() != 'commit\n':
 (ctl / 'committed').write_text('1')
 if kind == 'slow':
     wait('signed')
+if kind == 'lost':
+    # Interrupted after the signer finished: no result reaches the server.
+    sys.exit(3)
 print(rid, 'a' * 64, flush=True)

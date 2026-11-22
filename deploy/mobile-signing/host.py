@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # reviewed release, not cwd
-from common import (SCOPE, canonical, config, database, digest, directory, json,
+from common import (LIMIT, SCOPE, canonical, config, database, digest, directory, json,
                     line, manifest, persist, private_dir, private_file, re, read_failure, require,
                     save_failure, scope, send, time, transaction, transfer)
 
@@ -139,8 +139,10 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
             require(route(root,s) == peer)
             manifest(s)
 
-        # A stored output is only hashed locally; anything else may move the input and output.
-        seconds = budget(root, 0 if state == 'signed' else (directory(root,'inputs') / rid).stat().st_size)
+        # A stored output is only hashed locally; a dispatch moves the input and output.
+        # A lookup never reads the input copy: if it is gone, budget the largest output.
+        inp = directory(root,'inputs') / rid
+        seconds = budget(root, 0 if state == 'signed' else inp.stat().st_size if inp.exists() else LIMIT)
         signal.signal(signal.SIGALRM, stop('timed_out'))
         signal.setitimer(signal.ITIMER_REAL, seconds)
         # A durable claim before contacting the peer. A lost reply permits lookup only.
@@ -295,6 +297,12 @@ def main():
         with os.fdopen(3,'rb') as f:
             sha=permit(root,db,json.loads(line(sys.stdin.buffer)),rid,f,fence)
         print(rid,sha)
+    elif cmd == 'check':
+        # Re-validate a remembered receipt against the ledger now: same Run,
+        # still signed, not revoked, live manifest and route. No bytes, no hashing.
+        rid=sys.argv[3]
+        require(re.fullmatch('[0-9a-f]{32}',rid))
+        print(rid,release_authority(root,db,rid,json.loads(line(sys.stdin.buffer))))
     elif cmd == 'reconcile':
         print(canonical(reconcile(db,root,sys.argv[3])))
     elif cmd == 'register':
