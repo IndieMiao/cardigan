@@ -1191,7 +1191,7 @@ export class RuntimeTargets implements Runtime {
         p.process.machine !== target.fingerprint
       )
         return;
-      return { process: p.process, harness: run.harness };
+      return p.process;
     });
   }
   private withEnrollment<T extends RetirementIdentity>(
@@ -1201,15 +1201,10 @@ export class RuntimeTargets implements Runtime {
   ): T {
     if (execution.mode !== "agent-ssh" || !execution.macosCore) return owner;
     const enrolled = this.enrolledProcess(ref, owner);
-    const {
-      enrolled_process: _untrusted,
-      harness: _unbound,
-      ...identity
-    } = owner;
+    const { enrolled_process: _untrusted, ...identity } = owner;
     return {
       ...identity,
-      ...(enrolled ? { enrolled_process: enrolled.process } : {}),
-      ...(enrolled?.harness ? { harness: enrolled.harness } : {}),
+      ...(enrolled ? { enrolled_process: enrolled } : {}),
     } as T;
   }
   observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {

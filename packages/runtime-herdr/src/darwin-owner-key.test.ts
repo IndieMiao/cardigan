@@ -1,6 +1,7 @@
 import { createPublicKey, sign, verify } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   linkSync,
   mkdtempSync,
   readFileSync,
@@ -80,4 +81,41 @@ test("an unverifiable seed is refused and never replaced", async () => {
     await expect(darwinOwnerKey(dir, "e1", true)).rejects.toThrow();
     expect(readFileSync(seed)).toEqual(before);
   }
+});
+
+test("a concurrent creator's publication window is waited out, not refused", async () => {
+  const seed = join(dir, DARWIN_OWNER_SEED);
+  writeFileSync(seed, Buffer.alloc(32, 9), { mode: 0o600 });
+  chmodSync(seed, 0o600);
+  // Between link() and removing its temporary name the seed has two links.
+  const temp = join(dir, `.${DARWIN_OWNER_SEED}.publishing`);
+  linkSync(seed, temp);
+  setTimeout(() => rmSync(temp), 60);
+  const key = await darwinOwnerKey(dir, "e1", true);
+  rmSync(temp, { force: true });
+  expect(pem(await darwinOwnerKey(dir, "e1"))).toBe(pem(key));
+  expect(readFileSync(seed)).toEqual(Buffer.alloc(32, 9));
+});
+
+test("a creator's leftover temporary name for the same seed is cleared; other links are not", async () => {
+  const seed = join(dir, DARWIN_OWNER_SEED);
+  writeFileSync(seed, Buffer.alloc(32, 5), { mode: 0o600 });
+  chmodSync(seed, 0o600);
+  // A creator died between link() and removing its temporary name.
+  const leftover = join(
+    dir,
+    `.${DARWIN_OWNER_SEED}.${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}`,
+  );
+  linkSync(seed, leftover);
+  const key = await darwinOwnerKey(dir, "e1");
+  expect(existsSync(leftover)).toBe(false);
+  expect(pem(await darwinOwnerKey(dir, "e1"))).toBe(pem(key));
+  // A temporary-looking name for a different file is left alone.
+  const unrelated = join(
+    dir,
+    `.${DARWIN_OWNER_SEED}.${"1".repeat(8)}-0000-0000-0000-${"1".repeat(12)}`,
+  );
+  writeFileSync(unrelated, Buffer.alloc(32, 6), { mode: 0o600 });
+  expect(pem(await darwinOwnerKey(dir, "e1"))).toBe(pem(key));
+  expect(existsSync(unrelated)).toBe(true);
 });

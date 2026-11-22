@@ -11,7 +11,6 @@ import {
   darwinWorker,
   needsRetirementHandoff,
   retirementOwnsSession,
-  retirementReadoptable,
   sessionMaintenanceCandidate,
 } from "../session-maintenance.js";
 import { transition } from "../transitions.js";
@@ -53,8 +52,6 @@ export function beginIdleSessionRetirement(
       "Session is not an idle candidate",
     );
     const prior = retirementOwnsSession(a) ? a.idle_retirement : undefined;
-    // Nothing was sent under a no-key handoff: one fresh, signal-capable claim.
-    const readopt = retirementReadoptable(state, a);
     const next: Assignment = {
       ...a,
       idle_retirement: {
@@ -65,9 +62,8 @@ export function beginIdleSessionRetirement(
         ...(a.last_mcp_activity_at
           ? { activity_at: a.last_mcp_activity_at }
           : {}),
-        failures: readopt ? 0 : (prior?.failures ?? 0),
-        ...(!readopt &&
-        prior?.phase === "waiting" &&
+        failures: prior?.failures ?? 0,
+        ...(prior?.phase === "waiting" &&
         prior.last_failure === "unavailable" &&
         prior.evidence &&
         retirementObserveOnly(prior.evidence)
@@ -75,7 +71,6 @@ export function beginIdleSessionRetirement(
           : {}),
         ...(prior?.dispatch_wait ? { dispatch_wait: prior.dispatch_wait } : {}),
         ...(prior?.notice_sent ? { notice_sent: true } : {}),
-        ...(readopt || prior?.readopted ? { readopted: true } : {}),
       },
     };
     d.put("assignments", next);

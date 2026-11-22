@@ -9,8 +9,9 @@ import {
   randomUUID,
 } from "node:crypto";
 import { constants } from "node:fs";
-import { link, open, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { link, lstat, open, readdir, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 /** One host-private seed in the 0600 data directory; no per-session key is stored. */
 export const DARWIN_OWNER_SEED = "darwin-idle-owner.seed";
@@ -20,7 +21,9 @@ const ORDER = BigInt(
   "0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
 );
 
-async function readSeed(path: string) {
+class PublishingSeed extends Error {}
+
+async function readSeedOnce(path: string) {
   // Never follow a substituted link or read a shared, foreign or truncated seed.
   const handle = await open(
     path,
@@ -28,6 +31,9 @@ async function readSeed(path: string) {
   );
   try {
     const entry = await handle.stat();
+    // A creator holds a second (temporary) name between link() and its unlink.
+    if (entry.isFile() && entry.nlink === 2)
+      throw new PublishingSeed("Darwin owner seed is being published");
     if (
       !entry.isFile() ||
       entry.nlink !== 1 ||
@@ -42,6 +48,35 @@ async function readSeed(path: string) {
     return seed;
   } finally {
     await handle.close();
+  }
+}
+
+// createSeed's temporary names: `.${DARWIN_OWNER_SEED}.<uuid>`.
+const tempName = /^\.darwin-idle-owner\.seed\.[0-9a-f-]{36}$/u;
+
+/** A creator that died after link() leaves its own temporary name behind.
+ * Remove only such names for this exact inode; any other link stays refused. */
+async function dropStaleTemps(path: string) {
+  const seed = await lstat(path);
+  for (const name of await readdir(dirname(path))) {
+    if (!tempName.test(name)) continue;
+    const temp = join(dirname(path), name);
+    const entry = await lstat(temp).catch(() => undefined);
+    if (entry?.isFile() && entry.dev === seed.dev && entry.ino === seed.ino)
+      await rm(temp, { force: true });
+  }
+}
+
+async function readSeed(path: string) {
+  // Bounded wait for a concurrent creator; a lasting second link is refused.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readSeedOnce(path);
+    } catch (err) {
+      if (!(err instanceof PublishingSeed) || attempt > 20) throw err;
+      if (attempt === 20) await dropStaleTemps(path);
+      else await delay(25);
+    }
   }
 }
 

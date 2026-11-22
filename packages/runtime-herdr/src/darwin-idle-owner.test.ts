@@ -333,3 +333,56 @@ test("an owner enrolled with a key the controller cannot rebuild is never signed
     await cleanup();
   }
 }, 20000);
+
+test("a generation without an owner is refused with no further worker command", async () => {
+  vi.stubEnv("CARDIGAN_DARWIN_IDLE_TARGETS", fingerprint);
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "darwin-unowned-"));
+  const execution = { ...e, agentRoot: root };
+  const launched = await enrollDarwinOwner(execution, assignment, role, {
+    ...l,
+    args: launchArgsFor(execution),
+  });
+  // The launch directory exists, but no owner ever listened in it.
+  mkdirSync(JSON.parse(launched.args[4]!).directory, { recursive: true });
+  const commands: (readonly string[])[] = [];
+  const transport = async (_: unknown, argv: readonly string[]) => {
+    commands.push(argv);
+    return { file: argv[0]!, args: argv.slice(1) };
+  };
+  try {
+    expect(
+      await stopDarwinOwner(
+        execution,
+        ref,
+        {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          hangup_ms: 100,
+          terminate_ms: 500,
+          before_signal: () => {
+            throw new Error("never reached without an owner");
+          },
+          enrolled_process: {
+            machine: fingerprint,
+            boot: "boot",
+            uid: 501,
+            pid: 4242,
+            start: "1",
+            process_group: 4242,
+            terminal: generation,
+          },
+        },
+        transport,
+      ),
+    ).toEqual({
+      outcome: "withdrawn",
+      evidence: { stage: "probe", reason: "conditional_close_unavailable" },
+    });
+    // Only the signal-free relay ran; nothing was typed, signalled or sent.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.slice(0, 3)).toEqual(["/usr/bin/python3", "-IB", "-c"]);
+    expect(commands[0]![3]).toContain("idle-owner.sock");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
