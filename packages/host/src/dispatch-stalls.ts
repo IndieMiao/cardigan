@@ -163,7 +163,7 @@ export function dispatchStallCauses(
     const due =
       handoff?.type === "bell_turn_recovery_due" ? handoff : undefined;
     const binding = due?.payload as
-      | { run_id: string; session_key: string }
+      | { run_id: string; session_key: string; queued_run_id?: string }
       | undefined;
     if (
       (!auditOnly && !due && !transfer && !(age >= threshold)) ||
@@ -203,6 +203,15 @@ export function dispatchStallCauses(
     const blocked = (() => {
       if (auditOnly) return auditOnly;
       if (sharedStallRegistration(state, a)) return "shared_registration";
+      if (
+        binding?.queued_run_id &&
+        !runs.some(
+          (r) =>
+            r.id === binding.queued_run_id &&
+            untouchedStallSuccessor(state, a, r),
+        )
+      )
+        return "queue_changed";
       if (unfinished && !onlySuccessor) return "unfinished_run";
       if (
         binding &&

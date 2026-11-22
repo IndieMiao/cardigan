@@ -55,6 +55,7 @@ import {
   stoppedByHuman,
   trackRetirementDispatch,
   unreadableCommentTrigger,
+  untouchedStallSuccessor,
 } from "@cardigan/domain";
 import {
   armBellReceipt,
@@ -990,14 +991,15 @@ export class Dispatcher {
           observed?.error.code === "runtime_unavailable";
       let previousExitConfirmed = false;
       // Only an existing queued Run can take the between-Runs recovery path.
-      // A new notice needs the stall patrol's independent workspace check.
+      // With a checkout, positive exit only accelerates the preservation patrol;
+      // it never authorizes this dispatch to skip the backup or launch directly.
       if (
         queued &&
         systemTurn &&
         sessionLoss &&
         a.machine_id === "local" &&
-        !a.worktree_path &&
-        !runtimeRef.worktree_path
+        !retirementHeld &&
+        untouchedStallSuccessor(state, a, queued)
       ) {
         // A missing event-snapshot row is not exit proof: check the bound
         // terminal itself, or its local launch receipt when the core is gone.
@@ -1021,6 +1023,23 @@ export class Dispatcher {
             .catch(() => undefined);
           previousExitConfirmed = gone?.ok === true && gone.value === true;
         }
+      }
+      if (
+        queued &&
+        guardedTurn?.reason === "system_finished_turn" &&
+        previousExitConfirmed &&
+        (a.worktree_path || runtimeRef.worktree_path)
+      ) {
+        this.waitForTurn(
+          project,
+          a,
+          guardedTurn,
+          notes,
+          observation,
+          queued,
+          true,
+        );
+        return skip("awaiting_workspace_preservation");
       }
       if (retirementHeld || guardedTurn) {
         guard ??= observed?.ok ? idleWakeGuard(observed.value) : undefined;
@@ -1573,6 +1592,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     observation: string,
     queued: Run | undefined,
+    observedExit = false,
   ) {
     const { turn, reason } = guarded;
     const continuing = reason === "continuing_turn";
@@ -1598,10 +1618,18 @@ export class Dispatcher {
       )
         return;
       const pending = this.pendingForOwner(fresh, owner, notes);
+      const currentQueue = queued ? this.queued(fresh, owner) : undefined;
       if (
         notes.length
           ? !pending.length
-          : !queued || this.queued(fresh, owner)?.id !== queued.id
+          : !queued || currentQueue?.id !== queued.id
+      )
+        return;
+      if (
+        observedExit &&
+        (!currentQueue ||
+          currentQueue.id !== queued?.id ||
+          !untouchedStallSuccessor(fresh, owner, currentQueue))
       )
         return;
       recordTurnWait(tx, this.options.store, fresh, this.clock.now(), {
@@ -1609,6 +1637,7 @@ export class Dispatcher {
         turn,
         reason,
         observation,
+        ...(observedExit ? { observed_exit: true } : {}),
         notes: pending,
         ...(queued ? { queued_run_id: queued.id } : {}),
         timeoutMs: this.dispatchTimeoutMs,

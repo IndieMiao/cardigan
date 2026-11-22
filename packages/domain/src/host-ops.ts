@@ -96,6 +96,15 @@ export interface HostOpsExecution {
     "model" | "agent_cli_version" | "launch_profile_ref" | "harness" | "effort"
   >;
 }
+/** This route may preserve a verified exit, never stop a terminal that has become live. */
+export function observedLocalExitCause(e: Event | undefined) {
+  return (
+    e?.actor.kind === "system" &&
+    e.type === "bell_turn_recovery_due" &&
+    (e.payload as { activity_source?: string }).activity_source ===
+      "observed_local_exit"
+  );
+}
 export function pendingHostOpsActions(
   events: readonly Event[],
 ): HostOpsExecution[] {

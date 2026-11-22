@@ -8,6 +8,7 @@ import {
   eventsOfType,
   type HostOpsExecution,
   hostOpsPending,
+  observedLocalExitCause,
   type ProjectId,
   type Runtime,
 } from "@cardigan/domain";
@@ -123,6 +124,7 @@ export class StallPatrol {
       this.signal,
       stall?.system_finished_run_id,
       stall?.retirement_handoff,
+      observedLocalExitCause(eventById(state.events, stall?.cause_id)),
     );
   }
   async diagnostics(project: ProjectId) {

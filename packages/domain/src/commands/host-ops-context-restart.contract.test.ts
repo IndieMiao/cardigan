@@ -491,6 +491,30 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
       card_id: null,
     }),
   );
+  const preserved = apply(pending, stopped);
+  const successor = required(stopped.data.run);
+  expect(stopped.timeline.filter((e) => e.type === "handoff")).toEqual([]);
+  const replacement = {
+    run_id: successor.id,
+    runtime_ref: { ...ref, terminal_ref: "new" },
+  };
+  const launched = value(dispatchRun(preserved, system, replacement, f.io));
+  expect(launched.events).toContainEqual(
+    expect.objectContaining({
+      type: "session_replaced",
+      payload: expect.objectContaining({
+        reason: "dispatch_stall",
+        last_run_id: prior.id,
+        last_outcome: "blocked",
+      }),
+    }),
+  );
+  expect(launched.timeline.filter((e) => e.type === "handoff")).toMatchObject([
+    { body: expect.stringContaining(`最近 Run：${prior.id}`) },
+  ]);
+  expect(
+    dispatchRun(apply(preserved, launched), system, replacement, f.io).ok,
+  ).toBe(false);
   const failed = value(
     recordAutomaticContextRestartResult(
       apply(pending, stopped),

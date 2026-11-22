@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   acknowledgeRun,
@@ -7,6 +8,7 @@ import {
   recordDecision,
   requestDecision,
 } from "@cardigan/domain";
+import { HostOpsService } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import {
   listBellAttempts,
@@ -404,3 +406,180 @@ test("M5.6 failed replacement records failure, compensates and escalates once; c
       .every((token) => token.revoked_at !== null),
   ).toBe(true);
 });
+
+test.each([
+  "clean",
+  "dirty",
+  "backup_failure",
+  "lost_proof",
+  "live_again",
+  "live_during_backup",
+] as const)(
+  "M5.6: recover the original queued writer after core exit without waiting or signaling (%s)",
+  async (mode) => {
+    const s = scenario(),
+      a = s.target.assignment,
+      branch = "agent/test/writer";
+    const workspace = join(f.dataDir, "agent", "worktrees", f.project, a.id);
+    mkdirSync(workspace, { recursive: true });
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", workspace, ...args], {
+        encoding: "utf8",
+      }).trim();
+    git("init", "-q", "-b", branch);
+    git(
+      "-c",
+      "user.name=fixture",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-qm",
+      "base",
+      "--allow-empty",
+    );
+    const sha = git("rev-parse", "HEAD");
+    const ref = { ...f.refFor(a), local_process_receipt: "fixture-launch" };
+    f.store.uow.run((tx) => {
+      const current = tx.assignments.get(f.project, a.id);
+      const role = tx.roles.get(f.project, {
+        role_id: a.role_id,
+        role_version: a.role_version,
+      });
+      if (!current || !role) throw new Error("Missing writer fixture");
+      tx.roles.put(f.project, { ...role, worktree: "write" });
+      tx.assignments.put(f.project, {
+        ...current,
+        runtime_ref: ref,
+        worktree_path: workspace,
+        branch,
+        base_sha: sha,
+      });
+    });
+    if (mode === "dirty") writeFileSync(join(workspace, "private"), "fixture");
+    s.runtime.observe_retirement = vi.fn(async () => ({
+      ok: false as const,
+      error: { code: "runtime_unavailable" as const, message: "core offline" },
+    }));
+    let gone = true;
+    s.runtime.confirm_local_exit = vi.fn(async () => ({
+      ok: true as const,
+      value: gone,
+    }));
+    s.runtime.retire_idle = vi.fn();
+    const revive = () => {
+      s.runtime.observe_retirement = vi.fn(async () => ({
+        ok: true as const,
+        value: "alive" as const,
+      }));
+      vi.mocked(s.runtime.status).mockResolvedValue({
+        ok: true,
+        value: { process: "alive", agent: "idle", observed_seq: 1 },
+      });
+    };
+    const backup = vi.fn(async () => {
+      if (mode === "live_during_backup") revive();
+      if (mode === "backup_failure") throw new Error("unavailable");
+      return { sha, ref: "refs/cardigan/stall-backups/test" };
+    });
+    const service = new HostOpsService({
+      ...s.options,
+      contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
+      stallBackup: backup,
+    });
+    // This fixture supplies the prepared checkout above; exercise the real dispatch
+    // and acknowledgement commands, not a second checkout provisioner.
+    const startRun = vi.fn(
+      async ({ run, assignment }: Parameters<typeof startQueuedRun>[1]) => {
+        expect(assignment.worktree_path).toBe(workspace);
+        expect(git("rev-parse", "HEAD")).toBe(sha);
+        f.apply((state, actor, ports) =>
+          dispatchRun(
+            state,
+            actor,
+            {
+              run_id: run.id,
+              runtime_ref: { ...f.refFor(a), terminal_ref: "new" },
+            },
+            ports,
+          ),
+        );
+      },
+    );
+    const d = new Dispatcher({ ...s.options, startRun });
+    const events = (type: string) =>
+      f.state().events.filter((e) => e.type === type);
+    try {
+      await d.tick();
+      await d.tick();
+      expect(events("bell_turn_recovery_due")).toMatchObject([
+        {
+          payload: {
+            activity_source: "observed_local_exit",
+            queued_run_id: s.run.id,
+          },
+        },
+      ]);
+      expect(startRun).not.toHaveBeenCalled();
+      if (mode === "lost_proof") gone = false;
+      if (mode === "live_again") {
+        revive();
+      }
+      await vi.waitFor(async () => {
+        await service.tick();
+        if (mode === "clean")
+          expect(events("host_ops_action_finished")).toMatchObject([
+            { payload: { run_id: s.run.id, backup_sha: sha } },
+          ]);
+        else if (mode === "backup_failure")
+          expect(events("host_ops_action_finished")).toMatchObject([
+            { payload: { reason: "workspace_backup_unconfirmed" } },
+          ]);
+        else if (mode === "live_during_backup")
+          expect(events("host_ops_action_finished")).toMatchObject([
+            { payload: { reason: "terminal_exit_unconfirmed" } },
+          ]);
+        else expect(events("dispatch_stall_attention")).toHaveLength(1);
+      });
+      expect(f.state().runs.find((r) => r.id === s.run.id)).toEqual(s.run);
+      const current = f.state().assignments.find((o) => o.id === a.id);
+      expect(current?.runtime_ref).toEqual(mode === "clean" ? null : ref);
+      expect(s.runtime.retire_idle).not.toHaveBeenCalled();
+      expect(s.runtime.release).not.toHaveBeenCalled();
+      expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual(
+        [],
+      );
+      if (mode === "clean") {
+        await d.tick();
+        expect(startRun).toHaveBeenCalledOnce();
+        f.apply(
+          (state, actor, ports) =>
+            acknowledgeRun(state, actor, { run_id: s.run.id }, ports),
+          f.actorFor(a),
+        );
+        expect(f.state().runs.find((r) => r.id === s.run.id)).toHaveProperty(
+          "started_at",
+        );
+        const handoffs = f.state().timeline.filter((e) => e.type === "handoff");
+        expect(handoffs).toHaveLength(1);
+        for (const detail of [
+          "运行时失联",
+          JSON.stringify({ terminal_ref: ref.terminal_ref }),
+          `最近 Run：${s.previous.id}`,
+          "outcome：blocked",
+          "get_updates",
+        ])
+          expect(handoffs[0]?.body).toContain(detail);
+        expect(handoffs[0]?.body).not.toContain(workspace);
+      } else {
+        // The refusal belongs to the patrol; a newly live idle terminal has its
+        // own wake path and is not a replacement Session.
+        if (mode !== "live_again" && mode !== "live_during_backup")
+          await d.tick();
+        expect(startRun).not.toHaveBeenCalled();
+      }
+    } finally {
+      await d.close();
+      await service.close();
+    }
+  },
+);

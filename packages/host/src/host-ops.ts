@@ -15,6 +15,7 @@ import {
   contextUsageFresh,
   currentHarnessActivity,
   dispatchRecoveryQueuedAt,
+  eventById,
   finishHostOpsAction,
   guardReviewRestartStop,
   type HarnessActivity,
@@ -23,6 +24,7 @@ import {
   hostOpsExitConfirmation,
   hostOpsReadDiagnostics,
   lastRunActivity,
+  observedLocalExitCause,
   type ProjectId,
   pendingHostOpsActions,
   prepareHostOpsAction,
@@ -1515,6 +1517,8 @@ export class HostOpsService {
       const foreign =
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
+      const cause = eventById(read().events, action.dispatch_stall_id);
+      const exitOnly = observedLocalExitCause(cause);
       const stopStarted =
         action.retirement_handoff?.phase === "stopping" ||
         action.retirement_handoff?.observe_only ||
@@ -1667,7 +1671,7 @@ export class HostOpsService {
                       action.runtime_ref,
                       action.system_finished_run_id,
                     ),
-                    !!remote || stopStarted,
+                    !!remote || stopStarted || exitOnly,
                     checkWorkspace,
                     beforeSignal,
                   );

@@ -286,6 +286,7 @@ export async function stallEvidence(
   signal?: AbortSignal,
   systemTurn?: string,
   transfer?: HostOpsExecution["retirement_handoff"],
+  exitOnly = false,
 ) {
   // Conflicting live registrations invalidate ownership, even when hc has a
   // matching address/name. No filesystem or process access on their behalf.
@@ -348,6 +349,10 @@ export async function stallEvidence(
         : null,
     can_restart:
       bound &&
+      (!exitOnly ||
+        (owner?.ok &&
+          owner.value === "exited" &&
+          (!observed?.ok || observed.value.process === "exited"))) &&
       (transfer
         ? owner?.ok && owner.value === "exited"
           ? await transferredSessionExited(state, a, runtime, execution)

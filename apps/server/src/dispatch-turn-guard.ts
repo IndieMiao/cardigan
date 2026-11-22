@@ -122,6 +122,7 @@ export function recordTurnWait(
     observation: string;
     notes: readonly Notification[];
     queued_run_id?: Run["id"];
+    observed_exit?: true;
     timeoutMs: number;
     standing?: StandingResolver | undefined;
   },
@@ -157,6 +158,33 @@ export function recordTurnWait(
       ? { queued_run_id: input.queued_run_id }
       : {}),
   };
+  // Waiting for an idle client and preserving an already exited session are
+  // different jobs. Route the latter immediately, without changing the timer
+  // for a live/unknown terminal or giving a possibly stale observation stop authority.
+  if (
+    input.observed_exit &&
+    reason === "system_finished_turn" &&
+    input.queued_run_id
+  ) {
+    const session_key = turnSessionKey(owner);
+    const seen = matching("bell_turn_recovery_due").some(
+      (e) =>
+        payloadString(e.payload, "queued_run_id") === input.queued_run_id &&
+        payloadString(e.payload, "session_key") === session_key &&
+        payloadString(e.payload, "activity_source") === "observed_local_exit",
+    );
+    if (!seen)
+      dispatchAlert(tx, store, state, at, {
+        ...common,
+        type: "bell_turn_recovery_due",
+        activity_source: "observed_local_exit",
+        queued_run_id: input.queued_run_id,
+        session_key,
+        notification_ids: ids,
+        audience: "activity_log",
+      });
+    return;
+  }
   const unseen = ids.filter((id) => !first.has(id));
   const emptyWait = waits.find(
     (e) => !payloadStrings(e.payload, "notification_ids").length,
