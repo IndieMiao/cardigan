@@ -462,3 +462,59 @@ test("the worker cannot apply a previously accepted click after an indirect appr
   expect(JSON.stringify(remote.create.mock.lastCall)).not.toContain("choice_0");
   expect(JSON.stringify(remote.create.mock.lastCall)).toContain("敏感事项");
 });
+
+test("test DM uses only the current binding of this owner, no action buttons, no arbitrary recipient", async () => {
+  const { boundTestAdapter } = await import("./feishu-app.js");
+  const credential = { ...c, app_id: "cli_0123456789abcdef" },
+    config = JSON.stringify(credential),
+    target = appScope(credential);
+  const adapter = (actor: string) =>
+    boundTestAdapter(store, config, actor, 1000, () => remote);
+  expect(adapter(member)).toBeUndefined();
+  db.prepare(
+    "INSERT INTO feishu_bindings(scope,generation,member,open_id,chat,watermark) VALUES(?,?,?,?,?,0)",
+  ).run(target, "first", member, "owner-private", "dm");
+  expect(adapter("not-owner")).toBeUndefined();
+  const port = adapter(member)!;
+  const message = {
+      title: "Cardigan 外部通知测试",
+      url: "https://example.invalid",
+    },
+    signal = new AbortController().signal;
+  expect(await port.send(message, signal)).toBe("sent");
+  expect(remote.create).toHaveBeenCalledWith(
+    "owner-private",
+    expect.any(String),
+    expect.stringContaining(message.title),
+  );
+  db.prepare("UPDATE feishu_bindings SET generation=? WHERE scope=?").run(
+    "rebound",
+    target,
+  );
+  expect(await port.send(message, signal)).toBe("permanent");
+  expect(remote.create).toHaveBeenCalledTimes(1);
+});
+
+test("recreating the inbox for the same app and tenant does not reset the current binding window", () => {
+  const code = issue();
+  const reload = () =>
+    feishuInbox(
+      db,
+      c,
+      () => {},
+      () => now,
+      { bindingAttempts: 1, pending: 32 },
+      remote.bindingFailure,
+    );
+  receive = reload();
+  redeem("ordinary chat");
+  receive = reload();
+  redeem(code);
+  expect(binding()).toBeUndefined();
+  now += 59999;
+  redeem(code);
+  expect(binding()).toBeUndefined();
+  now += 1;
+  redeem(code);
+  expect(binding()?.open_id).toBe("owner");
+});

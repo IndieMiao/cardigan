@@ -382,6 +382,11 @@
     );
     overflow-y: auto;
   }
+  /* C-564: a combobox list is as wide as its field, within the viewport. */
+  .ui-suggestions-field {
+    width: var(--radix-popover-trigger-width);
+    max-width: calc(100vw - var(--ui-space-4));
+  }
   .ui-select-item,
   .ui-menu-item {
     display: flex;

@@ -1,6 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { WSClient } from "@larksuiteoapi/node-sdk";
+import {
+  currentExtGeneration,
+  type ExtGeneration,
+} from "./ext-message-generation.js";
 import { feishuDispatcher } from "./feishu-dispatcher.js";
 import { type AppCredential, feishuInbox } from "./feishu-inbox.js";
 import { privateSdkHttp, privateSdkLogger } from "./feishu-sdk.js";
@@ -10,10 +14,12 @@ const port = parentPort;
 if (!port) throw new Error("Worker port required");
 const {
   credential: c,
+  generation,
   path,
   limits,
 } = workerData as {
   credential: AppCredential;
+  generation?: ExtGeneration;
   path: string;
   limits: { bindingAttempts: number; pending: number };
 };
@@ -47,6 +53,7 @@ void ws
         Date.now,
         limits,
         (recipient) => port.postMessage({ bindingFailure: recipient }),
+        () => currentExtGeneration(generation),
       ),
     ),
   })
