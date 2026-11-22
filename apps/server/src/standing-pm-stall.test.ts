@@ -1,11 +1,12 @@
 import {
   type Assignment,
   type CardId,
+  type RuntimeRef,
   requestDecision,
   STANDING_PM_STALL_EVENTS,
 } from "@cardigan/domain";
-import { standingPmStallPolicy } from "@cardigan/host";
-import { standingResolver } from "@cardigan/store";
+import { StandingPmRecovery, standingPmStallPolicy } from "@cardigan/host";
+import { moveNotification, standingResolver } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
@@ -264,4 +265,233 @@ test("C-596: an unconfirmed restart is escalated once to host operations, not to
   } finally {
     await dispatcher.close();
   }
+});
+
+test("V-2944: an older turn recovery that cannot confirm exit is escalated once; nothing stops or starts beside it", async () => {
+  const { f, pm, dispatcher, events, note, patrol } = pmOps();
+  f.runtime.observe_retirement = vi.fn(async () => ({
+    ok: true as const,
+    value: "alive" as const,
+  }));
+  const signal = vi.fn();
+  f.runtime.retire_idle = vi.fn(async (_ref, opts) => {
+    if (!(await opts.workspace_preflight()) || !opts.before_signal())
+      throw new Error("fixture guard refused");
+    signal();
+    return {
+      ok: true as const,
+      value: {
+        outcome: "timeout" as const,
+        evidence: { stage: "TERM" as const, reason: "still_live" as const },
+      },
+    };
+  });
+  try {
+    await dispatcher.tick();
+    f.advance(10 * MIN);
+    await dispatcher.tick();
+    await patrol("host_ops_action_taken");
+    expect(events("host_ops_action_taken")[0]?.payload).toMatchObject({
+      assignment_id: pm.id,
+      system_finished_run_id: expect.any(String),
+    });
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(signal).toHaveBeenCalledTimes(1);
+    });
+    for (let i = 0; i < 3; i++) await patrol("host_ops_action_taken");
+    expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(0);
+    f.advance(5 * MIN);
+    await patrol(STANDING_PM_STALL_EVENTS.escalate);
+    const [escalated] = events(STANDING_PM_STALL_EVENTS.escalate);
+    expect(escalated?.payload).toMatchObject({
+      assignment_id: pm.id,
+      reason: "restart_unconfirmed",
+      handoff: "host_ops",
+      host_ops_assignment_id: f.ops.id,
+    });
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => n.event_id === escalated?.id)
+        .map((n) => n.recipient),
+    ).toEqual([{ kind: "assignment", assignment_id: f.ops.id }]);
+    for (let i = 0; i < 8; i++) {
+      f.advance(5 * MIN);
+      await f.service.tick();
+    }
+    expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(1);
+    expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(0);
+    expect(
+      events("host_ops_action_taken").filter(
+        (e) =>
+          (e.payload as { assignment_id?: string }).assignment_id === pm.id,
+      ),
+    ).toHaveLength(1);
+    expect(signal).toHaveBeenCalledTimes(1);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(note().status).toBe("pending");
+  } finally {
+    await dispatcher.close();
+  }
+});
+
+/** A PM idle after a normal Run, driven by the C-596 patrol alone. */
+function idlePm(owns: (ref: RuntimeRef) => boolean = () => true) {
+  const f = setup();
+  const pm = f.pm();
+  f.session(pm);
+  f.skipEvents();
+  const delivery = f.event(
+    "delivery_submitted",
+    { fixture: true },
+    pm,
+    f.target.card.id,
+  );
+  const recovery = new StandingPmRecovery(
+    f.store,
+    f.clock,
+    f.runtime,
+    new AbortController().signal,
+    undefined,
+    owns,
+  );
+  const tick = (snapshot = f.options.snapshot) =>
+    recovery.tick(f.project, snapshot);
+  const events = (type: string) =>
+    f.state().events.filter((e) => e.type === type);
+  const note = () =>
+    required(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: pm.id })
+        .find((n) => n.event_id === delivery.id),
+    );
+  const recipients = (id: string | undefined) =>
+    f.store
+      .listNotifications({ project_id: f.project })
+      .filter((n) => n.event_id === id)
+      .map((n) => n.recipient);
+  return { f, pm, tick, events, note, recipients };
+}
+
+test("V-2944: a terminal on another runtime is escalated to host ops; no restart, no human action", async () => {
+  const { f, tick, events, recipients } = idlePm(() => false);
+  f.advance(15 * MIN);
+  await tick();
+  f.advance(5 * MIN);
+  await tick();
+  const [escalated] = events(STANDING_PM_STALL_EVENTS.escalate);
+  expect(escalated?.payload).toMatchObject({ reason: "not_local" });
+  expect(recipients(escalated?.id)).toEqual([
+    { kind: "assignment", assignment_id: f.ops.id },
+  ]);
+  expect(events("host_ops_action_taken")).toHaveLength(0);
+  expect(f.state().human_actions).toEqual([]);
+});
+
+test("V-2944: a handed-off notice gets a deliverable reminder; a healthy bell closes the episode", async () => {
+  const { f, pm, tick, events, note } = idlePm();
+  const original = note();
+  f.store.uow.run(() =>
+    moveNotification(f.store.database, {
+      project_id: f.project,
+      id: original.id,
+      event: "needs_attention",
+      at: f.clock.now(),
+    }),
+  );
+  f.event("standing_inbox_stalled", {
+    assignment_id: pm.id,
+    reason: "pending_without_run",
+    notification_ids: [original.id],
+  } as unknown as Record<string, string>);
+  f.skipEvents();
+  f.advance(15 * MIN);
+  await tick();
+  const [redelivered] = events(STANDING_PM_STALL_EVENTS.redeliver);
+  expect(redelivered?.payload).toMatchObject({
+    notification_ids: [original.id],
+  });
+  const reminder = f.store
+    .listNotifications({ project_id: f.project, assignment_id: pm.id })
+    .find((n) => n.event_id === redelivered?.id);
+  expect(reminder).toMatchObject({
+    status: "pending",
+    card_id: f.target.card.id,
+  });
+  // The original row and the PM's cursor are untouched.
+  expect(note().status).toBe("needs_attention");
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    expect(f.runtime.wake).toHaveBeenCalled();
+    f.advance(5 * MIN);
+    await tick();
+    expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(0);
+  } finally {
+    await dispatcher.close();
+  }
+});
+
+test("V-2944: a restart that cannot get a launch snapshot escalates after one more grace", async () => {
+  const { f, tick, events } = idlePm();
+  const broken = vi.fn(async () => {
+    throw new Error("snapshot unavailable");
+  });
+  f.advance(15 * MIN);
+  await tick();
+  f.advance(5 * MIN);
+  await tick(broken);
+  expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(0);
+  f.advance(5 * MIN);
+  await tick(broken);
+  expect(broken).toHaveBeenCalledTimes(1);
+  const [escalated] = events(STANDING_PM_STALL_EVENTS.escalate);
+  expect(escalated?.payload).toMatchObject({
+    reason: "restart_unavailable",
+    observation: expect.stringContaining("launch_snapshot_unavailable"),
+  });
+  for (let i = 0; i < 5; i++) {
+    f.advance(10 * MIN);
+    await tick(broken);
+  }
+  expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(1);
+  expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(0);
+});
+
+test("V-2944: without an active host_ops the escalation waits, then reaches one that comes on duty", async () => {
+  const { f, tick, events, recipients } = idlePm(() => false);
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...f.ops, status: "suspended" }),
+  );
+  f.advance(15 * MIN);
+  await tick();
+  f.advance(5 * MIN);
+  await tick();
+  const [escalated] = events(STANDING_PM_STALL_EVENTS.escalate);
+  expect(escalated?.payload).toMatchObject({
+    handoff: "waiting_host_ops",
+    notice: expect.stringContaining("暂无在岗主机运维"),
+  });
+  expect(escalated?.payload).not.toHaveProperty("host_ops_assignment_id");
+  // No unresolvable PM Office address is used as a stand-in.
+  expect(recipients(escalated?.id)).toEqual([]);
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.project, { ...f.ops, status: "active" }),
+  );
+  f.advance(MIN);
+  await tick();
+  await tick();
+  expect(events("standing_pm_stall_handoff_delivered")).toMatchObject([
+    {
+      payload: {
+        escalation_id: escalated?.id,
+        host_ops_assignment_id: f.ops.id,
+      },
+    },
+  ]);
+  expect(recipients(escalated?.id)).toEqual([
+    { kind: "assignment", assignment_id: f.ops.id },
+  ]);
+  expect(f.state().human_actions).toEqual([]);
 });

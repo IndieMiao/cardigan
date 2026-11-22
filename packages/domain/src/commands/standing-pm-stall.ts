@@ -1,6 +1,10 @@
 import type { Actor, Assignment, Event, Run } from "../entities.js";
-import { eventsOfType } from "../event-index.js";
-import { type HostOpsExecution, hostOpsPending } from "../host-ops.js";
+import { eventById, eventsOfType } from "../event-index.js";
+import {
+  type HostOpsExecution,
+  hostOpsPending,
+  pendingHostOpsActions,
+} from "../host-ops.js";
 import type { CardId } from "../ids.js";
 import type { Notification } from "../notification.js";
 import { pmNotificationState } from "../pm-notification.js";
@@ -43,8 +47,14 @@ export const STANDING_PM_STALL_EVENTS = {
 export type StandingPmStallEscalation =
   | "repeated"
   | "restart_unconfirmed"
+  | "restart_unavailable"
   | "session_maintenance"
   | "not_local";
+/** Host facts the pure planner cannot read from state. */
+export interface StandingPmStallContext {
+  /** The bound terminal belongs to another runtime: this host cannot stop it. */
+  readonly foreign_runtime?: boolean;
+}
 interface StallBase {
   readonly assignment_id: Assignment["id"];
   /** Stream of the oldest stalled notice: it carries the timeline entry. */
@@ -68,7 +78,6 @@ const executing = (r: Run) =>
   !!r.inactivity_stop ||
   (!!r.launch_publication &&
     !["started", "exited"].includes(r.launch_publication.phase));
-const types = new Set<string>(Object.values(STANDING_PM_STALL_EVENTS));
 const of = (e: Event) =>
   (e.payload as { assignment_id?: string } | null)?.assignment_id;
 
@@ -98,6 +107,7 @@ export function planStandingPmStall(
   notes: readonly Notification[],
   now: string,
   policy: StandingPmStallPolicy = DEFAULT_STANDING_PM_STALL_POLICY,
+  context: StandingPmStallContext = {},
 ): StandingPmStallPlan | undefined {
   if (
     a.scope !== "standing" ||
@@ -153,19 +163,29 @@ export function planStandingPmStall(
       : undefined;
   const elapsed = (since: string) => at - Date.parse(since);
   if (hostOpsPending(state.events, a.id)) {
-    // Only our own restart may still be unconfirmed; any other pending
-    // operation owns the session until it settles.
+    // A pending operation (ours, an older turn recovery or an operator's)
+    // owns the session: never stop or start beside it. Once it has held the
+    // fence past the grace with the notice still stalled, hand it to host
+    // operations, at most once per window.
+    const held = pendingHostOpsActions(state.events)
+      .filter((x) => x.assignment_id === a.id)
+      .map((x) => eventById(state.events, x.action_id)?.created_at)
+      .filter((t): t is string => !!t)
+      .sort()[0];
     if (
-      open?.type === STANDING_PM_STALL_EVENTS.restart &&
-      elapsed(open.created_at) >= policy.grace_ms
+      !held ||
+      elapsed(held) < policy.grace_ms ||
+      elapsed(oldest.since) < policy.threshold_ms ||
+      (open?.type === STANDING_PM_STALL_EVENTS.escalate &&
+        elapsed(open.created_at) < policy.window_ms)
     )
-      return {
-        ...base,
-        episode_id: episodeOf(open),
-        stage: "escalate",
-        reason: "restart_unconfirmed",
-      };
-    return;
+      return;
+    return {
+      ...base,
+      ...(open ? { episode_id: episodeOf(open) } : {}),
+      stage: "escalate",
+      reason: "restart_unconfirmed",
+    };
   }
   if (!open) {
     if (elapsed(oldest.since) < policy.threshold_ms) return;
@@ -173,7 +193,8 @@ export function planStandingPmStall(
   }
   const episode = episodeOf(open);
   if (open.type === STANDING_PM_STALL_EVENTS.redeliver) {
-    if (elapsed(open.created_at) < policy.grace_ms) return;
+    const waited = elapsed(open.created_at);
+    if (waited < policy.grace_ms) return;
     const recent = history.filter(
       (e) =>
         e.type === STANDING_PM_STALL_EVENTS.restart &&
@@ -184,9 +205,13 @@ export function planStandingPmStall(
         ? "repeated"
         : a.role_upgrade || a.idle_retirement
           ? "session_maintenance"
-          : a.machine_id !== "local"
+          : a.machine_id !== "local" || context.foreign_runtime
             ? "not_local"
-            : undefined;
+            : // The restart was due a grace ago but could not be begun
+              // (e.g. no launch snapshot): stop retrying silently.
+              waited >= 2 * policy.grace_ms
+              ? "restart_unavailable"
+              : undefined;
     return reason
       ? { ...base, episode_id: episode, stage: "escalate", reason }
       : { ...base, episode_id: episode, stage: "restart" };
@@ -212,21 +237,31 @@ function episodeOf(e: Event) {
   );
 }
 
-function notice(state: CommandState, a: Assignment, plan: StandingPmStallPlan) {
+function notice(
+  state: CommandState,
+  a: Assignment,
+  plan: StandingPmStallPlan,
+  host_ops?: Assignment["id"],
+) {
   const name = state.employees?.find((e) => e.id === a.employee_id)?.name;
   const who = `常驻 PM ${name ? `${name}（${a.id}）` : a.id}`;
   const count = plan.notification_ids.length;
   if (plan.stage !== "escalate")
     return plan.stage === "redeliver"
-      ? `${who}有 ${count} 条通知长时间没有新 Run 处理，系统已按原门铃重投。`
-      : `${who}重投后仍没有新 Run，系统已安排重开会话（等同 pm restart），待处理事项保留。`;
+      ? `${who}有 ${count} 条通知长时间没有新 Run 处理，系统已再发一次提醒；原通知和游标保留。`
+      : `${who}提醒后仍没有新 Run，系统已安排重开会话（等同 pm restart），待处理事项保留。`;
   const why = {
     repeated: "短时间内反复停滞",
-    restart_unconfirmed: "自动重开未能确认旧会话退出",
+    restart_unconfirmed: "会话上的主机操作迟迟未能确认旧会话退出",
+    restart_unavailable: "到期后仍无法发起重开",
     session_maintenance: "正在会话维护，不能自动重开",
-    not_local: "不在本机运行时，不能自动重开",
+    not_local: "旧会话不在本机运行时，不能自动重开",
   }[plan.reason];
-  return `${who}${why}，已转主机运维核查；系统暂停自动重开。`;
+  return `${who}${why}；${
+    host_ops
+      ? `已通知主机运维 ${host_ops} 核查`
+      : "本项目暂无在岗主机运维，升级已登记，主机运维上岗后接手"
+  }，系统暂停自动重开。`;
 }
 
 interface StallParams {
@@ -236,6 +271,7 @@ interface StallParams {
   readonly policy?: StandingPmStallPolicy;
   /** Host observation of the bound terminal, for the audit only. */
   readonly observation?: string;
+  readonly context?: StandingPmStallContext;
 }
 
 function current(
@@ -244,7 +280,14 @@ function current(
   stage: StandingPmStallPlan["stage"],
 ) {
   const a = d.get("assignments", p.assignment_id);
-  const plan = planStandingPmStall(d.state, a, p.notes, d.now, p.policy);
+  const plan = planStandingPmStall(
+    d.state,
+    a,
+    p.notes,
+    d.now,
+    p.policy,
+    p.context,
+  );
   ensure(
     plan?.stage === stage,
     "stale_target",
@@ -260,8 +303,9 @@ function record(
   plan: StandingPmStallPlan,
   extra: Record<string, string> = {},
   observation?: string,
+  host_ops?: Assignment["id"],
 ) {
-  const body = notice(d.state, a, plan);
+  const body = notice(d.state, a, plan, host_ops);
   return d.emit(
     STANDING_PM_STALL_EVENTS[plan.stage],
     plan.card_id ?? undefined,
@@ -323,19 +367,89 @@ export function beginStandingPmStallRestart(
   });
 }
 
-/** Third stage: host operations take over; the human is only informed. */
+function hostOpsOf(d: CommandDraft, a: Assignment, id?: Assignment["id"]) {
+  if (id === undefined) return;
+  const ops = d.get("assignments", id);
+  ensure(
+    ops.id !== a.id &&
+      ops.scope === "standing" &&
+      ops.role_id === "host_ops" &&
+      ops.status === "active" &&
+      !ops.external,
+    "validation_failed",
+    "Escalation recipient must be this project's active host_ops",
+  );
+  return ops.id;
+}
+
+/**
+ * Third stage: host operations take over; the human is only informed. Without
+ * an active host_ops the escalation is recorded as waiting, not as delivered.
+ */
 export function escalateStandingPmStall(
   state: CommandState,
   actor: Actor,
-  p: StallParams,
+  p: StallParams & { host_ops_id?: Assignment["id"] },
   ports: CommandPorts,
 ) {
   return command(state, actor, "recover_standing_pm", ports, (d) => {
     const { a, plan } = current(d, p, "escalate");
-    return { plan, event: record(d, a, plan, {}, p.observation) };
+    const ops = hostOpsOf(d, a, p.host_ops_id);
+    const extra = ops
+      ? { handoff: "host_ops", host_ops_assignment_id: ops }
+      : { handoff: "waiting_host_ops" };
+    return { plan, event: record(d, a, plan, extra, p.observation, ops) };
   });
 }
 
-export function isStandingPmStallEvent(e: Event) {
-  return types.has(e.type);
+/** Escalations still waiting for host operations; closed by a started Run. */
+export function waitingStandingPmStallHandoffs(state: CommandState) {
+  const delivered = new Set(
+    eventsOfType(state.events, STANDING_PM_STALL_HANDOFF).map(
+      (e) => (e.payload as { escalation_id?: string }).escalation_id,
+    ),
+  );
+  return eventsOfType(state.events, STANDING_PM_STALL_EVENTS.escalate).filter(
+    (e) => {
+      const p = e.payload as { handoff?: string; assignment_id?: string };
+      return (
+        e.actor.kind === "system" &&
+        p.handoff === "waiting_host_ops" &&
+        !delivered.has(e.id) &&
+        !runsOf(state.runs, p.assignment_id ?? "").some(
+          (r) => r.started_at && r.started_at > e.created_at,
+        )
+      );
+    },
+  );
+}
+export const STANDING_PM_STALL_HANDOFF = "standing_pm_stall_handoff_delivered";
+
+/** A host_ops that comes on duty later takes over a waiting escalation once. */
+export function deliverStandingPmStallHandoff(
+  state: CommandState,
+  actor: Actor,
+  p: { escalation_id: Event["id"]; host_ops_id: Assignment["id"] },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "recover_standing_pm", ports, (d) => {
+    const escalation = waitingStandingPmStallHandoffs(state).find(
+      (e) => e.id === p.escalation_id,
+    );
+    ensure(escalation, "stale_target", "升级已转交或已结束");
+    const a = d.get("assignments", of(escalation) as Assignment["id"]);
+    const ops = hostOpsOf(d, a, p.host_ops_id) as Assignment["id"];
+    const body = `常驻 PM ${a.id} 的停滞升级已转给主机运维 ${ops} 核查。`;
+    return d.emit(
+      STANDING_PM_STALL_HANDOFF,
+      escalation.card_id,
+      {
+        assignment_id: a.id,
+        escalation_id: escalation.id,
+        host_ops_assignment_id: ops,
+        notice: body,
+      },
+      { type: "system", body, author: "system" },
+    );
+  });
 }

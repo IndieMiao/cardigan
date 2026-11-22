@@ -4,16 +4,22 @@ import {
   type Clock,
   type CommandState,
   DEFAULT_STANDING_PM_STALL_POLICY,
+  deliverStandingPmStallHandoff,
+  type Event,
   escalateStandingPmStall,
   type HostOpsExecution,
   type Notification,
+  type NotificationRecipient,
   type ProjectId,
   planStandingPmStall,
   type Runtime,
+  type RuntimeRef,
   recordStandingPmStallRedelivery,
   runById,
+  type StandingPmStallContext,
   type StandingPmStallPlan,
   type StandingPmStallPolicy,
+  waitingStandingPmStallHandoffs,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import {
@@ -68,7 +74,17 @@ export class StandingPmRecovery {
     private runtime: Runtime,
     private signal: AbortSignal,
     private policy: StandingPmStallPolicy = standingPmStallPolicy(),
+    /** False only when this host cannot stop the bound terminal (C-152). */
+    private owns: (ref: RuntimeRef) => boolean = () => true,
   ) {}
+  /** Last restart preparation failure, kept for the escalation's audit only. */
+  private readonly failures = new Map<Assignment["id"], string>();
+
+  private context(a: Assignment): StandingPmStallContext {
+    return a.runtime_ref && !this.owns(a.runtime_ref)
+      ? { foreign_runtime: true }
+      : {};
+  }
 
   /** The PM's own undelivered rows, resolved like the dispatcher's inbox. */
   notes(state: CommandState, a: Assignment): Notification[] {
@@ -126,6 +142,7 @@ export class StandingPmRecovery {
         this.notes(state, a),
         now,
         this.policy,
+        this.context(a),
       );
       return plan ? [{ assignment: a, plan }] : [];
     });
@@ -149,22 +166,89 @@ export class StandingPmRecovery {
     ) => Promise<NonNullable<HostOpsExecution["snapshot"]>>,
   ) {
     const state = this.store.uow.read((tx) => loadCommandState(tx, project));
+    this.handoffWaiting(project, state);
     for (const { assignment: a, plan } of this.plans(state)) {
       if (this.signal.aborted) return;
       if (unfinishedBellAttempts(this.store.database, project, a.id).length)
         continue;
-      const observation = await this.observe(a);
+      let observation = await this.observe(a);
       let launch: HostOpsExecution["snapshot"];
       if (plan.stage === "restart") {
         try {
           launch = await snapshot(a, project);
+          this.failures.delete(a.id);
         } catch {
-          continue; // Retried on the next patrol; nothing was written.
+          // Retried on the next patrol; the planner escalates once the
+          // restart is a full grace overdue.
+          this.failures.set(a.id, "launch_snapshot_unavailable");
+          continue;
         }
+      }
+      const failure = this.failures.get(a.id);
+      if (plan.stage === "escalate" && failure) {
+        observation = `${observation}; ${failure}`;
+        this.failures.delete(a.id);
       }
       if (this.signal.aborted) return;
       this.apply(project, a, plan, observation, launch);
     }
+  }
+
+  private hostOps(state: CommandState, a: Assignment) {
+    return state.assignments.find(
+      (o) =>
+        o.scope === "standing" &&
+        o.role_id === "host_ops" &&
+        o.status === "active" &&
+        !o.external &&
+        o.id !== a.id,
+    );
+  }
+
+  private notify(
+    project: ProjectId,
+    event: Event,
+    recipient: NotificationRecipient,
+    kind = "run_attention",
+  ) {
+    recordNotification(this.store.database, {
+      project_id: project,
+      event_id: event.id,
+      ...(event.card_id ? { card_id: event.card_id } : {}),
+      seq: event.seq,
+      kind,
+      at: event.created_at,
+      recipient,
+    });
+  }
+
+  /** An escalation recorded without host operations is delivered once one is on duty. */
+  private handoffWaiting(project: ProjectId, initial: CommandState) {
+    if (!waitingStandingPmStallHandoffs(initial).length) return;
+    this.store.uow.run((tx) => {
+      const state = loadCommandState(tx, project);
+      for (const escalation of waitingStandingPmStallHandoffs(state)) {
+        const pm = state.assignments.find(
+          (v) =>
+            v.id ===
+            (escalation.payload as { assignment_id?: string }).assignment_id,
+        );
+        const ops = pm && this.hostOps(state, pm);
+        if (!ops) continue;
+        const effect = deliverStandingPmStallHandoff(
+          state,
+          system(project),
+          { escalation_id: escalation.id, host_ops_id: ops.id },
+          { clock: this.clock, ids: tx.ids },
+        );
+        if (!effect.ok) continue;
+        persistEffect(tx, project, effect.value);
+        this.notify(project, escalation, {
+          kind: "assignment",
+          assignment_id: ops.id,
+        });
+      }
+    });
   }
 
   private apply(
@@ -196,6 +280,7 @@ export class StandingPmRecovery {
         notes: this.notes(fresh, owner),
         policy: this.policy,
         observation,
+        context: this.context(owner),
       };
       const ports = { clock: this.clock, ids: tx.ids };
       if (plan.stage === "redeliver") {
@@ -207,8 +292,16 @@ export class StandingPmRecovery {
         );
         if (!effect.ok) return;
         persistEffect(tx, project, effect.value);
-        // Re-ring through the normal dispatcher: failed rows go back to
-        // pending, due now. Escalated rows keep their handoff.
+        // A deliverable reminder through the normal dispatcher and guards. It
+        // points at the PM's unread streams; original events and ACK cursors
+        // stay as they are, and handed-off rows keep their handoff.
+        this.notify(
+          project,
+          effect.value.data.event,
+          { kind: "assignment", assignment_id: a.id },
+          "assignment",
+        );
+        // Failed rows also go back to pending, due now.
         const ids = new Set(effect.value.data.plan.notification_ids);
         for (const n of params.notes)
           if (ids.has(n.id) && n.status === "delivery_failed")
@@ -236,36 +329,29 @@ export class StandingPmRecovery {
         if (effect.ok) persistEffect(tx, project, effect.value);
         return;
       }
+      const ops = this.hostOps(fresh, owner);
       const effect = escalateStandingPmStall(
         fresh,
         system(project),
-        params,
+        { ...params, ...(ops ? { host_ops_id: ops.id } : {}) },
         ports,
       );
       if (!effect.ok) return;
       persistEffect(tx, project, effect.value);
       const event = effect.value.data.event;
-      const ops = fresh.assignments.find(
-        (o) =>
-          o.scope === "standing" &&
-          o.role_id === "host_ops" &&
-          o.status === "active" &&
-          !o.external &&
-          o.id !== a.id,
-      );
-      // Host operations own the follow-up. Without one, the other PM context
-      // is told instead; the human only sees the Needs You notice.
-      recordNotification(this.store.database, {
-        project_id: project,
-        event_id: event.id,
-        ...(event.card_id ? { card_id: event.card_id } : {}),
-        seq: event.seq,
-        kind: "run_attention",
-        at: event.created_at,
-        recipient: ops
-          ? { kind: "assignment", assignment_id: ops.id }
-          : { kind: recoveryPm(owner) },
-      });
+      // Host operations own the follow-up. Without one the escalation stays
+      // waiting (delivered when one comes on duty); an existing other PM
+      // context is informed. The human only sees the Needs You notice.
+      if (ops)
+        this.notify(project, event, {
+          kind: "assignment",
+          assignment_id: ops.id,
+        });
+      else {
+        const other = recoveryPm(owner);
+        if (standingResolver(this.store)(project, other, fresh))
+          this.notify(project, event, { kind: other });
+      }
     });
   }
 }

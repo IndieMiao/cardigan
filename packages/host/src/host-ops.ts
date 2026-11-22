@@ -164,6 +164,7 @@ export class HostOpsService {
       options.runtime,
       (project) => this.stallExecution(project),
       this.contextAbort.signal,
+      (ref) => options.ownsRuntimeRef?.(ref) !== false,
     );
   }
   /** A project-local worker may have a different account and workspace root

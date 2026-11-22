@@ -10,6 +10,7 @@ import {
   hostOpsPending,
   type ProjectId,
   type Runtime,
+  type RuntimeRef,
   STANDING_PM_STALL_EVENTS,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -66,8 +67,16 @@ export class StallPatrol {
     private runtime: Runtime,
     private execution: (project: ProjectId) => ExecutionConfig | undefined,
     private signal: AbortSignal,
+    owns?: (ref: RuntimeRef) => boolean,
   ) {
-    this.standingPm = new StandingPmRecovery(store, clock, runtime, signal);
+    this.standingPm = new StandingPmRecovery(
+      store,
+      clock,
+      runtime,
+      signal,
+      undefined,
+      owns,
+    );
   }
   private causes(state: CommandState) {
     const handoffs = dispatchHandoffs(state);

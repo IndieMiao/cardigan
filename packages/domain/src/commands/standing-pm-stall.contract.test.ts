@@ -3,15 +3,17 @@ import type { Assignment, Event, Run } from "../entities.js";
 import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
 import type { Notification } from "../notification.js";
 import type { CommandState } from "./core.js";
-import { finishHostOpsAction } from "./host-ops-actions.js";
+import { beginHostOpsAction, finishHostOpsAction } from "./host-ops-actions.js";
 import { notices } from "./notices.js";
 import {
   beginStandingPmStallRestart,
   DEFAULT_STANDING_PM_STALL_POLICY,
+  deliverStandingPmStallHandoff,
   escalateStandingPmStall,
   planStandingPmStall,
   recordStandingPmStallRedelivery,
   STANDING_PM_STALL_EVENTS,
+  waitingStandingPmStallHandoffs,
 } from "./standing-pm-stall.js";
 import {
   actor,
@@ -20,6 +22,7 @@ import {
   human,
   id,
   ports,
+  role,
   value,
 } from "./test-fixtures.js";
 
@@ -290,7 +293,7 @@ test("repeated stalls: two restarts per window, then escalation instead of a thi
   expect(
     notices(f.state)
       .map((n) => n.option)
-      .filter((q) => q.includes("转主机运维")),
+      .filter((q) => q.includes("升级主机运维")),
   ).toHaveLength(1);
 });
 
@@ -411,3 +414,149 @@ test("a started Run closes the episode; execution, human stop, ACK, hold and mai
   f.time += 2;
   expect(f.plan(notes)?.stage).toBe("redeliver");
 });
+
+test("an older operation holding the fence is escalated after the grace, never restarted beside", () => {
+  const f = setup();
+  const notes = [f.note(1, 0)];
+  // A system-turn recovery (or operator restart) took the fence at +16 min.
+  f.time = 16 * MIN;
+  f.state = apply(f.state, operatorRestart(f.state, f.owner, f.io));
+  f.time = 20 * MIN;
+  expect(f.plan(notes)).toBeUndefined();
+  f.time = 21 * MIN;
+  const plan = f.plan(notes);
+  expect(plan).toMatchObject({
+    stage: "escalate",
+    reason: "restart_unconfirmed",
+  });
+  expect(plan).not.toHaveProperty("episode_id");
+  const params = { assignment_id: f.owner.id, notes };
+  expect(
+    beginStandingPmStallRestart(f.state, system, { ...params, snapshot }, f.io)
+      .ok,
+  ).toBe(false);
+  f.state = apply(
+    f.state,
+    value(escalateStandingPmStall(f.state, system, params, f.io)),
+  );
+  // Once per window while the same operation still holds the fence.
+  f.time += DEFAULT_STANDING_PM_STALL_POLICY.window_ms - 1;
+  expect(f.plan(notes)).toBeUndefined();
+  f.time += 1;
+  expect(f.plan(notes)?.stage).toBe("escalate");
+});
+
+test("foreign runtime, an overdue restart and missing host_ops escalate without a human", () => {
+  const f = setup();
+  const notes = [f.note(1, 0)];
+  const params = { assignment_id: f.owner.id, notes };
+  f.time = 15 * MIN;
+  f.state = apply(
+    f.state,
+    value(recordStandingPmStallRedelivery(f.state, system, params, f.io)),
+  );
+  f.time = 20 * MIN;
+  const foreign = { foreign_runtime: true };
+  expect(
+    planStandingPmStall(
+      f.state,
+      f.owner,
+      notes,
+      at(f.time),
+      undefined,
+      foreign,
+    ),
+  ).toMatchObject({ stage: "escalate", reason: "not_local" });
+  expect(
+    beginStandingPmStallRestart(
+      f.state,
+      system,
+      { ...params, snapshot, context: foreign },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  // The restart was due but never begun (e.g. no launch snapshot).
+  f.time = 24 * MIN;
+  expect(f.plan(notes)?.stage).toBe("restart");
+  f.time = 25 * MIN;
+  expect(f.plan(notes)).toMatchObject({
+    stage: "escalate",
+    reason: "restart_unavailable",
+  });
+  // A recipient must be this project's active host_ops, not the PM itself.
+  expect(
+    escalateStandingPmStall(
+      f.state,
+      system,
+      { ...params, host_ops_id: f.owner.id },
+      f.io,
+    ).ok,
+  ).toBe(false);
+  const waiting = value(escalateStandingPmStall(f.state, system, params, f.io));
+  f.state = apply(f.state, waiting);
+  expect(waiting.data.event.payload).toMatchObject({
+    handoff: "waiting_host_ops",
+    notice: expect.stringContaining("暂无在岗主机运维"),
+  });
+  expect(waitingStandingPmStallHandoffs(f.state).map((e) => e.id)).toEqual([
+    waiting.data.event.id,
+  ]);
+  // A host_ops coming on duty takes it over exactly once.
+  const ops = {
+    ...f.owner,
+    id: id("assignment", 9),
+    role_id: "host_ops",
+    standing_mode: undefined,
+  } as unknown as Assignment;
+  f.state = { ...f.state, assignments: [...f.state.assignments, ops] };
+  const handoff = {
+    escalation_id: waiting.data.event.id,
+    host_ops_id: ops.id,
+  };
+  expect(deliverStandingPmStallHandoff(f.state, human, handoff, f.io).ok).toBe(
+    false,
+  );
+  f.state = apply(
+    f.state,
+    value(deliverStandingPmStallHandoff(f.state, system, handoff, f.io)),
+  );
+  expect(waitingStandingPmStallHandoffs(f.state)).toEqual([]);
+  expect(deliverStandingPmStallHandoff(f.state, system, handoff, f.io).ok).toBe(
+    false,
+  );
+  expect(f.state.human_actions).toEqual([]);
+});
+
+/** Stand-in for an older turn recovery or operator restart on the same PM. */
+function operatorRestart(
+  state: CommandState,
+  owner: Assignment,
+  io: ReturnType<typeof ports>,
+) {
+  const ops = {
+    ...owner,
+    id: id("assignment", 10),
+    role_id: "host_ops",
+    standing_mode: undefined,
+    runtime_ref: null,
+  } as unknown as Assignment;
+  const withOps: CommandState = {
+    ...state,
+    assignments: [...state.assignments, ops],
+    roles: [...state.roles, role("host_ops")],
+  };
+  const effect = value(
+    beginHostOpsAction(
+      withOps,
+      actor(10, "host_ops"),
+      {
+        tool: "host_ops_restart_standing_pm",
+        target_id: owner.id,
+        reason: "operator",
+        snapshot,
+      },
+      io,
+    ),
+  );
+  return { ...effect, changes: [] };
+}
