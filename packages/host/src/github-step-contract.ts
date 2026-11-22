@@ -92,7 +92,8 @@ export function parseGithubStepContract(raw: unknown): GithubStepContract {
     raw.steps.length > MAX_CONTRACT_STEPS
   )
     fail(`step_contract.steps 须为 1-${MAX_CONTRACT_STEPS} 项的列表`);
-  const postRaw = raw.post_steps ?? [];
+  // Only an omitted list defaults to empty; an explicit null is a typo.
+  const postRaw = raw.post_steps === undefined ? [] : raw.post_steps;
   if (!Array.isArray(postRaw) || postRaw.length > MAX_CONTRACT_POST_STEPS)
     fail(
       `step_contract.post_steps 须为不超过 ${MAX_CONTRACT_POST_STEPS} 项的列表`,
@@ -123,6 +124,16 @@ export function parseGithubStepContract(raw: unknown): GithubStepContract {
   for (const check of checkNames)
     if (!names.has(check))
       fail(`step_contract.steps 必须各含一次检查步骤 ${checkNames.join("/")}`);
+  // An exact name must never denote the same display name as a declared
+  // `uses` step or its cleanup, otherwise one step could be declared twice.
+  const generated = (name: string) =>
+    [...uses].some(
+      (action) =>
+        name.startsWith(`Run ${action}@`) ||
+        name.startsWith(`Post Run ${action}@`),
+    );
+  if ([...names].some(generated))
+    fail("step_contract.steps 的步骤名不能与 uses 步骤的生成名重复");
   const postNames = new Set<string>();
   const postUses = new Set<string>();
   for (const step of postSteps) {
@@ -135,6 +146,8 @@ export function parseGithubStepContract(raw: unknown): GithubStepContract {
         fail(
           "step_contract.post_steps 不能声明检查步骤、主步骤或 Set up job/Complete job",
         );
+      if (generated(step.name))
+        fail("step_contract.post_steps 的步骤名不能与 uses 步骤的生成名重复");
       if (postNames.has(step.name))
         fail("step_contract.post_steps 的步骤名不能重复");
       postNames.add(step.name);
@@ -160,12 +173,17 @@ function generatedRef(name: string, prefix: string): string | undefined {
  * True when `names` (already stripped of `Set up job`/`Complete job`) is
  * exactly the contract's main steps followed by an ordered subset of its
  * post steps. A `uses` post step must carry the same ref as its main step.
+ * Every display name may occur only once, whatever matched it.
  */
 export function matchesGithubStepContract(
   names: readonly string[],
   contract: GithubStepContract,
 ): boolean {
-  if (names.length < contract.steps.length) return false;
+  if (
+    names.length < contract.steps.length ||
+    new Set(names).size !== names.length
+  )
+    return false;
   const refs = new Map<string, string>();
   for (const [index, matcher] of contract.steps.entries()) {
     const name = names[index] ?? "";

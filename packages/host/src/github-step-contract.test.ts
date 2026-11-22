@@ -37,7 +37,10 @@ const SENSEN_RAW = {
   ],
 };
 const SENSEN = parseGithubStepContract(SENSEN_RAW);
-/** Shape GitHub reports for the sensen job (services + unnamed uses steps). */
+/**
+ * Synthesized from the incident description and GitHub's generated-name
+ * rules (services + unnamed uses steps); not a replay of a sensen run.
+ */
 const SENSEN_MAIN = [
   "Set up job",
   "Initialize containers",
@@ -157,7 +160,7 @@ describe("C-592: Cardigan default contract is unchanged", () => {
 });
 
 describe("C-592: configured step contract", () => {
-  test("sensen's real job shape passes with its configured contract", async () => {
+  test("sensen's synthesized job shape (from the incident description) passes with its configured contract", async () => {
     const result = await inspect(jobOf(SENSEN_MAIN, SENSEN_POST), SENSEN);
     expect(result.status).toBe("passed");
     expect(result.checks.map((c) => [c.name, c.status])).toEqual(
@@ -489,6 +492,99 @@ describe("C-592: step_contract validation", () => {
     ],
   ])("rejects %s", (_label, raw) => {
     expect(() => parseGithubStepContract(raw)).toThrow(/step_contract/u);
+  });
+
+  test("V-2917: rejects one display name declared through both uses and an exact name", () => {
+    const checks = [...GITHUB_CHECK_NAMES];
+    for (const raw of [
+      // post exact name equal to the main uses step's generated name
+      {
+        steps: [{ uses: "actions/checkout" }, ...checks],
+        post_steps: ["Run actions/checkout@v4"],
+      },
+      // main mixes uses and its exact generated name
+      {
+        steps: [
+          { uses: "actions/checkout" },
+          ...checks,
+          "Run actions/checkout@v4",
+        ],
+      },
+      // post mixes uses and its exact Post name
+      {
+        steps: [{ uses: "actions/checkout" }, ...checks],
+        post_steps: [
+          { uses: "actions/checkout" },
+          "Post Run actions/checkout@v4",
+        ],
+      },
+      // exact Post name for a uses step in main
+      {
+        steps: [{ uses: "actions/checkout" }, ...checks],
+        post_steps: ["Post Run actions/checkout@v4"],
+      },
+    ])
+      expect(() => parseGithubStepContract(raw)).toThrow(/生成名重复/u);
+    // Non-conflicting mixes stay valid.
+    expect(
+      parseGithubStepContract({
+        steps: [
+          { uses: "actions/checkout" },
+          "Run actions/checkout-extra@v1",
+          "Run pnpm install",
+          ...checks,
+        ],
+        post_steps: [{ uses: "actions/checkout" }, "Post Setup Node"],
+      }).steps,
+    ).toHaveLength(9);
+  });
+
+  test("V-2917: duplicate display names never pass, even with an unvalidated contract", async () => {
+    const contract: GithubStepContract = {
+      steps: [
+        { uses: "actions/checkout" },
+        ...GITHUB_CHECK_NAMES.map((name) => ({ name })),
+      ],
+      postSteps: [{ name: "Run actions/checkout@v4" }],
+    };
+    const main = ["Run actions/checkout@v4", ...GITHUB_CHECK_NAMES];
+    expect(matchesGithubStepContract(main, contract)).toBe(true);
+    expect(
+      matchesGithubStepContract([...main, "Run actions/checkout@v4"], contract),
+    ).toBe(false);
+    expect(
+      await inspect(
+        jobOf(["Set up job", ...main], ["Run actions/checkout@v4"]),
+        contract,
+      ),
+    ).toMatchObject(rejected);
+    const mixed: GithubStepContract = {
+      steps: [
+        { uses: "actions/checkout" },
+        { name: "Run actions/checkout@v4" },
+        ...GITHUB_CHECK_NAMES.map((name) => ({ name })),
+      ],
+      postSteps: [],
+    };
+    expect(
+      matchesGithubStepContract(
+        [
+          "Run actions/checkout@v4",
+          "Run actions/checkout@v4",
+          ...GITHUB_CHECK_NAMES,
+        ],
+        mixed,
+      ),
+    ).toBe(false);
+  });
+
+  test("an explicit null post_steps is a field error; omission defaults to empty", () => {
+    expect(() =>
+      parseGithubStepContract({
+        steps: [...GITHUB_CHECK_NAMES],
+        post_steps: null,
+      }),
+    ).toThrow(/post_steps/u);
   });
 
   test("errors never echo configured values", () => {
