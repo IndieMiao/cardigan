@@ -10,6 +10,7 @@ import {
   ApiError,
   type CardiganClient,
   type LaunchChange,
+  type LaunchModelCheck,
   type LaunchModelList,
   type LaunchModelMetadata,
   type LaunchPreview,
@@ -725,6 +726,7 @@ export function ProfileForm({
       fieldNames={creating ? ["name"] : []}
       fields={(server) => (
         <ProfileFields
+          client={context.client}
           draft={draft}
           patch={patch}
           setHarness={setHarness}
@@ -732,10 +734,14 @@ export function ProfileForm({
           settings={settings}
           choices={choices}
           legacyMode={
+            // The read's own value, while the harness is unchanged: it stays
+            // choosable after picking another, and choosing it is no edit.
             modes !== undefined &&
-            keptMode &&
-            draft.permission_mode !== "" &&
-            !modes.includes(draft.permission_mode)
+            draft.harness === initial.harness &&
+            initial.permission_mode !== "" &&
+            !modes.includes(initial.permission_mode)
+              ? initial.permission_mode
+              : undefined
           }
           problems={{
             ...problems,
@@ -856,13 +862,69 @@ const PERMISSION_MEANING: Readonly<Record<string, string>> = {
   bypassPermissions: "跳过全部权限确认。",
 };
 
+/** C-564: what an online check of the typed ID found, in a few words. */
+const CHECK_RESULT: Record<LaunchModelCheck["status"], string> = {
+  listed: "Provider 列出了这个模型",
+  not_listed: "Provider 未列出这个模型",
+  incomplete: "Provider 模型列表未查完，无法确认",
+  failed: "核对失败",
+  no_endpoint: "Provider 没有端点，无法核对",
+  missing_secret: "Provider 密钥未设置，无法核对",
+};
+
+/**
+ * C-564: check a typed model ID against the saved Provider's list, before
+ * saving. A result belongs to one version, Provider and ID; editing any of
+ * them drops it. A late reply for another ID is ignored.
+ */
+function useModelCheck(
+  client: CardiganClient,
+  version: string,
+  provider: string,
+  model: string,
+) {
+  const key = `${version}\n${provider}\n${model}`;
+  const [result, setResult] = useState<{
+    key: string;
+    state: "running" | LaunchModelCheck["status"] | { error: string };
+  }>();
+  const latest = useRef(key);
+  latest.current = key;
+  const start = () => {
+    if (result?.key === key && result.state === "running") return;
+    setResult({ key, state: "running" });
+    client.checkLaunchModel(version, provider, model).then(
+      (answer) => {
+        if (latest.current === key) setResult({ key, state: answer.status });
+      },
+      (error: unknown) => {
+        if (latest.current === key)
+          setResult({
+            key,
+            state: {
+              error:
+                error instanceof ApiError && error.code === "stale_snapshot"
+                  ? "启动配置已在别处修改，刷新后可重新核对"
+                  : error instanceof Error && error.message
+                    ? error.message
+                    : "核对失败",
+            },
+          });
+      },
+    );
+  };
+  return { state: result?.key === key ? result.state : undefined, start };
+}
+
 function ModelField({
+  client,
   draft,
   patch,
   settings,
   choices,
   error,
 }: {
+  client: CardiganClient;
   draft: ProfileDraft;
   patch: (next: Partial<ProfileDraft>) => void;
   settings: LaunchSettingsView;
@@ -887,21 +949,51 @@ function ModelField({
   const found = listed.find((m) => m.id === value);
   const problem = choicesProblem(choices);
   const loading = choices.state === "loading";
-  const unverified = value !== "" && !alias && !found && !loading;
+  const check = useModelCheck(client, settings.version, draft.provider, value);
+  const confirmed = check.state === "listed";
+  const unverified = value !== "" && !alias && !found && !loading && !confirmed;
+  const checkText =
+    check.state === undefined || check.state === "running"
+      ? undefined
+      : typeof check.state === "object"
+        ? `核对失败：${check.state.error}`
+        : CHECK_RESULT[check.state];
   const facts = alias
     ? [`别名 → ${alias.id}`, modelMeta(alias)].filter(Boolean).join(" · ")
     : modelMeta(found);
+  // Only a typed ID outside every list, with a saved Provider, can be checked.
+  const checkable = unverified && draft.provider !== "" && !textProblem(value);
   const hint =
-    loading || problem || unverified || facts ? (
+    loading || problem || unverified || facts || confirmed ? (
       <>
         {unverified && (
           <>
             <StatusTag status="unknown" label="未验证" />{" "}
           </>
         )}
-        {loading
-          ? "正在读取模型列表…"
-          : [facts, problem].filter(Boolean).join("；")}
+        {confirmed && (
+          <>
+            <StatusTag status="passed" label="已核对" />{" "}
+          </>
+        )}
+        {[loading ? "正在读取模型列表…" : facts, checkText, problem]
+          .filter(Boolean)
+          .join("；")}
+        {checkable && (
+          <>
+            {" "}
+            <Button
+              variant="link"
+              size="content"
+              aria-disabled={check.state === "running" || undefined}
+              onClick={() => {
+                if (check.state !== "running") check.start();
+              }}
+            >
+              {check.state === "running" ? "正在核对…" : "在线核对"}
+            </Button>
+          </>
+        )}
       </>
     ) : undefined;
   return (
@@ -933,7 +1025,8 @@ function PermissionField({
   draft: ProfileDraft;
   patch: (next: Partial<ProfileDraft>) => void;
   modes: readonly string[] | undefined;
-  legacy: boolean;
+  /** The read's unsupported value, kept as an option while untouched harness. */
+  legacy: string | undefined;
   error: string | undefined;
 }) {
   if (!modes)
@@ -948,7 +1041,7 @@ function PermissionField({
   const unused = modes.length === 0 && draft.permission_mode === "";
   const hint = unused
     ? `${draft.harness} 不使用此参数。`
-    : legacy
+    : legacy !== undefined && draft.permission_mode === legacy
       ? "当前值不在可选列表中，不改这一项时原样保留。"
       : PERMISSION_MEANING[draft.permission_mode];
   return (
@@ -962,10 +1055,8 @@ function PermissionField({
           onValueChange={(permission_mode) => patch({ permission_mode })}
         >
           <option value="">{unused ? "不适用" : "未设置"}</option>
-          {legacy && (
-            <option value={draft.permission_mode}>
-              {draft.permission_mode}（当前值）
-            </option>
+          {legacy !== undefined && (
+            <option value={legacy}>{legacy}（当前值）</option>
           )}
           {modes.map((mode) => (
             <option key={mode} value={mode}>
@@ -979,6 +1070,7 @@ function PermissionField({
 }
 
 function ProfileFields({
+  client,
   draft,
   patch,
   setHarness,
@@ -988,13 +1080,14 @@ function ProfileFields({
   legacyMode,
   problems,
 }: {
+  client: CardiganClient;
   draft: ProfileDraft;
   patch: (next: Partial<ProfileDraft>) => void;
   setHarness: (harness: string) => void;
   creating: boolean;
   settings: LaunchSettingsView;
   choices: ModelChoices;
-  legacyMode: boolean;
+  legacyMode: string | undefined;
   problems: Partial<Record<keyof ProfileDraft, string | undefined>>;
 }) {
   const harnesses = HARNESSES.includes(draft.harness as never)
@@ -1043,6 +1136,7 @@ function ProfileFields({
         </SelectControl>
       </label>
       <ModelField
+        client={client}
         draft={draft}
         patch={patch}
         settings={settings}
@@ -1094,6 +1188,14 @@ export function CopyProfileForm({
   const [name, setName] = useState("");
   const trimmed = name.trim();
   const taken = context.settings.profiles.some((p) => p.name === trimmed);
+  // C-564: a kept hand-written permission mode outside the harness's options
+  // stays on the original only; a copy would save it anew.
+  const mode = source.parameters.permission_mode;
+  const modes = context.settings.permission_modes?.[source.harness];
+  const legacyMode =
+    mode !== null && modes !== undefined && !modes.includes(mode)
+      ? mode
+      : undefined;
   const local =
     name === ""
       ? undefined
@@ -1104,7 +1206,7 @@ export function CopyProfileForm({
       context={context}
       label="复制启动配置"
       change={
-        trimmed && !local
+        trimmed && !local && legacyMode === undefined
           ? { op: "copy_profile", name: trimmed, source: source.name }
           : undefined
       }
@@ -1112,6 +1214,7 @@ export function CopyProfileForm({
       fieldNames={["name"]}
       fields={(server) => (
         <CopyFields
+          legacyMode={legacyMode}
           source={source.name}
           name={name}
           setName={setName}
@@ -1122,11 +1225,13 @@ export function CopyProfileForm({
   );
 }
 function CopyFields({
+  legacyMode,
   source,
   name,
   setName,
   problem,
 }: {
+  legacyMode: string | undefined;
   source: string;
   name: string;
   setName: (name: string) => void;
@@ -1137,6 +1242,12 @@ function CopyFields({
       <SettingsFacts>
         <SettingsFact label="来源">{source}</SettingsFact>
       </SettingsFacts>
+      {legacyMode !== undefined && (
+        <SettingsWarning role="alert">
+          原配置的权限模式 {legacyMode}{" "}
+          不在可选列表中，不能复制；请先在原配置中改选。
+        </SettingsWarning>
+      )}
       <TextField
         label="新配置名称"
         error={problem}

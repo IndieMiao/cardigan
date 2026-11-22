@@ -278,6 +278,11 @@ test("an old permission mode outside the list stays as it is and says so", async
   const mode = () => within(form).getByRole("combobox", { name: /权限模式/ });
   expect(mode().textContent).toContain("legacy（当前值）");
   expect(hintOf(mode())).toContain("不在可选列表中");
+  // Picking another and coming back is no edit: the old value stays a choice.
+  changeControl(mode(), { target: { value: "plan" } });
+  expect(hintOf(mode())).not.toContain("不在可选列表中");
+  changeControl(mode(), { target: { value: "legacy" } });
+  expect(hintOf(mode())).toContain("不在可选列表中");
   fireEvent.change(within(form).getByRole("textbox", { name: "推理强度" }), {
     target: { value: "low" },
   });
@@ -299,4 +304,89 @@ test("a changed model is an unapplied edit: leaving asks first", async () => {
   expect(
     await screen.findByRole("dialog", { name: "放弃未应用的修改？" }),
   ).toBeTruthy();
+});
+
+test("a typed ID can be checked online before saving; editing it drops the result (V-2818:6)", async () => {
+  const checkLaunchModel = vi.fn(
+    async (_version: string, provider: string, model: string) => ({
+      provider,
+      model,
+      status: model === "gateway-hidden" ? "listed" : "not_listed",
+    }),
+  ) as CardiganClient["checkLaunchModel"] & ReturnType<typeof vi.fn>;
+  const api = harness({ checkLaunchModel });
+  const form = await editProfile(api.client, "claude-opus");
+  const input = modelField(form);
+  await waitFor(() => expect(hintOf(input)).toContain("别名"));
+  // Alias or listed values have nothing to check.
+  expect(within(form).queryByRole("button", { name: "在线核对" })).toBeNull();
+  fireEvent.change(input, { target: { value: "gateway-hidden" } });
+  fireEvent.click(within(form).getByRole("button", { name: "在线核对" }));
+  await waitFor(() => expect(hintOf(input)).toContain("已核对"));
+  expect(hintOf(input)).toContain("Provider 列出了这个模型");
+  expect(hintOf(input)).not.toContain("未验证");
+  expect(checkLaunchModel).toHaveBeenCalledWith(
+    V1,
+    "anthropic",
+    "gateway-hidden",
+  );
+  // Another ID: the result does not carry over.
+  fireEvent.change(input, { target: { value: "gateway-typo" } });
+  expect(hintOf(input)).toContain("未验证");
+  expect(hintOf(input)).not.toContain("已核对");
+  fireEvent.click(within(form).getByRole("button", { name: "在线核对" }));
+  await waitFor(() =>
+    expect(hintOf(input)).toContain("Provider 未列出这个模型"),
+  );
+  expect(hintOf(input)).toContain("未验证");
+  // Nothing was saved or previewed by checking.
+  expect(api.previewLaunchChange).not.toHaveBeenCalled();
+});
+
+test("a profile keeping an unsupported permission mode cannot be copied (V-2818:3)", async () => {
+  const settings: LaunchSettingsView = {
+    ...launchSettingsFixture,
+    profiles: launchSettingsFixture.profiles.map((p) =>
+      p.name === "claude-opus"
+        ? { ...p, parameters: { ...p.parameters, permission_mode: "legacy" } }
+        : p,
+    ),
+  };
+  const api = harness({ launchSettings: vi.fn(async () => settings) });
+  render(<SettingsPage projectId="p-1" client={api.client} />);
+  fireEvent.click(await screen.findByRole("button", { name: "模型" }));
+  await screen.findByRole("table", { name: "启动配置" });
+  fireEvent.click(screen.getByRole("button", { name: "claude-opus" }));
+  const dialog = await screen.findByRole("dialog", { name: "claude-opus" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "复制" }));
+  expect(within(dialog).getByRole("alert").textContent).toContain(
+    "原配置的权限模式 legacy 不在可选列表中，不能复制",
+  );
+  fireEvent.change(
+    within(dialog).getByRole("textbox", { name: "新配置名称" }),
+    {
+      target: { value: "copy-1" },
+    },
+  );
+  expect(
+    within(dialog)
+      .getByRole("button", { name: "预览修改" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+});
+
+test("more than 100 matches show the first 100 and the count of the rest", async () => {
+  const many = list(
+    "anthropic",
+    Array.from({ length: 105 }, (_, i) => ({
+      id: `m-${String(i).padStart(3, "0")}`,
+      sources: ["provider" as const],
+    })),
+  );
+  const api = harness({ launchModels: vi.fn(async () => many) });
+  const form = await editProfile(api.client, "claude-opus");
+  const input = modelField(form);
+  fireEvent.change(input, { target: { value: "m-" } });
+  await waitFor(() => expect(options()).toHaveLength(100));
+  expect(screen.getByText("另有 5 项")).toBeTruthy();
 });

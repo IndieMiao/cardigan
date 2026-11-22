@@ -77,7 +77,7 @@ export class QuotedLogField {
       }
       if (
         this.identifier &&
-        !!this.word &&
+        this.word &&
         (token === "=" ||
           (token === ":" &&
             ((this.uppercase && (this.word.length >= 2 || this.quotedName)) ||

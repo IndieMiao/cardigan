@@ -375,3 +375,29 @@ test("C-564: the picker reads a fresh cache as is, refreshes a stale one without
     await readModelCatalog(dir, {}, { fetch: failing, now: stale }),
   ).toBeUndefined();
 });
+
+test("C-564: a refresh that keeps a field from the older cache is not fresh", async () => {
+  const { readModelCatalog } = await import("./model-catalog.js");
+  await writeFile(
+    join(dir, "models-dev.json"),
+    JSON.stringify({
+      fetched_at: now().toISOString(),
+      entries: [{ provider: "native", id: "v1", context_window: 8000 }],
+    }),
+  );
+  const broken = structuredClone(fixture) as Record<string, unknown>;
+  (
+    (broken.native as { models: Record<string, { limit: unknown }> }).models
+      .v1 as { limit: unknown }
+  ).limit = { context: "bad", output: 500 };
+  const snapshot = await readModelCatalog(
+    dir,
+    {},
+    { fetch: vi.fn(async () => Response.json(broken)), now: stale },
+  );
+  expect(snapshot?.fresh).toBe(false);
+  expect(snapshot?.fetched_at).toBe(now().toISOString());
+  expect(snapshot?.entries.find((e) => e.id === "v1")?.context_window).toBe(
+    8000,
+  );
+});

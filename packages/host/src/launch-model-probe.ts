@@ -16,6 +16,8 @@ function providerClient(
   secrets: Record<string, string>,
   limits: LaunchConfig["launch_check"],
   fetchImpl: typeof fetch = fetch,
+  /** C-564: an overall deadline; aborts the request and the body read. */
+  signal?: AbortSignal,
 ) {
   const p = resolved.provider?.definition;
   if (!p?.base_url || !p.api)
@@ -43,12 +45,14 @@ function providerClient(
   const base =
     url.href.replace(/\/+$/u, "") + (url.pathname === "/" ? "/v1" : "");
   const call = async (route: string, body?: unknown) => {
+    signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(limits?.timeout_ms ?? 5000);
     const response = await fetchImpl(`${base}/${route}`, {
       method: body ? "POST" : "GET",
       ...(body ? { body: JSON.stringify(body) } : {}),
       headers,
       redirect: "error",
-      signal: AbortSignal.timeout(limits?.timeout_ms ?? 5000),
+      signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
     });
     if (!response.ok) {
       await response.body?.cancel();
@@ -60,6 +64,10 @@ function providerClient(
     const chunks: Uint8Array[] = [];
     let size = 0;
     for (;;) {
+      if (signal?.aborted) {
+        await reader.cancel();
+        signal.throwIfAborted();
+      }
       const r = await reader.read();
       if (r.done) break;
       size += r.value.length;
@@ -103,20 +111,29 @@ const listedId = (id: unknown): id is string =>
   /^[^\p{Cc}]+$/u.test(id) &&
   id.trim() === id;
 
+/** The most model IDs one listing keeps; more makes the listing partial. */
+export const MAX_LISTED_MODELS = 5000;
+
 /**
- * C-564: the model IDs the Provider lists (`GET /models`, OpenAI-compatible
- * or Anthropic), page by page within the probe's limits. Never calls
- * inference. `complete` is false when a page, size or cursor limit cut the
- * listing short. Any failure throws a generic error without the response.
+ * Walk the Provider's `GET /models` pages (OpenAI-compatible or Anthropic)
+ * within the probe's limits, handing each page's plain IDs to `visit` until
+ * it returns true. Never calls inference. Any failure (including the
+ * deadline `signal`) throws a generic error without the response.
  */
-export async function listProviderModels(
+async function walkModels(
   resolved: ResolvedProfile,
   secrets: Record<string, string>,
   limits: LaunchConfig["launch_check"],
-  fetchImpl?: typeof fetch,
-): Promise<{ ids: string[]; complete: boolean }> {
-  const client = providerClient(resolved, secrets, limits, fetchImpl);
-  const ids = new Set<string>();
+  visit: (ids: string[]) => boolean,
+  options: { fetch?: typeof fetch; signal?: AbortSignal },
+): Promise<"done" | "stopped" | "limit"> {
+  const client = providerClient(
+    resolved,
+    secrets,
+    limits,
+    options.fetch,
+    options.signal,
+  );
   const cursors = new Set<string>();
   let route: string | undefined = "models";
   try {
@@ -125,18 +142,78 @@ export async function listProviderModels(
         if (error instanceof ResponseLimit) return null;
         throw error;
       });
-      if (list === null) return { ids: [...ids], complete: false };
+      if (list === null) return "limit";
       if (!Array.isArray(list?.data)) throw new Error();
-      for (const item of list.data as { id?: unknown }[])
-        if (listedId(item?.id) && ids.size < 5000) ids.add(item.id);
+      const ids = (list.data as { id?: unknown }[])
+        .map((item) => item?.id)
+        .filter(listedId);
+      if (visit(ids)) return "stopped";
       const next = client.nextPage(list, page, cursors);
-      if (next === null) return { ids: [...ids], complete: false };
+      if (next === null) return "limit";
       route = next;
     }
   } catch {
     throw new Error("接入点模型列表读取失败");
   }
-  return { ids: [...ids], complete: true };
+  return "done";
+}
+
+/**
+ * C-564: the model IDs the Provider lists. `complete` is false when a page,
+ * size or cursor limit, or the cap of `MAX_LISTED_MODELS`, cut it short.
+ */
+export async function listProviderModels(
+  resolved: ResolvedProfile,
+  secrets: Record<string, string>,
+  limits: LaunchConfig["launch_check"],
+  options: { fetch?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<{ ids: string[]; complete: boolean }> {
+  const ids = new Set<string>();
+  let truncated = false;
+  const end = await walkModels(
+    resolved,
+    secrets,
+    limits,
+    (page) => {
+      for (const id of page) {
+        if (ids.has(id)) continue;
+        if (ids.size >= MAX_LISTED_MODELS) {
+          truncated = true;
+          return true;
+        }
+        ids.add(id);
+      }
+      return false;
+    },
+    options,
+  );
+  return { ids: [...ids], complete: end === "done" && !truncated };
+}
+
+/**
+ * C-564: whether the Provider lists `model`, page by page until found. The
+ * ID is only compared on the host; it is never sent anywhere, and nothing
+ * calls inference. "incomplete" when a limit stopped the search first.
+ */
+export async function findProviderModel(
+  resolved: ResolvedProfile,
+  secrets: Record<string, string>,
+  limits: LaunchConfig["launch_check"],
+  model: string,
+  options: { fetch?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<"listed" | "not_listed" | "incomplete"> {
+  const end = await walkModels(
+    resolved,
+    secrets,
+    limits,
+    (ids) => ids.includes(model),
+    options,
+  );
+  return end === "stopped"
+    ? "listed"
+    : end === "done"
+      ? "not_listed"
+      : "incomplete";
 }
 
 /** An opt-in probe of the explicit provider only. Never follow redirects or echo bodies. */

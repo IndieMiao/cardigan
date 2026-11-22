@@ -78,6 +78,13 @@ const modelsBody = z.strictObject({
   version: versionSchema,
   provider: z.string().min(1).max(64),
 });
+const modelCheckBody = modelsBody.extend({
+  model: z
+    .string()
+    .min(1)
+    .max(256)
+    .regex(/^[^\p{Cc}]+$/u),
+});
 const checkBody = z.union([
   z.strictObject({
     version: versionSchema,
@@ -615,18 +622,39 @@ export class LaunchSettings {
       }
       return;
     }
-    if (!["/preview", "/confirm", "/checks", "/models"].includes(rest))
+    if (
+      !["/preview", "/confirm", "/checks", "/models", "/model-check"].includes(
+        rest,
+      )
+    )
       throw new HttpRejection(404, "not_found", "接口不存在");
     if (req.method !== "POST") methodNotAllowed(["POST"]);
     const body = await readJsonBody(req);
     const actor = authorize().member_id ?? "human";
-    if (rest === "/models") {
-      // C-564: read-only; only a saved Provider of the snapshot the person sees.
-      const input = modelsBody.safeParse(body);
-      if (!input.success) throw invalid();
-      const f = this.file();
-      if (input.data.version !== f.version) throw stale();
-      sendJson(res, 200, await this.models.list(f, input.data.provider));
+    if (rest === "/models" || rest === "/model-check") {
+      // C-564: read-only; only a saved Provider of the snapshot the person
+      // sees. Like the settings read, the session is checked again after
+      // the (slow) upstream answer and before anything is sent.
+      let answer: unknown;
+      if (rest === "/models") {
+        const input = modelsBody.safeParse(body);
+        if (!input.success) throw invalid();
+        const f = this.file();
+        if (input.data.version !== f.version) throw stale();
+        answer = await this.models.list(f, input.data.provider);
+      } else {
+        const input = modelCheckBody.safeParse(body);
+        if (!input.success) throw invalid();
+        const f = this.file();
+        if (input.data.version !== f.version) throw stale();
+        answer = await this.models.check(
+          f,
+          input.data.provider,
+          input.data.model,
+        );
+      }
+      authorize();
+      sendJson(res, 200, answer);
     } else if (rest === "/preview")
       sendJson(res, 200, this.preview(body, owner));
     else if (rest === "/confirm")

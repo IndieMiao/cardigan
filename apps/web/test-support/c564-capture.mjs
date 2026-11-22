@@ -429,6 +429,21 @@ try {
         "document.querySelector('[role=dialog]').textContent.includes('未验证')",
       );
       await scene("model-unverified", measureForm);
+      // Checked online before saving: not listed, then a listed one.
+      await click("在线核对");
+      await until(
+        "document.querySelector('[role=dialog]').textContent.includes('Provider 未列出这个模型')",
+      );
+      await scene("model-check-not-listed", measureForm);
+      await press(MODEL);
+      await type("gateway-hidden");
+      await click("在线核对");
+      await until(
+        "document.querySelector('[role=dialog]').textContent.includes('已核对')",
+      );
+      await scene("model-check-listed", measureForm);
+      await press(MODEL);
+      await type("my-private-model");
       // Permission modes for Claude Code, each with its meaning.
       await key("Tab");
       await markPermission();
@@ -471,6 +486,13 @@ try {
           ?.scrollIntoView({ block: "center" }),
       );
       await scene("permission-legacy", measureForm);
+
+      // A copy cannot carry the kept old value into a new profile.
+      await click("取消");
+      await until("!!document.querySelector('[role=dialog] h3')");
+      await click("复制");
+      await until("!!document.querySelector('[role=dialog] [role=alert]')");
+      await scene("permission-legacy-copy", measureForm);
 
       // Loading, a failed request, and a host answer whose sources failed.
       await models(theme, "?models=hold");

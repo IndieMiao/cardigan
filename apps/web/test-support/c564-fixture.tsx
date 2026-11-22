@@ -106,6 +106,12 @@ const client = fakeClient({
       models: mode === "down" ? [] : (models[provider] ?? []),
     });
   },
+  // A typed ID: "gateway-hidden" is listed by the Provider, others are not.
+  checkLaunchModel: async (_version, provider, model) => ({
+    provider,
+    model,
+    status: model === "gateway-hidden" ? "listed" : "not_listed",
+  }),
   previewLaunchChange: async (version, change) => ({
     version,
     preview_id: crypto.randomUUID(),

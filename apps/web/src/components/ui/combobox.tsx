@@ -149,7 +149,7 @@ export function Combobox({
         ))}
         {all.length > matches.length && (
           <SuggestionStatus>
-            另有 {all.length - matches.length} 项，输入以筛选
+            另有 {all.length - matches.length} 项
           </SuggestionStatus>
         )}
       </SuggestionList>

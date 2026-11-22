@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  findProviderModel,
   listProviderModels,
   type ModelCatalogSnapshot,
   readModelCatalog,
@@ -20,6 +21,7 @@ export const MODEL_CATALOG_RETRY_MS = 60_000;
 /** The whole listing (all pages) answers within this, or counts as failed. */
 export const MODEL_LIST_DEADLINE_MS = 15_000;
 const MAX_CACHED_LISTS = 64;
+const DAY_MS = 24 * 60 * 60_000;
 
 export interface ModelOption {
   readonly id: string;
@@ -49,6 +51,13 @@ export interface ModelListView {
   readonly listing: { readonly status: ListingStatus };
   readonly models: readonly ModelOption[];
 }
+export type ModelCheckStatus =
+  | "listed"
+  | "not_listed"
+  | "incomplete"
+  | "failed"
+  | "no_endpoint"
+  | "missing_secret";
 
 type Listing =
   | { status: "ok" | "partial"; ids: readonly string[] }
@@ -57,22 +66,20 @@ type Listing =
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 
-/** Protocol family → the models.dev provider whose metadata a listed ID may borrow. */
-const FAMILY: Record<string, string> = {
-  "anthropic-messages": "anthropic",
-  "openai-responses": "openai",
-  "openai-completions": "openai",
-};
-
 /**
  * C-564: the models a saved Provider can be set to, for the launch profile
- * form. Two sources: the public models.dev catalog (matched by the Provider's
- * ID or the catalog provider of its model aliases) and the Provider's own
- * `/models` listing, made on the host with the Provider's own credential to
- * its own endpoint only. Never calls inference; the credential never leaves
- * the host, and the answer holds only model IDs and public metadata.
- * Each Provider's listing is cached apart, keyed by its endpoint, protocol
- * and credential, so one Provider never answers for another.
+ * form. Two sources:
+ * - the public models.dev catalog, matched exactly: every model of the
+ *   catalog provider whose name is this Provider's ID, plus each model alias
+ *   of this Provider by its exact (catalog_provider or provider, id). An
+ *   alias never brings in the rest of a vendor's catalog, and a protocol
+ *   alone never lends metadata (docs/plans/launch-profiles.md);
+ * - the Provider's own `/models` listing, made on the host with the
+ *   credential it actually uses, to its own endpoint only.
+ * Never calls inference. The answer holds only model IDs and public
+ * metadata, all redacted against secrets.env. Listings are cached per
+ * Provider definition and credential, so one Provider never answers for
+ * another, nor an old credential for a new one.
  */
 export class ModelLists {
   private catalog?: {
@@ -88,10 +95,28 @@ export class ModelLists {
     private readonly options: {
       fetch?: typeof fetch;
       now?: () => number;
+      deadlineMs?: number;
     } = {},
   ) {}
   private now() {
     return this.options.now?.() ?? Date.now();
+  }
+  /** Runs `work` with an abort signal that fires at the overall deadline. */
+  private async withDeadline<T>(work: (signal: AbortSignal) => Promise<T>) {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      this.options.deadlineMs ?? MODEL_LIST_DEADLINE_MS,
+    );
+    timer.unref?.();
+    try {
+      return await work(controller.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  private fetchOption() {
+    return this.options.fetch ? { fetch: this.options.fetch } : {};
   }
   private readCatalog(file: SettingsFile) {
     const now = this.now();
@@ -99,34 +124,35 @@ export class ModelLists {
     const entry = {
       until: now + MODEL_CATALOG_RETRY_MS,
       value: readModelCatalog(this.dataDir, file.config.model_catalog, {
-        ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+        ...this.fetchOption(),
         now: () => new Date(this.now()),
       }).catch(() => undefined),
     };
     this.catalog = entry;
-    // A fresh snapshot is reused for the catalog's own age limit.
+    // A fresh snapshot is reused for the catalog's own age limit; anything
+    // else waits at least the retry interval before downloading again.
     void entry.value.then((snapshot) => {
       if (snapshot?.fresh && this.catalog === entry)
-        entry.until =
+        entry.until = Math.max(
+          entry.until,
           Date.parse(snapshot.fetched_at) +
-          (file.config.model_catalog?.max_age_ms ?? 24 * 60 * 60_000);
+            (file.config.model_catalog?.max_age_ms ?? DAY_MS),
+        );
     });
     return entry.value;
   }
-  private readListing(
+  /** The cache key: the whole Provider definition as resolved, and a digest of each credential. */
+  private listingKey(
     file: SettingsFile,
     target: ReturnType<typeof providerTarget>,
   ) {
     const { resolved, definition } = target;
-    const provider = resolved.provider?.definition;
-    // The credential takes part in the key only as a digest.
-    const key = digest(
+    return digest(
       JSON.stringify({
         id: resolved.provider?.name,
         harness: resolved.profile.harness,
-        api: provider?.api,
-        base_url: provider?.base_url,
-        codex: definition.codex ?? null,
+        resolved: resolved.provider?.definition ?? null,
+        definition,
         secrets: Object.entries(definition.secret_env).map(([env, ref]) => [
           env,
           ref,
@@ -135,36 +161,33 @@ export class ModelLists {
         limits: file.config.launch_check ?? null,
       }),
     );
+  }
+  private readListing(
+    file: SettingsFile,
+    target: ReturnType<typeof providerTarget>,
+  ) {
+    const key = this.listingKey(file, target);
     const now = this.now();
     const cached = this.lists.get(key);
     if (cached && cached.until > now) return cached.value;
     const entry = {
       until: now + MODEL_LIST_TTL_MS,
-      value: (async (): Promise<Listing> => {
-        let timer: NodeJS.Timeout | undefined;
+      value: this.withDeadline(async (signal): Promise<Listing> => {
         try {
-          const listed = await Promise.race([
-            listProviderModels(
-              resolved,
-              file.secrets,
-              file.config.launch_check,
-              this.options.fetch,
-            ),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(reject, MODEL_LIST_DEADLINE_MS);
-              timer.unref?.();
-            }),
-          ]);
+          const listed = await listProviderModels(
+            target.resolved,
+            file.secrets,
+            file.config.launch_check,
+            { ...this.fetchOption(), signal },
+          );
           return {
             status: listed.complete ? "ok" : "partial",
             ids: listed.ids,
           };
         } catch {
           return { status: "failed" };
-        } finally {
-          clearTimeout(timer);
         }
-      })(),
+      }),
     };
     this.lists.delete(key);
     this.lists.set(key, entry);
@@ -176,7 +199,8 @@ export class ModelLists {
     });
     return entry.value;
   }
-  async list(file: SettingsFile, id: string): Promise<ModelListView> {
+  /** The saved Provider, how it is reached (if at all), and whether a credential is missing. */
+  private provider(file: SettingsFile, id: string) {
     const { config, secrets } = file;
     const definition = Object.hasOwn(config.providers, id)
       ? config.providers[id]
@@ -192,43 +216,49 @@ export class ModelLists {
     const missing = Object.values(definition.secret_env).some(
       (ref) => !Object.hasOwn(secrets, ref) || !secrets[ref],
     );
+    return { target, missing };
+  }
+  async list(file: SettingsFile, id: string): Promise<ModelListView> {
+    const { config, secrets } = file;
+    const { target, missing } = this.provider(file, id);
     const [snapshot, listing] = await Promise.all([
       this.readCatalog(file),
       target && !missing
         ? this.readListing(file, target)
         : Promise.resolve(undefined),
     ]);
-    // The catalog providers this Provider stands for.
+    const entries = snapshot?.entries ?? [];
+    const key = (provider: string, model: string) => `${provider}\n${model}`;
+    const byKey = new Map(entries.map((e) => [key(e.provider, e.id), e]));
+    // Exact catalog rows for this Provider, by model ID.
+    const exact = new Map<string, CatalogEntry>();
     const matched = new Set<string>();
-    const known = new Set(snapshot?.entries.map((e) => e.provider));
-    if (known.has(id)) matched.add(id);
+    for (const entry of entries)
+      if (entry.provider === id) {
+        exact.set(entry.id, entry);
+        matched.add(id);
+      }
     for (const model of Object.values(config.models ?? {}))
       if (model.provider === id) {
-        const name = model.catalog_provider ?? model.provider;
-        if (known.has(name)) matched.add(name);
+        const row = byKey.get(
+          key(model.catalog_provider ?? model.provider, model.id),
+        );
+        if (row) {
+          if (!exact.has(row.id)) exact.set(row.id, row);
+          matched.add(row.provider);
+        }
       }
     const plain = (value: string) => publicFields(value, secrets) === value;
-    const byId = new Map<string, CatalogEntry>();
-    const family = FAMILY[target?.resolved.provider?.definition.api ?? ""];
-    for (const entry of snapshot?.entries ?? [])
-      if (matched.has(entry.provider) || entry.provider === family) {
-        const own = matched.has(entry.provider);
-        // A matched provider's row wins over the protocol family's.
-        if (own || !byId.has(entry.id)) byId.set(entry.id, entry);
-      }
     const options = new Map<string, ModelOption>();
     const add = (modelId: string, source: "catalog" | "provider") => {
       if (!plain(modelId)) return;
       const old = options.get(modelId);
       if (old) {
         if (!old.sources.includes(source))
-          options.set(modelId, {
-            ...old,
-            sources: [...old.sources, source],
-          });
+          options.set(modelId, { ...old, sources: [...old.sources, source] });
         return;
       }
-      const meta = byId.get(modelId);
+      const meta = exact.get(modelId);
       options.set(modelId, {
         id: modelId,
         sources: [source],
@@ -244,11 +274,10 @@ export class ModelLists {
         ...(meta?.cost !== undefined && { cost: meta.cost }),
       });
     };
-    for (const entry of snapshot?.entries ?? [])
-      if (matched.has(entry.provider)) add(entry.id, "catalog");
+    for (const modelId of exact.keys()) add(modelId, "catalog");
     if (listing && listing.status !== "failed")
       for (const modelId of listing.ids) add(modelId, "provider");
-    return {
+    const view: ModelListView = {
       version: file.version,
       provider: id,
       catalog: {
@@ -259,7 +288,7 @@ export class ModelLists {
             : snapshot.fresh
               ? "ok"
               : "stale",
-        providers: [...matched].filter(plain),
+        providers: [...matched],
         fetched_at: snapshot?.fetched_at ?? null,
       },
       listing: {
@@ -271,5 +300,34 @@ export class ModelLists {
       },
       models: [...options.values()].sort((a, b) => a.id.localeCompare(b.id)),
     };
+    // Every dynamic text that leaves, including catalog metadata.
+    return publicFields(view, secrets) as ModelListView;
+  }
+  /**
+   * C-564: whether the saved Provider lists a model ID typed in the form,
+   * before anything is saved. The ID is compared on the host only; nothing
+   * calls inference and nothing is recorded.
+   */
+  async check(
+    file: SettingsFile,
+    id: string,
+    model: string,
+  ): Promise<{ provider: string; model: string; status: ModelCheckStatus }> {
+    const { target, missing } = this.provider(file, id);
+    if (publicFields(model, file.secrets) !== model) throw invalid("model");
+    const status: ModelCheckStatus = !target
+      ? "no_endpoint"
+      : missing
+        ? "missing_secret"
+        : await this.withDeadline((signal) =>
+            findProviderModel(
+              target.resolved,
+              file.secrets,
+              file.config.launch_check,
+              model,
+              { ...this.fetchOption(), signal },
+            ),
+          ).catch(() => "failed" as const);
+    return { provider: id, model, status };
   }
 }

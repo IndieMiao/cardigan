@@ -212,10 +212,11 @@ export async function readModelCatalog(
       max_bytes,
       cache_max_bytes,
     });
+    // A field kept from the older snapshot keeps its older time: not fresh.
     return {
       entries: projection.entries,
       fetched_at: projection.fetched_at,
-      fresh: true,
+      fresh: projection.fetched_at === now.toISOString(),
     };
   } catch {
     return cache

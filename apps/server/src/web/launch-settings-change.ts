@@ -192,6 +192,16 @@ export function candidate(
     case "copy_profile": {
       if (!Object.hasOwn(config.profiles, change.source))
         throw invalid("source");
+      // C-564: a copy is a new profile; a kept hand-written permission mode
+      // outside the harness's options is not carried into it.
+      const source = config.profiles[change.source];
+      const mode = source?.permission_mode;
+      if (
+        source &&
+        mode !== undefined &&
+        !PERMISSION_MODES[source.harness].includes(mode)
+      )
+        throw invalid("permission_mode");
       doc.setIn(path, doc.createNode(file.raw.profiles[change.source]));
       diff.push({
         field: path.join("."),

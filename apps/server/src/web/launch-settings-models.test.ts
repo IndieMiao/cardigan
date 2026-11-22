@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
 import { loadLaunchFiles } from "../host.js";
 import { liveLaunch } from "../live-launch.js";
+import { readLaunchSettings } from "./launch-settings-file.js";
 import { ModelLists } from "./launch-settings-models.js";
 
 // C-564: the profile form's model choices come from the models.dev catalog
@@ -16,7 +17,8 @@ import { ModelLists } from "./launch-settings-models.js";
 // the Provider's own (synthetic) credential to its own (mocked) endpoint.
 // No real Provider, models.dev or inference is contacted.
 const gatewayKey = "fixture-gateway-credential-1a2b",
-  relayKey = "fixture-relay-credential-3c4d";
+  relayKey = "fixture-relay-credential-3c4d",
+  spareKey = "fixture-spare-credential-5e6f";
 const config = `providers:
   anthropic:
     api: anthropic-messages
@@ -26,7 +28,8 @@ const config = `providers:
     api: openai-completions
     harness: pi
     base_url: https://relay.example.invalid/v1
-    secret_env: { RELAY_API_KEY: RELAY_KEY }
+    pi: { env_key: RELAY_API_KEY }
+    secret_env: { RELAY_API_KEY: RELAY_KEY, RELAY_SPARE_KEY: SPARE_KEY }
   unset:
     api: anthropic-messages
     base_url: https://unset.example.invalid
@@ -35,6 +38,7 @@ const config = `providers:
     harness: pi
 models:
   opus: { provider: anthropic, id: claude-fixture-opus }
+  chat: { provider: relay, id: relay-chat, catalog_provider: openai }
 profiles:
   claude: { harness: claude-code, provider: anthropic, model: opus, permission_mode: legacyMode }
   coder: { harness: pi, provider: relay, model: relay-chat }
@@ -112,7 +116,7 @@ beforeEach(async () => {
   writeFileSync(join(dir, "launch.yaml"), config, { mode: 0o600 });
   writeFileSync(
     join(dir, "secrets.env"),
-    `GATEWAY_KEY=${gatewayKey}\nRELAY_KEY=${relayKey}\n`,
+    `GATEWAY_KEY=${gatewayKey}\nRELAY_KEY=${relayKey}\nSPARE_KEY=${spareKey}\n`,
     { mode: 0o600 },
   );
   h = await webHarness({
@@ -190,16 +194,27 @@ test("a Provider's choices merge the catalog and its own listing, with metadata;
 test("each Provider is listed with its own endpoint and credential; listings never mix", async () => {
   const relay = await models("relay");
   expect(relay.status, relay.body).toBe(200);
-  // Not in the catalog by ID: listed by the Provider, metadata borrowed from
-  // the protocol family (openai) only for IDs the Provider itself lists.
+  // Not a catalog provider itself: only its alias's exact catalog row
+  // (openai/relay-chat) joins, never the rest of that vendor's catalog, and a
+  // listed ID without an exact row gets no metadata.
   expect(relay.json).toMatchObject({
-    catalog: { status: "not_listed", providers: [] },
+    catalog: { status: "ok", providers: ["openai"] },
     listing: { status: "ok" },
     models: [
-      { id: "relay-chat", sources: ["provider"], context_window: 64000 },
+      {
+        id: "relay-chat",
+        sources: ["catalog", "provider"],
+        context_window: 64000,
+      },
       { id: "relay-mini", sources: ["provider"] },
     ],
   });
+  expect(JSON.stringify(relay.json)).not.toContain("gpt-fixture");
+  expect(
+    (relay.json as { models: { id: string }[] }).models.find(
+      (m) => m.id === "relay-mini",
+    ),
+  ).toEqual({ id: "relay-mini", sources: ["provider"] });
   const anthropic = await models("anthropic");
   expect(JSON.stringify(anthropic.json)).not.toContain("relay-");
   expect(JSON.stringify(relay.json)).not.toContain("gateway-only");
@@ -369,4 +384,208 @@ test("the read names each harness's permission modes; a new value must be one of
     },
   });
   expect(created.status, created.body).toBe(200);
+});
+
+/** The settings file as the host reads it now (for direct ModelLists calls). */
+const settingsFile = () => ({
+  ...readLaunchSettings(dir, h.dataDir, 0),
+  version: "v",
+});
+const relayCalls = () =>
+  network.mock.calls
+    .filter(([url]) => String(url).startsWith("https://relay."))
+    .map(
+      ([, init]) =>
+        (init?.headers as Record<string, string> | undefined)?.authorization,
+    );
+
+test("switching the credential Pi actually uses is a different listing, not a cached one (V-2818:1)", async () => {
+  const lists = new ModelLists(h.dataDir, { fetch: network as typeof fetch });
+  await lists.list(settingsFile(), "relay");
+  // Both references stay; only the selected one changes.
+  writeFileSync(
+    join(dir, "launch.yaml"),
+    config.replace(
+      "pi: { env_key: RELAY_API_KEY }",
+      "pi: { env_key: RELAY_SPARE_KEY }",
+    ),
+  );
+  const switched = await lists.list(settingsFile(), "relay");
+  expect(relayCalls()).toEqual([`Bearer ${relayKey}`, `Bearer ${spareKey}`]);
+  // The mock only accepts the first credential: the new one is not answered from cache.
+  expect(switched.listing.status).toBe("failed");
+});
+
+test("a session ended while the list is fetched gets no list (V-2818:2)", async () => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  network.mockImplementationOnce(async () => {
+    await held;
+    return Response.json({ data: [{ id: "late-private-model" }] });
+  });
+  const pending = models("anthropic");
+  await vi.waitFor(() => expect(network).toHaveBeenCalledOnce());
+  const logout = await call(h.port, "/api/logout", {
+    method: "POST",
+    cookie,
+    headers: {
+      "content-type": "application/json",
+      origin: `http://${h.hostHeader}`,
+    },
+  });
+  expect(logout.status).toBe(200);
+  release();
+  const answer = await pending;
+  expect(answer.status).toBe(401);
+  expect(answer.body).not.toContain("late-private-model");
+});
+
+test("copying a profile does not carry a kept unsupported permission mode into a new one (V-2818:3)", async () => {
+  const copy = (source: string) =>
+    post("preview", {
+      version,
+      change: { op: "copy_profile", name: `${source}-copy`, source },
+    });
+  expect((await copy("claude")).json).toMatchObject({
+    error: { details: { field: "permission_mode" } },
+  });
+  expect((await copy("coder")).status).toBe(200);
+  // The original keeps its value.
+  expect(
+    (await reread()).profiles.find((p: { name: string }) => p.name === "claude")
+      .parameters.permission_mode,
+  ).toBe("legacyMode");
+});
+
+test("the overall deadline stops the upstream reads: no page is requested after it (V-2818:5)", async () => {
+  const pages = vi.fn(
+    (_url: string | URL, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            resolve(
+              Response.json({
+                data: [{ id: `m-${pages.mock.calls.length}` }],
+                has_more: true,
+                last_id: `m-${pages.mock.calls.length}`,
+              }),
+            ),
+          40,
+        );
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(init.signal?.reason);
+        });
+      }),
+  );
+  const lists = new ModelLists(h.dataDir, {
+    fetch: (async (url: string | URL, init?: RequestInit) =>
+      String(url).includes("gateway")
+        ? pages(url, init)
+        : network(url, init)) as typeof fetch,
+    deadlineMs: 100,
+  });
+  const view = await lists.list(settingsFile(), "anthropic");
+  expect(view.listing.status).toBe("failed");
+  const made = pages.mock.calls.length;
+  expect(made).toBeGreaterThan(0);
+  expect(made).toBeLessThan(5);
+  await new Promise((r) => setTimeout(r, 200));
+  expect(pages.mock.calls.length).toBe(made);
+});
+
+test("a typed ID is checked against the saved Provider before saving; the ID is never sent (V-2818:6)", async () => {
+  const check = (provider: string, model: string) =>
+    post("model-check", { version, provider, model });
+  expect((await check("anthropic", "gateway-only")).json).toEqual({
+    provider: "anthropic",
+    model: "gateway-only",
+    status: "listed",
+  });
+  expect((await check("anthropic", "typo-model")).json).toMatchObject({
+    status: "not_listed",
+  });
+  expect((await check("unset", "x")).json).toMatchObject({
+    status: "missing_secret",
+  });
+  expect((await check("bare", "x")).json).toMatchObject({
+    status: "no_endpoint",
+  });
+  // A secret value as the "model" is refused before any request.
+  const before = network.mock.calls.length;
+  expect((await check("anthropic", gatewayKey)).status).toBe(400);
+  expect(network.mock.calls.length).toBe(before);
+  for (const [url, init] of network.mock.calls) {
+    expect(String(url)).toBe("https://gateway.example.invalid/v1/models");
+    expect(init?.body).toBeUndefined();
+  }
+  expect(
+    (
+      await post(
+        "model-check",
+        { version, provider: "anthropic", model: "x" },
+        { authorization: "Bearer agent-token" },
+      )
+    ).status,
+  ).toBe(403);
+  expect((await check("anthropic", "bad\nid")).status).toBe(400);
+});
+
+test("catalog metadata is redacted like every other returned text (V-2818:7)", async () => {
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({
+      ...catalog,
+      entries: catalog.entries.map((e) =>
+        e.id === "claude-fixture-haiku"
+          ? { ...e, reasoning_efforts: [gatewayKey, "low"] }
+          : e,
+      ),
+    }),
+  );
+  const lists = new ModelLists(h.dataDir, { fetch: network as typeof fetch });
+  const view = await lists.list(settingsFile(), "anthropic");
+  expect(JSON.stringify(view)).not.toContain(gatewayKey);
+  expect(
+    view.models.find((m) => m.id === "claude-fixture-haiku")?.reasoning_efforts,
+  ).toEqual(["***", "low"]);
+});
+
+test("a refresh that keeps older fields is reported stale and is not downloaded again at once (V-2818:9)", async () => {
+  const old = "2026-11-18T00:00:00.000Z";
+  writeFileSync(
+    join(h.dataDir, "models-dev.json"),
+    JSON.stringify({
+      fetched_at: old,
+      entries: [
+        { provider: "anthropic", id: "claude-fixture-opus", context_window: 9 },
+        { provider: "openai", id: "relay-chat", context_window: 64000 },
+      ],
+    }),
+  );
+  const downloads = vi.fn(async () =>
+    Response.json({
+      anthropic: {
+        models: { "claude-fixture-opus": { limit: { context: "bad" } } },
+      },
+    }),
+  );
+  let clock = Date.parse("2026-11-22T00:00:00.000Z");
+  const lists = new ModelLists(h.dataDir, {
+    fetch: (async (url: string | URL, init?: RequestInit) =>
+      String(url) === "https://models.dev/api.json"
+        ? downloads()
+        : network(url, init)) as typeof fetch,
+    now: () => clock,
+  });
+  const first = await lists.list(settingsFile(), "anthropic");
+  expect(first.catalog).toMatchObject({ status: "stale", fetched_at: old });
+  expect(
+    first.models.find((m) => m.id === "claude-fixture-opus")?.context_window,
+  ).toBe(9);
+  clock += 1000;
+  await lists.list(settingsFile(), "anthropic");
+  expect(downloads).toHaveBeenCalledOnce();
 });
