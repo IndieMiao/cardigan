@@ -106,6 +106,8 @@ M5.6：阻塞 Decision 和审核轮次上限的隐式 Run 结束与 finish_run �
 
 S24：`pauseStandingAssignment` 是只允许同项目 human 的主机命令，仅作用于常驻 pm。它经 suspend 暂停 Assignment、经 cancel 结束未完成 Run，保留 RuntimeRef 供主机回收。`queueRun(..., {resume:true})` 也仅允许人恢复 suspended 常驻 PM，并在同一个纯命令中恢复状态、排新 Run；系统派发不能使用该选项。CLI 在暂停事务内撤销 Token、结清被手动中断的投递意图，关闭失败会保持暂停；显式 start 失败也重新暂停。工作项 stop 保持原语义。
 
+`update_card.deadline`：省略保留原值，日期字符串设置截止日期，`null` 清除字段并在时间线注明。人用 `cardigan card update <C-n> --deadline <YYYY-MM-DD>|none`。
+
 S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模板由适配层在命令事务内从 Token 所属项目登记信息补齐；显式字段保留，缺少登记默认值返回 validation_failed。不需要仓库的模板不自动绑定项目仓库。domain createCard 按模板检查字段，不做仓储 IO。幂等使用未补默认值的原始请求作为指纹；成功重放不重新读取项目配置。create_card／update_card 的 MCP 响应隐藏 repo，实体变更仍保存完整字段。
 
 ## P2-V V1a 全局员工命令
