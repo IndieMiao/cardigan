@@ -1,6 +1,18 @@
-import type { WorkItem } from "../entities.js";
+import type { Card, WorkItem } from "../entities.js";
 import type { AssignmentId, WorkItemId } from "../ids.js";
 import type { CommandDraft, CommandState } from "./core.js";
+import { workCompleted } from "./work-status.js";
+
+/** A retired target has no remaining action for PM, even if its historical wait survives. */
+export function closedResumeTarget(item: WorkItem, status: Card["status"]) {
+  return (
+    status === "done" ||
+    status === "cancelled" ||
+    item.status === "cancelled" ||
+    !!item.replaced_by_work_item_id ||
+    workCompleted(item)
+  );
+}
 
 type Attention = {
   card_id: WorkItem["card_id"];
@@ -18,8 +30,14 @@ export function resumeAttention(state: CommandState) {
   const cached = cache.get(state);
   if (cached) return cached;
   const open = new Map<WorkItemId, Attention>();
-  const items = new Map(state.work_items.map((w) => [w.id, w]));
-  const byOwner = new Map(state.work_items.map((w) => [w.assignment_id, w.id]));
+  const cards = new Map(state.cards.map((c) => [c.id, c.status]));
+  const current = state.work_items.filter((w) => {
+    const status = cards.get(w.card_id);
+    return status && !closedResumeTarget(w, status);
+  });
+  const items = new Map(current.map((w) => [w.id, w]));
+  const byOwner = new Map(current.map((w) => [w.assignment_id, w.id]));
+  const stopped = new Set<AssignmentId>();
   for (const e of state.events) {
     if (!e.card_id || e.actor.project_id !== state.project_id) continue;
     if (typeof e.payload !== "object" || !e.payload || Array.isArray(e.payload))
@@ -42,7 +60,14 @@ export function resumeAttention(state: CommandState) {
         if (row.card_id === e.card_id) open.delete(id);
       continue;
     }
-    if (e.type === "run_queued" && p.assignment_id) {
+    if (e.type === "assignment_stopped" && p.assignment_id)
+      stopped.add(p.assignment_id);
+    // A queue receipt is not an actual restart. Only dispatch ends a human stop.
+    if (
+      p.assignment_id &&
+      ((e.type === "run_queued" && !stopped.has(p.assignment_id)) ||
+        (e.type === "run_dispatched" && stopped.delete(p.assignment_id)))
+    ) {
       const id = byOwner.get(p.assignment_id);
       if (id && items.get(id)?.card_id === e.card_id) open.delete(id);
       continue;

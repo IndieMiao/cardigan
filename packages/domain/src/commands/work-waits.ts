@@ -14,7 +14,7 @@ import {
   ensure,
 } from "./core.js";
 import { authorPrecheckWait } from "./precheck-wait.js";
-import { deferResume } from "./resume-attention.js";
+import { closedResumeTarget, deferResume } from "./resume-attention.js";
 import { resumeBlockReason, resumeWork } from "./resumption.js";
 import { stoppedByHuman } from "./stop.js";
 
@@ -339,6 +339,7 @@ export function resumeWorkWaits(
         (!item.assignment_id || !waitingOwners.has(item.assignment_id))
       )
         continue;
+      if (closedResumeTarget(item, d.card(item.card_id).status)) continue;
       const owner = d
         .list("assignments")
         .find((a) => a.id === item.assignment_id);

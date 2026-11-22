@@ -3,7 +3,8 @@ import { isMergePrerequisite } from "../human-action.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { createQueuedRun, launchSettings } from "./launch.js";
-import { deferResume } from "./resume-attention.js";
+import { closedResumeTarget, deferResume } from "./resume-attention.js";
+import { stoppedByHuman } from "./stop.js";
 import { reviewRound } from "./workflow.js";
 
 function upgradedSinceRun(
@@ -103,9 +104,13 @@ export function resumeWork(
 
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   const deferred = (reason: string) => deferResume(d, item, reason, event.id);
-  if (d.card(item.card_id).hold) return deferred("卡片已暂停");
+  const card = d.card(item.card_id);
+  if (closedResumeTarget(item, card.status)) return;
+  if (card.hold) return deferred("卡片已暂停");
   if (!item.assignment_id) return deferred("没有负责人");
   const assignment = d.get("assignments", item.assignment_id);
+  if (stoppedByHuman(d.state.events, assignment.id))
+    return deferred("指派已被人工停止");
   if (
     !hasRunTarget(assignment, {
       work_items: d.list("work_items"),

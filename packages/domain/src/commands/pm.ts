@@ -981,18 +981,15 @@ export function updateWorkItem(
       const { reported_blocker: _confirmed, ...remaining } = result;
       result = remaining;
     }
-    if (resume && !confirmReported) {
+    if (resume || confirmReported) {
       const reason = resumeBlockReason(d, result);
-      if (reason) {
-        // Keep compound edits atomic. A status-only request can return the
-        // unchanged blocked item and commit a durable reason for PM instead.
-        ensure(
-          Object.keys(p).every(
-            (key) => key === "status" || key === "work_item_id",
-          ),
-          "illegal_transition",
-          reason,
-        );
+      // A status-only confirmation may clear the reported blocker independently.
+      // For a mixed request either all fields take effect or none do. The reason
+      // is an audit fact, not a partial update to the item.
+      const compound = Object.keys(p).some(
+        (key) => key !== "status" && key !== "work_item_id",
+      );
+      if (reason && (!confirmReported || compound)) {
         deferResume(d, item, reason);
         return item;
       }
