@@ -316,3 +316,97 @@ test.each(["claude-code", "codex"] as const)(
     expect(send).toHaveBeenCalledOnce();
   },
 );
+
+test.each(["idle", "done"])(
+  "kept %s still requires an empty editor before the original bell",
+  async (state) => {
+    const raw = client();
+    const runtime = value(await HerdrRuntime.create({ client: raw }));
+    const binding = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness: "codex" as const,
+    };
+    let screen = "›\n? for shortcuts";
+    const writes: string[][] = [];
+    raw.exec = async (args) => {
+      if (args[0] === "get")
+        return JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: { state },
+          labels: { project: "fixture", assignment: "A-1" },
+          foreground: { name: "codex", pid: 42 },
+        });
+      if (args[0] === "read") return screen;
+      if (args[0] === "send") writes.push([...args]);
+      return "{}";
+    };
+    const send = () =>
+      runtime.wake(ref, "original", { prompt_binding: binding });
+    // The editor can change after the outer preflight without changing OSC state.
+    expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    for (const editor of [
+      "› draft",
+      "› Explain this codebase",
+      "Press Enter to confirm\n›",
+    ]) {
+      screen = `${editor}\n? for shortcuts`;
+      expect(value(await runtime.observe_prompt(ref, binding))).toBe(false);
+      expect(value(await send())).toEqual({ sent: false, withdrawn: true });
+    }
+    expect(writes).toEqual([]);
+    screen = "›\n? for shortcuts";
+    expect(value(await send())).toEqual({ sent: true });
+    expect(writes).toEqual([
+      [
+        "send",
+        "--json",
+        ...(state === "idle" ? ["--if", "idle"] : []),
+        "--",
+        ref.terminal_ref,
+        "original",
+      ],
+    ]);
+  },
+);
+
+test("kept idle uses hc's write-time condition when work starts after the final prompt check", async () => {
+  const raw = client();
+  const runtime = value(await HerdrRuntime.create({ client: raw }));
+  let state = "idle";
+  const typed: string[] = [];
+  raw.exec = async (args) => {
+    if (args[0] === "get")
+      return JSON.stringify({
+        address: ref.terminal_ref,
+        state: "live",
+        status: { state },
+        labels: { project: "fixture", assignment: "A-1" },
+        foreground: { name: "claude", pid: 10 },
+      });
+    if (args[0] === "read") return "──────────\n❯\n──────────\n? for shortcuts";
+    if (args[0] === "send") {
+      if (args[2] === "--if" && args[3] === "idle" && state !== "idle")
+        throw new RuntimeFailure(
+          "runtime_conflict",
+          "fixture condition declined",
+        );
+      typed.push(args.join(" "));
+    }
+    return "{}";
+  };
+  const result = await runtime.wake(ref, "bell", {
+    prompt_binding: {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness: "claude-code",
+    },
+    before_send: () => {
+      state = "working";
+      return true;
+    },
+  });
+  expect(result.ok).toBe(false);
+  expect(typed).toEqual([]);
+});

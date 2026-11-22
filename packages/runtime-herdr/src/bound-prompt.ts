@@ -11,7 +11,8 @@ interface Terminal {
 }
 
 // The controller snapshot can have no OSC state for these clients. Accept
-// only an empty editor (or a stock placeholder) and its own idle footer.
+// only an empty editor and its own idle footer. Plain text cannot distinguish
+// a stock placeholder from a draft containing those same words.
 // Never export screen text, arguments, process ids or error messages.
 function editor(screen: string, binding: PromptBinding) {
   if (Buffer.byteLength(screen) > 65536) return false;
@@ -31,14 +32,7 @@ function editor(screen: string, binding: PromptBinding) {
     return false;
   const bottom = lines.slice(0, -1);
   if (!codex && /^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
-  if (
-    !(
-      codex
-        ? /^›(?: (?:Implement \{feature\}|Explain this codebase|Find and fix a bug in @filename|Write tests for @filename))?$/u
-        : /^❯$/u
-    ).test(bottom.pop() ?? "")
-  )
-    return false;
+  if (bottom.pop() !== (codex ? "›" : "❯")) return false;
   if (
     /esc to (?:interrupt|cancel)|press enter to confirm/iu.test(
       lines.slice(-8).join("\n"),
@@ -108,19 +102,18 @@ export async function boundPrompt(
   try {
     const before = await read();
     if (!before) return false;
-    if (
-      !binding.require_disconnect &&
-      ["idle", "done"].includes(before.status?.state ?? "")
-    )
-      return true;
     const screen = await raw.exec(["read", ref.terminal_ref, "--lines", "0"]);
     if (!editor(screen, binding)) return false;
     const after = await read();
-    return (
-      !!after &&
-      after.created_ms === before.created_ms &&
-      after.foreground?.pid === before.foreground?.pid
-    );
+    const state = before.status?.state ?? "unknown";
+    if (
+      !after ||
+      (after.status?.state ?? "unknown") !== state ||
+      after.created_ms !== before.created_ms ||
+      after.foreground?.pid !== before.foreground?.pid
+    )
+      return false;
+    return state;
   } catch {
     return false;
   }

@@ -143,7 +143,7 @@ export interface GovernedHcClient extends HcClient {
   readonly coreKey: string;
   /** False means the guard declined before the underlying client was called. */
   execIfCurrent(
-    args: readonly string[],
+    args: readonly string[] | (() => readonly string[]),
     current: () => boolean,
     inspect?: (client: Pick<HcClient, "exec">) => Promise<boolean>,
   ): Promise<boolean>;
@@ -214,8 +214,9 @@ export function governHcClient(
         // Both the FIFO and cross-process slot have been acquired. There must
         // be no await between checking fresh authority and starting raw IO.
         if (inspect && !(await inspect(client))) return false;
+        const command = typeof args === "function" ? args() : args;
         if (!current()) return false;
-        await client.exec(args);
+        await client.exec(command);
         return true;
       }),
     exec: (args, ms) =>

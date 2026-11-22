@@ -2,6 +2,7 @@ import {
   type Assignment,
   assignmentCardHeld,
   assignmentDependenciesAllowStart,
+  associatedHarnessActivity,
   type Clock,
   type CommandState,
   currentHarnessActivity,
@@ -16,6 +17,7 @@ import {
 } from "@cardigan/domain";
 import { tryHostOpsLock, wakeIsCurrent } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
+import { payloadString } from "@cardigan/router";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
 
 interface Options {
@@ -33,6 +35,7 @@ import { dispatchAlert, hostOpsAlertRecipient } from "./dispatch-alert.js";
 const interval = 60_000;
 const claimed = "client_resume_claimed";
 const attention = "client_resume_attention";
+const progressed = "client_resume_progressed";
 function receipt(s: CommandState, run: Run, type: string) {
   return eventsOfType(s.events, type).findLast(
     (e) =>
@@ -70,9 +73,10 @@ export class ClientRecovery {
       sample.source === `${run.harness}:session_metadata` &&
       Date.parse(sample.updated_at) > since
     ) {
-      if (sample.error === "stream_disconnected") return { screen: false };
+      if (sample.error === "stream_disconnected")
+        return { screen: false, at: Date.parse(sample.updated_at) };
       if (sample.error === "unclassified" || sample.turn_ended)
-        return { screen: true };
+        return { screen: true, at: Date.parse(sample.updated_at) };
       return;
     }
     // Workers need not export a transcript. An acknowledged bell on this exact
@@ -85,7 +89,24 @@ export class ClientRecovery {
       JSON.stringify(bell.runtime_ref) === JSON.stringify(a.runtime_ref) &&
       Date.parse(this.clock.now()) - since >= interval
     )
-      return { screen: true };
+      return { screen: true, at: since };
+  }
+  private lastProgress(s: CommandState, a: Assignment, run: Run) {
+    const sample = associatedHarnessActivity(
+      s,
+      a,
+      this.clock.now(),
+      this.options.harnessActivity?.(s.project_id, a.id),
+    );
+    const modelAt =
+      sample?.source === `${run.harness}:session_metadata` &&
+      (sample.error ? sample.last_progress_at : sample.updated_at);
+    const at = modelAt ? Date.parse(modelAt) : NaN;
+    return lastRunActivity(
+      run,
+      a,
+      sample && at <= Date.parse(sample.updated_at) ? at : undefined,
+    );
   }
   private eligible(s: CommandState, a: Assignment, run: Run) {
     const w = s.work_items.find((w) => w.id === a.work_item_id);
@@ -106,7 +127,7 @@ export class ClientRecovery {
   }
   async tick(s: CommandState) {
     const { runtime, store } = this.options;
-    if (!runtime.observe_prompt || this.closing()) return;
+    if (this.closing()) return;
     const now = Date.parse(this.clock.now()),
       project = s.project_id;
     const running = new Set(
@@ -129,20 +150,22 @@ export class ClientRecovery {
       const a = s.assignments.find((a) => a.id === run.assignment_id);
       const ref = a?.runtime_ref;
       if (!a || !ref) continue;
-      const proof = this.proof(s, a, run);
-      if (!proof || !this.eligible(s, a, run)) continue;
-      this.next.set(key, now + interval);
-      const binding = {
-        project_id: project,
-        assignment_id: a.id,
-        harness: run.harness,
-        ...(proof.screen ? { require_disconnect: true as const } : {}),
-      };
-      const observed = await runtime
-        .observe_prompt(ref, binding)
-        .catch(() => undefined);
       const previous = receipt(s, run, claimed);
-      const write = (type: string, reason: string) =>
+      const resolved = previous && receipt(s, run, progressed);
+      const watching = previous && !resolved;
+      const proof = watching ? undefined : this.proof(s, a, run);
+      if ((!watching && !proof) || !this.eligible(s, a, run)) continue;
+      this.next.set(key, now + interval);
+      const write = (
+        type: string,
+        reason: string,
+        valid: (
+          state: CommandState,
+          owner: Assignment,
+          current: Run,
+        ) => boolean,
+        progressAt?: number,
+      ) =>
         store.uow.run((tx) => {
           const state = loadCommandState(tx, project),
             owner = tx.assignments.get(project, a.id),
@@ -153,8 +176,7 @@ export class ClientRecovery {
             !current ||
             !wakeIsCurrent(state, a, run.id) ||
             !this.eligible(state, owner, current) ||
-            lastRunActivity(current, owner) !== lastRunActivity(run, a) ||
-            this.proof(state, owner, current)?.screen !== proof.screen ||
+            !valid(state, owner, current) ||
             receipt(state, run, type) ||
             (type === claimed && receipt(state, run, attention))
           )
@@ -166,6 +188,9 @@ export class ClientRecovery {
               ?.card_id,
             type,
             reason,
+            ...(progressAt !== undefined
+              ? { progress_at: new Date(progressAt).toISOString() }
+              : {}),
             notifyHostOps: type === attention,
             audience:
               type !== attention
@@ -176,6 +201,69 @@ export class ClientRecovery {
           });
           return true;
         });
+      // The receipt survives both a server restart and the disappearance of
+      // the original error screen. Watching it never grants another write.
+      if (watching) {
+        const at = Date.parse(previous.created_at);
+        const hasProgress = (
+          state: CommandState,
+          owner: Assignment,
+          current: Run,
+        ) => this.lastProgress(state, owner, current) > at;
+        const latest = this.lastProgress(s, a, run);
+        if (latest > at) {
+          write(
+            progressed,
+            "续跑后已检测到本轮新进展",
+            (state, owner, current) =>
+              this.lastProgress(state, owner, current) >= latest,
+            latest,
+          );
+        } else if (now - at >= interval) {
+          write(
+            attention,
+            "领取续跑提示后仍无本轮新进展；请主机运维核对原会话，不重复投递。",
+            (state, owner, current) =>
+              !receipt(state, current, progressed) &&
+              !hasProgress(state, owner, current),
+          );
+        }
+        continue;
+      }
+      // After verified progress, only a new disconnect can need handoff.
+      // In particular, a stale/missing sample cannot reopen this watch.
+      if (
+        !proof ||
+        !runtime.observe_prompt ||
+        (resolved &&
+          proof.at <=
+            Date.parse(
+              payloadString(resolved.payload, "progress_at") ??
+                resolved.created_at,
+            ))
+      )
+        continue;
+      const sameEvidence = (
+        state: CommandState,
+        owner: Assignment,
+        current: Run,
+      ) => {
+        const fresh = this.proof(state, owner, current);
+        return (
+          lastRunActivity(current, owner) === lastRunActivity(run, a) &&
+          fresh?.at === proof.at &&
+          fresh.screen === proof.screen
+        );
+      };
+      const binding = {
+        project_id: project,
+        assignment_id: a.id,
+        harness: run.harness,
+        ...(proof.screen ? { require_disconnect: true as const } : {}),
+      };
+      const observed = await runtime
+        .observe_prompt(ref, binding)
+        .catch(() => undefined);
       if (!observed?.ok || !observed.value) {
         // Absence of a screen-only match isn't an incident. A positively
         // attributed disconnect with persistently unverified ownership is.
@@ -183,15 +271,16 @@ export class ClientRecovery {
           write(
             attention,
             "断流后无法确认客户端空闲或归属；请主机运维核对原终端并续办，不自动重启。",
+            sameEvidence,
           );
         continue;
       }
       if (previous) {
-        if (now - Date.parse(previous.created_at) >= interval)
-          write(
-            attention,
-            "续跑后客户端仍停在断流提示符；请主机运维接管原会话，不再自动发送。",
-          );
+        write(
+          attention,
+          "续跑后本轮再次断流；请主机运维接管原会话，不再自动发送。",
+          sameEvidence,
+        );
         continue;
       }
       const unlock = await tryHostOpsLock(store, project, a.id, "launch");
@@ -201,15 +290,20 @@ export class ClientRecovery {
           .wake(ref, `请继续当前 ${run.id} 未完成的工作。`, {
             prompt_binding: binding,
             before_send: () =>
-              write(claimed, "客户端断流，领取本轮唯一续跑提示"),
+              write(claimed, "客户端断流，领取本轮唯一续跑提示", sameEvidence),
           })
           .catch(() => undefined);
         if (result?.ok && result.value.sent)
-          write("client_resume_sent", "已向原会话发送续跑提示");
+          write(
+            "client_resume_sent",
+            "已向原会话发送续跑提示",
+            (state) => !!receipt(state, run, claimed),
+          );
         else if (!result?.ok || !result.value.withdrawn)
           write(
             attention,
             "续跑提示送达不明；请主机运维核对原会话，不重复投递。",
+            sameEvidence,
           );
       } finally {
         await unlock();

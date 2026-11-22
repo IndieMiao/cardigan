@@ -587,7 +587,7 @@ export class HerdrRuntime implements Runtime {
   ) {
     return result(async () => {
       this.checkRef(ref);
-      return boundPrompt(this.client, ref, binding);
+      return !!(await boundPrompt(this.client, ref, binding));
     });
   }
   wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
@@ -600,13 +600,12 @@ export class HerdrRuntime implements Runtime {
       this.invalidateStatus(ref);
       try {
         const guard = options?.observed_guard;
+        let ifIdle = options?.if_idle || guard?.state === "unknown";
         const sent = await this.client.execIfCurrent(
-          [
+          () => [
             "send",
             "--json",
-            ...(options?.if_idle || guard?.state === "unknown"
-              ? ["--if", "idle"]
-              : []),
+            ...(ifIdle ? ["--if", "idle"] : []),
             "--",
             ref.terminal_ref,
             doorbell,
@@ -623,11 +622,15 @@ export class HerdrRuntime implements Runtime {
                   !(await options.resource_preflight())
                 )
                   return false;
-                if (
-                  options?.prompt_binding &&
-                  !(await boundPrompt(raw, ref, options.prompt_binding))
-                )
-                  return false;
+                if (options?.prompt_binding) {
+                  const state = await boundPrompt(
+                    raw,
+                    ref,
+                    options.prompt_binding,
+                  );
+                  if (!state) return false;
+                  ifIdle ||= state === "idle";
+                }
                 if (!guard && !options?.retirement_owner) return true;
                 // Read through the reserved slot, not the queue (capacity may be one).
                 const terminalState = async () => {
