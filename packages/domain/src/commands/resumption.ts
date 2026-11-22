@@ -103,14 +103,16 @@ export function resumeWork(
 }
 
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
-  const deferred = (reason: string) => deferResume(d, item, reason, event.id);
   const card = d.card(item.card_id);
   if (closedResumeTarget(item, card.status)) return;
-  if (card.hold) return deferred("卡片已暂停");
-  if (!item.assignment_id) return deferred("没有负责人");
+  if (card.hold) return deferResume(d, item, "卡片已暂停", event.id);
+  if (!item.assignment_id) return deferResume(d, item, "没有负责人", event.id);
   const assignment = d.get("assignments", item.assignment_id);
-  if (stoppedByHuman(d.state.events, assignment.id))
-    return deferred("指派已被人工停止");
+  const stop = stoppedByHuman(d.state.events, assignment.id)
+    ? "指派已被人工停止"
+    : undefined;
+  const deferred = (reason: string) =>
+    deferResume(d, item, stop ?? reason, event.id);
   if (
     !hasRunTarget(assignment, {
       work_items: d.list("work_items"),
@@ -151,6 +153,9 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   // the durable resume event and let Dispatcher resolve the current trusted
   // launch configuration before queuing a Run. No historical Run is rewritten.
   if (upgradedSinceRun(d, item, assignment, previous)) {
+    // Keep the owner's notification even when stopped; it is not a Run.
+    // Dispatcher leaves it pending until an actual human restart.
+    if (stop) deferred(stop);
     // Every entry point needs a durable request independent of its cause's
     // notification/readiness policy. Router coalesces the cause for this owner.
     d.emit("work_item_resume_requested", item.card_id, {
@@ -164,6 +169,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     });
     return;
   }
+  if (stop) return deferred(stop);
   ensure(
     previous.role_version === assignment.role_version &&
       previous.model.trim() &&

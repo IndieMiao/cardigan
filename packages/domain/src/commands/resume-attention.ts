@@ -75,6 +75,12 @@ export function resumeAttention(state: CommandState) {
     const w = p.work_item_id && items.get(p.work_item_id);
     if (!w || w.card_id !== e.card_id) continue;
     if (
+      e.type === "work_item_resume_requested" &&
+      p.assignment_id &&
+      stopped.has(p.assignment_id)
+    )
+      continue; // A suspended wake notification is not a restart.
+    if (
       [
         "work_item_resume_requested",
         "precheck_wait_delivered",
