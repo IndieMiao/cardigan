@@ -144,6 +144,18 @@ async function until<T>(read: () => Promise<T>, done: (value: T) => boolean) {
   }
   throw new Error("condition not reached");
 }
+type Answer = Awaited<ReturnType<typeof requestMobileSignature>>;
+// Poll past the legitimate in-progress answers. Every one must be well formed:
+// queued never carries a request number, pending always carries this one.
+async function settle(read: () => Promise<Answer>) {
+  return until(read, (r) => {
+    if (r.status === "queued") expect(r.request_id).toBeNull();
+    if (r.status === "pending") expect(r.request_id).toBe("1".repeat(32));
+    return r.status !== "queued" && r.status !== "pending";
+  });
+}
+const accepted = (read: () => Promise<Answer>) =>
+  until(read, (r) => r.status !== "queued");
 function fakeHost(kind: string) {
   const data = mkdtempSync(join(tmpdir(), "signing-job-"));
   const ctl = join(data, "ctl");
@@ -171,7 +183,7 @@ test("first call is accepted at once; polls of the same Run follow one job to it
     });
   try {
     const started = Date.now();
-    const first = await call();
+    const first = await accepted(call);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(first).toMatchObject({
       status: "pending",
@@ -208,7 +220,7 @@ test("first call is accepted at once; polls of the same Run follow one job to it
     expect(host.spawns()).toEqual(["slow", "check"]);
     // After the job settles, a later call asks the ledger again (lookup only).
     writeFileSync(join(host.ctl, "kind"), "stored");
-    expect(await call()).toEqual(receipt);
+    expect(await settle(call)).toEqual(receipt);
     expect(host.spawns()).toEqual(["slow", "check", "stored", "check"]);
   } finally {
     rmSync(host.data, { recursive: true, force: true });
@@ -225,7 +237,7 @@ test("a helper past its reported deadline is terminated; the next poll looks the
       killMs: 2_000,
     });
   try {
-    expect(await call()).toMatchObject({
+    expect(await accepted(call)).toMatchObject({
       status: "pending",
       deadline_seconds: 1,
     });
@@ -234,7 +246,7 @@ test("a helper past its reported deadline is terminated; the next poll looks the
       (gone) => gone,
     );
     writeFileSync(join(host.ctl, "kind"), "lookup");
-    expect(await until(call, (r) => r.status !== "pending")).toMatchObject({
+    expect(await settle(call)).toMatchObject({
       status: "signed",
       request_id: "1".repeat(32),
     });
@@ -281,7 +293,8 @@ test("before the durable claim the call reports queued without a request number"
     });
     expect(await call()).toMatchObject({ status: "queued", request_id: null });
     writeFileSync(join(host.ctl, "claim"), "");
-    expect(await until(call, (r) => r.status !== "queued")).toMatchObject({
+    // After the claim, pending (with the number) is a legitimate step.
+    expect(await settle(call)).toMatchObject({
       status: "signed",
       request_id: "1".repeat(32),
     });
@@ -299,7 +312,7 @@ test("a claimed attempt that ended without a result is unconfirmed, then looked 
       acceptWaitMs: 2_000,
     });
   try {
-    expect(await call()).toEqual({
+    expect(await settle(call)).toEqual({
       status: "unconfirmed",
       request_id: "1".repeat(32),
       platform: "android",
@@ -313,16 +326,18 @@ test("a claimed attempt that ended without a result is unconfirmed, then looked 
     // A fresh module instance: its in-flight job table starts empty.
     expect(restarted.requestMobileSignature).not.toBe(requestMobileSignature);
     expect(
-      await restarted.requestMobileSignature(
-        host.data,
-        jobScope("R-11"),
-        () => {},
-        { program: host.program, acceptWaitMs: 2_000 },
+      await settle(() =>
+        restarted.requestMobileSignature(
+          host.data,
+          jobScope("R-11"),
+          () => {},
+          { program: host.program, acceptWaitMs: 2_000 },
+        ),
       ),
     ).toMatchObject({ status: "signed", request_id: "1".repeat(32) });
     // ...and the live server, which remembers the failed attempt, must not
-    // need a restart: its first poll looks the same request up as well.
-    expect(await call()).toMatchObject({
+    // need a restart: its next poll looks the same request up as well.
+    expect(await settle(call)).toMatchObject({
       status: "signed",
       request_id: "1".repeat(32),
     });
@@ -346,7 +361,7 @@ test("a success the ledger no longer releases is not reported, and a refusal bef
       acceptWaitMs: 100,
     });
   try {
-    expect(await call()).toMatchObject({ status: "pending" });
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
     writeFileSync(join(host.ctl, "ready"), "");
     // Revoked (or expired) after signing, before the next poll.
     writeFileSync(join(host.ctl, "revoked"), "");
