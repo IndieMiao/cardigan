@@ -19,6 +19,7 @@ import {
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { card, project_id } from "../../store/src/test-support.js";
+import { measureHistoryTick } from "../test-support/tick-work.js";
 import { ExtMessageSender, sendExtMessage } from "./ext-message.js";
 import type { ExtMessageConfig } from "./ext-message-config.js";
 
@@ -748,7 +749,7 @@ test("an external edit during send is not mistaken for our settlement audit", as
 });
 
 test.each([false, true])(
-  "production-size first enable bounds computation, replay writes and writer lock time (quiet overflow: %s)",
+  "production-size backlog bounds history visits and writes per transaction (quiet overflow: %s)",
   async (quietOverflow) => {
     if (quietOverflow) {
       quiet();
@@ -813,26 +814,15 @@ test.each([false, true])(
     // so it must reproject (and take the next batch), not hit an unchanged cursor.
     for (const cold of [true, false]) {
       if (quietOverflow && !cold) advance(1000);
-      const locks: number[] = [];
-      let compute = 0;
-      store.observe({
-        transaction(kind, ms) {
-          if (kind === "run") locks.push(ms);
-          else compute += ms;
-        },
-      });
-      const start = performance.now();
-      await active.tick();
-      const elapsed = performance.now() - start,
-        longest = Math.max(...locks);
-      console.info(
-        `ext-message (${quietOverflow ? "quiet" : "ordinary"}, ${cold ? "cold" : "warm"}): projection ${compute.toFixed(1)} ms, tick ${elapsed.toFixed(1)} ms, longest write ${longest.toFixed(1)} ms`,
+      const { writes, visits } = await measureHistoryTick(store, () =>
+        active.tick(),
       );
+      expect(visits).toBeLessThanOrEqual(8);
       expect(rows()).toHaveLength(cold ? 32 : 64);
       expect(fake.messages).toHaveLength(quietOverflow ? 0 : cold ? 32 : 64);
-      expect(compute).toBeLessThan(cold ? 2000 : 200);
-      expect(elapsed).toBeLessThan(cold ? 3000 : 750);
-      expect(longest).toBeLessThan(50);
+      expect(writes.length).toBeGreaterThan(0);
+      // 32 outbox rows plus the durable quiet-overflow marker.
+      expect(Math.max(...writes)).toBeLessThanOrEqual(32 + 1);
     }
   },
   20000,
