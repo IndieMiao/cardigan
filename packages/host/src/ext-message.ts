@@ -5,16 +5,19 @@ import {
   type CardId,
   type Clock,
   type CommandState,
+  EXT_MESSAGE_FILTER_DEFAULTS,
   type ExtMessage,
   type ExtMessageItem,
   type ExtMessagePort,
   extInteraction,
+  extMessageAllowed,
   extMessageItems,
   type ProjectId,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   activateExtChannels,
+  activateExtFilterMarks,
   afterExtWatermark,
   claimExtMessage,
   closeExtRateBatch,
@@ -25,6 +28,8 @@ import {
   extAttemptAvailable,
   extAttemptSlots,
   extChannelActivation,
+  extFilterExcludes,
+  extFilterProjectScope,
   extQuietOverflow,
   extQuietStamp,
   extRateBatch,
@@ -51,6 +56,7 @@ import {
   type ExtMessageConfiguration,
   extChannelLimit,
   extMessageQuiet,
+  loadExtMessageFilter,
 } from "./ext-message-config.js";
 import { createFeishuAdapter } from "./ext-message-feishu.js";
 import {
@@ -306,6 +312,27 @@ function planChannel(
   return { ...classify(slots), classify };
 }
 
+/**
+ * C-580: record the push filter of a loaded configuration; a kind or project
+ * switched back on starts after the current event position. The settings
+ * publication calls this under the same writer lock as its channel
+ * activation, so nothing created between saving and the background reload is
+ * lost or replayed.
+ */
+export function activateExtMessageFilter(
+  db: Store["database"],
+  c: ExtMessageConfiguration,
+) {
+  if (c.status !== "loaded") return undefined;
+  const filter = c.config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
+  return activateExtFilterMarks(
+    db,
+    filter.kinds,
+    EXT_MESSAGE_FILTER_DEFAULTS.kinds,
+    filter.excluded_projects,
+    c.publication,
+  );
+}
 export function extFingerprints(
   c: ExtMessageConfiguration,
   applicationActive: boolean,
@@ -348,19 +375,24 @@ export class ExtMessageSender {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
   }
   private activations?: Map<string, ExtChannelActivation>;
+  /** C-580: cutoff per enabled filter scope (`kind:…`, `project:…`). */
+  private filterMarks = new Map<string, number>();
   private observedBinding?: string;
   private activate(tx?: StoreTransactionContext): void {
     if (this.activations) return;
     const { configuration: c, store } = this.options;
     const fingerprints = extFingerprints(c, !!this.app);
-    const activate = (tx: StoreTransactionContext) =>
-      activateExtChannels(
+    const activate = (tx: StoreTransactionContext) => {
+      const marks = activateExtMessageFilter(store.database, c);
+      if (marks) this.filterMarks = marks;
+      return activateExtChannels(
         store.database,
         tx,
         fingerprints,
         this.clock.now(),
         c.status === "loaded" ? c.publication : undefined,
       );
+    };
     this.activations = tx ? activate(tx) : store.uow.run(activate);
   }
   private current(channel: string) {
@@ -666,7 +698,36 @@ export class ExtMessageSender {
       )
         return;
       const state = loadCommandState(tx, projectId);
-      const items = extMessageItems(state, projectId);
+      // C-580: a filtered item is treated as handled: never queued, and a
+      // queued, retrying or rate-held row settles as skipped (no failure
+      // notice). Items from before a scope was switched back on stay filtered.
+      const filter = config.filter ?? EXT_MESSAGE_FILTER_DEFAULTS;
+      const after = (scope: string, item: ExtMessageItem) => {
+        const mark = this.filterMarks.get(scope);
+        return (
+          !mark ||
+          afterExtWatermark(store.database, projectId, item.event_id, mark)
+        );
+      };
+      const projectScope = extFilterProjectScope(projectId);
+      const filtered = new Set<string>();
+      const items = extMessageItems(state, projectId).map((item) => {
+        if (
+          extMessageAllowed(filter, item) &&
+          after(`kind:${item.kind}`, item) &&
+          after(projectScope, item)
+        )
+          return item;
+        filtered.add(itemKey(item.kind, item.item_id));
+        return { ...item, handled: true };
+      });
+      const filteredRows = channels.flatMap((channel) =>
+        pendingExtMessages(store.database, projectId, channel).filter(
+          (row) =>
+            filtered.has(itemKey(row.item_kind, row.item_id)) &&
+            !(row.lease_until && row.lease_until > now),
+        ),
+      );
       const quiet = extMessageQuiet(config, now);
       const plans =
         projected && !config.quiet_hours
@@ -688,12 +749,32 @@ export class ExtMessageSender {
       return {
         cursor,
         plans,
+        filteredRows,
         version,
         state,
         items: new Map(items.map((i) => [itemKey(i.kind, i.item_id), i])),
       };
     });
     if (!plan) return;
+    // C-580: settle filtered queue rows before any quota, rate batch or
+    // digest decision, so they never spend a slot or join a later send.
+    if (plan.filteredRows.length)
+      plan.version = store.uow.run((tx) => {
+        const at = this.clock.now();
+        const unchanged = store.snapshotVersion(projectId) === plan.version;
+        for (const row of plan.filteredRows) {
+          const fresh = getExtMessage(store.database, row);
+          if (
+            fresh?.status !== "pending" ||
+            fresh.lease_id !== row.lease_id ||
+            (fresh.lease_until !== null && fresh.lease_until > at)
+          )
+            continue;
+          this.settle(tx, fresh, "skipped", null, at, at);
+        }
+        // Only our own audits changed the snapshot; later claims may use it.
+        return unchanged ? store.snapshotVersion(projectId)! : plan.version;
+      });
     if (
       plan.plans.some(
         (p) =>
@@ -1045,14 +1126,36 @@ export class ExtMessageSender {
       result = await sendExtMessage(port, message, config.policy.timeout_ms);
     }
     const now = this.clock.now();
+    const published =
+      result !== "sent" && this.options.generation
+        ? loadExtMessageFilter(this.options.generation.path)
+        : undefined;
     const settledVersions = store.uow.run((tx) => {
       finishExtAttempt(store.database, claimed.lease, Date.parse(now));
       const stillCurrent = participants.filter(
         (p) => store.snapshotVersion(p) === projections.get(p)!.version,
       );
       for (const row of claimed.rows) {
-        const status =
-          result === "sent"
+        // C-580: the filter may have been saved while this send was in
+        // flight. An unsent item it now excludes stops quietly.
+        // The published file is checked too: its database record may still
+        // be awaiting recovery after the save already returned "applied".
+        const dropped =
+          result !== "sent" &&
+          (extFilterExcludes(
+            store.database,
+            row.project_id,
+            row.item_kind,
+            row.event_id,
+          ) ||
+            (published !== undefined &&
+              !extMessageAllowed(published, {
+                kind: row.item_kind as ExtMessageItem["kind"],
+                project_id: row.project_id,
+              })));
+        const status = dropped
+          ? "skipped"
+          : result === "sent"
             ? "sent"
             : result === "permanent" ||
                 result === "adapter_unavailable" ||
@@ -1067,7 +1170,7 @@ export class ExtMessageSender {
           tx,
           row,
           status,
-          result === "sent" ? null : result,
+          result === "sent" || dropped ? null : result,
           now,
           next,
         );

@@ -18,6 +18,44 @@ export type ExtMessageKind =
   | "merge_confirmation"
   | "human_action"
   | "notice";
+export const EXT_MESSAGE_KINDS: readonly ExtMessageKind[] = [
+  "decision",
+  "human_action",
+  "merge_confirmation",
+  "notice",
+];
+/**
+ * C-580: which Needs You items are pushed at all. An item that fails the
+ * filter is never queued, retried or reported as undelivered. The sensitive
+ * rule (generic text and link only) applies unchanged to items that pass.
+ */
+export interface ExtMessageFilter {
+  /**
+   * `merge_confirmation` covers only confirmations whose decider is the
+   * human: system and PM-held confirmations are never items to begin with.
+   */
+  readonly kinds: Readonly<Record<ExtMessageKind, boolean>>;
+  /** Projects never pushed; projects created later are pushed by default. */
+  readonly excluded_projects: readonly ProjectId[];
+}
+export const EXT_MESSAGE_FILTER_DEFAULTS: ExtMessageFilter = {
+  kinds: {
+    decision: true,
+    human_action: true,
+    merge_confirmation: true,
+    notice: false,
+  },
+  excluded_projects: [],
+};
+export function extMessageAllowed(
+  filter: ExtMessageFilter,
+  item: Pick<ExtMessageItem, "kind" | "project_id">,
+): boolean {
+  return (
+    filter.kinds[item.kind] === true &&
+    !filter.excluded_projects.includes(item.project_id)
+  );
+}
 export interface ExtMessageItem {
   readonly project_id: ProjectId;
   readonly card_id?: CardId;

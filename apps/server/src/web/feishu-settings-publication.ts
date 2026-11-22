@@ -1,4 +1,8 @@
-import { extFingerprints, loadExtMessageConfig } from "@cardigan/host";
+import {
+  activateExtMessageFilter,
+  extFingerprints,
+  loadExtMessageConfig,
+} from "@cardigan/host";
 import {
   activateExtChannels,
   extEventWatermark,
@@ -63,6 +67,7 @@ export class FeishuPublication {
         readSettings(this.path).version !== f.version
       )
         throw stale();
+      activateExtMessageFilter(this.store.database, c);
       activateExtChannels(
         this.store.database,
         tx,
@@ -117,6 +122,7 @@ export class FeishuPublication {
           p.watermark !== extEventWatermark(this.store.database)
         )
           throw stale();
+        activateExtMessageFilter(this.store.database, c);
         activateExtChannels(
           this.store.database,
           tx,
