@@ -97,12 +97,14 @@ try {
       const limit = content
         ? content.getBoundingClientRect().right + 0.5
         : innerWidth;
+      // C-561: the left edge too (C-563 review: only the right was checked).
+      const start = content ? content.getBoundingClientRect().left - 0.5 : 0;
       // Every visible descendant must stay inside the bounded content column.
       const overflowing = [...(content?.querySelectorAll("*") ?? [])]
         .filter((e) => {
           if (e.closest("[hidden]")) return false;
           const r = e.getBoundingClientRect();
-          return r.width > 0 && r.right > limit;
+          return r.width > 0 && (r.right > limit || r.left < start);
         })
         .slice(0, 8)
         .map(box);
@@ -182,6 +184,187 @@ try {
       Buffer.from(full.data, "base64"),
     );
   };
+  /** C-561: the Feishu settings drawer, viewed as it is seen (viewport). */
+  const feishuScene = async (name, width, theme, section) => {
+    await run((section) => {
+      const d = document.querySelector("[role=dialog]");
+      const target = section
+        ? [...d.querySelectorAll("h3, legend, label")].find(
+            (e) => e.firstChild?.textContent?.trim() === section,
+          )
+        : undefined;
+      if (section && !target) throw new Error(`Missing section: ${section}`);
+      if (target) target.scrollIntoView({ block: "start" });
+      else d.querySelector("form")?.scrollIntoView({ block: "start" });
+    }, section ?? null);
+    await delay(150);
+    await settle().catch(() => {});
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    report.scenes[`${name}-${width}-${theme}`] = await run(() => {
+      const d = document.querySelector("[role=dialog]");
+      const r = d.getBoundingClientRect();
+      const box = (e) => {
+        if (!e) return null;
+        const b = e.getBoundingClientRect(),
+          st = getComputedStyle(e);
+        return {
+          text: e.textContent.trim().slice(0, 32),
+          x: Math.round(b.left * 10) / 10,
+          y: Math.round(b.top * 10) / 10,
+          w: Math.round(b.width * 10) / 10,
+          h: Math.round(b.height * 10) / 10,
+          font: `${st.fontSize}/${st.lineHeight} ${st.fontWeight}`,
+        };
+      };
+      return {
+        drawer: { x: r.left, y: r.top, w: r.width, h: r.height },
+        drawerScrollWidth: d.scrollWidth,
+        drawerClientWidth: d.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        title: box(d.querySelector("h2")),
+        section: box(d.querySelector("section h3")),
+        label: box(d.querySelector("form label")),
+        input: box(d.querySelector("form input:not([aria-hidden=true])")),
+        switch: box(d.querySelector("form [role=switch]")),
+        button: box(d.querySelector("form [data-ui='button']")),
+        fact: box(d.querySelector("dt")),
+        notice: box(d.querySelector("form [role=alert]")),
+        // Credential inputs are password fields and empty after a failure.
+        passwordInputs: [...d.querySelectorAll("input[type=password]")].map(
+          (i) => ({ autocomplete: i.autocomplete, length: i.value.length }),
+        ),
+        // Radix switches keep an invisible aria-hidden input beside them.
+        outside: [...d.querySelectorAll("*")]
+          .filter((e) => {
+            const b = e.getBoundingClientRect();
+            return (
+              b.width > 0 &&
+              !(
+                e.matches("input[aria-hidden=true]") &&
+                getComputedStyle(e).opacity === "0"
+              ) &&
+              (b.right > r.right + 0.5 || b.left < r.left - 0.5)
+            );
+          })
+          .slice(0, 5)
+          .map(box),
+      };
+    });
+    await writeFile(
+      resolve(output, `${name}-${width}-${theme}.png`),
+      Buffer.from(shot.data, "base64"),
+    );
+  };
+  const feishuPress = (text) =>
+    run((text) => {
+      const scope = document.querySelector("[role=dialog]") ?? document;
+      const target = [...scope.querySelectorAll("button")].find(
+        (b) => b.offsetParent && b.textContent.trim() === text,
+      );
+      if (!target) throw new Error(`Missing button: ${text}`);
+      target.click();
+    }, text);
+  const feishuFill = (values) =>
+    run((values) => {
+      const set = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      ).set;
+      for (const label of document.querySelectorAll("[role=dialog] label")) {
+        const name = label.firstChild?.textContent?.trim();
+        const input = label.querySelector("input");
+        if (!input || !(name in values)) continue;
+        set.call(input, values[name]);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }, values);
+  const dialogHas = (text) =>
+    `!!document.querySelector('[role=dialog]') && document.querySelector('[role=dialog]').textContent.includes(${JSON.stringify(text)})`;
+  /** Edit → preview → a failed save (synthetic) → a saved change. */
+  const feishuEditor = async (width, theme) => {
+    await feishuPress("编辑配置");
+    await until("!!document.querySelector('[role=dialog] form')");
+    await delay(300);
+    await feishuScene("feishu-edit", width, theme);
+    await feishuScene("feishu-edit-secrets", width, theme, "凭据");
+    await feishuFill({ "群机器人（条/分钟）": "30" });
+    await run(() => {
+      const legend = [
+        ...document.querySelectorAll("[role=dialog] legend"),
+      ].find((l) => l.textContent.trim() === "群机器人签名密钥");
+      [...legend.parentElement.querySelectorAll("button")]
+        .find((b) => b.textContent.trim() === "填写")
+        .click();
+    });
+    await until(
+      "!!document.querySelector('[role=dialog] input[type=password]')",
+    );
+    // A synthetic, non-credential value; the field shows dots only.
+    await feishuFill({ 新群机器人签名密钥: "fixture-signing-value" });
+    await feishuScene("feishu-edit-filled", width, theme, "凭据");
+    await feishuPress("预览修改");
+    await until(dialogHas("确认修改"));
+    await feishuScene("feishu-preview", width, theme);
+    await feishuPress("返回修改");
+    await until(
+      "!!document.querySelector('[role=dialog] form[aria-label=编辑飞书配置]')",
+    );
+    await feishuFill({ "标题长度（字）": "999" });
+    await feishuPress("预览修改");
+    await until(dialogHas("确认修改"));
+    await feishuPress("确认保存");
+    await until(dialogHas("服务端未接受这次修改"));
+    await feishuScene("feishu-failed", width, theme);
+    await feishuFill({ "标题长度（字）": "100" });
+    await run(() => {
+      const legend = [
+        ...document.querySelectorAll("[role=dialog] legend"),
+      ].find((l) => l.textContent.trim() === "群机器人签名密钥");
+      [...legend.parentElement.querySelectorAll("button")]
+        .find((b) => b.textContent.trim() === "撤销填写")
+        .click();
+    });
+    await feishuPress("预览修改");
+    await until(dialogHas("确认修改"));
+    await feishuPress("确认保存");
+    await until(
+      "!document.querySelector('[role=dialog]') && [...document.querySelectorAll('[data-settings-row]')].some((r) => r.textContent.includes('每分钟 30 条'))",
+    );
+    await capture("feishu-saved", width, theme);
+    // V-2857: an unconfirmed draft left behind is held and named once.
+    await feishuPress("编辑配置");
+    await until("!!document.querySelector('[role=dialog] form')");
+    await feishuFill({ "标题长度（字）": "77" });
+    await run(() => {
+      location.hash = "#/p/p-1/settings";
+    });
+    await until(
+      "!document.querySelector('[role=dialog]') && document.body.textContent.includes('飞书配置有未确认的修改')",
+    );
+    await capture("feishu-held", width, theme);
+    await run(() => {
+      location.hash = "#/p/p-1/activity";
+    });
+    await until(
+      "location.hash === '#/p/p-1/activity' && document.body.textContent.includes('飞书配置有未确认的修改')",
+    );
+    await settle();
+    report.scenes[`feishu-held-away-${width}-${theme}`] = {
+      scrollWidth: await evaluate("document.documentElement.scrollWidth"),
+    };
+    {
+      const { data } = await send("Page.captureScreenshot", { format: "png" });
+      await writeFile(
+        resolve(output, `feishu-held-away-${width}-${theme}.png`),
+        Buffer.from(data, "base64"),
+      );
+    }
+    await feishuPress("继续编辑");
+    await until(
+      "[...document.querySelectorAll('[role=dialog] label')].some((l) => l.firstChild?.textContent?.trim() === '标题长度（字）' && l.querySelector('input')?.value === '77')",
+    );
+    await feishuScene("feishu-held-restored", width, theme, "高级");
+  };
   const click = (text) =>
     run((text) => {
       const button = [
@@ -243,6 +426,22 @@ try {
           "!!document.querySelector('[data-settings-content]:not([hidden]) h3 button[aria-expanded=true]')",
         );
         await capture("feishu-config-advanced", width, theme);
+        // C-561: both test entries and their results (synthetic: sent, timeout).
+        await open(
+          "?feishu=connected&feishuBound=1&feishuConfig=1#/p/p-1/settings?tab=feishu",
+          "[...document.querySelectorAll('[data-ui=\"badge\"]')].some(el => el.textContent.trim() === '已绑定') && !!document.querySelector('[data-settings-content]:not([hidden]) [aria-expanded=false]')",
+        );
+        await run(() => {
+          for (const b of document.querySelectorAll(
+            "[data-settings-content]:not([hidden]) button",
+          ))
+            if (b.textContent.trim() === "发送测试消息") b.click();
+        });
+        await until(
+          "['已发送', '超时，未确认送达'].every((t) => [...document.querySelectorAll('[data-ui=\"badge\"]')].some((el) => el.textContent.trim() === t))",
+        );
+        await capture("feishu-tests", width, theme);
+        await feishuEditor(width, theme);
         continue;
       }
       if (cardPage) {
