@@ -87,10 +87,22 @@ const EXISTING: Env[] = [
 const LAYERS: { profile: Env; inherited: Env }[] = [
   ...EXISTING.map((profile) => ({ profile, inherited: {} })),
   ...EXISTING.map((inherited) => ({ profile: {}, inherited })),
-  { profile: { NO_PROXY: "localhost" }, inherited: { no_proxy: "api.internal.invalid" } },
-  { profile: { no_proxy: ".lan" }, inherited: { NO_PROXY: "api.internal.invalid" } },
-  { profile: { NO_PROXY: "localhost" }, inherited: { NO_PROXY: "api.internal.invalid" } },
-  { profile: { no_proxy: "*" }, inherited: { NO_PROXY: "api.internal.invalid" } },
+  {
+    profile: { NO_PROXY: "localhost" },
+    inherited: { no_proxy: "api.internal.invalid" },
+  },
+  {
+    profile: { no_proxy: ".lan" },
+    inherited: { NO_PROXY: "api.internal.invalid" },
+  },
+  {
+    profile: { NO_PROXY: "localhost" },
+    inherited: { NO_PROXY: "api.internal.invalid" },
+  },
+  {
+    profile: { no_proxy: "*" },
+    inherited: { NO_PROXY: "api.internal.invalid" },
+  },
   {
     profile: { NO_PROXY: "other.invalid", no_proxy: "other.invalid" },
     inherited: { NO_PROXY: "api.internal.invalid", no_proxy: ".lan" },
@@ -179,7 +191,8 @@ const parsePrinted = (out: string): Env => {
 /** Run the local launch.sh exports and bypass block in sh with `inherited`. */
 function localEnv(compiled: Compiled, inherited: Env): Env {
   const script = fileEnding(compiled, "/launch.sh");
-  const start = script.indexOf("export MCP_TOKEN\n") + "export MCP_TOKEN\n".length;
+  const start =
+    script.indexOf("export MCP_TOKEN\n") + "export MCP_TOKEN\n".length;
   const end = script.indexOf("# Git's legacy");
   const block = script
     .slice(start, end)

@@ -119,7 +119,13 @@ test("C-600 only the launch's own key advances a pending session; anything else 
       ),
     ).toBeUndefined();
     expect(
-      store.advanceMcpHandshake(project_id, id, "tools_listed", own, "token-old"),
+      store.advanceMcpHandshake(
+        project_id,
+        id,
+        "tools_listed",
+        own,
+        "token-old",
+      ),
     ).toBeUndefined();
     expect(
       store.uow.read((tx) => tx.assignments.get(project_id, id))?.mcp_handshake,
@@ -130,6 +136,10 @@ test("C-600 only the launch's own key advances a pending session; anything else 
     );
     expect(
       store.advanceMcpHandshake(project_id, id, "tools_listed", other),
+    ).toBe("pending");
+    // A late call from another launch's harness (its own key) proves nothing.
+    expect(
+      store.advanceMcpHandshake(project_id, id, "tool_called", other),
     ).toBe("pending");
     // A deadline for another session does not touch this one.
     expect(store.advanceMcpHandshake(project_id, id, "deadline", other)).toBe(

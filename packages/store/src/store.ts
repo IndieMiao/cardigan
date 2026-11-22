@@ -1150,7 +1150,12 @@ export class Store {
         key_sha256 !== undefined && key_sha256 === a.mcp_session_key_sha256;
       if (observed === "deadline") return own ? "missing" : "pending";
       if (own) return "listed";
-      return observed === "tool_called" ? "missing" : "pending";
+      // Another launch's key comes from that launch's own harness (e.g. a
+      // late call): no evidence about this session. Only a call carrying no
+      // key at all — a wrapper — proves this session lacks native tools.
+      return observed === "tool_called" && key_sha256 === undefined
+        ? "missing"
+        : "pending";
     };
     // A request on another launch's Token (e.g. a late call of the replaced
     // session) says nothing about this session.

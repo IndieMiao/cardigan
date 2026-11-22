@@ -170,7 +170,10 @@ test("C-600 verification needs a new session and a SHA-256 key digest", () => {
       runtime_ref: ref,
       verify_mcp_session: { key_sha256: "not-a-digest", token_id: "t" },
     },
-    { runtime_ref: ref, verify_mcp_session: { key_sha256: KEY(1), token_id: "" } },
+    {
+      runtime_ref: ref,
+      verify_mcp_session: { key_sha256: KEY(1), token_id: "" },
+    },
     { verify_mcp_session: { key_sha256: KEY(1), token_id: "t" } },
   ])
     expect(

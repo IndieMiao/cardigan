@@ -192,3 +192,61 @@ test("C-600 a dispatch timeout shorter than the handshake deadline still names t
   for (let i = 0; i < 4; i++) await d.tick();
   expectSettledAndReported(runs, t.assignment.id);
 });
+
+test("C-600 a late call from the replaced launch never fails the healthy rebuilt session", async () => {
+  const { t, runs, owner } = start();
+  const d = new Dispatcher(verifiedOptions());
+  await d.tick();
+  f.advance(DEFAULT_MCP_HANDSHAKE_TIMEOUT_MS);
+  for (let i = 0; i < 3 && runs().length < 2; i++) await d.tick();
+  await untilDispatched(d, runs, runs()[0]?.id);
+  expect(owner()?.mcp_session_key_sha256).toBe(digest(2));
+  // The first launch's harness (its own key and Token) calls late.
+  expect(
+    f.store.advanceMcpHandshake(
+      f.project,
+      t.assignment.id,
+      "tool_called",
+      digest(1),
+      "token-2",
+    ),
+  ).toBe("pending");
+  expect(
+    f.store.advanceMcpHandshake(
+      f.project,
+      t.assignment.id,
+      "tool_called",
+      undefined,
+      "token-1",
+    ),
+  ).toBeUndefined();
+  expect(
+    f.store.advanceMcpHandshake(
+      f.project,
+      t.assignment.id,
+      "tools_listed",
+      digest(2),
+      "token-2",
+    ),
+  ).toBe("listed");
+  await d.tick();
+  expect(f.runtime.release).toHaveBeenCalledTimes(1);
+  expect(runs().at(-1)?.status).toBe("dispatched");
+});
+
+test("C-600 with a 60 s dispatch timeout and 30 s ticks, each launch is rebuilt or settled once, for the MCP reason", async () => {
+  const { t, runs } = start();
+  const d = new Dispatcher(verifiedOptions({ dispatchTimeoutMs: 60_000 }));
+  await d.tick();
+  for (let i = 0; i < 12; i++) {
+    f.advance(30_000);
+    await d.tick();
+  }
+  expectSettledAndReported(runs, t.assignment.id);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "run_dispatch_recovered")
+      .map((e) => (e.payload as { reason?: string }).reason),
+  ).toEqual(["mcp_unavailable"]);
+});

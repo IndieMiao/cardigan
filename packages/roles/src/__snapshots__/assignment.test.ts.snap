@@ -165,8 +165,8 @@ export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export DISABLE_AUTOUPDATER='1'
 export CLAUDE_CONFIG_DIR='/srv/cardigan/runs/A-12/claude'
-# C-600: the Card MCP host never goes through a proxy; keep inherited
-# exceptions per spelling and leave a bypass-everything list untouched.
+# C-600: the Card MCP host never goes through a proxy; every other
+# destination keeps the route it had (per spelling, layered, \`*\` untouched).
 cardigan_bypass() {
   case "$(printf '%s' "$2" | tr -d ' \\t')" in
     \\*) printf '%s' "$2" ;;
@@ -174,10 +174,12 @@ cardigan_bypass() {
     *) printf '%s,%s' "$1" "$2" ;;
   esac
 }
-cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${NO_PROXY:-\${no_proxy:-}}")
-cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${no_proxy:-\${NO_PROXY:-}}")
+cardigan_prior_upper="\${NO_PROXY:-}"
+cardigan_prior_lower="\${no_proxy:-}"
+cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_upper:-$cardigan_prior_lower}")
+cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_lower:-$cardigan_prior_upper}")
 export NO_PROXY="$cardigan_upper" no_proxy="$cardigan_lower"
-unset cardigan_upper cardigan_lower
+unset cardigan_prior_upper cardigan_prior_lower cardigan_upper cardigan_lower
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
@@ -398,8 +400,8 @@ export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
 export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export CODEX_HOME='/srv/cardigan/runs/A-12/codex'
-# C-600: the Card MCP host never goes through a proxy; keep inherited
-# exceptions per spelling and leave a bypass-everything list untouched.
+# C-600: the Card MCP host never goes through a proxy; every other
+# destination keeps the route it had (per spelling, layered, \`*\` untouched).
 cardigan_bypass() {
   case "$(printf '%s' "$2" | tr -d ' \\t')" in
     \\*) printf '%s' "$2" ;;
@@ -407,10 +409,12 @@ cardigan_bypass() {
     *) printf '%s,%s' "$1" "$2" ;;
   esac
 }
-cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${NO_PROXY:-\${no_proxy:-}}")
-cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${no_proxy:-\${NO_PROXY:-}}")
+cardigan_prior_upper="\${NO_PROXY:-}"
+cardigan_prior_lower="\${no_proxy:-}"
+cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_upper:-$cardigan_prior_lower}")
+cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_lower:-$cardigan_prior_upper}")
 export NO_PROXY="$cardigan_upper" no_proxy="$cardigan_lower"
-unset cardigan_upper cardigan_lower
+unset cardigan_prior_upper cardigan_prior_lower cardigan_upper cardigan_lower
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
@@ -647,8 +651,8 @@ export GIT_CONFIG_VALUE_1='/srv/agent/worktrees/A-12'
 export GIT_CONFIG_KEY_2='safe.directory'
 export GIT_CONFIG_VALUE_2='/srv/agent/repos/p-demo'
 export PI_CODING_AGENT_DIR='/srv/cardigan/runs/A-12/pi'
-# C-600: the Card MCP host never goes through a proxy; keep inherited
-# exceptions per spelling and leave a bypass-everything list untouched.
+# C-600: the Card MCP host never goes through a proxy; every other
+# destination keeps the route it had (per spelling, layered, \`*\` untouched).
 cardigan_bypass() {
   case "$(printf '%s' "$2" | tr -d ' \\t')" in
     \\*) printf '%s' "$2" ;;
@@ -656,10 +660,12 @@ cardigan_bypass() {
     *) printf '%s,%s' "$1" "$2" ;;
   esac
 }
-cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${NO_PROXY:-\${no_proxy:-}}")
-cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${no_proxy:-\${NO_PROXY:-}}")
+cardigan_prior_upper="\${NO_PROXY:-}"
+cardigan_prior_lower="\${no_proxy:-}"
+cardigan_upper=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_upper:-$cardigan_prior_lower}")
+cardigan_lower=$(cardigan_bypass '127.0.0.1' "\${cardigan_prior_lower:-$cardigan_prior_upper}")
 export NO_PROXY="$cardigan_upper" no_proxy="$cardigan_lower"
-unset cardigan_upper cardigan_lower
+unset cardigan_prior_upper cardigan_prior_lower cardigan_upper cardigan_lower
 # Git's legacy command-line environment must not override the scoped list.
 unset GIT_CONFIG_PARAMETERS
 # The first task message is the last positional argument: claude, codex and pi
