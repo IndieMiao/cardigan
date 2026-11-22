@@ -176,7 +176,13 @@ def retirement_terminal(c):
     with core_rpc(user.pw_dir, c['session'], 'linux') as rpc:
         t = rpc('terminal.get', dict(terminal=c['terminal']))
     labels = dict(cardigan='1', project=c['project'], assignment=c['assignment'],
-                  run=c['launch_run'], generation=c['generation'])
+                  run=c['launch_run'])
+    if not labels['run']:
+        raise ValueError()
+    if c['generation'] is not None:
+        labels['generation'] = c['generation']
+    elif 'generation' in t['labels']:
+        raise ValueError()
     if (t['address'] != c['terminal'] or not all(t['labels'].get(k) == v for k, v in labels.items())
             or t['state'] not in ('live', 'finished') or type(t.get('created_ms')) != int):
         raise ValueError()

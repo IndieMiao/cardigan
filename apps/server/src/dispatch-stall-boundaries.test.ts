@@ -1,17 +1,28 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   type Assignment,
   abortDispatch,
+  acknowledgeRun,
   type CardId,
+  dispatchRun,
   finishRun,
   queueRun,
+  type Run,
   recordDecision,
   requestDecision,
   reviewRunWakeDisposition,
 } from "@cardigan/domain";
+import { armBellReceipt, confirmBellWrite, launchRun } from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
+import { parseLaunchConfig } from "@cardigan/roles";
 import { moveNotification, recordNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
@@ -264,8 +275,18 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
 });
 
 function endedReviewer(discussWhileWaiting = false) {
-  const { f, a, card, item, tree } = reviewerFixture();
-  const run = f.session(a, false);
+  const fixture = reviewerFixture();
+  return endReviewerTurn(
+    fixture,
+    fixture.f.session(fixture.a, false),
+    discussWhileWaiting,
+  );
+}
+function endReviewerTurn(
+  { f, a, card, item, tree }: ReturnType<typeof reviewerFixture>,
+  run: Run,
+  discussWhileWaiting = false,
+) {
   const q = f.apply((state, actor, ports) =>
     requestDecision(
       state,
@@ -347,40 +368,100 @@ function endedReviewer(discussWhileWaiting = false) {
 }
 
 test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once from worker-side evidence", async () => {
-  const { f, a, run, notice } = endedReviewer();
-  const ref = f.store.uow.run((tx) => {
-    const owner = tx.assignments.get(f.project, a.id),
-      old = tx.runs.get(f.project, run.id);
-    if (!owner?.runtime_ref || !old) throw new Error("missing reviewer");
-    const ref = {
-      ...owner.runtime_ref,
-      runtime_machine: "cardigan-agent",
-      terminal_ref: "cardigan-agent/t2",
-      target: {
-        machine_id: "local",
-        project_id: f.project,
-        generation: "legacy",
-        session: "fixture",
-        fingerprint: "a".repeat(64),
+  const fixture = reviewerFixture();
+  const { f, a, card, tree } = fixture;
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.project, { ...card, flow_version: 5 }),
+  );
+  const queue = () =>
+    f.apply((s, actor, p) =>
+      queueRun(
+        s,
+        actor,
+        {
+          assignment_id: a.id,
+          model: "fixture-model",
+          agent_cli_version: "fixture",
+        },
+        p,
+      ),
+    );
+  const start = (run: Run) =>
+    f.apply(
+      (s, actor, p) => acknowledgeRun(s, actor, { run_id: run.id }, p),
+      f.actorFor(a),
+    );
+  const worker = await loopbackFixture(f.dataDir, f.project, a.id);
+  const { agentRoot } = worker.execution;
+  for (const path of [
+    agentRoot,
+    ...["worktrees", "builds"].flatMap((area) => [
+      join(agentRoot, area),
+      join(agentRoot, area, f.project),
+    ]),
+  ])
+    chmodSync(path, 0o2750);
+  const launch = await launchRun(
+    {
+      store: f.store,
+      runtime: worker.runtime,
+      execution: worker.execution,
+      clock: f.clock,
+      dataDir: f.dataDir,
+      mcpUrl: "http://localhost/mcp",
+      launch: {
+        config: parseLaunchConfig({
+          profiles: { fixture: { harness: "pi", model: "fixture-model" } },
+        }),
+        secrets: {},
       },
-      launch_generation: {
-        run_id: run.id,
-        generation: "cad0f00d-aaaa-4bbb-8000-aaaaaaaaaaaa",
-      },
-    };
-    tx.assignments.put(f.project, { ...owner, runtime_ref: ref });
-    tx.runs.put(f.project, { ...old, recovery_runtime: ref });
-    return ref;
+    },
+    {
+      project: f.project,
+      assignment_id: a.id,
+      run: queue(),
+      actor: { kind: "system", project_id: f.project },
+      worktree: { path: tree, base_sha: "b".repeat(40) },
+    },
+  );
+  expect(launch.runtime_ref.launch_generation).toBeUndefined();
+  expect(launch.run.recovery_policy).toBeUndefined();
+  expect(launch.run.recovery_runtime).toBeUndefined();
+  expect(worker.labels).toEqual({
+    cardigan: "1",
+    project: f.project,
+    assignment: a.id,
+    run: launch.run.id,
   });
-  const worker = await loopbackFixture(f.dataDir, ref, a.id);
+  expect(launch.run.bell_delivery?.runtime_ref).toEqual(launch.runtime_ref);
+  start(launch.run);
+  f.apply(
+    (s, actor, p) =>
+      finishRun(
+        s,
+        actor,
+        { run_id: launch.run.id, outcome: "completed", summary: "fixture" },
+        p,
+      ),
+    f.actorFor(a),
+  );
+  // The decision ends a later Run that reused this terminal, not its creating Run.
+  f.advance(1000);
+  const reused = queue();
+  f.apply((s, actor, p) => dispatchRun(s, actor, { run_id: reused.id }, p));
+  expect(
+    armBellReceipt(f.store, f.project, reused.id, launch.runtime_ref, card.id),
+  ).toBe(true);
+  confirmBellWrite(f.store, f.project, reused.id, f.clock.now());
+  start(reused);
+  const { notice } = endReviewerTurn(fixture, reused);
   f.runtime.observe_retirement = worker.runtime.observe_retirement.bind(
     worker.runtime,
   );
   f.runtime.retire_idle = worker.runtime.retire_idle.bind(worker.runtime);
-  vi.mocked(f.runtime.status).mockResolvedValue({
-    ok: true,
-    value: { process: "alive", agent: "unknown", observed_seq: 1 },
-  });
+  vi.mocked(f.runtime.status).mockImplementation(
+    worker.runtime.status.bind(worker.runtime),
+  );
   const dispatcher = new Dispatcher(f.options);
   try {
     await dispatcher.tick();
@@ -388,7 +469,13 @@ test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once fro
     await dispatcher.tick();
     const row = async () =>
       (await f.view()).dispatch_stalls.find((s) => s.assignment_id === a.id);
-    for (const evidence of ["conflict", "busy", "incomplete"]) {
+    for (const evidence of [
+      "conflict",
+      "wrong-run",
+      "unexpected-generation",
+      "busy",
+      "incomplete",
+    ]) {
       worker.sample(evidence);
       expect(await row()).toMatchObject({
         workspace: "clean",
@@ -399,6 +486,16 @@ test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once fro
     }
     expect(worker.signals).toEqual([]);
     worker.sample("matched");
+    writeFileSync(join(tree, "pending-review"), "keep");
+    expect(await row()).toMatchObject({
+      terminal_owner: "confirmed",
+      workspace: "dirty",
+      can_restart: false,
+    });
+    await f.service.tick();
+    expect(worker.signals).toEqual([]);
+    rmSync(join(tree, "pending-review"));
+    f.advance(30_000);
     expect(await row()).toMatchObject({
       workspace: "clean",
       process_state: "alive",
@@ -414,14 +511,27 @@ test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once fro
       },
       { timeout: 10000 },
     );
+    await f.service.tick();
+    await dispatcher.tick();
+    await f.service.tick();
+    await dispatcher.tick();
     expect(worker.signals).toEqual(["TERM"]);
     expect(f.runtime.release).not.toHaveBeenCalled();
-    await dispatcher.tick();
+    const notes = f.store
+      .listNotifications({ project_id: f.project, assignment_id: a.id })
+      .filter((n) => n.event_id === notice.id);
+    expect(notes).toMatchObject([{ status: "belled" }]);
     expect(
-      f.store
-        .listNotifications({ project_id: f.project, assignment_id: a.id })
-        .find((n) => n.event_id === notice.id)?.status,
-    ).toBe("belled");
+      f
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === a.id &&
+            r.id !== launch.run.id &&
+            r.id !== reused.id &&
+            r.status !== "cancelled",
+        ),
+    ).toMatchObject([{ id: notes[0]?.run_id }]);
   } finally {
     await dispatcher.close();
   }

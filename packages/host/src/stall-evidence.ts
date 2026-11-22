@@ -6,6 +6,7 @@ import {
   type RetirementIdentity,
   type Runtime,
   type RuntimeRef,
+  systemTurnOwner,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
@@ -156,7 +157,7 @@ export async function stallEvidence(
   runtime: Runtime,
   execution?: ExecutionConfig,
   signal?: AbortSignal,
-  systemTurn = false,
+  systemTurn?: string,
 ) {
   const [workspace, observed, owner] = await Promise.all([
     stallWorkspace(state, a, execution, signal),
@@ -166,10 +167,11 @@ export async function stallEvidence(
     systemTurn &&
     a.runtime_ref?.machine_id === a.machine_id &&
     a.machine_id === "local"
-      ? observeTurnOwner(runtime, a.runtime_ref, {
-          project_id: state.project_id,
-          assignment_id: a.id,
-        })
+      ? observeTurnOwner(
+          runtime,
+          a.runtime_ref,
+          systemTurnOwner(state, a.id, a.runtime_ref, systemTurn),
+        )
       : undefined,
   ]);
   const terminal_state = observed?.ok ? observed.value.agent : null;

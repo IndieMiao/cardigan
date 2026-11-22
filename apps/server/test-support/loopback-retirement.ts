@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RuntimeRef } from "@cardigan/domain";
+import { runtimeTargetBinding } from "@cardigan/host";
 import { expect, vi } from "vitest";
 import * as ssh from "../../../packages/runtime-herdr/src/agent-ssh.js";
 import {
@@ -12,14 +12,31 @@ import {
  * with bounded fixture responses. No hc socket, SSH connection or real signal. */
 export async function loopbackFixture(
   dir: string,
-  ref: RuntimeRef,
+  project: string,
   assignment: string,
 ) {
-  const target = ref.target!,
-    gen = ref.launch_generation!;
-  const machine = ref.runtime_machine;
+  const machine = "cardigan-agent",
+    session = "fixture";
   const endpoint = join(dir, "fixture-identity"),
     knownHostsFile = join(dir, "fixture-hosts");
+  const config = {
+    mode: "agent-ssh" as const,
+    machine,
+    dataDir: dir,
+    agentRoot: join(dir, "agent"),
+    gid: process.getgid?.() ?? -1,
+    identityFile: endpoint,
+    knownHostsFile,
+  };
+  const target = runtimeTargetBinding({
+    project_id: project,
+    machine_id: "local",
+    generation: "legacy",
+    execution: config,
+    session,
+  });
+  const execution = { ...config, target };
+  const labels: Record<string, string> = {};
   for (const file of [endpoint, knownHostsFile])
     writeFileSync(file, "fixture only", { mode: 0o600 });
   let sample = "conflict",
@@ -28,12 +45,14 @@ export async function loopbackFixture(
   vi.spyOn(ssh, "agentProcessCommand").mockImplementation(
     async (_, args, options) => {
       expect(options).toEqual({ workerRuntimeDir: true });
-      const c = JSON.parse(args.at(-1)!);
+      const [source, payload] = args.slice(-2);
+      if (!source || !payload) throw new Error("Missing collector arguments");
+      const c = JSON.parse(payload);
       expect(c).toMatchObject({
         project: target.project_id,
         assignment,
-        launch_run: gen.run_id,
-        generation: gen.generation,
+        launch_run: labels.run,
+        generation: null,
         terminal: "t2",
         session: target.session,
         local: true,
@@ -46,18 +65,23 @@ export async function loopbackFixture(
         ...(sample !== "incomplete" ? { pid: 12345 } : {}),
         status: { state: sample === "busy" ? "working" : "unknown" },
         labels: {
-          cardigan: "1",
-          project: target.project_id,
-          assignment: sample === "conflict" ? "other" : assignment,
-          run: gen.run_id,
-          generation: gen.generation,
+          ...labels,
+          ...(sample === "conflict" ? { assignment: "other" } : {}),
+          ...(sample === "wrong-run" ? { run: "R-99999" } : {}),
+          ...(sample === "unexpected-generation"
+            ? { generation: "other" }
+            : {}),
         },
       };
       return {
-        file: process.execPath,
+        // Run the shipped projection; substitute only the socket and Linux account/uid facts.
+        file: "/usr/bin/python3",
         args: [
-          "-e",
-          "process.stdout.write(process.argv[1])",
+          "-IB",
+          "-c",
+          workerSocket,
+          source,
+          JSON.stringify(c),
           JSON.stringify(t),
         ],
       };
@@ -65,19 +89,16 @@ export async function loopbackFixture(
   );
   const result = await HerdrRuntime.create({
     session: target.session,
-    execution: {
-      mode: "agent-ssh",
-      target,
-      machine,
-      dataDir: dir,
-      agentRoot: join(dir, "agent"),
-      gid: 2001,
-      identityFile: endpoint,
-      knownHostsFile,
-    },
+    execution,
+    socketPath: join(dir, "relay.sock"),
     client: {
       available: async () => true,
-      async *lines() {},
+      async *lines() {
+        yield JSON.stringify({
+          seq: 1,
+          terminals: [{ address: `${machine}/t2`, state: "live" }],
+        });
+      },
       exec: async (args) => {
         if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
         if (args[0] === "machine")
@@ -86,6 +107,18 @@ export async function loopbackFixture(
               ? { machines: [] }
               : { version: HC_RELEASE.version },
           );
+        if (args[0] === "run") {
+          for (const [i, arg] of args.slice(0, args.indexOf("--")).entries()) {
+            if (arg !== "--label") continue;
+            const [key, value] = args[i + 1]?.split("=") ?? [];
+            if (!key || !value) throw new Error("Invalid fixture launch label");
+            labels[key] = value;
+          }
+          return JSON.stringify({ address: `${machine}/t2` });
+        }
+        // The relay can see a live address, but has no worker owner labels.
+        if (args[0] === "get")
+          return JSON.stringify({ address: `${machine}/t2`, state: "live" });
         expect(args.slice(0, 4)).toEqual(["exec", "--on", machine, "--"]);
         const mode = args[args.indexOf("-c") + 2];
         if (mode === "probe")
@@ -105,9 +138,24 @@ export async function loopbackFixture(
   if (!result.ok) throw new Error(result.error.message);
   return {
     runtime: result.value,
+    execution,
+    labels,
     signals,
     sample: (v: string) => {
       sample = v;
     },
   };
 }
+
+const workerSocket = `import sys, json, contextlib, types
+scope = {"__name__": "fixture"}
+exec(sys.argv[1], scope)
+binding, terminal = map(json.loads, sys.argv[2:])
+def get(method, params):
+    assert method == "terminal.get" and params == {"terminal": terminal["address"]}
+    return terminal
+scope.update(core_rpc=lambda *_: contextlib.nullcontext(get), managed_loopback_account=lambda *_: None,
+             pwd=types.SimpleNamespace(getpwuid=lambda _: types.SimpleNamespace(pw_dir="/fixture")),
+             os=types.SimpleNamespace(getuid=lambda: 1001, geteuid=lambda: 1001,
+                                      stat=lambda _: types.SimpleNamespace(st_uid=1001)))
+print(json.dumps(scope["retirement_terminal"](binding)))`;

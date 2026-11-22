@@ -5,7 +5,7 @@ import {
   contextUsageFresh,
   contextUsageLevel,
 } from "../context-usage.js";
-import type { Actor, Assignment, Run } from "../entities.js";
+import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import { eventById, eventsOfType } from "../event-index.js";
 import {
   type HostOpsExecution,
@@ -14,6 +14,7 @@ import {
 } from "../host-ops.js";
 import type { EventId } from "../ids.js";
 import { runsOf } from "../run-index.js";
+import type { RetirementIdentity } from "../runtime-port.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -154,6 +155,42 @@ export function systemEndedTurn(state: CommandState, owner: Assignment) {
   )
     ? last
     : undefined;
+}
+
+/** Flow 5 loopback launches have no generation. The creating Run's label
+ * stays on the terminal across reused bells. Use the first confirmed dispatch
+ * on the exact bound ref, never the most recent Run or the address alone. */
+export function systemTurnOwner(
+  state: CommandState,
+  assignment: Assignment["id"],
+  ref: RuntimeRef | null,
+  endedRun: string,
+): RetirementIdentity {
+  const identity = { project_id: state.project_id, assignment_id: assignment };
+  if (
+    ref?.target?.generation !== "legacy" ||
+    ref.machine_id !== "local" ||
+    ref.runtime_machine === "local" ||
+    ref.launch_generation
+  )
+    return identity;
+  const key = JSON.stringify(ref);
+  let first: Run["bell_delivery"],
+    ambiguous = false,
+    endedBound = false;
+  for (const r of runsOf(state.runs, assignment)) {
+    const bell = r.bell_delivery;
+    if (!bell || JSON.stringify(bell.runtime_ref) !== key) continue;
+    if (bell.run_id !== r.id || !bell.sent_at) return identity;
+    if (r.id === endedRun) endedBound = true;
+    if (!first?.sent_at || bell.sent_at < first.sent_at) {
+      first = bell;
+      ambiguous = false;
+    } else if (bell.sent_at === first.sent_at) ambiguous = true;
+  }
+  return endedBound && first && !ambiguous
+    ? { ...identity, first_bell_run_id: first.run_id }
+    : identity;
 }
 
 /** An expired dispatch guard, not general authority for system to restart a worker. */

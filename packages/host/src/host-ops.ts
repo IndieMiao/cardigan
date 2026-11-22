@@ -35,6 +35,7 @@ import {
   requestHostOpsExitConfirmation,
   reviewRestartStopStarted,
   type SessionActivity,
+  systemTurnOwner,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -1503,10 +1504,12 @@ export class HostOpsService {
           result = await stopSystemTurn(
             runtime,
             action.runtime_ref,
-            {
-              project_id: project,
-              assignment_id: action.assignment_id,
-            },
+            systemTurnOwner(
+              read(),
+              action.assignment_id,
+              action.runtime_ref,
+              action.system_finished_run_id,
+            ),
             stopStarted,
             checkWorkspace,
             beforeSignal,

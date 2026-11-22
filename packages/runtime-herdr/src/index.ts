@@ -1002,27 +1002,27 @@ export class HerdrRuntime implements Runtime {
     raw?: Pick<HcClient, "exec">,
   ): Promise<Terminal> {
     const execution = this.execution;
-    if (
-      managedLoopback(execution) &&
-      ref.launch_generation &&
-      ref.machine_id === "local"
-    ) {
+    if (managedLoopback(execution) && ref.machine_id === "local") {
       if (
         ref.target?.project_id !== owner.project_id ||
         ref.target?.session !== this.session
       )
         fail("runtime_conflict", "Loopback binding changed");
+      const run = ref.launch_generation?.run_id ?? owner.first_bell_run_id;
+      if (!run) fail("runtime_conflict", "Missing bound worker launch Run");
       const terminal = ref.terminal_ref.slice(execution.machine.length + 1);
       const t: Terminal = await loopbackTerminal(execution, {
         project: owner.project_id,
         assignment: owner.assignment_id,
-        launch_run: ref.launch_generation.run_id,
-        generation: ref.launch_generation.generation,
+        launch_run: run,
+        generation: ref.launch_generation?.generation ?? null,
         terminal,
         session: this.session,
       });
       if (
         t.address !== terminal ||
+        t.labels?.cardigan !== "1" ||
+        t.labels.run !== run ||
         !["live", "finished"].includes(t.state) ||
         !Number.isSafeInteger(t.created_ms) ||
         (t.state === "live" &&

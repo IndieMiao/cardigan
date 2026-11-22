@@ -113,7 +113,7 @@ export class StallPatrol {
       this.runtime,
       this.execution(state.project_id),
       this.signal,
-      !!stall?.system_finished_run_id,
+      stall?.system_finished_run_id,
     );
   }
   async diagnostics(project: ProjectId) {

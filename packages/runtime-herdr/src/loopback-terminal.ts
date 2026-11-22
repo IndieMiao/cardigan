@@ -24,7 +24,7 @@ export async function loopbackTerminal(
     project: string;
     assignment: string;
     launch_run: string;
-    generation: string;
+    generation: string | null;
     terminal: string;
     session: string;
   },
