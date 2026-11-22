@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import zipfile
 from archives import inspect_zip
-from common import LIMIT, digest, private_file, require
+from common import LIMIT, digest, failure_stage, private_file, require
 
 
 def tool(cwd, argv, diagnostics=False, pass_fds=()):
@@ -28,11 +28,12 @@ def tool(cwd, argv, diagnostics=False, pass_fds=()):
 
 
 def android(c, src, dest, tmp):
-    names = inspect_zip(src)
-    require('AndroidManifest.xml' in names and not any(re.match(r'(?i)^META-INF/[^/]+\.(SF|RSA|DSA|EC)$',n) for n in names))
+    with failure_stage('archive_invalid'):
+        names = inspect_zip(src, apk=True)
+        require('AndroidManifest.xml' in names and not any(re.match(r'(?i)^META-INF/[^/]*\.(SF|RSA|DSA|EC)$',n) for n in names))
     def package(path):
         return tool(tmp,[c['aapt2'],'dump','packagename',path]).decode().strip()
-    require(package(src)==c['app'])
+    require(package(src)==c['app'], 'package_mismatch')
     # Pin one immutable keystore inode across the public certificate check and use.
     # Rotation replaces the file; neither the key nor its password enters stdout.
     with private_file(Path(c['keystore'])).open('rb') as store:
@@ -43,12 +44,15 @@ def android(c, src, dest, tmp):
                           '-storepass:file', password], pass_fds=(fd,))
         require(cert and hashlib.sha256(cert).hexdigest() == c['cert_sha256'])
         store.seek(0)
-        tool(tmp, [c['apksigner'], 'sign', '--ks', pinned, '--ks-key-alias', c['alias'],
-                   '--ks-pass', 'file:'+str(password), '--key-pass', 'file:'+str(private_file(Path(c['key_password_file']))),
-                   '--v4-signing-enabled', 'false', '--out', dest, src], pass_fds=(fd,))
-    result=tool(tmp,[c['apksigner'],'verify','--print-certs',dest]).decode()
-    certs=re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})$',result,re.M)
-    require([d.lower() for d in certs] == [c['cert_sha256']] and package(dest)==c['app'])
+        with failure_stage('apksigner_failed'):
+            tool(tmp, [c['apksigner'], 'sign', '--ks', pinned, '--ks-key-alias', c['alias'],
+                       '--ks-pass', 'file:'+str(password), '--key-pass', 'file:'+str(private_file(Path(c['key_password_file']))),
+                       '--v4-signing-enabled', 'false', '--out', dest, src], pass_fds=(fd,))
+    with failure_stage('apksigner_failed'):
+        result=tool(tmp,[c['apksigner'],'verify','--print-certs',dest]).decode()
+        certs=re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})$',result,re.M)
+        require([d.lower() for d in certs] == [c['cert_sha256']])
+    require(package(dest)==c['app'], 'package_mismatch')
 
 
 def plist(path):
