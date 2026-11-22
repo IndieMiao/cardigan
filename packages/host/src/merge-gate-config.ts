@@ -16,7 +16,7 @@ import {
 } from "./merge-gate-executors.js";
 import {
   type MergePushConfig,
-  parseMergePushConfig,
+  parseMergePushRoutes,
 } from "./merge-push-config.js";
 import type { CheckoutCheck } from "./temporary-checkout.js";
 
@@ -40,7 +40,8 @@ export type ProjectMergeGate =
       readonly checks: readonly MergeGateCheck[];
       readonly env: Readonly<Record<string, string>>;
       readonly totalTimeoutMs: number;
-      readonly push?: MergePushConfig;
+      /** Push routes, at most one per central baseline branch. */
+      readonly push?: readonly MergePushConfig[];
       /** Absent for `executor: local` or no executor: exactly today's behavior. */
       readonly executor?: MergeGateExecutor;
       readonly affected?: MergeGateAffected;
@@ -243,7 +244,7 @@ async function projectConfig(
     ...(queue ? { queue } : {}),
     ...(raw.push === undefined
       ? {}
-      : { push: await parseMergePushConfig(raw.push, dataDir, baseBranch) }),
+      : { push: await parseMergePushRoutes(raw.push, dataDir, baseBranch) }),
     ...(executor === undefined ? {} : { executor }),
     ...(raw.affected === undefined
       ? {}

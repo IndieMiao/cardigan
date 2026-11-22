@@ -219,3 +219,36 @@ test("external notification configuration is loaded once at startup and disabled
     else process.env.CARDIGAN_CONFIG_DIR = previous;
   }
 });
+
+test.each([true, false])(
+  "startup fence holds even after listeners bind (release=%s)",
+  async (release) => {
+    const gate = Promise.withResolvers<void>();
+    const reconcile = vi.fn(async () => []);
+    const dispatch = vi.fn(async () => {});
+    server = await startCardiganServer({
+      role: "background",
+      backgroundReady: gate.promise,
+      config: { dataDir, host: "127.0.0.1", port: 0 },
+      store,
+      git: stubGit({ project, reconcile }),
+      dispatcher: { ...dispatcher(), intervalMs: 5, recoverLaunches: dispatch },
+      warn: () => {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    if (release) {
+      gate.resolve();
+      await vi.waitFor(() => {
+        expect(dispatch).toHaveBeenCalled();
+        expect(reconcile).toHaveBeenCalled();
+      });
+    }
+    await server.close();
+    server = undefined;
+    // A late ready after shutdown cannot start a new owner.
+    gate.resolve();
+    if (!release) expect(dispatch).not.toHaveBeenCalled();
+  },
+);

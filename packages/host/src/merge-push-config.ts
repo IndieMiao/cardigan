@@ -4,7 +4,12 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export interface MergePushConfig {
   readonly remote: string;
+  /** Remote branch that receives the push. */
   readonly branch: string;
+  /** Central baseline branch this route publishes (cards with this `base_branch`). */
+  readonly baseBranch: string;
+  /** The project's registered baseline: push records without a branch belong here. */
+  readonly registered?: boolean;
   readonly target: string;
   readonly keyFile?: string;
   readonly knownHostsFile?: string;
@@ -121,13 +126,23 @@ export async function parseMergePushConfig(
   if (
     Object.keys(p).some(
       (key) =>
-        !["remote", "branch", "key_file", "known_hosts_file"].includes(key),
+        ![
+          "remote",
+          "branch",
+          "base_branch",
+          "key_file",
+          "known_hosts_file",
+        ].includes(key),
     )
   )
     return fail("push 含有不支持的字段");
+  const source = p.base_branch ?? baseBranch;
+  if (!validPushBranch(source))
+    return fail("push.base_branch 不是有效的分支名");
   const protocol = pushProtocol(p.remote),
     remote = p.remote as string,
-    branch = p.branch ?? baseBranch;
+    // Default: the remote branch of the same name as the central branch.
+    branch = p.branch ?? source;
   if (!validPushBranch(branch)) return fail("push.branch 不是有效的分支名");
   let keys: Pick<MergePushConfig, "keyFile" | "knownHostsFile"> = {};
   if (
@@ -149,6 +164,8 @@ export async function parseMergePushConfig(
   return {
     remote,
     branch,
+    baseBranch: source,
+    ...(source === baseBranch ? { registered: true } : {}),
     ...keys,
     target: createHash("sha256")
       .update(JSON.stringify([remote, branch]))
@@ -164,6 +181,7 @@ export async function validateMergePushConfig(
     {
       remote: config.remote,
       branch: config.branch,
+      base_branch: config.baseBranch,
       ...(config.keyFile
         ? { key_file: relative(resolve(dataDir), config.keyFile) }
         : {}),
@@ -175,4 +193,26 @@ export async function validateMergePushConfig(
     },
     dataDir,
   );
+}
+
+/**
+ * `push` is one route or a list of routes. Each central baseline branch pushes
+ * through at most one route, and two routes never share a remote branch.
+ * Branches without a route merge only in the central repository.
+ */
+export async function parseMergePushRoutes(
+  raw: unknown,
+  dataDir: string,
+  baseBranch = "main",
+): Promise<readonly MergePushConfig[]> {
+  const entries = Array.isArray(raw) ? raw : [raw];
+  if (!entries.length) return fail("push 列表不能为空");
+  const routes: MergePushConfig[] = [];
+  for (const entry of entries)
+    routes.push(await parseMergePushConfig(entry, dataDir, baseBranch));
+  if (new Set(routes.map((r) => r.baseBranch)).size !== routes.length)
+    return fail("同一个 base_branch 只能配置一个推送目标");
+  if (new Set(routes.map((r) => r.target)).size !== routes.length)
+    return fail("两个推送目标不能指向同一远程分支");
+  return routes;
 }

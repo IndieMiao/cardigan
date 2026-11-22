@@ -122,6 +122,7 @@ export {
   type MergePushFailure,
   type MergePushHoldReason,
   mergePushMessage,
+  mergePushRoute,
   recordMergePushResult,
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";

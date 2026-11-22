@@ -78,6 +78,9 @@ test("hundreds of cleaned owners skip runtime and token revocation, including af
   const revoke = vi.spyOn(f.store, "revokeToken");
   const loop = executor(status, release);
   await loop.tick();
+  expect(status.mock.calls.length).toBeLessThanOrEqual(16);
+  expect(loop.pending(f.project_id)).toBe(true);
+  for (let i = 0; loop.pending(f.project_id) && i < 601; i++) await loop.tick();
   expect(status).toHaveBeenCalledTimes(601);
   expect(f.store.verifyToken(token.token)).toBeUndefined();
   status.mockClear();

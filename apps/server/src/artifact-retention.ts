@@ -1,5 +1,5 @@
-import type { Dirent } from "node:fs";
-import { lstat, readdir, readFile, unlink } from "node:fs/promises";
+import { type Dirent, lstatSync, unlinkSync } from "node:fs";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   AttachmentId,
@@ -40,6 +40,7 @@ async function readPolicies(dir: string) {
 }
 /** Select and tombstone while holding the same write lock used by delivery and decision commands. */
 function expire(
+  store: Pick<Store, "database">,
   tx: StoreTransactionContext,
   project: ProjectId,
   policy: Policy,
@@ -53,7 +54,7 @@ function expire(
         : [],
     );
   const live = new Set<string>();
-  if (!records.length) return live;
+  if (!records.length) return { live, more: false };
   const pins = new Set<AttachmentId>(),
     hashes = new Set<string>();
   function subject(s: DeliverySubject) {
@@ -72,19 +73,20 @@ function expire(
     for (const id of r.attachments) pins.add(id);
   for (const h of tx.human_actions.list(project))
     for (const id of h.result?.attachments ?? []) pins.add(id);
-  for (const card of new Set(records.map(({ a }) => a.card_id))) {
-    for (const e of tx.events.listAfter(project, card, 0)) {
-      if (
-        e.type === "card_marked_done" &&
-        e.payload &&
-        typeof e.payload === "object" &&
-        "attachments" in e.payload &&
-        Array.isArray(e.payload.attachments)
-      )
-        for (const id of e.payload.attachments)
-          if (typeof id === "string") pins.add(id);
-    }
+  // Streamed attachments may be pinned by a completion. Read the type index
+  // in this transaction instead of decoding each owning card's entire history.
+  for (const row of store.database
+    .prepare(
+      "SELECT doc FROM events WHERE project_id=? AND type='card_marked_done' AND card_id IS NOT NULL",
+    )
+    .iterate(project)) {
+    const ids = JSON.parse(String(row.doc)).payload?.attachments;
+    if (Array.isArray(ids))
+      for (const id of ids)
+        if (typeof id === "string") pins.add(id as AttachmentId);
   }
+  let changed = 0;
+  const until = performance.now() + 250;
   let total = records.reduce((sum, { a }) => sum + a.size, 0);
   for (const { a, s } of records.sort(
     (x, y) =>
@@ -111,17 +113,20 @@ function expire(
       live.add(s.blob_id);
       continue;
     }
+    if (changed >= 16 || (changed && performance.now() >= until))
+      return { live, more: true };
+    changed++;
     tx.attachments.put(project, {
       ...a,
       streamed_artifact: { ...s, expired: { at, reason } },
     });
     total -= a.size;
   }
-  return live;
+  return { live, more: false };
 }
 /** A crash after tombstoning is retryable. Unknown fresh blobs may be in-flight: never remove them. */
-export async function sweepArtifacts(
-  store: Pick<Store, "uow" | "listProjects">,
+export async function* artifactPages(
+  store: Pick<Store, "uow" | "listProjects" | "database">,
   dir: string,
   at: string,
 ) {
@@ -135,25 +140,46 @@ export async function sweepArtifacts(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
   }
-  const policies = await readPolicies(dir),
-    live = new Set<string>(),
+  const live = new Set<string>(),
     expired = new Set<string>();
   for (const p of store.listProjects()) {
-    const ids = store.uow.run((tx) => {
-      const kept = expire(tx, p.id, policies.get(p.id) ?? defaults, at);
-      return {
-        kept,
-        expired: tx.attachments
-          .list(p.id)
-          .flatMap((a) =>
-            a.streamed_artifact?.expired ? [a.streamed_artifact.blob_id] : [],
-          ),
-      };
-    });
-    for (const id of ids.kept) live.add(id);
-    for (const id of ids.expired) expired.add(id);
+    while (true) {
+      const policies = await readPolicies(dir);
+      const ids = store.uow.run((tx) => {
+        const kept = expire(
+          store,
+          tx,
+          p.id,
+          policies.get(p.id) ?? defaults,
+          at,
+        );
+        return {
+          kept,
+          expired: tx.attachments
+            .list(p.id)
+            .flatMap((a) =>
+              a.streamed_artifact?.expired ? [a.streamed_artifact.blob_id] : [],
+            ),
+        };
+      });
+      if (ids.kept.more) {
+        yield;
+        continue;
+      }
+      for (const id of ids.kept.live) live.add(id);
+      for (const id of ids.expired) expired.add(id);
+      break;
+    }
+    yield;
   }
+  let count = 0,
+    until = performance.now() + 250;
   for (const entry of entries) {
+    if (++count > 128 || performance.now() >= until) {
+      yield;
+      count = 1;
+      until = performance.now() + 250;
+    }
     if (
       !entry.isFile() ||
       !ARTIFACT_BLOB_ID.test(entry.name) ||
@@ -167,9 +193,32 @@ export async function sweepArtifacts(
         stat.isFile() &&
         (expired.has(entry.name) || Date.parse(at) - stat.mtimeMs > DAY)
       )
-        await unlink(path);
+        store.uow.run(() => {
+          // The page may have yielded since we collected references. A live
+          // record in ANY project now wins, even for an old orphan candidate.
+          const refs = store.database
+            .prepare(`SELECT json_extract(doc,'$.streamed_artifact.expired') IS NULL AS live
+            FROM attachments WHERE json_extract(doc,'$.streamed_artifact.blob_id')=?`)
+            .all(entry.name);
+          if (refs.some((row) => row.live)) return;
+          const current = lstatSync(path);
+          if (
+            current.isFile() &&
+            (refs.length || Date.parse(at) - current.mtimeMs > DAY)
+          )
+            unlinkSync(path);
+        });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
+  }
+}
+
+/** Exhaustive maintenance entry; the production timer advances one page at a time. */
+export async function sweepArtifacts(
+  ...args: Parameters<typeof artifactPages>
+) {
+  for await (const _page of artifactPages(...args)) {
+    /* drain */
   }
 }

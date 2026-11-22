@@ -8,6 +8,7 @@ import { attempt, type CommandState } from "./core.js";
 import { mergeRiskBlockers } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext } from "./merge-context.js";
+import { missingMergeCheckReason } from "./merge-failure-view.js";
 import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
 import {
   screenshotCheckBlocker,
@@ -78,7 +79,12 @@ export function pmMergeBlockers(
     blockers.push(
       check
         ? `合并闸门检查未通过（当前 ${check.status}）`
-        : "合并闸门检查尚无结果（未开启闸门的项目须交人确认）",
+        : missingMergeCheckReason(
+            state.project_settings?.merge_gate_enabled,
+            state.events,
+            card_id,
+            completion.id,
+          ),
     );
   const items = state.work_items.filter(
     (w) => w.card_id === card_id && w.status !== "cancelled",
