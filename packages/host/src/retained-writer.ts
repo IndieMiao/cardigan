@@ -3,19 +3,23 @@ import { join } from "node:path";
 import {
   type Assignment,
   automaticContextActionForRun,
+  type Clock,
   type CommandState,
   eventsOfType,
+  type ProjectId,
   type Run,
   type RuntimeRef,
   sharedStallRegistration,
   stoppedByHuman,
 } from "@cardigan/domain";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   agentProcessCommand,
   type ExecutionConfig,
   executionPaths,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
+import type { Store } from "@cardigan/store";
 import { captureTranscript } from "./capture-transcript.js";
 import { stallWorkspace, writableInPlace } from "./stall-evidence.js";
 
@@ -111,6 +115,60 @@ export async function writerPlacementSeal(
   }
 }
 
+/** The preserved checkout or its binding changed after backup. The original
+ * queued Run and notifications stay for Ops; this is not a launch failure. */
+export class RetainedWriterRefused extends Error {
+  constructor() {
+    super("Preserved writer checkout could not be verified");
+  }
+}
+/** Record one refusal per queued Run. The stall patrol hands it to Ops; the
+ * Dispatcher holds the Run instead of retrying the same checkout every tick. */
+export function recordRetainedWriterRefusal(
+  store: Store,
+  project: ProjectId,
+  runId: Run["id"],
+  clock: Clock,
+) {
+  store.uow.run((tx) => {
+    const state = loadCommandState(tx, project);
+    const run = state.runs.find((r) => r.id === runId);
+    if (!run || run.status !== "queued" || retainedWriterRefusal(state, runId))
+      return;
+    const action = automaticContextActionForRun(state.events, run);
+    if (!action?.dispatch_stall_id) return;
+    const a = state.assignments.find((v) => v.id === run.assignment_id);
+    const card = state.work_items.find(
+      (w) => w.id === a?.work_item_id,
+    )?.card_id;
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project, card),
+      ...(card ? { card_id: card } : {}),
+      actor: { kind: "system", project_id: project },
+      type: "retained_writer_refused",
+      created_at: clock.now(),
+      payload: {
+        assignment_id: run.assignment_id,
+        run_id: run.id,
+        action_id: action.action_id,
+        ...(action.system_finished_run_id
+          ? { system_finished_run_id: action.system_finished_run_id }
+          : {}),
+        dispatch_stall_id: action.dispatch_stall_id,
+        reason: "writer_checkout_refused",
+        body: "保全的原工作区在启动前不能再核验（目录、权限或登记已变）。未启动后继，原排队和通知保留，已交主机运维核查。",
+      },
+    });
+  });
+}
+/** The refusal for this exact queued Run, if one was recorded. */
+export function retainedWriterRefusal(state: CommandState, run: Run["id"]) {
+  return eventsOfType(state.events, "retained_writer_refused").find(
+    (e) => (e.payload as { run_id?: string }).run_id === run,
+  );
+}
+
 /** No placement or repair is allowed on this path, including when a caller
  * supplied a worktree. A missing/mismatched receipt must never fall through. */
 export function retainedWriterForRun(
@@ -141,7 +199,7 @@ export function retainedWriterForRun(
   )
     return;
   const reject = () => {
-    throw new Error("Preserved writer checkout could not be verified");
+    throw new RetainedWriterRefused();
   };
   if (
     action.assignment_id !== a.id ||

@@ -5,6 +5,7 @@ import {
   beginSystemTurnRestart,
   type Clock,
   type CommandState,
+  type Event,
   eventById,
   eventsOfType,
   type HostOpsExecution,
@@ -36,6 +37,93 @@ function turnKey(s: DispatchStall) {
 // Maintenance observations are a projection (not the retirement/upgrade fence).
 // Exclude only that projection from the CAS. A new runtime or activity sample
 // invalidates the observation; retry it only for the very same registration.
+/** Same incident key as the patrol's turn recovery: retirement transfers by
+ * cause, system-ended turns by the ended Run. */
+function incidentMatches(stall: DispatchStall, payload: unknown) {
+  const p = payload as {
+    system_finished_run_id?: string;
+    cause_id?: string;
+    dispatch_stall_id?: string;
+  };
+  return stall.retirement_handoff
+    ? (p.cause_id ?? p.dispatch_stall_id) === stall.cause_id
+    : !!stall.system_finished_run_id &&
+        p.system_finished_run_id === stall.system_finished_run_id;
+}
+/** The reason the latest automatic (system) attempt for this incident failed:
+ * it finished without a successor, kept an unconfirmed stop for PM, or its
+ * preserved checkout was refused at launch. Undefined while it may succeed. */
+export function failedAutomaticAttempt(
+  state: CommandState,
+  matches: (e: { payload: unknown }) => boolean,
+) {
+  const attempt = eventsOfType(state.events, "host_ops_action_taken").findLast(
+    (e) => e.actor.kind === "system" && matches(e),
+  );
+  if (!attempt) return;
+  const about = (e: { payload: unknown }) =>
+    (e.payload as { action_id?: string }).action_id === attempt.id;
+  const refused = eventsOfType(state.events, "retained_writer_refused").find(
+    about,
+  );
+  if (refused)
+    return (refused.payload as { reason?: string }).reason ?? "writer_refused";
+  const finished = eventsOfType(state.events, "host_ops_action_finished").find(
+    about,
+  );
+  if (finished) {
+    const p = finished.payload as { run_id?: string; reason?: string };
+    return p.run_id ? undefined : (p.reason ?? "automatic_recovery_withdrawn");
+  }
+  const deferred = eventsOfType(state.events, "host_ops_action_deferred").find(
+    (e) => about(e) && (e.payload as { notify_pm?: boolean }).notify_pm,
+  );
+  return deferred
+    ? ((deferred.payload as { reason?: string }).reason ??
+        "terminal_exit_unconfirmed")
+    : undefined;
+}
+/** One Ops handoff per incident (to the host_ops patrol, else PM Office). */
+function publishStallHandoff(
+  tx: Parameters<Parameters<Store["uow"]["run"]>[0]>[0],
+  store: Store,
+  state: CommandState,
+  a: Assignment,
+  stall: DispatchStall,
+  clock: Clock,
+  payload: object,
+) {
+  const project = state.project_id;
+  const ops = state.assignments.find(
+    (o) =>
+      o.scope === "standing" &&
+      o.role_id === "host_ops" &&
+      o.status === "active" &&
+      !o.external &&
+      o.id !== a.id,
+  );
+  const event = {
+    ...(stall.card_id ? { card_id: stall.card_id } : {}),
+    actor: { kind: "system" as const, project_id: project },
+    created_at: clock.now(),
+    payload: payload as Event["payload"],
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project, stall.card_id ?? undefined),
+    type: "dispatch_stall_attention",
+  };
+  tx.events.append(project, event);
+  recordNotification(store.database, {
+    project_id: project,
+    event_id: event.id,
+    card_id: stall.card_id ?? undefined,
+    seq: event.seq,
+    at: event.created_at,
+    recipient: ops
+      ? { kind: "assignment", assignment_id: ops.id }
+      : { kind: "pm_office" },
+    kind: "run_attention",
+  });
+}
 export function recoveryBasis({
   session_maintenance: _maintenance,
   ...rest
@@ -103,10 +191,24 @@ export class StallPatrol {
     const causes = all.filter(
       (s) => turnKey(s) || !owners.has(s.assignment_id),
     );
+    // An automatic attempt withdrawn before any signal leaves the incident to
+    // Ops: once evidence recovers they may resume the original queue from it.
+    const withdrawn = new Set(
+      eventsOfType(state.events, "host_ops_action_finished")
+        .filter(
+          (e) =>
+            (e.payload as { result?: string }).result ===
+            "withdrawn_stall_changed",
+        )
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    );
     const consumed = new Set(
-      eventsOfType(state.events, "host_ops_action_taken").map(
-        (e) => (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
-      ),
+      eventsOfType(state.events, "host_ops_action_taken")
+        .filter((e) => e.actor.kind !== "system" || !withdrawn.has(e.id))
+        .map(
+          (e) =>
+            (e.payload as { dispatch_stall_id?: string }).dispatch_stall_id,
+        ),
     );
     const actionable = oldestPerGroup(
       causes.filter((s) => !s.restart_blocked && !consumed.has(s.cause_id)),
@@ -286,7 +388,36 @@ export class StallPatrol {
               p.system_finished_run_id === stall.system_finished_run_id;
       });
     const handled = (s: CommandState) => recorded(s, "host_ops_action_taken");
-    if (!a || handled(state) || hostOpsPending(state.events, a.id)) return;
+    // A failed automatic attempt is neither a recovery nor Ops pickup. Hand the
+    // incident off once, without starting a second stop for the same turn.
+    if (a && handled(state)) {
+      const failure = failedAutomaticAttempt(state, (e) =>
+        incidentMatches(stall, e.payload),
+      );
+      if (failure && !recorded(state, "dispatch_stall_attention"))
+        this.store.uow.run((tx) => {
+          const fresh = loadCommandState(tx, project);
+          if (
+            recorded(fresh, "dispatch_stall_attention") ||
+            !failedAutomaticAttempt(fresh, (e) =>
+              incidentMatches(stall, e.payload),
+            )
+          )
+            return;
+          const row = this.causes(fresh).find(
+            (s) => s.cause_id === stall.cause_id && s.assignment_id === a.id,
+          );
+          if (!row) return; // Original notification already delivered.
+          publishStallHandoff(tx, this.store, fresh, a, stall, this.clock, {
+            ...row,
+            can_restart: false,
+            reason: failure,
+            next_step: turnNextStep,
+          });
+        });
+      return;
+    }
+    if (!a || hostOpsPending(state.events, a.id)) return;
     const view = await this.evidence(state, a, stall);
     let reason =
       stall.restart_blocked ?? (!view.can_restart ? "unsafe_evidence" : null);
@@ -385,22 +516,16 @@ export class StallPatrol {
         publish("bell_turn_recovery_failed", { kind: recoveryPm(a) });
       // Adopt older failures too. All overdue notices for this owner's turn
       // share a handoff; the still-pending originals keep their retry path.
-      if (!recorded(fresh, "dispatch_stall_attention")) {
-        const ops = fresh.assignments.find(
-          (o) =>
-            o.scope === "standing" &&
-            o.role_id === "host_ops" &&
-            o.status === "active" &&
-            !o.external &&
-            o.id !== a.id,
+      if (!recorded(fresh, "dispatch_stall_attention"))
+        publishStallHandoff(
+          tx,
+          this.store,
+          fresh,
+          a,
+          stall,
+          this.clock,
+          incident.payload,
         );
-        publish(
-          "dispatch_stall_attention",
-          ops
-            ? { kind: "assignment", assignment_id: ops.id }
-            : { kind: "pm_office" },
-        );
-      }
     });
     if (retry && !this.signal.aborted)
       await this.recoverTurn(retry.state, retry.stall, snapshot, false);

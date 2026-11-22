@@ -657,6 +657,33 @@ test.each([
         },
         { timeout: 10_000 },
       );
+      if (
+        [
+          "backup_failure",
+          "replaced_during_backup",
+          "live_during_backup",
+          "finished_group_alive",
+        ].includes(mode)
+      ) {
+        // A failed automatic attempt is handed to Ops once; it is not pickup.
+        await vi.waitFor(async () => {
+          f.advance(31_000);
+          await service.tick();
+          expect(events("dispatch_stall_attention")).toMatchObject([
+            { payload: { can_restart: false, assignment_id: a.id } },
+          ]);
+        });
+        expect(events("host_ops_action_taken")).toHaveLength(1);
+        f.advance(16 * 60_000);
+        await vi.waitFor(async () => {
+          f.advance(31_000);
+          await service.tick();
+          expect(events("dispatch_stall_handoff_overdue")).toHaveLength(1);
+        });
+        expect(events("dispatch_stall_attention")).toHaveLength(1);
+        expect(events("host_ops_action_taken")).toHaveLength(1);
+        expect(s.notes().map((n) => n.status)).not.toContain("resolved");
+      }
       expect(f.state().runs.find((r) => r.id === s.run.id)).toEqual(s.run);
       const current = f.state().assignments.find((o) => o.id === a.id);
       expect(current?.runtime_ref).toEqual(backedUp ? null : ref);
@@ -759,6 +786,42 @@ test.each([
         expect(f.state().timeline.filter((e) => e.type === "handoff")).toEqual(
           [],
         );
+        if (mode !== "stopped_at_launch") {
+          // Refusal keeps the original work: no cancellation, no resolved
+          // notice, one refusal and one Ops handoff; repeated ticks hold.
+          const queuedRun = () => f.state().runs.find((r) => r.id === s.run.id);
+          expect(queuedRun()?.status).toBe("queued");
+          expect(events("retained_writer_refused")).toMatchObject([
+            { payload: { run_id: s.run.id, assignment_id: a.id } },
+          ]);
+          await d.tick();
+          await d.tick();
+          expect(s.runtime.provision).not.toHaveBeenCalled();
+          expect(events("retained_writer_refused")).toHaveLength(1);
+          expect(queuedRun()?.status).toBe("queued");
+          expect(s.notes().map((n) => n.status)).not.toContain("resolved");
+          await vi.waitFor(async () => {
+            f.advance(31_000);
+            await service.tick();
+            expect(events("dispatch_stall_attention")).toMatchObject([
+              {
+                payload: {
+                  assignment_id: a.id,
+                  can_restart: false,
+                  reason: "writer_checkout_refused",
+                },
+              },
+            ]);
+          });
+          f.advance(16 * 60_000);
+          await vi.waitFor(async () => {
+            f.advance(31_000);
+            await service.tick();
+            expect(events("dispatch_stall_handoff_overdue")).toHaveLength(1);
+          });
+          expect(events("host_ops_action_taken")).toHaveLength(1);
+          expect(queuedRun()?.status).toBe("queued");
+        }
         if (mode === "missing_at_launch")
           expect(existsSync(workspace)).toBe(false);
         if (mode === "shared_at_launch")

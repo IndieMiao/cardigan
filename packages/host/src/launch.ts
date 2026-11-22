@@ -89,7 +89,10 @@ import {
 } from "./preparation-queue.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
 import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
-import { retainedWriterForRun } from "./retained-writer.js";
+import {
+  RetainedWriterRefused,
+  retainedWriterForRun,
+} from "./retained-writer.js";
 import { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 import {
   effectiveRunLimit,
@@ -599,7 +602,10 @@ async function launchWithClaim(
     return result;
   } catch (error) {
     deferred = error instanceof RunTargetDeferred;
-    withdrawn = error instanceof RunWakeWithdrawn;
+    // Nothing was delivered; the original notifications keep their retry path.
+    withdrawn =
+      error instanceof RunWakeWithdrawn ||
+      error instanceof RetainedWriterRefused;
     throw error;
   } finally {
     if (withdrawn)
@@ -1370,6 +1376,15 @@ async function launch(
       token_id: tokenId,
     };
   } catch (error) {
+    // Verification precedes any credential, terminal or publication. Keep the
+    // queued Run: cancelling it would consume the work Ops must still recover.
+    if (
+      error instanceof RetainedWriterRefused &&
+      tokenId === undefined &&
+      ref === undefined &&
+      publication === undefined
+    )
+      throw error;
     const deferred =
       step !== "sentinel write" &&
       (error instanceof RunTargetDeferred ||

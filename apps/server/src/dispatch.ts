@@ -78,13 +78,16 @@ import {
   type ReadResourceLimits,
   type ResourceAccess,
   type ResourceAdmission,
+  RetainedWriterRefused,
   RunPreflightDeferred,
   RunPreparationDeferred,
   RunTargetDeferred,
   RuntimeTargetError,
   type RuntimeTargets,
+  recordRetainedWriterRefusal,
   recordRetirementDispatch,
   redactFailureLine,
+  retainedWriterRefusal,
   runCapacitySnapshot,
   settleTestReviewLimits,
   testReviewRunPrompt,
@@ -823,6 +826,9 @@ export class Dispatcher {
     // pending and no session is woken, replaced or started for it.
     if (stoppedByHuman(state.events, a.id)) return "human_stopped";
     const queued = this.queued(state, a);
+    // A refused preserved checkout waits for Ops; never retry it every tick.
+    if (queued && retainedWriterRefusal(state, queued.id))
+      return "host_operation";
     // C-244: keyed per Run snapshot; same as scanning runs for `a`.
     return runsOf(state.runs, a.id).some(
       (r) =>
@@ -1481,6 +1487,16 @@ export class Dispatcher {
         this.deferPreflight(job, queued?.queue_reason)
       )
         return skip("preflight_wait");
+      if (error instanceof RetainedWriterRefused) {
+        // The launch already withdrew its attempt and kept the queued Run.
+        recordRetainedWriterRefusal(
+          this.options.store,
+          project,
+          job.run.id,
+          this.clock,
+        );
+        return skip("writer_refused");
+      }
       if (error instanceof RunPreparationDeferred) {
         const attempt = job.attempt;
         this.options.store.uow.run(() =>

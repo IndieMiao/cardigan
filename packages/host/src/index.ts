@@ -260,6 +260,11 @@ export {
   type ResourceAdmission,
 } from "./resource-leases.js";
 export { targetProbe } from "./resource-probe.js";
+export {
+  RetainedWriterRefused,
+  recordRetainedWriterRefusal,
+  retainedWriterRefusal,
+} from "./retained-writer.js";
 export { bindRepairAttempt, crossRepairSendBoundary } from "./review-wake.js";
 export {
   applyRoleDocument,
