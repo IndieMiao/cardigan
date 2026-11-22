@@ -3,13 +3,13 @@ import os
 from pathlib import Path
 import subprocess
 import stat
-from contextlib import contextmanager
 import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # reviewed release, not cwd
-from common import (SCOPE, canonical, config, database, digest, directory, json, line, manifest,
-                    persist, private_dir, private_file, re, require, scope, send, time, transfer)
+from common import (SCOPE, canonical, config, database, digest, directory, failure_fields, json,
+                    line, manifest, persist, private_dir, private_file, re, read_failure, require,
+                    save_failure, scope, send, time, transaction, transfer)
 
 
 def ledger(root):
@@ -20,17 +20,6 @@ def ledger(root):
     db.execute('CREATE TABLE IF NOT EXISTS dispatch_peer (id TEXT PRIMARY KEY, peer TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS observed (id TEXT PRIMARY KEY, state TEXT NOT NULL, sha TEXT)')
     return db
-
-
-@contextmanager
-def transaction(db):
-    db.execute('BEGIN IMMEDIATE')
-    try:
-        yield
-        db.commit()
-    except BaseException:
-        db.rollback()
-        raise
 
 
 def event(db, ctx, rid, action):
@@ -120,7 +109,8 @@ def request(root, db, identity, fence, dial=connect):
         try:
             inp = directory(root,'inputs') / rid
             size = inp.stat().st_size if fresh else 0
-            send(p.stdin, canonical({'grant':s,'mode':'sign' if fresh else 'lookup','size':size}).encode())
+            send(p.stdin, canonical({'grant':s,'mode':'sign' if fresh else 'lookup','size':size,
+                                     'failure_details':True}).encode())
             if fresh:
                 with inp.open('rb') as f:
                     require(transfer(f,p.stdin,size) == s['sha256'])
@@ -137,8 +127,11 @@ def request(root, db, identity, fence, dial=connect):
                 raise
             send(p.stdin,b'commit')
             header = json.loads(line(p.stdout))
-            if header == {'status':'failed'}:
-                db.execute("UPDATE grants SET state='failed' WHERE id=? AND state='pending'",(rid,))
+            if header.get('status') == 'failed':
+                with transaction(db):
+                    db.execute("UPDATE grants SET state='failed' WHERE id=? AND state='pending'", (rid,))
+                    db.execute("INSERT OR REPLACE INTO observed VALUES(?,'failed',NULL)", (rid,))
+                    save_failure(db, rid, header.get('failure_category'))
                 raise ValueError('refused')
             with tempfile.TemporaryDirectory(dir=root) as tmp:
                 received = Path(tmp)/'output'
@@ -184,7 +177,7 @@ def reconcile(db, root, rid, dial=connect):
     manifest(spec, live=False)
     event(db, scope(spec), rid, 'check_receipt')
     with dial(root, peer) as p:
-        send(p.stdin, canonical({'mode':'receipt','grant':spec,'size':0}).encode())
+        send(p.stdin, canonical({'mode':'receipt','grant':spec,'size':0,'failure_details':True}).encode())
         p.stdin.close()
         response = json.loads(line(p.stdout))
         require(not p.stdout.read(1) and p.wait(timeout=10)==0)
@@ -197,7 +190,10 @@ def reconcile(db, root, rid, dial=connect):
                        ('peer_signed' if state=='signed' else 'failed', rid))
         db.execute('INSERT OR REPLACE INTO observed VALUES(?,?,?)',(rid,state,sha))
         event(db,scope(spec),rid,'receipt_'+state)
-    return response
+        details = failure_fields(response.get('failure_category')) if state == 'failed' else {}
+        if details:
+            save_failure(db, rid, details['failure_category'])
+    return {'state': state, 'sha256': sha, **details}
 
 
 def release_authority(root, db, rid, identity=None):
@@ -254,8 +250,9 @@ def main():
         row=db.execute('SELECT spec,state,output,revoked FROM grants WHERE id=?',(sys.argv[3],)).fetchone()
         require(row)
         obs=db.execute('SELECT state,sha FROM observed WHERE id=?',(sys.argv[3],)).fetchone()
+        details = read_failure(db, sys.argv[3]) if obs and obs[0] == 'failed' else {}
         print(canonical({'candidate':json.loads(row[0]),'state':row[1],'output':row[2],'revoked':bool(row[3]),
-                         'worker_receipt':{'state':obs[0],'sha256':obs[1]} if obs else None}))
+                         'worker_receipt':{'state':obs[0],'sha256':obs[1],**details} if obs else None}))
     elif cmd == 'revoke':
         rid=sys.argv[3]
         require(db.execute('UPDATE grants SET revoked=1 WHERE id=?',(rid,)).rowcount == 1)
