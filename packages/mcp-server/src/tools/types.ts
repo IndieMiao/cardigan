@@ -1,6 +1,7 @@
 import {
   holdsStandingOnlyTools,
   isStandingOnlyTool,
+  managedPmOffice,
   type ToolName,
 } from "@cardigan/domain";
 import type { z } from "zod";
@@ -92,6 +93,7 @@ export function visibleTools(
           assignment.role_id === "pm" &&
           assignment.standing_mode === "office" &&
           assignment.external === true)) &&
+      (tool.name !== "send_owner_message" || managedPmOffice(assignment)) &&
       (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );
 }

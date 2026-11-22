@@ -68,6 +68,7 @@ let store: Store,
   job: FeishuJob | undefined,
   member: string;
 const remote = {
+  text: vi.fn(async () => true),
   bindingFailure: vi.fn(async (_to: string) => {}),
   create: vi.fn(async () => `m-${randomUUID()}`),
   patch: vi.fn(async () => true),

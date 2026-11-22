@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { pipeline } from "node:stream/promises";
+import type { OwnerMessagePort } from "@cardigan/domain";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ArtifactUploads } from "./artifact-uploads.js";
 import { serveAttachmentDownload } from "./attachment-download.js";
@@ -45,6 +46,7 @@ import {
   mobileAccess,
   mobileSigningTool,
 } from "./tools/mobile-signing.js";
+import { ownerMessageTool } from "./tools/owner-message.js";
 import {
   type ReservationOptions,
   reservationTool,
@@ -57,6 +59,7 @@ export interface McpServerOptions
     SupportToolOptions,
     HostOpsToolOptions,
     CheckLogOptions,
+    OwnerMessagePort,
     ReservationOptions,
     MobileSigningOptions,
     ProbeToolOptions {
@@ -116,6 +119,7 @@ export function serverTools(
     SupportToolOptions &
     HostOpsToolOptions &
     CheckLogOptions &
+    OwnerMessagePort &
     ReservationOptions &
     MobileSigningOptions &
     ProbeToolOptions,
@@ -126,6 +130,7 @@ export function serverTools(
     runProbeTool(options),
     mobileSigningTool(options),
     reservationTool(options),
+    ownerMessageTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -522,6 +527,7 @@ export async function startMcpServer(
         assignment.scope,
         assignment.role_id,
         assignment.standing_mode ?? null,
+        assignment.external === true,
       ]);
       let fingerprint = catalogs.get(key);
       if (fingerprint === undefined) {

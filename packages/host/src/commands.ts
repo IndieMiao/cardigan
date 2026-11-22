@@ -17,6 +17,7 @@ import {
   applyStandingMode,
   holdsStandingOnlyTools,
   isStandingOnlyTool,
+  managedPmOffice,
   standingModeFromTools,
   standingTools,
 } from "@cardigan/domain";
@@ -209,6 +210,9 @@ function modeScopedTools(
   assignment: Assignment | undefined,
   allowed_tools: readonly RoleReference["allowed_tools"][number][],
 ): readonly RoleReference["allowed_tools"][number][] {
+  allowed_tools = allowed_tools.filter(
+    (tool) => tool !== "send_owner_message" || managedPmOffice(assignment),
+  );
   if (
     assignment === undefined ||
     assignment.scope !== "standing" ||

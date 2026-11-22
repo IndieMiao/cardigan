@@ -234,6 +234,7 @@ export * from "./merge-override.js";
 export * from "./merge-stage.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
+export * from "./owner-message.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./pm-notification.js";
 export * from "./ports.js";

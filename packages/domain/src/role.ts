@@ -63,6 +63,7 @@ export const STANDING_ROLE_TOOLS = [
   "withdraw_review",
   "create_card",
   "update_card",
+  "send_owner_message",
   "set_merge_solo",
   "set_merge_window",
   "reserve_machine_resource",
@@ -84,6 +85,7 @@ export const STANDING_ROLE_TOOLS = [
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
 export const STANDING_ONLY_TOOLS = [
+  "send_owner_message",
   "set_merge_solo",
   "set_merge_window",
   "reserve_machine_resource",

@@ -953,6 +953,7 @@ export async function serveWrite(
         .object({
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
+          pm_owner_messages: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
           cross_card_read: z.boolean().optional(),
           auto_merge_paused: z.boolean().optional(),
@@ -1012,6 +1013,9 @@ export async function serveWrite(
                 system_auto_assign_verifiers:
                   input.system_auto_assign_verifiers,
               }
+            : {}),
+          ...(input.pm_owner_messages !== undefined
+            ? { pm_owner_messages: input.pm_owner_messages }
             : {}),
           ...(input.system_reminders !== undefined
             ? { system_reminders: input.system_reminders }

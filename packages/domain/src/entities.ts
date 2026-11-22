@@ -69,6 +69,7 @@ export const toolNames = [
   "request_delivery_rework",
   "create_card",
   "update_card",
+  "send_owner_message",
   "set_merge_solo",
   "set_merge_window",
   "reserve_machine_resource",
