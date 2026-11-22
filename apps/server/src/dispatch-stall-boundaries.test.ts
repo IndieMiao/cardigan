@@ -644,8 +644,33 @@ test("a paused reviewer's directed instruction recovers on independently proven 
     });
     await f.service.tick();
     expect(
-      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
     ).toHaveLength(0);
+    // C-573: an outstanding failure that nobody picked up is not a recovery.
+    f.advance(15 * 60_000);
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      const escalation = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "dispatch_stall_handoff_overdue" &&
+            (e.payload as { assignment_id: string }).assignment_id === a.id,
+        );
+      expect(escalation).toHaveLength(1);
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .filter((n) => n.event_id === escalation[0]?.id),
+      ).toMatchObject([{ recipient: { kind: "pm_office" } }]);
+    });
+    expect(f.runtime.release).not.toHaveBeenCalled();
     f.advance(30_000); // Next scheduled patrol, same outstanding notice.
     proof.mockResolvedValue({ ok: true, value: true });
     expect(await row()).toMatchObject({
@@ -656,14 +681,26 @@ test("a paused reviewer's directed instruction recovers on independently proven 
     await vi.waitFor(async () => {
       await f.service.tick();
       expect(
-        f.state().events.some((e) => e.type === "host_ops_action_finished"),
+        f
+          .state()
+          .events.some(
+            (e) =>
+              e.type === "host_ops_action_finished" &&
+              (e.payload as { assignment_id?: string }).assignment_id === a.id,
+          ),
       ).toBe(true);
     });
     expect(
       f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
     ).toHaveLength(1);
     expect(
-      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "host_ops_action_taken" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
     ).toHaveLength(1);
     expect(proof).toHaveBeenCalledWith(ref, {
       project_id: f.project,
@@ -759,6 +796,45 @@ test.each(["dirty", "unknown"])(
     }
   },
 );
+
+test("an existing queued successor is preserved when both the snapshot and exact terminal row are missing", async () => {
+  const { f, a, notice } = endedReviewer();
+  const successor = f.apply((state, actor, ports) =>
+    queueRun(
+      state,
+      actor,
+      {
+        assignment_id: a.id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      ports,
+    ),
+  );
+  const missing = {
+    ok: false,
+    error: { code: "runtime_not_found", message: "missing" },
+  } as const;
+  vi.mocked(f.runtime.status).mockResolvedValue(missing);
+  f.runtime.observe_retirement = vi.fn(async () => missing);
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    expect(f.runtime.observe_retirement).toHaveBeenCalled();
+    expect(f.options.startRun).not.toHaveBeenCalled();
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    expect(f.state().runs.find((r) => r.id === successor.id)?.status).toBe(
+      "queued",
+    );
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id)?.status,
+    ).toBe("pending");
+  } finally {
+    await dispatcher.close();
+  }
+});
 
 test.each([
   "automatic",

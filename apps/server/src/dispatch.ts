@@ -999,9 +999,7 @@ export class Dispatcher {
             assignment_id: a.id,
           })
           .catch(() => undefined);
-        previousExitConfirmed = exact?.ok
-          ? exact.value === "exited"
-          : exact?.error.code === "runtime_not_found";
+        previousExitConfirmed = exact?.ok === true && exact.value === "exited";
         if (
           !exact?.ok &&
           exact?.error.code === "runtime_unavailable" &&

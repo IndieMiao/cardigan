@@ -58,9 +58,7 @@ export async function stopSystemTurn(
   if (!ref) return "terminal_binding_changed";
   const confirmed = async () => {
     const exact = await observeTurnOwner(runtime, ref, owner);
-    return exact?.ok
-      ? exact.value === "exited"
-      : exact?.error.code === "runtime_not_found";
+    return exact?.ok === true && exact.value === "exited";
   };
   if (alreadyStopping)
     return (await confirmed()) ? "exited" : "terminal_exit_unconfirmed";

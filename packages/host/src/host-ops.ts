@@ -162,17 +162,22 @@ export class HostOpsService {
       options.store,
       this.clock,
       options.runtime,
-      (project) => this.stallExecution(project),
+      (project, machine) => this.stallExecution(project, machine),
       this.contextAbort.signal,
     );
   }
   /** A project-local worker may have a different account and workspace root
    * than the host default. Never fall back across a rejected registry binding. */
-  private stallExecution(project: ProjectId) {
+  private stallExecution(
+    project: ProjectId,
+    machine: Assignment["machine_id"],
+  ) {
     try {
       return this.options.workerExecution
-        ? this.options.workerExecution(project, "local")
-        : this.options.contextUsage?.execution;
+        ? this.options.workerExecution(project, machine)
+        : machine === "local"
+          ? this.options.contextUsage?.execution
+          : undefined;
     } catch {
       return undefined;
     }
@@ -1359,7 +1364,7 @@ export class HostOpsService {
           ? await stallWorkspace(
               state,
               a,
-              this.stallExecution(project),
+              this.stallExecution(project, a.machine_id),
               this.contextAbort.signal,
             )
           : "unknown";

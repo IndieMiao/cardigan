@@ -26,6 +26,7 @@ import {
   dispatchStallCauses,
 } from "./dispatch-stalls.js";
 import { stallEvidence } from "./stall-evidence.js";
+import { overdueStallHandoffs } from "./stall-handoff.js";
 
 const turnNextStep =
   "系统会复查原通知；请主机运维从派发停滞核对终端名字、归属及客户端状态，确认空闲后续办。不能确认时保留会话，不自动重启。";
@@ -46,7 +47,10 @@ export class StallPatrol {
     private store: Store,
     private clock: Clock,
     private runtime: Runtime,
-    private execution: (project: ProjectId) => ExecutionConfig | undefined,
+    private execution: (
+      project: ProjectId,
+      machine: Assignment["machine_id"],
+    ) => ExecutionConfig | undefined,
     private signal: AbortSignal,
   ) {}
   private causes(state: CommandState) {
@@ -114,7 +118,7 @@ export class StallPatrol {
       state,
       a,
       this.runtime,
-      this.execution(state.project_id),
+      this.execution(state.project_id, a.machine_id),
       this.signal,
       stall?.system_finished_run_id,
     );
@@ -171,6 +175,37 @@ export class StallPatrol {
           key(e.payload as unknown as DispatchStall),
         ),
       );
+      for (const original of overdueStallHandoffs(
+        state.events,
+        rows,
+        this.clock.now(),
+      )) {
+        const row = original.payload as unknown as DispatchStall;
+        const event = {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project, row.card_id ?? undefined),
+          ...(row.card_id ? { card_id: row.card_id } : {}),
+          actor: { kind: "system" as const, project_id: project },
+          type: "dispatch_stall_handoff_overdue",
+          created_at: this.clock.now(),
+          payload: {
+            assignment_id: row.assignment_id,
+            cause_id: row.cause_id,
+            handoff_id: original.id,
+            body: `${row.assignment_id} 的派发停滞移交已满 15 分钟，未记录接续操作。请 PM Office 核对运维承接。`,
+          },
+        };
+        tx.events.append(project, event);
+        recordNotification(this.store.database, {
+          project_id: project,
+          event_id: event.id,
+          card_id: row.card_id ?? undefined,
+          seq: event.seq,
+          at: event.created_at,
+          kind: "run_attention",
+          recipient: { kind: "pm_office" },
+        });
+      }
       for (const stall of rows) {
         if (stall.system_finished_run_id || sent.has(key(stall))) continue;
         const event = {
@@ -324,7 +359,9 @@ export class StallPatrol {
         );
         publish(
           "dispatch_stall_attention",
-          ops ? { kind: "assignment", assignment_id: ops.id } : undefined,
+          ops
+            ? { kind: "assignment", assignment_id: ops.id }
+            : { kind: "pm_office" },
         );
       }
     });

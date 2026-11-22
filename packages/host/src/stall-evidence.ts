@@ -13,6 +13,7 @@ import {
   agentProcessCommand,
   type ExecutionConfig,
   executionPaths,
+  runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
 import { captureTranscript } from "./capture-transcript.js";
 
@@ -27,6 +28,29 @@ for path in sys.argv[1:]:
     if not stat.S_ISDIR(mode): sys.exit(1)
 else: print("present")`;
 
+/** No fallback from a remote Assignment to the controller or another registration. */
+function boundWorkspaceTarget(
+  project: CommandState["project_id"],
+  a: Assignment,
+  execution?: ExecutionConfig,
+) {
+  if (a.external) return false;
+  if (a.machine_id === "local")
+    return (
+      !execution?.target ||
+      (execution.target.project_id === project &&
+        execution.target.machine_id === "local")
+    );
+  const ref = a.runtime_ref;
+  return (
+    execution?.mode === "agent-ssh" &&
+    !!ref &&
+    execution.target?.project_id === project &&
+    execution.target.machine_id === a.machine_id &&
+    runtimeOwnsRef(execution, ref)
+  );
+}
+
 type Workspace = "clean" | "dirty" | "unknown" | "no_worktree";
 /** Fixed placement only. Use the worker account for agent-ssh; never return paths, stderr or filenames. */
 export async function stallWorkspace(
@@ -35,7 +59,7 @@ export async function stallWorkspace(
   execution?: ExecutionConfig,
   signal?: AbortSignal,
 ): Promise<Workspace> {
-  if (a.external || a.machine_id !== "local") return "unknown";
+  if (!boundWorkspaceTarget(state.project_id, a, execution)) return "unknown";
   if (
     a.scope === "standing" &&
     !a.worktree_path &&
@@ -51,11 +75,7 @@ export async function stallWorkspace(
     role?.worktree === "none"
   )
     return "no_worktree";
-  if (
-    !execution ||
-    (execution.target && execution.target.machine_id !== "local")
-  )
-    return "unknown";
+  if (!execution) return "unknown";
   try {
     const roots = executionPaths(execution, state.project_id, a.id);
     const path = join(roots.worktreesRoot, state.project_id, a.id);
@@ -159,14 +179,13 @@ export async function stallEvidence(
   signal?: AbortSignal,
   systemTurn?: string,
 ) {
+  const bound = boundWorkspaceTarget(state.project_id, a, execution);
   const [workspace, observed, owner] = await Promise.all([
     stallWorkspace(state, a, execution, signal),
-    a.runtime_ref
+    a.runtime_ref && (a.machine_id === "local" || bound)
       ? runtime.status(a.runtime_ref).catch(() => undefined)
       : undefined,
-    systemTurn &&
-    a.runtime_ref?.machine_id === a.machine_id &&
-    a.machine_id === "local"
+    systemTurn && a.runtime_ref?.machine_id === a.machine_id && bound
       ? observeTurnOwner(
           runtime,
           a.runtime_ref,

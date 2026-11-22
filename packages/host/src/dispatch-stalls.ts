@@ -259,6 +259,13 @@ export function dispatchStallCauses(
       (n.next_attempt_at && n.next_attempt_at > now)
     )
       continue;
+    // The original incident remains visible. Deliver its PM reminder normally,
+    // but never open a second stall solely because that reminder is still unread.
+    if (
+      eventById(state.events, n.event_id)?.type ===
+      "dispatch_stall_handoff_overdue"
+    )
+      continue;
     const sent = n.run_id && runById(state.runs, n.run_id);
     const owner =
       n.recipient.kind === "assignment"
