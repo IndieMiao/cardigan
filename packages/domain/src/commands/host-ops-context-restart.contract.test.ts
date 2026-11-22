@@ -451,6 +451,27 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
   expect(
     pendingHostOpsActions(apply(pending, withdraw(pending)).events),
   ).toHaveLength(0);
+  // The withdrawal reports whether this attempt wrote its writer receipt;
+  // omitted when the caller cannot say (later receipts then cannot stand).
+  expect(withdraw(pending).events[0]?.payload).not.toHaveProperty(
+    "backup_recorded",
+  );
+  for (const recorded of [false, true])
+    expect(
+      value(
+        withdrawUnstartedStallRestart(
+          pending,
+          system,
+          started.data.action_id,
+          f.io,
+          "workspace_backup_unconfirmed",
+          recorded,
+        ),
+      ).events[0]?.payload,
+    ).toMatchObject({
+      result: "withdrawn_stall_changed",
+      backup_recorded: recorded,
+    });
   // A pre-signal withdrawal leaves the incident to Ops, never to a second
   // automatic attempt; a signalled or in-flight attempt still consumes it.
   const withdrawn = apply(pending, withdraw(pending));

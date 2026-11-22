@@ -208,7 +208,8 @@ type BackupRow = {
 type IncidentAction = Pick<
   HostOpsExecution,
   "assignment_id" | "dispatch_stall_id" | "system_finished_run_id"
->;
+> &
+  Partial<Pick<HostOpsExecution, "action_id">>;
 const sameIncident = (
   action: IncidentAction,
   other: Partial<IncidentAction> | undefined,
@@ -219,33 +220,46 @@ const sameIncident = (
     ? other.system_finished_run_id === action.system_finished_run_id
     : !!action.dispatch_stall_id &&
       other.dispatch_stall_id === action.dispatch_stall_id);
-/** The incident's actions in event order, and the first one that settled
- * (finished with a successor Run). A writer settles only after recording its
- * own system backup receipt, so that receipt is mandatory evidence. */
+/** The incident's actions in event order, the first one that settled
+ * (finished with a successor Run; a writer settles only after recording its
+ * receipt), and the attempts positively known not to have written a receipt
+ * (withdrawn with `backup_recorded: false`). Anything else may have written one. */
 function incidentHistory(state: CommandState, action: IncidentAction) {
   const order = new Map<string, number>();
   for (const e of eventsOfType(state.events, "host_ops_action_taken"))
     if (sameIncident(action, e.payload as Partial<IncidentAction>))
       order.set(e.id, order.size);
   let settled: number | undefined;
+  const noReceipt = new Set<string>();
   for (const e of eventsOfType(state.events, "host_ops_action_finished")) {
-    const p = e.payload as { action_id?: string; run_id?: string };
+    const p = e.payload as {
+      action_id?: string;
+      run_id?: string;
+      backup_recorded?: boolean;
+    };
     const at = p.action_id ? order.get(p.action_id) : undefined;
-    if (p.run_id && at !== undefined && (settled === undefined || at < settled))
-      settled = at;
+    if (at === undefined || !p.action_id) continue;
+    if (p.run_id && (settled === undefined || at < settled)) settled = at;
+    if (!p.run_id && p.backup_recorded === false) noReceipt.add(p.action_id);
   }
-  return { order, settled };
+  /** An attempt before `limit` (other than the asking one) that may have
+   * written a receipt now unreadable. */
+  const unaccounted = (limit: number) =>
+    [...order].some(
+      ([id, at]) => at < limit && id !== action.action_id && !noReceipt.has(id),
+    );
+  return { order, settled, unaccounted };
 }
 /** The incident's original directory identity: its earliest system backup
  * receipt, provided that receipt's action is not later than the first settled
- * action. A receipt written by an unsettled attempt still counts. When the
- * first settled action's receipt is unreadable, no later receipt replaces it.
- * Looked up by incident (ended Run or cause), never by a newer action id. */
+ * action and every earlier attempt is known not to have written one. A receipt
+ * from an unsettled attempt still counts; an unreadable earlier receipt is
+ * never replaced by a later one. Looked up by incident, never by action id. */
 export function firstIncidentBackup(
   state: CommandState,
   action: IncidentAction,
 ): BackupRow | undefined {
-  const { order, settled } = incidentHistory(state, action);
+  const { order, settled, unaccounted } = incidentHistory(state, action);
   let earliest: { at: number; row: BackupRow } | undefined;
   for (const e of eventsOfType(
     state.events,
@@ -262,27 +276,29 @@ export function firstIncidentBackup(
       earliest = { at, row: p };
   }
   if (!earliest) return;
-  return settled === undefined || earliest.at <= settled
-    ? earliest.row
-    : undefined;
+  if (settled !== undefined && earliest.at > settled) return;
+  return unaccounted(earliest.at) ? undefined : earliest.row;
 }
-/** A recovery of this incident already settled its session (and possibly
- * refused the preserved checkout): its first receipt is mandatory evidence. */
+/** The incident's first receipt is mandatory evidence: an action settled, a
+ * launch refused the preserved checkout, or an earlier attempt may have
+ * written a receipt that is now unreadable. */
 export function incidentWriterRefused(
   state: CommandState,
   action: IncidentAction,
 ) {
+  const { settled, unaccounted } = incidentHistory(state, action);
   return (
-    incidentHistory(state, action).settled !== undefined ||
+    settled !== undefined ||
+    unaccounted(Number.POSITIVE_INFINITY) ||
     eventsOfType(state.events, "retained_writer_refused").some((e) =>
       sameIncident(action, e.payload as Partial<IncidentAction>),
     )
   );
 }
 /** The takeover's identity verdict for a freshly computed directory seal:
- * the matching first record, `null` (mismatch, or an incident whose required
- * first record is missing), or `undefined` when this action records the first
- * (no receipt was ever written and nothing has settled). */
+ * the matching first record, `null` (mismatch, or a required first record that
+ * is missing or unprovable), or `undefined` when this action records the
+ * first (no attempt may have written a receipt and nothing has settled). */
 export function incidentIdentity(
   state: CommandState,
   action: IncidentAction,

@@ -1037,6 +1037,10 @@ export function withdrawUnstartedStallRestart(
   actionId: HostOpsExecution["action_id"],
   ports: CommandPorts,
   reason?: string,
+  /** Whether this attempt wrote its writer backup receipt before withdrawing.
+   * A later receipt can stand for the incident only after earlier attempts
+   * are positively known not to have written one. */
+  backupRecorded?: boolean,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const action = pendingHostOpsActions(state.events).find(
@@ -1059,6 +1063,9 @@ export function withdrawUnstartedStallRestart(
       assignment_id: action.assignment_id,
       result: "withdrawn_stall_changed",
       ...(reason ? { reason } : {}),
+      ...(backupRecorded === undefined
+        ? {}
+        : { backup_recorded: backupRecorded }),
       body: "派发积压、终端或工作区证据已改变；未停止旧会话，请 PM 核对。",
     });
   });

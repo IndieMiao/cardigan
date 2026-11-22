@@ -1275,6 +1275,14 @@ export class HostOpsService {
         return effect.data;
       });
       if (!lease) return;
+      // Whether this attempt has a writer backup receipt on record. Reported on
+      // withdrawal: a later receipt may stand for the incident only when no
+      // earlier attempt may have written one.
+      let receiptRecorded = read().events.some(
+        (e) =>
+          e.type === "dispatch_stall_backup_verified" &&
+          (e.payload as { action_id?: string }).action_id === action.action_id,
+      );
       const fail = (reason: string) => {
         if (action.dispatch_stall_id) {
           const withdrawn = store.uow.run((tx) => {
@@ -1285,6 +1293,7 @@ export class HostOpsService {
                 action.action_id,
                 { clock: this.clock, ids: tx.ids },
                 reason,
+                receiptRecorded,
               ),
             );
             persistEffect(tx, project, effect);
@@ -1681,6 +1690,7 @@ export class HostOpsService {
                   });
                 }
               });
+              receiptRecorded = true;
             } catch {
               fail(
                 placementChanged
