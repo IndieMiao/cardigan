@@ -164,9 +164,18 @@ export class MachineChecks extends MachineCheckJournal {
     project: string,
     machine: string | null,
     binding: string | null,
-    authorize: (tx: StoreTransactionContext) => string,
+    caller:
+      | ((tx: StoreTransactionContext) => string)
+      | {
+          onVerified(
+            tx: StoreTransactionContext,
+            results: Record<CheckKind, CheckResult>,
+          ): void;
+        },
   ) {
-    this.store.uow.run(authorize);
+    const authorize = typeof caller === "function" ? caller : undefined;
+    if (authorize) this.store.uow.run(authorize);
+    const jobs: Partial<Record<CheckKind, string>> = {};
     const failed = (reason: string): CheckResult => ({
       status: "failed",
       failed_steps: [reason],
@@ -187,9 +196,9 @@ export class MachineChecks extends MachineCheckJournal {
           project,
           machine,
           kind,
-          "web",
+          authorize ? "web" : "patrol",
           (tx, job, joined) => {
-            const member = authorize(tx);
+            const member = authorize?.(tx);
             if (!tx.machines.get(project, machine))
               throw new HttpRejection(404, "not_found", "项目未登记此机器");
             machineAudit(
@@ -200,13 +209,15 @@ export class MachineChecks extends MachineCheckJournal {
                 machine_id: machine,
                 project_id: project,
                 kind,
-                member_id: member,
+                ...(member !== undefined ? { member_id: member } : {}),
                 check_id: job.id,
               },
+              authorize ? "human" : "system",
             );
           },
         );
         if (joined) return failed("机器检查占用中，请稍后重试");
+        jobs[kind] = job.id;
         try {
           const result = await this.execute(
             job,
@@ -253,6 +264,25 @@ export class MachineChecks extends MachineCheckJournal {
         };
       const worker = await run("worker");
       const machineResult = await run("machine");
+      const checks = { worker, machine: machineResult };
+      if (typeof caller !== "function") {
+        this.store.uow.run((tx) => {
+          if (
+            !this.signal.aborted &&
+            this.currentBinding(project, tx.machines.get(project, machine)) ===
+              binding &&
+            (["worker", "machine"] as const).every(
+              (kind) =>
+                checks[kind].status === "passed" &&
+                !checks[kind].failed_steps.length &&
+                jobs[kind] &&
+                this.latest(machine, project, kind)?.id === jobs[kind],
+            )
+          )
+            caller.onVerified(tx, checks);
+        });
+        return checks;
+      }
       try {
         if (
           this.store.uow.read((tx) =>

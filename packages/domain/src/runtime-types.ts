@@ -26,6 +26,7 @@ export const retirementReasons = {
   hc_failed: "hc 请求未成功",
   identity_changed: "终端身份或启动代次不匹配",
   terminal_busy: "终端仍在工作或等待处理",
+  conditional_close_unavailable: "终端管理器不支持绑定原代次关闭",
   kept_terminal: "终端在程序退出后会保留 shell",
   terminal_not_live: "hc 未报告终端存活或已结束",
   missing_pid: "hc 未返回有效的终端进程号",
@@ -65,9 +66,12 @@ export type IdleRetirementResult =
 /** These are properties of this terminal/platform. Do not keep retrying signals. */
 export const retirementObserveOnly = (evidence?: RetirementEvidence) =>
   evidence !== undefined &&
-  ["kept_terminal", "pidfd_unavailable", "unsupported"].includes(
-    evidence.reason,
-  );
+  [
+    "kept_terminal",
+    "pidfd_unavailable",
+    "unsupported",
+    "conditional_close_unavailable",
+  ].includes(evidence.reason);
 
 export type RetirementSettlement =
   | IdleRetirementResult

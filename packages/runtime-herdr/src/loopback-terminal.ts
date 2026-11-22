@@ -29,6 +29,16 @@ export async function loopbackTerminal(
     session: string;
   },
 ) {
+  return workerTerminalProbe(execution, {
+    ...binding,
+    local: true,
+    platform: "linux",
+    root: execution.agentRoot,
+    gid: execution.gid,
+  });
+}
+/** Pinned SSH account, not a mutable hc relay alias. No core autostart. */
+export async function workerTerminalProbe(execution: Ssh, binding: object) {
   try {
     const source = await readFile(
       new URL("../../../deploy/inspect-worker.py", import.meta.url),
@@ -36,19 +46,7 @@ export async function loopbackTerminal(
     );
     const cmd = await agentProcessCommand(
       execution,
-      [
-        "/usr/bin/python3",
-        "-IB",
-        "-c",
-        source,
-        JSON.stringify({
-          ...binding,
-          local: true,
-          platform: "linux",
-          root: execution.agentRoot,
-          gid: execution.gid,
-        }),
-      ],
+      ["/usr/bin/python3", "-IB", "-c", source, JSON.stringify(binding)],
       { workerRuntimeDir: true },
     );
     const { stdout } = await promisify(execFile)(cmd.file, cmd.args, {

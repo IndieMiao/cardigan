@@ -19,6 +19,30 @@ import {
 export { retirementOwnsSession } from "./retirement-session.js";
 export * from "./session-maintenance-types.js";
 
+export function darwinWorker(state: CommandState, a: Assignment) {
+  return (
+    a.machine_id !== "local" &&
+    state.machines?.some(
+      (m) => m.id === a.machine_id && ["macos", "darwin"].includes(m.os),
+    ) === true
+  );
+}
+
+export function needsRetirementHandoff(state: CommandState, a: Assignment) {
+  const p = a.idle_retirement;
+  return (
+    a.scope === "work_item" &&
+    !a.external &&
+    a.status === "active" &&
+    !!p &&
+    !p.handoff &&
+    (p.failures >= 3 ||
+      (p.phase === "waiting" && p.last_failure === "timeout")) &&
+    retirementOwnsSession(a) &&
+    darwinWorker(state, a)
+  );
+}
+
 function relatedOwners(state: CommandState, a: Assignment) {
   return state.assignments.filter(
     (other) =>
@@ -155,6 +179,8 @@ export function sessionMaintenanceCandidate(
   )
     return excluded("operation_pending");
   if (a.role_upgrade) return excluded("upgrade_pending");
+  if (a.idle_retirement?.handoff && retirementOwnsSession(a))
+    return excluded("retained_for_dispatch");
   if (a.idle_retirement?.phase === "stopping")
     return excluded("retirement_pending");
   if (!a.runtime_ref) return excluded("no_session");
