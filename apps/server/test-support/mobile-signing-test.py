@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import signal
 import sqlite3
 import struct
 import subprocess
@@ -290,6 +291,126 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         self.assertEqual(receipt,host.reconcile(self.db,self.host,rid,self.dial))
         with self.assertRaises(ValueError): self.call()
         self.assertEqual((self.worker/'uses').read_text(),'used\n')
+
+    def actions(self):
+        return [a for (a,) in self.db.execute('SELECT action FROM events WHERE request=? ORDER BY rowid',(self.spec['id'],))]
+
+    def test_budget_scales_with_input_size_and_private_limits(self):
+        # C-598: 334 MB at the default 512 KiB/s each way, plus ten minutes for signing.
+        self.assertEqual(host.budget(self.host, 0), 600)
+        self.assertEqual(host.budget(self.host, 334_000_000), 600 + 1275)
+        self.assertEqual(host.budget(self.host, 512*1024 + 1), 603)
+        save(self.host/'limits.json', canonical({'bytes_per_second': 128*1024}))
+        self.assertEqual(host.budget(self.host, 334_000_000), 600 + 5097)
+        save(self.host/'limits.json', canonical({'base_seconds': 60, 'bytes_per_second': 16*1024}))
+        self.assertEqual(host.budget(self.host, 16*1024), 62)
+        for bad in ({'base_seconds': 59}, {'bytes_per_second': 1}, {'base_seconds': 86401},
+                    {'base_seconds': 600.5}, {'base_seconds': True}, {'other': 1}, []):
+            save(self.host/'limits.json', canonical(bad))
+            with self.assertRaises(ValueError): host.budget(self.host, 1)
+        save(self.host/'limits.json', canonical({})); (self.host/'limits.json').chmod(0o644)
+        with self.assertRaises(ValueError): host.budget(self.host, 1)
+        (self.host/'limits.json').unlink(); (self.host/'limits.json').symlink_to(self.host/'routes.json')
+        with self.assertRaises(ValueError): host.budget(self.host, 1)
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_own_deadline_records_timed_out(self):
+        reported = []
+        with patch('host.budget', return_value=1):
+            with self.assertRaises(host.Stopped):
+                host.request(self.host, self.db, self.ctx, lambda: time.sleep(3), self.dial,
+                             accepted=lambda *a: reported.append(a))
+        self.assertEqual(reported, [(self.spec['id'], 1, 'sign')])
+        self.assertEqual(self.actions(), ['registered', 'approved', 'request', 'timed_out'])
+        self.assertEqual(self.db.execute('SELECT state,output FROM grants').fetchone(), ('pending', None))
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertFalse((self.worker/'uses').exists())
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_killed_after_peer_signed_same_run_retrieves(self):
+        # C-598: the server helper is terminated after the signer finished but
+        # before the output reached the control host. The next request of the
+        # same Run, after an operator reconcile, fetches the stored bytes by lookup.
+        rid = self.spec['id']; reads = []
+        real_line = host.line
+        def interrupted_line(stream):
+            data = real_line(stream); reads.append(data)
+            if data.startswith(b'{"sha256"'):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+            return data
+        previous = signal.signal(signal.SIGTERM, host.stop('interrupted'))
+        try:
+            with patch('host.line', interrupted_line):
+                with self.assertRaises(host.Stopped): self.call()
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(self.actions(), ['registered','approved','request','dispatch','interrupted'])
+        self.assertFalse((self.host/'outputs'/rid).exists())
+        self.assertEqual(host.reconcile(self.db,self.host,rid,self.dial)['state'], 'signed')
+        self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(), ('peer_signed',))
+        # A lookup never reads the local input copy; without it the budget is the largest output.
+        (self.host/'inputs'/rid).unlink()
+        reported = []
+        result = host.request(self.host, self.db, self.ctx, lambda: None, self.dial,
+                              accepted=lambda *a: reported.append(a))
+        out = self.host/'outputs'/rid
+        self.assertEqual(result, (rid, digest(out)))
+        self.assertEqual(digest(out), digest(self.worker/'outputs'/rid))
+        self.assertEqual(reported[0], (rid, host.budget(self.host, host.LIMIT), 'lookup'))
+        self.assertEqual(self.actions()[-4:], ['receipt_signed','lookup','reconcile','signed'])
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+        self.assertEqual(host.request(self.host, self.db, self.ctx, lambda: None, self.dial,
+                                      accepted=lambda *a: reported.append(a)), result)
+        self.assertEqual(reported[-1][::2], (rid, 'stored')); self.assertEqual(self.calls, 3)
+
+    def test_main_reports_acceptance_then_fences(self):
+        out = directory(self.host,'outputs')/self.spec['id']
+        save(out, 'signed-fixture')
+        self.db.execute("UPDATE grants SET state='signed',output=?", (digest(out),))
+        proc = subprocess.Popen([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'request'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        with proc:
+            proc.stdin.write(canonical(self.ctx).encode()+b'\n'); proc.stdin.flush()
+            self.assertEqual(proc.stdout.readline(), f'accepted {self.spec["id"]} 600 stored\n'.encode())
+            self.assertEqual(proc.stdout.readline(), b'ready\n')
+            proc.stdin.write(b'commit\n'); proc.stdin.close()
+            self.assertEqual(proc.stdout.read(), f'{self.spec["id"]} {digest(out)}\n'.encode())
+        self.assertEqual(proc.returncode, 0)
+
+    def test_check_revalidates_a_remembered_receipt(self):
+        rid = self.spec['id']
+        out = directory(self.host,'outputs')/rid
+        save(out, 'signed-fixture')
+        def check(identity=self.ctx):
+            return subprocess.run([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'check', rid],
+                                  input=canonical(identity).encode()+b'\n', capture_output=True)
+        self.assertNotEqual(check().returncode, 0)  # approved, not signed
+        self.db.execute("UPDATE grants SET state='signed',output=?", (digest(out),))
+        done = check()
+        self.assertEqual((done.returncode, done.stdout), (0, f'{rid} {digest(out)}\n'.encode()))
+        self.assertNotEqual(check({**self.ctx, 'run': 'R-2'}).returncode, 0)
+        events = self.actions()
+        self.db.execute('UPDATE grants SET revoked=1')
+        self.assertNotEqual(check().returncode, 0)
+        self.db.execute('UPDATE grants SET revoked=0')
+        with sqlite3.connect(self.host/'audit.sqlite') as db:
+            db.execute('UPDATE grants SET spec=?', (canonical({**self.spec, 'expires': 1}),))
+        self.assertNotEqual(check().returncode, 0)
+        self.assertEqual(self.actions(), events)  # read-only: no audit rows, no bytes
+
+    @unittest.skipUnless(os.path.exists('/usr/bin/ssh'), 'helper dials the fixed OpenSSH client')
+    def test_terminated_helper_records_interrupted(self):
+        proc = subprocess.Popen([sys.executable, '-IB', str(HELPERS/'host.py'), str(self.host), 'request'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        with proc:
+            # Approved but routed to a peer this fixture never answers: block before ready.
+            save(self.host/'ssh.conf', 'Host fixture\n  ProxyCommand /bin/sleep 30\n')
+            proc.stdin.write(canonical(self.ctx).encode()+b'\n'); proc.stdin.flush()
+            self.assertTrue(proc.stdout.readline().startswith(f'accepted {self.spec["id"]} '.encode()))
+            proc.terminate()
+            self.assertNotEqual(proc.wait(timeout=10), 0)
+        self.assertEqual(self.actions()[-2:], ['request', 'interrupted'])
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_worker_historical_receipt_is_metadata_only(self):

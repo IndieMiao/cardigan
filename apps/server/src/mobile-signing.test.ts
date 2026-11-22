@@ -1,12 +1,20 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { buffer } from "node:stream/consumers";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import {
   openMobileArtifact,
   requestMobileSignature,
@@ -115,3 +123,256 @@ test("Run can fetch the exact audited bytes, not a different request, Run, revok
     rmSync(data, { recursive: true, force: true });
   }
 });
+
+const FAKE = fileURLToPath(
+  new URL("../test-support/mobile-signing-fake-host.py", import.meta.url),
+);
+const jobScope = (run: string) => ({
+  project: "project",
+  machine: "worker",
+  card: "C-1",
+  run,
+  assignment: "A-1",
+  platform: "android" as const,
+  worker_uid: 42,
+});
+async function until<T>(read: () => Promise<T>, done: (value: T) => boolean) {
+  for (let i = 0; i < 250; i++) {
+    const value = await read();
+    if (done(value)) return value;
+    await delay(20);
+  }
+  throw new Error("condition not reached");
+}
+type Answer = Awaited<ReturnType<typeof requestMobileSignature>>;
+// Poll past the legitimate in-progress answers. Every one must be well formed:
+// queued never carries a request number, pending always carries this one.
+async function settle(read: () => Promise<Answer>) {
+  return until(read, (r) => {
+    if (r.status === "queued") expect(r.request_id).toBeNull();
+    if (r.status === "pending") expect(r.request_id).toBe("1".repeat(32));
+    return r.status !== "queued" && r.status !== "pending";
+  });
+}
+const accepted = (read: () => Promise<Answer>) =>
+  until(read, (r) => r.status !== "queued");
+function fakeHost(kind: string) {
+  const data = mkdtempSync(join(tmpdir(), "signing-job-"));
+  const ctl = join(data, "ctl");
+  mkdirSync(ctl);
+  writeFileSync(join(ctl, "kind"), kind);
+  return {
+    data,
+    ctl,
+    spawns: () =>
+      existsSync(join(ctl, "spawns"))
+        ? readFileSync(join(ctl, "spawns"), "utf8").trim().split("\n")
+        : [],
+    program: ["/usr/bin/python3", "-IB", FAKE, ctl],
+  };
+}
+
+test("first call is accepted at once; polls of the same Run follow one job to its receipt", async () => {
+  const host = fakeHost("slow");
+  const scope = jobScope("R-7");
+  let fenced = 0;
+  const call = () =>
+    requestMobileSignature(host.data, scope, () => fenced++, {
+      program: host.program,
+      acceptWaitMs: 300,
+    });
+  try {
+    const started = Date.now();
+    const first = await accepted(call);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(first).toMatchObject({
+      status: "pending",
+      request_id: "1".repeat(32),
+      platform: "android",
+      phase: "transferring",
+      mode: "sign",
+      deadline_seconds: 900,
+      poll_after_seconds: 30,
+    });
+    expect(await call()).toMatchObject({
+      status: "pending",
+      phase: "transferring",
+    });
+    expect(fenced).toBe(0);
+    writeFileSync(join(host.ctl, "ready"), "");
+    await until(call, (r) => r.status === "pending" && r.phase === "signing");
+    expect(fenced).toBe(1);
+    writeFileSync(join(host.ctl, "signed"), "");
+    const receipt = await until(call, (r) => r.status === "signed");
+    expect(receipt).toEqual({
+      status: "signed",
+      request_id: "1".repeat(32),
+      sha256: "a".repeat(64),
+      platform: "android",
+      download: {
+        method: "GET",
+        query: `?mobile_artifact=${"1".repeat(32)}&platform=android`,
+        requires_bearer: true,
+      },
+    });
+    // Every poll above joined the one helper: nothing was resent. The
+    // receipt was re-validated against the ledger before it was returned.
+    expect(host.spawns()).toEqual(["slow", "check"]);
+    // After the job settles, a later call asks the ledger again (lookup only).
+    writeFileSync(join(host.ctl, "kind"), "stored");
+    expect(await settle(call)).toEqual(receipt);
+    expect(host.spawns()).toEqual(["slow", "check", "stored", "check"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a helper past its reported deadline is terminated; the next poll looks the same request up", async () => {
+  const host = fakeHost("hang");
+  const call = () =>
+    requestMobileSignature(host.data, jobScope("R-8"), () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+      graceMs: 200,
+      killMs: 2_000,
+    });
+  try {
+    expect(await accepted(call)).toMatchObject({
+      status: "pending",
+      deadline_seconds: 1,
+    });
+    await until(
+      async () => existsSync(join(host.ctl, "terminated")),
+      (gone) => gone,
+    );
+    writeFileSync(join(host.ctl, "kind"), "lookup");
+    expect(await settle(call)).toMatchObject({
+      status: "signed",
+      request_id: "1".repeat(32),
+    });
+    expect(host.spawns()).toEqual(["hang", "lookup", "check"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a Run that is no longer current at the fence never commits", async () => {
+  const host = fakeHost("stored");
+  try {
+    expect(
+      await requestMobileSignature(
+        host.data,
+        jobScope("R-9"),
+        () => {
+          throw new Error("stale Run");
+        },
+        { program: host.program, acceptWaitMs: 5_000, killMs: 2_000 },
+      ),
+      // Claimed but never dispatched: from now on only a lookup is possible.
+    ).toMatchObject({ status: "unconfirmed", request_id: "1".repeat(32) });
+    expect(existsSync(join(host.ctl, "committed"))).toBe(false);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("before the durable claim the call reports queued without a request number", async () => {
+  const host = fakeHost("unclaimed");
+  const call = () =>
+    requestMobileSignature(host.data, jobScope("R-10"), () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+    });
+  try {
+    expect(await call()).toEqual({
+      status: "queued",
+      request_id: null,
+      platform: "android",
+      elapsed_seconds: expect.any(Number),
+      poll_after_seconds: 5,
+    });
+    expect(await call()).toMatchObject({ status: "queued", request_id: null });
+    writeFileSync(join(host.ctl, "claim"), "");
+    // After the claim, pending (with the number) is a legitimate step.
+    expect(await settle(call)).toMatchObject({
+      status: "signed",
+      request_id: "1".repeat(32),
+    });
+    expect(host.spawns()).toEqual(["unclaimed", "check"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a claimed attempt that ended without a result is unconfirmed, then looked up, never re-signed", async () => {
+  const host = fakeHost("lost");
+  const call = () =>
+    requestMobileSignature(host.data, jobScope("R-11"), () => {}, {
+      program: host.program,
+      acceptWaitMs: 2_000,
+    });
+  try {
+    expect(await settle(call)).toEqual({
+      status: "unconfirmed",
+      request_id: "1".repeat(32),
+      platform: "android",
+      poll_after_seconds: 60,
+    });
+    // E.g. the operator reconciled peer_signed; the ledger only allows lookup.
+    writeFileSync(join(host.ctl, "kind"), "lookup");
+    // Side by side (V-2954): a restarted server has no job memory at all...
+    vi.resetModules();
+    const restarted = await import("./mobile-signing.js");
+    // A fresh module instance: its in-flight job table starts empty.
+    expect(restarted.requestMobileSignature).not.toBe(requestMobileSignature);
+    expect(
+      await settle(() =>
+        restarted.requestMobileSignature(
+          host.data,
+          jobScope("R-11"),
+          () => {},
+          { program: host.program, acceptWaitMs: 2_000 },
+        ),
+      ),
+    ).toMatchObject({ status: "signed", request_id: "1".repeat(32) });
+    // ...and the live server, which remembers the failed attempt, must not
+    // need a restart: its next poll looks the same request up as well.
+    expect(await settle(call)).toMatchObject({
+      status: "signed",
+      request_id: "1".repeat(32),
+    });
+    expect(host.spawns()).toEqual([
+      "lost",
+      "lookup",
+      "check",
+      "lookup",
+      "check",
+    ]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a success the ledger no longer releases is not reported, and a refusal before the claim throws", async () => {
+  const host = fakeHost("slow");
+  const call = () =>
+    requestMobileSignature(host.data, jobScope("R-12"), () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+    });
+  try {
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
+    writeFileSync(join(host.ctl, "ready"), "");
+    // Revoked (or expired) after signing, before the next poll.
+    writeFileSync(join(host.ctl, "revoked"), "");
+    writeFileSync(join(host.ctl, "signed"), "");
+    await expect(until(call, () => false)).rejects.toThrow(
+      /^Signing unavailable$/u,
+    );
+    writeFileSync(join(host.ctl, "kind"), "refused");
+    await expect(call()).rejects.toThrow(/^Signing unavailable$/u);
+    expect(host.spawns()).toEqual(["slow", "check", "refused"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
