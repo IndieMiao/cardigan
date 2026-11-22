@@ -326,14 +326,117 @@ test.each(
     expect(
       value(listNeedsYou(f.state, human, clock)).data.story_proposals,
     ).toEqual([]);
-    f.commit(f.propose([child("A"), { ...b, repo: "another/repo" }]));
-    f.commit(f.confirm(1));
-    expect(f.children()[1]).toMatchObject({
-      repo: "another/repo",
-      base_branch: "release",
-    });
   },
 );
+
+test("with several registrations an explicit registered repo takes its own branch", () => {
+  const another = { repo: "another/repo", base_branch: "main" };
+  const f = setup([registered, another]);
+  f.commit(
+    f.propose([
+      child("A", { template_id: "dev", repo: another.repo }),
+      child("B", { template_id: "dev", repo: another.repo, base_branch: "x" }),
+    ]),
+  );
+  f.commit(f.confirm(1));
+  expect(f.children()).toMatchObject([
+    another,
+    { ...another, base_branch: "x" },
+  ]);
+});
+
+test.each([
+  { repos: [registered], base_branch: undefined },
+  { repos: [registered], base_branch: "trunk" },
+  { repos: [], base_branch: "release" },
+])(
+  "a repo this project has not registered is refused at submission: $repos $base_branch",
+  ({ repos, base_branch }) => {
+    const f = setup(repos);
+    const b = child("B", {
+      template_id: "dev",
+      repo: "other-project/repo",
+      ...(base_branch === undefined ? {} : { base_branch }),
+    });
+    expect(f.propose([child("A"), b])).toMatchObject({
+      ok: false,
+      error: {
+        code: "validation_failed",
+        message:
+          "第 2 张子卡「B」无法开出：仓库（repo）other-project/repo 不是当前项目登记的仓库",
+        details: { child: 2 },
+      },
+    });
+    expect(f.current().story?.proposals).toBeUndefined();
+    expect(
+      value(listNeedsYou(f.state, human, clock)).data.story_proposals,
+    ).toEqual([]);
+  },
+);
+
+test("confirmation refuses the whole batch when a named repo is no longer registered", () => {
+  const f = setup([registered]);
+  f.commit(
+    f.propose([
+      child("A", { template_id: "dev" }),
+      child("B", { template_id: "dev", repo: registered.repo }),
+    ]),
+  );
+  const replaced = { repo: "replacement/repo", base_branch: "trunk" };
+  expect(
+    confirmStoryProposal(
+      f.state,
+      human,
+      { card_id: f.story.id, version: 1 },
+      { ...f.p, project_repositories: [replaced] },
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: {
+      message:
+        "第 2 张子卡「B」无法开出：仓库（repo）registered/repo 不是当前项目登记的仓库",
+      details: { child: 2 },
+    },
+  });
+  expect(f.children()).toEqual([]);
+  expect(f.current().story?.proposals?.[0]?.confirmed).toBeUndefined();
+});
+
+test("plain create_card keeps an explicit unregistered repo with its explicit branch", () => {
+  const f = setup([registered]);
+  const card = f.commit(
+    createCard(
+      f.state,
+      human,
+      {
+        template_id: "dev",
+        title: "Direct",
+        goal: "Direct card",
+        acceptance_criteria: ["works"],
+        repo: "other/repo",
+        base_branch: "dev",
+        source: { kind: "quote", text: "Direct card" },
+      },
+      f.p,
+    ),
+  );
+  expect(card).toMatchObject({ repo: "other/repo", base_branch: "dev" });
+  expect(
+    createCard(
+      f.state,
+      human,
+      {
+        template_id: "dev",
+        title: "No branch",
+        goal: "Direct card",
+        acceptance_criteria: ["works"],
+        repo: "other/repo",
+        source: { kind: "quote", text: "Direct card" },
+      },
+      f.p,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
 
 test("submission identifies the child with an invalid template form or dependency", () => {
   const f = setup([registered]);

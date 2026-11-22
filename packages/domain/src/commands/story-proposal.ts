@@ -148,20 +148,24 @@ function openChildren(
     const depends_on_cards = [...siblings, ...(child.depends_on_cards ?? [])];
     // Name the child on refusal; the whole confirmation still rolls back.
     const card = checkStoryChild(number, child.title, () =>
-      createCardInDraft(d, {
-        ...storyChildForm(
-          story.id,
-          child,
-          `需求卡 ${story.id} 拆解方案第 ${proposal.version} 版第 ${number} 张（${proposal.entry_id}）`,
-        ),
-        story_source: {
-          card_id: story.id,
-          version: proposal.version,
-          entry_id: proposal.entry_id,
-          number,
+      createCardInDraft(
+        d,
+        {
+          ...storyChildForm(
+            story.id,
+            child,
+            `需求卡 ${story.id} 拆解方案第 ${proposal.version} 版第 ${number} 张（${proposal.entry_id}）`,
+          ),
+          story_source: {
+            card_id: story.id,
+            version: proposal.version,
+            entry_id: proposal.entry_id,
+            number,
+          },
+          ...(depends_on_cards.length ? { depends_on_cards } : {}),
         },
-        ...(depends_on_cards.length ? { depends_on_cards } : {}),
-      }),
+        { registered_repo_only: true },
+      ),
     );
     opened.set(index, card);
   }

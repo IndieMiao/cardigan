@@ -178,8 +178,20 @@ export function createCard(
   );
 }
 
+export interface CardCreationOptions {
+  /**
+   * Story children may name only a repository registered for this project
+   * (C-587); plain create_card keeps its explicit repo + branch semantics.
+   */
+  readonly registered_repo_only?: boolean;
+}
+
 /** Check the creation form without allocating IDs or changing the draft. */
-export function prepareCardCreation(d: CommandDraft, p: CreateCardParams) {
+export function prepareCardCreation(
+  d: CommandDraft,
+  p: CreateCardParams,
+  options: CardCreationOptions = {},
+) {
   const state = d.state;
   d.pm();
   d.projectAccess();
@@ -213,11 +225,19 @@ export function prepareCardCreation(d: CommandDraft, p: CreateCardParams) {
     (template.requires_repo || p.base_branch !== undefined
       ? only?.repo
       : undefined);
-  const registration = repo
-    ? (only ?? registry?.find((r) => r.repo === repo))
-    : undefined;
+  // Only the registration naming this very repository may supply its branch.
+  const registration =
+    repo === undefined ? undefined : registry?.find((r) => r.repo === repo);
   const base_branch = p.base_branch ?? registration?.base_branch ?? undefined;
   if (template.requires_repo || repo !== undefined) text(repo, "repo");
+  ensure(
+    !options.registered_repo_only ||
+      registry === undefined ||
+      repo === undefined ||
+      registration !== undefined,
+    "validation_failed",
+    `仓库（repo）${repo} 不是当前项目登记的仓库`,
+  );
   if (template.requires_repo || repo !== undefined || base_branch !== undefined)
     text(base_branch, "base_branch");
   ensure(
@@ -288,6 +308,7 @@ export function prepareCardCreation(d: CommandDraft, p: CreateCardParams) {
 export function createCardInDraft(
   d: CommandDraft,
   p: CreateCardParams & { readonly story_source?: Card["story_source"] },
+  options: CardCreationOptions = {},
 ): Card {
   const state = d.state;
   {
@@ -301,7 +322,7 @@ export function createCardInDraft(
       parent,
       repo,
       base_branch,
-    } = prepareCardCreation(d, p);
+    } = prepareCardCreation(d, p, options);
     if (parent?.story) {
       if (parent.story.summary_entry_id) {
         const { summary_entry_id: _old, ...story } = parent.story;

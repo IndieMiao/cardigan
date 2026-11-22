@@ -129,7 +129,9 @@ function proposalChildren(
     );
     const cards = [...new Set<CardId>(c.depends_on_cards ?? [])];
     checkStoryChild(n, c.title, () => {
-      prepareCardCreation(d, storyChildForm(story.id, c));
+      prepareCardCreation(d, storyChildForm(story.id, c), {
+        registered_repo_only: true,
+      });
       if (cards.length) validateCardDependencyRefs(d, cards);
     });
     return {
