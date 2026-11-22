@@ -570,6 +570,52 @@ test("§6.4/S6 an MCP assign wakes the new Assignment so the host can start it",
   expect(result.notifications[0]?.work_item_id).toBe("W-1");
 });
 
+test("only the PM's current same-machine successor notice wakes an in-progress producer", () => {
+  const actor = { ...agent("A-3"), role_id: "pm" };
+  const wake = event(
+    "work_item_assigned",
+    { work_item_id: "W-1", assignment_id: "A-4" },
+    { actor },
+  );
+  const item = workItem("W-1", { assignment_id: "A-4", status: "in_progress" });
+  const state = snapshot({
+    work_items: [item],
+    assignments: [
+      assignment("A-4", {
+        work_item_id: "W-1",
+        recovery: {
+          previous_assignment_id: "A-1",
+          source: "main",
+          same_machine_confirmed_by: "assignment:A-3",
+        },
+      }),
+    ],
+  });
+  expect(recipients(routeEvent({ event: wake, snapshot: state }))).toEqual([
+    "assignment:A-4",
+  ]);
+  for (const stale of [
+    { ...wake, actor: human() },
+    { ...wake, payload: { ...(wake.payload as object), assignment_id: "A-1" } },
+  ])
+    expect(recipients(routeEvent({ event: stale, snapshot: state }))).toEqual(
+      [],
+    );
+  expect(
+    recipients(
+      routeEvent({
+        event: wake,
+        snapshot: {
+          ...state,
+          work_items: [
+            workItem("W-1", { assignment_id: "A-4", status: "blocked" }),
+          ],
+        },
+      }),
+    ),
+  ).toEqual([]);
+});
+
 test("§6.4/C-88 a verification assignment notice is retained for dispatch after delivery", () => {
   const result = routeEvent({
     event: event(
@@ -1507,11 +1553,14 @@ test("release wakes only actionable assigned work, even if old delivery notifica
     "assignment:A-1",
     "assignment:A-2",
   ]);
+  const manual = {
+    ...state,
+    work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
+  };
+  expect(recipients(routeEvent({ event: released, snapshot: manual }))).toEqual(
+    ["needs_you", "assignment:A-1", "assignment:A-2"],
+  );
   for (const blocked of [
-    {
-      ...state,
-      work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
-    },
     {
       ...state,
       work_items: state.work_items.map((w) => ({
@@ -1600,25 +1649,28 @@ test("C-414 explicit waits avoid empty-run escalation and automatic recovery sen
   ).toEqual(["pm_ops"]);
 });
 
-test("candidate conflict retry exhaustion is sent only to PM Ops", () => {
-  const note = event(
-    "baseline_conflict_limit_reached",
-    { body: "同一提交自动同步已达上限" },
-    { actor: { kind: "system", project_id } },
-  );
-  const result = routeEvent({ event: note, snapshot: snapshot() });
-  expect(result.notifications).toHaveLength(1);
-  expect(result.notifications[0]).toMatchObject({
-    recipient: { kind: "pm_ops" },
-    kind: "escalation",
-  });
-  expect(
-    routeEvent({
-      event: { ...note, actor: { kind: "system", project_id: "other" } },
-      snapshot: snapshot(),
-    }).notifications,
-  ).toEqual([]);
-});
+test.each(["baseline_conflict_limit_reached", "work_item_resume_deferred"])(
+  "%s is sent only to PM Ops",
+  (type) => {
+    const note = event(
+      type,
+      { body: "同一提交自动同步已达上限" },
+      { actor: { kind: "system", project_id } },
+    );
+    const result = routeEvent({ event: note, snapshot: snapshot() });
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0]).toMatchObject({
+      recipient: { kind: "pm_ops" },
+      kind: "escalation",
+    });
+    expect(
+      routeEvent({
+        event: { ...note, actor: { kind: "system", project_id: "other" } },
+        snapshot: snapshot(),
+      }).notifications,
+    ).toEqual([]);
+  },
+);
 
 test("candidate conflict results inform an active author but cannot bypass bounded idle recovery or produce empty-run PM noise", () => {
   const conflict = event(

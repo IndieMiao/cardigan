@@ -161,7 +161,7 @@ export function releaseLostRemoteWorker(
       },
       {
         type: "system",
-        body: `${reason} 请 PM 选择恢复来源和另一台机器重新指派。`,
+        body: `${reason} 请 PM 选择恢复来源并指定机器；使用原机器须显式确认同机恢复。`,
       },
     );
     return a.id;

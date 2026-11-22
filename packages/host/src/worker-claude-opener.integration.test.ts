@@ -60,9 +60,47 @@ test("the worker emits only activity from the fd and original record time", asyn
       updated_at: new Date(at).toISOString(),
     },
     path,
-    activity: { cwd: "/worktree/src", session_id: "one", updated_at: at },
+    activity: {
+      cwd: "/worktree/src",
+      session_id: "one",
+      updated_at: at,
+      model_output_at: at,
+    },
   });
 });
+
+test.each([false, true])(
+  "worker resume input never advances model output (prior assistant: %s)",
+  async (priorOutput) => {
+    const path = join(folder, "one.jsonl");
+    const later = "2026-01-01T01:00:05.000Z";
+    const echo = JSON.stringify({
+      type: "user",
+      sessionId: "one",
+      cwd: "/worktree/src",
+      timestamp: later,
+      message: { content: "PRIVATE-RESUME-INPUT" },
+    });
+    await writeFile(path, priorOutput ? `${record("one")}\n${echo}` : echo);
+    await utimes(path, new Date(later), new Date(later));
+    // Check the complete fd reader output. No transcript body or usage counters
+    // may cross the boundary, even when the echoed input is the latest record.
+    expect(JSON.parse(await read())).toEqual({
+      path,
+      file_activity: {
+        cwd: "/worktree/src",
+        session_id: "one",
+        updated_at: later,
+      },
+      activity: {
+        cwd: "/worktree/src",
+        session_id: "one",
+        updated_at: later,
+        ...(priorOutput ? { model_output_at: at } : {}),
+      },
+    });
+  },
+);
 
 test.each(["missing", "symlink", "ambiguous", "conflicting session"])(
   "the opener refuses %s transcripts",

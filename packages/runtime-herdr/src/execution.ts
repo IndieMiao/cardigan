@@ -54,6 +54,8 @@ export type ExecutionConfig = {
       readonly user?: string;
       readonly hostKeyAlias?: string;
       readonly path?: string;
+      /** Project tool variables for Runs and capability checks, not SSH or host helpers. */
+      readonly env?: Readonly<Record<string, string>>;
       /** Darwin only: hc owns the core; this retired service must be absent. */
       readonly macosCore?: {
         readonly python: string;

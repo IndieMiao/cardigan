@@ -39,6 +39,7 @@ const form = {
 async function fixture(
   probe: WorkerProbeRunner = async () => true,
   withLaunchSettings = false,
+  env: NodeJS.ProcessEnv = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "wizard-")),
     dataDir = "/private/controller",
@@ -59,7 +60,7 @@ async function fixture(
       check: async () => {
         throw new Error("unexpected");
       },
-      wizard: { root, dataDir, env: {}, probe, refresh },
+      wizard: { root, dataDir, env, probe, refresh },
     },
   });
   const base = f.projectPath("/worker-wizards");
@@ -88,6 +89,7 @@ function wizard(response: ResponseBody, status = 200) {
       wizard: {
         id: string;
         phase: string;
+        check_id?: string;
         preview: { preview_id: string; diff: unknown[] };
         commands: Record<string, string>;
         steps: {
@@ -220,6 +222,23 @@ test.runIf(process.platform === "linux")(
       const runtime = join(f.root, "runtime-workers.yaml");
       const original = "# keep host comment\nversion: 1\nmachines: []\n";
       writeFileSync(runtime, original, { mode: 0o600 });
+      // C-565: no worker uses an MCP address yet, so nothing is suggested.
+      const defaults = async () => {
+        const r = await f.call(`${f.base}/defaults`);
+        expect(r.status, r.text).toBe(200);
+        return (r.json as { defaults: { mcp_url?: string } }).defaults;
+      };
+      expect(await defaults()).toEqual({});
+      expect((await f.post("/defaults")).status).toBe(405);
+      expect(
+        (
+          await f.call(`${f.base}/defaults`, {
+            headers: {
+              authorization: `Bearer ${f.token(f.primary.owner)}`,
+            },
+          })
+        ).status,
+      ).toBe(403);
       const preview = await f.post("", form);
       const s = wizard(preview, 201);
       const path = `/${s.id}`;
@@ -252,6 +271,13 @@ test.runIf(process.platform === "linux")(
         expect.objectContaining({ step: "account", state: "running" }),
       );
       expect((await run()).status).toBe(409);
+      // C-565: a late automatic recheck meeting a running check is told the
+      // session moved on (not a preview error), and starts nothing.
+      const whileRunning = await f.post(`${path}/run`, {
+        resume_check_id: (await status()).check_id,
+      });
+      expect(whileRunning.status).toBe(409);
+      expect(whileRunning.text).toContain("worker_check_changed");
       gate.resolve();
       await vi.waitFor(async () =>
         expect((await status()).phase).toBe("failed"),
@@ -267,7 +293,18 @@ test.runIf(process.platform === "linux")(
       );
       expect((await f.post(`${path}/launch-preview`)).status).toBe(409);
       repaired = true;
-      expect((await run()).status).toBe(202);
+      // C-565: an automatic recheck names the failed check it continues;
+      // another check id (a stale page) is refused without starting one.
+      const failedCheck = (await status()).check_id;
+      expect(failedCheck).toEqual(expect.any(String));
+      const resume = (id: unknown) =>
+        f.post(`${path}/run`, { resume_check_id: id });
+      expect((await resume(42)).status).toBe(400);
+      const moved = await resume("another-check");
+      expect(moved.status).toBe(409);
+      expect(moved.text).toContain("worker_check_changed");
+      expect((await status()).phase).toBe("failed");
+      expect((await resume(failedCheck)).status).toBe(202);
       await vi.waitFor(async () =>
         expect((await status()).phase).toBe("passed"),
       );
@@ -285,6 +322,18 @@ test.runIf(process.platform === "linux")(
           ),
       ).toMatchObject({ label: form.label, status: "offline" });
       expect(readFileSync(runtime, "utf8")).toBe(original);
+      // A late automatic recheck of the earlier failure cannot restart the
+      // passed check, so it cannot drop a launch preview another page holds.
+      const held = (await f.post(`${path}/launch-preview`)).json as {
+        wizard: { preview: { preview_id: string } };
+      };
+      const late = await resume(failedCheck);
+      expect(late.status).toBe(409);
+      expect(late.text).toContain("worker_check_changed");
+      expect((await status()).phase).toBe("passed");
+      expect((await status()).preview.preview_id).toBe(
+        held.wizard.preview.preview_id,
+      );
       const launchPreview = async () => ({
         preview_id: wizard(await f.post(`${path}/launch-preview`)).preview
           .preview_id,
@@ -311,6 +360,12 @@ test.runIf(process.platform === "linux")(
       expect(loadRuntimeWorkers(f.dataDir, runtime)).toMatchObject([
         { machine_id: form.machine_id, allow_remote_launch: true },
       ]);
+      // The address the enabled binding uses is now offered to the next form.
+      expect(await defaults()).toEqual({
+        mcp_url: form.mcp_url,
+        mcp_source: "workers",
+      });
+
       const backups = readdirSync(f.root).filter((n) => n.endsWith(".bak"));
       expect(backups).toHaveLength(1);
       const backup = join(f.root, String(backups[0]));
@@ -556,6 +611,36 @@ test
       } finally {
         cli.mockRestore();
         drain.mockRestore();
+      }
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "C-565: with no worker bindings yet, an explicit remote MCP address is suggested; a loopback one never is",
+  async () => {
+    for (const [value, expected] of [
+      [
+        "https://mcp.example.ts.net:8443/mcp",
+        {
+          mcp_url: "https://mcp.example.ts.net:8443/mcp",
+          mcp_source: "host",
+        },
+      ],
+      ["http://127.0.0.1:3004/mcp", {}],
+      ["https://user:secret@mcp.example.ts.net/mcp", {}],
+    ] as const) {
+      const f = await fixture(async () => true, false, {
+        CARDIGAN_MCP_URL: value,
+      });
+      try {
+        await f.password(TEST_PASSWORD);
+        await f.login();
+        const r = await f.call(`${f.base}/defaults`);
+        expect(r.status, r.text).toBe(200);
+        expect((r.json as { defaults: unknown }).defaults).toEqual(expected);
+      } finally {
+        await f.close();
       }
     }
   },

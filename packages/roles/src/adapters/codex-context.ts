@@ -117,6 +117,42 @@ function codexError(info: unknown): HarnessActivity["error"] {
       ? "server_error"
       : "unclassified";
 }
+// Recovery requires positive evidence of output. Accounting records and tool
+// results are useful activity, but cannot confirm that the model resumed.
+function producedOutput(kind: unknown, p: Record<string, unknown> | undefined) {
+  if (!p) return false;
+  const text = (v: unknown) => typeof v === "string" && v.length > 0;
+  if (kind === "event_msg")
+    return (
+      (p.type === "agent_message" && text(p.message)) ||
+      (["agent_reasoning", "agent_reasoning_raw_content"].includes(
+        String(p.type),
+      ) &&
+        text(p.text))
+    );
+  if (kind !== "response_item") return false;
+  if (p.type === "message")
+    return (
+      p.role === "assistant" &&
+      Array.isArray(p.content) &&
+      p.content.some(
+        (v) => object(v)?.type === "output_text" && text(object(v)?.text),
+      )
+    );
+  if (p.type === "reasoning")
+    return (
+      text(p.encrypted_content) ||
+      [p.summary, p.content].some(
+        (blocks) =>
+          Array.isArray(blocks) && blocks.some((b) => text(object(b)?.text)),
+      )
+    );
+  return (
+    (p.type === "function_call" || p.type === "custom_tool_call") &&
+    text(p.name) &&
+    text(p.call_id)
+  );
+}
 export function parseCodexActivity(
   head: string,
   tail: string,
@@ -130,6 +166,7 @@ export function parseCodexActivity(
   );
   let last: ActivityMetadata | undefined;
   let fault: ActivityMetadata | undefined;
+  let outputAt: string | undefined;
   // Never infer silence from a truncated prefix or an unreadable record.
   const events = records(tail, start);
   let silentSince =
@@ -165,8 +202,10 @@ export function parseCodexActivity(
           ? Math.max(timestamp, silentSince)
           : undefined;
     }
+    const output = producedOutput(event?.type, payload);
     if (
       !(
+        output ||
         event?.type === "response_item" ||
         (event?.type === "event_msg" &&
           ["token_count", "task_complete", "task_started"].includes(
@@ -192,10 +231,11 @@ export function parseCodexActivity(
     )
       return {};
     if (error) fault = sample;
+    if (output) outputAt = sample.updated_at;
     last = sample;
   }
   return {
-    activity: last,
+    activity: last && outputAt ? { ...last, model_output_at: outputAt } : last,
     startupFailure:
       fault?.error &&
       fault.error !== "unclassified" &&

@@ -8,6 +8,7 @@ import {
 import { homedir } from "node:os";
 import { join, posix } from "node:path";
 import type { Machine } from "@cardigan/domain";
+import { parseWorkerEnvironment } from "@cardigan/roles";
 import {
   type ExecutionConfig,
   validateSshConfig,
@@ -155,7 +156,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication preparation_cooldown python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
+          "project_id user gid alias session root path env generation publication preparation_cooldown python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -198,6 +199,7 @@ export function parseRuntimeWorkers(
               !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(retiredLabel)))
         )
           return invalid();
+        const env = parseWorkerEnvironment(p.env);
         const execution: RuntimeWorker["execution"] = {
           mode: "agent-ssh",
           dataDir,
@@ -211,6 +213,7 @@ export function parseRuntimeWorkers(
           knownHostsFile: path(m.known_hosts_file),
           hostKeyAlias: str(m.host_key_alias),
           path: str(p.path),
+          ...(Object.keys(env).length ? { env } : {}),
           ...(darwin
             ? {
                 macosCore: {

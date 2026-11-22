@@ -39,7 +39,6 @@ import {
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
-  latestMergeCheck,
   listNeedsYou,
   listNeedsYouCounts,
   markCardDone,
@@ -82,6 +81,11 @@ import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
 import { runQueuedAt } from "../run-queued-at.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
+import {
+  type CardChecking,
+  cardCheckingIndex,
+  currentCardMergeCheck,
+} from "./card-checking.js";
 import { cardDependencyGraph } from "./card-dependencies.js";
 import { PAGE_LIMITS } from "./pagination.js";
 import {
@@ -316,6 +320,7 @@ function webRunAuthorView(state: CommandState, run_id: string) {
 
 type WebAuthorView = ReturnType<typeof webAuthorView>;
 type WebCardView = Omit<CardView, "next_owners"> & {
+  readonly checking?: CardChecking;
   readonly next_owners: readonly (CardView["next_owners"][number] &
     WebAuthorView)[];
 };
@@ -325,16 +330,20 @@ export function cardViews(
   state: CommandState,
   dependencyState: CardDependencyState = state,
   mergeState?: CommandState,
+  precheckEvents?: readonly Event[],
 ): WebCardView[] {
+  const checkingOf = cardCheckingIndex(state, mergeState, precheckEvents);
   return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
     (card) => {
       const stage = mergeState
         ? mergeStage(mergeState, card)
         : card.merge_stage;
       const { merge_stage: _stage, ...fields } = card;
+      const checking = checkingOf(card);
       return {
         ...fields,
         ...(stage ? { merge_stage: stage } : {}),
+        ...(checking ? { checking } : {}),
         ...(card.depends_on_cards?.length ||
         dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
           ? { dependency: cardDependencyView(dependencyState, card) }
@@ -387,6 +396,8 @@ export function cardListViews(
   queue: readonly RunQueuePosition[] = [],
   dependencyState?: CardDependencyState,
   mergeState?: CommandState,
+  /** C-567: other cards' precheck events that this page's waits point to. */
+  precheckEvents?: readonly Event[],
 ): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -446,49 +457,56 @@ export function cardListViews(
       run_presence: strongestPresence(presences),
     }));
   };
-  return cardViews(state, dependencyState, mergeState).map((card) => {
-    const template = cardTemplate(card, state.card_templates);
-    const items = state.work_items.filter((item) => item.card_id === card.id),
-      completed = items.filter(
-        (item) => item.status === "accepted" || item.status === "passed",
-      ).length,
-      updated_at =
-        updatedAt?.get(card.id) ??
-        state.events
-          .filter((event) => event.card_id === card.id)
-          .map((event) => event.created_at)
-          .sort()
-          .at(-1) ??
-        card.created_at;
-    return {
-      ...card,
-      // Resolve the card's bound version from this snapshot, never the latest.
-      template_info: template
-        ? {
-            id: template.id,
-            title: template.title,
-            version: template.version,
-            builtin: template.builtin,
-          }
-        : null,
-      ...(queue.some(
-        (r) => r.project_id === state.project_id && r.card_id === card.id,
-      )
-        ? {
-            queued_runs: queue.filter(
-              (r) => r.project_id === state.project_id && r.card_id === card.id,
-            ),
-          }
-        : {}),
-      produce_owners: owners(items.filter((item) => item.kind === "produce")),
-      participants: participants(card.id, items),
-      work_items: items.map(({ id, title, status }) => ({ id, title, status })),
-      attachment_count: attachmentCounts.get(card.id) ?? 0,
-      progress: { completed, total: items.length },
-      updated_at,
-      roles: [...new Set(items.map((item) => item.role_id))].sort(),
-    };
-  });
+  return cardViews(state, dependencyState, mergeState, precheckEvents).map(
+    (card) => {
+      const template = cardTemplate(card, state.card_templates);
+      const items = state.work_items.filter((item) => item.card_id === card.id),
+        completed = items.filter(
+          (item) => item.status === "accepted" || item.status === "passed",
+        ).length,
+        updated_at =
+          updatedAt?.get(card.id) ??
+          state.events
+            .filter((event) => event.card_id === card.id)
+            .map((event) => event.created_at)
+            .sort()
+            .at(-1) ??
+          card.created_at;
+      return {
+        ...card,
+        // Resolve the card's bound version from this snapshot, never the latest.
+        template_info: template
+          ? {
+              id: template.id,
+              title: template.title,
+              version: template.version,
+              builtin: template.builtin,
+            }
+          : null,
+        ...(queue.some(
+          (r) => r.project_id === state.project_id && r.card_id === card.id,
+        )
+          ? {
+              queued_runs: queue.filter(
+                (r) =>
+                  r.project_id === state.project_id && r.card_id === card.id,
+              ),
+            }
+          : {}),
+        produce_owners: owners(items.filter((item) => item.kind === "produce")),
+        participants: participants(card.id, items),
+        work_items: items.map(({ id, title, status }) => ({
+          id,
+          title,
+          status,
+        })),
+        attachment_count: attachmentCounts.get(card.id) ?? 0,
+        progress: { completed, total: items.length },
+        updated_at,
+        roles: [...new Set(items.map((item) => item.role_id))].sort(),
+      };
+    },
+  );
 }
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
@@ -781,6 +799,8 @@ export function cardDetail(
     readonly now?: string;
     readonly dependencyState?: CardDependencyState | undefined;
     readonly mergeState?: CommandState | undefined;
+    /** C-567: other cards' precheck events that this card's waits point to. */
+    readonly precheckEvents?: readonly Event[];
   } = {},
 ) {
   if (options.dependencyState) {
@@ -806,6 +826,7 @@ export function cardDetail(
     },
     options.dependencyState ?? state,
     options.mergeState,
+    options.precheckEvents,
   )[0];
   if (card === undefined) {
     return undefined;
@@ -1299,24 +1320,6 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
     note: check.note ?? null,
     updated_at: check.updated_at,
   }));
-}
-
-function currentCardMergeCheck(state: CommandState, cardId: CardId) {
-  if (!state.cards.some((c) => c.id === cardId)) return undefined;
-  const items = new Set(
-    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
-  );
-  const completion = state.deliveries
-    .filter(
-      (d) =>
-        items.has(d.work_item_id) &&
-        d.kind === "card_completion" &&
-        d.status !== "superseded",
-    )
-    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-  return completion
-    ? latestMergeCheck(state.events, cardId, completion.id)
-    : undefined;
 }
 
 function decisionActionWebView(

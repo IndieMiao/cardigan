@@ -945,6 +945,17 @@ export class RuntimeTargets implements Runtime {
         Promise.resolve({ ok: true as const, value: false }),
     );
   }
+  observe_prompt(
+    ref: RuntimeRef,
+    binding: NonNullable<RuntimeWakeOptions["prompt_binding"]>,
+  ) {
+    return this.invoke(
+      () => this.targetForRef(ref, binding.project_id),
+      (runtime) =>
+        runtime.observe_prompt?.(ref, binding) ??
+        Promise.resolve({ ok: true as const, value: false }),
+    );
+  }
   observe_retirement(ref: RuntimeRef, identity: RetirementIdentity) {
     return this.invoke(
       () => this.targetForRef(ref, identity.project_id),

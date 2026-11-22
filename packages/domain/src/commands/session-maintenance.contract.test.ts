@@ -651,3 +651,37 @@ test("shared workspace Run history fences retirement; a different machine's hist
   expect(sessionMaintenanceCandidate(isolated, a, now).candidate).toBe(true);
   expect(JSON.parse(sessionMaintenanceBasis(isolated, a)).runs).toHaveLength(1);
 });
+
+test("retention cap only parks an exact kept-and-alive waiting ref, including legacy counts", () => {
+  const s = setup(),
+    a = s.assignments[0]!;
+  for (const failures of [2, 3, 40]) {
+    const retained = {
+      ...a,
+      idle_retirement: {
+        phase: "waiting" as const,
+        runtime_ref: a.runtime_ref!,
+        started_at: now,
+        threshold_minutes: 60,
+        failures,
+        evidence: {
+          stage: "confirm" as const,
+          reason: "kept_terminal" as const,
+          observation: "alive" as const,
+        },
+      },
+    };
+    const state = { ...s, assignments: [retained] };
+    expect(sessionMaintenanceCandidate(state, retained, now)).toEqual(
+      failures < 3
+        ? { candidate: true, reason: "idle_candidate" }
+        : { candidate: false, reason: "retained_for_dispatch" },
+    );
+    expect(
+      beginIdleSessionRetirement(state, system, a.id, 60, {
+        ...ports(),
+        clock: { now: () => now },
+      }).ok,
+    ).toBe(failures < 3);
+  }
+});

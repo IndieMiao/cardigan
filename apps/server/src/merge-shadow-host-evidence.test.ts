@@ -8,6 +8,7 @@ import {
   realReviewTrust,
   reviewedCompletion,
 } from "../../../packages/host/test-support/real-review.js";
+import { measureWrites } from "../../../packages/host/test-support/tick-work.js";
 import { MergeShadowObserver } from "./merge-shadow.js";
 
 // V-2725: one current confirmation plus 15 unrecorded historical confirmations
@@ -65,7 +66,7 @@ test("live review evidence is rechecked without holding the SQLite writer", asyn
           .filter((e) => e.type === "system_merge_shadow_recorded"),
       );
     const observer = new MergeShadowObserver(store, undefined, d.io.clock);
-    // A timing hook alone could undercount: independently attempt BEGIN IMMEDIATE
+    // Independently attempt BEGIN IMMEDIATE
     // on a second connection at every synchronous central ref lookup.
     other.exec("PRAGMA busy_timeout = 0");
     const readRef = x.transport.readRefSync.bind(x.transport);
@@ -80,29 +81,16 @@ test("live review evidence is rechecked without holding the SQLite writer", asyn
         }
         return readRef(...args);
       });
-    const writers: number[] = [];
-    store.observe({
-      transaction(kind, ms) {
-        if (kind === "run") writers.push(ms);
-      },
-    });
-    const before = x.calls.length;
-    const start = performance.now();
-    await observer.tick(project);
-    const tick = performance.now() - start;
+    const writes = await measureWrites(store, () => observer.tick(project));
     expect(shadows()).toHaveLength(16);
     expect(locked).toEqual([]);
     expect(refs.mock.calls.length).toBe(64); // 2 baseline reads per proof, at planning AND consumption
-    expect(writers).toHaveLength(16);
-    const maxWrite = Math.max(...writers);
-    console.info(
-      `live proofs: ${x.calls.length - before} Git calls, ${locked.length} under the write lock; tick ${tick.toFixed(1)}, max write ${maxWrite.toFixed(1)} ms`,
+    expect(writes).toHaveLength(16);
+    // One audit and its timeline entry, including sequence/index updates.
+    expect(Math.max(...writes)).toBeLessThanOrEqual(8);
+    expect(await measureWrites(store, () => observer.tick(project))).toEqual(
+      [],
     );
-    expect(maxWrite).toBeLessThan(75);
-    expect(tick).toBeLessThan(2500);
-    writers.length = 0;
-    await observer.tick(project);
-    expect(writers).toEqual([]);
 
     // Now revoke between projection and final guard, without changing SQLite.
     store.uow.run((tx) =>

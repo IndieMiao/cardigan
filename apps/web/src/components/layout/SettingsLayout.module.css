@@ -159,6 +159,43 @@
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
   }
+  /* Disclosure title: a control-high hit area that keeps the heading line. */
+  .groupToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-height: var(--ui-control);
+    margin: calc((var(--ui-leading) - var(--ui-control)) / 2) 0;
+    margin-inline-start: calc(-1 * var(--ui-space-1));
+    padding: 0 var(--ui-space-1);
+    border: 0;
+    border-radius: var(--ui-radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .groupToggle:hover {
+    background: var(--surface-muted);
+  }
+  .groupToggle:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .groupToggle :global(.lucide) {
+    color: var(--text-muted);
+  }
+  /* C-565 step marker icon (declared before the more specific icon rules). */
+  .stepMarker > :global(.lucide) {
+    width: var(--ui-arrow);
+    height: var(--ui-arrow);
+  }
+  .groupToggle[aria-expanded="true"] :global(.lucide) {
+    transform: rotate(90deg);
+  }
+  .rows[hidden] {
+    display: none;
+  }
   .group[data-tone="caution"] .groupHeading h3 {
     color: var(--status-wait);
   }
@@ -469,6 +506,97 @@
   }
   .notice ul {
     padding-inline-start: var(--ui-space-4);
+  }
+  /* C-565: a field with its hint (and note) below the control. */
+  .field {
+    display: grid;
+    gap: var(--ui-space-1);
+    min-width: 0;
+  }
+  .fieldHint {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .fieldHint :where(p) {
+    margin: 0;
+  }
+  /* A command moves to the next line whole rather than breaking inside. */
+  .fieldHint code {
+    display: inline-block;
+    max-width: 100%;
+  }
+  /* A hint under a control outside a label (a toggle group) sits as close. */
+  .dialogFields [data-ui="toggle-group"] + .fieldHint {
+    margin-block-start: calc(var(--ui-space-1) - var(--ui-space-3));
+  }
+  /* C-565: the steps of a multi-step drawer, wrapping on narrow screens. */
+  .steps {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-1) var(--ui-space-4);
+    margin: 0 0 var(--ui-space-4);
+    padding: 0;
+    list-style: none;
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .steps > li {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    white-space: nowrap;
+  }
+  .steps > li:is([data-state="done"], [data-state="current"]) {
+    color: var(--text);
+  }
+  .steps > li[data-state="current"] {
+    font-weight: 600;
+  }
+  .stepMarker {
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    width: var(--ui-leading);
+    height: var(--ui-leading);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-pill-radius);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    font-weight: 400;
+  }
+  /* A step that did not pass: danger colour, never ticked as done. */
+  .steps > li[data-state="failed"] {
+    color: var(--danger);
+  }
+  /* An optional step that was not needed: muted, dashed, never ticked. */
+  [data-state="skipped"] > .stepMarker {
+    border-style: dashed;
+  }
+  [data-failed] > .stepMarker {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  [data-state="current"] > .stepMarker {
+    border-color: var(--text);
+    background: var(--text);
+    color: var(--surface);
+  }
+  [data-state="current"][data-failed] > .stepMarker {
+    border-color: var(--danger);
+    background: var(--danger);
+  }
+  .visuallyHidden {
+    position: absolute;
+    width: var(--ui-stroke);
+    height: var(--ui-stroke);
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .avatar {
     flex: none;

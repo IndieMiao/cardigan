@@ -77,6 +77,7 @@ import {
 import { notices } from "./notices.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
+import { resumeAttention } from "./resume-attention.js";
 import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
   runtimeUnknownDeferred,
@@ -853,6 +854,7 @@ function selectNeedsYou<T>(
     ...(isPmOps(d)
       ? {
           pm_queue: {
+            deferred_resumes: [...resumeAttention(state).values()],
             waiting_merge_checks: waiting,
             snoozed_merges: d
               .list("decisions")

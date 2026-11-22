@@ -36,7 +36,19 @@ export interface RuntimeLaunchRecovery {
     launch: RuntimeLaunch,
   ): Promise<RuntimeResult<RuntimeRef>>;
 }
+/** Only the named, currently live CLI may receive a recovery prompt. */
+export interface PromptObservation extends RetirementIdentity {
+  readonly harness: "codex" | "claude-code";
+  /** Omitted: either bound empty editor. False: positively require a clear
+   * editor (not a failed observation). True: positively require a disconnect. */
+  readonly require_disconnect?: boolean;
+}
+/** A clear-screen observation is read-only, never a send condition. */
+export interface PromptBinding extends PromptObservation {
+  readonly require_disconnect?: true;
+}
 export interface RuntimeWakeOptions {
+  readonly prompt_binding?: PromptBinding;
   /** A retirement-held ref must still belong to this owner at the send slot. */
   readonly retirement_owner?: RetirementIdentity;
   readonly if_idle?: boolean;
@@ -71,6 +83,10 @@ export interface RetirementIdentity {
   readonly assignment_id: string;
 }
 export interface Runtime {
+  observe_prompt?(
+    ref: RuntimeRef,
+    binding: PromptObservation,
+  ): Promise<RuntimeResult<boolean>>;
   /** Read-only. Only a finished terminal with this exact identity proves exit. */
   observe_retirement?(
     ref: RuntimeRef,

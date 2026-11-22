@@ -487,6 +487,7 @@ interface AssignmentFields {
   readonly recovery?: {
     readonly previous_assignment_id: AssignmentId;
     readonly source: "main" | "backup";
+    readonly same_machine_confirmed_by?: Author;
     readonly backup?: {
       readonly sha: string;
       readonly at: string;

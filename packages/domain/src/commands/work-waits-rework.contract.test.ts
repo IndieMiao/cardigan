@@ -259,20 +259,24 @@ for (const mode of ["blocker", "run"] as const) {
       finish(mode === "run" ? condition : undefined);
       const ready = deploy(deployed);
       // Another gate can delay the first scan until the next deployment is waiting.
+      const cards = state.cards;
       state = {
         ...state,
-        work_items: state.work_items.map((w) =>
-          w.id === work ? { ...w, manual_assign: true } : w,
-        ),
+        cards: cards.map((c) => ({
+          ...c,
+          hold: {
+            reason: "Paused",
+            resume_condition: "PM releases hold",
+            set_by: "human",
+            set_at: io.clock.now(),
+          },
+        })),
       };
-      expect(scan().data).toEqual([]);
+      const blocked = scan();
+      expect(blocked.data).toEqual([]);
+      save(blocked);
       deploy(later, status, false, deployed);
-      state = {
-        ...state,
-        work_items: state.work_items.map((w) =>
-          w.id === work ? { ...w, manual_assign: false } : w,
-        ),
-      };
+      state = { ...state, cards };
       const restored = scan();
       expect(restored.data).toEqual([work]);
       expect(restored.events[0]?.payload).toMatchObject({

@@ -694,6 +694,12 @@ const schemas = {
     role_version: z.number().int().positive().optional(),
     machine_id: text.optional(),
     recovery_source: z.enum(["main", "backup"]).optional(),
+    confirm_same_machine: z
+      .boolean()
+      .describe(
+        "Explicitly reuse the specified original machine after confirmed exit and release; requires recovery_source.",
+      )
+      .optional(),
     os: text.optional(),
     arch: text.optional(),
     required_tags: z.array(text).optional(),

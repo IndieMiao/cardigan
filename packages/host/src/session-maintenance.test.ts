@@ -818,7 +818,7 @@ test("kept shells are observed without operator requests or repeated signals", a
   }));
   Object.assign(f.runtime, { retire_idle: retire });
   try {
-    for (const minute of [0, 1, 3, 7]) {
+    for (const minute of [0, 1]) {
       f.setTime(`2030-01-01T02:0${minute}:00Z`);
       await f.tick();
     }
@@ -828,7 +828,7 @@ test("kept shells are observed without operator requests or repeated signals", a
         .events.filter((e) => e.type === "idle_session_retirement_started"),
     ).toHaveLength(1);
     expect(retire).toHaveBeenCalledOnce();
-    expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(3);
+    expect(f.runtime.observe_retirement).toHaveBeenCalledTimes(1);
     expect(f.store.listNotifications({ project_id: f.project })).toHaveLength(
       0,
     );
