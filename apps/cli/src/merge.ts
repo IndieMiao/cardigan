@@ -36,6 +36,7 @@ import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
 import {
   announceDataDir,
+  loadProjectMergeGate,
   resolveActor,
   resolveDataDir,
   resolveProject,
@@ -118,23 +119,6 @@ function open(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
     dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
-}
-
-async function projectGate(
-  store: Store,
-  project_id: ProjectId,
-  io: CliIo,
-  flags: Args["flags"],
-) {
-  const config = await loadMergeGateConfig({
-    dataDir: resolveDataDir(io, optional(flags, "data-dir")),
-    baseBranches: Object.fromEntries(
-      store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
-    ),
-    projectIds: store.listProjects().map((p) => p.id),
-    env: io.env,
-  });
-  return config.forProject(project_id);
 }
 
 export async function runMergeCommand(
@@ -539,7 +523,12 @@ async function mergeConfirm(
       );
       return EXIT.ok;
     }
-    const gate = await projectGate(store, project_id, io, parsed.flags);
+    const gate = await loadProjectMergeGate(
+      store,
+      project_id,
+      io,
+      optional(parsed.flags, "data-dir"),
+    );
     const holdReason = optional(parsed.flags, "reason");
     const holdUntil = optional(parsed.flags, "until");
     if (option === "hold" && !holdReason?.trim())
@@ -653,7 +642,12 @@ async function mergeRequest(
       optional(parsed.flags, "project"),
     );
     requireMergeCard(store, project_id, id);
-    const gate = await projectGate(store, project_id, io, parsed.flags);
+    const gate = await loadProjectMergeGate(
+      store,
+      project_id,
+      io,
+      optional(parsed.flags, "data-dir"),
+    );
     const decision: Decision = runCommand(store, {
       operation: "请求合并",
       target: id,

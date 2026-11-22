@@ -344,6 +344,27 @@ test("merge status lists the card, the confirmation and the plan", async () => {
   );
 });
 
+test.each([false, true])(
+  "C-577: enabling auto-merge uses the current gate when reassigning confirmations (configured=%s)",
+  async (configured) => {
+    const { confirmation } = await seatAwaitingMerge();
+    expect(confirmation.decider).toBe("human");
+    if (configured) enableMergeGate();
+    expect((await cardigan("preference", "set", "auto-merge", "on")).code).toBe(
+      0,
+    );
+    const open = state().decisions.filter(
+      (q) => q.trigger === "merge_confirmation" && q.status === "open",
+    );
+    if (configured) {
+      expect(open.map((q) => q.decider)).toEqual(["system"]);
+    } else {
+      expect(open).toEqual([confirmation]);
+      expect((await cardigan("needs-you")).out).toContain("待你拍板（1）");
+    }
+  },
+);
+
 test("C-577: merge status reports the persisted system decider before handoff", async () => {
   await seatAwaitingMerge();
   store.uow.run((tx) => {

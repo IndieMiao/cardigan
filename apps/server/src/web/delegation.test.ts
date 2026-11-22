@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { createProcessIo, main } from "@cardigan/cli";
 import {
   type Decision,
@@ -1045,6 +1046,16 @@ async function humanAuthorizationAcross(
     await f.close();
   }
 }
+
+test("C-309: the configured gate fixture has a private directory", async () => {
+  const f = await m5Cross({ mergeGate: "enabled" });
+  try {
+    expect((await stat(f.configDir)).mode & 0o077).toBe(0);
+    expect(f.mergeGate.forProject(f.project.project_id).status).toBe("enabled");
+  } finally {
+    await f.close();
+  }
+});
 
 test.each([
   "idle",
