@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type Decision,
   EXT_MESSAGE_DEFAULTS,
+  EXT_MESSAGE_FILTER_DEFAULTS,
   type ExtMessage,
   type ExtMessagePort,
   extMessageItems,
@@ -672,7 +673,15 @@ test.each([
 ] as const)(
   "the final slot persists overflow not yet projected (limit %i, %i slots already used)",
   async (limit, used) => {
-    config = { ...config, policy: { ...config.policy, max_per_minute: limit } };
+    // The 50 role-upgrade notices are part of the overflow: push notices.
+    config = {
+      ...config,
+      policy: { ...config.policy, max_per_minute: limit },
+      filter: {
+        ...EXT_MESSAGE_FILTER_DEFAULTS,
+        kinds: { ...EXT_MESSAGE_FILTER_DEFAULTS.kinds, notice: true },
+      },
+    };
     const active = sender();
     active.recordStatus();
     if (used) {
@@ -2000,4 +2009,317 @@ test("inheriting or overriding the same effective budget preserves the epoch and
   advance(30000);
   await sender().tick();
   expect(rows()[0]?.status).toBe("sent");
+});
+
+// C-580: push filter by item kind and project (synthetic facts, fake adapter).
+const addDecision = (n: number, project: string = project_id) =>
+  store.uow.run((tx) => {
+    const id = `Q-${n}` as Decision["id"];
+    tx.decisions.put(project, {
+      id,
+      key: id,
+      card_id: "C-1",
+      kind: "choose",
+      question: `Fixture ${n}`,
+      context: "PRIVATE context",
+      raised_by: "human",
+      decider: "human",
+      status: "open",
+      category: "general",
+      blocking: false,
+      affected_cards: [],
+      affected_work_items: [],
+      options: [],
+      recommended: "",
+      doc_refs: [],
+    });
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      card_id: "C-1",
+      seq: tx.ids.nextEventSequence(project, "C-1"),
+      type: "decision_requested",
+      actor: { kind: "human", project_id: project },
+      payload: { decision_id: id },
+      created_at: now,
+    });
+  });
+const addNotice = (project: string = project_id) =>
+  store.uow.run((tx) =>
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project),
+      type: "host_role_upgraded",
+      actor: { kind: "system", project_id: project },
+      created_at: now,
+      payload: {},
+    }),
+  );
+const pushFilter = (
+  kinds: Partial<
+    Record<
+      "decision" | "human_action" | "merge_confirmation" | "notice",
+      boolean
+    >
+  >,
+  excluded_projects: string[] = [],
+) => ({
+  kinds: { ...EXT_MESSAGE_FILTER_DEFAULTS.kinds, ...kinds },
+  excluded_projects,
+});
+const sentKinds = () =>
+  fake.messages.map((m) => ("kind" in m ? m.kind : "digest"));
+const noFailureTrace = () => {
+  // A retryable attempt is audited as non-final; only a final one is a failure.
+  expect(
+    events().some(
+      (e) =>
+        e.type === "ext_message_failed" &&
+        (e.payload as { final?: boolean }).final === true,
+    ),
+  ).toBe(false);
+  expect(
+    store.uow
+      .read((tx) => notices(loadCommandState(tx, project_id)))
+      .some((n) => n.kind === "external_message"),
+  ).toBe(false);
+};
+
+test("C-580 without a filter section, decisions and actions are pushed and notices never enter the queue", async () => {
+  const path = join(dir, "ext-message.yaml");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      enabled: true,
+      workbench_url: "https://workbench.invalid",
+      channels: { fake: { enabled: true, credential: "SYNTHETIC_SECRET" } },
+    }),
+    { mode: 0o600 },
+  );
+  expect(loadExtMessageConfig(path)).toMatchObject({
+    status: "loaded",
+    config: { filter: EXT_MESSAGE_FILTER_DEFAULTS },
+  });
+  config = { ...config, policy: { ...config.policy, max_per_minute: 100 } };
+  const { filter: _absent, ...legacy } = config;
+  config = legacy;
+  sender().recordStatus();
+  addDecision(1);
+  addAction(1);
+  addNotice();
+  await sender().tick();
+  // Merge confirmations need a live completion; the domain contract covers them.
+  expect(sentKinds().sort()).toEqual(["decision", "human_action"]);
+  expect(rows().some((r) => r.item_kind === "notice")).toBe(false);
+  noFailureTrace();
+});
+
+test("C-580 switching a kind back on never sends anything filtered while it was off, however large the backlog", async () => {
+  config = { ...config, policy: { ...config.policy, max_per_minute: 100 } };
+  sender().recordStatus();
+  // Observed while off (one tick), and created while off but never observed.
+  for (let n = 0; n < 40; n++) addNotice();
+  await sender().tick();
+  for (let n = 0; n < 5; n++) addNotice();
+  expect(fake.messages).toEqual([]);
+  config = { ...config, filter: pushFilter({ notice: true }) };
+  // The filter is not a rotation: the channel keeps its epoch.
+  const epoch = outbox.extChannelActivation(store.database, "fake");
+  const on = sender();
+  on.recordStatus();
+  expect(outbox.extChannelActivation(store.database, "fake")).toEqual(epoch);
+  await on.tick();
+  await on.tick();
+  expect(fake.messages).toEqual([]);
+  addNotice();
+  await on.tick();
+  expect(sentKinds()).toEqual(["notice"]);
+  // Off and on again: the same cutoff applies once more.
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  addNotice();
+  config = { ...config, filter: pushFilter({ notice: true }) };
+  const again = sender();
+  again.recordStatus();
+  await again.tick();
+  expect(sentKinds()).toEqual(["notice"]);
+});
+
+test("C-580 a rate-held item of a kind switched off is skipped at once and not sent when switched back on", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    filter: pushFilter({ notice: true }),
+  };
+  sender().recordStatus();
+  addNotice();
+  addNotice();
+  await sender().tick();
+  expect(sentKinds()).toEqual(["notice"]);
+  expect(rows().map((r) => [r.status, r.digest_id])).toContainEqual([
+    "pending",
+    "rate:queued",
+  ]);
+  advance(20_000);
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  await sender().tick();
+  expect(rows().filter((r) => r.status === "pending")).toEqual([]);
+  expect(rows().filter((r) => r.status === "skipped")).toHaveLength(1);
+  advance(41_000);
+  config = { ...config, filter: pushFilter({ notice: true }) };
+  sender().recordStatus();
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  noFailureTrace();
+});
+
+test("C-580 skipping filtered rate-held members spends no slot and keeps the allowed members", async () => {
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 1 },
+    filter: pushFilter({ notice: true }),
+  };
+  sender().recordStatus();
+  addNotice();
+  addNotice();
+  addAction(1);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  config = { ...config, filter: pushFilter({ notice: false }) };
+  sender().recordStatus();
+  advance(61_000);
+  await sender().tick();
+  // The overflow summary counts only the action: the filtered notice left
+  // the batch without spending the slot.
+  expect(fake.messages).toHaveLength(2);
+  expect(fake.messages[1]).toMatchObject({ title: "1 条待处理" });
+  expect(rows().filter((r) => r.status === "pending")).toEqual([]);
+  noFailureTrace();
+});
+
+test("C-580 excluded projects are isolated: one project's filter never mutes another", async () => {
+  const other = "p-other";
+  store.createProject({ id: other, name: "Other" });
+  store.uow.run((tx) => tx.cards.put(other, card()));
+  config = {
+    ...config,
+    policy: { ...config.policy, max_per_minute: 100 },
+    filter: pushFilter({}, [other]),
+  };
+  sender().recordStatus();
+  addAction(1);
+  addAction(2, other);
+  addDecision(3, other);
+  await sender().tick();
+  expect(fake.messages.map((m) => m.project)).toEqual([project_id]);
+  expect(rows().some((r) => r.project_id === other)).toBe(false);
+  // Swap the projects: each project's new items follow its own switch, and
+  // nothing from the time the other project was excluded is sent.
+  config = { ...config, filter: pushFilter({}, [project_id]) };
+  sender().recordStatus();
+  addAction(4);
+  addAction(5, other);
+  await sender().tick();
+  expect(fake.messages.map((m) => [m.project, "item" in m && m.item])).toEqual([
+    [project_id, "H-1"],
+    [other, "H-5"],
+  ]);
+});
+
+test("C-580 a retry of a kind switched off stops without another attempt or failure notice", async () => {
+  startChannel();
+  fake.result = "retryable";
+  await sender().tick();
+  expect(rows()).toMatchObject([{ status: "pending", attempts: 1 }]);
+  config = { ...config, filter: pushFilter({ human_action: false }) };
+  sender().recordStatus();
+  advance(30_000);
+  await sender().tick();
+  advance(60_000);
+  await sender().tick();
+  expect(fake.messages).toHaveLength(1);
+  expect(rows()).toMatchObject([{ status: "skipped", attempts: 1 }]);
+  noFailureTrace();
+  // Kinds still switched on keep retrying as before.
+  addDecision(1);
+  await sender().tick();
+  expect(rows().find((r) => r.item_kind === "decision")).toMatchObject({
+    status: "pending",
+    attempts: 1,
+  });
+  advance(30_000);
+  fake.result = "sent";
+  await sender().tick();
+  expect(rows().find((r) => r.item_kind === "decision")).toMatchObject({
+    status: "sent",
+    attempts: 2,
+  });
+});
+
+test("C-580 a queued project excluded before its send settles as skipped, not failed", async () => {
+  startChannel();
+  store.uow.run((tx) => {
+    const item = extMessageItems(
+      loadCommandState(tx, project_id),
+      project_id,
+    )[0]!;
+    projectExtMessage(store.database, item, "fake", now);
+  });
+  config = { ...config, filter: pushFilter({}, [project_id]) };
+  await sender().tick();
+  expect(fake.messages).toEqual([]);
+  expect(rows()).toMatchObject([{ status: "skipped", attempts: 0 }]);
+  noFailureTrace();
+});
+
+test("C-580 a sensitive item of a pushed kind still carries only the generic prompt; a filtered one is not sent", async () => {
+  config = { ...config, filter: pushFilter({ decision: false }) };
+  startChannel();
+  addDecision(1);
+  store.uow.run((tx) => tx.cards.put(project_id, card({ sensitive: true })));
+  await sender().tick();
+  expect(fake.messages).toEqual([
+    {
+      project: project_id,
+      title: "有 1 条敏感事项待处理",
+      url: "https://workbench.invalid/#/p/p-fictional/cards/C-1?at=human-action-H-1",
+    },
+  ]);
+  expect(rows().some((r) => r.item_kind === "decision")).toBe(false);
+});
+
+test("C-580 a saved filter is hot-loaded by the live sender within one tick", async () => {
+  const { LiveExtMessageSender } = await import("./live-ext-message.js");
+  const path = join(dir, "ext-message.yaml");
+  const write = (filter: object) =>
+    writeFileSync(
+      path,
+      JSON.stringify({
+        enabled: true,
+        workbench_url: "https://example.invalid",
+        policy: { max_per_minute: 99 },
+        channels: { fake: { enabled: true, credential: "SYNTHETIC" } },
+        filter,
+      }),
+      { mode: 0o600 },
+    );
+  const live = new LiveExtMessageSender(path, {
+    store,
+    clock,
+    adapters: { fake: () => fake },
+  });
+  write({ human_action: false });
+  live.start();
+  addAction(1);
+  await live.tick();
+  expect(fake.messages).toEqual([]);
+  write({ human_action: true, notice: true });
+  await live.tick();
+  // H-1 arrived while actions were off and stays unsent.
+  expect(fake.messages).toEqual([]);
+  addAction(2);
+  addNotice();
+  await live.tick();
+  expect(sentKinds().sort()).toEqual(["human_action", "notice"]);
+  await live.stop();
 });
