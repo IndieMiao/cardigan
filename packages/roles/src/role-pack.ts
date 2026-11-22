@@ -305,6 +305,7 @@ const ROLE_BODIES: Record<
   string
 > = {
   pm: [
+    "- 仅托管常驻 PM Office 在项目开启偏好后可用 `send_owner_message`，用于把已发布测试版的版本说明等纯文字发给绑定的所有者，不用于催办、群发或发送敏感信息。参考 attachment-64：版本号、是否必须更新、What's new、Download（HTTPS 链接、大小、SHA-256、安装说明）、iPhone 情况、Known issues。queued 不是送达；看来源卡时间线的结果，不要重复发送。",
     "# 角色：PM",
     "",
     HUMAN_TERMINAL_RULE,

@@ -225,6 +225,7 @@ test("C-237 human system rules and manual holds validate and audit without admit
         await write(
           {
             system_auto_assign_verifiers: true,
+            pm_owner_messages: true,
             system_reminders: true,
             system_reminder_policy: policy,
           },
@@ -234,6 +235,7 @@ test("C-237 human system rules and manual holds validate and audit without admit
     ).toBe(200);
     expect((await f.call(prefs)).json).toMatchObject({
       system_auto_assign_verifiers: true,
+      pm_owner_messages: true,
       system_reminders: true,
       system_reminder_policy: policy,
     });
@@ -277,6 +279,7 @@ test("C-237 human system rules and manual holds validate and audit without admit
     const token = f.token(f.primary.owner);
     for (const [path, body] of [
       [prefs, { system_auto_assign_verifiers: false }],
+      [prefs, { pm_owner_messages: true }],
       [hold, { manual_assign: false }],
     ] as const)
       expect(

@@ -235,6 +235,7 @@ export {
   type RunDirectory,
   runDirectory,
 } from "./naming.js";
+export { enqueueOwnerMessage } from "./owner-message.js";
 export { persistPmRotation } from "./pm-rotation.js";
 export {
   type PreparationPolicy,

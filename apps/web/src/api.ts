@@ -1571,6 +1571,7 @@ export interface SystemReminderPolicy {
 export interface SystemRulesPreferences {
   readonly system_auto_assign_verifiers?: boolean;
   readonly system_reminders?: boolean;
+  readonly pm_owner_messages?: boolean;
   readonly system_reminder_policy?: SystemReminderPolicy | null;
 }
 export interface PreferencesView extends SystemRulesPreferences {
