@@ -4,7 +4,9 @@ import {
   reviewImpactLabel,
   type WorkItem,
 } from "../entities.js";
+import { originalRunTrigger } from "../run-trigger.js";
 import { sharedReviewers } from "../shared-findings.js";
+import { reviewDiscussionInstruction } from "../shared-review-wake.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
@@ -163,10 +165,14 @@ export function requestReviewLimit(
     );
   if (decision.status !== "resolved")
     for (const run of runs)
-      endRun(d, run, "blocked", decision.question, {
-        reason: "review_limit",
-        decision_id: id,
-      });
+      if (
+        item.status !== "waiting_decision" ||
+        !reviewDiscussionInstruction(item, originalRunTrigger(d.state, run))
+      )
+        endRun(d, run, "blocked", decision.question, {
+          reason: "review_limit",
+          decision_id: id,
+        });
   if (sibling && review) {
     const affected = [...sibling.affected_work_items, item.id];
     d.put("decisions", { ...sibling, affected_work_items: affected });

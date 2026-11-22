@@ -16,6 +16,7 @@ import {
   currentHarnessActivity,
   dispatchRecoveryQueuedAt,
   finishHostOpsAction,
+  guardReviewRestartStop,
   type HarnessActivity,
   type HostOpsExecution,
   type HostOpsExecutionTool,
@@ -32,7 +33,9 @@ import {
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  reviewRestartStopStarted,
   type SessionActivity,
+  systemTurnOwner,
   type WorkerInspectionRequest,
   withdrawRecoveredHostOpsAction,
   withdrawUnstartedStallRestart,
@@ -159,9 +162,20 @@ export class HostOpsService {
       options.store,
       this.clock,
       options.runtime,
-      () => options.contextUsage?.execution,
+      (project) => this.stallExecution(project),
       this.contextAbort.signal,
     );
+  }
+  /** A project-local worker may have a different account and workspace root
+   * than the host default. Never fall back across a rejected registry binding. */
+  private stallExecution(project: ProjectId) {
+    try {
+      return this.options.workerExecution
+        ? this.options.workerExecution(project, "local")
+        : this.options.contextUsage?.execution;
+    } catch {
+      return undefined;
+    }
   }
   /** Each monitor (including its in-flight probes) belongs to one immutable launch generation. */
   private get upstream(): UpstreamHealthMonitor | undefined {
@@ -286,6 +300,7 @@ export class HostOpsService {
       current,
       platform,
       harness,
+      this.options.runtime,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {
@@ -500,21 +515,39 @@ export class HostOpsService {
         "stale_target",
         "精确上下文数据缺失、过期或会话已更换，请重新读取诊断",
       );
-    const params = {
-      ...(p.dispatch_stall_id
-        ? { dispatch_stall_id: p.dispatch_stall_id }
-        : {}),
-      ...(contextUsage
-        ? {
-            context_usage: contextUsage,
-            context_stale_after_ms:
-              this.options.contextUsage?.staleAfterMs ??
-              DEFAULT_CONTEXT_STALE_AFTER_MS,
-          }
-        : {}),
-      tool,
-      target_id: p.target_id as AssignmentId | RunId,
-      reason: p.reason ?? "",
+    const paramsFor = (state: CommandState) => {
+      const stall =
+        p.dispatch_stall_id &&
+        this.stallPatrol.current(
+          state,
+          p.target_id as AssignmentId,
+          p.dispatch_stall_id,
+        );
+      if (p.dispatch_stall_id && !stall)
+        throw new ToolError(
+          "stale_target",
+          "该指派已没有可以按此原因恢复的积压",
+          { reason: "stall_not_current" },
+        );
+      return {
+        ...(stall && stall.review_trigger_id
+          ? { review_trigger_id: stall.review_trigger_id }
+          : {}),
+        ...(p.dispatch_stall_id
+          ? { dispatch_stall_id: p.dispatch_stall_id }
+          : {}),
+        ...(contextUsage
+          ? {
+              context_usage: contextUsage,
+              context_stale_after_ms:
+                this.options.contextUsage?.staleAfterMs ??
+                DEFAULT_CONTEXT_STALE_AFTER_MS,
+            }
+          : {}),
+        tool,
+        target_id: p.target_id as AssignmentId | RunId,
+        reason: p.reason ?? "",
+      };
     };
     const activity =
       tool === "host_ops_cancel_run"
@@ -530,7 +563,7 @@ export class HostOpsService {
           undefined,
           activity,
         );
-      return unwrap(prepareHostOpsAction(state, actor, params)).data;
+      return unwrap(prepareHostOpsAction(state, actor, paramsFor(state))).data;
     });
     if (p.dispatch_stall_id) {
       const state = store.uow.read((tx) => loadCommandState(tx, project));
@@ -590,6 +623,7 @@ export class HostOpsService {
       store.runIdempotent(invocation, (tx) => {
         context.revalidateToken?.();
         const state = loadCommandState(tx, project);
+        const params = paramsFor(state);
         const fresh = unwrap(prepareHostOpsAction(state, actor, params)).data;
         const diagnosis =
           tool === "host_ops_cancel_run"
@@ -601,19 +635,6 @@ export class HostOpsService {
                 undefined,
                 freshActivity,
               );
-        if (
-          p.dispatch_stall_id &&
-          !this.stallPatrol.current(
-            state,
-            fresh.assignment.id,
-            p.dispatch_stall_id,
-          )
-        )
-          throw new ToolError(
-            "stale_target",
-            "该指派已没有可以按此原因恢复的积压",
-            { reason: "stall_not_current" },
-          );
         if (
           JSON.stringify(fresh.assignment) !==
             JSON.stringify(preflight.assignment) ||
@@ -1338,7 +1359,7 @@ export class HostOpsService {
           ? await stallWorkspace(
               state,
               a,
-              this.options.contextUsage?.execution,
+              this.stallExecution(project),
               this.contextAbort.signal,
             )
           : "unknown";
@@ -1346,6 +1367,27 @@ export class HostOpsService {
         evidenceFailure = `workspace=${workspace}`;
         return false;
       };
+      const reviewRestart =
+        action.tool === "host_ops_restart_assignment" &&
+        !action.dispatch_stall_id &&
+        read().work_items.some(
+          (w) =>
+            w.assignment_id === action.assignment_id && w.kind === "verify",
+        );
+      const reviewStopGuard = (beforeRelease: boolean) =>
+        store.uow.run((tx) => {
+          const effect = unwrap(
+            guardReviewRestartStop(
+              loadCommandState(tx, project),
+              { kind: "system", project_id: project },
+              action.action_id,
+              { clock: this.clock, ids: tx.ids },
+              beforeRelease,
+            ),
+          );
+          persistEffect(tx, project, effect);
+          return effect.data;
+        });
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (
@@ -1360,6 +1402,7 @@ export class HostOpsService {
           fail(evidenceFailure ?? "stall_not_current");
           return false;
         }
+        if (reviewRestart && !reviewStopGuard(false)) return false;
         if (action.tool === "host_ops_cancel_run") return true;
         if (this.upstream !== observationMonitor) {
           fail("upstream_configuration_changed");
@@ -1420,16 +1463,17 @@ export class HostOpsService {
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
       const stopStarted =
-        (action.automatic_context_restart === true ||
+        (reviewRestart && reviewRestartStopStarted(read(), action.action_id)) ||
+        ((action.automatic_context_restart === true ||
           !!action.dispatch_stall_id) &&
-        read().events.some(
-          (e) =>
-            e.type === "host_ops_action_deferred" &&
-            (e.payload as { action_id?: string }).action_id ===
-              action.action_id &&
-            (e.payload as { reason?: string }).reason ===
-              "automatic_context_stop_started",
-        );
+          read().events.some(
+            (e) =>
+              e.type === "host_ops_action_deferred" &&
+              (e.payload as { action_id?: string }).action_id ===
+                action.action_id &&
+              (e.payload as { reason?: string }).reason ===
+                "automatic_context_stop_started",
+          ));
       // A started stop can only observe its exit. The original notice may
       // already be ACKed; settlement rechecks it before allowing a new Run.
       if (!(action.system_finished_run_id && stopStarted) && !mayStop()) return;
@@ -1442,6 +1486,7 @@ export class HostOpsService {
       } else {
         const beforeSignal = () => {
           if (!mayStop()) return false;
+          if (reviewRestart && !reviewStopGuard(true)) return false;
           if (action.automatic_context_restart || action.dispatch_stall_id)
             this.defer(
               project,
@@ -1459,10 +1504,12 @@ export class HostOpsService {
           result = await stopSystemTurn(
             runtime,
             action.runtime_ref,
-            {
-              project_id: project,
-              assignment_id: action.assignment_id,
-            },
+            systemTurnOwner(
+              read(),
+              action.assignment_id,
+              action.runtime_ref,
+              action.system_finished_run_id,
+            ),
             stopStarted,
             checkWorkspace,
             beforeSignal,

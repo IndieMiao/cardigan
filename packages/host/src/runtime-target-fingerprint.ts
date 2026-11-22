@@ -19,6 +19,7 @@ export function runtimeTargetBinding({
   execution: ExecutionConfig;
   session: string;
 }): RuntimeTargetBinding {
+  // parseRuntimeWorkers canonicalizes env keys and omits an empty mapping.
   const fingerprint = createHash("sha256")
     .update(
       JSON.stringify([
@@ -28,6 +29,9 @@ export function runtimeTargetBinding({
         registeredRuntimeOf(execution, session),
         execution.dataDir,
         execution.mode === "agent-ssh" ? execution.path : null,
+        ...(execution.mode === "agent-ssh" && execution.env
+          ? [{ env: execution.env }]
+          : []),
         ...(execution.mode === "agent-ssh" && execution.macosCore
           ? [{ macosCore: execution.macosCore }]
           : []),

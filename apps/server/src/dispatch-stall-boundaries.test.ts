@@ -1,21 +1,33 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   type Assignment,
   abortDispatch,
+  acknowledgeRun,
   type CardId,
+  dispatchRun,
   finishRun,
   queueRun,
+  type Run,
   recordDecision,
   requestDecision,
   reviewRunWakeDisposition,
 } from "@cardigan/domain";
+import { armBellReceipt, confirmBellWrite, launchRun } from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
+import { parseLaunchConfig } from "@cardigan/roles";
 import { moveNotification, recordNotification } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
 import { setup } from "../test-support/dispatch-stalls.js";
+import { loopbackFixture } from "../test-support/loopback-retirement.js";
 import { Dispatcher } from "./dispatch.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 
@@ -262,9 +274,19 @@ test("a cleaned verifier build allows recovery; an existing unreadable checkout,
   await vi.waitFor(() => expect(f.runtime.release).toHaveBeenCalledOnce());
 });
 
-function endedReviewer() {
-  const { f, a, card, item, tree } = reviewerFixture();
-  const run = f.session(a, false);
+function endedReviewer(discussWhileWaiting = false) {
+  const fixture = reviewerFixture();
+  return endReviewerTurn(
+    fixture,
+    fixture.f.session(fixture.a, false),
+    discussWhileWaiting,
+  );
+}
+function endReviewerTurn(
+  { f, a, card, item, tree }: ReturnType<typeof reviewerFixture>,
+  run: Run,
+  discussWhileWaiting = false,
+) {
   const q = f.apply((state, actor, ports) =>
     requestDecision(
       state,
@@ -291,6 +313,16 @@ function endedReviewer() {
     ),
   );
   f.advance(1);
+  if (discussWhileWaiting) {
+    const notice = f.event(
+      "instruction_issued",
+      { work_item_id: item.id },
+      a,
+      card.id,
+    );
+    f.skipEvents();
+    return { f, a, card, item, notice, tree, run };
+  }
   f.apply((state, actor, ports) =>
     recordDecision(
       state,
@@ -334,6 +366,323 @@ function endedReviewer() {
   f.skipEvents();
   return { f, a, card, item, notice, tree, run };
 }
+
+test("H-192: a clean reviewer on a bound loopback SSH terminal recovers once from worker-side evidence", async () => {
+  const fixture = reviewerFixture();
+  const { f, a, card, tree } = fixture;
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.project, { ...card, flow_version: 5 }),
+  );
+  const queue = () =>
+    f.apply((s, actor, p) =>
+      queueRun(
+        s,
+        actor,
+        {
+          assignment_id: a.id,
+          model: "fixture-model",
+          agent_cli_version: "fixture",
+        },
+        p,
+      ),
+    );
+  const start = (run: Run) =>
+    f.apply(
+      (s, actor, p) => acknowledgeRun(s, actor, { run_id: run.id }, p),
+      f.actorFor(a),
+    );
+  const worker = await loopbackFixture(f.dataDir, f.project, a.id);
+  const { agentRoot } = worker.execution;
+  for (const path of [
+    agentRoot,
+    ...["worktrees", "builds"].flatMap((area) => [
+      join(agentRoot, area),
+      join(agentRoot, area, f.project),
+    ]),
+  ])
+    chmodSync(path, 0o2750);
+  const launch = await launchRun(
+    {
+      store: f.store,
+      runtime: worker.runtime,
+      execution: worker.execution,
+      clock: f.clock,
+      dataDir: f.dataDir,
+      mcpUrl: "http://localhost/mcp",
+      launch: {
+        config: parseLaunchConfig({
+          profiles: { fixture: { harness: "pi", model: "fixture-model" } },
+        }),
+        secrets: {},
+      },
+    },
+    {
+      project: f.project,
+      assignment_id: a.id,
+      run: queue(),
+      actor: { kind: "system", project_id: f.project },
+      worktree: { path: tree, base_sha: "b".repeat(40) },
+    },
+  );
+  expect(launch.runtime_ref.launch_generation).toBeUndefined();
+  expect(launch.run.recovery_policy).toBeUndefined();
+  expect(launch.run.recovery_runtime).toBeUndefined();
+  expect(worker.labels).toEqual({
+    cardigan: "1",
+    project: f.project,
+    assignment: a.id,
+    run: launch.run.id,
+  });
+  expect(launch.run.bell_delivery?.runtime_ref).toEqual(launch.runtime_ref);
+  start(launch.run);
+  f.apply(
+    (s, actor, p) =>
+      finishRun(
+        s,
+        actor,
+        { run_id: launch.run.id, outcome: "completed", summary: "fixture" },
+        p,
+      ),
+    f.actorFor(a),
+  );
+  // The decision ends a later Run that reused this terminal, not its creating Run.
+  f.advance(1000);
+  const reused = queue();
+  f.apply((s, actor, p) => dispatchRun(s, actor, { run_id: reused.id }, p));
+  expect(
+    armBellReceipt(f.store, f.project, reused.id, launch.runtime_ref, card.id),
+  ).toBe(true);
+  confirmBellWrite(f.store, f.project, reused.id, f.clock.now());
+  start(reused);
+  const { notice } = endReviewerTurn(fixture, reused);
+  f.runtime.observe_retirement = worker.runtime.observe_retirement.bind(
+    worker.runtime,
+  );
+  f.runtime.retire_idle = worker.runtime.retire_idle.bind(worker.runtime);
+  vi.mocked(f.runtime.status).mockImplementation(
+    worker.runtime.status.bind(worker.runtime),
+  );
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    const row = async () =>
+      (await f.view()).dispatch_stalls.find((s) => s.assignment_id === a.id);
+    for (const evidence of [
+      "conflict",
+      "wrong-run",
+      "unexpected-generation",
+      "busy",
+      "incomplete",
+    ]) {
+      worker.sample(evidence);
+      expect(await row()).toMatchObject({
+        workspace: "clean",
+        can_restart: false,
+      });
+      await f.service.tick();
+      f.advance(30_000);
+    }
+    expect(worker.signals).toEqual([]);
+    worker.sample("matched");
+    writeFileSync(join(tree, "pending-review"), "keep");
+    expect(await row()).toMatchObject({
+      terminal_owner: "confirmed",
+      workspace: "dirty",
+      can_restart: false,
+    });
+    await f.service.tick();
+    expect(worker.signals).toEqual([]);
+    rmSync(join(tree, "pending-review"));
+    f.advance(30_000);
+    expect(await row()).toMatchObject({
+      workspace: "clean",
+      process_state: "alive",
+      terminal_owner: "confirmed",
+      can_restart: true,
+    });
+    await vi.waitFor(
+      async () => {
+        await f.service.tick();
+        expect(
+          f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+        ).toHaveLength(1);
+      },
+      { timeout: 10000 },
+    );
+    await f.service.tick();
+    await dispatcher.tick();
+    await f.service.tick();
+    await dispatcher.tick();
+    expect(worker.signals).toEqual(["TERM"]);
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    const notes = f.store
+      .listNotifications({ project_id: f.project, assignment_id: a.id })
+      .filter((n) => n.event_id === notice.id);
+    expect(notes).toMatchObject([{ status: "belled" }]);
+    expect(
+      f
+        .state()
+        .runs.filter(
+          (r) =>
+            r.assignment_id === a.id &&
+            r.id !== launch.run.id &&
+            r.id !== reused.id &&
+            r.status !== "cancelled",
+        ),
+    ).toMatchObject([{ id: notes[0]?.run_id }]);
+  } finally {
+    await dispatcher.close();
+  }
+}, 20000);
+
+test.each(["before request", "before signal", "after signal"])(
+  "ordinary restart respects a reviewer pause %s",
+  async (when) => {
+    const { f, a, item } = endedReviewer(when === "before request");
+    const request = () =>
+      f.service.tools.execute(f.context, "host_ops_restart_assignment", {
+        target_id: a.id,
+        reason: "fixture",
+        idempotency_key: "plain-restart",
+      });
+    const pause = () =>
+      f.store.uow.run((tx) => {
+        const w = tx.work_items.get(f.project, item.id);
+        if (!w) throw new Error("missing verifier");
+        tx.work_items.put(f.project, { ...w, status: "waiting_decision" });
+      });
+    if (when === "before request") {
+      await expect(request()).rejects.toThrow(/等待拍板/);
+      expect(
+        f.state().events.some((e) => e.type === "host_ops_action_taken"),
+      ).toBe(false);
+    } else {
+      await request();
+      if (when === "before signal") pause();
+      else {
+        const release = vi.mocked(f.runtime.release).getMockImplementation();
+        if (!release) throw new Error("missing release");
+        vi.mocked(f.runtime.release).mockImplementationOnce(async (...args) => {
+          pause();
+          return release(...args);
+        });
+      }
+      await f.service.tick();
+      expect(
+        f.state().events.filter((e) => e.type === "host_ops_action_finished"),
+      ).toMatchObject([
+        {
+          payload: {
+            result:
+              when === "before signal"
+                ? "withdrawn_review_wait"
+                : "stopped_without_restart",
+          },
+        },
+      ]);
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) => r.assignment_id === a.id && r.status === "queued",
+          ),
+      ).toHaveLength(0);
+      expect(f.state().work_items.find((w) => w.id === item.id)?.status).toBe(
+        "waiting_decision",
+      );
+    }
+    expect(f.runtime.release).toHaveBeenCalledTimes(
+      when === "after signal" ? 1 : 0,
+    );
+  },
+);
+
+test("a paused reviewer's directed instruction recovers on independently proven local exit, not on an offline core alone", async () => {
+  const { f, a, item, run, notice } = endedReviewer(true);
+  const ref = f.store.uow.run((tx) => {
+    const owner = tx.assignments.get(f.project, a.id),
+      w = tx.work_items.get(f.project, item.id);
+    if (!owner?.runtime_ref || !w) throw new Error("missing reviewer");
+    const ref = {
+      ...owner.runtime_ref,
+      local_process_receipt: "fixture-receipt",
+    };
+    tx.assignments.put(f.project, { ...owner, runtime_ref: ref });
+    tx.runs.put(f.project, {
+      ...tx.runs.get(f.project, run.id)!,
+      recovery_runtime: ref,
+    });
+    expect(w.status).toBe("waiting_decision");
+    return ref;
+  });
+  const missing = {
+    ok: false,
+    error: { code: "runtime_unavailable", message: "offline" },
+  } as const;
+  vi.mocked(f.runtime.status).mockResolvedValue(missing);
+  f.runtime.observe_retirement = vi.fn(async () => missing);
+  const proof = vi.fn(async () => ({ ok: true as const, value: false }));
+  f.runtime.confirm_local_exit = proof;
+  const dispatcher = new Dispatcher(f.options);
+  try {
+    await dispatcher.tick();
+    f.advance(600000);
+    await dispatcher.tick();
+    const row = async () =>
+      (await f.view()).dispatch_stalls.find((s) => s.assignment_id === a.id);
+    expect(await row()).toMatchObject({
+      can_restart: false,
+      terminal_owner: "unconfirmed",
+    });
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
+      ).toHaveLength(1);
+    });
+    await f.service.tick();
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(0);
+    f.advance(30_000); // Next scheduled patrol, same outstanding notice.
+    proof.mockResolvedValue({ ok: true, value: true });
+    expect(await row()).toMatchObject({
+      can_restart: true,
+      terminal_owner: "confirmed",
+      process_state: "exited",
+    });
+    await vi.waitFor(async () => {
+      await f.service.tick();
+      expect(
+        f.state().events.some((e) => e.type === "host_ops_action_finished"),
+      ).toBe(true);
+    });
+    expect(
+      f.state().events.filter((e) => e.type === "bell_turn_recovery_failed"),
+    ).toHaveLength(1);
+    expect(
+      f.state().events.filter((e) => e.type === "host_ops_action_taken"),
+    ).toHaveLength(1);
+    expect(proof).toHaveBeenCalledWith(ref, {
+      project_id: f.project,
+      assignment_id: a.id,
+    });
+    expect(f.runtime.release).not.toHaveBeenCalled();
+    await dispatcher.tick();
+    expect(
+      f.store
+        .listNotifications({ project_id: f.project, assignment_id: a.id })
+        .find((n) => n.event_id === notice.id)?.status,
+    ).toBe("belled");
+    expect(f.state().work_items.find((w) => w.id === item.id)?.status).toBe(
+      "waiting_decision",
+    );
+  } finally {
+    await dispatcher.close();
+  }
+});
 
 test.each(["dirty", "unknown"])(
   "an exact missing terminal cannot start a notice-only Run on a %s workspace",

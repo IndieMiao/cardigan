@@ -228,6 +228,53 @@ test.each([
     expect(result.processes).toEqual(live ? [] : null);
   },
 );
+test.each(["alive", "exited", "unknown"] as const)(
+  "native local: only exact hc evidence is exposed (%s)",
+  async (value) => {
+    const { a, target } = worker("local");
+    const bound = { ...target, generation: "legacy" };
+    const ref = {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t2",
+      agent_name: "reviewer",
+      target: bound,
+    };
+    const observe = vi.fn().mockResolvedValue({ ok: true, value });
+    const runtime = { observe_retirement: observe } as unknown as Runtime;
+    vi.mocked(agentProcessCommand).mockClear();
+    const read = inspectWorker(
+      { mode: "local", dataDir: "/controller", target: bound },
+      project,
+      { ...a, runtime_ref: ref },
+      undefined,
+      true,
+      "linux",
+      undefined,
+      runtime,
+    );
+    if (value === "unknown")
+      await expect(read).rejects.toThrow("local_terminal_unconfirmed");
+    else
+      expect(await read).toMatchObject({
+        terminals: [
+          {
+            address: "t2",
+            state: value === "alive" ? "live" : "finished",
+            screen: [],
+          },
+        ],
+        processes: null,
+        events: null,
+      });
+    expect(observe).toHaveBeenCalledWith(ref, {
+      project_id: project,
+      assignment_id: a.id,
+    });
+    expect(agentProcessCommand).not.toHaveBeenCalled();
+  },
+);
+
 test("collector: synthetic hc socket, generation, transcript, truncated command and redaction boundaries", () => {
   execFileSync(
     "/usr/bin/python3",
