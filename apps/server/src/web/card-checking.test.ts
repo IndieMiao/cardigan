@@ -4,7 +4,7 @@ import {
   fixture,
   id,
 } from "../../../../packages/domain/src/commands/test-fixtures.js";
-import { cardCheckingIndex } from "./card-checking.js";
+import { cardCheckingIndex, missingPrecheckTargets } from "./card-checking.js";
 import { cardSummary } from "./cards-page.js";
 import { cardListViews } from "./read.js";
 
@@ -12,12 +12,16 @@ import { cardListViews } from "./read.js";
 
 const card1 = id("card", 1);
 let seq = 0;
-function systemEvent(type: string, payload: Record<string, unknown>): Event {
+function systemEvent(
+  type: string,
+  payload: Record<string, unknown>,
+  card = card1,
+): Event {
   seq += 1;
   return {
     id: `event-${seq}`,
     project_id: fixture().project_id,
-    card_id: card1,
+    card_id: card,
     seq,
     type,
     actor: { kind: "system", project_id: fixture().project_id },
@@ -25,7 +29,7 @@ function systemEvent(type: string, payload: Record<string, unknown>): Event {
     payload,
   } as unknown as Event;
 }
-const precheck = (status: string) =>
+const precheck = (status: string, card = card1, attempt = "attempt-1") =>
   systemEvent(
     status === "queued"
       ? "precheck_queued"
@@ -33,15 +37,16 @@ const precheck = (status: string) =>
         ? "precheck_started"
         : "precheck_finished",
     {
-      attempt_id: "attempt-1",
+      attempt_id: attempt,
       assignment_id: id("assignment", 1),
       work_item_id: id("work_item", 1),
-      card_id: card1,
+      card_id: card,
       head_sha: "a".repeat(40),
       status,
       branch: "feature",
       machine_id: "local",
     },
+    card,
   );
 const waitingForPrecheck: Partial<WorkItem> = {
   status: "blocked",
@@ -134,6 +139,80 @@ describe("precheck in flight", () => {
       } as Partial<WorkItem>),
     );
     expect(view.checking?.precheck?.waiting_items).toStrictEqual([]);
+  });
+});
+
+describe("waits for another card's precheck (C-567 review)", () => {
+  const card2 = id("card", 2);
+  const waitFor = (target: string): Partial<WorkItem> =>
+    ({
+      ...waitingForPrecheck,
+      reported_blocker: {
+        ...(waitingForPrecheck.reported_blocker as NonNullable<
+          WorkItem["reported_blocker"]
+        >),
+        resume_when: { kind: "precheck_finished", target_id: target },
+      },
+    }) as Partial<WorkItem>;
+
+  test.each(["queued", "running"])(
+    "a %s precheck on another card marks the waiting card",
+    (status) => {
+      const view = listed(
+        state([precheck(status, card2, "other-1")], waitFor("other-1")),
+      );
+      expect(view.checking).toStrictEqual({
+        precheck: {
+          attempt_ids: ["other-1"],
+          waiting_items: [id("work_item", 1)],
+        },
+      });
+    },
+  );
+
+  test("the other card's events may come from outside the page's state", () => {
+    const outside = [precheck("running", card2, "other-1")];
+    const scoped = state([], waitFor("other-1"));
+    expect(missingPrecheckTargets(scoped)).toStrictEqual(["other-1"]);
+    expect(listed(scoped).checking).toBeUndefined();
+    const view = cardListViews(
+      scoped,
+      undefined,
+      [],
+      undefined,
+      undefined,
+      outside,
+    ).find((c) => c.id === card1);
+    expect(view?.checking?.precheck?.waiting_items).toStrictEqual([
+      id("work_item", 1),
+    ]);
+    // Once that attempt settles the item reads as a blocker again.
+    const settled = cardListViews(scoped, undefined, [], undefined, undefined, [
+      ...outside,
+      precheck("failed", card2, "other-1"),
+    ]).find((c) => c.id === card1);
+    expect(settled?.checking).toBeUndefined();
+    expect(missingPrecheckTargets(state(outside, waitFor("other-1")))).toEqual(
+      [],
+    );
+  });
+
+  test("a wait handed to PM for a manual resume stays a blocker", () => {
+    const manual = {
+      ...waitingForPrecheck,
+      reported_blocker: {
+        ...(waitingForPrecheck.reported_blocker as NonNullable<
+          WorkItem["reported_blocker"]
+        >),
+        auto_resume_disabled: true,
+      },
+    } as Partial<WorkItem>;
+    const view = listed(state([precheck("running")], manual));
+    // The card still shows its running precheck, but W-1 is not hidden.
+    expect(view.checking).toStrictEqual({
+      precheck: { attempt_ids: ["attempt-1"], waiting_items: [] },
+    });
+    expect(missingPrecheckTargets(state([], manual))).toStrictEqual([]);
   });
 });
 

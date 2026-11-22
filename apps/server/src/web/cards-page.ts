@@ -1,6 +1,10 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  missingPrecheckTargets,
+  readPrecheckAttempts,
+} from "./card-checking.js";
 import { readCardDependencies } from "./card-dependencies.js";
 import { cardSelectors } from "./card-selectors.js";
 import { HttpRejection } from "./http.js";
@@ -318,6 +322,7 @@ export function readCardsPage(
         queue,
         readCardDependencies(store, tx, project),
         readMergeQueueState(tx, project),
+        readPrecheckAttempts(store, project, missingPrecheckTargets(state)),
       ).map((c) => [c.id, c]),
     );
     const cards = ids.flatMap((id) => {
