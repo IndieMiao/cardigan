@@ -32,7 +32,31 @@ sudo python3 deploy/install-agent.py --host-user <主机用户名> \
 
 ## Agent 附件助手（C-595）
 
-`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、组只读），由 worker 向导首装、人工升级或 `cardigan-helper-v2` 签名升级随 helper 一起更新；在 C-595 之前登记的签名升级入口只收三个 helper，不会自动装上附件助手（自动迁移另卡处理）；请按 `cardigan machine check` 在 `agent.attachment_tools` 的 `remedy` 中给出的两步命令手动补装（控制主机 scp 当前发行的两份文件，目标机核对摘要后安装）。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对它们与当前发布一致。
+`agent-tools/` 下的 `download-attachment.mjs`、`upload-evidence.mjs` 是只依赖 Node 内置模块的预构建单文件。受管 worker 上装在 `<工作根>/libexec/agent-tools/`（root 所有、项目组只读），由 worker 向导首装，并随人工升级和 `cardigan-helper-v2` 签名升级与 helper 一起更新。员工启动时通过 `CARDIGAN_AGENT_TOOLS` 找到它们。不要手改，修改源码后运行 `pnpm --filter @cardigan/mcp-server build:agent-tools` 重建。
+
+`cardigan machine check` 的 `agent.attachment_tools` 能力项会核对两个文件存在、可执行且与当前发布一致；不一致时只报原因和期望 SHA-256，不生成命令。在 C-595 之前登记签名升级的机器不会自动装上助手（自动补装另卡处理），这时按下面的固定步骤手动补装：
+
+```sh
+# 1. 目标机，管理员：新建只属于本次补装的暂存目录，记下路径
+stage=$(mktemp -d) && echo "$stage"
+
+# 2. 控制主机，主机账号：从当前已部署的发行目录拷两个文件进暂存目录
+scp <发行目录>/deploy/agent-tools/download-attachment.mjs \
+    <发行目录>/deploy/agent-tools/upload-evidence.mjs \
+    <管理员>@<目标机>:<暂存目录>/
+
+# 3. 目标机，管理员：与 machine check 报出的期望 SHA-256 逐一核对，不一致就停止
+cd "$stage" && sha256sum download-attachment.mjs upload-evidence.mjs   # macOS：shasum -a 256
+
+# 4. 安装到固定路径（Run 账号需要读和执行，与向导一致用 root:项目组 0750），再核对一次
+sudo test ! -L <工作根>/libexec/agent-tools
+sudo install -d -o root -g <项目组> -m 0750 <工作根>/libexec/agent-tools
+sudo install -o root -g <项目组> -m 0750 download-attachment.mjs upload-evidence.mjs <工作根>/libexec/agent-tools/
+sudo sha256sum <工作根>/libexec/agent-tools/download-attachment.mjs <工作根>/libexec/agent-tools/upload-evidence.mjs
+
+# 5. 只删除本次的暂存目录，然后重跑 machine check 确认
+cd / && rm -r "$stage"
+```
 
 ## 安装 cardigan 命令
 

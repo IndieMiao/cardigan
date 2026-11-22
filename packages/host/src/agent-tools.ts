@@ -220,8 +220,15 @@ const PROBLEM_TEXT = {
   not_executable: "无法执行",
 } as const;
 
-/** Readable reason for a failed check; undefined means installed and current. */
-export function agentToolsProblem(output: string): string | undefined {
+/**
+ * Readable reason for a failed check; undefined means installed and current.
+ * With the release digests each problem names the expected SHA-256, so an
+ * operator can verify a manual install (deploy/README.md) against it.
+ */
+export function agentToolsProblem(
+  output: string,
+  expected?: Readonly<Record<AgentTool, string>>,
+): string | undefined {
   const status = RESULT.exec(output)?.[1];
   if (status === undefined) return "附件助手检查未完成";
   if (status === "ok") return undefined;
@@ -232,38 +239,11 @@ export function agentToolsProblem(output: string): string | undefined {
         keyof typeof PROBLEM_TEXT,
         string,
       ];
-      return AGENT_TOOLS.includes(name as AgentTool)
-        ? `附件助手 ${name} ${PROBLEM_TEXT[kind]}`
-        : "附件助手检查未完成";
+      if (!AGENT_TOOLS.includes(name as AgentTool)) return "附件助手检查未完成";
+      const digest = expected?.[name as AgentTool];
+      return `附件助手 ${name} ${PROBLEM_TEXT[kind]}${digest ? `（期望 SHA-256 ${digest}）` : ""}`;
     })
     .join("；");
-}
-
-/**
- * Two operator steps for a remote worker, independent of what that worker's
- * deploy directory contains: copy the two files from this controller's deployed
- * release, then on the worker verify them against the release digests before
- * installing them root-owned and group read-only. Regenerated on every check.
- */
-export function agentToolsInstallCommand(
-  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
-  os: string,
-  current: AgentToolsRelease,
-  source: string = releaseAgentToolsDirectory(),
-) {
-  const target = remoteAgentToolsDirectory(execution.agentRoot);
-  const sums = AGENT_TOOLS.map(
-    (name) => `'${current.digests[name]}  ${name}'`,
-  ).join(" ");
-  const copy = `scp ${AGENT_TOOLS.map((name) => join(source, name)).join(" ")} <管理员>@<目标机>:`;
-  const install = [
-    `printf '%s\\n' ${sums} | ${os === "darwin" ? "/usr/bin/shasum -a 256" : "/usr/bin/sha256sum"} -c -`,
-    `sudo test ! -L ${target}`,
-    `sudo install -d -o root -g ${execution.gid} -m 0750 ${target}`,
-    `sudo install -o root -g ${execution.gid} -m 0750 ${AGENT_TOOLS.join(" ")} ${target}/`,
-    `rm -f ${AGENT_TOOLS.join(" ")}`,
-  ].join(" && ");
-  return `控制主机（主机账号）：${copy}\n目标机（管理员登录后在家目录）：${install}`;
 }
 
 /** Version records the release commit the matching tools were verified against. */
@@ -271,7 +251,6 @@ export function agentToolsCapability(
   execution: ExecutionConfig,
   machine: string,
   current: AgentToolsRelease | null = agentToolsRelease() ?? null,
-  os?: string,
 ): CapabilityDefinition {
   const command = [
     "node",
@@ -292,15 +271,7 @@ export function agentToolsCapability(
         ? RELEASE_UNAVAILABLE
         : output === undefined
           ? "附件助手检查未完成"
-          : agentToolsProblem(output),
+          : agentToolsProblem(output, current.digests),
     parseVersion: () => current?.source.slice(0, 12) ?? null,
-    failureRemedy: (reason) =>
-      current !== null &&
-      os !== undefined &&
-      machine !== "local" &&
-      execution.mode === "agent-ssh" &&
-      reason.startsWith("附件助手 ")
-        ? agentToolsInstallCommand(execution, os, current)
-        : undefined,
   };
 }

@@ -83,10 +83,6 @@ export async function refreshMachineObservations(
     launch_enabled: false,
   };
   let capabilities: MachineCapability[] = [];
-  // C-595: operator commands belong to this check's target and release only.
-  // They are returned with this result and never persisted, so a later
-  // `machine show` cannot offer a command for an outdated release or binding.
-  const remedies = new Map<string, string>();
   let observedBrowserDigest: string | null | undefined;
   let targetFingerprint: string | undefined;
   let checkedTarget: ObservationTarget | undefined;
@@ -118,12 +114,7 @@ export async function refreshMachineObservations(
       ? []
       : (options.catalog?.() ?? [
           ...loadMachineCapabilityCatalog(options.env, root, target.machine.os),
-          agentToolsCapability(
-            target.execution,
-            machine,
-            undefined,
-            target.machine.os,
-          ),
+          agentToolsCapability(target.execution, machine),
         ]);
     const failures: NonNullable<
       MachineHealth["capability_failures"]
@@ -164,8 +155,6 @@ export async function refreshMachineObservations(
         const reason = entry.failureReason?.(
           result.ok ? result.output : undefined,
         );
-        const remedy = reason && entry.failureRemedy?.(reason);
-        if (remedy) remedies.set(entry.key, remedy);
         if (reason)
           failures.push({ key: entry.key, search_locations: [], reason });
         continue;
@@ -294,29 +283,5 @@ export async function refreshMachineObservations(
         notifyHelperMismatch(tx, project, machine, { now }, mismatch, fields);
     });
   }
-  return withRemedies(
-    readMachineObservations(store, project, machine, now()),
-    remedies,
-    `machine-observation:${observation}`,
-  );
-}
-
-/** Attach this check's commands only to the observation it produced. */
-function withRemedies<T extends ReturnType<typeof readMachineObservations>>(
-  observations: T,
-  remedies: ReadonlyMap<string, string>,
-  evidence: string,
-): T {
-  const health = observations.health;
-  if (!remedies.size || health?.evidence_ref !== evidence) return observations;
-  return {
-    ...observations,
-    health: {
-      ...health,
-      capability_failures: health.capability_failures?.map((failure) => {
-        const remedy = remedies.get(failure.key);
-        return remedy ? { ...failure, remedy } : failure;
-      }),
-    },
-  };
+  return readMachineObservations(store, project, machine, now());
 }

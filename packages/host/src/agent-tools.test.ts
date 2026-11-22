@@ -2,11 +2,9 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -23,7 +21,6 @@ import {
   AGENT_TOOLS_CAPABILITY,
   agentToolsCapability,
   agentToolsDirectoryFor,
-  agentToolsInstallCommand,
   agentToolsProblem,
   agentToolsRelease,
   installLocalAgentTools,
@@ -301,202 +298,16 @@ test("machine check records current tools and a readable reason otherwise", asyn
       {
         key: AGENT_TOOLS_CAPABILITY,
         search_locations: [],
-        reason: "附件助手 download-attachment.mjs 与当前发布的 SHA-256 不一致",
+        reason: `附件助手 download-attachment.mjs 与当前发布的 SHA-256 不一致（期望 SHA-256 ${currentRelease().digests["download-attachment.mjs"]}）`,
       },
     ]);
+    // C-595/Q-1177: only the reason and expected digest; no operator command,
+    // neither in this result nor in the stored observation `machine show` reads.
+    expect(JSON.stringify(stale)).not.toContain("sudo");
+    expect(
+      readMachineObservations(store, "a", "local").health?.capability_failures,
+    ).toEqual(stale.health?.capability_failures);
   } finally {
     store.close();
   }
-});
-
-test("a remote failure carries a two-step command sourced from the controller release", () => {
-  const root = temp();
-  const release = currentRelease();
-  const command = agentToolsInstallCommand(
-    sshExecution(root),
-    "linux",
-    release,
-  );
-  const target = join(root, "libexec", "agent-tools");
-  expect(command).toContain(
-    `sudo install -d -o root -g ${gid} -m 0750 ${target}`,
-  );
-  expect(command).toContain(
-    `sudo install -o root -g ${gid} -m 0750 download-attachment.mjs upload-evidence.mjs ${target}/`,
-  );
-  expect(
-    agentToolsInstallCommand(sshExecution(root), "darwin", release),
-  ).toContain("/usr/bin/shasum -a 256 -c -");
-  // Step 1 copies from this controller's deployed release, not the worker's deploy tree.
-  const [copy, install] = command.split("\n") as [string, string];
-  expect(copy).toBe(
-    `控制主机（主机账号）：scp ${join(deployTools, "download-attachment.mjs")} ${join(deployTools, "upload-evidence.mjs")} <管理员>@<目标机>:`,
-  );
-  expect(command).not.toContain("/opt/cardigan/deploy");
-  // Step 2 runs from a home directory holding only the two copied files (a
-  // worker whose deploy tree predates the tools). Privilege is simulated.
-  const home = temp();
-  for (const name of AGENT_TOOLS)
-    writeFileSync(join(home, name), readFileSync(join(deployTools, name)));
-  const step = install
-    .replace(/^目标机（管理员登录后在家目录）：/u, "")
-    .replaceAll("sudo ", "")
-    .replaceAll("-o root ", "");
-  execFileSync("/bin/sh", ["-c", step], { cwd: home });
-  for (const name of AGENT_TOOLS) {
-    expect(readFileSync(join(target, name))).toEqual(release.files[name]);
-    expect(statSync(join(target, name)).mode & 0o7777).toBe(0o750);
-  }
-  expect(readdirSync(home)).toEqual([]);
-  // A tampered copy stops before anything is installed.
-  rmSync(target, { recursive: true });
-  for (const name of AGENT_TOOLS)
-    writeFileSync(join(home, name), readFileSync(join(deployTools, name)));
-  writeFileSync(join(home, AGENT_TOOLS[1]), "tampered");
-  expect(() =>
-    execFileSync("/bin/sh", ["-c", step], { cwd: home, stdio: "ignore" }),
-  ).toThrow();
-  expect(existsSync(target)).toBe(false);
-  const remote = agentToolsCapability(
-    sshExecution(root),
-    "mac-mini",
-    release,
-    "linux",
-  );
-  expect(remote.failureRemedy?.("附件助手 download-attachment.mjs 缺失")).toBe(
-    command,
-  );
-  expect(remote.failureRemedy?.(RELEASE_UNAVAILABLE)).toBeUndefined();
-  expect(
-    agentToolsCapability(
-      sshExecution(root),
-      "local",
-      release,
-      "linux",
-    ).failureRemedy?.("附件助手 download-attachment.mjs 缺失"),
-  ).toBeUndefined();
-});
-
-test("machine check reports the current manual install command on every retry and target", async () => {
-  const root = temp();
-  const store = Store.open({ dataDir: root });
-  try {
-    store.createProject({ id: "a" });
-    const registered = {
-      id: "worker-a",
-      herdr_machine: "worker-a",
-      label: "fixture",
-      os: "linux",
-      arch: "x64",
-      tags: [],
-      max_assignments: 1,
-      status: "online",
-      last_seen: new Date().toISOString(),
-    } as const;
-    store.uow.run((tx) => tx.machines.put("a", registered));
-    const binding = (agentRoot: string, gidValue: number) =>
-      ({
-        ...sshExecution(agentRoot),
-        gid: gidValue,
-        target: {
-          project_id: "a",
-          machine_id: "worker-a",
-          session: "s",
-          generation: "g",
-          fingerprint: "f".repeat(64),
-        },
-      }) as const;
-    const observe = async (
-      execution: ReturnType<typeof binding>,
-      result: { ok: boolean; output: string },
-    ) =>
-      (
-        await refreshMachineObservations({
-          store,
-          project: "a",
-          machine: "worker-a",
-          env: { CARDIGAN_CONFIG_DIR: root },
-          stageUpgrade: async () => {
-            throw new Error("no helper mismatch expected");
-          },
-          target: () => ({ machine: registered, execution }),
-          check: async () => ({ blockers: [], launch_enabled: true }),
-          probe: async (_execution, _os, command) =>
-            Array.isArray(command) && command[1] === "-e"
-              ? result
-              : { ok: false, output: "" },
-        })
-      ).health;
-    const tools = (health: Awaited<ReturnType<typeof observe>>) =>
-      health?.capability_failures?.find(
-        (f) => f.key === AGENT_TOOLS_CAPABILITY,
-      );
-    const first = binding(join(root, "first"), 901);
-    const missing = {
-      ok: true,
-      output: "agent-tools missing:upload-evidence.mjs\n",
-    };
-    // A transient probe failure has no command; the retry computes one.
-    expect(tools(await observe(first, { ok: false, output: "" }))).toEqual({
-      key: AGENT_TOOLS_CAPABILITY,
-      search_locations: [],
-      reason: "附件助手检查未完成",
-    });
-    const health = await observe(first, missing);
-    expect(health?.available).toBe(true);
-    expect(tools(health)).toEqual({
-      key: AGENT_TOOLS_CAPABILITY,
-      search_locations: [],
-      reason: "附件助手 upload-evidence.mjs 缺失",
-      remedy: agentToolsInstallCommand(first, "linux", currentRelease()),
-    });
-    // `machine show` reads the stored observation: the reason, never a command
-    // that was not rebuilt for the current release and binding.
-    expect(
-      readMachineObservations(store, "a", "worker-a").health
-        ?.capability_failures,
-    ).toContainEqual({
-      key: AGENT_TOOLS_CAPABILITY,
-      search_locations: [],
-      reason: "附件助手 upload-evidence.mjs 缺失",
-    });
-    expect(
-      JSON.stringify(readMachineObservations(store, "a", "worker-a")),
-    ).not.toContain("remedy");
-    // A changed binding replaces the command; nothing of the old target remains.
-    const second = binding(join(root, "second"), 902);
-    const replaced = tools(await observe(second, missing));
-    expect(replaced?.remedy).toBe(
-      agentToolsInstallCommand(second, "linux", currentRelease()),
-    );
-    expect(replaced?.remedy).not.toContain(join(root, "first"));
-    expect(replaced?.remedy).not.toContain("-g 901");
-    // Once installed, the stored observation carries no command at all.
-    expect(
-      tools(await observe(second, { ok: true, output: "agent-tools ok\n" })),
-    ).toBeUndefined();
-  } finally {
-    store.close();
-  }
-});
-
-test("a new release yields a command pinned to its own digests", () => {
-  const root = temp();
-  const current = currentRelease();
-  const next = {
-    ...current,
-    source: "e".repeat(40),
-    digests: { ...current.digests, "upload-evidence.mjs": "d".repeat(64) },
-  };
-  const command = agentToolsInstallCommand(sshExecution(root), "linux", next);
-  expect(command).toContain(`'${"d".repeat(64)}  upload-evidence.mjs'`);
-  expect(command).not.toContain(current.digests["upload-evidence.mjs"]);
-  expect(
-    agentToolsCapability(
-      sshExecution(root),
-      "worker-a",
-      next,
-      "linux",
-    ).failureRemedy?.("附件助手 upload-evidence.mjs 缺失"),
-  ).toBe(command);
 });
