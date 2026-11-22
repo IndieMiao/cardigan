@@ -69,6 +69,20 @@ runtime:
 
 将身份文件改为真实绝对路径；YAML 不展开变量、`~` 或 shell rc。`--host` 必须与配置一致。PATH 必须显式包含 `/opt/homebrew/bin`；hc 与 herdr-core 都指向下一节安装的签名 App 可执行文件。发布限额仅约束启动材料，沿用 Linux 向导合同；两处 MCP 地址必须一致。
 
+Android 项目可在私有 `runtime-workers.yaml` 对应的 `machines[].projects[]` 条目中加 `env`（与 `path` 同级；使用向导时也在输入的同一绑定中填写）：
+
+```yaml
+env:
+  ANDROID_HOME: /Users/cg_example/Library/Android/sdk
+  ANDROID_AVD_HOME: /Users/cg_example/.android/avd
+  ANDROID_ADB_SERVER_PORT: "15037"  # 示例：换成分配给本项目的端口，不用默认 5037
+```
+
+`env` 只传给该项目在该机器上新启动的 Run 和能力检查命令，不修改账号的登录环境，也不分配端口或设备。用工具的绝对路径；如需按名称找到 `adb`，把 SDK 的 `platform-tools` 目录加到绑定的 `path`，不要设置 `env.PATH`。变更前先清退使用旧绑定的会话，再重新检查机器能力。省略 `env` 或填写 `{}` 保持原行为。
+
+每个绑定最多 32 项。键以大写英文字母开头，后续限大写字母、数字、下划线，总长不超过 64。不得使用凭据名（含 `TOKEN`、`SECRET`、`KEY`、`PASSWORD`，或 `MYSQL_PWD` 这类密码名），也不得覆盖账号、启动器、加载器或资源策略变量（如 `HOME`、`PATH`、`LD_*`、`OPENSSL_*`、`EDITOR`、`CARDIGAN_*`、`ADB_SERVER_SOCKET`）。值必须是无控制字符的字符串，每值最多 1024 个 UTF-8 字节，合计最多 8192 字节。端口等数字要加引号；不会展开 `$HOME` 或执行 shell。**不要在这里放凭据**：值会进入启动材料，校验变量名不能判断值是否保密。
+
+
 macOS 省略 `session` 时，向导在草案中填入短名 `cg`；每项目独立账号和 HOME 保证状态分离。显式会话名保留，不自动改名。固定版本 hc 在未配置路径覆盖时使用 `HOME/.local/state/herdr-core/<session>/<session>.sock`，holder 使用同目录的 `<session>.holder.<8 位十六进制标识>.sock`。两条完整路径按 UTF-8 字节计算，macOS 上限均为 **103 字节**；holder 比主 socket 多 16 字节，主 socket 未超限也可能被拒绝。向导在草案与资源检查中拒绝超限，原因码为 `worker_macos_socket_path_too_long`。优先缩短 `session`，并按第 5 节重新确认配置；HOME 本身过长则由管理员重新规划独立账号目录。连接入口清除外部 XDG/HC 环境，并把 `HC_SOCKET` 固定为上述默认路径，避免本地 shell 或 hc 配置文件重定向 socket。
 
 在控制主机私有 `$CARDIGAN_CONFIG_DIR/run-capacity.yaml` 合入并设文件权限 0600：

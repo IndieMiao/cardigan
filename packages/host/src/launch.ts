@@ -1092,6 +1092,9 @@ async function launch(
       ...(input.resourceAccess
         ? { resource_bindings: input.resourceAccess.bindings }
         : {}),
+      ...(execution.mode === "agent-ssh" && execution.env
+        ? { worker_env: execution.env }
+        : {}),
       agent_nice: execution.agentNice ?? 10,
       agent_local_tests: true,
       run_resources: resourceEntry(

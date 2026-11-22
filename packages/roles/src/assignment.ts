@@ -34,6 +34,7 @@ import type {
 } from "./schema.js";
 import { resolveProfile } from "./schema.js";
 import { testWorkerLimit } from "./test-worker-limit.js";
+import { parseWorkerEnvironment } from "./worker-environment.js";
 
 /**
  * Compile "start this Assignment" on top of the M1.8 launch compiler.
@@ -267,6 +268,17 @@ export function compileAssignmentLaunch(
     env.NODE_OPTIONS = [env.NODE_OPTIONS, testLimit.nodeOptions]
       .filter(Boolean)
       .join(" ");
+  for (const [key, value] of Object.entries(
+    parseWorkerEnvironment(input.worker_env),
+  )) {
+    if (
+      Object.hasOwn(env, key) ||
+      Object.hasOwn(resolved.provider?.definition.env ?? {}, key) ||
+      secretKeys.has(key)
+    )
+      throw new Error("Worker environment conflicts with launch profile");
+    env[key] = value;
+  }
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =
     Object.keys(secretEnv).length === 0

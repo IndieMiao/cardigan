@@ -354,6 +354,13 @@ test.each(["clean", "unconfirmed", "auth"])(
 test.each(["codex", "pi", "claude-code"] as const)(
   "%s material is generation-private and start follows durable dispatch",
   async (harness) => {
+    execution = {
+      ...execution,
+      env: {
+        ANDROID_HOME: "/fixture/Android SDK",
+        ANDROID_ADB_SERVER_PORT: "15037",
+      },
+    };
     const f = fixture(harness);
     const launched = await f.start();
     expect(order).toEqual([
@@ -383,6 +390,7 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const launchJson =
       files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "";
     const spec = JSON.parse(launchJson);
+    expect(spec.env).toMatchObject(execution.env ?? {});
     const description = runtime.provision.mock.calls.at(-1)?.[3];
     expect(description.command).toBe(execution.fileHelper?.python);
     expect(description.args.at(-1)).toBe(

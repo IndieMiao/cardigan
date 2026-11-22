@@ -131,3 +131,4 @@ export {
   profileLaunchSettings,
 } from "./settings.js";
 export { testReviewPrompt } from "./test-review.js";
+export { parseWorkerEnvironment } from "./worker-environment.js";

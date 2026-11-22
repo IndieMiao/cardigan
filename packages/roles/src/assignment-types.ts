@@ -115,6 +115,8 @@ export interface CompileAssignmentInput {
   readonly secrets: Readonly<Record<string, string>>;
   /** CPU niceness increment for the Agent and its children; defaults to 10. */
   readonly agent_nice?: number;
+  /** Non-secret project tool variables from the selected private worker binding. */
+  readonly worker_env?: Readonly<Record<string, string>>;
   /** Host policy for local employee sessions, never a project setting. */
   readonly resource_bindings?: readonly {
     key: string;
