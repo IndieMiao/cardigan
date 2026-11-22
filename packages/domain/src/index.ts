@@ -167,6 +167,7 @@ export {
 } from "./commands/source-merge.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
+export * from "./commands/standing-pm-stall.js";
 export {
   stoppedByHuman,
   stopWorkItemAssignment,

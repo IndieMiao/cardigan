@@ -293,6 +293,7 @@ export {
 export { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
+export { standingPmStallPolicy } from "./standing-pm-recovery.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
 export {
   proveSystemReviewLimit,

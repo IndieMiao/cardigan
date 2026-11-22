@@ -90,6 +90,8 @@ const systemNoticeEvents = new Map([
   ["standing_pm_rotated", "常驻 PM 已轮换"],
   ["standing_pm_recovered", "常驻 PM 已安排自动恢复"],
   ["standing_pm_recovery_started", "常驻 PM 已恢复执行"],
+  ["standing_pm_stall_restarted", "常驻 PM 停滞，已自动重开会话"],
+  ["standing_pm_stall_escalated", "常驻 PM 反复停滞，已转主机运维"],
   ["office_wait_started", "等待 PM Office"],
   ["office_wait_overdue", "PM Office 等待超时"],
 ]);
