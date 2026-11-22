@@ -8,6 +8,10 @@ import { extractReferences } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import {
+  missingPrecheckTargets,
+  readPrecheckAttempts,
+} from "./card-checking.js";
 import { readCardDependencies } from "./card-dependencies.js";
 import { cardDetail, cardListViews } from "./read.js";
 import { withSuggestionProgress } from "./sql-state.js";
@@ -149,21 +153,23 @@ export function readCardDetail(
         (row) =>
           JSON.parse(row.doc as string) as CommandState["events"][number],
       );
-    return cardDetail(
-      withSuggestionProgress(store, {
-        ...state,
-        runs: tx.runs.list(project_id),
-        attachments: tx.attachments.list(project_id),
-        timeline,
-        events: state.events.length
-          ? state.events
-          : [...events, ...relatedEvents],
-      }),
-      card_id,
-      {
-        ...options,
-        dependencyState: readCardDependencies(store, tx, project_id),
-      },
-    );
+    const detailState = withSuggestionProgress(store, {
+      ...state,
+      runs: tx.runs.list(project_id),
+      attachments: tx.attachments.list(project_id),
+      timeline,
+      events: state.events.length
+        ? state.events
+        : [...events, ...relatedEvents],
+    });
+    return cardDetail(detailState, card_id, {
+      ...options,
+      dependencyState: readCardDependencies(store, tx, project_id),
+      precheckEvents: readPrecheckAttempts(
+        store,
+        project_id,
+        missingPrecheckTargets(detailState),
+      ),
+    });
   });
 }

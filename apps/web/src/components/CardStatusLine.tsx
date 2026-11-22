@@ -1,5 +1,10 @@
 import type { ReactNode } from "react";
 import type { CardDetail } from "../api.js";
+import {
+  cardChecking,
+  MERGE_CHECK_LABEL,
+  PRECHECK_LABEL,
+} from "../card-checking.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { StatusTag } from "./Foundation.js";
 import { MergeStatusFacts } from "./MergeStatusLine.js";
@@ -14,14 +19,24 @@ const nextStep = {
 
 export function CardStatusLine({
   detail,
+  projectId,
   metadata,
 }: {
   readonly detail: CardDetail;
+  readonly projectId?: string;
   readonly metadata?: ReactNode;
 }) {
   const { card } = detail;
   const confirmations = detail.merge_confirmations ?? [];
-  const waiting = card.waiting_on.filter(
+  // C-567: blockers that only wait for a running precheck read as “预检中”.
+  const checks = cardChecking(card);
+  const precheckLog = card.prechecks?.find(
+    (check) =>
+      card.checking?.precheck?.attempt_ids.includes(check.attempt_id) &&
+      check.log_ref === `${check.attempt_id}.log` &&
+      /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(check.attempt_id),
+  );
+  const waiting = checks.waiting.filter(
     (item) => !confirmations.some((q) => q.id === item.ref),
   );
   const owners = card.next_owners.filter(
@@ -76,6 +91,19 @@ export function CardStatusLine({
           <NextOwners owners={owners} />
         </span>
       )}
+      {checks.precheck &&
+        (precheckLog && projectId ? (
+          <a
+            href={`/api/projects/${encodeURIComponent(projectId)}/prechecks/${encodeURIComponent(precheckLog.attempt_id)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {PRECHECK_LABEL}
+          </a>
+        ) : (
+          <span>{PRECHECK_LABEL}</span>
+        ))}
+      {checks.mergeCheck && <span>{MERGE_CHECK_LABEL}</span>}
       {waiting.map((item) => (
         <span key={`${item.kind}/${item.ref}`}>
           {card.hold && item.ref === card.id
