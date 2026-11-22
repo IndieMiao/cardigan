@@ -74,7 +74,10 @@ function run(script: string, f: ReturnType<typeof fixture>) {
   }).toString();
 }
 
-function steps(f: ReturnType<typeof fixture>) {
+function steps(
+  f: ReturnType<typeof fixture>,
+  pasted: (name: string, digest: string) => string = (_, digest) => digest,
+) {
   const release = agentToolsRelease();
   if (!release) throw new Error("release checkout unavailable");
   const [prepare, copy, install] = readmeSteps();
@@ -85,9 +88,12 @@ function steps(f: ReturnType<typeof fixture>) {
     release.digests,
   );
   const reported = (name: string) =>
-    new RegExp(`${name.replace(".", "\\.")} ([0-9a-f]{64})`, "u").exec(
-      reason ?? "",
-    )?.[1] ?? "unreported";
+    pasted(
+      name,
+      new RegExp(`${name.replace(".", "\\.")} ([0-9a-f]{64})`, "u").exec(
+        reason ?? "",
+      )?.[1] ?? "unreported",
+    );
   const filled = prepare
     .replace(
       "<download-attachment.mjs 的期望 SHA-256>",
@@ -174,3 +180,25 @@ test("README steps refuse a linked tools directory", () => {
   for (const name of AGENT_TOOLS)
     expect(existsSync(join(elsewhere, name))).toBe(false);
 });
+
+test.each([
+  ["download-attachment.mjs", (d: string) => d.slice(0, 63)],
+  ["upload-evidence.mjs", (d: string) => d.slice(0, 63)],
+  ["upload-evidence.mjs", (d: string) => `${d}0`],
+  ["download-attachment.mjs", (d: string) => d.toUpperCase()],
+  ["upload-evidence.mjs", () => ""],
+] as const)(
+  "README steps refuse a malformed pasted digest for %s even when the other is right",
+  (target, mangle) => {
+    const f = fixture();
+    const s = steps(f, (name, digest) =>
+      name === target ? mangle(digest) : digest,
+    );
+    const stage = s.prepare();
+    s.copy(stage);
+    expect(() => s.install(stage)).toThrow();
+    expect(existsSync(f.tools)).toBe(false);
+    for (const name of AGENT_TOOLS)
+      expect(existsSync(join(stage, name))).toBe(true);
+  },
+);
