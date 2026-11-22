@@ -1,6 +1,7 @@
 export {
   ARTIFACT_BLOB_ID,
   artifactPath,
+  openArtifact,
   sendArtifact,
 } from "./artifact-files.js";
 export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
@@ -83,4 +84,9 @@ export {
   whoamiTool,
 } from "./tools/index.js";
 export type { SigningScope } from "./tools/mobile-signing.js";
+export {
+  PublicationError,
+  type PublicationOptions,
+  type PublishInput,
+} from "./tools/publish-artifact.js";
 export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

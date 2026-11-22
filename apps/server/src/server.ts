@@ -72,6 +72,7 @@ import {
   requestMobileSignature,
 } from "./mobile-signing.js";
 import { serverProbes } from "./probes.js";
+import { apkPublisher } from "./publish-artifact.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -498,6 +499,10 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               probeHost: probes,
+              ...(execution.mode === "agent-ssh" &&
+              runtimeEnv.CARDIGAN_ARTIFACT_PUBLICATION === "1"
+                ? { publishArtifact: apkPublisher(config.dataDir) }
+                : {}),
               ...(execution.mode === "agent-ssh" &&
               runtimeEnv.CARDIGAN_MOBILE_SIGNING === "1"
                 ? {
