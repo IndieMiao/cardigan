@@ -2008,8 +2008,76 @@ export interface FeishuBindingView {
   code?: string;
   expires?: number;
 }
+/** C-558: the five write-only Feishu credentials; only their state is ever read. */
+export const FEISHU_SECRET_KEYS = [
+  "lark_webhook",
+  "lark_sign_secret",
+  "app_id",
+  "app_secret",
+  "tenant_key",
+] as const;
+export type FeishuSecretKey = (typeof FEISHU_SECRET_KEYS)[number];
+export type FeishuChannel = "lark" | "lark_app";
+/**
+ * C-558 `GET /api/feishu-settings`: dotted YAML keys to values (durations in
+ * milliseconds). A string that contains a credential reads as `null`.
+ */
+export interface FeishuSettingsView {
+  readonly version: string;
+  readonly settings: Readonly<Record<string, unknown>>;
+  readonly secrets: Readonly<
+    Record<
+      FeishuSecretKey,
+      { readonly set: boolean; readonly updated_at: string | null }
+    >
+  >;
+}
+export interface FeishuSettingsChange {
+  readonly settings?: Readonly<Record<string, unknown>>;
+  readonly secrets?: {
+    readonly set: readonly FeishuSecretKey[];
+    readonly clear: readonly FeishuSecretKey[];
+  };
+}
+export interface FeishuSettingsPreview {
+  readonly version: string;
+  readonly preview_id: string;
+  readonly diff: readonly {
+    readonly key: string;
+    readonly before: unknown;
+    readonly after: unknown;
+  }[];
+  readonly restart_required: boolean;
+}
+/** `timeout` and `unknown` are no proof of delivery. */
+export type FeishuTestResult =
+  | "sent"
+  | "permanent"
+  | "retryable"
+  | "timeout"
+  | "unknown";
+
 export interface CardiganClient {
   feishuBinding?(action?: "code" | "unbind"): Promise<FeishuBindingView>;
+  /** C-561: Feishu bot settings (human sessions only; 403 otherwise). */
+  feishuSettings?(): Promise<FeishuSettingsView>;
+  /** Diff of `change` against `version`; never carries credential values. */
+  previewFeishuSettings?(
+    version: string,
+    change: FeishuSettingsChange,
+  ): Promise<FeishuSettingsPreview>;
+  /** Apply a preview; credential values travel only here. */
+  confirmFeishuSettings?(
+    version: string,
+    previewId: string,
+    idempotencyKey: string,
+    secrets?: Readonly<Partial<Record<FeishuSecretKey, string>>>,
+  ): Promise<void>;
+  /** One person-requested test message; a new key for every click. */
+  testFeishuChannel?(
+    channel: FeishuChannel,
+    idempotencyKey: string,
+  ): Promise<FeishuTestResult>;
   /** In-memory only, scoped to the currently validated login. */
   cachedCards?(
     projectId: string,
@@ -2504,6 +2572,41 @@ export class HttpCardiganClient implements CardiganClient {
       "/api/me/feishu",
       action ? { method: "POST", body: JSON.stringify({ action }) } : {},
     );
+  }
+  feishuSettings(): Promise<FeishuSettingsView> {
+    return this.request("/api/feishu-settings");
+  }
+  previewFeishuSettings(
+    version: string,
+    change: FeishuSettingsChange,
+  ): Promise<FeishuSettingsPreview> {
+    return this.request("/api/feishu-settings/preview", {
+      method: "POST",
+      body: JSON.stringify({ version, change }),
+    });
+  }
+  async confirmFeishuSettings(
+    version: string,
+    previewId: string,
+    idempotencyKey: string,
+    secrets?: Readonly<Partial<Record<FeishuSecretKey, string>>>,
+  ): Promise<void> {
+    await this.request("/api/feishu-settings/confirm", {
+      method: "POST",
+      body: JSON.stringify({ version, preview_id: previewId, secrets }),
+      idempotencyKey,
+    });
+  }
+  async testFeishuChannel(
+    channel: FeishuChannel,
+    idempotencyKey: string,
+  ): Promise<FeishuTestResult> {
+    // A network retry resends the same key, so the server sends at most once.
+    const { result } = await this.request<{ result: FeishuTestResult }>(
+      `/api/feishu-settings/test/${channel}`,
+      { method: "POST", body: "{}", idempotencyKey },
+    );
+    return result;
   }
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");
