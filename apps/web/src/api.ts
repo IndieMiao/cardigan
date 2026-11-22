@@ -167,6 +167,8 @@ export interface CardView {
   readonly hold?: CardHold;
   readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
+  /** C-567: present only while a precheck or merge check is queued/running. */
+  readonly checking?: CardChecking;
   readonly id: string;
   readonly title: string;
   readonly goal: string;
@@ -190,6 +192,20 @@ export interface CardView {
   readonly source?:
     | { readonly kind: "quote"; readonly text: string }
     | { readonly kind: "decision"; readonly decision_id: string };
+}
+
+export interface CardChecking {
+  readonly precheck?: {
+    readonly attempt_ids: readonly string[];
+    /** Blocked work items that only wait for one of these attempts. */
+    readonly waiting_items: readonly string[];
+    /** Other cards whose precheck is waited for; their events refresh this card. */
+    readonly cards?: readonly string[];
+  };
+  readonly merge_check?: {
+    readonly attempt_id: string;
+    readonly status: "queued" | "running";
+  };
 }
 
 export interface DependencyCard {

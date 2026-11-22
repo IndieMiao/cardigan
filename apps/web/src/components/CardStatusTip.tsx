@@ -1,5 +1,10 @@
 import { WHY_MAX_LENGTH } from "@cardigan/domain";
 import type { CardListItem, MergeStageView } from "../api.js";
+import {
+  cardChecking,
+  MERGE_CHECK_LABEL,
+  PRECHECK_LABEL,
+} from "../card-checking.js";
 import { routeHash } from "../route.js";
 import { dependencyWaitLabel } from "./CardDependencies.js";
 import { DetailsTip } from "./DetailsTip.js";
@@ -11,9 +16,16 @@ import { Button } from "./ui/button.js";
 /** Card summaries expose read-model facts without rendering explanation blocks. */
 export function CardStatusTip({ card }: { card: CardListItem }) {
   const wait = dependencyWaitLabel(card);
+  const checks = cardChecking(card);
   const lines = [
     ...(wait ? [wait, card.early_start?.reason ?? ""] : []),
-    ...card.waiting_on.map((item) => item.label),
+    ...card.waiting_on.map((item) =>
+      checks.precheckWait(item) ? `${item.ref} ${PRECHECK_LABEL}` : item.label,
+    ),
+    ...(checks.precheck && !card.waiting_on.some(checks.precheckWait)
+      ? [PRECHECK_LABEL]
+      : []),
+    ...(checks.mergeCheck ? [MERGE_CHECK_LABEL] : []),
     ...(card.merge_stage ? [mergeStageLabel(card.merge_stage)] : []),
     ...(card.merge_solo ? ["单独批次"] : []),
   ];

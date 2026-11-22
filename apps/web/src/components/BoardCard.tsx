@@ -1,5 +1,10 @@
 import type { MouseEvent, ReactNode } from "react";
 import type { CardListItem } from "../api.js";
+import {
+  cardChecking,
+  MERGE_CHECK_LABEL,
+  PRECHECK_LABEL,
+} from "../card-checking.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
@@ -88,7 +93,9 @@ export function BoardCard({
     event.preventDefault();
     onOpenCard(card.id, event.currentTarget);
   };
-  const reasons = new Set(card.waiting_on.map((item) => item.kind));
+  // C-567: a blocker that only waits for a running precheck is not red.
+  const checks = cardChecking(card);
+  const reasons = new Set(checks.waiting.map((item) => item.kind));
   const blocked = reasons.has("blocked");
   const waiting = reasons.has("decision") || reasons.has("human_action");
   const complete =
@@ -201,7 +208,7 @@ export function BoardCard({
                 blocked: "阻塞",
               }[kind];
               return badge(
-                `${label}：${card.waiting_on
+                `${label}：${checks.waiting
                   .filter((item) => item.kind === kind)
                   .map((item) => item.label)
                   .join("；")}`,
@@ -219,6 +226,20 @@ export function BoardCard({
                   : "board-card-waiting",
               );
             })}
+        {display.waiting &&
+          checks.precheck &&
+          badge(
+            PRECHECK_LABEL,
+            <StatusIcon status="running" decorative />,
+            PRECHECK_LABEL,
+          )}
+        {display.waiting &&
+          checks.mergeCheck &&
+          badge(
+            MERGE_CHECK_LABEL,
+            <StatusIcon status="running" decorative />,
+            MERGE_CHECK_LABEL,
+          )}
         {superseded &&
           badge(
             superseded,
