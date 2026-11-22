@@ -377,8 +377,8 @@ test("a success the ledger no longer releases is not reported, and a refusal bef
   }
 }, 20_000);
 
-test("a claimed request cut off before the commit is resent under the same number", async () => {
-  const host = fakeHost("resume");
+test("a claimed request cut off before the commit is continued under the same number", async () => {
+  const host = fakeHost("continue");
   try {
     expect(
       await settle(() =>
@@ -388,7 +388,7 @@ test("a claimed request cut off before the commit is resent under the same numbe
         }),
       ),
     ).toMatchObject({ status: "signed", request_id: "1".repeat(32) });
-    expect(host.spawns()).toEqual(["resume", "check"]);
+    expect(host.spawns()).toEqual(["continue", "check"]);
   } finally {
     rmSync(host.data, { recursive: true, force: true });
   }
@@ -427,6 +427,53 @@ test("shutdown ends in-flight helpers inside its bound and starts no new one", a
       request_id: null,
     });
     expect(host.spawns()).toEqual(["transfer"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a success settling during shutdown starts no check, and no artifact helper starts after it", async () => {
+  const host = fakeHost("slow");
+  vi.resetModules();
+  const signing = await import("./mobile-signing.js");
+  const scope = jobScope("R-16");
+  const call = () =>
+    signing.requestMobileSignature(host.data, scope, () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+    });
+  try {
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
+    writeFileSync(join(host.ctl, "ready"), "");
+    await until(call, (r) => r.status === "pending" && r.phase === "signing");
+    const drained = signing.drainMobileSigning({
+      waitMs: 5_000,
+      killMs: 2_000,
+    });
+    writeFileSync(join(host.ctl, "signed"), "");
+    await drained;
+    // Not re-validated now and not reported as signed: the next process does.
+    expect(await call()).toEqual({
+      status: "unconfirmed",
+      request_id: "1".repeat(32),
+      platform: "android",
+      poll_after_seconds: 60,
+    });
+    expect(await call()).toMatchObject({ status: "unconfirmed" });
+    // The file opens; only the shutdown refuses the helper.
+    mkdirSync(join(host.data, "mobile-signing", "outputs"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(host.data, "mobile-signing", "outputs", "1".repeat(32)),
+      "fixture",
+    );
+    await expect(
+      signing.openMobileArtifact(host.data, scope, "1".repeat(32), () => {}, {
+        program: host.program,
+      }),
+    ).rejects.toThrow();
+    expect(host.spawns()).toEqual(["slow"]);
   } finally {
     rmSync(host.data, { recursive: true, force: true });
   }

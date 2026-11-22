@@ -394,11 +394,60 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         out = self.host/'outputs'/rid
         self.assertEqual(result, (rid, digest(out)))
         self.assertEqual(digest(out), digest(self.worker/'outputs'/rid))
-        self.assertEqual(reported, [(rid, host.budget(self.host, self.candidate.stat().st_size), 'resume')])
+        # Reported before the receipt query, so the caller keeps the number either way.
+        self.assertEqual(reported, [(rid, host.budget(self.host, self.candidate.stat().st_size), 'continue')])
         self.assertEqual(self.actions()[-3:], ['resume','dispatch','signed'])
         self.assertEqual(len(procs), 3)  # cut-off attempt, receipt query, resend
         self.assertEqual((self.worker/'uses').read_text(), 'used\n')
         self.assertEqual(self.call(), result); self.assertEqual(self.calls, 3)
+
+    @unittest.skipIf(os.getuid()==0,'real worker refuses root')
+    def test_failed_receipt_query_keeps_number_and_never_resends(self):
+        # Review V-2980:1: the receipt query of a claimed request fails (peer gone).
+        # The number is still reported for polling; an unknown receipt sends nothing.
+        rid = self.spec['id']
+        def gone(): raise BrokenPipeError()
+        with self.assertRaises(BrokenPipeError): self.call(fence=gone)
+        def silent(root, peer):
+            self.calls += 1
+            return subprocess.Popen([sys.executable, '-IB', '-c', 'import sys; sys.stdin.readline()'],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        reported = []
+        with self.assertRaises(ValueError):
+            host.request(self.host, self.db, self.ctx, lambda: None, silent, accepted=lambda *a: reported.append(a))
+        self.assertEqual(reported, [(rid, host.budget(self.host, self.candidate.stat().st_size), 'continue')])
+        self.assertEqual(self.actions()[-1], 'not_released')
+        self.assertEqual(self.db.execute('SELECT state FROM grants').fetchone(), ('pending',))
+        self.assertFalse((self.worker/'uses').exists())
+        # Back online: the same number resumes and is signed once.
+        self.assertEqual(self.call()[0], rid)
+        self.assertEqual((self.worker/'uses').read_text(), 'used\n')
+
+    def test_stopped_receipt_query_is_bounded_and_audited(self):
+        # Review V-2980:2: SIGTERM while a peer stays silent on the receipt query.
+        # The helper hangs up at once, records interrupted, and leaves no connection.
+        with sqlite3.connect(self.host/'audit.sqlite') as db:
+            db.execute("UPDATE grants SET state='pending'")
+            db.execute("INSERT INTO dispatch_peer VALUES(?,?)", (self.spec['id'], 'fixture'))
+        procs = []
+        def silent(root, peer):
+            procs.append(subprocess.Popen([sys.executable, '-IB', '-c', 'import sys, time; sys.stdin.readline(); time.sleep(30)'],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL))
+            return procs[-1]
+        import threading
+        main = threading.main_thread().ident
+        timer = threading.Timer(0.25, lambda: signal.pthread_kill(main, signal.SIGTERM))
+        previous = signal.signal(signal.SIGTERM, host.stop('interrupted'))
+        started = time.monotonic()
+        try:
+            timer.start()
+            with self.assertRaises(host.Stopped):
+                host.request(self.host, self.db, self.ctx, lambda: None, silent)
+        finally:
+            timer.cancel(); signal.signal(signal.SIGTERM, previous)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(len(procs), 1); self.assertIsNotNone(procs[0].poll())
+        self.assertEqual(self.actions()[-1], 'interrupted')
 
     @unittest.skipIf(os.getuid()==0,'real worker refuses root')
     def test_fence_lost_before_commit_resumes(self):

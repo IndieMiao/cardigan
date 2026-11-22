@@ -122,15 +122,32 @@ def observe(db, rid, state, sha, category=None):
     return {'state': state, 'sha256': sha}
 
 
+def hang_up(p):
+    # Bounded on every path, including a signal or deadline mid-read: never
+    # wait for a silent peer before the audit event is written.
+    p.kill()
+    p.wait()
+    try:
+        p.stdin.close()
+    except BrokenPipeError:
+        pass
+    finally:
+        p.stdout.close()
+
+
 def undispatched(root, s, peer, dial):
     # Read-only receipt query at the pinned peer (C-601). `absent` or `received`
     # means the signer never got a commit for this number, so the key was never
-    # used. The signer re-checks this under its serial lock before accepting a resend.
-    with dial(root, peer) as p:
+    # used. The signer re-checks this under its serial lock before accepting a
+    # resend. Any other or unreadable answer is no permission to resend.
+    p = dial(root, peer)
+    try:
         send(p.stdin, canonical({'mode':'receipt','grant':s,'size':0,'dispatch_states':True}).encode())
         p.stdin.close()
         response = json.loads(line(p.stdout))
         require(not p.stdout.read(1) and p.wait(timeout=10)==0)
+    finally:
+        hang_up(p)
     require(type(response) is dict)
     return response.get('state') in ('absent', 'received')
 
@@ -162,10 +179,16 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
         # A claimed request whose input transfer was cut off before the commit
         # (server restart, interrupted helper) resends the same number to the
         # peer fixed at the first dispatch. Anything else is a lookup only.
-        resume = False
-        if state == 'pending' and inp.exists():
+        # The claim is already durable, so report the number before any peer IO:
+        # a failed or interrupted receipt query still leaves the caller a request
+        # number to poll, never a refusal.
+        resume = reported = False
+        if state == 'pending':
             pinned = db.execute('SELECT peer FROM dispatch_peer WHERE id=?', (rid,)).fetchone()
-            resume = pinned is not None and pinned[0] == peer and undispatched(root, s, peer, dial)
+            probe = inp.exists() and pinned is not None and pinned[0] == peer
+            accepted(rid, seconds, 'continue' if probe else 'lookup')
+            reported = True
+            resume = probe and undispatched(root, s, peer, dial)
         # A durable claim before contacting the peer. A lost reply permits lookup or resend only.
         with transaction(db):
             fresh = db.execute("UPDATE grants SET state='pending' WHERE id=? AND NOT revoked AND state='approved'", (rid,)).rowcount == 1
@@ -174,7 +197,8 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
             elif resume:
                 require(db.execute("SELECT 1 FROM grants WHERE id=? AND state='pending' AND NOT revoked", (rid,)).fetchone())
             event(db, ctx, rid, 'request' if fresh else 'resume' if resume else 'lookup')
-        accepted(rid, seconds, 'sign' if fresh else 'resume' if resume else 'stored' if state == 'signed' else 'lookup')
+        if not reported:
+            accepted(rid, seconds, 'sign' if fresh else 'stored' if state == 'signed' else 'lookup')
         fresh = fresh or resume  # both move the input; the signer dedupes by number
         output = directory(root,'outputs') / rid
         if state == 'signed':
@@ -226,14 +250,7 @@ def request(root, db, identity, fence, dial=connect, accepted=lambda rid, second
                     raise
             return rid,sha
         finally:
-            p.kill()
-            p.wait()
-            try:
-                p.stdin.close()
-            except BrokenPipeError:
-                pass
-            finally:
-                p.stdout.close()
+            hang_up(p)
     except Exception as exc:
         signal.setitimer(signal.ITIMER_REAL, 0)
         if db.in_transaction:

@@ -20,8 +20,11 @@ export interface MobileSigningTiming {
   /** Local hash-and-release of a stored output (default 600 s). */
   readonly permitMs?: number;
 }
-/** `resume` resends the input of a claimed request the signer never committed (C-601). */
-type Mode = "sign" | "resume" | "lookup" | "stored";
+/**
+ * C-601: `continue` is a claimed request whose signer receipt is being
+ * checked; it then resends the input (never committed) or looks it up.
+ */
+type Mode = "sign" | "continue" | "lookup" | "stored";
 interface Progress {
   accepted(request_id: string, seconds: number, mode: Mode): void;
   committed(): void;
@@ -53,6 +56,8 @@ function helper(
     "-IB",
     HOST,
   ];
+  // Every helper is started here: none after a shutdown began (C-601).
+  if (draining) return Promise.reject(new Error("Signing unavailable"));
   return new Promise((resolve, reject) => {
     const child = spawn(
       file,
@@ -116,7 +121,7 @@ function helper(
     input.on("error", fail);
     const handle = (row: string) => {
       const start =
-        /^accepted ([0-9a-f]{32}) ([1-9][0-9]{0,6}) (sign|resume|lookup|stored)$/u.exec(
+        /^accepted ([0-9a-f]{32}) ([1-9][0-9]{0,6}) (sign|continue|lookup|stored)$/u.exec(
           row,
         );
       if (
@@ -325,7 +330,12 @@ export async function requestMobileSignature(
   }
   const elapsed_seconds = Math.floor((Date.now() - job.started) / 1000);
   if (job.outcome) {
-    if (jobs.get(key) === job && !("error" in job.outcome && job.request_id))
+    // While shutting down a settled job keeps answering with its number.
+    if (
+      !draining &&
+      jobs.get(key) === job &&
+      !("error" in job.outcome && job.request_id)
+    )
       jobs.delete(key);
     if ("error" in job.outcome) {
       if (!job.request_id) throw new Error("Signing unavailable");
@@ -336,8 +346,16 @@ export async function requestMobileSignature(
         poll_after_seconds: 60,
       };
     }
-    // A remembered success is only reported while the ledger still releases it.
+    // A remembered success is only reported while the ledger still releases
+    // it. Shutting down: no check now; the next process looks it up again.
     const receipt = job.outcome.receipt;
+    if (draining)
+      return {
+        status: "unconfirmed" as const,
+        request_id: receipt.request_id,
+        platform: scope.platform,
+        poll_after_seconds: 60,
+      };
     const now = await helper(dataDir, scope, current, timing, {
       check: receipt.request_id,
     });
