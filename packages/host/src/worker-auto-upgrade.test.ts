@@ -13,13 +13,21 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Machine } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import { readMachineObservations, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { parse } from "yaml";
-import { AGENT_TOOLS, agentToolsRelease } from "./agent-tools.js";
+import {
+  AGENT_TOOLS,
+  agentToolsCapability,
+  agentToolsRelease,
+} from "./agent-tools.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { MachineCheckJournal } from "./machine-check-journal.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
+import {
+  checkRegisteredMachine,
+  type RuntimeTargets,
+} from "./runtime-targets.js";
 import { loadRuntimeWorkers } from "./runtime-workers-config.js";
 import { patrolHelperUpgrade } from "./worker-auto-upgrade.js";
 import {
@@ -28,6 +36,7 @@ import {
   workerHelperDigests,
 } from "./worker-helper-release.js";
 import { onboardWorker } from "./worker-onboarding.js";
+import { type stageWorkerUpgrade, upgradeMaterials } from "./worker-upgrade.js";
 import {
   enrolledUpgradeIdentity,
   upgradeIdentity,
@@ -153,7 +162,9 @@ async function setup(
     expected_output: "fixture",
     on_failure: "fixture",
   };
-  const stageUpgrade = vi.fn(async () => terminal);
+  const stageUpgrade = vi.fn<typeof stageWorkerUpgrade>(async () => terminal);
+  // C-599: when set, the outer observation probes the attachment tools with this output.
+  const tools: { output?: string } = {};
   const journal = new MachineCheckJournal(store);
   const registered: Machine = {
     id: machine,
@@ -167,6 +178,7 @@ async function setup(
     last_seen: new Date().toISOString(),
   };
   store.uow.run((tx) => tx.machines.put(project, registered));
+  let last: Awaited<ReturnType<typeof refreshMachineObservations>> | undefined;
   const finalize = async (
     kind: "machine" | "worker",
     binding: string,
@@ -196,14 +208,19 @@ async function setup(
           check: () => raw(job.id),
           catalog: () => {
             if (!outerOK) throw new Error("probe interrupted");
-            return [];
+            return tools.output === undefined
+              ? []
+              : [agentToolsCapability(options.execution, machine)];
           },
+          probe: async () => ({ ok: true, output: tools.output ?? "" }),
         }),
       (v) => ({
         status: v.health?.available ? "passed" : "failed",
         failed_steps: [],
+        ...(v.agent_tools ? { agent_tools: v.agent_tools } : {}),
       }),
     );
+    last = r;
     return {
       blockers: r.health?.blockers ?? ["failed"],
       launch_enabled: r.health?.launch_enabled ?? false,
@@ -262,6 +279,9 @@ async function setup(
     store,
     stageUpgrade,
     terminal,
+    tools,
+    last: () => last,
+    registered,
     actions: () => store.uow.read((tx) => tx.human_actions.list(project)),
   };
 }
@@ -713,4 +733,259 @@ test("an entry enrolled before C-595 gets the unchanged v1 bundle after refusing
     installRelease(worker, project, "identity", undefined, send),
   ).rejects.toThrow("worker_upgrade_unavailable");
   expect(send).toHaveBeenCalledOnce();
+});
+
+// C-599: registered (enrolled) and manual workers whose helpers are current but
+// whose attachment tools are missing or stale.
+const missing = "agent-tools missing:download-attachment.mjs";
+const v2Result = {
+  "worker-files.py": "0".repeat(64),
+  "agent-tools/download-attachment.mjs": "none",
+  "agent-tools/upload-evidence.mjs": "none",
+};
+type Fixture = Awaited<ReturnType<typeof setup>>;
+const toolsPayload = (f: Fixture) =>
+  f.store.uow
+    .read((tx) => tx.events.listAfter(project, undefined, 0))
+    .filter((e) => e.type === "worker_helper_upgrade_verified")
+    .map((e) => (e.payload as { agent_tools?: string }).agent_tools);
+const open = (f: Fixture) => f.actions().filter((a) => a.status === "open");
+
+test.each(["linux", "macos"])(
+  "C-599 %s: an enrolled v2 entry installs missing tools once and reports them verified",
+  async (os) => {
+    const f = await setup(os);
+    f.enroll();
+    f.tools.output = missing;
+    const toolsStale = vi.fn(async () => f.tools.output !== "agent-tools ok");
+    Object.assign(f.adapters, { toolsStale });
+    f.adapters.install.mockImplementationOnce(async () => {
+      expect(f.isHeld()).toBe(true);
+      f.tools.output = "agent-tools ok";
+      return v2Result;
+    });
+    expect(await f.run(pass)).toEqual(pass);
+    expect(toolsStale).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: "agent-ssh" }),
+      machine,
+      os === "macos" ? "darwin" : "linux",
+      undefined,
+    );
+    expect(f.adapters.install).toHaveBeenCalledOnce();
+    expect(f.isHeld()).toBe(false);
+    expect(toolsPayload(f)).toEqual(["verified"]);
+    expect(f.last()?.agent_tools).toEqual({ status: "current" });
+    expect(f.actions()).toEqual([]);
+    // The same release key is never probed or installed again.
+    expect(await f.run(pass)).toEqual(pass);
+    expect(toolsStale).toHaveBeenCalledOnce();
+    expect(f.adapters.install).toHaveBeenCalledOnce();
+  },
+);
+
+test.each([
+  ["v2", v2Result, "unverified"],
+  ["v1", { "worker-files.py": "0".repeat(64) }, "entry_v1_needs_migration"],
+] as const)(
+  "C-599: a %s result that leaves the tools stale is never reported installed nor retried",
+  async (_entry, result, outcome) => {
+    const f = await setup("linux");
+    f.enroll();
+    f.tools.output = missing;
+    Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+    f.adapters.install.mockResolvedValueOnce(result);
+    // Tools never block dispatch: the helpers are verified, the tools are not.
+    expect(await f.run(pass)).toEqual(pass);
+    expect(f.isHeld()).toBe(false);
+    expect(toolsPayload(f)).toEqual([outcome]);
+    const [notice] = open(f);
+    expect(notice).toMatchObject({
+      terminal: f.terminal,
+      instructions: expect.stringContaining("v1 入口只能更新三个 helper"),
+    });
+    expect(notice?.helper_upgrade).toBeUndefined();
+    expect(f.last()?.agent_tools).toMatchObject({
+      status: "ready",
+      human_action_id: notice?.id,
+    });
+    expect(await f.run(pass)).toEqual(pass);
+    expect(f.adapters.install).toHaveBeenCalledOnce();
+    expect(open(f).map((a) => a.id)).toEqual([notice?.id]);
+    expect(f.stageUpgrade).toHaveBeenCalledTimes(2);
+  },
+);
+
+test("C-599: a tools-only refresh does not hold dispatch while it cannot start", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  f.adapters.promotionPending = () => true;
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).not.toHaveBeenCalled();
+  expect(upgradeState(f.store, project, machine)).toBeUndefined();
+  // Until the patrol has tried this release, no administrator command is offered.
+  expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
+  expect(f.stageUpgrade).not.toHaveBeenCalled();
+  expect(f.actions()).toEqual([]);
+  f.adapters.promotionPending = () => false;
+  f.adapters.install.mockResolvedValueOnce(v2Result);
+  expect(await f.run(pass)).toEqual(pass);
+  expect(f.adapters.install).toHaveBeenCalledOnce();
+});
+
+test("C-599: a failed tools install after the claim holds dispatch and offers no tools command", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  Object.assign(f.adapters, { toolsStale: vi.fn(async () => true) });
+  f.adapters.install.mockRejectedValueOnce(new Error("ssh"));
+  expect((await f.run(pass)).blockers).toEqual([upgradeHold]);
+  expect(f.isHeld()).toBe(true);
+  expect(f.last()?.agent_tools).toBeUndefined();
+  expect(f.stageUpgrade).not.toHaveBeenCalled();
+  expect(open(f).map((a) => a.instructions)).toEqual([
+    expect.stringContaining("helper 自动升级未获验证（install）"),
+  ]);
+});
+
+test("C-599: a manual worker's notice is re-staged after a failure and replaced on any change", async () => {
+  const f = await setup("linux");
+  f.tools.output = missing;
+  const staged = (command: string) => ({ ...f.terminal, command });
+  f.stageUpgrade.mockRejectedValueOnce(new Error("transient"));
+  await f.manual("machine");
+  const [unstaged] = open(f);
+  expect(unstaged?.terminal).toBeUndefined();
+  expect(unstaged?.instructions).toContain("暂存失败");
+  expect(unstaged?.instructions).toContain("该机未登记签名自动升级");
+  expect(f.last()?.agent_tools?.status).toBe("staging_failed");
+  // Re-staging succeeds: the command-less notice is replaced, not kept.
+  f.stageUpgrade.mockResolvedValue(staged("staged-command-1"));
+  await f.manual("machine");
+  const [first] = open(f);
+  expect(first?.id).not.toBe(unstaged?.id);
+  expect(first?.terminal?.command).toBe("staged-command-1");
+  await f.manual("machine");
+  expect(open(f).map((a) => a.id)).toEqual([first?.id]);
+  // Same tools, different release bundle or staged script.
+  f.stageUpgrade.mockResolvedValue(staged("staged-command-2"));
+  await f.manual("machine");
+  const [second] = open(f);
+  expect(second?.terminal?.command).toBe("staged-command-2");
+  // Same staged bytes, different binding.
+  await f.manual("machine", "rebound");
+  const [rebound] = open(f);
+  expect(rebound?.id).not.toBe(second?.id);
+  // Only the latest notice is open; the old ones are retired, not reported done.
+  expect(
+    f
+      .actions()
+      .filter((a) => a.id !== rebound?.id)
+      .map((a) => [a.status, a.cancellation?.by]),
+  ).toEqual(Array(3).fill(["cancelled", "system"]));
+  // An unverifiable result never keeps the old command.
+  f.tools.output = "unexpected";
+  await f.manual("machine", "rebound");
+  expect(open(f)).toEqual([]);
+  expect(f.last()?.agent_tools).toEqual({ status: "unverifiable" });
+  f.tools.output = missing;
+  await f.manual("machine", "rebound");
+  expect(open(f)).toHaveLength(1);
+  f.tools.output = "agent-tools ok";
+  await f.manual("machine", "rebound");
+  expect(open(f)).toEqual([]);
+  expect(f.last()?.agent_tools).toEqual({ status: "current" });
+  // Neither history nor the stored job replays a command.
+  const history = JSON.stringify([
+    readMachineObservations(f.store, project, machine),
+    f.store.database.prepare("SELECT doc FROM machine_check_jobs").all(),
+  ]);
+  expect(history).not.toContain("staged-command");
+});
+
+test("C-599: an enrolled worker's explicit check waits for the patrol's first attempt", async () => {
+  const f = await setup("linux");
+  f.enroll();
+  f.tools.output = missing;
+  await f.manual("machine");
+  expect(f.last()?.agent_tools).toEqual({ status: "automatic" });
+  expect(f.stageUpgrade).not.toHaveBeenCalled();
+  expect(f.actions()).toEqual([]);
+});
+
+test("C-599: standalone and joined explicit checks get the same verified command; history never does", async () => {
+  const f = await setup("linux");
+  f.tools.output = missing;
+  // The real staged command, so the explicit caller can re-derive and compare it.
+  f.stageUpgrade.mockImplementation(
+    async (worker, os) => upgradeMaterials(worker, os).terminal,
+  );
+  const runtime = (fingerprint = f.target.fingerprint) =>
+    ({
+      resolve: () => ({
+        execution: {
+          ...f.options.execution,
+          target: { ...f.target, fingerprint },
+        },
+        machine: f.registered,
+      }),
+      check: async () => ({ ok: true, value: pass }),
+    }) as unknown as RuntimeTargets;
+  const options = {
+    store: f.store,
+    project,
+    machine,
+    env: f.options.env,
+    stageUpgrade: f.stageUpgrade,
+    catalog: () => [agentToolsCapability(f.options.execution, machine)],
+    probe: async () => ({ ok: true as const, output: missing }),
+  };
+  const standalone = await checkRegisteredMachine(options, () => runtime());
+  const guidance = (standalone as { agent_tools_guidance?: unknown })
+    .agent_tools_guidance;
+  const [notice] = open(f);
+  const command = upgradeMaterials(
+    f.options.execution as Parameters<typeof upgradeMaterials>[0],
+    "linux",
+  ).terminal.command;
+  expect(guidance).toEqual({
+    status: "ready",
+    message: expect.any(String),
+    human_action_id: notice?.id,
+    terminal: expect.objectContaining({ command }),
+  });
+  // Join a patrol observation that is still running.
+  const gate = Promise.withResolvers<void>();
+  const patrol = checkRegisteredMachine(
+    options,
+    async () => {
+      await gate.promise;
+      return runtime();
+    },
+    "patrol",
+  );
+  const joined = checkRegisteredMachine(options, () => runtime());
+  gate.resolve();
+  const [p, j] = await Promise.all([patrol, joined]);
+  expect(p.health?.evidence_ref).toBe(j.health?.evidence_ref);
+  expect(p).not.toHaveProperty("agent_tools_guidance");
+  expect(j).toHaveProperty("agent_tools_guidance", guidance);
+  // A binding change after the observation never returns its command.
+  let calls = 0;
+  const rebound = await checkRegisteredMachine(options, () =>
+    calls++ ? runtime("rebound") : runtime(),
+  );
+  expect(rebound).toHaveProperty("agent_tools_guidance", {
+    status: "changed",
+    message: expect.any(String),
+  });
+  expect(JSON.stringify(rebound)).not.toContain(command);
+  // `machine show` and stored check jobs carry no command.
+  expect(
+    JSON.stringify([
+      readMachineObservations(f.store, project, machine),
+      f.store.database.prepare("SELECT doc FROM machine_check_jobs").all(),
+    ]),
+  ).not.toContain(command);
 });

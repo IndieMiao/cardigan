@@ -10,6 +10,7 @@ import {
   recordHelperUpgradeChecks,
   requestDeploymentAction,
   retireVerifiedHelperAction,
+  retireWorkerMaintenanceActions,
 } from "./deployment.js";
 import { listNeedsYou } from "./queries.js";
 
@@ -627,6 +628,94 @@ test("only verified system evidence retires the matching open manual helper acti
   expect(
     value(retireVerifiedHelperAction(state, system, target, io)).events,
   ).toEqual([]);
+});
+
+test("C-599: only system retires stale open notices of one machine's refreshable namespace", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system", project_id: state.project_id } as const;
+  const open = (key: string) => {
+    const effect = value(
+      requestDeploymentAction(
+        state,
+        system,
+        { key, instructions: key, reason: "worker_maintenance" },
+        io,
+      ),
+    );
+    state = apply(state, effect);
+    return effect.data.id;
+  };
+  const prefix = "worker-agent-tools:remote:";
+  const old = open(`${prefix}old`),
+    current = open(`${prefix}current`),
+    neighbor = open("worker-agent-tools:remote-2:old"),
+    helper = open(helperKey("remote"));
+  const target = { prefix, keep: `${prefix}current`, reason: "已换版" };
+  for (const caller of [
+    human,
+    actor(5, "host_ops"),
+    { ...system, project_id: "other" },
+  ])
+    expect(retireWorkerMaintenanceActions(state, caller, target, io).ok).toBe(
+      false,
+    );
+  // Only this namespace: never another machine's, a helper notice or a foreign key.
+  for (const bad of [
+    { prefix: "worker-helper:remote:" },
+    { prefix: "worker-agent-tools:" },
+    { keep: "worker-agent-tools:remote-2:old" },
+    { reason: " " },
+  ])
+    expect(
+      retireWorkerMaintenanceActions(state, system, { ...target, ...bad }, io)
+        .ok,
+    ).toBe(false);
+  const result = value(
+    retireWorkerMaintenanceActions(state, system, target, io),
+  );
+  expect(result.events.map((e) => e.type)).toEqual(["human_action_cancelled"]);
+  state = apply(state, result);
+  const status = (id: string) =>
+    state.human_actions.find((h) => h.id === id)?.status;
+  expect(state.human_actions.find((h) => h.id === old)).toMatchObject({
+    status: "cancelled",
+    cancellation: { by: "system", reason: "已换版" },
+  });
+  expect([current, neighbor, helper].map(status)).toEqual([
+    "open",
+    "open",
+    "open",
+  ]);
+  // Without a current key every open notice of the namespace is retired, once.
+  const all = value(
+    retireWorkerMaintenanceActions(
+      state,
+      system,
+      { prefix, reason: "已就绪" },
+      io,
+    ),
+  );
+  state = apply(state, all);
+  expect([current, neighbor, helper].map(status)).toEqual([
+    "cancelled",
+    "open",
+    "open",
+  ]);
+  expect(
+    value(
+      retireWorkerMaintenanceActions(
+        state,
+        system,
+        { prefix, reason: "x" },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+  // A retired key that comes back is a new open notice.
+  const again = open(`${prefix}old`);
+  expect(again).not.toBe(old);
+  expect(status(again)).toBe("open");
 });
 
 test("patrol completes only a matching open helper action with two passed checks, once", () => {

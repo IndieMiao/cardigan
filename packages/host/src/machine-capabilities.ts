@@ -16,6 +16,10 @@ import {
 } from "@cardigan/store";
 import { agentToolsCapability } from "./agent-tools.js";
 import {
+  type AgentToolsOutcome,
+  reconcileAgentToolsAction,
+} from "./agent-tools-maintenance.js";
+import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
 } from "./machine-capability-catalog.js";
@@ -69,7 +73,12 @@ export interface MachineObservationOptions {
 /** Shared by the background patrol, machine check, and worker onboarding. */
 export async function refreshMachineObservations(
   options: MachineObservationOptions,
-) {
+): Promise<
+  ReturnType<typeof readMachineObservations> & {
+    /** C-599: this observation's attachment tools outcome; never a command. */
+    agent_tools?: AgentToolsOutcome;
+  }
+> {
   const { store, project, machine } = options;
   options.signal?.throwIfAborted();
   const now = options.now ?? (() => new Date().toISOString());
@@ -224,6 +233,32 @@ export async function refreshMachineObservations(
     targetFingerprint,
     observedBrowserDigest,
   );
+  const owns = () =>
+    readMachineObservationsInTransaction(store, project, machine, now()).health
+      ?.evidence_ref === `machine-observation:${observation}`;
+  const tools =
+    recorded && checkedTarget
+      ? await reconcileAgentToolsAction({
+          store,
+          project,
+          machine,
+          observation,
+          health,
+          capabilities,
+          target: checkedTarget,
+          currentBinding: async () =>
+            (await options.target()).execution.target?.fingerprint,
+          stillCurrent: owns,
+          ...(options.env ? { env: options.env } : {}),
+          ...(options.stageUpgrade ? { stage: options.stageUpgrade } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+          now,
+        }).catch(() => undefined)
+      : undefined;
+  const observed = () => ({
+    ...readMachineObservations(store, project, machine, now()),
+    ...(tools ? { agent_tools: tools } : {}),
+  });
   const mismatch = health.blockers.find(helperMismatch);
   const manualAllowed = () =>
     manualWorkerUpgradeAllowed(
@@ -260,7 +295,7 @@ export async function refreshMachineObservations(
         (await options.target()).execution.target?.fingerprint !==
         pinned.fingerprint
       )
-        return readMachineObservations(store, project, machine, now());
+        return observed();
     }
     const fields = {
       helper_upgrade: {
@@ -283,5 +318,5 @@ export async function refreshMachineObservations(
         notifyHelperMismatch(tx, project, machine, { now }, mismatch, fields);
     });
   }
-  return readMachineObservations(store, project, machine, now());
+  return observed();
 }

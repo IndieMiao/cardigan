@@ -37,6 +37,10 @@ import {
   type Store,
 } from "@cardigan/store";
 import {
+  type AgentToolsOutcome,
+  agentToolsGuidance,
+} from "./agent-tools-maintenance.js";
+import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
@@ -1424,6 +1428,31 @@ export async function checkRegisteredMachine(
   patrolCheck?: (job: string) => ReturnType<MachineObservationOptions["check"]>,
 ) {
   const journal = new MachineCheckJournal(options.store);
+  // C-599: only the explicit caller gets guidance, re-derived from the current
+  // binding and release; the stored outcome never contains a command.
+  const guided = async <T extends object>(
+    result: T,
+    outcome: AgentToolsOutcome | undefined,
+  ) => {
+    const { agent_tools: _omit, ...rest } = result as T & {
+      agent_tools?: AgentToolsOutcome;
+    };
+    if (source !== "cli" || !outcome) return rest;
+    let target: Parameters<typeof agentToolsGuidance>[4];
+    try {
+      target = (await create()).resolve(options.project, options.machine);
+    } catch {
+      target = undefined;
+    }
+    const guidance = agentToolsGuidance(
+      options.store,
+      options.project,
+      options.machine,
+      outcome,
+      target,
+    );
+    return guidance ? { ...rest, agent_tools_guidance: guidance } : rest;
+  };
   for (;;) {
     options.signal?.throwIfAborted();
     const { job, joined } = journal.claim(
@@ -1432,8 +1461,8 @@ export async function checkRegisteredMachine(
       "machine",
       source,
     );
-    if (!joined)
-      return journal.execute(
+    if (!joined) {
+      const value = await journal.execute(
         job,
         (progress) => {
           progress("runtime");
@@ -1453,8 +1482,11 @@ export async function checkRegisteredMachine(
         (r) => ({
           status: r.health?.available ? "passed" : "failed",
           failed_steps: r.health?.blockers ?? ["observation"],
+          ...(r.agent_tools ? { agent_tools: r.agent_tools } : {}),
         }),
       );
+      return guided(value, value.agent_tools);
+    }
     // No CLI/patrol caller may use a different project's observations. Wait for
     // the slot; only reuse evidence when this binding's machine check finished.
     while (journal.read(options.machine, job.id)?.status === "running") {
@@ -1472,7 +1504,10 @@ export async function checkRegisteredMachine(
         observations.health?.evidence_ref === `machine-observation:${job.id}` &&
         observations.health.status !== "checking"
       )
-        return observations;
+        return guided(
+          observations,
+          journal.read(options.machine, job.id)?.agent_tools,
+        );
     }
   }
 }

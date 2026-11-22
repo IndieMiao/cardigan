@@ -196,12 +196,20 @@ async function sendRelease(
     )
   )
     return invalid();
-  return Object.fromEntries(helpers.map((n) => [n, String(old[n])]));
+  // Tool entries are present only when a v2 entry installed them ("none": first install).
+  return Object.fromEntries([
+    ...helpers.map((n) => [n, String(old[n])]),
+    ...tools.map((n) => [n, old[n] === null ? "none" : String(old[n])]),
+  ]) as Record<string, string>;
 }
+/** C-599: true only when the release went through a v2 entry, which installs the tools. */
+export const installedAgentTools = (before: Record<string, string>) =>
+  toolEntries.every((n) => typeof before[n] === "string");
 /**
  * Entries enrolled before C-595 refuse a v2 bundle while verifying it, before
  * any write or replay record, so only then retry the unchanged v1 bundle.
- * Their helpers stay current; machine check reports the tools they cannot take.
+ * Their helpers stay current; the result then lacks the tool entries and the
+ * machine is reported as needing an administrator migration (C-599).
  */
 export async function installRelease(
   worker: Worker,

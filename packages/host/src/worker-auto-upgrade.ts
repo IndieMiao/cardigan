@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { occupiedRunSlots } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
+import { agentToolsStale } from "./agent-tools-maintenance.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import {
   matchesWorkerPlatform,
@@ -17,11 +18,13 @@ import {
 import { enrolledUpgradeIdentity } from "./worker-upgrade-enrollment.js";
 import {
   finishUpgrade,
+  type InstallEvidence,
   upgradeHold,
   upgradeKey,
   upgradeState,
 } from "./worker-upgrade-gate.js";
 import {
+  installedAgentTools,
   installRelease,
   promotionPending,
 } from "./worker-upgrade-transport.js";
@@ -43,25 +46,56 @@ export async function patrolHelperUpgrade(
     check: () => Promise<Check>;
   },
   initial: Check,
-  adapters = {
+  adapters: {
+    install: typeof installRelease;
+    workerCheck: typeof onboardWorker;
+    promotionPending: typeof promotionPending;
+    /** C-599: current helpers with missing/stale attachment tools also install, once per release key. */
+    toolsStale?: typeof agentToolsStale;
+  } = {
     install: installRelease,
     workerCheck: onboardWorker,
     promotionPending,
+    toolsStale: agentToolsStale,
   },
 ): Promise<Check> {
   const { store, project, machine, execution, signal } = options;
   if (machine === "local" || execution.mode !== "agent-ssh") return initial;
   const previous = upgradeState(store, project, machine);
   const wasHeld = !!previous && previous.state !== "verified";
-  if (!wasHeld && !initial.blockers.some(helperMismatch)) return initial;
-  if (initial.blockers.includes("machine_not_ready")) return initial;
   const root = dirname(runtimeWorkersPath(options.env));
   const key = upgradeKey(execution.target?.fingerprint);
+  let toolsOnly = false;
+  if (!wasHeld && !initial.blockers.some(helperMismatch)) {
+    // Only an enrolled, otherwise healthy binding that has not tried this key yet.
+    if (
+      initial.blockers.length ||
+      previous?.release_key === key ||
+      !adapters.toolsStale
+    )
+      return initial;
+    try {
+      if (!enrolledUpgradeIdentity(root, project, machine)) return initial;
+    } catch {
+      return initial;
+    }
+    const os = store.uow.read((tx) => tx.machines.get(project, machine))?.os;
+    if (!os || !(await adapters.toolsStale(execution, machine, os, signal)))
+      return initial;
+    toolsOnly = true;
+  }
+  if (initial.blockers.includes("machine_not_ready")) return initial;
 
   let stage = "configuration";
   const start = Date.now();
   let before: Record<string, string> = {};
-  const evidence = () => ({ before, start, job: options.job });
+  let tools: InstallEvidence["tools"];
+  const evidence = (): InstallEvidence => ({
+    before,
+    start,
+    job: options.job,
+    ...(tools ? { tools } : {}),
+  });
   const fail = () =>
     store.uow.run((tx) =>
       finishUpgrade(store, tx, project, machine, key, stage, evidence(), false),
@@ -106,11 +140,13 @@ export async function patrolHelperUpgrade(
       ? { ...held, blockers: [...initial.blockers, upgradeHold] }
       : initial;
   }
-  const needsInstall = initial.blockers.some(helperMismatch);
+  const needsInstall = toolsOnly || initial.blockers.some(helperMismatch);
   if (!needsInstall && initial.blockers.length)
     return { ...held, blockers: [...initial.blockers, upgradeHold] };
   try {
-    if (adapters.promotionPending(execution.dataDir)) return held;
+    // A tools-only refresh never holds dispatch before it writes: retry next patrol.
+    if (adapters.promotionPending(execution.dataDir))
+      return toolsOnly ? initial : held;
   } catch {
     /* Missing/invalid deployment proof is recorded as an installation failure. */
   }
@@ -130,7 +166,7 @@ export async function patrolHelperUpgrade(
       .run(project, machine, key);
     return true;
   });
-  if (!claimed) return held;
+  if (!claimed) return toolsOnly ? initial : held;
   try {
     if (previous?.release_key === key) {
       stage = "unexpected_drift";
@@ -161,6 +197,8 @@ export async function patrolHelperUpgrade(
     if (needsInstall) {
       stage = "install";
       before = await adapters.install(execution, project, identity, signal);
+      // A v1 entry upgraded only the helpers: never record that as tools installed.
+      tools = installedAgentTools(before) ? "installed" : "entry_v1";
     }
     stage = "worker_check";
     if (
