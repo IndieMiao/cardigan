@@ -401,7 +401,7 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
    ```sh
    sudo /bin/sh "${KIT:?}/deploy/enroll-helper-worker.sh" --project example
    tag=$(/usr/bin/python3 -IB -c 'import hashlib; print(hashlib.sha256(b"example").hexdigest()[:20])')
-sudo -n -l -U "cgu_$tag"
+   sudo -n -l -U "cgu_$tag"
    ```
 
 3. 确认输出中只有 `/opt/cardigan-helper-upgrade-<tag>/upgrade ""`，系统 SSH 只允许该账号用已安装受限公钥认证（无其它可信 CA、键或认证入口）。核对 worker 账号与升级账号不共组，不额外授予图形登录。若不符，保持未激活，不通过修改权限绕过检查。在控制主机原目录激活：

@@ -227,7 +227,8 @@ def main(system='Darwin'):
         path = Path(args.config)
         config = binding_config(path)
         if path.parent == CONFIG_DIR[system] and (path.name == 'worker.json' or path.name.startswith('worker-')):
-            select_binding(binding_inventory(system), config['project'])
+            selected, config = select_binding(binding_inventory(system), config['project'])
+            require(selected == path)
         install_binding(config, system, args.apply)
     elif args.project:
         _, config = select_binding(binding_inventory(system), args.project)
@@ -242,7 +243,8 @@ def main(system='Darwin'):
                 select_binding(inventory, cfg['project'])
                 install_binding(cfg, system, False)
             except Exception:
-                print(json.dumps({'config': path.name, 'installation': 'failed'}))
+                project = cfg['project'] if cfg is not None else (path.stem[7:] if path.name != 'worker.json' else None)
+                print(json.dumps({'project': project, 'config': path.name, 'installation': 'failed'}))
                 failed = True
         require(not failed)
 

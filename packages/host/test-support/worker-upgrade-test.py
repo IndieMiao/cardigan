@@ -104,7 +104,8 @@ class EntryTest(unittest.TestCase):
                     with self.assertRaises(ValueError): invoke(system, '--check')
                     reports = [json.loads(l) for l in log.getvalue().splitlines()[2:]]
                     self.assertEqual([r.get('config') for r in reports if r['installation']=='failed'], [bad.name])
-                    self.assertEqual({r['project'] for r in reports if 'project' in r}, {'one','two'})
+                    self.assertEqual({r['project']: r['installation'] for r in reports},
+                                     {'one':'checked', 'two':'checked', 'broken':'failed'})
                     invoke(system, '--project', 'two', '--apply')
                     self.assertEqual(registry['apply'].call_args.args[1], self.root / 'two')
                     bad.unlink()

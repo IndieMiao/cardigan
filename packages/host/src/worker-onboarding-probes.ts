@@ -271,7 +271,9 @@ export function workerNextAction(
   const e = config.worker.execution;
   if (step === "directories") {
     const guide = config.worker.os === "darwin" ? "macos" : "linux";
-    const installer = `sudo /usr/bin/python3 -IB /opt/cardigan/deploy/install-${guide}-worker.py --project ${config.worker.project_id}`;
+    const python =
+      guide === "macos" ? "/opt/homebrew/bin/python3" : "/usr/bin/python3";
+    const installer = `sudo ${python} -IB /opt/cardigan/deploy/install-${guide}-worker.py --project ${config.worker.project_id}`;
     return `${installer} --check && ${installer} --apply`;
   }
   if (step === "helpers") {
