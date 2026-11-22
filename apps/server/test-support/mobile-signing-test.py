@@ -30,6 +30,10 @@ def save(path, data):
     return path
 
 
+# Members rejected in a real Godot APK; AAPT2 resource path shortening emits them.
+AAPT2_SHORTENED = ('res/-8.xml', 'res/-B.png', 'res/-N.png', 'res/-p.png')
+
+
 class Signing(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
@@ -42,6 +46,8 @@ class Signing(unittest.TestCase):
             z.writestr('assets/.godot/', b'')
             z.writestr('assets/.godot/imported/icon.ctex', b'fixture')
             z.writestr('assets/.import', b'fixture')
+            for name in AAPT2_SHORTENED:
+                z.writestr(name, b'fixture')
         self.candidate.chmod(0o600)
         self.spec={'id':'1'*32,'version':'test-v1','app':'test.fixture','build':'job-1','commit':'b'*40,
                    'sha256':digest(self.candidate),'expires':int(time.time())+600,'platform':'android',
@@ -313,25 +319,40 @@ else: print('Signer #1 certificate SHA-256 digest: '+'FINGERPRINT')
         with zipfile.ZipFile(signed) as z:
             self.assertEqual(z.read('assets/.godot/imported/icon.ctex'), b'fixture')
             self.assertIn('assets/.import', z.namelist())
+            for name in AAPT2_SHORTENED:
+                self.assertEqual(z.read(name), b'fixture')
         tree = directory(self.root, 'tree')
         with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, tree)
         self.assertEqual(caught.exception.category, 'archive_member_name')
         self.assertFalse((tree/'assets/.godot').exists())
 
+    def test_dash_segments_in_apk_but_not_ios_archive(self):
+        for name in AAPT2_SHORTENED + ('-/item', 'res/-'):
+            with self.subTest(name=name):
+                with zipfile.ZipFile(self.candidate, 'w') as z:
+                    z.writestr('AndroidManifest.xml', b'fixture'); z.writestr(name, b'fixture')
+                self.assertIn(name, inspect_zip(self.candidate, apk=True))
+                tree = directory(self.root, 'tree-'+hashlib.sha256(name.encode()).hexdigest()[:8])
+                with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, tree)
+                self.assertEqual(caught.exception.category, 'archive_member_name')
+                self.assertFalse(tree.joinpath(*name.split('/')).exists())
+
     def test_apk_member_name_boundaries(self):
         for name in ('../other','assets/../x','./file','x/.','/absolute','ok//file','ok//',
                      'a\\b','x/line\nfeed','x/ctrl\x01','x/trailing.','x/trailing ',
-                     'x/.Cache/other','x/.cache/file/nested'):
+                     'x/.Cache/other','x/.cache/file/nested',
+                     '-/../x','res/-..','res/-.','res/- ','/-8.xml','res//-8.xml','res/-\x01',
+                     'res/-8.XML','res/-8.xml/nested'):
             with self.subTest(name=name):
                 with zipfile.ZipFile(self.candidate,'w') as z:
-                    z.writestr('x/.cache/file',b'first'); z.writestr(name,b'fixture')
+                    z.writestr('x/.cache/file',b'first'); z.writestr('res/-8.xml',b'first')
+                    z.writestr(name,b'fixture')
                 with self.assertRaises(SigningFailure) as caught: inspect_zip(self.candidate, apk=True)
                 self.assertEqual(caught.exception.category, 'archive_member_name')
 
     def test_same_godot_member_requires_classic_zip(self):
-        path = 'assets/.godot/item'
-        for zip64 in (False, True):
-            with self.subTest(zip64=zip64):
+        for path, zip64 in [(p, z) for p in ('assets/.godot/item', 'res/-8.xml') for z in (False, True)]:
+            with self.subTest(path=path, zip64=zip64):
                 with zipfile.ZipFile(self.candidate, 'w') as z:
                     z.writestr('AndroidManifest.xml', b'fixture')
                     with z.open(path, 'w', force_zip64=zip64) as member:
