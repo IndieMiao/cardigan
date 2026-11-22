@@ -82,12 +82,16 @@ export class StandingPmRecovery {
    * attempt records one; the planner escalates once it is a grace old.
    */
   private readonly failures = new Map<
-    Assignment["id"],
+    string,
     { episode_id: string; since: string; reason: string }
   >();
+  /** Assignment numbers are per project; one patrol walks every project. */
+  private key(project: ProjectId, a: Assignment) {
+    return JSON.stringify([project, a.id]);
+  }
 
-  private context(a: Assignment): StandingPmStallContext {
-    const failed = this.failures.get(a.id);
+  private context(project: ProjectId, a: Assignment): StandingPmStallContext {
+    const failed = this.failures.get(this.key(project, a));
     return {
       ...(a.runtime_ref && !this.owns(a.runtime_ref)
         ? { foreign_runtime: true }
@@ -103,10 +107,15 @@ export class StandingPmRecovery {
     };
   }
 
-  private failed(a: Assignment, plan: StandingPmStallPlan, reason: string) {
-    const prior = this.failures.get(a.id);
+  private failed(
+    project: ProjectId,
+    a: Assignment,
+    plan: StandingPmStallPlan,
+    reason: string,
+  ) {
+    const prior = this.failures.get(this.key(project, a));
     const episode_id = plan.episode_id ?? "";
-    this.failures.set(a.id, {
+    this.failures.set(this.key(project, a), {
       episode_id,
       since: prior?.episode_id === episode_id ? prior.since : this.clock.now(),
       reason,
@@ -169,7 +178,7 @@ export class StandingPmRecovery {
         this.notes(state, a),
         now,
         this.policy,
-        this.context(a),
+        this.context(state.project_id, a),
       );
       return plan ? [{ assignment: a, plan }] : [];
     });
@@ -206,11 +215,11 @@ export class StandingPmRecovery {
         } catch {
           // Retried on the next patrol; the planner escalates once the
           // first actual failure is a full grace old.
-          this.failed(a, plan, "launch_snapshot_unavailable");
+          this.failed(project, a, plan, "launch_snapshot_unavailable");
           continue;
         }
       }
-      const failure = this.failures.get(a.id);
+      const failure = this.failures.get(this.key(project, a));
       if (plan.stage === "escalate" && failure)
         observation = `${observation}; ${failure.reason}`;
       if (this.signal.aborted) return;
@@ -306,7 +315,7 @@ export class StandingPmRecovery {
         notes: this.notes(fresh, owner),
         policy: this.policy,
         observation,
-        context: this.context(owner),
+        context: this.context(project, owner),
       };
       const ports = { clock: this.clock, ids: tx.ids };
       if (plan.stage === "redeliver") {
@@ -354,10 +363,15 @@ export class StandingPmRecovery {
         );
         if (effect.ok) {
           persistEffect(tx, project, effect.value);
-          this.failures.delete(a.id);
+          this.failures.delete(this.key(project, a));
         } else if (effect.error.code !== "stale_target")
           // The intent itself was refused: an actual failure to begin.
-          this.failed(owner, plan, `restart_refused:${effect.error.code}`);
+          this.failed(
+            project,
+            owner,
+            plan,
+            `restart_refused:${effect.error.code}`,
+          );
         return;
       }
       const ops = this.hostOps(fresh, owner);
@@ -369,7 +383,7 @@ export class StandingPmRecovery {
       );
       if (!effect.ok) return;
       persistEffect(tx, project, effect.value);
-      this.failures.delete(a.id);
+      this.failures.delete(this.key(project, a));
       const event = effect.value.data.event;
       // Host operations own the follow-up. Without one the escalation stays
       // waiting (delivered when one comes on duty); an existing other PM

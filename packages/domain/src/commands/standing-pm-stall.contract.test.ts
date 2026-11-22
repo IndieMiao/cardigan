@@ -637,3 +637,37 @@ test("the automatic restart intent carries its source; operators cannot set it",
     standing_pm_stall: true,
   });
 });
+
+test("the recovery's own reminder is never work by itself", () => {
+  const f = setup();
+  const original = f.note(1, 0);
+  const params = { assignment_id: f.owner.id, notes: [original] };
+  f.time = 15 * MIN;
+  const reminder = value(
+    recordStandingPmStallRedelivery(f.state, system, params, f.io),
+  );
+  f.state = apply(f.state, reminder);
+  const own = f.note(2, 15, {
+    event_id: reminder.data.event.id,
+    seq: reminder.data.event.seq,
+    recipient: { kind: "assignment", assignment_id: f.owner.id },
+  });
+  f.time = 20 * MIN;
+  // With the original still unread, the reminder is not counted alongside it.
+  expect(f.plan([original, own])).toMatchObject({
+    stage: "restart",
+    notification_ids: [original.id],
+  });
+  // With the original read (ACKed), the reminder alone plans nothing.
+  expect(f.plan([own])).toBeUndefined();
+  f.time = 120 * MIN;
+  expect(f.plan([own])).toBeUndefined();
+  expect(
+    beginStandingPmStallRestart(
+      f.state,
+      system,
+      { assignment_id: f.owner.id, notes: [own], snapshot },
+      f.io,
+    ).ok,
+  ).toBe(false);
+});

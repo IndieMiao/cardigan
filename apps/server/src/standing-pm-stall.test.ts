@@ -10,7 +10,12 @@ import {
   StandingPmRecovery,
   standingPmStallPolicy,
 } from "@cardigan/host";
-import { moveNotification, standingResolver } from "@cardigan/store";
+import { loadCommandState } from "@cardigan/mcp-server";
+import {
+  moveNotification,
+  recordNotification,
+  standingResolver,
+} from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { setup } from "../test-support/dispatch-stalls.js";
 import { Dispatcher } from "./dispatch.js";
@@ -619,4 +624,99 @@ test("V-2959: host ops that read the waiting notice still get a bell for the lat
   expect(forOps.map((n) => n.status)).toEqual(["pending"]);
   await tick();
   expect(events("standing_pm_stall_handoff_delivered")).toHaveLength(1);
+});
+
+test("V-2967: same-numbered PMs in two projects keep separate restart failures and both escalate", async () => {
+  const { f, pm, events } = idlePm();
+  // A second project on the same store and patrol, whose PM has the same number.
+  const other = "p-other" as typeof f.project;
+  expect(f.store.createProject({ id: other, name: "Other" }).ok).toBe(true);
+  f.store.uow.run((tx) => {
+    tx.assignments.put(other, { ...pm, created_at: f.clock.now() });
+    const e = {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(other),
+      type: "delivery_submitted",
+      payload: { fixture: true },
+      created_at: f.clock.now(),
+      actor: { kind: "system" as const, project_id: other },
+    };
+    tx.events.append(other, e);
+    recordNotification(f.store.database, {
+      project_id: other,
+      event_id: e.id,
+      seq: e.seq,
+      at: e.created_at,
+      kind: "assignment",
+      recipient: { kind: "assignment", assignment_id: pm.id },
+    });
+  });
+  const broken = vi.fn(async () => {
+    throw new Error("snapshot unavailable");
+  });
+  const recovery = new StandingPmRecovery(
+    f.store,
+    f.clock,
+    f.runtime,
+    new AbortController().signal,
+    standingPmStallPolicy(),
+  );
+  const both = async () => {
+    await recovery.tick(f.project, broken);
+    await recovery.tick(other, broken);
+  };
+  const escalated = (project: typeof f.project) =>
+    f.store.uow
+      .read((tx) => loadCommandState(tx, project))
+      .events.filter((e) => e.type === STANDING_PM_STALL_EVENTS.escalate);
+  f.advance(15 * MIN);
+  await both();
+  f.advance(5 * MIN);
+  await both();
+  expect(escalated(f.project)).toHaveLength(0);
+  f.advance(5 * MIN);
+  await both();
+  for (const project of [f.project, other])
+    expect(escalated(project).map((e) => e.payload)).toMatchObject([
+      {
+        assignment_id: pm.id,
+        reason: "restart_unavailable",
+        observation: expect.stringContaining("launch_snapshot_unavailable"),
+      },
+    ]);
+  expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(0);
+});
+
+test("V-2967: the recovery's own reminder never justifies a restart once the original notice is read", async () => {
+  const { f, pm, tick, events, note } = idlePm();
+  const original = note();
+  f.advance(15 * MIN);
+  await tick();
+  const [redelivered] = events(STANDING_PM_STALL_EVENTS.redeliver);
+  expect(redelivered?.payload).toMatchObject({
+    notification_ids: [original.id],
+  });
+  // The PM reads the only original notice during the grace, without a new Run.
+  f.advance(MIN);
+  expect(
+    f.store.ackEvents({
+      project_id: f.project,
+      card_id: f.target.card.id,
+      assignment_id: pm.id,
+      up_to_seq: original.seq,
+    }).ok,
+  ).toBe(true);
+  f.advance(4 * MIN);
+  await tick();
+  f.advance(30 * MIN);
+  await tick();
+  expect(events(STANDING_PM_STALL_EVENTS.restart)).toHaveLength(0);
+  expect(events(STANDING_PM_STALL_EVENTS.escalate)).toHaveLength(0);
+  expect(events("host_ops_action_taken")).toHaveLength(0);
+  // The reminder itself stays deliverable through the normal dispatcher.
+  expect(
+    f.store
+      .listNotifications({ project_id: f.project, assignment_id: pm.id })
+      .find((n) => n.event_id === redelivered?.id)?.status,
+  ).toBe("pending");
 });

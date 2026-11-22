@@ -144,6 +144,9 @@ export function planStandingPmStall(
         ["pending", "delivery_failed", "needs_attention"].includes(n.status) &&
         (acked.get(n.card_id ?? "") ?? -1) < n.seq &&
         !(n.card_id && held.has(n.card_id)) &&
+        // The recovery's own reminders are delivered normally but are never
+        // work by themselves: a stage needs an original notice still unread.
+        !ownReminder(state, n) &&
         // Rows the dispatcher deliberately holds back are not a stall.
         !decisionFollowupBlocked(state, n.event_id, a.id) &&
         !(
@@ -234,6 +237,15 @@ export function planStandingPmStall(
       : policy.window_ms;
   if (elapsed(open.created_at) < wait) return;
   return { ...base, stage: "redeliver" };
+}
+
+const RECOVERY_EVENTS: ReadonlySet<string> = new Set([
+  ...Object.values(STANDING_PM_STALL_EVENTS),
+  "standing_pm_stall_handoff_delivered",
+]);
+function ownReminder(state: CommandState, n: Notification) {
+  const e = eventById(state.events, n.event_id);
+  return !!e && e.actor.kind === "system" && RECOVERY_EVENTS.has(e.type);
 }
 
 /** ISO timestamps compare as strings. */
