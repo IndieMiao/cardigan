@@ -3,7 +3,10 @@ import {
   type Assignment,
   type CommandState,
   idleWakeGuard,
+  type RetirementIdentity,
   type Runtime,
+  type RuntimeRef,
+  systemTurnOwner,
 } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import {
@@ -120,13 +123,41 @@ export async function stallWorkspace(
     return "unknown";
   }
 }
+/** Missing hc is not an exit. The native Linux adapter can independently
+ * prove that this exact non-kept launch, its process group and socket are gone. */
+export async function observeTurnOwner(
+  runtime: Runtime,
+  ref: RuntimeRef,
+  identity: RetirementIdentity,
+  systemTurn = true,
+) {
+  const exact = await runtime
+    .observe_retirement?.(
+      ref,
+      systemTurn ? { ...identity, system_finished_turn: true } : identity,
+    )
+    .catch(() => undefined);
+  if (
+    exact &&
+    !exact.ok &&
+    exact.error.code === "runtime_unavailable" &&
+    ref.machine_id === "local" &&
+    ref.local_process_receipt
+  ) {
+    const proof = await runtime
+      .confirm_local_exit?.(ref, identity)
+      .catch(() => undefined);
+    if (proof?.ok && proof.value) return { ok: true, value: "exited" } as const;
+  }
+  return exact;
+}
 export async function stallEvidence(
   state: CommandState,
   a: Assignment,
   runtime: Runtime,
   execution?: ExecutionConfig,
   signal?: AbortSignal,
-  systemTurn = false,
+  systemTurn?: string,
 ) {
   const [workspace, observed, owner] = await Promise.all([
     stallWorkspace(state, a, execution, signal),
@@ -136,12 +167,11 @@ export async function stallEvidence(
     systemTurn &&
     a.runtime_ref?.machine_id === a.machine_id &&
     a.machine_id === "local"
-      ? runtime
-          .observe_retirement?.(a.runtime_ref, {
-            project_id: state.project_id,
-            assignment_id: a.id,
-          })
-          .catch(() => undefined)
+      ? observeTurnOwner(
+          runtime,
+          a.runtime_ref,
+          systemTurnOwner(state, a.id, a.runtime_ref, systemTurn),
+        )
       : undefined,
   ]);
   const terminal_state = observed?.ok ? observed.value.agent : null;
@@ -155,16 +185,23 @@ export async function stallEvidence(
   const ownerConfirmed =
     owner?.ok && (owner.value === "alive" || owner.value === "exited");
   const unknownOrIdle =
-    !observed?.ok ||
-    ["unknown", "idle", "done"].includes(observed.value.agent) ||
-    observed.value.process === "exited";
+    (!observed?.ok &&
+      observed?.error.code !== "runtime_conflict" &&
+      observed?.error.code !== "invalid_launch") ||
+    (observed?.ok &&
+      (["unknown", "idle", "done"].includes(observed.value.agent) ||
+        observed.value.process === "exited"));
   return {
     ...(systemTurn
       ? { terminal_owner: ownerConfirmed ? "confirmed" : "unconfirmed" }
       : {}),
     workspace,
     terminal_state,
-    process_state: observed?.ok ? observed.value.process : null,
+    process_state: observed?.ok
+      ? observed.value.process
+      : owner?.ok
+        ? owner.value
+        : null,
     can_restart:
       (systemTurn ? !!ownerConfirmed && unknownOrIdle : !!safeTerminal) &&
       a.machine_id === "local" &&

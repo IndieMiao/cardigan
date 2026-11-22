@@ -357,7 +357,7 @@ async function startUnlocked(
         EXIT.failure,
       );
   }
-  if (assignment.role_id === "independent_reviewer")
+  if (entities.workItem?.kind === "verify")
     settleTestReviewLimits(store, project_id);
   const run = (() => {
     try {

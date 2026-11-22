@@ -1,4 +1,5 @@
 import type { Assignment, Machine, RuntimeRef } from "./entities.js";
+import type { RunId } from "./ids.js";
 import type { Role } from "./role.js";
 import type { IdleRetirementResult, RuntimeResult } from "./runtime-types.js";
 
@@ -63,6 +64,9 @@ export interface RuntimeInteractionReader {
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
 export interface RetirementIdentity {
+  /** First host-confirmed bell on this exact legacy ref; the worker must
+   * independently show this Run as the terminal's original launch label. */
+  readonly first_bell_run_id?: RunId;
   readonly project_id: string;
   readonly assignment_id: string;
 }
@@ -70,7 +74,7 @@ export interface Runtime {
   /** Read-only. Only a finished terminal with this exact identity proves exit. */
   observe_retirement?(
     ref: RuntimeRef,
-    identity: RetirementIdentity,
+    identity: RetirementIdentity & { readonly system_finished_turn?: true },
   ): Promise<RuntimeResult<RuntimeObservation["process"]>>;
   /** Read-only local kernel check for an already queued Run whose core is gone.
    * A missing socket alone never proves the original terminal process exited. */

@@ -20,6 +20,7 @@ import {
   beginStalledPatrolRestart,
   beginSystemTurnRestart,
   recordAutomaticContextRestartResult,
+  systemTurnOwner,
 } from "./host-ops-context-restart.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
 import { setProjectPreferences } from "./preferences.js";
@@ -33,6 +34,7 @@ import {
   now,
   ports,
   role,
+  run,
   value,
 } from "./test-fixtures.js";
 
@@ -584,3 +586,64 @@ test.each(["card", "project"] as const)(
     expect(Boolean(held.data.run)).toBe(stream === "project");
   },
 );
+
+test("a generationless loopback owner needs an unambiguous confirmed bell on the entire bound ref", () => {
+  const state = fixture(),
+    created = run(),
+    reused = run(2, 1);
+  const bound = {
+    ...ref,
+    runtime_machine: "worker",
+    terminal_ref: "worker/t1",
+    target: {
+      project_id: state.project_id,
+      machine_id: "local",
+      session: "fixture",
+      generation: "legacy",
+      fingerprint: "a".repeat(64),
+    },
+  };
+  const first = {
+    ...created,
+    bell_delivery: { run_id: created.id, sent_at: now, runtime_ref: bound },
+  };
+  const later = {
+    ...reused,
+    bell_delivery: {
+      run_id: reused.id,
+      sent_at: "2099-01-01T00:00:00.000Z",
+      runtime_ref: bound,
+    },
+  };
+  const owner = (runs: typeof state.runs, endedRun = first.id) =>
+    systemTurnOwner({ ...state, runs }, created.assignment_id, bound, endedRun);
+  expect(owner([later, first], later.id)).toHaveProperty(
+    "first_bell_run_id",
+    first.id,
+  );
+  expect(owner([first], later.id)).not.toHaveProperty("first_bell_run_id");
+  for (const runs of [
+    [],
+    [created],
+    [
+      {
+        ...first,
+        bell_delivery: {
+          ...first.bell_delivery,
+          runtime_ref: {
+            ...bound,
+            target: { ...bound.target, fingerprint: "b".repeat(64) },
+          },
+        },
+      },
+    ],
+    [{ ...first, assignment_id: id("assignment", 9) }],
+    [{ ...first, bell_delivery: { ...first.bell_delivery, run_id: later.id } }],
+    [{ ...first, bell_delivery: { runtime_ref: bound, run_id: first.id } }],
+    [
+      first,
+      { ...later, bell_delivery: { ...later.bell_delivery, sent_at: now } },
+    ],
+  ])
+    expect(owner(runs)).not.toHaveProperty("first_bell_run_id");
+});

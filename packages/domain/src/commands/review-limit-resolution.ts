@@ -1,4 +1,5 @@
 import type { Decision, WorkItem } from "../entities.js";
+import { eventById, eventsForDecision } from "../event-index.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { dispatchedRepair, sharedReworkItem } from "../shared-review-wake.js";
@@ -250,6 +251,55 @@ export function recordDecisionResolution(
         "本卡或范围变化未授权，请升级给人",
       );
       applyReviewStrategy(d, q, resolution.option, resolution.rationale);
+    }
+    // Old CLI starts wrote an unclaimed initial Run *during* the budget
+    // wait. Release only that empty queue entry; never touch a live terminal,
+    // token, capacity reservation, bell or work already being prepared.
+    const opened = eventsForDecision(d.state.events, q.id).find(
+      (e) => e.type === "decision_requested" && e.card_id === q.card_id,
+    );
+    for (const id of q.affected_work_items) {
+      const item = d.work(id);
+      if (
+        !opened ||
+        item.kind !== "verify" ||
+        item.status !== "waiting_decision"
+      )
+        continue;
+      for (const r of d.list("runs")) {
+        if (
+          r.assignment_id !== item.assignment_id ||
+          r.kind !== "initial" ||
+          r.status !== "queued" ||
+          r.started_at ||
+          r.launch_publication ||
+          r.preparation_retry ||
+          r.inactivity_stop ||
+          r.dispatch_stop ||
+          r.bell_delivery
+        )
+          continue;
+        const event = eventById(d.state.events, r.trigger_event_id);
+        if (
+          event?.type !== "run_queued" ||
+          event.card_id !== item.card_id ||
+          event.seq <= opened.seq ||
+          (event.payload as { run_id?: string }).run_id !== r.id
+        )
+          continue;
+        d.put("runs", {
+          ...r,
+          status: unwrap(transition("run", r.status, "cancel")),
+          outcome: "failed",
+          finished_at: d.now,
+          summary: "启动时审核正在等待拍板，已撤销未派发的排队轮次",
+        });
+        d.emit("run_dispatch_aborted", item.card_id, {
+          run_id: r.id,
+          reason: "review_wait_initial",
+          decision_id: q.id,
+        });
+      }
     }
     for (const id of new Set(q.affected_work_items))
       raiseVerifierLimit(d, d.work(id), q.id, resolution);
