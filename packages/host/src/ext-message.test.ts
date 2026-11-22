@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   type Decision,
   EXT_MESSAGE_DEFAULTS,
@@ -11,8 +12,10 @@ import {
   notices,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
+import * as outbox from "@cardigan/store";
 import {
   claimExtMessage,
+  DEFAULT_DB_FILE,
   listExtMessages,
   projectExtMessage,
   Store,
@@ -1895,13 +1898,26 @@ test.each([false, true])(
     ).toBe(151200);
     if (quietOverflow) now = "2026-01-02T07:59:59.000Z";
     const active = sender();
+    // total_changes() cannot see read-only planning inside a write transaction.
+    // At each candidate existence check, a second connection must be able to write.
+    using contender = new DatabaseSync(join(dir, DEFAULT_DB_FILE));
+    contender.exec("PRAGMA busy_timeout = 0");
+    const has = outbox.hasExtMessage;
+    using lookups = vi
+      .spyOn(outbox, "hasExtMessage")
+      .mockImplementation((...args) => {
+        contender.exec("BEGIN IMMEDIATE; ROLLBACK");
+        return has(...args);
+      });
     // First tick includes cold SQLite/JSON decoding. Second tick sees our audits,
     // so it must reproject (and take the next batch), not hit an unchanged cursor.
     for (const cold of [true, false]) {
       if (quietOverflow && !cold) advance(1000);
+      lookups.mockClear();
       const { writes, visits } = await measureHistoryTick(store, () =>
         active.tick(),
       );
+      expect(lookups).toHaveBeenCalled();
       expect(visits).toBeLessThanOrEqual(8);
       expect(rows()).toHaveLength(cold ? 32 : 64);
       expect(fake.messages).toHaveLength(quietOverflow ? 0 : cold ? 32 : 64);
