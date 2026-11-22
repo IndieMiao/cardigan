@@ -28,7 +28,7 @@ Q-963 只批准开发与隔离测试。不开开关、不配置专用账号、�
 
 ## 升级已有签名端程序（管理员）
 
-C-548/C-551 只更新项目 worker 的三个 helper，**不更新独立签名端**。先确认含修复的控制主机发行版已部署成功。从该次部署记录定位不可变发行目录，不从 Git 工作树、Run 或待签附件取程序。在其 `deploy/mobile-signing` 目录执行：
+C-548/C-551 只更新项目 worker 的三个 helper，**不更新独立签名端**。归档检查在签名端的 `archives.py` 中执行：C-582（APK 内点开头的路径段，如 Godot 的 `assets/.godot/`）与 C-590（APK 内“-”开头的路径段，如 AAPT2 缩短后的 `res/-8.xml`）都要按本节换版后才生效；只换其中一个文件不算升级。先确认含修复的控制主机发行版已部署成功。从该次部署记录定位不可变发行目录，不从 Git 工作树、Run 或待签附件取程序。在其 `deploy/mobile-signing` 目录执行：
 
 ```sh
 /usr/bin/shasum -a 256 archives.py common.py host.py platforms.py worker.py | /usr/bin/shasum -a 256
@@ -54,4 +54,4 @@ sudo /bin/sh -eu -c '
 ' sh "${STAGE:?需提供管理员暂存目录绝对路径}" "${EXPECTED:?需提供控制主机发行版摘要}"
 ```
 
-若切换中断，保持停签，检查 `.signer-upgrade.*/previous`；确认本次备份后可恢复到原程序目录。不要改授权、删除账本或从工作树补文件。forced command 每次新建 Python 进程，下次连接即用新版。先验安装目录摘要与控制主机一致再恢复请求。新主机的 `show <id>` 在 `worker_receipt.failure_category` 显示签名端记录的固定失败类别；其中 `archive_member_name` 表示路径名或路径别名被拒，`archive_too_large` 表示数量或大小超限，`package_mismatch` 表示包名不符，`apksigner_failed` 表示签名或验签失败。断连先 `reconcile <id>` 再 `show`。旧版失败回执没有该字段，不能据此推断原因。重送要在新 Run 中用新请求号重新登记并核准原候选摘要；不要沿用失败的批准。
+若切换中断，保持停签，检查 `.signer-upgrade.*/previous`；确认本次备份后可恢复到原程序目录。不要改授权、删除账本或从工作树补文件。forced command 每次新建 Python 进程，下次连接即用新版。先验安装目录摘要与控制主机一致再恢复请求。新主机的 `show <id>` 在 `worker_receipt.failure_category` 显示签名端记录的固定失败类别；其中 `archive_member_name` 表示路径名或路径别名被拒（升级后对真实候选仍报此类别时，先核对安装目录摘要是否已是新版），`archive_too_large` 表示数量或大小超限，`package_mismatch` 表示包名不符，`apksigner_failed` 表示签名或验签失败。断连先 `reconcile <id>` 再 `show`。旧版失败回执没有该字段，不能据此推断原因。重送要在新 Run 中用新请求号重新登记并核准原候选摘要；不要沿用失败的批准。

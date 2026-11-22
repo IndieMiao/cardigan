@@ -80,6 +80,7 @@ export const STANDING_ROLE_TOOLS = [
   "resolve_delegated_decision",
   "triage_human_action",
   "complete_host_action",
+  "publish_artifact",
 ] as const satisfies readonly ToolName[];
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
@@ -128,6 +129,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
       tool !== "request_check" &&
       tool !== "run_probe" &&
       tool !== "request_mobile_signature" &&
+      tool !== "publish_artifact" &&
       tool !== "replace_verification_work_item" &&
       tool !== "request_delivery_rework" &&
       workItemTool(tool),

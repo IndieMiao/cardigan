@@ -5,7 +5,11 @@ import type {
   Result,
   RoleReference,
 } from "@cardigan/domain";
-import { holdsStandingOnlyTools, isStandingOnlyTool } from "@cardigan/domain";
+import {
+  holdsPublicationTool,
+  holdsStandingOnlyTools,
+  isStandingOnlyTool,
+} from "@cardigan/domain";
 import type { McpBackend, McpToken } from "./backend.js";
 
 /** MCP callers are always assignments: a token belongs to one assignment. */
@@ -104,6 +108,8 @@ export function recordIdentity(
                 lookup.assignment.role_id === "pm" &&
                 lookup.assignment.standing_mode === "office" &&
                 lookup.assignment.external === true)) &&
+            (tool !== "publish_artifact" ||
+              holdsPublicationTool(lookup.assignment)) &&
             (!isStandingOnlyTool(tool) ||
               holdsStandingOnlyTools(lookup.assignment)),
         ),

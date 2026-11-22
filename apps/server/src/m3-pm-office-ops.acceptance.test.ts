@@ -225,6 +225,7 @@ async function pmFixture(automaticOps = false) {
               "resolve_delegated_decision",
               "triage_human_action",
               "replace_verification_work_item",
+              "publish_artifact",
             ].includes(tool) &&
               !(STANDING_ONLY_TOOLS as readonly string[]).includes(tool) &&
               !(
