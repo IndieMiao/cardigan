@@ -1,4 +1,5 @@
 import type { HarnessActivity, Runtime } from "@cardigan/domain";
+import { beginBellAttempt } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { stalledTranscript } from "../test-support/dispatch.js";
 import { setup } from "../test-support/dispatch-stalls.js";
@@ -81,7 +82,17 @@ test.each(["codex", "claude-code"] as const)(
   },
 );
 
-test.each(["mcp", "waiting", "settled", "session"])(
+test.each([
+  "mcp",
+  "waiting",
+  "settled",
+  "session",
+  "hold",
+  "stopping",
+  "role_upgrade",
+  "bell",
+  "dependency",
+])(
   "%s change before the send slot withdraws the continuation",
   async (race) => {
     const f = setup(),
@@ -99,12 +110,69 @@ test.each(["mcp", "waiting", "settled", "session"])(
       error: "stream_disconnected" as const,
       updated_at: f.clock.now(),
     };
+    const dependency = race === "dependency" ? f.create().card : undefined;
+    const notice =
+      race === "bell"
+        ? f.event("fixture_bell", {}, a, item.card_id)
+        : undefined;
     const runtime = {
       ...f.runtime,
       observe_prompt: vi.fn(async () => ({ ok: true as const, value: true })),
       wake: vi.fn<Runtime["wake"]>(async (_ref, _msg, guard) => {
         f.store.uow.run((tx) => {
           const owner = tx.assignments.get(f.project, a.id)!;
+          if (race === "hold" || race === "dependency") {
+            const card = tx.cards.get(f.project, item.card_id)!;
+            tx.cards.put(
+              f.project,
+              race === "hold"
+                ? {
+                    ...card,
+                    hold: {
+                      reason: "fixture",
+                      resume_condition: "review",
+                      set_by: "human",
+                      set_at: f.clock.now(),
+                    },
+                  }
+                : { ...card, depends_on_cards: [dependency!.id] },
+            );
+          }
+          if (race === "stopping")
+            tx.assignments.put(f.project, {
+              ...owner,
+              idle_retirement: {
+                phase: "stopping",
+                runtime_ref: owner.runtime_ref!,
+                started_at: f.clock.now(),
+                threshold_minutes: 60,
+                failures: 0,
+              },
+            });
+          if (race === "role_upgrade")
+            tx.assignments.put(f.project, {
+              ...owner,
+              role_upgrade: {
+                role_version: owner.role_version + 1,
+                previous_runtime_ref: owner.runtime_ref,
+              },
+            });
+          if (notice) {
+            const note = f.store
+              .listNotifications({ project_id: f.project, assignment_id: a.id })
+              .find((n) => n.event_id === notice.id)!;
+            beginBellAttempt(f.store.database, {
+              project_id: f.project,
+              id: "in-flight",
+              assignment_id: a.id,
+              run_id: r.id,
+              notification_ids: [note.id],
+              started_at: f.clock.now(),
+              lease_until: new Date(
+                Date.parse(f.clock.now()) + 60000,
+              ).toISOString(),
+            });
+          }
           if (race === "waiting")
             tx.work_items.put(f.project, {
               ...tx.work_items.get(f.project, item.id)!,
@@ -226,4 +294,42 @@ test("new progress followed by another error between patrols is not a second sen
   await service().tick(f.state());
   expect(runtime.wake).toHaveBeenCalledOnce();
   expect(events("client_resume_attention")).toHaveLength(1);
+});
+
+test("two observers of the same unclaimed Run compete at the durable send boundary", async () => {
+  const { f, runtime, service, events } = disconnected("codex");
+  // Delay the second observation's response until after the first writer has
+  // released the host lock. Both patrols used the same pre-claim snapshot.
+  const observed = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  const snapshot = f.state();
+  runtime.observe_prompt.mockImplementationOnce(async () => {
+    observed.resolve();
+    await release.promise;
+    return { ok: true, value: true };
+  });
+  const decisions: boolean[] = [];
+  const typed = vi.fn();
+  runtime.wake.mockImplementation(async (_ref, text, guard) => {
+    const allowed = guard?.before_send?.() === true;
+    decisions.push(allowed);
+    if (allowed) typed(text);
+    return {
+      ok: true,
+      value: allowed ? { sent: true } : { sent: false, withdrawn: true },
+    };
+  });
+  const delayed = service().tick(snapshot);
+  try {
+    await observed.promise;
+    await service().tick(snapshot);
+  } finally {
+    release.resolve();
+    await delayed;
+  }
+  expect(runtime.observe_prompt).toHaveBeenCalledTimes(2);
+  expect(decisions).toEqual([true, false]);
+  expect(typed).toHaveBeenCalledTimes(1);
+  expect(events("client_resume_claimed")).toHaveLength(1);
+  expect(events("client_resume_sent")).toHaveLength(1);
 });

@@ -69,8 +69,9 @@ export async function boundPrompt(
       !ref.launch_generation &&
       ref.target?.project_id === binding.project_id &&
       /^[a-z0-9_-]{1,7}-[a-f0-9]{24}$/u.test(ref.agent_name) &&
-      !labels?.project &&
-      !labels?.assignment;
+      labels?.project === undefined &&
+      labels?.assignment === undefined &&
+      labels?.run === undefined;
 
     if (
       t.address !== ref.terminal_ref ||
