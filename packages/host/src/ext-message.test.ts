@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   type Decision,
   EXT_MESSAGE_DEFAULTS,
@@ -11,14 +12,17 @@ import {
   notices,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
+import * as outbox from "@cardigan/store";
 import {
   claimExtMessage,
+  DEFAULT_DB_FILE,
   listExtMessages,
   projectExtMessage,
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { card, project_id } from "../../store/src/test-support.js";
+import { measureHistoryTick } from "../test-support/tick-work.js";
 import { ExtMessageSender, sendExtMessage } from "./ext-message.js";
 import {
   type ExtMessageConfig,
@@ -1831,7 +1835,7 @@ test("an external edit during send is not mistaken for our settlement audit", as
 });
 
 test.each([false, true])(
-  "production-size live backlog bounds computation, replay writes and writer lock time (quiet overflow: %s)",
+  "production-size live backlog bounds history visits and writes per transaction (quiet overflow: %s)",
   async (quietOverflow) => {
     config = { ...config, policy: { ...config.policy, max_per_minute: 100 } };
     if (quietOverflow) {
@@ -1894,30 +1898,32 @@ test.each([false, true])(
     ).toBe(151200);
     if (quietOverflow) now = "2026-01-02T07:59:59.000Z";
     const active = sender();
+    // total_changes() cannot see read-only planning inside a write transaction.
+    // At each candidate existence check, a second connection must be able to write.
+    using contender = new DatabaseSync(join(dir, DEFAULT_DB_FILE));
+    contender.exec("PRAGMA busy_timeout = 0");
+    const has = outbox.hasExtMessage;
+    using lookups = vi
+      .spyOn(outbox, "hasExtMessage")
+      .mockImplementation((...args) => {
+        contender.exec("BEGIN IMMEDIATE; ROLLBACK");
+        return has(...args);
+      });
     // First tick includes cold SQLite/JSON decoding. Second tick sees our audits,
     // so it must reproject (and take the next batch), not hit an unchanged cursor.
     for (const cold of [true, false]) {
       if (quietOverflow && !cold) advance(1000);
-      const locks: number[] = [];
-      let compute = 0;
-      store.observe({
-        transaction(kind, ms) {
-          if (kind === "run") locks.push(ms);
-          else compute += ms;
-        },
-      });
-      const start = performance.now();
-      await active.tick();
-      const elapsed = performance.now() - start,
-        longest = Math.max(...locks);
-      console.info(
-        `ext-message (${quietOverflow ? "quiet" : "ordinary"}, ${cold ? "cold" : "warm"}): projection ${compute.toFixed(1)} ms, tick ${elapsed.toFixed(1)} ms, longest write ${longest.toFixed(1)} ms`,
+      lookups.mockClear();
+      const { writes, visits } = await measureHistoryTick(store, () =>
+        active.tick(),
       );
+      expect(lookups).toHaveBeenCalled();
+      expect(visits).toBeLessThanOrEqual(8);
       expect(rows()).toHaveLength(cold ? 32 : 64);
       expect(fake.messages).toHaveLength(quietOverflow ? 0 : cold ? 32 : 64);
-      expect(compute).toBeLessThan(cold ? 2000 : 200);
-      expect(elapsed).toBeLessThan(cold ? 3000 : 750);
-      expect(longest).toBeLessThan(50);
+      expect(writes.length).toBeGreaterThan(0);
+      // 32 outbox rows plus the durable quiet-overflow marker.
+      expect(Math.max(...writes)).toBeLessThanOrEqual(32 + 1);
     }
   },
   20000,
