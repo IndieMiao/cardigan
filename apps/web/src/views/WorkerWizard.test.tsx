@@ -23,6 +23,7 @@ import { CapacityProvider } from "../components/Capacity.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { MachinesSettings } from "./MachinesSettings.js";
+import { WorkerWizardDrawer } from "./WorkerWizard.js";
 
 afterEach(() => {
   cleanup();
@@ -53,7 +54,7 @@ const input: WorkerWizardInput = {
   account: "cg_cardigan",
   uid: 1501,
   gid: 1501,
-  mcp_url: "http://control.invalid:7781/mcp",
+  mcp_url: "https://control.example.ts.net/mcp",
 };
 
 /**
@@ -827,4 +828,262 @@ test("V-2540: a refused config preview cannot be confirmed again; 返回修改 r
         .disabled,
     ).toBe(false),
   );
+});
+
+/** C-565: the drawer alone, with quick automatic rechecks. */
+function drawer(
+  extra: Partial<CardiganClient>,
+  props: { autoRecheckMs?: number; autoRecheckMax?: number } = {},
+) {
+  const c = fakeClient(extra);
+  const onChanged = vi.fn();
+  render(
+    <WorkerWizardDrawer
+      client={c}
+      projectId="p-1"
+      pollMs={5}
+      autoRecheckMs={props.autoRecheckMs ?? 20}
+      {...(props.autoRecheckMax
+        ? { autoRecheckMax: props.autoRecheckMax }
+        : {})}
+      onChanged={onChanged}
+      onClose={() => {}}
+    />,
+  );
+  return within(screen.getByRole("dialog"));
+}
+const stepBar = (dialog: ReturnType<typeof within>) => {
+  const items = within(
+    dialog.getByRole("list", { name: "添加 worker 的步骤" }),
+  ).getAllByRole("listitem");
+  return {
+    names: items.map((li) => li.textContent?.replace(/^\d|（已完成）/gu, "")),
+    current: items
+      .filter((li) => li.getAttribute("aria-current") === "step")
+      .map((li) => li.textContent?.replace(/^\d/u, "")),
+    done: items.filter((li) => li.dataset.state === "done").length,
+  };
+};
+async function toBlocked(
+  dialog: ReturnType<typeof within>,
+  values: WorkerWizardInput = input,
+) {
+  await fill(dialog, values);
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "开始检查" }));
+}
+
+test("C-565: the whole wizard path is shown from the first screen, with the current step marked", async () => {
+  const fake = backend(["ssh", "account", "passed"]);
+  const dialog = drawer(fake.client, { autoRecheckMs: 60_000 });
+  expect(stepBar(dialog)).toEqual({
+    names: ["填写", "预览确认", "9 项检查", "目标机命令", "开启远程派发"],
+    current: ["填写"],
+    done: 0,
+  });
+  await fill(dialog);
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await dialog.findByRole("button", { name: "确认写入配置" });
+  expect(stepBar(dialog).current).toEqual(["预览确认"]);
+  expect(stepBar(dialog).done).toBe(1);
+  fireEvent.click(dialog.getByRole("button", { name: "确认写入配置" }));
+  await dialog.findByRole("button", { name: "开始检查" });
+  expect(stepBar(dialog).current).toEqual(["9 项检查"]);
+  fireEvent.click(dialog.getByRole("button", { name: "开始检查" }));
+  // Stopped at SSH: still a check matter, not a target-machine command.
+  await dialog.findByRole("button", { name: "继续检查" });
+  expect(stepBar(dialog).current).toEqual(["9 项检查"]);
+  fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
+  // Stopped at the account: the commands are the step now.
+  await waitFor(() => expect(stepBar(dialog).current).toEqual(["目标机命令"]));
+  fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
+  await dialog.findByRole("button", { name: "复查" });
+  expect(stepBar(dialog).current).toEqual(["开启远程派发"]);
+  fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
+  fireEvent.click(
+    await dialog.findByRole("checkbox", { name: "我确认开启远程派发" }),
+  );
+  fireEvent.click(dialog.getByRole("button", { name: "开启远程派发" }));
+  await dialog.findByText("已开启远程派发");
+  expect(stepBar(dialog)).toMatchObject({ current: [], done: 5 });
+});
+
+test("C-565: every field says what it is and where to find it; inferable values are prefilled", async () => {
+  const fake = backend([]);
+  const defaults = Promise.withResolvers<{
+    defaults: { mcp_url?: string };
+  }>();
+  const dialog = drawer({
+    ...fake.client,
+    workerWizardDefaults: vi.fn(() => defaults.promise),
+  });
+  const box = (name: string) =>
+    dialog.getByRole("textbox", { name }) as HTMLInputElement;
+  const hint = (name: string) => {
+    const id = box(name).getAttribute("aria-describedby") ?? "";
+    return document.getElementById(id)?.textContent ?? "";
+  };
+  // Port and the recommended account are already there.
+  expect(box("SSH 端口").value).toBe("22");
+  expect(box("专用账号").value).toBe("cg_p_1");
+  expect(box("MCP 地址").value).toBe("");
+  expect(hint("机器编号")).toContain("不能是 local");
+  expect(hint("机器编号")).toContain("cardigan worker add");
+  expect(hint("主机地址")).toContain("tailnet");
+  expect(hint("专用账号")).toContain("cg_");
+  expect(hint("UID")).toContain("getent passwd | cut -d: -f3 | sort -n");
+  expect(hint("GID")).toContain("getent group | cut -d: -f3 | sort -n");
+  expect(hint("MCP 地址")).toContain("只认 HTTPS 的 /mcp");
+  // The host's known MCP address fills the empty field.
+  await act(async () =>
+    defaults.resolve({
+      defaults: { mcp_url: "https://control.example.ts.net/mcp" },
+    }),
+  );
+  expect(box("MCP 地址").value).toBe("https://control.example.ts.net/mcp");
+  expect(hint("MCP 地址")).toContain("已填入现有 worker 使用的地址");
+  // macOS: the commands that list taken numbers there; arm64 only.
+  fireEvent.click(dialog.getByRole("button", { name: "macOS" }));
+  expect(hint("UID")).toContain("dscl . -list /Users UniqueID");
+  expect(hint("GID")).toContain("dscl . -list /Groups PrimaryGroupID");
+  const os = screen
+    .getByRole("dialog")
+    .querySelector("[data-ui='toggle-group']");
+  expect(
+    document.getElementById(os?.getAttribute("aria-describedby") ?? "")
+      ?.textContent,
+  ).toContain("Apple Silicon");
+  // A prefilled form only needs what cannot be inferred.
+  fireEvent.click(dialog.getByRole("button", { name: "Linux" }));
+  for (const [name, value] of [
+    ["机器编号", "studio"],
+    ["名称", "工作室"],
+    ["主机地址", "worker.invalid"],
+    ["UID", "1501"],
+    ["GID", "1501"],
+  ] as const)
+    fireEvent.change(box(name), { target: { value } });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  await dialog.findByRole("button", { name: "确认写入配置" });
+  expect(fake.client.createWorkerWizard).toHaveBeenCalledWith("p-1", {
+    ...input,
+    // Back from macOS the architecture stays arm64 (unchanged behaviour).
+    arch: "arm64",
+    account: "cg_p_1",
+    mcp_url: "https://control.example.ts.net/mcp",
+  });
+});
+
+test("C-565: a suggested MCP address never replaces one the reader typed", async () => {
+  const fake = backend([]);
+  const defaults = Promise.withResolvers<{
+    defaults: { mcp_url?: string };
+  }>();
+  const dialog = drawer({
+    ...fake.client,
+    workerWizardDefaults: vi.fn(() => defaults.promise),
+  });
+  const mcp = dialog.getByRole("textbox", { name: "MCP 地址" });
+  fireEvent.change(mcp, {
+    target: { value: "https://other.example.ts.net/mcp" },
+  });
+  await act(async () =>
+    defaults.resolve({
+      defaults: { mcp_url: "https://control.example.ts.net/mcp" },
+    }),
+  );
+  expect((mcp as HTMLInputElement).value).toBe(
+    "https://other.example.ts.net/mcp",
+  );
+});
+
+test("C-565: mistakes are shown beside their fields and the first one takes focus", async () => {
+  const fake = backend([]);
+  const dialog = drawer(fake.client);
+  await fill(dialog, {
+    ...input,
+    uid: 12,
+    mcp_url: "http://control.example.ts.net/mcp",
+  });
+  fireEvent.click(dialog.getByRole("button", { name: "预览配置" }));
+  const uid = dialog.getByRole("textbox", { name: "UID" });
+  await waitFor(() => expect(document.activeElement).toBe(uid));
+  expect(uid.getAttribute("aria-invalid")).toBe("true");
+  const notes = (uid.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent);
+  expect(notes).toContain("UID 须为不小于 501 的整数。");
+  const mcp = dialog.getByRole("textbox", { name: "MCP 地址" });
+  expect(mcp.getAttribute("aria-invalid")).toBe("true");
+  expect(dialog.getByText("MCP 地址须为 HTTPS 的 /mcp 地址。")).toBeTruthy();
+  expect(
+    dialog.getByRole("textbox", { name: "GID" }).getAttribute("aria-invalid"),
+  ).toBeNull();
+  expect(fake.client.createWorkerWizard).not.toHaveBeenCalled();
+  // Correcting a field takes its note down.
+  fireEvent.change(uid, { target: { value: "1501" } });
+  expect(uid.getAttribute("aria-invalid")).toBeNull();
+  expect(dialog.queryByText("UID 须为不小于 501 的整数。")).toBeNull();
+  expect(mcp.getAttribute("aria-invalid")).toBe("true");
+});
+
+test("C-565: after a stop the commands fix, the page checks again by itself and moves on", async () => {
+  const fake = backend(["account", "account", "directories", "passed"]);
+  const dialog = drawer(fake.client);
+  await toBlocked(dialog);
+  // account blocked → rechecked → still blocked → rechecked → next stop
+  // (directories) → rechecked → all passed, without pressing anything.
+  await dialog.findByRole("button", { name: "复查" }, { timeout: 3000 });
+  expect(fake.writes).toEqual(["confirm", "run", "run", "run", "run"]);
+  expect(stepBar(dialog).current).toEqual(["开启远程派发"]);
+});
+
+test("C-565: automatic rechecks stop at their limit; 继续检查 stays and starts them over", async () => {
+  const fake = backend(["account", "account", "account", "account", "passed"]);
+  const dialog = drawer(fake.client, { autoRecheckMax: 2 });
+  await toBlocked(dialog);
+  await dialog.findByText(
+    "自动复查已停止：在目标机执行命令后，请点“继续检查”。",
+    undefined,
+    { timeout: 3000 },
+  );
+  expect(fake.writes).toEqual(["confirm", "run", "run", "run"]);
+  await new Promise((done) => setTimeout(done, 100));
+  expect(fake.writes).toHaveLength(4);
+  fireEvent.click(dialog.getByRole("button", { name: "继续检查" }));
+  await dialog.findByRole("button", { name: "复查" }, { timeout: 3000 });
+  expect(fake.writes).toEqual(["confirm", "run", "run", "run", "run", "run"]);
+});
+
+test("C-565: a stop the commands do not fix (SSH) waits for 继续检查", async () => {
+  const fake = backend(["ssh"]);
+  const dialog = drawer(fake.client);
+  await toBlocked(dialog);
+  await dialog.findByRole("button", { name: "继续检查" });
+  await new Promise((done) => setTimeout(done, 150));
+  expect(fake.writes).toEqual(["confirm", "run"]);
+  expect(dialog.queryByText(/自动复查/u)).toBeNull();
+});
+
+test("C-565: the suggestions are a same-origin read of the owner's wizard defaults", async () => {
+  const fetcher = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          defaults: { mcp_url: "https://control.example.ts.net/mcp" },
+        }),
+      ),
+  );
+  const http = new HttpCardiganClient(fetcher);
+  expect(await http.workerWizardDefaults("p 1")).toEqual({
+    defaults: { mcp_url: "https://control.example.ts.net/mcp" },
+  });
+  const [[url, init]] = fetcher.mock.calls as unknown as [
+    string,
+    RequestInit,
+  ][];
+  expect(url).toBe("/api/projects/p%201/worker-wizards/defaults");
+  expect(init.method ?? "GET").toBe("GET");
+  expect(init.credentials).toBe("same-origin");
 });

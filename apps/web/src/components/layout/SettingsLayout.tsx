@@ -1,4 +1,4 @@
-import { CircleHelp, TriangleAlert } from "lucide-react";
+import { Check, ChevronRight, CircleHelp, TriangleAlert } from "lucide-react";
 import {
   type ComponentProps,
   type ReactNode,
@@ -534,28 +534,92 @@ export function SettingsDiff({
 export function SettingsField({
   label,
   error,
+  hint,
   children,
 }: {
   label: ReactNode;
   error?: string | undefined;
+  /**
+   * C-565: what the value is and where to find it, below the control and
+   * tied to it with `aria-describedby` (only where a card asks for it).
+   */
+  hint?: ReactNode;
   children: (field: {
     invalid: true | undefined;
     describedBy: string | undefined;
   }) => ReactNode;
 }) {
   const id = useId();
-  return (
+  const hintId = `${id}-hint`;
+  const describedBy =
+    [hint ? hintId : "", error ? id : ""].filter(Boolean).join(" ") ||
+    undefined;
+  const field = (
     <>
       {/* biome-ignore lint/a11y/noLabelWithoutControl: the control comes from `children`. */}
       <label>
         {label}
-        {children({
-          invalid: error ? true : undefined,
-          describedBy: error ? id : undefined,
-        })}
+        {children({ invalid: error ? true : undefined, describedBy })}
       </label>
+      {hint && <SettingsFieldHint id={hintId}>{hint}</SettingsFieldHint>}
       {error && <SettingsWarning id={id}>{error}</SettingsWarning>}
     </>
+  );
+  // A hinted field keeps its label, hint and note together (4px apart).
+  return hint ? <div className={styles.field}>{field}</div> : field;
+}
+
+/** C-565: a field's hint for controls outside `SettingsField` (a legend). */
+export function SettingsFieldHint({
+  id,
+  children,
+}: {
+  id: string;
+  children: ReactNode;
+}) {
+  return (
+    <div id={id} className={styles.fieldHint}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * C-565: the whole path of a multi-step drawer, shown from its first screen.
+ * Steps before `current` are done; `current` equal to the number of steps
+ * means all are done.
+ */
+export function SettingsSteps({
+  label,
+  steps,
+  current,
+}: {
+  label: string;
+  steps: readonly string[];
+  current: number;
+}) {
+  return (
+    <ol aria-label={label} className={styles.steps}>
+      {steps.map((step, i) => {
+        const state = i < current ? "done" : i === current ? "current" : "todo";
+        return (
+          <li
+            key={step}
+            data-state={state}
+            aria-current={state === "current" ? "step" : undefined}
+          >
+            {i > 0 && <ChevronRight aria-hidden="true" />}
+            <span className={styles.stepMarker} aria-hidden="true">
+              {state === "done" ? <Check /> : i + 1}
+            </span>
+            {step}
+            {state === "done" && (
+              <span className={styles.visuallyHidden}>（已完成）</span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

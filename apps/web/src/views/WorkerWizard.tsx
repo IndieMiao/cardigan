@@ -1,5 +1,6 @@
 import {
   type FormEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useId,
@@ -28,9 +29,12 @@ import {
   SettingsDrawerFeedback,
   SettingsFact,
   SettingsFacts,
+  SettingsField,
+  SettingsFieldHint,
   SettingsGroup,
   SettingsRow,
   SettingsSection,
+  SettingsSteps,
   SettingsTable,
   SettingsText,
   SettingsWarning,
@@ -165,27 +169,42 @@ const EMPTY_FORM: Form = {
 };
 const integer = (value: string) =>
   /^\d+$/u.test(value.trim()) ? Number(value.trim()) : Number.NaN;
-/** The same rules the server applies, so most mistakes show before sending. */
-function validate(form: Form): WorkerWizardInput | string {
+type FieldErrors = Partial<Record<keyof Form, string>>;
+/**
+ * The same rules the server applies, so most mistakes show before sending,
+ * each beside its own field.
+ */
+function validate(
+  form: Form,
+): { input: WorkerWizardInput } | { errors: FieldErrors } {
+  const errors: FieldErrors = {};
   const machine = form.machine_id.trim();
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(machine) ||
     machine === "local"
   )
-    return WIZARD_ERRORS.worker_identity_invalid as string;
+    errors.machine_id = WIZARD_ERRORS.worker_identity_invalid as string;
   const label = form.label.trim();
-  if (!label || label.length > 80) return "请填写名称（不超过 80 个字）。";
-  if (!form.host.trim()) return "请填写主机地址。";
+  if (!label || label.length > 80)
+    errors.label = "请填写名称（不超过 80 个字）。";
+  if (!form.host.trim()) errors.host = "请填写主机地址。";
   const port = integer(form.port);
-  if (!(port >= 1 && port <= 65535)) return "SSH 端口须为 1～65535 的整数。";
+  if (!(port >= 1 && port <= 65535))
+    errors.port = "SSH 端口须为 1～65535 的整数。";
   if (!/^cg_[a-z0-9_]{1,26}$/u.test(form.account.trim()))
-    return "专用账号须以 cg_ 开头，只含小写字母、数字和下划线。";
+    errors.account = "专用账号须以 cg_ 开头，只含小写字母、数字和下划线。";
   const uid = integer(form.uid),
     gid = integer(form.gid);
-  if (![uid, gid].every((v) => v >= 501 && v <= 2147483647))
-    return "UID 和 GID 须为不小于 501 的整数。";
-  if (!form.mcp_url.trim()) return "请填写 MCP 地址。";
-  return {
+  if (!(uid >= 501 && uid <= 2147483647))
+    errors.uid = "UID 须为不小于 501 的整数。";
+  if (!(gid >= 501 && gid <= 2147483647))
+    errors.gid = "GID 须为不小于 501 的整数。";
+  const mcp = form.mcp_url.trim();
+  if (!mcp) errors.mcp_url = "请填写 MCP 地址。";
+  else if (!/^https:\/\/[^/?#@\s]+\/mcp$/u.test(mcp))
+    errors.mcp_url = "MCP 地址须为 HTTPS 的 /mcp 地址。";
+  if (Object.keys(errors).length > 0) return { errors };
+  const input: WorkerWizardInput = {
     machine_id: machine,
     label,
     os: form.os,
@@ -195,8 +214,63 @@ function validate(form: Form): WorkerWizardInput | string {
     account: form.account.trim(),
     uid,
     gid,
-    mcp_url: form.mcp_url.trim(),
+    mcp_url: mcp,
   };
+  return { input };
+}
+
+/** The account the guides recommend: `cg_` and the project's short name. */
+function suggestedAccount(projectId: string): string {
+  const name = projectId
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 26);
+  return name ? `cg_${name}` : "";
+}
+/** Where a prefilled MCP address came from, for its hint. */
+type McpSource = "workers" | "page" | undefined;
+const TAILNET =
+  /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net(?::[0-9]+)?$/u;
+/** This Workbench reached through Tailscale Serve: its `/mcp` on the same name. */
+function pageMcpUrl(): string | undefined {
+  try {
+    const origin = window.location.origin;
+    return TAILNET.test(origin) ? `${origin}/mcp` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Steps of the whole wizard, shown from the first screen. */
+const WIZARD_STEPS = [
+  "填写",
+  "预览确认",
+  "9 项检查",
+  "目标机命令",
+  "开启远程派发",
+] as const;
+/** Checks that stop for commands an administrator runs on the target. */
+const isCommandStep = (s: WorkerWizardStep) =>
+  s.command_key !== undefined ||
+  (COMMAND_KEYS as readonly string[]).includes(s.step);
+function wizardStep(wizard: WorkerWizardView | undefined): number {
+  switch (wizard?.phase) {
+    case undefined:
+      return 0;
+    case "preview":
+      return 1;
+    case "failed": {
+      const blocked = wizard.steps.find((s) => s.state === "blocked");
+      return blocked && isCommandStep(blocked) ? 3 : 2;
+    }
+    case "passed":
+      return 4;
+    case "enabled":
+      return WIZARD_STEPS.length;
+    default:
+      return 2;
+  }
 }
 
 const elapsed = (step: WorkerWizardStep) =>
@@ -210,6 +284,8 @@ export function WorkerWizardDrawer({
   onClose,
   onChanged,
   pollMs = 1000,
+  autoRecheckMs = 15_000,
+  autoRecheckMax = 20,
 }: {
   client: CardiganClient;
   projectId: string;
@@ -217,6 +293,13 @@ export function WorkerWizardDrawer({
   /** The host's machine registry may have changed (registered, enabled). */
   onChanged: () => void;
   pollMs?: number;
+  /**
+   * C-565: after a check stops at a step the target-machine commands fix,
+   * check again this often, at most `autoRecheckMax` times for that step;
+   * “继续检查” stays available throughout.
+   */
+  autoRecheckMs?: number;
+  autoRecheckMax?: number;
 }) {
   const [wizard, setWizard] = useState<WorkerWizardView>();
   /** The session this browser holds for the project (also before it loads). */
@@ -243,7 +326,17 @@ export function WorkerWizardDrawer({
   const [retry, setRetry] = useState<(() => void) | undefined>();
   const [message, setMessage] = useNotice();
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<Form>(EMPTY_FORM);
+  /** What can be inferred is prefilled; the reader's own edits are kept. */
+  const [form, setForm] = useState<Form>(() => ({
+    ...EMPTY_FORM,
+    account: suggestedAccount(projectId),
+    mcp_url: pageMcpUrl() ?? "",
+  }));
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [mcpSource, setMcpSource] = useState<McpSource>(() =>
+    pageMcpUrl() ? "page" : undefined,
+  );
+  const mcpEdited = useRef(false);
   /** The launch preview the reader ticked; another preview needs its own. */
   const [launchConfirmed, setLaunchConfirmed] = useState<string>();
   const alive = useRef(true);
@@ -327,6 +420,25 @@ export function WorkerWizardDrawer({
     const id = storedWizard(projectId);
     if (id) void read(id);
   }, [projectId, read]);
+  // The MCP address the host's workers already use, unless the reader typed one.
+  useEffect(() => {
+    const get = client.workerWizardDefaults;
+    if (!get) return;
+    let live = true;
+    get
+      .call(client, projectId)
+      .then(({ defaults }) => {
+        const url = defaults.mcp_url;
+        if (!live || !url || mcpEdited.current) return;
+        setForm((f) => ({ ...f, mcp_url: url }));
+        setMcpSource("workers");
+      })
+      // Only a suggestion: without it the field keeps its hint.
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client, projectId]);
   // A running check is polled until it ends; leaving stops the polling only.
   const runningId =
     wizard?.phase === "running" && readState === "ok" ? wizard.id : undefined;
@@ -388,14 +500,23 @@ export function WorkerWizardDrawer({
     }
   };
 
-  const submit = (event: FormEvent) => {
+  const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const input = validate(form);
-    if (typeof input === "string") {
-      setError(input);
+    const checked = validate(form);
+    if ("errors" in checked) {
+      setFieldErrors(checked.errors);
+      setError("");
       setRetry(undefined);
+      // The first field to correct takes focus (after the notes render).
+      const target = event.currentTarget;
+      window.setTimeout(() => {
+        if (target instanceof HTMLElement)
+          target.querySelector<HTMLElement>("[aria-invalid='true']")?.focus();
+      });
       return;
     }
+    setFieldErrors({});
+    const { input } = checked;
     const create = client.createWorkerWizard;
     if (!create) return;
     const replaced = wizard?.id;
@@ -453,6 +574,44 @@ export function WorkerWizardDrawer({
     }
   };
 
+  /**
+   * C-565 auto recheck: once a check stops at a step the target-machine
+   * commands fix, the same check is started again every `autoRecheckMs`
+   * (at most `autoRecheckMax` times per blocked step), so the page moves on
+   * by itself after the administrator ran the command. A request error, a
+   * failed read, editing the form or leaving pauses it.
+   */
+  const [rechecks, setRechecks] = useState<{ step: string; count: number }>();
+  const blockedStep =
+    wizard?.phase === "failed" && !editing && readState === "ok"
+      ? wizard.steps.find((s) => s.state === "blocked" && isCommandStep(s))
+          ?.step
+      : undefined;
+  const recheckCount =
+    blockedStep && rechecks?.step === blockedStep ? rechecks.count : 0;
+  const autoRecheck =
+    blockedStep !== undefined &&
+    !error &&
+    busy === undefined &&
+    recheckCount < autoRecheckMax;
+  const startRun = useRef<() => void>(undefined);
+  startRun.current = () => void act("run", step({ kind: "run" }));
+  useEffect(() => {
+    if (!autoRecheck || !blockedStep) return;
+    const timer = window.setTimeout(() => {
+      setRechecks({ step: blockedStep, count: recheckCount + 1 });
+      startRun.current?.();
+    }, autoRecheckMs);
+    return () => window.clearTimeout(timer);
+  }, [autoRecheck, blockedStep, recheckCount, autoRecheckMs]);
+  const recheckNotice = !blockedStep
+    ? undefined
+    : recheckCount >= autoRecheckMax
+      ? "自动复查已停止：在目标机执行命令后，请点“继续检查”。"
+      : autoRecheck
+        ? `执行目标机命令后会自动复查（每 ${Math.round(autoRecheckMs / 1000)} 秒，已复查 ${recheckCount}/${autoRecheckMax} 次）`
+        : undefined;
+
   const phase = wizard?.phase;
   const loading = readState === "loading";
   const refused = readState === "refused";
@@ -464,7 +623,12 @@ export function WorkerWizardDrawer({
     <Button
       variant={variant}
       aria-disabled={waiting}
-      onClick={() => void act("run", step({ kind: "run" }))}
+      onClick={() => {
+        if (sending.current) return;
+        // Asked by hand: automatic rechecks start over for the next stop.
+        setRechecks(undefined);
+        void act("run", step({ kind: "run" }));
+      }}
     >
       {label}
     </Button>
@@ -549,12 +713,29 @@ export function WorkerWizardDrawer({
               )}…`}
             />
           )}
+          {recheckNotice && (
+            <RequestFeedback interactive message={recheckNotice} />
+          )}
         </SettingsDrawerFeedback>
+        {(showForm || content) && (
+          <SettingsSteps
+            label="添加 worker 的步骤"
+            steps={WIZARD_STEPS}
+            current={showForm ? 0 : wizardStep(content)}
+          />
+        )}
         {showForm && (
           <WizardForm
             form={form}
-            setForm={(next) => {
+            errors={fieldErrors}
+            mcpSource={mcpSource}
+            setForm={(next, key) => {
+              if (key === "mcp_url") {
+                mcpEdited.current = true;
+                setMcpSource(undefined);
+              }
               setForm(next);
+              setFieldErrors(({ [key]: _, ...rest }) => rest);
               setError("");
             }}
             busy={busy !== undefined}
@@ -595,7 +776,8 @@ export function WorkerWizardDrawer({
                 onBack={() => {
                   if (!form.machine_id)
                     setForm({
-                      ...EMPTY_FORM,
+                      // The prefilled port, account and MCP address stay.
+                      ...form,
                       machine_id: content.machine_id,
                       label: content.label,
                       os: content.os === "linux" ? "linux" : "macos",
@@ -648,8 +830,23 @@ export function WorkerWizardDrawer({
   );
 }
 
+/** Commands that list the numbers already taken on the target machine. */
+const ID_COMMANDS: Readonly<Record<Form["os"], { uid: string; gid: string }>> =
+  {
+    linux: {
+      uid: "getent passwd | cut -d: -f3 | sort -n",
+      gid: "getent group | cut -d: -f3 | sort -n",
+    },
+    macos: {
+      uid: "dscl . -list /Users UniqueID | sort -nk2",
+      gid: "dscl . -list /Groups PrimaryGroupID | sort -nk2",
+    },
+  };
+
 function WizardForm({
   form,
+  errors,
+  mcpSource,
   setForm,
   busy,
   back,
@@ -657,113 +854,149 @@ function WizardForm({
   onCancel,
 }: {
   form: Form;
-  setForm: (form: Form) => void;
+  /** Each mistake is shown beside its own field. */
+  errors: FieldErrors;
+  mcpSource: McpSource;
+  setForm: (form: Form, changed: keyof Form) => void;
   busy: boolean;
   back: boolean;
-  onSubmit: (event: FormEvent) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
 }) {
-  const field = (key: keyof Form) => (event: { target: { value: string } }) =>
-    setForm({ ...form, [key]: event.target.value });
+  const osHint = useId();
+  const commands = ID_COMMANDS[form.os];
+  const text = (
+    key: keyof Form,
+    label: string,
+    hint: ReactNode,
+    numeric = false,
+  ) => (
+    <SettingsField label={label} error={errors[key]} hint={hint}>
+      {({ invalid, describedBy }) => (
+        <Input
+          value={form[key]}
+          inputMode={numeric ? "numeric" : undefined}
+          autoComplete={numeric ? undefined : "off"}
+          aria-invalid={invalid}
+          aria-describedby={describedBy}
+          onChange={(event) =>
+            setForm({ ...form, [key]: event.target.value }, key)
+          }
+        />
+      )}
+    </SettingsField>
+  );
   return (
     <form aria-label="worker 接入信息" noValidate onSubmit={onSubmit}>
       <SettingsDialogFields>
         <fieldset disabled={busy}>
-          <label>
-            机器编号
-            <Input
-              value={form.machine_id}
-              autoComplete="off"
-              onChange={field("machine_id")}
-            />
-          </label>
-          <label>
-            名称
-            <Input value={form.label} onChange={field("label")} />
-          </label>
+          {text(
+            "machine_id",
+            "机器编号",
+            "每台物理机一个固定编号：字母、数字、点、下划线或连字符，不能是 local。已用 cardigan worker add 登记过的机器，填原来的编号。",
+          )}
+          {text("label", "名称", "机器列表中显示的名字，不超过 80 个字。")}
         </fieldset>
         <fieldset disabled={busy}>
           <legend>系统</legend>
           <ToggleGroup
             type="multiple"
             aria-label="系统"
+            aria-describedby={osHint}
             value={[form.os]}
             onValueChange={(next) => {
               const os = next.at(-1);
               if (os === "linux" || os === "macos")
-                setForm({
-                  ...form,
-                  os,
-                  arch: os === "macos" ? "arm64" : form.arch,
-                });
+                setForm(
+                  {
+                    ...form,
+                    os,
+                    arch: os === "macos" ? "arm64" : form.arch,
+                  },
+                  "os",
+                );
             }}
           >
             <ToggleGroupItem value="linux">Linux</ToggleGroupItem>
             <ToggleGroupItem value="macos">macOS</ToggleGroupItem>
           </ToggleGroup>
+          <SettingsFieldHint id={osHint}>
+            目标机的操作系统。macOS 只支持 Apple Silicon（arm64）。
+          </SettingsFieldHint>
         </fieldset>
         <fieldset disabled={busy}>
-          <label>
-            架构
-            <SelectControl
-              value={form.os === "macos" ? "arm64" : form.arch}
-              onValueChange={(arch) => {
-                if (arch === "x64" || arch === "arm64")
-                  setForm({ ...form, arch });
-              }}
-            >
-              {form.os === "linux" && <option value="x64">x64</option>}
-              <option value="arm64">arm64</option>
-            </SelectControl>
-          </label>
-          <label>
-            主机地址
-            <Input
-              value={form.host}
-              autoComplete="off"
-              onChange={field("host")}
-            />
-          </label>
-          <label>
-            SSH 端口
-            <Input
-              value={form.port}
-              inputMode="numeric"
-              onChange={field("port")}
-            />
-          </label>
-          <label>
-            专用账号
-            <Input
-              value={form.account}
-              autoComplete="off"
-              onChange={field("account")}
-            />
-          </label>
-          <label>
-            UID
-            <Input
-              value={form.uid}
-              inputMode="numeric"
-              onChange={field("uid")}
-            />
-          </label>
-          <label>
-            GID
-            <Input
-              value={form.gid}
-              inputMode="numeric"
-              onChange={field("gid")}
-            />
-          </label>
-          <label>
-            MCP 地址
-            <Input
-              value={form.mcp_url}
-              autoComplete="off"
-              onChange={field("mcp_url")}
-            />
-          </label>
+          <SettingsField
+            label="架构"
+            hint={
+              form.os === "macos" ? (
+                "Apple Silicon 固定为 arm64。"
+              ) : (
+                <>
+                  在目标机运行 <code>uname -m</code>
+                  {"：x86_64 选 x64，aarch64 选 arm64。"}
+                </>
+              )
+            }
+          >
+            {({ describedBy }) => (
+              <SelectControl
+                value={form.os === "macos" ? "arm64" : form.arch}
+                aria-describedby={describedBy}
+                onValueChange={(arch) => {
+                  if (arch === "x64" || arch === "arm64")
+                    setForm({ ...form, arch }, "arch");
+                }}
+              >
+                {form.os === "linux" && <option value="x64">x64</option>}
+                <option value="arm64">arm64</option>
+              </SelectControl>
+            )}
+          </SettingsField>
+          {text(
+            "host",
+            "主机地址",
+            "控制主机能用 SSH 连上的目标机域名或 IP，通常是 tailnet 名（如 worker-a.<tailnet>.ts.net），不带用户名。",
+          )}
+          {text("port", "SSH 端口", "目标机 sshd 监听的端口，默认 22。", true)}
+          {text(
+            "account",
+            "专用账号",
+            "目标机上为本项目新建的非管理员账号：以 cg_ 开头，每个项目单独一个，不复用个人或 CI 账号。已按项目名推荐。",
+          )}
+          {text(
+            "uid",
+            "UID",
+            <>
+              {"不小于 501、目标机上没被占用的用户编号。在目标机查已占用的："}
+              <code>{commands.uid}</code>
+            </>,
+            true,
+          )}
+          {text(
+            "gid",
+            "GID",
+            <>
+              {
+                "专用账号主组的编号，不小于 501 且未被占用，通常与 UID 相同。在目标机查已占用的："
+              }
+              <code>{commands.gid}</code>
+            </>,
+            true,
+          )}
+          {text(
+            "mcp_url",
+            "MCP 地址",
+            <>
+              {
+                "控制主机经 Tailscale Serve 提供的地址，形如 https://<主机>.<tailnet>.ts.net/mcp；只认 HTTPS 的 /mcp。"
+              }
+              {mcpSource === "workers"
+                ? "已填入现有 worker 使用的地址。"
+                : mcpSource === "page"
+                  ? "已按当前 Workbench 的地址填入，请核对 /mcp 的转发。"
+                  : ""}
+            </>,
+          )}
         </fieldset>
       </SettingsDialogFields>
       <SettingsDialogActions>

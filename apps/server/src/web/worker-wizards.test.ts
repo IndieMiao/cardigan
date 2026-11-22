@@ -220,6 +220,23 @@ test.runIf(process.platform === "linux")(
       const runtime = join(f.root, "runtime-workers.yaml");
       const original = "# keep host comment\nversion: 1\nmachines: []\n";
       writeFileSync(runtime, original, { mode: 0o600 });
+      // C-565: no worker uses an MCP address yet, so nothing is suggested.
+      const defaults = async () => {
+        const r = await f.call(`${f.base}/defaults`);
+        expect(r.status, r.text).toBe(200);
+        return (r.json as { defaults: { mcp_url?: string } }).defaults;
+      };
+      expect(await defaults()).toEqual({});
+      expect((await f.post("/defaults")).status).toBe(405);
+      expect(
+        (
+          await f.call(`${f.base}/defaults`, {
+            headers: {
+              authorization: `Bearer ${f.token(f.primary.owner)}`,
+            },
+          })
+        ).status,
+      ).toBe(403);
       const preview = await f.post("", form);
       const s = wizard(preview, 201);
       const path = `/${s.id}`;
@@ -311,6 +328,8 @@ test.runIf(process.platform === "linux")(
       expect(loadRuntimeWorkers(f.dataDir, runtime)).toMatchObject([
         { machine_id: form.machine_id, allow_remote_launch: true },
       ]);
+      // The address the enabled binding uses is now offered to the next form.
+      expect(await defaults()).toEqual({ mcp_url: form.mcp_url });
       const backups = readdirSync(f.root).filter((n) => n.endsWith(".bak"));
       expect(backups).toHaveLength(1);
       const backup = join(f.root, String(backups[0]));

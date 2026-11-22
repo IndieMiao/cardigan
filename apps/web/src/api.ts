@@ -1333,6 +1333,11 @@ export interface WorkerWizardInput {
   readonly gid: number;
   readonly mcp_url: string;
 }
+/** C-565: what the host already knows for a new worker (owner only). */
+export interface WorkerWizardDefaults {
+  /** The HTTPS `/mcp` address existing remote workers use. */
+  readonly mcp_url?: string;
+}
 export type WorkerWizardStepName =
   | "configuration"
   | "registration"
@@ -2198,6 +2203,10 @@ export interface CardiganClient {
     projectId: string,
     input: WorkerWizardInput,
   ): Promise<{ wizard: WorkerWizardView }>;
+  /** C-565: values the host can suggest for a new worker form. */
+  workerWizardDefaults?(
+    projectId: string,
+  ): Promise<{ defaults: WorkerWizardDefaults }>;
   workerWizard?(
     projectId: string,
     wizardId: string,
@@ -2644,6 +2653,13 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/worker-wizards`,
       { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+  workerWizardDefaults(
+    projectId: string,
+  ): Promise<{ defaults: WorkerWizardDefaults }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/defaults`,
     );
   }
   workerWizard(

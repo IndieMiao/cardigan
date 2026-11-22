@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { activeOwner, type Clock } from "@cardigan/domain";
 import {
   commitWorkerFile,
   effectiveRunLimit,
+  loadRuntimeWorkers,
   type MachineCheckJournal,
   planWorkerFile,
   type WizardFilePlan,
@@ -58,6 +60,32 @@ const preview = (plan: WizardFilePlan, now: number) => ({
   expires: now + 15 * 60_000,
   plan,
 });
+/**
+ * C-565: the HTTPS `/mcp` address the host's remote workers already use, to
+ * prefill the form. Only validated private configuration is read (this
+ * project's bindings first, else one address shared by all); nothing when
+ * the file is missing, invalid or the addresses disagree.
+ */
+function knownMcpUrl(host: WizardHost, project: string): string | undefined {
+  let workers: ReturnType<typeof loadRuntimeWorkers>;
+  try {
+    workers = loadRuntimeWorkers(
+      host.dataDir,
+      join(host.root, "runtime-workers.yaml"),
+    );
+  } catch {
+    return undefined;
+  }
+  const urls = (list: typeof workers) => [
+    ...new Set(
+      list.flatMap((w) => (w.execution.mcp ? [w.execution.mcp.url] : [])),
+    ),
+  ];
+  const own = urls(workers.filter((w) => w.project_id === project));
+  if (own.length === 1) return own[0];
+  const all = urls(workers);
+  return own.length === 0 && all.length === 1 ? all[0] : undefined;
+}
 function view(s: Session) {
   return {
     id: s.id,
@@ -129,6 +157,11 @@ export class WorkerWizards {
     const host = this.host;
     if (!host || this.signal.aborted)
       throw new HttpRejection(503, "unavailable", "向导服务不可用");
+    if (rest === "/worker-wizards/defaults") {
+      if (req.method !== "GET") methodNotAllowed(["GET"]);
+      const mcp_url = knownMcpUrl(host, project);
+      return sendJson(res, 200, { defaults: mcp_url ? { mcp_url } : {} });
+    }
     const match =
       /^\/worker-wizards(?:\/([a-f0-9-]{36})(?:\/(confirm|run|cancel|launch-preview|enable))?)?$/.exec(
         rest,
