@@ -11,7 +11,12 @@ from unittest import mock
 module = runpy.run_path(str(Path(__file__).resolve().parents[3] / 'deploy/manual-worker-upgrade.py'))
 upgrade = module['upgrade_files']
 names = module['HELPERS']
+tools = module['TOOLS']
 digest = module['digest']
+
+
+def installed(path):
+    return digest(path) if path.exists() else None
 
 
 class UpgradeTest(unittest.TestCase):
@@ -26,15 +31,21 @@ class UpgradeTest(unittest.TestCase):
             (self.release / n).write_text('new-' + n)
             (self.lib / n).write_text('old-' + n)
         (self.release / 'extra').write_text('new-release')
+        (self.release / 'agent-tools').mkdir()
+        for n in tools:
+            (self.release / n).write_text('new-' + n)
         # Mirror unpack()'s modes for this archive of non-executable files.
         self.release.chmod(0o755)
-        for entry in self.release.iterdir():
-            entry.chmod(0o644)
+        for entry in self.release.rglob('*'):
+            entry.chmod(0o755 if entry.is_dir() else 0o644)
         (self.live / 'previous').write_text('leave-intact')
-        self.cfg = {'project': 'sample', 'rev': 'c' * 40, 'manifest': {p.name: digest(p) for p in self.release.iterdir()}}
+        self.cfg = {'project': 'sample', 'rev': 'c' * 40, 'manifest': {
+            p.relative_to(self.release).as_posix(): digest(p) for p in self.release.rglob('*') if p.is_file()}}
         self.backup = self.root / ('deploy.bak-' + 'c' * 12 + '-' + hashlib.sha256(b'sample').hexdigest()[:20])
         owner = self.root.stat()
-        m = mock.patch.dict(upgrade.__globals__, DEPLOY_OWNER=(owner.st_uid, owner.st_gid))
+        # Root ownership of the tools directory is covered by test_tool_directory_requires_root.
+        m = mock.patch.dict(upgrade.__globals__, DEPLOY_OWNER=(owner.st_uid, owner.st_gid),
+                            tool_directory=lambda lib, gid: (lib / 'agent-tools').mkdir(exist_ok=True))
         m.start(); self.addCleanup(m.stop)
         self.calls = []
         for command in ('os.chown', 'os.fchown'):
@@ -57,10 +68,17 @@ class UpgradeTest(unittest.TestCase):
                 self.assertTrue(all(digest(self.lib / n) == self.cfg['manifest'][n] for n in names))
             if fail:
                 raise ValueError('check_failed')
-        upgrade(self.work, self.release, self.live, self.lib, 123, self.cfg, digest, installer, lambda _: True)
+        upgrade(self.work, self.release, self.live, self.lib, 123, self.cfg, installed, installer, lambda _: True)
+
+    def test_tool_directory_requires_root(self):
+        with self.assertRaisesRegex(ValueError, 'unsafe_agent_tools_directory'):
+            module['tool_directory'](self.lib, 123)
 
     def test_linux(self):
         self.run_upgrade('linux')
+        for n in tools:
+            self.assertEqual(digest(self.lib / n), self.cfg['manifest'][n])
+            self.assertEqual((self.lib / n).stat().st_mode & 0o777, 0o750)
         self.assertEqual(self.calls, ['--check', '--apply'])
         self.assertEqual((self.work / names[0]).read_text(), 'old-' + names[0])
         self.assertTrue(all(digest(self.lib / n) == self.cfg['manifest'][n] for n in names))
@@ -82,7 +100,7 @@ class UpgradeTest(unittest.TestCase):
             (other / name).write_text('old-other')
         original = self.live.stat().st_ino
         with mock.patch.dict(upgrade.__globals__, exchange_directories=mock.Mock(side_effect=AssertionError)):
-            upgrade(self.work, self.release, self.live, other, 124, self.cfg, digest, lambda _: None, lambda _: True)
+            upgrade(self.work, self.release, self.live, other, 124, self.cfg, installed, lambda _: None, lambda _: True)
         self.assertEqual(original, self.live.stat().st_ino)
         self.assertEqual(len(list(self.root.glob('deploy.bak-*'))), 1)
         self.assertEqual((self.backup / 'previous').read_text(), 'leave-intact')
@@ -102,8 +120,8 @@ class UpgradeTest(unittest.TestCase):
             (lib / n).write_text('other')
         with mock.patch.object(Path, 'rename', side_effect=InterruptedError):
             with self.assertRaises(InterruptedError):
-                upgrade(self.work, self.release, self.live, lib, 124, self.cfg, digest, lambda _: None, lambda _: True)
-        self.assertEqual({p.name: digest(p) for p in self.live.iterdir()}, self.cfg['manifest'])
+                upgrade(self.work, self.release, self.live, lib, 124, self.cfg, installed, lambda _: None, lambda _: True)
+        self.assertEqual({p.relative_to(self.live).as_posix(): digest(p) for p in self.live.rglob('*') if p.is_file()}, self.cfg['manifest'])
         self.assertTrue(any((p / 'previous').is_file() for p in self.root.glob('deploy.new-*')))
         self.assertTrue(all((lib / n).read_text() == 'other' for n in names))
 
@@ -145,6 +163,33 @@ class UpgradeTest(unittest.TestCase):
             else:
                 module['unpack'](archive, dest, manifest)
                 self.assertEqual(digest(dest / 'deploy' / names[0]), manifest[names[0]])
+
+    def test_nested_executable_agent_tools_ship_with_the_release(self):
+        # C-595: the unchanged template ships the prebuilt agent tools in a nested,
+        # executable directory, verified against the manifest like every release file.
+        source = Path(__file__).resolve().parents[3] / 'deploy' / 'agent-tools'
+        tools = ('download-attachment.mjs', 'upload-evidence.mjs')
+        staged = self.root / 'staged' / 'deploy'
+        (staged / 'agent-tools').mkdir(parents=True)
+        for name in tools:
+            (staged / 'agent-tools' / name).write_bytes((source / name).read_bytes())
+            (staged / 'agent-tools' / name).chmod(0o755)
+        for n in names:
+            (staged / n).write_text('new-' + n)
+        manifest = {p.relative_to(staged).as_posix(): digest(p) for p in staged.rglob('*') if p.is_file()}
+        archive = self.root / 'deploy.tar.gz'
+        with tarfile.open(archive, 'w:gz') as tar:
+            tar.add(staged, arcname='deploy')
+        dest = self.root / 'unpacked'
+        dest.mkdir()
+        module['unpack'](archive, dest, manifest)
+        self.cfg.update(manifest=manifest, os='darwin')
+        upgrade(self.work, dest / 'deploy', self.live, self.lib, 123, self.cfg, installed, lambda _: None, lambda _: True)
+        for name in tools:
+            path = self.live / 'agent-tools' / name
+            self.assertEqual(digest(path), manifest['agent-tools/' + name])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.backup / 'previous').read_text(), 'leave-intact')
 
 
 if __name__ == '__main__':

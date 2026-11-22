@@ -256,6 +256,7 @@ export function compileAssignmentLaunch(
     });
   }
   if (input.agent_local_tests) env.CARDIGAN_AGENT_LOCAL_TESTS = "1";
+  if (input.agent_tools_dir) env.CARDIGAN_AGENT_TOOLS = input.agent_tools_dir;
   const testLimit =
     input.test_max_workers === undefined
       ? undefined

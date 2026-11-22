@@ -90,7 +90,7 @@ export function attachmentPreview(
       method: "GET",
       query: { attachment_id: attachment.id },
       instructions:
-        "在本会话已配置的 Card MCP 地址追加 attachment_id 查询参数，使用当前会话 Bearer Token 下载到本地文件；不要输出正文或凭据。可在已构建的仓库运行 node packages/mcp-server/dist/download-attachment.js <已配置的Card-MCP地址> <附件编号> <新本地文件>，助手仅从环境继承 MCP_TOKEN。元数据不等于已阅读证据。",
+        '在本会话已配置的 Card MCP 地址追加 attachment_id 查询参数，使用当前会话 Bearer Token 下载到本地文件；不要输出正文或凭据。可运行受管机器预装的 node "$CARDIGAN_AGENT_TOOLS/download-attachment.mjs" <已配置的Card-MCP地址> <附件编号> <新本地文件>（Cardigan 仓库也可用已构建的 packages/mcp-server/dist/download-attachment.js），助手仅从环境继承 MCP_TOKEN。元数据不等于已阅读证据。',
     },
   };
   if (!text) return { ...metadata, content_mode: "metadata", reason: "binary" };

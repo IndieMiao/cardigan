@@ -160,12 +160,22 @@ function targetCommands(
         ].join(" && ")
       : `sudo groupadd --gid ${gid} ${user} && sudo useradd --uid ${uid} --gid ${gid} --home-dir ${home} --no-create-home --shell /bin/sh ${user}`,
     directories: workerDirectoryCommand(mac, project, user, work),
-    helpers: ["worker-files.py", "worker-git.py"]
-      .map(
+    // C-595: the attachment tools sit beside the helpers. Always (re)install them so an
+    // existing copy with the right bytes but a writable mode or owner is corrected.
+    helpers: [
+      ...["worker-files.py", "worker-git.py"].map(
         (file) =>
           `sudo test ! -L ${work}/libexec/${file} && (sudo cmp -s /opt/cardigan/deploy/${file} ${work}/libexec/${file} || (sudo test ! -e ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}))`,
-      )
-      .join(" && "),
+      ),
+      `sudo test ! -L ${work}/libexec/agent-tools && sudo install -d -o root -g ${user} -m 0750 ${work}/libexec/agent-tools`,
+      ...[
+        "agent-tools/download-attachment.mjs",
+        "agent-tools/upload-evidence.mjs",
+      ].map(
+        (file) =>
+          `sudo test ! -L ${work}/libexec/${file} && sudo install -o root -g ${user} -m 0750 /opt/cardigan/deploy/${file} ${work}/libexec/${file}`,
+      ),
+    ].join(" && "),
     tools: mac
       ? `codesign --verify --deep --strict -R '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"' '/Applications/Herdr Core.app' && sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' ${home}/.local/bin/hc && sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' ${home}/.local/bin/herdr-core`
       : `sudo /usr/bin/python3 -I - <<'PY'\nimport os, pathlib, platform, runpy\nbinary = runpy.run_path('/opt/cardigan/deploy/install-agent.py')['payload'](None, platform.machine())\nfor name in ('hc', 'herdr-core'):\n    path = pathlib.Path('${home}/.local/bin') / name\n    if path.exists():\n        if path.is_symlink() or path.read_bytes() != binary: raise SystemExit('installed binary conflict')\n        continue\n    with path.open('xb') as f:\n        os.fchmod(f.fileno(), 0o600)\n        f.write(binary)\n        os.fchown(f.fileno(), 0, ${gid})\n        os.fchmod(f.fileno(), 0o750)\nPY`,

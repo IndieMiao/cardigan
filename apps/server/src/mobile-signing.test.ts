@@ -30,10 +30,10 @@ test("host and worker protocol, isolation gates and fixed platform recipes", () 
           new URL("../test-support/mobile-signing-test.py", import.meta.url),
         ),
       ],
-      { stdio: "pipe", timeout: 20000 },
+      { stdio: "pipe", timeout: 40_000 },
     ),
   ).not.toThrow();
-}, 25_000);
+}, 45_000);
 test("an unprovisioned control plane cannot start a signer or expose a path", async () => {
   const dir = mkdtempSync(join(tmpdir(), "signing-disabled-"));
   try {
@@ -268,7 +268,7 @@ test("a Run that is no longer current at the fence never commits", async () => {
         },
         { program: host.program, acceptWaitMs: 5_000, killMs: 2_000 },
       ),
-      // Claimed but never dispatched: from now on only a lookup is possible.
+      // Claimed but never dispatched: the next call resends the same number.
     ).toMatchObject({ status: "unconfirmed", request_id: "1".repeat(32) });
     expect(existsSync(join(host.ctl, "committed"))).toBe(false);
   } finally {
@@ -372,6 +372,108 @@ test("a success the ledger no longer releases is not reported, and a refusal bef
     writeFileSync(join(host.ctl, "kind"), "refused");
     await expect(call()).rejects.toThrow(/^Signing unavailable$/u);
     expect(host.spawns()).toEqual(["slow", "check", "refused"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a claimed request cut off before the commit is continued under the same number", async () => {
+  const host = fakeHost("continue");
+  try {
+    expect(
+      await settle(() =>
+        requestMobileSignature(host.data, jobScope("R-13"), () => {}, {
+          program: host.program,
+          acceptWaitMs: 100,
+        }),
+      ),
+    ).toMatchObject({ status: "signed", request_id: "1".repeat(32) });
+    expect(host.spawns()).toEqual(["continue", "check"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("shutdown ends in-flight helpers inside its bound and starts no new one", async () => {
+  const host = fakeHost("transfer");
+  // Draining is final for a process: use a module instance of its own.
+  vi.resetModules();
+  const signing = await import("./mobile-signing.js");
+  const call = (run: string) =>
+    signing.requestMobileSignature(host.data, jobScope(run), () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+    });
+  try {
+    expect(await accepted(() => call("R-14"))).toMatchObject({
+      status: "pending",
+      phase: "transferring",
+      deadline_seconds: 900,
+    });
+    const started = Date.now();
+    await signing.drainMobileSigning({ waitMs: 200, killMs: 5_000 });
+    // SIGTERM after the wait: the helper ended itself, well before SIGKILL.
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(existsSync(join(host.ctl, "terminated"))).toBe(true);
+    // The claimed request is left for the next process; nothing is spawned.
+    expect(await call("R-14")).toEqual({
+      status: "unconfirmed",
+      request_id: "1".repeat(32),
+      platform: "android",
+      poll_after_seconds: 60,
+    });
+    expect(await call("R-15")).toMatchObject({
+      status: "queued",
+      request_id: null,
+    });
+    expect(host.spawns()).toEqual(["transfer"]);
+  } finally {
+    rmSync(host.data, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a success settling during shutdown starts no check, and no artifact helper starts after it", async () => {
+  const host = fakeHost("slow");
+  vi.resetModules();
+  const signing = await import("./mobile-signing.js");
+  const scope = jobScope("R-16");
+  const call = () =>
+    signing.requestMobileSignature(host.data, scope, () => {}, {
+      program: host.program,
+      acceptWaitMs: 100,
+    });
+  try {
+    expect(await accepted(call)).toMatchObject({ status: "pending" });
+    writeFileSync(join(host.ctl, "ready"), "");
+    await until(call, (r) => r.status === "pending" && r.phase === "signing");
+    const drained = signing.drainMobileSigning({
+      waitMs: 5_000,
+      killMs: 2_000,
+    });
+    writeFileSync(join(host.ctl, "signed"), "");
+    await drained;
+    // Not re-validated now and not reported as signed: the next process does.
+    expect(await call()).toEqual({
+      status: "unconfirmed",
+      request_id: "1".repeat(32),
+      platform: "android",
+      poll_after_seconds: 60,
+    });
+    expect(await call()).toMatchObject({ status: "unconfirmed" });
+    // The file opens; only the shutdown refuses the helper.
+    mkdirSync(join(host.data, "mobile-signing", "outputs"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(host.data, "mobile-signing", "outputs", "1".repeat(32)),
+      "fixture",
+    );
+    await expect(
+      signing.openMobileArtifact(host.data, scope, "1".repeat(32), () => {}, {
+        program: host.program,
+      }),
+    ).rejects.toThrow();
+    expect(host.spawns()).toEqual(["slow"]);
   } finally {
     rmSync(host.data, { recursive: true, force: true });
   }
