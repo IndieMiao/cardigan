@@ -19,7 +19,7 @@ import {
   executionPaths,
   runtimeOwnsRef,
 } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import { type Store, withdrawBellAttempt } from "@cardigan/store";
 import { captureTranscript } from "./capture-transcript.js";
 import { stallWorkspace, writableInPlace } from "./stall-evidence.js";
 
@@ -57,17 +57,25 @@ export async function writerPlacementSeal(
   execution?: ExecutionConfig,
   signal?: AbortSignal,
 ) {
+  // A settled local session leaves no binding; seal the Assignment's own
+  // placement then. A remote checkout always needs its registered binding.
+  const unbound = !ref && !a.runtime_ref && a.machine_id === "local";
   if (
-    !ref ||
+    (!ref && !unbound) ||
     !execution ||
     a.scope !== "work_item" ||
     a.external ||
     !a.worktree_path ||
     !a.branch ||
     !a.base_sha ||
-    ref.machine_id !== a.machine_id ||
-    (ref.target && ref.target.project_id !== project) ||
-    !runtimeOwnsRef(execution, ref)
+    (ref &&
+      (ref.machine_id !== a.machine_id ||
+        (ref.target && ref.target.project_id !== project) ||
+        !runtimeOwnsRef(execution, ref))) ||
+    (unbound &&
+      execution.target &&
+      (execution.target.project_id !== project ||
+        execution.target.machine_id !== "local"))
   )
     return;
   const path = join(
@@ -77,8 +85,8 @@ export async function writerPlacementSeal(
   );
   if (
     a.worktree_path !== path ||
-    (ref.worktree_path && ref.worktree_path !== path) ||
-    (ref.branch && ref.branch !== a.branch)
+    (ref?.worktree_path && ref.worktree_path !== path) ||
+    (ref?.branch && ref.branch !== a.branch)
   )
     return;
   try {
@@ -101,7 +109,7 @@ export async function writerPlacementSeal(
           a.role_id,
           a.role_version,
           a.machine_id,
-          ref.target?.fingerprint ?? null,
+          (ref ? ref.target : execution.target)?.fingerprint ?? null,
           execution.mode,
           path,
           a.branch,
@@ -122,18 +130,35 @@ export class RetainedWriterRefused extends Error {
     super("Preserved writer checkout could not be verified");
   }
 }
-/** Record one refusal per queued Run. The stall patrol hands it to Ops; the
- * Dispatcher holds the Run instead of retrying the same checkout every tick. */
+/** A refusal is definitely unsent: in the same transaction, withdraw the
+ * Dispatcher's own attempt (so lease recovery never treats it as an unknown
+ * send) and record one refusal per (queued Run, recovery action). The stall
+ * patrol hands it to Ops; the Dispatcher holds the Run meanwhile. */
 export function recordRetainedWriterRefusal(
   store: Store,
   project: ProjectId,
   runId: Run["id"],
   clock: Clock,
+  attemptId?: string,
 ) {
   store.uow.run((tx) => {
+    if (attemptId && withdrawBellAttempt(store.database, project, attemptId)) {
+      // The unsent attempt's address stamp goes with it (no terminal, no
+      // send), so the queue is the untouched successor Ops can still recover.
+      const stamped = tx.runs.get(project, runId);
+      if (
+        stamped?.status === "queued" &&
+        stamped.bell_delivery?.run_id === runId &&
+        !stamped.bell_delivery.runtime_ref &&
+        !stamped.bell_delivery.sent_at
+      ) {
+        const { bell_delivery: _unsent, ...queued } = stamped;
+        tx.runs.put(project, queued);
+      }
+    }
     const state = loadCommandState(tx, project);
     const run = state.runs.find((r) => r.id === runId);
-    if (!run || run.status !== "queued" || retainedWriterRefusal(state, runId))
+    if (!run || run.status !== "queued" || retainedWriterRefusal(state, run))
       return;
     const action = automaticContextActionForRun(state.events, run);
     if (!action?.dispatch_stall_id) return;
@@ -162,11 +187,15 @@ export function recordRetainedWriterRefusal(
     });
   });
 }
-/** The refusal for this exact queued Run, if one was recorded. */
-export function retainedWriterRefusal(state: CommandState, run: Run["id"]) {
-  return eventsOfType(state.events, "retained_writer_refused").find(
-    (e) => (e.payload as { run_id?: string }).run_id === run,
-  );
+/** The refusal made by the recovery action currently bound to this queued Run.
+ * A later Ops takeover binds a new action, which lifts the hold. */
+export function retainedWriterRefusal(state: CommandState, run: Run) {
+  const action = automaticContextActionForRun(state.events, run);
+  if (!action) return;
+  return eventsOfType(state.events, "retained_writer_refused").find((e) => {
+    const p = e.payload as { run_id?: string; action_id?: string };
+    return p.run_id === run.id && p.action_id === action.action_id;
+  });
 }
 
 /** No placement or repair is allowed on this path, including when a caller

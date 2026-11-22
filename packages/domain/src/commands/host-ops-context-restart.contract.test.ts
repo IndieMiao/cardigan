@@ -517,6 +517,29 @@ test("system turn recovery binds the ended Run, target and expiry; uncertain exi
     }),
   );
   const preserved = apply(pending, stopped);
+  // A settled recovery whose successor launch refused the preserved checkout
+  // is left to Ops on the same incident; the system never retries it.
+  const refused: CommandState = {
+    ...preserved,
+    events: [
+      ...preserved.events,
+      {
+        ...due,
+        id: f.io.ids.nextEventId(),
+        seq: 99,
+        type: "retained_writer_refused",
+        payload: {
+          assignment_id: a.id,
+          run_id: required(stopped.data.run).id,
+          action_id: started.data.action_id,
+          system_finished_run_id: prior.id,
+        },
+      },
+    ],
+  };
+  expect(takeover(preserved).ok).toBe(false);
+  expect(begin(refused).ok).toBe(false);
+  expect(takeover(refused).ok).toBe(true);
   const successor = required(stopped.data.run);
   expect(stopped.timeline.filter((e) => e.type === "handoff")).toEqual([]);
   const replacement = {

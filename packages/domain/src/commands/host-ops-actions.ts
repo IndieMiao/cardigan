@@ -441,15 +441,19 @@ export function beginHostOpsActionInDraft(
     );
     // A system attempt withdrawn before any signal does not consume the
     // incident for Ops, who may recover it once the evidence is current.
-    const withdrawnUnsignalled = new Set(
-      eventsOfType(state.events, "host_ops_action_finished")
+    // Nor does one whose successor launch refused the preserved checkout.
+    const withdrawnUnsignalled = new Set([
+      ...eventsOfType(state.events, "host_ops_action_finished")
         .filter(
           (e) =>
             (e.payload as { result?: string }).result ===
             "withdrawn_stall_changed",
         )
         .map((e) => (e.payload as { action_id?: string }).action_id),
-    );
+      ...eventsOfType(state.events, "retained_writer_refused")
+        .filter((e) => e.actor.kind === "system")
+        .map((e) => (e.payload as { action_id?: string }).action_id),
+    ]);
     ensure(
       !eventsOfType(state.events, "host_ops_action_taken").some((e) => {
         // Only Ops may take it over; the system never retries its own attempt.

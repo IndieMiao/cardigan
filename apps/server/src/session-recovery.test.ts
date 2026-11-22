@@ -600,6 +600,38 @@ test.each([
       contextUsage: { execution: { mode: "local", dataDir: f.dataDir } },
       stallBackup: backup,
     });
+    /** The fixture's host_ops patrol resumes the original incident. */
+    const opsTakeover = async () => {
+      f.store.uow.run((tx) =>
+        tx.roles.put(f.project, {
+          role_id: "host_ops",
+          role_version: 1,
+          allowed_tools: HOST_OPS_ROLE_TOOLS,
+          capabilities: [],
+        }),
+      );
+      const ops = f.apply((st, actor, p) =>
+        createHostOpsAssignment(st, actor, {}, p),
+      ).assignment;
+      const token = f.store.issueToken({
+        project_id: f.project,
+        assignment_id: ops.id,
+        role: { role_version: 1, allowed_tools: HOST_OPS_ROLE_TOOLS },
+      });
+      const context = {
+        identity: unwrap(authenticate(f.store, token.token)),
+        store: f.store,
+      };
+      const cause = f
+        .state()
+        .events.find((e) => e.type === "bell_turn_recovery_due")?.id as string;
+      await service.tools.execute(context, "host_ops_restart_assignment", {
+        target_id: a.id,
+        reason: "fixture",
+        dispatch_stall_id: cause,
+        idempotency_key: "ops-takeover",
+      });
+    };
     const startRun = vi.fn(s.options.startRun);
     const d = new Dispatcher({ ...s.options, startRun });
     const events = (type: string) =>
@@ -847,6 +879,22 @@ test.each([
           });
           expect(events("host_ops_action_taken")).toHaveLength(1);
           expect(queuedRun()?.status).toBe("queued");
+          // Past every attempt lease: the dispatch and recovery patrols still
+          // find the original work intact and start nothing.
+          f.advance(2 * 60 * 60_000);
+          await d.tick();
+          f.advance(31_000);
+          await service.tick();
+          await d.tick();
+          expect(
+            unfinishedBellAttempts(f.store.database, f.project, a.id),
+          ).toEqual([]);
+          expect(queuedRun()?.status).toBe("queued");
+          expect(s.notes().map((n) => n.status)).not.toContain("resolved");
+          expect(events("run_dispatch_aborted")).toEqual([]);
+          expect(s.runtime.provision).not.toHaveBeenCalled();
+          // Only the refused attempt itself; no retry after the lease.
+          expect(startRun).toHaveBeenCalledOnce();
         }
         if (mode === "missing_at_launch" || mode === "missing_after_token")
           expect(existsSync(workspace)).toBe(false);
@@ -857,6 +905,41 @@ test.each([
               .run((tx) => tx.tokensForAssignment(f.project, a.id))
               .filter((t) => t.revoked_at === null),
           ).toHaveLength(0);
+        if (mode === "missing_at_launch" || mode === "missing_after_token") {
+          // The checkout is back. Ops takes over the same incident; the new
+          // action re-verifies backup and placement, and the original Run
+          // starts exactly once despite the earlier refusal.
+          renameSync(kept, workspace);
+          await opsTakeover();
+          await vi.waitFor(
+            async () => {
+              f.advance(31_000);
+              await service.tick();
+              expect(events("dispatch_stall_backup_verified")).toHaveLength(2);
+              expect(
+                events("host_ops_action_finished").filter(
+                  (e) => (e.payload as { run_id?: string }).run_id === s.run.id,
+                ),
+              ).toHaveLength(2);
+            },
+            { timeout: 10_000 },
+          );
+          await d.tick();
+          await d.tick();
+          expect(startRun).toHaveBeenCalledTimes(2);
+          expect(s.runtime.provision).toHaveBeenCalledOnce();
+          expect(vi.mocked(s.runtime.provision).mock.calls[0]?.[3].cwd).toBe(
+            workspace,
+          );
+          expect(
+            f.state().runs.filter((r) => r.assignment_id === a.id),
+          ).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ id: s.run.id, status: "dispatched" }),
+            ]),
+          );
+          expect(events("run_dispatch_aborted")).toEqual([]);
+        }
         if (mode === "shared_at_launch")
           expect(readFileSync(join(workspace, "source"), "utf8")).toBe(
             "tracked edit",
@@ -869,9 +952,11 @@ test.each([
           ].includes(mode)
         )
           expect(
-            execFileSync("git", ["-C", kept, "rev-parse", "HEAD"], {
-              encoding: "utf8",
-            }).trim(),
+            execFileSync(
+              "git",
+              ["-C", existsSync(kept) ? kept : workspace, "rev-parse", "HEAD"],
+              { encoding: "utf8" },
+            ).trim(),
           ).toBe(sha);
       } else {
         // The refusal belongs to the patrol; a newly live idle terminal has its
@@ -887,33 +972,7 @@ test.each([
           // The system withdrew before any signal. Once the backup recovers,
           // Ops takes over the same incident and the original queue resumes.
           backupFails = false;
-          f.store.uow.run((tx) =>
-            tx.roles.put(f.project, {
-              role_id: "host_ops",
-              role_version: 1,
-              allowed_tools: HOST_OPS_ROLE_TOOLS,
-              capabilities: [],
-            }),
-          );
-          const ops = f.apply((st, actor, p) =>
-            createHostOpsAssignment(st, actor, {}, p),
-          ).assignment;
-          const token = f.store.issueToken({
-            project_id: f.project,
-            assignment_id: ops.id,
-            role: { role_version: 1, allowed_tools: HOST_OPS_ROLE_TOOLS },
-          });
-          const context = {
-            identity: unwrap(authenticate(f.store, token.token)),
-            store: f.store,
-          };
-          const cause = events("bell_turn_recovery_due")[0]?.id as string;
-          await service.tools.execute(context, "host_ops_restart_assignment", {
-            target_id: a.id,
-            reason: "fixture",
-            dispatch_stall_id: cause,
-            idempotency_key: "ops-takeover",
-          });
+          await opsTakeover();
           await vi.waitFor(
             async () => {
               await service.tick();

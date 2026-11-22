@@ -1697,6 +1697,16 @@ export class HostOpsService {
               if (result === "exited" && !(await exited()))
                 result = "terminal_exit_unconfirmed";
             }
+          } else if (
+            action.system_finished_run_id &&
+            !action.runtime_ref &&
+            a &&
+            !a.runtime_ref &&
+            !a.session_ref &&
+            !remote
+          ) {
+            // Settled by an earlier recovery: no session left to stop.
+            result = "exited";
           } else if (action.system_finished_run_id) {
             result =
               remote &&

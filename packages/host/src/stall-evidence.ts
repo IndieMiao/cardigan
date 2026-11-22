@@ -411,6 +411,10 @@ export async function stallEvidence(
       (observed.value.process === "exited" || idleWakeGuard(observed.value)));
   const ownerConfirmed =
     owner?.ok && (owner.value === "alive" || owner.value === "exited");
+  // A local session already settled by an earlier recovery leaves no binding
+  // and nothing to stop; its exit was proven before the binding was cleared.
+  const unboundLocal =
+    !a.runtime_ref && !a.session_ref && a.machine_id === "local";
   // An ordinary stall row gets the same ownership and exit guards as turn
   // recovery: this Assignment's idle terminal, a kernel-proven exit, or no
   // session at all. A matching address or a generic status is not enough.
@@ -441,6 +445,7 @@ export async function stallEvidence(
     can_restart:
       bound &&
       (!exitOnly ||
+        unboundLocal ||
         (owner?.ok &&
           owner.value === "exited" &&
           (!observed?.ok || observed.value.process === "exited"))) &&
@@ -456,7 +461,7 @@ export async function stallEvidence(
             !!observed?.ok &&
             idleWakeGuard(observed.value)
         : (systemTurn
-            ? !!ownerConfirmed && unknownOrIdle
+            ? (!!ownerConfirmed && unknownOrIdle) || unboundLocal
             : !!safeTerminal && (await ordinaryOwned())) &&
           (a.machine_id === "local" || !!remoteExited)) &&
       (writableInPlace(workspace) || workspace === "no_worktree"),

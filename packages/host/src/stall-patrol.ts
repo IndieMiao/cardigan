@@ -202,6 +202,9 @@ export class StallPatrol {
         )
         .map((e) => (e.payload as { action_id?: string }).action_id),
     );
+    // So does one whose successor launch refused the preserved checkout.
+    for (const e of eventsOfType(state.events, "retained_writer_refused"))
+      withdrawn.add((e.payload as { action_id?: string }).action_id);
     const consumed = new Set(
       eventsOfType(state.events, "host_ops_action_taken")
         .filter((e) => e.actor.kind !== "system" || !withdrawn.has(e.id))

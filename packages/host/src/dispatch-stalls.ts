@@ -215,9 +215,26 @@ export function dispatchStallCauses(
       )
         return "queue_changed";
       if (unfinished && !onlySuccessor) return "unfinished_run";
+      // Our own recovery settled the session, then its successor launch was
+      // refused: the unbound queue is still this incident, for Ops to take over.
+      const settledByRefusal =
+        !!binding &&
+        !a.runtime_ref &&
+        eventsOfType(state.events, "retained_writer_refused").some((e) => {
+          const p = e.payload as {
+            assignment_id?: string;
+            run_id?: string;
+            system_finished_run_id?: string;
+          };
+          return (
+            p.assignment_id === a.id &&
+            p.system_finished_run_id === binding.run_id &&
+            (!binding.queued_run_id || p.run_id === binding.queued_run_id)
+          );
+        });
       if (
         binding &&
-        (binding.session_key !== turnSessionKey(a) ||
+        ((binding.session_key !== turnSessionKey(a) && !settledByRefusal) ||
           systemEndedTurn(state, a)?.id !== binding.run_id)
       )
         return "turn_binding_changed";

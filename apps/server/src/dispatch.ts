@@ -827,8 +827,7 @@ export class Dispatcher {
     if (stoppedByHuman(state.events, a.id)) return "human_stopped";
     const queued = this.queued(state, a);
     // A refused preserved checkout waits for Ops; never retry it every tick.
-    if (queued && retainedWriterRefusal(state, queued.id))
-      return "host_operation";
+    if (queued && retainedWriterRefusal(state, queued)) return "host_operation";
     // C-244: keyed per Run snapshot; same as scanning runs for `a`.
     return runsOf(state.runs, a.id).some(
       (r) =>
@@ -1488,12 +1487,14 @@ export class Dispatcher {
       )
         return skip("preflight_wait");
       if (error instanceof RetainedWriterRefused) {
-        // The launch already withdrew its attempt and kept the queued Run.
+        // Definitely unsent: the launch kept the queued Run. Withdraw this
+        // attempt with the refusal so lease recovery cannot cancel the Run.
         recordRetainedWriterRefusal(
           this.options.store,
           project,
           job.run.id,
           this.clock,
+          job.attempt.id,
         );
         return skip("writer_refused");
       }
