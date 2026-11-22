@@ -72,6 +72,7 @@ export interface ServerConfig {
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  readonly CARDIGAN_ARTIFACT_PUBLICATION?: string | undefined;
   readonly CARDIGAN_MOBILE_SIGNING?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_INLINE_BYTES?: string | undefined;
   /** hc session the runtime uses; registered for the CLI (C-152). */

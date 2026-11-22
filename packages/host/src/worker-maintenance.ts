@@ -29,7 +29,7 @@ export function notifyWorkerMaintenance(
     ),
   );
 }
-const manualUpgradeKey = (machine: string) =>
+export const manualUpgradeKey = (machine: string) =>
   `worker-helper:${machine}:${Object.values(workerHelperDigests()).join(":")}`;
 
 export function retireManualUpgrade(

@@ -64,6 +64,7 @@ export const toolNames = [
   "request_check",
   "run_probe",
   "request_mobile_signature",
+  "publish_artifact",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -496,6 +497,8 @@ interface AssignmentFields {
   };
   readonly idle_retirement?: {
     readonly phase: "stopping" | "waiting";
+    /** Idle patrol yielded this generation; stopping still fences every new launch. */
+    readonly handoff?: true;
     /** This claim cannot send signals. Absent on legacy or signal-capable claims. */
     readonly observe_only?: true;
     readonly runtime_ref: RuntimeRef;

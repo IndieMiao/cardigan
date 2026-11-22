@@ -343,6 +343,7 @@ export {
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
 export { WorkerGitTransport } from "./worker-git.js";
+export { manualUpgradeKey } from "./worker-maintenance.js";
 export { workerMcpConfig } from "./worker-mcp.js";
 export * from "./worker-observations.js";
 export * from "./worker-onboarding.js";

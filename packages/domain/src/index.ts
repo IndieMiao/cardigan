@@ -1,3 +1,4 @@
+export * from "./artifact-publication.js";
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
@@ -63,6 +64,7 @@ export {
 export {
   beginIdleSessionRetirement,
   confirmWaitingRetirementExit,
+  handoffIdleSessionRetirement,
   settleIdleSessionRetirement,
   trackRetirementDispatch,
 } from "./commands/idle-session-retirement.js";

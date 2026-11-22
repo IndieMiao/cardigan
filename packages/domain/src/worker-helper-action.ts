@@ -3,7 +3,10 @@ import type { HumanAction } from "./entities.js";
 import { eventsOfType } from "./event-index.js";
 
 /** The original system request (not editable instructions) identifies pre-upgrade rows. */
-export function workerHelperAction(state: CommandState, action: HumanAction) {
+export function workerHelperAction(
+  state: Pick<CommandState, "project_id" | "events">,
+  action: HumanAction,
+) {
   if (action.requested_by !== "system" || action.card_id) return undefined;
   const request = eventsOfType(
     state.events,
@@ -40,4 +43,19 @@ export function workerHelperAction(state: CommandState, action: HumanAction) {
         ? machine
         : null,
   };
+}
+
+export function matchesOpenHelperAction(
+  state: Pick<CommandState, "project_id" | "events">,
+  action: HumanAction,
+  target: { machine_id: string; key: string; binding: string },
+) {
+  if (
+    action.status !== "open" ||
+    !target.binding ||
+    (action.helper_upgrade && action.helper_upgrade.binding !== target.binding)
+  )
+    return false;
+  const origin = workerHelperAction(state, action);
+  return origin?.machine_id === target.machine_id && origin.key === target.key;
 }
